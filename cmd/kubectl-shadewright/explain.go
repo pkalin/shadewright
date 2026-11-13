@@ -100,6 +100,8 @@ var troubleshootingSections = map[string][]string{
 	"DeliveryBlocked":                   {secAfterMerge},
 	"DeliveryFailed":                    {secAfterMerge},
 	"DeliveryNotChecked":                {secAfterMerge},
+	"InvalidRevert":                     {secPhases},
+	"RevertApplied":                     {secAfterMerge},
 	"DeliveryNotObserved":               {secAfterMerge, secRollout},
 	"DeliverySuspended":                 {secAfterMerge},
 	"DesiredValueMissing":               {secRender},
@@ -320,6 +322,9 @@ type RequestExplanation struct {
 	ChainRoot string `json:"chainRoot,omitempty"`
 	// Replaces is the name in spec.replaces: the request this one replaces.
 	Replaces string `json:"replaces,omitempty"`
+	// Reverts is the name in spec.reverts: the failed request whose change this revert undoes (ADR-0030
+	// section 8).
+	Reverts string `json:"reverts,omitempty"`
 	// HandoffFrom is status.handoff.from: the request this one took the pull request over from.
 	HandoffFrom *HandoffReport `json:"handoffFrom,omitempty"`
 	// HandoffTo is status.handoff.to: the request that took the pull request over from this one.
@@ -555,6 +560,9 @@ func explainRequest(rr *remediationv1alpha1.RemediationRequest,
 	if rep := rr.Spec.Replaces; rep != nil {
 		r.Replaces = clean(string(rep.Name), maxName)
 	}
+	if rev := rr.Spec.Reverts; rev != nil {
+		r.Reverts = clean(rev.Name, maxName)
+	}
 	if h := st.Handoff; h != nil {
 		if h.From != nil {
 			r.HandoffFrom = &HandoffReport{Name: clean(string(h.From.Name), maxName),
@@ -731,6 +739,9 @@ func requestLines(p *printer, e *Explanation, r *RequestExplanation, now time.Ti
 	}
 	if h := r.HandoffTo; h != nil {
 		p.line("  Replaced by:  %s (handoff %s)", h.Name, h.Phase)
+	}
+	if r.Reverts != "" {
+		p.line("  Reverts:      %s", r.Reverts)
 	}
 	if r.ChainRoot != "" {
 		p.line("  Chain root:   %s", r.ChainRoot)

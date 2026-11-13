@@ -201,6 +201,12 @@ type RemediationRequestReconciler struct {
 	// ends, is being deleted or is gone, not with forget, which runs on every reconcile of a request after the
 	// merge.
 	reportCounters reportCounters
+	// unwrittenResets holds, per request in Verifying, a reset of the executor's window whose status write was lost
+	// (clearing.go), applied again by the next check. Memory only; dropped like reportCounters.
+	unwrittenResets unwrittenResets
+	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
+	// it. Memory only, set once.
+	since reconcilingSince
 }
 
 // forget drops what this process keeps in memory about a request: its last full recheck, its last
@@ -417,12 +423,14 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		if apierrors.IsNotFound(err) {
 			r.forget(req.NamespacedName)
 			r.reportCounters.forget(req.NamespacedName)
+			r.unwrittenResets.forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !rr.DeletionTimestamp.IsZero() {
 		r.forget(req.NamespacedName)
 		r.reportCounters.forget(req.NamespacedName)
+		r.unwrittenResets.forget(req.NamespacedName)
 		return r.finalize(ctx, rr)
 	}
 	if err := r.backfill(ctx, rr); err != nil {
@@ -444,6 +452,11 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		if !progresses(rr) {
 			r.forget(req.NamespacedName)
+			if rr.Status.Phase != remediationv1alpha1.PhaseVerifying {
+				// Windows exist only in Verifying. A request seen in another phase after the merge was ended,
+				// by this executor or by another writer, and a reset kept for a lost write has no window left.
+				r.unwrittenResets.forget(req.NamespacedName)
+			}
 			return r.afterStop(ctx, rr, stepErr)
 		}
 		res, err := r.recheck(ctx, rr)
@@ -722,6 +735,17 @@ func (r *RemediationRequestReconciler) checkChainLink(ctx context.Context, rr *r
 	return outcome{}, false, nil
 }
 
+// checkLinks runs the link checks that come before anything else is read about a request: a replacement's
+// chain link (ADR-0028 section 4 item 2), then a revert's link (ADR-0030 section 8). The API refuses a revert that
+// replaces a request, so the two never meet. refused is true with the Denied outcome of the first that fails.
+func (r *RemediationRequestReconciler) checkLinks(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	out outcome, refused bool, err error) {
+	if out, refused, err := r.checkChainLink(ctx, rr); err != nil || refused {
+		return out, refused, err
+	}
+	return r.checkRevertLink(ctx, rr)
+}
+
 // check gathers the input and decides. The error is non-nil only for a failure worth retrying.
 //
 // The refusal order (design 5.3): a missing policy or settings object, a kind the action cannot change, a missing
@@ -730,8 +754,7 @@ func (r *RemediationRequestReconciler) checkChainLink(ctx context.Context, rr *r
 // Git, and policy.Decide decide on everything, the resolved source included.
 func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	outcome, error) {
-	// A replacement's chain link comes first, before anything else is read about it (ADR-0028 section 4 item 2).
-	if out, refused, err := r.checkChainLink(ctx, rr); err != nil || refused {
+	if out, refused, err := r.checkLinks(ctx, rr); err != nil || refused {
 		return out, err
 	}
 	pol := &remediationv1alpha1.RemediationPolicy{}
@@ -831,7 +854,7 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 
 	in.Source = res.Source
 	d := policy.Decide(in)
-	o := decided(d, pol)
+	o := revertApproval(rr, decided(d, pol))
 	o.source = res.Source
 	if d.Outcome != policy.OutcomeAllowed {
 		return o, nil
@@ -1025,6 +1048,9 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	requestPhases.setNamespace(r.Namespace)
 	if err := mgr.Add(requestPhases.source.Runnable(mgr.GetCache(), &remediationv1alpha1.RemediationRequest{})); err != nil {
 		return fmt.Errorf("adding the source of the RemediationRequest phase metric: %w", err)
+	}
+	if err := mgr.Add(sinceMarker{r: r}); err != nil {
+		return fmt.Errorf("adding the start of reconciling of the RemediationRequest controller: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&remediationv1alpha1.RemediationRequest{}).

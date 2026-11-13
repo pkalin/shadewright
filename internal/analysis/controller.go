@@ -889,7 +889,8 @@ func samePlan(old, spec remediationv1alpha1.RemediationRequestSpec) bool {
 }
 
 // requestSpec is the spec of the request of a plan: nothing in it comes from the model but the action and the
-// extra checks, which the loop validated.
+// extra checks, which the loop validated. It never sets spec.reverts: a model proposal has no such field, and
+// only the analyzer's deterministic revert proposer makes a revert (ADR-0030 section 8).
 func requestSpec(inc *remediationv1alpha1.Incident, p Plan) remediationv1alpha1.RemediationRequestSpec {
 	approval := true
 	return remediationv1alpha1.RemediationRequestSpec{
@@ -933,7 +934,9 @@ func (c *Controller) createRequest(ctx context.Context, inc *remediationv1alpha1
 			e.Mode != spec.Mode || e.ApprovalRequired == nil || !*e.ApprovalRequired ||
 			!equality.Semantic.DeepEqual(e.Action, spec.Action) ||
 			!equality.Semantic.DeepEqual(e.Verification.Checks, spec.Verification.Checks) ||
-			!equality.Semantic.DeepEqual(e.Replaces, spec.Replaces) || e.ChainRoot != spec.ChainRoot {
+			!equality.Semantic.DeepEqual(e.Replaces, spec.Replaces) || e.ChainRoot != spec.ChainRoot ||
+			e.Reverts != nil || spec.Reverts != nil {
+			// A revert (spec.reverts) is made only by the deterministic revert proposer, never by this loop.
 			return "", errors.New("a RemediationRequest of that name holds another plan")
 		}
 		return name, nil

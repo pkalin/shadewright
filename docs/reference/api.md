@@ -101,7 +101,7 @@ Validation rules:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
-| `spec` | [RemediationRequestSpec](#remediationrequestspec) | Yes | spec is the plan.<br>Rule: spec is immutable; a changed plan is a new RemediationRequest<br>Rule: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject<br>Rule: SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet<br>Rule: replaces and chainRoot are set together or not at all |
+| `spec` | [RemediationRequestSpec](#remediationrequestspec) | Yes | spec is the plan.<br>Rule: spec is immutable; a changed plan is a new RemediationRequest<br>Rule: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject<br>Rule: SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet<br>Rule: replaces and chainRoot are set together or not at all<br>Rule: a revert (spec.reverts) requires approvalRequired: true<br>Rule: a revert (spec.reverts) never replaces another request |
 | `status` | [RemediationRequestStatus](#remediationrequeststatus) | No | status is the progress, written by the controller. |
 
 ## RemediationSettings
@@ -675,7 +675,7 @@ Used by: [RemediationRequestSpec](#remediationrequestspec).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | string | Yes | name of the Incident.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
-| `uid` | [UID](#uid) | Yes | uid of the Incident.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `uid` | [UID](#uid) | Yes | uid of the Incident.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 
 ### IncidentSpec
 
@@ -749,7 +749,7 @@ Used by: [Handoff](#handoff).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | [Name](#name) | Yes | name of the predecessor.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
-| `uid` | [UID](#uid) | Yes | uid of the predecessor.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `uid` | [UID](#uid) | Yes | uid of the predecessor.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `hint` | [HintRef](#hintref) | Yes | hint is the predecessor's hint the replacement answers. |
 | `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
 | `pullRequestUpdate` | [HandoffStep](#handoffstep) | No | pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for good. Until it is Done the body carries the predecessor's marker, or after refused rewrites further up the chain an earlier request's, which this request accepts as its own while its chain reaches that request.<br>One of `Done`, `Refused` |
@@ -904,7 +904,7 @@ Used by: [VerificationReportStatus](#verificationreportstatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `podUID` | [UID](#uid) | Yes | podUID is the UID of the pod.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `podUID` | [UID](#uid) | Yes | podUID is the UID of the pod.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `container` | string | Yes | container is the name of the container, the action's container.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `finishedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | finishedAt is the finish time of the termination, written by the node's clock. It is shown, never compared: no time decides the OOM rule. |
 
@@ -922,7 +922,7 @@ Used by: [IncidentSpec](#incidentspec), [RemediationRequestSpec](#remediationreq
 | `kind` | string | Yes | kind of the object.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[A-Z][A-Za-z0-9]*$` |
 | `namespace` | string | No | namespace of the object; empty for cluster-scoped objects.<br>Maximum length: 63<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `name` | string | Yes | name of the object.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
-| `uid` | [UID](#uid) | No | uid of the object.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `uid` | [UID](#uid) | No | uid of the object.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 
 ### OccurrenceRecord
 
@@ -957,7 +957,7 @@ Used by: [Handoff](#handoff).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | [Name](#name) | Yes | name of the replacement.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
-| `uid` | [UID](#uid) | Yes | uid of the replacement, so a request recreated under the same name is never taken for it.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `uid` | [UID](#uid) | Yes | uid of the replacement, so a request recreated under the same name is never taken for it.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `hint` | [HintRef](#hintref) | Yes | hint is this request's hint the replacement answers. |
 | `expectedHead` | string | Yes | expectedHead is the head of the branch when the intent was recorded: the replacement's commit must have it as its parent.<br>Pattern: `^[0-9a-f]{40}$` |
 | `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
@@ -1006,7 +1006,7 @@ Used by: [VerificationReportStatus](#verificationreportstatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `podUID` | [UID](#uid) | Yes | podUID is the UID of the pod.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `podUID` | [UID](#uid) | Yes | podUID is the UID of the pod.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `restarts` | integer | Yes | restarts is the sum of the restart counts of the pod's containers and native sidecars (init containers with restartPolicy Always) when the baseline was last taken. A later sample that shows a higher sum is a Restarted reset.<br>Minimum: 0 |
 
 ### PolicyAction
@@ -1195,6 +1195,8 @@ Validation rules:
 - AdjustKedaMaxReplicas can only target a keda.sh ScaledObject: `self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/') && self.targetRef.kind == 'ScaledObject')`
 - SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet: `self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])`
 - replaces and chainRoot are set together or not at all: `has(self.replaces) == has(self.chainRoot)`
+- a revert (spec.reverts) requires approvalRequired: true: `!has(self.reverts) || (has(self.approvalRequired) && self.approvalRequired)`
+- a revert (spec.reverts) never replaces another request: `!has(self.reverts) || !has(self.replaces)`
 
 Used by: [RemediationRequest](#remediationrequest).
 
@@ -1208,7 +1210,8 @@ Used by: [RemediationRequest](#remediationrequest).
 | `action` | [Action](#action) | Yes | action is the typed change.<br>Rule: adjustKedaMaxReplicas must be set if and only if type is AdjustKedaMaxReplicas<br>Rule: setContainerMemoryLimit must be set if and only if type is SetContainerMemoryLimit |
 | `verification` | [Verification](#verification) | No | verification says when the change counts as a success.<br>Default: `{}`<br>Rule: stableFor must be at least 1m<br>Rule: timeout must be at most 24h<br>Rule: timeout must be longer than stableFor |
 | `replaces` | [RequestReplacement](#requestreplacement) | No | replaces names the request this one replaces and the reviewer hint of that request it answers (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of the plan, so it is part of the request's name: the same plan answering another hint is another request. The executor checks the link once, at the policy check, and then takes the pull request over (the handoff). |
-| `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (shadewright/&lt;chainRoot>), so every request of a chain works on the same branch and pull request.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (shadewright/&lt;chainRoot>), so every request of a chain works on the same branch and pull request.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `reverts` | [RequestRef](#requestref) | No | reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a revert. A deterministic revert proposer in the analyzer is planned (#96, second part) to create one for a request that ended Failed with Verified False; none is built, so no component creates a revert yet. A model proposal has no such field. A revert requires approvalRequired: true, never replaces another request, and is never changed after create (the spec is immutable). The executor checks the link before the policy check: the named request exists with this UID, ended Failed with Verified False, is not a revert itself, has the same Incident, target and action type (and container), and this request's previous and desired values are its desired and previous values; this request's name is RevertName of that UID, so a failed request has at most one revert at a time (a revert that was deleted can be created again; the proposer must cover that). Otherwise the request ends Denied with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier writes no report for it, and once rolled out, configured and available for stableFor it ends Inconclusive with reason RevertApplied, never Succeeded. |
 
 ### RemediationRequestStatus
 
@@ -1232,7 +1235,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `planDigest` | string | No | planDigest covers the semantic change, the target UID, the resolved source with the repository URL and provider installation from RemediationSettings, and the policy UID and generation. It is fixed when the branch is created; if any input changes later, the request becomes Superseded and its PR is closed.<br>Pattern: `^sha256:[0-9a-f]{64}$` |
 | `planRepository` | [PlanRepository](#planrepository) | No | planRepository is the repository and installation the plan digest covers, set together with planDigest. |
 | `policyRevision` | string | No | policyRevision is the policy name and generation the decision used, as name/generation. The policy UID is recorded next to it, because a deleted and recreated policy can reach the same generation again.<br>Maximum length: 128 |
-| `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA<br>Rule: reviewCheck names the recorded head<br>Rule: conflictSeen names the recorded head |
 | `mergeReceipt` | [MergeReceipt](#mergereceipt) | No | mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed after (validation rules on the object). A request merged without a full merge commit ID gets none and ends Inconclusive with reason NoMergeReceipt; a merge with a foreign change (MergedWithForeignChange) gets none either. Unset on a request merged before the field existed (condition Verified Unknown, reason MergedBeforeVerification). |
 | `mergeCommitAwaitedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a change it cannot check. Set once and never changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset when the commit was reported at once. |
@@ -1282,12 +1285,12 @@ Used by: [RemediationSettings](#remediationsettings).
 RequestRef names another RemediationRequest in the same namespace.
 
 
-Used by: [RemediationRequestStatus](#remediationrequeststatus).
+Used by: [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | string | Yes | name of the request.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
-| `uid` | [UID](#uid) | Yes | uid of the request, so a request recreated under the same name is never taken for it.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `uid` | [UID](#uid) | Yes | uid of the request, so a request recreated under the same name is never taken for it.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 
 ### RequestReplacement
 
@@ -1299,7 +1302,7 @@ Used by: [RemediationRequestSpec](#remediationrequestspec).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | [Name](#name) | Yes | name of the replaced request, in the same namespace.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
-| `uid` | [UID](#uid) | Yes | uid of the replaced request, so a request recreated under the same name is never taken for it.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `uid` | [UID](#uid) | Yes | uid of the replaced request, so a request recreated under the same name is never taken for it.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `hint` | [HintRef](#hintref) | Yes | hint is the pinned hint of the replaced request that this plan answers. |
 
 ### ResetReason
@@ -1463,9 +1466,11 @@ Used by: [GitHubRepository](#githubrepository).
 
 ### UID
 
-UID is a Kubernetes object UID in its canonical lower-case form.
+UID is a Kubernetes object UID in its canonical lower-case form. MaxLength states the bound the pattern
+already holds, so the API server can bound the cost of CEL rules that read the field.
 
 - Underlying type: string
+- Maximum length: 36
 - Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 
 Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [OOMKill](#oomkill), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [PodBaseline](#podbaseline), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestRef](#requestref), [RequestReplacement](#requestreplacement), [VerificationReportSpec](#verificationreportspec).
@@ -1528,9 +1533,9 @@ Used by: [VerificationReport](#verificationreport).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `requestUID` | [UID](#uid) | Yes | requestUID is the UID of the RemediationRequest the report is about.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `requestUID` | [UID](#uid) | Yes | requestUID is the UID of the RemediationRequest the report is about.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `mergeCommitSHA` | string | Yes | mergeCommitSHA is the merge commit of the request's merge receipt.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
-| `targetUID` | [UID](#uid) | Yes | targetUID is the UID of the target workload.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `targetUID` | [UID](#uid) | Yes | targetUID is the UID of the target workload.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `templateRevision` | string | Yes | templateRevision is the template revision of the rollout, from the request's status.rollout: a Deployment's revision annotation or a StatefulSet's update revision.<br>Maximum length: 253<br>Minimum length: 1 |
 | `container` | string | No | container is the name of the action's container, for an action that names one (SetContainerMemoryLimit). An OOM kill of this container ends the request Failed.<br>Maximum length: 63<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 
@@ -1566,14 +1571,14 @@ Used by: [VerificationWindow](#verificationwindow).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: NotAvailable (the target reports other available replicas than desired, fewer or more, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision or container) or PartialRollout (the report does not cover every desired replica). Every one is a reset of the no-evidence class.<br>One of `NotAvailable`, `StaleReport`, `ReportMismatch`, `PartialRollout` |
+| `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: NotAvailable (the target reports other available replicas than desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked before RolledOut is True). Every one is a reset of the no-evidence class.<br>One of `NotAvailable`, `StaleReport`, `ReportMismatch`, `PartialRollout` |
 | `time` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | time is when the reset was recorded, on the executor's clock. It is never earlier than windowStart at that moment or the previous reset, so the window is open only while windowStart is later than it. |
 
 ### VerificationWindow
 
 VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
-never compared with a time of the report. A restart of the executor loses nothing of it. A lastReset is
+never compared with a time of the report. No window counts time from before the executor process began reconciling, so after a restart or a leader change every open window needs a full stableFor again. A lastReset is
 counted: resets is at least 1 when it is set.
 
 

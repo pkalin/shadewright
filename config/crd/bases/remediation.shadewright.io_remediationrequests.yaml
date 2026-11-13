@@ -1080,6 +1080,39 @@ spec:
                   rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
                 - message: reviewCheck names the recorded head
                   rule: '!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA'
+              queuedBehind:
+                description: |-
+                  queuedBehind names the requests that held the lock on the target when the executor last held this one back
+                  (Queued, with any reason) while the target was locked, written in that status write (#643). When a later check finds other
+                  holders, the executor first reads the recorded ones from the API server and only then replaces them. Until
+                  the request is decided, it ends Superseded (PlanFresh False, reason AnotherRequestClosed) when a recorded
+                  request ended NeedsIntervention because its pull request for the same target and field was closed without a
+                  merge. A request that never waited behind that one has no record of it and is decided as usual. Only the
+                  executor writes it; it is never cleared.
+                items:
+                  description: RequestRef names another RemediationRequest in the
+                    same namespace.
+                  properties:
+                    name:
+                      description: name of the request.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    uid:
+                      description: uid of the request, so a request recreated under
+                        the same name is never taken for it.
+                      pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                      type: string
+                  required:
+                  - name
+                  - uid
+                  type: object
+                maxItems: 4
+                type: array
+                x-kubernetes-list-map-keys:
+                - uid
+                x-kubernetes-list-type: map
               refusedHints:
                 description: |-
                   refusedHints are the newest comments with the command that the executor refused, at most

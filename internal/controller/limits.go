@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -168,6 +169,9 @@ type limitsState struct {
 	// or deleted): the lock then lasts until a person or a look-up of checkHeld frees it, so the request
 	// waits longer between checks and is woken by lockWaiters when the holder changes.
 	stoppedLock bool
+	// holders are the requests that hold the lock on the target, by name, at most MaxQueuedBehind, whatever
+	// reason holds the request back: what waitForLimits records in status.queuedBehind (duplicates.go, #643).
+	holders []remediationv1alpha1.RequestRef
 	// clear is what the check found the breaker no longer needs (staleOutcomes), cleared after the decision.
 	clear clearing
 	// endedDeleting are the active requests, other than the one checked, that ended and are being deleted
@@ -307,6 +311,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		if e.target == rr.Spec.TargetRef.UID && e.lock && uid != predecessor {
 			locked = true
 			lockMoving = lockMoving || e.active
+			s.holders = append(s.holders, remediationv1alpha1.RequestRef{Name: e.name, UID: remediationv1alpha1.UID(uid)})
 		}
 		switch e.outcome {
 		case outcomeSuccess:
@@ -321,6 +326,8 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		}
 	}
 	s.active -= chainPairs(seen, rr.UID, predecessor)
+	slices.SortFunc(s.holders, func(a, b remediationv1alpha1.RequestRef) int { return strings.Compare(a.Name, b.Name) })
+	s.holders = s.holders[:min(len(s.holders), remediationv1alpha1.MaxQueuedBehind)]
 	// The failures in a row are those after the latest success; one at the very same time counts as a failure.
 	inRow := make([]time.Time, 0, len(failures))
 	for _, t := range failures {
@@ -581,9 +588,11 @@ var (
 )
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
-// the reason, writes the status when that changed, and checks again after s.recheckDelay. A wait for the
-// target's state that the request was in before ends here (endWait): the policy check let it through, so a later
-// wait is a new one with its own clock, not one that already lasted the whole time the request was Queued (#556).
+// the reason and, when the target is locked, records its holders in status.queuedBehind (#643; holdBack checked
+// the recorded ones first), writes the status when that changed, and checks again after s.recheckDelay. A
+// record is kept while the target is not locked. A wait for the target's state that the request was in before
+// ends here (endWait): the policy check let it through, so a later wait is a new one with its own clock, not
+// one that already lasted the whole time the request was Queued (#556).
 func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	s limitsState) (reconcile.Result, error) {
 	reason := s.reason
@@ -594,7 +603,12 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 		Message:            queuedMessages[reason],
 		ObservedGeneration: rr.Generation,
 	})
-	if endWait(&rr.Status.Conditions) || queued {
+	recorded := false
+	if len(s.holders) > 0 && !slices.Equal(rr.Status.QueuedBehind, s.holders) {
+		rr.Status.QueuedBehind = s.holders
+		recorded = true
+	}
+	if endWait(&rr.Status.Conditions) || queued || recorded {
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 		}
@@ -703,6 +717,18 @@ func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remedia
 			return reconcile.Result{}, false, true, clearing{}, err
 		}
 		if s.reason != "" {
+			// Other holders than the recorded ones: the recorded ones are checked before the record is replaced,
+			// so a holder whose pull request was closed while another request took the lock still ends this one
+			// (duplicates.go, #643).
+			if len(s.holders) > 0 && len(rr.Status.QueuedBehind) > 0 &&
+				!slices.Equal(rr.Status.QueuedBehind, s.holders) {
+				if ended, err := r.endIfDuplicate(ctx, rr); ended || err != nil {
+					if ended {
+						r.forget(client.ObjectKeyFromObject(rr))
+					}
+					return reconcile.Result{}, false, true, clr, err
+				}
+			}
 			res, err = r.waitForLimits(ctx, rr, s)
 			return res, false, true, clr, err
 		}

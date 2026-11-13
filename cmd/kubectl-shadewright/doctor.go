@@ -61,6 +61,7 @@ const (
 	anchorDeployments  = "#deployments"
 	anchorRepositories = "#repositories"
 	anchorFlux         = "#flux"
+	anchorDelivery     = "#delivery-sources"
 )
 
 // errChecksFailed is returned after the output when at least one check failed, so the command exits non-zero.
@@ -71,7 +72,10 @@ var doctorCRDs = append(slices.Clone(shadewrightCRDs), "remediationpolicies.reme
 
 // The components whose Deployments doctor checks, by their control-plane label (the same in the chart and in
 // config/manager).
-var doctorComponents = []string{"analyzer", "executor", verifierComponent}
+var doctorComponents = []string{componentAnalyzer, "executor", verifierComponent}
+
+// componentAnalyzer is the component whose Deployment holds the watched namespaces (--watch-namespaces).
+const componentAnalyzer = "analyzer"
 
 // verifierComponent is the one component an install may leave out: the chart deploys the verifier only with a
 // namespace to watch (verifier.watchNamespaces, or analyzer.watchNamespaces while it is null).
@@ -117,6 +121,8 @@ type Diagnosis struct {
 	Checks []Check `json:"checks"`
 	// Failed is true when any check failed.
 	Failed bool `json:"failed"`
+	// Delivery is the report of the delivery sources of the watched namespaces, or nil when it was not made.
+	Delivery *Delivery `json:"delivery,omitempty"`
 }
 
 func (d *Diagnosis) add(name, level, detail, anchor string) *Check {
@@ -138,11 +144,18 @@ func doctor(ctx context.Context, c client.Reader, namespace, plugin string) *Dia
 	}
 	settings, state := checkSettings(ctx, c, d)
 	checkKillSwitch(d, settings, state)
+	var analyzers []appsv1.Deployment
+	var analyzersErr error
 	for _, comp := range doctorComponents {
-		checkDeployments(ctx, c, d, namespace, comp)
+		deps, err := checkDeployments(ctx, c, d, namespace, comp)
+		if comp == componentAnalyzer {
+			analyzers, analyzersErr = deps, err
+		}
 	}
 	checkRepositories(d, settings)
-	checkFlux(ctx, c, d, settings)
+	flux := &fluxLists{c: c}
+	checkFlux(ctx, flux, d, settings)
+	checkDelivery(ctx, c, flux, d, settings, namespace, analyzers, analyzersErr)
 	return d
 }
 
@@ -299,29 +312,32 @@ func checkKillSwitch(d *Diagnosis, s *remediationv1alpha1.RemediationSettings, s
 	}
 }
 
-// checkDeployments checks that the Deployments of one component in the operator namespace are available.
-func checkDeployments(ctx context.Context, c client.Reader, d *Diagnosis, namespace, comp string) {
+// checkDeployments checks that the Deployments of one component in the operator namespace are available, and
+// returns them, or the error of the list when they could not be read.
+func checkDeployments(ctx context.Context, c client.Reader, d *Diagnosis, namespace, comp string) (
+	[]appsv1.Deployment, error) {
 	check := "Deployment " + comp
 	list := &appsv1.DeploymentList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace), client.MatchingLabels{componentLabel: comp}); err != nil {
 		level, detail := readLevel(err, "the Deployments of namespace "+clean(namespace, maxName))
 		d.add(check, level, detail, anchorDeployments)
-		return
+		return nil, err
 	}
 	if len(list.Items) == 0 && comp == verifierComponent {
 		d.add(check, levelWarn, "not deployed: the chart deploys the verifier only with a namespace to watch "+
 			"(verifier.watchNamespaces); without it a merged request can end only Inconclusive", anchorDeployments)
-		return
+		return nil, nil
 	}
 	if len(list.Items) == 0 {
 		d.add(check, levelFail, fmt.Sprintf("no Deployment labelled %s=%s in namespace %s; is this the operator "+
 			"namespace? Pass it with -n", componentLabel, comp, clean(namespace, maxName)), anchorDeployments)
-		return
+		return nil, nil
 	}
 	for i := range list.Items {
 		level, detail := deploymentLevel(&list.Items[i])
 		d.add(check+" "+clean(list.Items[i].Name, maxName), level, detail, anchorDeployments)
 	}
+	return list.Items, nil
 }
 
 // deploymentLevel says whether a Deployment is available: pass when its Available condition is True for the
@@ -445,11 +461,12 @@ func missingGitHub(gh *remediationv1alpha1.GitHubRepository) []string {
 // (the match the executor's source mapping makes, ADR-0012) and the Kustomizations that apply them: the
 // spec rules the executor applies to them, the branch they track and whether they are Ready. A cluster
 // without Flux, a caller who may not list its objects, or a list cut at listMaxPages pages gets a warn.
-func checkFlux(ctx context.Context, c client.Reader, d *Diagnosis, s *remediationv1alpha1.RemediationSettings) {
+func checkFlux(ctx context.Context, flux *fluxLists, d *Diagnosis, s *remediationv1alpha1.RemediationSettings) {
 	if s == nil || len(s.Spec.Repositories) == 0 {
 		return
 	}
-	sources, srcTruncated, err := listAll(ctx, c, fluxGitRepositories)
+	srcList := flux.list(ctx, fluxGitRepositories)
+	sources, srcTruncated, err := srcList.items, srcList.truncated, srcList.err
 	if err != nil {
 		fluxReadFailed(d, "GitRepositories", err)
 		return
@@ -487,7 +504,8 @@ func checkFlux(ctx context.Context, c client.Reader, d *Diagnosis, s *remediatio
 		}
 		if !listedKs {
 			// Listed once, and a failure or a cut reported once, for all the sources.
-			kustomizations, ksTruncated, ksErr = listAll(ctx, c, fluxKustomizations)
+			ksList := flux.list(ctx, fluxKustomizations)
+			kustomizations, ksTruncated, ksErr = ksList.items, ksList.truncated, ksList.err
 			listedKs = true
 			switch {
 			case ksErr != nil:
@@ -617,6 +635,33 @@ func objName(o *unstructured.Unstructured) string {
 	return clean(o.GetNamespace(), maxName) + "/" + clean(o.GetName(), maxName)
 }
 
+// fluxLists lists each Flux kind once per run, for the Flux checks and the delivery report.
+type fluxLists struct {
+	c    client.Reader
+	read map[schema.GroupVersionKind]*listResult
+}
+
+// listResult is the outcome of one listAll.
+type listResult struct {
+	items     []unstructured.Unstructured
+	truncated bool
+	err       error
+}
+
+// list returns the objects of a list kind, listing them on the first call.
+func (f *fluxLists) list(ctx context.Context, gvk schema.GroupVersionKind) *listResult {
+	if r, ok := f.read[gvk]; ok {
+		return r
+	}
+	if f.read == nil {
+		f.read = map[schema.GroupVersionKind]*listResult{}
+	}
+	items, truncated, err := listAll(ctx, f.c, gvk)
+	r := &listResult{items: items, truncated: truncated, err: err}
+	f.read[gvk] = r
+	return r
+}
+
 // listAll lists every object of a kind in all namespaces, in pages, up to listMaxPages pages. truncated is
 // true when the server had more after the last page read.
 func listAll(ctx context.Context, c client.Reader, gvk schema.GroupVersionKind) (
@@ -655,6 +700,7 @@ func renderDoctorText(w io.Writer, d *Diagnosis) error {
 			p.line("      See %s", c.Link)
 		}
 	}
+	renderDeliveryText(p, d.Delivery)
 	p.line("")
 	p.line("%d passed, %d warnings, %d failed", counts[levelPass], counts[levelWarn], counts[levelFail])
 	return p.err

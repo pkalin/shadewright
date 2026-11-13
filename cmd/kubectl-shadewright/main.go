@@ -69,8 +69,9 @@ Commands:
             given an Incident's name, the same for each of its requests, newest first
   doctor    read-only checks of an install: the CRDs and the version they serve, the RemediationSettings
             and its repositories, the kill switch, the analyzer and executor Deployments, and the Flux
-            sources and Kustomizations of the repositories; each check is pass, warn or fail. Exits 1 when
-            any check fails; a warn (including a read your permissions do not allow) does not
+            sources and Kustomizations of the repositories, then the Flux sources that deliver the workloads
+            of the watched namespaces; each check is pass, warn or fail. Exits 1 when any check fails; a
+            warn (including a read your permissions do not allow) does not
 
 Flags:
   -n, --namespace string      operator namespace (default: the kubeconfig context's namespace)

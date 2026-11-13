@@ -19,6 +19,7 @@ package apivalidation
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -97,5 +98,45 @@ var _ = Describe("RemediationRequest reverts", func() {
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
 			Expect(err.Error()).To(ContainSubstring("spec is immutable"), name)
 		}
+	})
+})
+
+// uidPattern is the pattern of the UID type in the generated schemas.
+const uidPattern = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+
+var _ = Describe("UID fields", func() {
+	// Every field of the UID type (spec.reverts.uid and spec.replaces.uid among them) states maxLength 36, the
+	// bound its pattern holds, so the API server can bound the cost of CEL rules that read it.
+	It("carry maxLength 36 in every CRD of the group", func() {
+		crds := &apiextensionsv1.CustomResourceDefinitionList{}
+		Expect(k8sClient.List(ctx, crds)).To(Succeed())
+		found := 0
+		var walk func(path string, s apiextensionsv1.JSONSchemaProps)
+		walk = func(path string, s apiextensionsv1.JSONSchemaProps) {
+			if s.Pattern == uidPattern {
+				found++
+				Expect(s.MaxLength).To(HaveValue(BeEquivalentTo(36)), path)
+			}
+			for name, p := range s.Properties {
+				walk(path+"."+name, p)
+			}
+			if s.Items != nil && s.Items.Schema != nil {
+				walk(path+"[]", *s.Items.Schema)
+			}
+			if s.AdditionalProperties != nil && s.AdditionalProperties.Schema != nil {
+				walk(path+"{}", *s.AdditionalProperties.Schema)
+			}
+		}
+		for _, crd := range crds.Items {
+			if crd.Spec.Group != v1alpha1.GroupVersion.Group {
+				continue
+			}
+			for _, v := range crd.Spec.Versions {
+				if v.Schema != nil && v.Schema.OpenAPIV3Schema != nil {
+					walk(crd.Name, *v.Schema.OpenAPIV3Schema)
+				}
+			}
+		}
+		Expect(found).To(BeNumerically(">", 0), "no field of the UID type was found")
 	})
 })

@@ -126,9 +126,12 @@ func inverseAction(a, b remediationv1alpha1.Action) bool {
 	return equality.Semantic.DeepEqual(want, b)
 }
 
-// revertApproval keeps approval required on an allowed revert, whatever the policy decided: the CEL rules of
-// the request already require approvalRequired: true on a revert, and this holds even for a request the API
-// server stored before that rule existed. A revert is never merged without a person.
+// revertApproval keeps approval required on an allowed revert, whatever the policy decided. Through the API it
+// changes nothing today: CEL requires approvalRequired: true on every revert the API server accepts, and
+// policy.Decide ORs spec.approvalRequired into its decision. It guards the executor's own layer against a change
+// in either (a policy package that stops reading the field, a rule that is relaxed), so that a revert is never
+// merged without a person whatever the policy code says. TestRevertApproval covers it; an envtest cannot,
+// since no revert with approvalRequired false reaches the executor.
 func revertApproval(rr *remediationv1alpha1.RemediationRequest, o outcome) outcome {
 	if remediationv1alpha1.IsRevert(rr) && o.approval != nil && !*o.approval {
 		o.approval = new(true)

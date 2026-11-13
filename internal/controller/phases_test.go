@@ -1125,6 +1125,50 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		expectRevertCleared(rr)
 	})
 
+	It("resets a revert's window while it is not rolled out, so an earlier span does not carry over", func() {
+		w := newWorldWith(nil, asRevert)
+		setTargetStatus(w, 0, 2, revisionOld, revisionNew)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		applied := w.merged.Add(time.Minute)
+		mustReconcileAt(w, applied)
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		Expect(meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut)).To(BeFalse())
+		// A window recorded earlier and open, a second after the applied time (and after any reset there).
+		start := metav1.NewTime(applied.Add(time.Second))
+		if rr.Status.Verification == nil {
+			rr.Status.Verification = &remediationv1alpha1.VerificationWindow{}
+		}
+		rr.Status.Verification.WindowStart = &start
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+
+		mustReconcileAt(w, applied.Add(verification.PollInterval))
+		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+		rolledOut := start.Add(verification.MinStableForMemory)
+		mustReconcileAt(w, rolledOut)
+		rr = fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying),
+			"the window opens when the rollout completes, not at the earlier start")
+		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally("==", rolledOut))
+		Expect(rr.Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetPartialRollout))
+	})
+
+	It("never counts a revert of a target scaled to zero as available", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		ss := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, w.ssKey, ss)).To(Succeed())
+		ss.Spec.Replicas = ptr.To[int32](0)
+		Expect(k8sClient.Update(ctx, ss)).To(Succeed())
+		setTargetStatus(w, 0, 0, revisionNew, revisionNew)
+		deadline := fetch(w).Status.Deadline.Time
+		drive(w, applied.Add(verification.PollInterval), deadline, verification.PollInterval, 1, nil)
+		Expect(fetch(w).Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		mustReconcileAt(w, deadline)
+		expectRevertCleared(expectEnd(w, remediationv1alpha1.PhaseInconclusive,
+			string(remediationv1alpha1.ResetNotAvailable)))
+	})
+
 	It("ends a revert VerificationDisabled with --verify-outcomes off, Cleared still RevertApplied", func() {
 		w := newWorldWith(nil, asRevert)
 		applied := verifying(w)

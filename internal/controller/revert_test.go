@@ -127,8 +127,7 @@ func TestInverseActionKeda(t *testing.T) {
 }
 
 // TestRevertApproval: an allowed revert keeps approval required even when the policy's decision would lower it
-// (a request stored before the CEL rule that requires approvalRequired: true on a revert); other requests keep
-// the decision.
+// (a decision that no longer reads spec.approvalRequired); other requests keep the decision.
 func TestRevertApproval(t *testing.T) {
 	_, revert := failedAndRevert()
 	revert.Spec.ApprovalRequired = new(false)

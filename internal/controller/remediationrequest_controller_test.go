@@ -280,21 +280,6 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Expect(condition(got).Reason).To(Equal("DecreaseNotAllowed"))
 	})
 
-	It("keeps approval required on an allowed revert under an Optional policy", func() {
-		// The failed request lowered the limit from 512Mi to 384Mi; the revert raises it back within the bounds.
-		create(func() {
-			liveLimit("384Mi")
-			policy.Spec.Approval = remediationv1alpha1.ApprovalOptional
-			request.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("512Mi")
-		})
-		asRevertOf(nil)
-		_, err := reconcileOnce()
-		Expect(err).NotTo(HaveOccurred())
-		got := fetch()
-		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
-		Expect(got.Status.EffectiveApprovalRequired).To(HaveValue(BeTrue()))
-	})
-
 	DescribeTable("denies a revert whose link does not hold with InvalidRevert, before the policy check",
 		func(edit func(failed, revert *remediationv1alpha1.RemediationRequest), why string) {
 			create(func() { liveLimit("384Mi") })

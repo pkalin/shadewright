@@ -200,9 +200,10 @@ type RemediationRequestSpec struct {
 	ChainRoot UID `json:"chainRoot,omitempty"`
 
 	// reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a
-	// revert, which the analyzer's deterministic revert proposer creates for a request that ended Failed with
-	// Verified False; a model proposal has no such field. A revert requires approvalRequired: true, never
-	// replaces another request, and is never changed after create (the spec is immutable). The executor checks
+	// revert. A deterministic revert proposer in the analyzer is planned (#96, second part) to create one for a
+	// request that ended Failed with Verified False; none is built, so no component creates a revert yet. A
+	// model proposal has no such field. A revert requires approvalRequired: true, never replaces another
+	// request, and is never changed after create (the spec is immutable). The executor checks
 	// the link before the policy check: the named request exists with this UID, ended Failed with Verified
 	// False, is not a revert itself, has the same Incident, target and action type (and container), and this
 	// request's previous and desired values are its desired and previous values; this request's name is
@@ -476,10 +477,11 @@ type RolloutStatus struct {
 // Verifying request that was not good.
 type VerificationReset struct {
 	// reason says why the window was reset: NotAvailable (the target reports other available replicas than
-	// desired, fewer or more, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is
-	// missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another
-	// request, merge commit, target, template revision or container) or PartialRollout (the report does not cover
-	// every desired replica). Every one is a reset of the no-evidence class.
+	// desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the
+	// KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter
+	// stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
+	// or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked
+	// before RolledOut is True). Every one is a reset of the no-evidence class.
 	// +kubebuilder:validation:Enum=NotAvailable;StaleReport;ReportMismatch;PartialRollout
 	// +required
 	Reason ResetReason `json:"reason"`

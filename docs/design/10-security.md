@@ -193,7 +193,7 @@ Requests that ended before `lastPhaseTransitionTime` existed are not counted, so
 **It trips** when three failures came after the latest success, among the requests that went through the policy check.
 
 - Failures: `Failed`, `NeedsIntervention`, a rejected pull request included.
-- Successes: `Merged` and `Succeeded`.
+- Successes: `Merged` and `Succeeded`, except a revert (`spec.reverts`, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 8), which is never a success in any phase, with `--verify-outcomes` on or off: it clears nothing, so the failure it reverts stays counted. A revert that fails counts as a failure.
 - Undecided: `WaitingForDelivery` and `Verifying` (#681) are neither. The move to them refreshes `lastPhaseTransitionTime`, so a merge older than later failures would otherwise read as a newer success and close the breaker. With `--verify-outcomes` on, a `Merged` request with a merge receipt is undecided too: the next reconcile moves it to `WaitingForDelivery`, and read as a success in between it would close the breaker before its outcome is known. With the flag off it is a success, and a request found in `WaitingForDelivery` or `Verifying` ends `Inconclusive` (`VerificationDisabled`), so none waits there for ever.
 - It stays tripped until a success.
 
@@ -208,7 +208,7 @@ Requests that ended before `lastPhaseTransitionTime` existed are not counted, so
 **The probe is marked.** The policy check sets `status.breakerProbe` on a request it lets through while the breaker is tripped, in the same status write as the allowed decision. The breaker finds the probe by that field only, so leaders with different clocks agree on it and a restart keeps it.
 
 - A request without the field (let through before the trip, or before the field existed) is not a probe.
-- A probe runs until it reaches a final phase or `Merged`, also while it is being deleted. `Merged` and `Succeeded` count as its success. A probe in `WaitingForDelivery` or `Verifying`, or with `--verify-outcomes` on in `Merged` with a merge receipt, stays the probe until it ends, so the others keep waiting (`CircuitHalfOpen`). With the flag off such a probe in `WaitingForDelivery` or `Verifying` ends `Inconclusive` (`VerificationDisabled`), which opens the breaker again for a full cool-down, after which the next request goes through as the new probe.
+- A probe runs until it reaches a final phase or `Merged`, also while it is being deleted. `Merged` and `Succeeded` count as its success, except for a revert. A probe in `WaitingForDelivery` or `Verifying`, or with `--verify-outcomes` on in `Merged` with a merge receipt, stays the probe until it ends, so the others keep waiting (`CircuitHalfOpen`). With the flag off such a probe in `WaitingForDelivery` or `Verifying` ends `Inconclusive` (`VerificationDisabled`), which opens the breaker again for a full cool-down, after which the next request goes through as the new probe.
 - One that ended without `lastPhaseTransitionTime` (written by hand) is taken to have ended one cool-down after the trip. It holds the breaker open for one more cool-down at most.
 - Requests let through before the trip that still run are not probes. They are not stopped, and a failure among them opens the breaker again.
 

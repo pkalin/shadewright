@@ -62,6 +62,9 @@ import (
 //   - A ScaledObject has no pods of its own: its window is good while it is ready by the KedaReady rule (else
 //     NotAvailable), and once it held for the effective stableFor the request ends Inconclusive with
 //     ClearingNotChecked (CheckNotAvailable when QueueBacklogDecreasing is named).
+//   - A revert of a Deployment or StatefulSet reads no report (clearRevertStep): a check before RolledOut is
+//     True resets its window (PartialRollout), so no earlier span carries over, and so does a target with no
+//     desired replica (NotAvailable).
 //   - At the timeout without a success, clearing.AtTimeout decides: Failed for a stuck rollout, a ScaledObject
 //     that is not ready and recorded trouble in a report bound to the request (Restarted), else Inconclusive
 //     with the reason that holds the window closed.
@@ -486,22 +489,27 @@ func revertAppliedMessage(kind string, stableFor time.Duration) string {
 
 // clearRevertStep is clearStep for a revert of a Deployment or StatefulSet (ADR-0030 section 8). It reads no
 // report: the verifier writes none for a revert, so the OOM rule and Cleared do not apply, and Cleared stays
-// Unknown with RevertApplied. The executor's own window is good while RolledOut is True and the target reports
-// exactly the desired replicas available (else NotAvailable); once it spans stableFor on the executor's clock the
-// request ends Inconclusive with RevertApplied, never Succeeded. At the timeout a stuck rollout ends it Failed
+// Unknown with RevertApplied. The executor's own window is good while RolledOut is True (else it is reset with
+// PartialRollout) and the target reports exactly the desired replicas available, at least one (else
+// NotAvailable); once it spans stableFor on the executor's clock the request ends Inconclusive with
+// RevertApplied, never Succeeded. At the timeout a stuck rollout ends it Failed
 // (RolloutStuck); anything else ends it Inconclusive with the reason that held the window closed.
 func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, target client.Object, now, deadline time.Time,
 	stableFor time.Duration, changed bool, stuck *rollout.Result) (reconcile.Result, error) {
 	w := executorWindow(rr)
 	good := false
-	if meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut) {
-		if desired, available := replicasOf(target); available != desired {
-			resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
-		} else {
-			w.Good(now)
-			good = true
-		}
+	desired, available := replicasOf(target)
+	switch {
+	case !meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut):
+		// Not rolled out is a bad check too: a window recorded before it must not carry its span over.
+		resetWindow(&w, remediationv1alpha1.ResetPartialRollout, now)
+	case desired < 1 || available != desired:
+		// No desired replica (scaled to zero, or a kind replicasOf does not know) shows no availability.
+		resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
+	default:
+		w.Good(now)
+		good = true
 	}
 	changed = storeWindow(rr, w) || changed
 	if good && w.Span(now) >= stableFor {

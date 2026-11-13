@@ -598,7 +598,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		writeTimeout = 2 * time.Second
 		git.SetFail(func(op string) error {
 			switch op {
-			case opFind:
+			case opGet:
 				time.Sleep(1400 * time.Millisecond)
 			case "ListComments":
 				time.Sleep(900 * time.Millisecond)
@@ -755,7 +755,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		It("declines a hint with no answer once HintAnswerTimeout has passed, also when the comments are not read",
 			func() {
 				git.SetFail(func(op string) error {
-					if op == opFind {
+					if op == opGet {
 						return &providers.RetryableError{Err: errors.New("GitHub find pull request: status 502")}
 					}
 					return nil

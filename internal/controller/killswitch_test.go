@@ -33,7 +33,7 @@ import (
 // gitReads are the GitProvider methods that write nothing to the host. Every other method is a write, and a
 // write method added to the interface is gated by this test's rule until it is listed here on purpose.
 var gitReads = map[string]bool{"Capabilities": true, "ReadFile": true, "ListDir": true, "BranchHead": true,
-	"CheckBranch": true, "CheckMerged": true, opFind: true, "CheckChain": true, "Parents": true,
+	"CheckBranch": true, "CheckMerged": true, opFind: true, "GetChangeRequest": true, "CheckChain": true, "Parents": true,
 	"CheckCommit": true}
 
 // TestGatedGitGatesEveryWrite calls every GitProvider method of a gated provider whose gate refuses, and checks
@@ -133,6 +133,10 @@ func (p *checkpointProbe) CommentChangeRequest(ctx context.Context, _ int64, _, 
 
 func (p *checkpointProbe) FindChangeRequest(ctx context.Context, _ string) (providers.ChangeRequest, error) {
 	return providers.ChangeRequest{}, p.probe(ctx, opFind)
+}
+
+func (p *checkpointProbe) GetChangeRequest(ctx context.Context, _ int64) (providers.ChangeRequest, error) {
+	return providers.ChangeRequest{}, p.probe(ctx, "GetChangeRequest")
 }
 
 func (p *checkpointProbe) CreateBranch(ctx context.Context, _, _ string) error {

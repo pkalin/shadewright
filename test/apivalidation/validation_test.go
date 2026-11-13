@@ -215,6 +215,91 @@ var _ = Describe("RemediationRequest", func() {
 		}
 	})
 
+	// ADR-0030 section 1 (#678): the merge receipt is written once and never changed, also by dropping it or the
+	// whole status and writing it again, and its merge commit is the one status.pullRequest records.
+	Describe("status.mergeReceipt", func() {
+		const merge = "89abcdef0123456789abcdef0123456789abcdef"
+		mergedAt := metav1.NewMicroTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+		receipt := func() *v1alpha1.MergeReceipt {
+			return &v1alpha1.MergeReceipt{
+				Repository:   v1alpha1.PlanRepository{URL: "https://github.com/example/fleet", InstallationID: 7},
+				TargetBranch: "main", PullRequest: 1, HeadSHA: testHeadSHA, MergeCommitSHA: merge, MergedAt: mergedAt,
+			}
+		}
+		merged := func() *v1alpha1.RemediationRequest {
+			GinkgoHelper()
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+				MergeCommitSHA: merge}
+			rr.Status.MergeReceipt = receipt()
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write of the receipt is allowed")
+			return rr
+		}
+		refused := func(rr *v1alpha1.RemediationRequest, name, msg string, change func(*v1alpha1.RemediationRequest)) {
+			GinkgoHelper()
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			change(got)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring(msg), name)
+		}
+
+		It("is kept as first written", func() {
+			rr := merged()
+			later := metav1.NewMicroTime(mergedAt.Add(time.Minute))
+			for name, change := range map[string]func(*v1alpha1.MergeReceipt){
+				"repository changed":   func(m *v1alpha1.MergeReceipt) { m.Repository.URL = "https://github.com/example/other" },
+				"installation changed": func(m *v1alpha1.MergeReceipt) { m.Repository.InstallationID = 8 },
+				"targetBranch changed": func(m *v1alpha1.MergeReceipt) { m.TargetBranch = "release" },
+				"pullRequest changed":  func(m *v1alpha1.MergeReceipt) { m.PullRequest = 2 },
+				"headSHA changed":      func(m *v1alpha1.MergeReceipt) { m.HeadSHA = strings.Repeat("e", 40) },
+				"mergedAt moved":       func(m *v1alpha1.MergeReceipt) { m.MergedAt = later },
+			} {
+				refused(rr, name, "status.mergeReceipt is set once and never changed",
+					func(r *v1alpha1.RemediationRequest) { change(r.Status.MergeReceipt) })
+			}
+		})
+
+		It("is never removed, also with the whole status", func() {
+			rr := merged()
+			refused(rr, "receipt removed", "status.mergeReceipt is set once and never changed",
+				func(r *v1alpha1.RemediationRequest) { r.Status.MergeReceipt = nil })
+			refused(rr, "status emptied", "status.mergeReceipt is set once and never changed",
+				func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} })
+		})
+
+		It("names the merge commit status.pullRequest records", func() {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			const msg = "status.mergeReceipt.mergeCommitSHA must equal status.pullRequest.mergeCommitSHA"
+			refused(rr, "another merge commit", msg, func(r *v1alpha1.RemediationRequest) {
+				r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+					MergeCommitSHA: strings.Repeat("c", 40)}
+				r.Status.MergeReceipt = receipt()
+			})
+			refused(rr, "no merge commit recorded", msg, func(r *v1alpha1.RemediationRequest) {
+				r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA}
+				r.Status.MergeReceipt = receipt()
+			})
+			refused(rr, "no pull request recorded", msg, func(r *v1alpha1.RemediationRequest) {
+				r.Status.MergeReceipt = receipt()
+			})
+		})
+
+		It("is written again unchanged", func() {
+			rr := merged()
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			got.Status.Phase = v1alpha1.PhaseInconclusive
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a write that keeps the receipt is allowed")
+		})
+	})
+
 	// Review of #532: status.rollout is set once, so clearing waitStartedAt cannot restart the delivery window,
 	// clearing ended cannot reopen a final verdict, and dropping rollout cannot let the executor adopt another
 	// revision after a restart.

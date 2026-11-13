@@ -84,6 +84,13 @@ func supersedable(rr *remediationv1alpha1.RemediationRequest) bool {
 		rr.DeletionTimestamp.IsZero()
 }
 
+// mergedPhases are the phases a merged request can be in, listed one by one (ADR-0030 section 10): Merged and
+// every phase after it, Inconclusive and Failed included. Failed also ends steps before the merge; such a request
+// has no merge time (mergeTime), so it supersedes nothing.
+var mergedPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseMerged,
+	remediationv1alpha1.PhaseWaitingForDelivery, remediationv1alpha1.PhaseVerifying, remediationv1alpha1.PhaseSucceeded,
+	remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.PhaseFailed}
+
 // mergeTime returns when w was merged: status.pullRequest.mergedAt, set once with the phase Merged. A request
 // merged before that field existed and still Merged has its lastPhaseTransitionTime, which is then the merge's;
 // in a later phase that time has moved, so such a request has no merge time (ok false) and supersedes nothing.
@@ -105,7 +112,7 @@ func mergeTime(w *remediationv1alpha1.RemediationRequest) (time.Time, bool) {
 // knowing about.
 func mergesBefore(ctx context.Context, w, rr *remediationv1alpha1.RemediationRequest) bool {
 	if w.UID == rr.UID || rr.Spec.IncidentRef.UID == "" || w.Spec.IncidentRef.UID != rr.Spec.IncidentRef.UID ||
-		w.Spec.TargetRef.UID != rr.Spec.TargetRef.UID || !slices.Contains(successPhases, w.Status.Phase) ||
+		w.Spec.TargetRef.UID != rr.Spec.TargetRef.UID || !slices.Contains(mergedPhases, w.Status.Phase) ||
 		!sameField(ctx, w, rr) {
 		return false
 	}
@@ -237,7 +244,7 @@ func (r *RemediationRequestReconciler) endingRequestOf(ctx context.Context, rr *
 			w.Spec.TargetRef.UID != rr.Spec.TargetRef.UID {
 			continue
 		}
-		if !slices.Contains(successPhases, w.Status.Phase) {
+		if !slices.Contains(mergedPhases, w.Status.Phase) {
 			if ended(w.Status.Phase) {
 				continue
 			}

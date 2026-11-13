@@ -1394,6 +1394,54 @@ func TestFindChangeRequestNone(t *testing.T) {
 	}
 }
 
+func TestGetChangeRequest(t *testing.T) {
+	h := newHarness(t, get("/pulls/12", "pull_merged.json"))
+	cr, err := h.p.GetChangeRequest(ctx, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Number != 12 || cr.State != providers.ChangeRequestMerged || cr.HeadBranch != branch ||
+		cr.BaseBranch != target || cr.HeadSHA != strings.Repeat("7", 40) || cr.MergeCommit != strings.Repeat("d", 40) {
+		t.Errorf("got %+v", cr)
+	}
+	h = newHarness(t, get("/pulls/12", "pull_open.json"))
+	if cr, err := h.p.GetChangeRequest(ctx, 12); err != nil || cr.State != providers.ChangeRequestOpen || cr.MergeCommit != "" {
+		t.Errorf("open: got %+v, %v", cr, err)
+	}
+}
+
+// TestGetChangeRequestNotOurs checks that a pull request that is not from a shadewright/ branch of this
+// repository to the target branch is not found, and that a missing one is not found either.
+func TestGetChangeRequestNotOurs(t *testing.T) {
+	h := newHarness(t, get("/pulls/13", "pull_foreign.json"))
+	if _, err := h.p.GetChangeRequest(ctx, 13); !providers.IsNotFound(err) {
+		t.Fatalf("foreign branch: got %v", err)
+	}
+	h = newHarness(t, status(http.MethodGet, "/pulls/12", http.StatusNotFound, fxForbidden))
+	_, err := h.p.GetChangeRequest(ctx, 12)
+	if !providers.IsNotFound(err) {
+		t.Fatalf("missing: got %v", err)
+	}
+	assertSafe(t, err)
+}
+
+// TestGetChangeRequestFailures checks that an answer that cannot be trusted, or a refusal, is an error and never
+// a pull request or not found.
+func TestGetChangeRequestFailures(t *testing.T) {
+	h := newHarness(t, get("/pulls/13", "pull_merged.json")) // GitHub answered with #12
+	if _, err := h.p.GetChangeRequest(ctx, 13); err == nil || providers.IsNotFound(err) {
+		t.Errorf("another number: got %v", err)
+	}
+	h = newHarness(t, status(http.MethodGet, "/pulls/12", http.StatusForbidden, fxForbidden))
+	if _, err := h.p.GetChangeRequest(ctx, 12); !errors.Is(err, providers.ErrForbidden) {
+		t.Errorf("forbidden: got %v", err)
+	}
+	h = newHarness(t)
+	if _, err := h.p.GetChangeRequest(ctx, 0); err == nil || providers.IsNotFound(err) {
+		t.Errorf("number 0: got %v", err)
+	}
+}
+
 func TestCloseChangeRequest(t *testing.T) {
 	patch := status(http.MethodPatch, "/pulls/12", http.StatusOK, "pull_closed.json")
 	patch.check = func(t *testing.T, b map[string]any) {

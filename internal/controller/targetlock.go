@@ -92,7 +92,8 @@ var closedReasons = map[string]bool{
 }
 
 // prMayBeOpen is the status rule of the lock: whether a pull request of the request may still be open. It is
-// known not to be only when the status says so: Merged and the phases after it mean the merge; Superseded is
+// known not to be only when the status says so: Merged and the phases after it (Inconclusive included, which
+// only a merged request reaches) mean the merge; Superseded is
 // written only after the close, except Superseded after a handoff (handedOff), whose pull request its
 // replacement holds and which so may be open (ADR-0028 section 4 item 8: no status rule releases a lock on its
 // account; it released the lock in the status write that ended it); and PullRequestOpened with reason PullRequestClosed, ChangeRequestClosed or
@@ -102,7 +103,7 @@ var closedReasons = map[string]bool{
 // else, a stop that left the pull request open (HeadMoved, a refused close), one the executor could not find
 // (ChangeRequestGone), Failed or an unknown phase included, may still be open (fail closed).
 func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
-	if slices.Contains(successPhases, rr.Status.Phase) ||
+	if slices.Contains(successPhases, rr.Status.Phase) || rr.Status.Phase == remediationv1alpha1.PhaseInconclusive ||
 		(rr.Status.Phase == remediationv1alpha1.PhaseSuperseded && !handedOff(rr)) {
 		return false
 	}

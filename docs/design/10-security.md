@@ -200,9 +200,9 @@ Requests that ended before `lastPhaseTransitionTime` existed are not counted, so
 
 - The probe's success closes the breaker.
 - The probe's failure is the latest failure, so the breaker is open again for a full cool-down.
-- A probe that ends neither way (`Expired`, `Cancelled`, `Superseded`, `Denied`) also opens it again for a full cool-down from its end. Only a success closes it (fail closed).
+- A probe that ends neither way (`Expired`, `Cancelled`, `Superseded`, `Denied`, `Inconclusive`) also opens it again for a full cool-down from its end. Only a success closes it (fail closed).
 
-**Which failures count.** Outside a probe, `Expired` is not a failure: it comes from Git host outages and deadlines, not from a bad change. `Denied`, `Cancelled` and `Superseded` are skipped too.
+**Which failures count.** Outside a probe, `Expired` is not a failure: it comes from Git host outages and deadlines, not from a bad change. `Denied`, `Cancelled` and `Superseded` are skipped too, and so is `Inconclusive` (#678, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 5): merged, with no evidence either way, it is read like `Expired` and is never a success.
 
 **The probe is marked.** The policy check sets `status.breakerProbe` on a request it lets through while the breaker is tripped, in the same status write as the allowed decision. The breaker finds the probe by that field only, so leaders with different clocks agree on it and a restart keeps it.
 
@@ -217,7 +217,7 @@ Requests that ended before `lastPhaseTransitionTime` existed are not counted, so
 
 The breaker reads only the outcomes it may still need (#390). Each request carries `status.breakerCounts`, a selectable field:
 
-- **Set** in the status write that ends the request: `true` for a success, a failure, or a probe that ended any other way (`Expired`, `Cancelled`, `Superseded`, `Denied`); `false` for any other end (a refusal, `Expired` outside a probe).
+- **Set** in the status write that ends the request: `true` for a success, a failure, or a probe that ended any other way (`Expired`, `Cancelled`, `Superseded`, `Denied`, `Inconclusive`); `false` for any other end (a refusal, `Expired` outside a probe).
 - **Cleared** to `false` only on outcomes that ended before the latest request in `Succeeded`, the only final success. The same write names that request in `status.breakerClearedBy`, also a selectable field. `Merged`, `WaitingForDelivery` and `Verifying` count as successes for the decision, as before, but clear nothing: verification (#92) may still move them to `Failed`, and that write sets the field `true` again.
 - **Restored** to `true` when the request in `Succeeded` is deleted: its finalizer lists the requests that name it and sets the field back on each before it removes itself. A restore that fails keeps the finalizer, and the deletion is retried.
 - **Unset** while the request has not ended, and on one that ended before the field existed. An unset request is read (fail closed). A one-time pass sets the field on an older ended request from its status, in the same status write as `status.holdsTarget`.

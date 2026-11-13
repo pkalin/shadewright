@@ -42,8 +42,14 @@ GitOps controller
 Incident
 :   The record of one repeated symptom on one workload. See [read an Incident](how-to/read-an-incident.md).
 
+Inconclusive
+:   The final phase of a merged request whose effect could be shown neither way; condition `Verified` gives the reason ([ADR-0030](adr/0030-merge-receipt-and-verification-outcomes.md)).
+
 Kill switch
 :   `spec.paused` on `RemediationSettings`: a gate before every Git write. See [pause and resume](how-to/pause-and-resume.md).
+
+Merge receipt
+:   `status.mergeReceipt`: the repository, target branch, pull request, head and merge commit of a merge, written once with the phase `Merged` ([ADR-0030](adr/0030-merge-receipt-and-verification-outcomes.md)).
 
 Module
 :   A platform (AKS, EKS, GKE) or an integration (KEDA, Flux, ...) that adds detection, symptoms or actions, enabled by name in `spec.modules`.

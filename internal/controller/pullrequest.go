@@ -1037,7 +1037,8 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	if err != nil {
 		return hintLook{}, err
 	}
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	// By its number, not its branch: the branch may carry a newer pull request (ADR-0030 section 1).
+	cr, err := findRecorded(ctx, git, rr)
 	switch {
 	case errors.Is(err, providers.ErrNotFound):
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,

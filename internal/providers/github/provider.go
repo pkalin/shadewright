@@ -45,6 +45,7 @@ const (
 	opCheckCommit  = "GitHub check commit"
 	opOpenCR       = "GitHub open pull request"
 	opFindCR       = "GitHub find pull request"
+	opGetCR        = "GitHub get pull request"
 	opCloseCR      = "GitHub close pull request"
 	opCommentCR    = "GitHub comment on pull request"
 	opAutoMerge    = "GitHub auto-merge"
@@ -1127,6 +1128,36 @@ func (p *Provider) FindChangeRequest(ctx context.Context, headBranch string) (pr
 		}
 	}
 	return providers.ChangeRequest{}, fmt.Errorf("%s: %w", opFindCR, providers.ErrNotFound)
+}
+
+// GetChangeRequest returns pull request number of this repository, in any state. ErrNotFound when GitHub has
+// none with that number (404, 410), and also when it is not from a shadewright/ branch of this repository to
+// the target branch, such as a fork's pull request: that one is never Shadewright's.
+func (p *Provider) GetChangeRequest(ctx context.Context, number int64) (providers.ChangeRequest, error) {
+	if number < 1 {
+		return providers.ChangeRequest{}, errors.New(opGetCR + ": the pull request number must be positive")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	r, err := p.do(ctx, call{op: opGetCR, method: http.MethodGet, path: "/pulls/" + strconv.FormatInt(number, 10)})
+	if err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	if !r.ok() {
+		return providers.ChangeRequest{}, statusError(opGetCR, r.status)
+	}
+	var pr pullJSON
+	if err := decode(opGetCR, r, &pr); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	if pr.Number != number {
+		return providers.ChangeRequest{}, errors.New(opGetCR + ": GitHub returned an unexpected pull request")
+	}
+	if !p.ours(pr) {
+		return providers.ChangeRequest{}, fmt.Errorf("%s: not a Shadewright pull request to the target branch: %w",
+			opGetCR, providers.ErrNotFound)
+	}
+	return p.toChangeRequest(opGetCR, pr)
 }
 
 func (p *Provider) pull(ctx context.Context, number int64) (pullJSON, error) {

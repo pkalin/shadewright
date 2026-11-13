@@ -60,6 +60,7 @@ const (
 	secPolicy      = "policy-decision"
 	secPullRequest = "pull-request-step"
 	secRollout     = "rollout-after-the-merge"
+	secReceipt     = "merge-receipt"
 	secFreshness   = "freshness"
 	secRender      = "render-check"
 	secNotRequest  = "not-request-reasons"
@@ -164,6 +165,8 @@ var troubleshootingSections = map[string][]string{
 	"ReviewListTooLong":                 {secPullRequest},
 	"RevisionMismatch":                  {secFlux},
 	"RolloutComplete":                   {secRollout},
+	"NoMergeReceipt":                    {secReceipt},
+	"MergedBeforeVerification":          {secReceipt},
 	"RolloutNotDetermined":              {secRollout},
 	"RolloutProgressing":                {secRollout},
 	"RolloutStuck":                      {secRollout},
@@ -230,6 +233,7 @@ var terminalPhases = map[remediationv1alpha1.RemediationPhase]bool{
 	remediationv1alpha1.PhaseCancelled:         true,
 	remediationv1alpha1.PhaseSuperseded:        true,
 	remediationv1alpha1.PhaseNeedsIntervention: true,
+	remediationv1alpha1.PhaseInconclusive:      true,
 }
 
 // Explanation is what `kubectl shadewright explain` shows. Every string in it that came from the cluster has
@@ -265,7 +269,8 @@ type RequestExplanation struct {
 	// Created is the request's creation time.
 	Created metav1.Time `json:"created"`
 	// Stop is the condition that ended the request, set only in a phase that ends it without a merge:
-	// Denied, NeedsIntervention, Superseded, Expired, Cancelled or Failed.
+	// Denied, NeedsIntervention, Superseded, Expired, Cancelled or Failed, and in Inconclusive, where it is
+	// condition Verified.
 	Stop *StopReport `json:"stop,omitempty"`
 	// Incident is the name in spec.incidentRef.
 	Incident string `json:"incident"`
@@ -472,7 +477,17 @@ func explainRequest(rr *remediationv1alpha1.RemediationRequest,
 		r.PhaseSince = &metav1.Time{Time: st.LastPhaseTransitionTime.Time}
 	}
 	if terminalPhases[st.Phase] {
-		r.Stop = stopReport(st.Conditions)
+		conds := st.Conditions
+		if st.Phase == remediationv1alpha1.PhaseInconclusive {
+			// Merged, so Approved is True; Verified carries why nothing could be shown (ADR-0030 section 5).
+			for _, c := range conds {
+				if c.Type == remediationv1alpha1.ConditionVerified {
+					conds = []metav1.Condition{c}
+					break
+				}
+			}
+		}
+		r.Stop = stopReport(conds)
 	}
 	if s := st.Source; s != nil {
 		r.Source = &SourceReport{

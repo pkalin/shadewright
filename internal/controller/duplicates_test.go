@@ -126,6 +126,30 @@ func TestMergesBefore(t *testing.T) {
 	}
 }
 
+// TestMergesBeforeInEveryMergedPhase checks that a request merged after the duplicate was created supersedes it
+// in every phase a merged request can be in, the ends after the merge Inconclusive and Failed included
+// (ADR-0030 section 10, #678), and that a Failed request without a merge time (one that failed before the
+// merge) does not.
+func TestMergesBeforeInEveryMergedPhase(t *testing.T) {
+	created := limitsNow.Add(-time.Hour)
+	dup := otherRequest("dup", limitsTarget, "", 0)
+	dup.CreationTimestamp = metav1.NewTime(created)
+	for _, p := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseMerged,
+		remediationv1alpha1.PhaseWaitingForDelivery, remediationv1alpha1.PhaseVerifying,
+		remediationv1alpha1.PhaseSucceeded, remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.PhaseFailed} {
+		o := withPullRequest(otherRequest("won", limitsTarget, p, time.Minute), ReasonChangeRequestMerged)
+		at := metav1.NewMicroTime(created.Add(time.Second))
+		o.Status.PullRequest.MergedAt = &at
+		if !mergesBefore(context.Background(), o, dup) {
+			t.Errorf("%s: a request merged after the duplicate was created does not supersede it", p)
+		}
+	}
+	failed := withPullRequest(otherRequest("won", limitsTarget, remediationv1alpha1.PhaseFailed, time.Minute), "")
+	if mergesBefore(context.Background(), failed, dup) {
+		t.Error("a request that failed before the merge supersedes the duplicate")
+	}
+}
+
 // TestMergedAtIsSetOnceWithMerged checks that the phase Merged records status.pullRequest.mergedAt in the same
 // write, and that no later phase moves it, while lastPhaseTransitionTime moves with every phase (#556).
 func TestMergedAtIsSetOnceWithMerged(t *testing.T) {

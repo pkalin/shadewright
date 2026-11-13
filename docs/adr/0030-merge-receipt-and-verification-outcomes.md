@@ -29,7 +29,7 @@ What is missing is a receipt that binds the merge to its repository, branch and 
 
 ## Decision
 
-[![Planned path after the merge: the merge receipt (repository, targetBranch, pullRequest, headSHA, mergeCommitSHA, mergedAt), delivery checked against the receipt, three outcomes kept apart (rolled out, configured, cleared) each with its evidence and how it is read, cleared read from a VerificationReport that a separate verifier identity writes, the stable window, and the terminal phases Succeeded, Inconclusive and Failed, with Failed leading to a revert request that the analyzer creates.](../assets/diagrams/verification-outcomes.svg)](../assets/diagrams/verification-outcomes.svg "Open full size")
+[![Path after the merge, planned except the merge receipt and its end Inconclusive with NoMergeReceipt, which are built: the merge receipt (repository, targetBranch, pullRequest, headSHA, mergeCommitSHA, mergedAt), delivery checked against the receipt, three outcomes kept apart (rolled out, configured, cleared) each with its evidence and how it is read, cleared read from a VerificationReport that a separate verifier identity writes, the stable window, and the terminal phases Succeeded, Inconclusive and Failed, with Failed leading to a revert request that the analyzer creates.](../assets/diagrams/verification-outcomes.svg)](../assets/diagrams/verification-outcomes.svg "Open full size")
 
 ### 1. The merge receipt
 
@@ -49,7 +49,7 @@ Rules:
 - A CEL rule on the object keeps the whole receipt equal to its first value once set, in the same form as the existing rules for `mergeCommitSHA` and `appliedObservedAt`, so neither removing `status.mergeReceipt` nor removing the whole status can change it. A second rule requires `mergeReceipt.mergeCommitSHA` to equal `status.pullRequest.mergeCommitSHA`.
 - The receipt is written only for a merge that holds exactly the planned change. `MergedWithForeignChange` (phase `NeedsIntervention`) gets none.
 - When the Git host reports no merge commit, or one that is not a full commit ID, the request is still `Merged` but gets no receipt; the next reconcile ends it `Inconclusive` with reason `NoMergeReceipt` (section 5).
-- **Restart and lost writes.** The receipt is part of the write that sets `Merged`. If that write is lost, the request is still in its earlier phase and the next reconcile looks for the merged pull request again. Today a recorded pull request is looked up by its branch, not its number: `watchStep` calls `FindChangeRequest(branch)`, which returns the most recent Shadewright pull request of that branch, and a pull request with another number ends the request `NeedsIntervention` (`HeadMoved`). A branch can carry a second pull request after the first merged, for instance in a supersede chain of ADR-0028, where the branch name derives from the chain's first request; the merge of the recorded pull request would then never be recorded. #94a adds a lookup by number to `GitProvider` (`GetChangeRequest(number)`, in the repository of `status.planRepository`) and uses it for every request with `status.pullRequest.number` set, checking that the pull request found has the recorded head branch, target branch and head commit. The lookup by branch and marker stays for the adopt path, where no number was recorded. The host's answer for a merged pull request does not change, so the repeated write has the same values. A status wiped by hand cannot drop the receipt (CEL), and a request whose status was never written goes through the policy check again and adopts the merged pull request by its marker.
+- **Restart and lost writes.** The receipt is part of the write that sets `Merged`. If that write is lost, the request is still in its earlier phase and the next reconcile looks for the merged pull request again. Before #94a (#678) a recorded pull request was looked up by its branch, not its number: `watchStep` called `FindChangeRequest(branch)`, which returns the most recent Shadewright pull request of that branch, and a pull request with another number ends the request `NeedsIntervention` (`HeadMoved`). A branch can carry a second pull request after the first merged, for instance in a supersede chain of ADR-0028, where the branch name derives from the chain's first request; the merge of the recorded pull request would then never be recorded. #94a adds a lookup by number to `GitProvider` (`GetChangeRequest(number)`, in the repository of `status.planRepository`) and uses it for every request with `status.pullRequest.number` set, checking that the pull request found has the recorded head branch, target branch and head commit. The lookup by branch and marker stays for the adopt path, where no number was recorded. The host's answer for a merged pull request does not change, so the repeated write has the same values. A status wiped by hand cannot drop the receipt (CEL), and a request whose status was never written goes through the policy check again and adopts the merged pull request by its marker.
 - **Requests merged before the receipt existed** keep `Merged`. The executor sets `Verified` to `Unknown` with reason `MergedBeforeVerification` once and starts no verification, so the circuit breaker, which counts `Merged` as a success, reads the same history after the upgrade.
 
 Every later check uses the receipt, not the live settings: delivery is asked about `mergeCommitSHA` on `targetBranch`, and the ancestry question goes to `repository`. A settings entry changed after the merge cannot point the check at another repository.
@@ -182,7 +182,7 @@ stateDiagram-v2
     classDef planned stroke-dasharray: 5 5
     [*] --> Merged: a person merged, receipt written in the same status write
     Merged --> WaitingForDelivery: next reconcile, deadline is the delivery window (planned)
-    Merged --> Inconclusive: no merge receipt, NoMergeReceipt (planned)
+    Merged --> Inconclusive: no merge receipt, NoMergeReceipt
     WaitingForDelivery --> Verifying: Flux applied the merge commit or a descendant, Delivered True (planned)
     WaitingForDelivery --> Failed: Flux failed on the merge commit at the end of the window, DeliveryFailed (planned)
     WaitingForDelivery --> Inconclusive: not observed, blocked, suspended, target gone or replaced (planned)
@@ -196,7 +196,7 @@ stateDiagram-v2
     class WaitingForDelivery,Verifying,Succeeded,Inconclusive planned
 ```
 
-`Merged` and the rollout report under it are built; every state and arrow after `Merged` is planned. `Failed` exists for steps before the merge, and its use after the merge is planned. The deadline of a step after the merge never ends a request `Expired`: past the merge, the evidence decides between `Failed` and `Inconclusive`. `Expired` stays for steps before the merge, which narrows the "`Expired` on deadline" of #94 to those steps.
+`Merged`, the rollout report under it, and the end `Inconclusive` with `NoMergeReceipt` are built (#678); every other state and arrow after `Merged` is planned, and so `Inconclusive` keeps the planned style for its other arrows. `Failed` exists for steps before the merge, and its use after the merge is planned. The deadline of a step after the merge never ends a request `Expired`: past the merge, the evidence decides between `Failed` and `Inconclusive`. `Expired` stays for steps before the merge, which narrows the "`Expired` on deadline" of #94 to those steps.
 
 Also before the merge: a pull request closed without a merge keeps ending `NeedsIntervention` with `ChangeRequestClosed` (decided 2026-11-13), because a person rejecting a proposal is a signal the circuit breaker counts as a failure, and the fix for #643 reads that phase and reason.
 
@@ -343,4 +343,4 @@ A close without a merge keeps ending `NeedsIntervention` with `ChangeRequestClos
 
 ## Amendments
 
-None.
+- 2026-11-13: #94a (#678) is built: `status.mergeReceipt` with its two CEL rules, `GetChangeRequest(number)` in `GitProvider`, the GitHub adapter and the fake, used by `watchStep` for a recorded pull request, the phase `Inconclusive` with reason `NoMergeReceipt`, `MergedBeforeVerification` for requests merged before receipts existed, and the Incident closure reason `RequestInconclusive`. The arrow `Merged --> Inconclusive` in section 6 is no longer planned. Section 10 describes the code at `e2abcd9`, before this.

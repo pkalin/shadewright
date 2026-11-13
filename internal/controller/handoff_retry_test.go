@@ -134,7 +134,7 @@ func TestStepNotRecordedDoesNotHoldBackTheLook(t *testing.T) {
 	ctx := context.Background()
 	var looks atomic.Int32
 	g.SetFail(func(op string) error {
-		if op == "FindChangeRequest" {
+		if op == "GetChangeRequest" {
 			looks.Add(1)
 		}
 		return nil

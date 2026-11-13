@@ -481,6 +481,37 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(condition(p, remediationv1alpha1.ConditionApproved).Reason).To(Equal(remediationv1alpha1.ReasonHandedOff))
 	})
 
+	// ADR-0030 section 1 (#678): the merge on the handoff path writes the receipt with the replacement's head.
+	It("writes the merge receipt with the replacement's head when the merged head is its commit", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		var mergeSHA string
+		git.SetAfter(func(op string) error {
+			if op == opAppend {
+				var err error
+				mergeSHA, err = git.Merge(number)
+				return err
+			}
+			return nil
+		})
+		pollOf(repl)
+		git.SetAfter(nil)
+		drive(2)
+		r := get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		m := r.Status.MergeReceipt
+		Expect(m).NotTo(BeNil(), "the receipt is written with Merged")
+		Expect(m.HeadSHA).To(Equal(r.Status.PullRequest.HeadSHA))
+		Expect(m.HeadSHA).NotTo(Equal(oldHead), "the replacement's commit, not the head it replaced")
+		Expect(m.PullRequest).To(Equal(number))
+		Expect(m.MergeCommitSHA).To(Equal(mergeSHA))
+		Expect(m.Repository).To(Equal(*r.Status.PlanRepository))
+		Expect(m.TargetBranch).To(Equal(r.Status.Source.TargetBranch))
+		Expect(r.Status.PullRequest.MergedAt).NotTo(BeNil())
+		Expect(m.MergedAt.Equal(r.Status.PullRequest.MergedAt)).To(BeTrue(), "the time of the write that set Merged")
+		Expect(get(pred).Status.MergeReceipt).To(BeNil(), "the request it replaced did not merge")
+	})
+
 	It("keeps the old pull request when policy denies the replacement, and declines the hint", func() {
 		answer()
 		pollOf(pred)

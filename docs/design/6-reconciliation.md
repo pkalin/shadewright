@@ -2,13 +2,13 @@
 
 [![Shadewright executor: a RemediationRequest passes the policy's field checks, the source mapping, the full policy decision, the limits, the freshness check, the patcher with the semantic diff and the kill switch gate; the Key Vault signer lets the GitHub App open the pull request, the request waits in AwaitingApproval and stops in Merged when a person merges, after which the rollout of a Deployment or StatefulSet is reported in RolledOut once Flux applied the merge commit; refusals end in Denied, NeedsIntervention or Superseded; built up to Merged and the rollout report, with auto-merge, the delivery phases and the verifier planned, drawn dashed.](../assets/diagrams/executor.svg)](../assets/diagrams/executor.svg "Open full size")
 
-[![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; only the steps up to Merged are built; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention.](../assets/diagrams/phases.svg)](../assets/diagrams/phases.svg "Open full size")
+[![RemediationRequest phases: Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying, Succeeded; only the steps up to Merged are built; any step can end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention; a merged request without a merge receipt ends Inconclusive.](../assets/diagrams/phases.svg)](../assets/diagrams/phases.svg "Open full size")
 
 This section covers how a `RemediationRequest` moves through its phases: the phases and transitions (6.1), the policy check that decides a request (6.2), retries and deadlines (6.3), the shape of every reconcile (6.4), the pull request step (6.5), the checks that run before every write (6.6) and what happens when a request is deleted (6.7). Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (6.8).
 
-Only the steps up to `Merged` are built; delivery and verification (the rest of the main path in the picture) are planned.
+Only the steps up to `Merged` are built, with the merge receipt; delivery and verification (the rest of the main path in the picture) are planned.
 
-Other terminal or waiting phases: `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`. Conditions explain why; `phase` is a summary for humans.
+Other terminal or waiting phases: `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`, `Inconclusive` (merged, and neither success nor failure could be shown; built only for a merge without a receipt, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 5). Conditions explain why; `phase` is a summary for humans.
 
 ## 6.1. Phases and transitions
 
@@ -21,9 +21,9 @@ What happens next, step by step:
 - **After a pull request closed without a merge.** An undecided request that waited behind the target lock of another request for the same target and field, whose pull request was then closed without a merge, ends `Superseded` (`AnotherRequestClosed`) before it takes the lock (6.6.4).
 - **Freshness before merge.** The executor re-checks the freshness of a decided request before merge every five minutes, and at once on any change to the request (once its pull request waits for review, only when no full recheck ran in the last five minutes). While a pull request waits for review, the executor only looks at the pull request in between, every `--pull-request-poll-interval` (one minute by default), so a merge or a close is seen within that interval (#434); a look writes nothing to Git, so every write still comes right after a freshness check. A stale plan becomes `Superseded`, or `NeedsIntervention` if its repository settings became unusable, without waiting for a write.
 - **Opening the pull request.** A fresh `PolicyChecked` request opens its pull request and moves to `PRCreated` and `AwaitingApproval` (6.5).
-- **Merge.** Observing a person's merge is built: the request then stops in `Merged` (step 5 of 6.5).
+- **Merge.** Observing a person's merge is built: the request then stops in `Merged`, with the merge receipt in the same status write; a merge without a full merge commit ID ends `Inconclusive` (`NoMergeReceipt`) on the next reconcile (step 5 of 6.5).
 - **Rollout after the merge.** Built (#532), reporting only: the phase stays `Merged`. The executor waits up to an hour after the merge for the Flux Kustomization that applies a Deployment or StatefulSet target to report the merge commit (or a later commit of the target branch that holds it) applied, records that time once in `status.pullRequest.appliedObservedAt`, then reads the target's rollout status and sets `RolledOut`: `True` when every pod runs the applied template, `False` with reason `RolloutStuck` and one core Event when it did not within 10 minutes of that time. A delivery not seen within the hour gives `False` with reason `DeliveryNotObserved` and one Event; a target of another kind gives `Unknown` with reason `KindNotChecked`. It never acts on a pod (invariant 2) and uses only the `get` it already holds (invariant 6). A read that fails or a cancelled reconcile is never a verdict, but the check always ends with one: a stuck rollout is read again for an hour after the deadline, a newer template revision ends it with `RolloutSuperseded`, a gone or unreadable target with `RolloutNotDetermined`. The delivery is checked before the hour is judged, and time while writes are paused does not count against the hour (`status.rollout.pausedSince` and `pausedSeconds`), so a resume leaves the unused part of it. The rollout judged is the one the applied commit produced: right after Flux reports it applied, the executor reads the target and records, in the same status write as the applied time, the commit Flux applied (`status.rollout.appliedRevision`), the target's generation and a hash of its pod template, after asking Flux once more that it still reports the same commit applied (otherwise it looks again); the template revision is recorded once the target's controller observed that generation and the target's current one (a Deployment's revision annotation can name a later generation before its status does), and a template that changed again before then ends the check with `RolloutSuperseded`. A later commit of the target branch that holds the merge commit counts as ours, so the template it produced is judged. A change made outside Git (`kubectl edit`, another controller) that lands before that read cannot be told apart and is not covered. `status.rollout` is set once: CEL rules keep it and each of its fields, and `ended` never goes back to false, so neither the delivery window nor a final verdict can be reopened by a status write.
-- **Planned.** Enabling auto-merge, following delivery (`WaitingForDelivery`) and verification (`Verifying`, `Succeeded`) are designed but not built. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) defines what comes after `Merged`: a merge receipt written with the phase, delivery checked against it, the outcomes rolled out, configured and cleared as separate conditions, the stable window, and a new terminal phase `Inconclusive` for a merged change whose effect cannot be shown either way.
+- **Planned.** Enabling auto-merge, following delivery (`WaitingForDelivery`) and verification (`Verifying`, `Succeeded`) are designed but not built. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) defines what comes after `Merged`: a merge receipt written with the phase (built, #678), delivery checked against it, the outcomes rolled out, configured and cleared as separate conditions, the stable window, and a new terminal phase `Inconclusive` for a merged change whose effect cannot be shown either way.
 
 ```mermaid
 stateDiagram-v2
@@ -40,6 +40,7 @@ stateDiagram-v2
             AutoMergeQueued --> Merged: checks pass (planned)
         }
         Merged --> WaitingForDelivery: (planned)
+        Merged --> Inconclusive: no merge receipt, NoMergeReceipt (next reconcile)
         WaitingForDelivery --> Verifying: the GitOps controller applied the merge commit (planned)
     }
     Pending --> Denied: policy refuses
@@ -60,6 +61,7 @@ stateDiagram-v2
     Expired --> [*]
     Cancelled --> [*]
     Superseded --> [*]
+    Inconclusive --> [*]
 ```
 
 ## 6.2. The policy check
@@ -259,12 +261,14 @@ Auto-merge is not built yet, so a request whose policy allows automation also wa
 
 ### Step 5: watching the recorded pull request
 
-From then on each reconcile looks at the recorded pull request before the freshness check, because a merged change makes the plan look stale.
+From then on each reconcile looks at the recorded pull request before the freshness check, because a merged change makes the plan look stale. <span class="sw-status sw-built">built</span> (#678) It finds it by its recorded number in the repository of `status.planRepository` (`GetChangeRequest`), not by its branch, and checks that it is from the request's branch to its target branch: a branch can carry a newer pull request after the first merged (a supersede chain shares its branch), and the merge of the recorded one must still be recorded. A look-up that fails is retried and decides nothing.
 
-- Merged is `Merged` (`Approved` `True`).
-- A moved head or a pull request that cannot be found is `NeedsIntervention` (`HeadMoved`, `ChangeRequestGone`).
+- Merged is `Merged` (`Approved` `True`), with the merge receipt in the same status write (below).
+- A moved head or a pull request that cannot be found is `NeedsIntervention` (`HeadMoved`, `ChangeRequestGone`). A pull request with the recorded number that is not from the request's branch to its target branch counts as not found.
 - Closed without a merge is a rejection, `NeedsIntervention` (`ChangeRequestClosed`). There are two exceptions. The cleanup of a stale plan has started (`PlanFresh` `False` with a stale reason, written before the close), or the plan is stale now: a stale plan's own close looks the same and ends `Superseded`.
 - A merge after the cleanup has started still ends `Merged`, and the mark is removed.
+
+**The merge receipt** <span class="sw-status sw-built">built</span> (#678, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 1). The status write that sets `Merged` also writes `status.mergeReceipt`: the repository and installation of `status.planRepository`, `status.source.targetBranch`, the pull request number, the head that was merged (`status.pullRequest.headSHA`), the merge commit (`status.pullRequest.mergeCommitSHA`) and `mergedAt` (`status.pullRequest.mergedAt` of that write). It is written on the three paths that record a merge: the recorded pull request, a merged pull request adopted by its marker after a lost write (`endMerged`), and the replacement's merge after a handoff (with the replacement's head). A merge with a foreign change (`MergedWithForeignChange`) gets none. Two CEL rules on the object keep the receipt equal to its first value (also when it or the whole status is removed and written again) and its merge commit equal to `status.pullRequest.mergeCommitSHA`. A lost write leaves the request in its earlier phase; the next look finds the pull request again by its number, and the host's answer for a merged pull request does not change, so the receipt is written with the same values (only `mergedAt`, the time of the write, is new). When the host reports no merge commit, or one that is not a full commit ID, the request is still `Merged` without a receipt, with `Verified` `Unknown`, reason `NoMergeReceipt`, in the same write; the next reconcile ends it `Inconclusive` with that reason. A request merged before the receipt existed (no receipt, no `Verified`) keeps `Merged` and gets `Verified` `Unknown`, reason `MergedBeforeVerification`, once; its phase does not change, so the circuit breaker reads the same history. The decision reads only the recorded status, never a time.
 
 These outcomes are written to the `Approved` condition. `PullRequestOpened` stays `True`, the pull request having been opened.
 

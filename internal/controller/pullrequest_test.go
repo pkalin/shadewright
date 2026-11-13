@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -935,6 +936,234 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 	})
 
+	// ADR-0030 section 1 (#678): the merge receipt, written in the status write that sets Merged.
+	expectReceipt := func(got *remediationv1alpha1.RemediationRequest, number int64, head, merge string) {
+		GinkgoHelper()
+		m := got.Status.MergeReceipt
+		Expect(m).NotTo(BeNil(), "no merge receipt")
+		Expect(m.Repository).To(Equal(*got.Status.PlanRepository))
+		Expect(m.TargetBranch).To(Equal(got.Status.Source.TargetBranch))
+		Expect(m.PullRequest).To(Equal(number))
+		Expect(m.HeadSHA).To(Equal(head))
+		Expect(m.MergeCommitSHA).To(Equal(merge))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(merge))
+		Expect(got.Status.PullRequest.MergedAt).NotTo(BeNil())
+		Expect(m.MergedAt.Equal(got.Status.PullRequest.MergedAt)).To(BeTrue(), "the time of the write that set Merged")
+	}
+	// mergedWrite returns the first status write that set Merged.
+	mergedWrite := func(rec *statusRecorder) *remediationv1alpha1.RemediationRequestStatus {
+		GinkgoHelper()
+		for _, st := range rec.written() {
+			if st.Phase == remediationv1alpha1.PhaseMerged {
+				return &st
+			}
+		}
+		Fail("no status write set Merged")
+		return nil
+	}
+
+	It("writes the merge receipt of the recorded pull request in the status write that sets Merged (#678)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n, head := got.Status.PullRequest.Number, got.Status.PullRequest.HeadSHA
+		sha, err := git.Merge(n)
+		Expect(err).NotTo(HaveOccurred())
+		rec := &statusRecorder{Client: k8sClient}
+		r := reconciler()
+		r.Client = rec
+		_, _ = r.Reconcile(ctx, key())
+		Expect(mergedWrite(rec).MergeReceipt).NotTo(BeNil(), "the receipt is in the write that sets Merged")
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		expectReceipt(got, n, head, sha)
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified)).To(BeNil(),
+			"a merge with a receipt leaves Verified to the steps after the merge")
+		receipt := got.Status.MergeReceipt.DeepCopy()
+		clock = clock.Add(time.Hour)
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.MergeReceipt).To(Equal(receipt), "a later reconcile keeps the receipt")
+	})
+
+	It("repeats a status write lost after a merge with the same receipt values (#678)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n, head := got.Status.PullRequest.Number, got.Status.PullRequest.HeadSHA
+		sha, err := git.Merge(n)
+		Expect(err).NotTo(HaveOccurred())
+		lost := 0
+		r := reconciler()
+		r.Client = &statusRecorder{Client: k8sClient, fail: func(rr *remediationv1alpha1.RemediationRequest) bool {
+			if rr.Status.Phase == remediationv1alpha1.PhaseMerged {
+				lost++
+				return true
+			}
+			return false
+		}}
+		_, err = r.Reconcile(ctx, key())
+		Expect(err).To(HaveOccurred(), "the lost write is returned for a retry")
+		Expect(lost).To(Equal(1))
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the write that set Merged was lost")
+		Expect(got.Status.MergeReceipt).To(BeNil())
+		clock = clock.Add(time.Minute)
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		expectReceipt(got, n, head, sha)
+	})
+
+	It("records the merge of the recorded pull request when its branch carries a newer pull request (#678)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n, head := got.Status.PullRequest.Number, got.Status.PullRequest.HeadSHA
+		sha, err := git.Merge(n)
+		Expect(err).NotTo(HaveOccurred())
+		// A newer pull request on the same branch, as a supersede chain can open after the first merged.
+		_, err = git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 2\n"))
+		Expect(err).NotTo(HaveOccurred())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: "next", Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.Number).NotTo(Equal(n))
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged), "the newer pull request does not hide the merge")
+		expectReceipt(got, n, head, sha)
+	})
+
+	It("stops with ChangeRequestGone when the recorded number is a pull request from another branch (#678)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		head, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.CreateBranch(ctx, "shadewright/someone-else", head)).To(Succeed())
+		other, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: "shadewright/someone-else",
+			BaseBranch: mainBranch, Title: "newer"})
+		Expect(err).NotTo(HaveOccurred())
+		got.Status.PullRequest.Number = other.Number
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestGone))
+		Expect(got.Status.MergeReceipt).To(BeNil())
+	})
+
+	It("retries a look-up by number that fails, deciding nothing (#678)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return &providers.RetryableError{Err: errors.New("server error")}
+			}
+			return nil
+		})
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a failed read is not an answer")
+		Expect(got.Status.MergeReceipt).To(BeNil())
+		git.SetFail(nil)
+		_ = reconcileOnce()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("writes the merge receipt on the adopt path, for a merged pull request found after a lost open (#678)", func() {
+		var sha string
+		got := mergedAfterLostOpen(func(string) {}, func(n int64) (string, error) {
+			var err error
+			sha, err = git.Merge(n)
+			return sha, err
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		cr := openRequests()[0]
+		expectReceipt(got, cr.Number, cr.HeadSHA, sha)
+	})
+
+	It("writes no merge receipt for a merge with a foreign change (#678)", func() {
+		got := mergedAfterLostOpen(func(branch string) {
+			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(got.Status.MergeReceipt).To(BeNil())
+	})
+
+	DescribeTable("ends a merge without a full merge commit ID Inconclusive with NoMergeReceipt (#678)",
+		func(commit string) {
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			n := got.Status.PullRequest.Number
+			_, err := git.Merge(n)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(git.SetMergeCommit(n, commit)).To(Succeed())
+			_ = reconcileOnce()
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+			Expect(got.Status.MergeReceipt).To(BeNil())
+			Expect(got.Status.PullRequest.MergeCommitSHA).To(BeEmpty())
+			verified := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified)
+			Expect(verified).NotTo(BeNil(), "set in the write that records the merge")
+			Expect(verified.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(verified.Reason).To(Equal(ReasonNoMergeReceipt))
+
+			clock = clock.Add(time.Minute)
+			_ = reconcileOnce()
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseInconclusive))
+			verified = meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified)
+			Expect(verified.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(verified.Reason).To(Equal(ReasonNoMergeReceipt))
+			approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+			Expect(approved.Status).To(Equal(metav1.ConditionTrue), "the merge stays recorded")
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+			Expect(got.Status.BreakerCounts).To(HaveValue(BeFalse()), "neither a success nor a failure")
+			Expect(got.Status.LastPhaseTransitionTime.Time.Equal(clock)).To(BeTrue())
+
+			_ = reconcileOnce()
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseInconclusive), "it is final")
+		},
+		Entry("none", ""),
+		Entry("abbreviated", "abcdef1"),
+		Entry("upper case", strings.Repeat("AB", 20)),
+		Entry("SHA-256", strings.Repeat("ab", 32)),
+	)
+
+	It("marks a request merged before merge receipts existed once, and leaves its breaker reading as it was (#678)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		sha, err := git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		// What an executor before receipts wrote for the merge: Merged with the merge commit, nothing else.
+		merged := metav1.NewMicroTime(clock)
+		got.Status.Phase = remediationv1alpha1.PhaseMerged
+		got.Status.LastPhaseTransitionTime = &merged
+		got.Status.PullRequest.MergeCommitSHA = sha
+		got.Status.PullRequest.MergedAt = &merged
+		got.Status.HoldsTarget = new(false)
+		got.Status.BreakerCounts = new(true)
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		before := fetch()
+		Expect(breakerOutcome(before)).To(Equal(outcomeSuccess))
+
+		clock = clock.Add(time.Minute)
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.MergeReceipt).To(BeNil())
+		verified := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified)
+		Expect(verified).NotTo(BeNil())
+		Expect(verified.Status).To(Equal(metav1.ConditionUnknown))
+		Expect(verified.Reason).To(Equal(ReasonMergedBeforeVerification))
+		Expect(got.Status.LastPhaseTransitionTime).To(Equal(before.Status.LastPhaseTransitionTime))
+		Expect(got.Status.BreakerCounts).To(Equal(before.Status.BreakerCounts))
+		Expect(breakerOutcome(got)).To(Equal(outcomeSuccess), "the breaker reads the same history")
+
+		clock = clock.Add(time.Hour)
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		again := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified)
+		Expect(*again).To(Equal(*verified), "written once")
+	})
+
 	It("retries the check of a merged pull request found after a lost open without closing it again (#524)", func() {
 		got := mergedAfterLostOpen(func(string) {
 			faulty.failOn(opCheckMerged, &providers.RetryableError{Err: errors.New("server error")})
@@ -1511,10 +1740,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// look runs one reconcile with r and returns its requeue, and how many pull request look-ups and
 		// target branch head reads it made.
 		look := func(r *RemediationRequestReconciler) (time.Duration, int, int) {
-			finds, heads := faulty.count(opFind), faulty.count(opBranchHead)
+			finds, heads := faulty.count(opGet), faulty.count(opBranchHead)
 			res, err := r.Reconcile(ctx, key())
 			Expect(err).NotTo(HaveOccurred())
-			return res.RequeueAfter, faulty.count(opFind) - finds, faulty.count(opBranchHead) - heads
+			return res.RequeueAfter, faulty.count(opGet) - finds, faulty.count(opBranchHead) - heads
 		}
 
 		It("looks at the pull request every poll interval and sees a merge within it", func() {
@@ -1572,11 +1801,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			r := reconciler()
 			look(r)
 			clock = clock.Add(DefaultPullRequestPollInterval)
-			faulty.failOn(opFind, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
+			faulty.failOn(opGet, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
 			wait, _, heads := look(r)
 			Expect(wait).To(Equal(3*time.Minute), "not the poll interval")
 			Expect(heads).To(BeZero(), "the freshness check does not call the host again at once")
-			faulty.failOn(opFind, &providers.RetryableError{RetryAfter: time.Hour, Err: errors.New("rate limited")})
+			faulty.failOn(opGet, &providers.RetryableError{RetryAfter: time.Hour, Err: errors.New("rate limited")})
 			wait, _, _ = look(r)
 			Expect(wait).To(Equal(FullRecheckInterval), "never longer than the full recheck's period")
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
@@ -1639,7 +1868,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 			It("resumes also when that look is rate limited", func() {
 				r := pauseBetweenFullRechecks()
-				faulty.failOn(opFind, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
+				faulty.failOn(opGet, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
 				wait, _, heads := look(r)
 				Expect(heads).To(BeNumerically(">", 0), "the full recheck runs")
 				Expect(wait).To(Equal(DefaultPullRequestPollInterval))
@@ -1653,7 +1882,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			r := reconciler()
 			look(r)
 			clock = clock.Add(DefaultPullRequestPollInterval)
-			faulty.failOn(opFind, errors.New("connection reset"))
+			faulty.failOn(opGet, errors.New("connection reset"))
 			wait, _, heads := look(r)
 			Expect(heads).To(BeNumerically(">", 0), "the full recheck runs, as it did before the polls")
 			Expect(wait).To(Equal(DefaultPullRequestPollInterval))
@@ -2532,6 +2761,7 @@ func (f *failingStatus) Update(ctx context.Context, obj client.Object, opts ...c
 // Operation names of faultyGit. A ReadFile fault or count may name the path too: "ReadFile <path>".
 const (
 	opFind         = "FindChangeRequest"
+	opGet          = "GetChangeRequest"
 	opCreateBranch = "CreateBranch"
 	opReadFile     = "ReadFile"
 	opListDir      = "ListDir"
@@ -2712,6 +2942,17 @@ func (f *faultyGit) OpenChangeRequest(ctx context.Context, req providers.NewChan
 	}
 	cr, err := f.Git.OpenChangeRequest(ctx, req)
 	if err = f.leave(ctx, opOpen, err); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	return cr, nil
+}
+
+func (f *faultyGit) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	if err := f.enter(opGet, strconv.FormatInt(n, 10)); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	cr, err := f.Git.GetChangeRequest(ctx, n)
+	if err = f.leave(ctx, opGet, err); err != nil {
 		return providers.ChangeRequest{}, err
 	}
 	return cr, nil

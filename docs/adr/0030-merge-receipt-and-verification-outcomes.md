@@ -1,6 +1,6 @@
 # ADR-0030: The merge receipt and the three outcomes of verification
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-13
 
 ## Context

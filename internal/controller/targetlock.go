@@ -100,18 +100,21 @@ var closedReasons = map[string]bool{
 // account; it released the lock in the status write that ended it); and PullRequestOpened with reason PullRequestClosed, ChangeRequestClosed or
 // ChangeRequestMerged (markClosed) means Shadewright closed it or saw it closed or merged. Without a recorded
 // pull request one may still exist, opened while the status write that would record it was lost, so that
-// counts as may be open too, until a look-up by the branch and marker says otherwise (checkHeld). Anything
+// counts as may be open too, Superseded and Expired included (their cleanup closes only the pull requests with
+// this request's marker, and anyone may open one from the branch), until a look-up of the branch says otherwise
+// (checkHeld, openHolding). Anything
 // else, a stop that left the pull request open (HeadMoved, a refused close), one the executor could not find
 // (ChangeRequestGone), Failed or an unknown phase included, may still be open (fail closed). It speaks of the
 // request's recorded pull request only: another one of its branch may be open, so a lock is released on a closed
 // one only after the read of the branch (closedOnly, checkHeld), never by this rule alone (settleLock).
 func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.PullRequest == nil {
+		return !slices.Contains(successPhases, rr.Status.Phase) && !undecided(rr.Status.Phase) &&
+			rr.Status.Phase != remediationv1alpha1.PhaseInconclusive
+	}
 	if slices.Contains(successPhases, rr.Status.Phase) || undecided(rr.Status.Phase) || rr.Status.Phase == remediationv1alpha1.PhaseInconclusive ||
 		(rr.Status.Phase == remediationv1alpha1.PhaseSuperseded && !handedOff(rr)) {
 		return false
-	}
-	if rr.Status.PullRequest == nil {
-		return true
 	}
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened)
 	return c == nil || !closedReasons[c.Reason]
@@ -143,7 +146,11 @@ func closedOnly(rr *remediationv1alpha1.RemediationRequest) bool {
 	return c != nil && (c.Reason == ReasonPullRequestClosed || c.Reason == ReasonChangeRequestClosed)
 }
 
-// release clears the lock in the status about to be written, with the condition that said why it was kept.
+// release clears the lock in the status about to be written, with the condition that said why it was kept. It is
+// the one place that writes status.holdsTarget false (TestLockClearedInOnePlace): the release on a pull request's
+// account is made by settleLock (the status rule) and checkHeld (the read of the branch, openHolding) only; the
+// other callers are a request that never took the lock (a refusal, a queued duplicate) and the two ends of a
+// handoff, whose pull request the replacement holds.
 func release(rr *remediationv1alpha1.RemediationRequest) {
 	rr.Status.HoldsTarget = new(false)
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)

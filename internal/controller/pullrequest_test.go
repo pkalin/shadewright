@@ -3047,12 +3047,46 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					To(Equal(ReasonPullRequestDeadline))
 				Expect(openRequests()).To(HaveLen(1))
 				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed), "no open pull request is left behind")
-				Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "the cleanup proved none open: the lock is released")
 				Expect(faulty.count(opOpen)).To(Equal(1))
+				// The cleanup closes only the pull requests with this request's marker, so the expiry does not
+				// release the lock itself (#688): the read of the branch after it does (checkHeld).
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the expiry does not release the lock on its own")
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "the read of the branch finds none open")
+			})
+
+			It("keeps the lock after the deadline while an unmarked pull request is open on the branch (#688)", func() {
+				// Marked #1 is opened and its status write lost; a person closes it and opens #2, without the
+				// marker, from the same branch. The deadline's cleanup closes only marked ones: #2 may still be
+				// merged and deliver the change, so the target stays locked until it is closed or merged.
+				loseStatusWrites()
+				marked := openRequests()[0]
+				Expect(git.CloseChangeRequest(ctx, marked.Number)).To(Succeed())
+				other, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: marked.HeadBranch,
+					BaseBranch: mainBranch, Title: "opened by a person", Body: "no marker"})
+				Expect(err).NotTo(HaveOccurred())
+				clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the expiry does not release the lock")
+				Expect(faulty.count(opClose)).To(BeZero(), "the unmarked one is not closed")
+				_, err = reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				got = fetch()
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the unmarked open one keeps the lock")
+				held := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
+				Expect(held).NotTo(BeNil())
+				Expect(held.Message).To(ContainSubstring(fmt.Sprintf("#%d", other.Number)))
+				_, reconcileSecond := second()
+				expectLocked(reconcileSecond())
+				Expect(git.CloseChangeRequest(ctx, other.Number)).To(Succeed())
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "none is open any more")
 			})
 
 			DescribeTable("expires with a clear message when the close after the deadline is refused",
-				func(op string, class error, reason string) {
+				func(op string, class error, reason, what string) {
 					loseStatusWrites()
 					clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
 					faulty.failOn(op, fmt.Errorf("status 403 from https://github.com/example/fleet: %w", class))
@@ -3065,6 +3099,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					Expect(c.Reason).To(Equal(ReasonPullRequestDeadlineCleanupRefused))
 					Expect(c.Message).To(ContainSubstring(reason))
 					Expect(c.Message).To(ContainSubstring("close it by hand"))
+					Expect(c.Message).To(ContainSubstring(what), "the message says what the host refused")
 					Expect(c.Message).NotTo(ContainSubstring("https://"))
 					Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the refused close left it open")
 
@@ -3100,9 +3135,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 						To(Equal(ReasonChangeRequestClosed))
 					Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 				},
-				Entry("finding it (403)", opList, providers.ErrForbidden, ReasonGitForbidden),
-				Entry("closing it (403)", opClose, providers.ErrForbidden, ReasonGitForbidden),
-				Entry("closing it (422)", opClose, providers.ErrRejected, ReasonGitRejected),
+				Entry("finding it (403)", opList, providers.ErrForbidden, ReasonGitForbidden, "to read the pull requests"),
+				Entry("closing it (403)", opClose, providers.ErrForbidden, ReasonGitForbidden, "to close a pull request"),
+				Entry("closing it (422)", opClose, providers.ErrRejected, ReasonGitRejected, "to close a pull request"),
 			)
 
 			It("closes the pull request it finds by its marker when the target file changes first", func() {
@@ -3173,7 +3208,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			for _, c := range []struct{ name, op, after string }{
 				{"reading the target branch head in the freshness check", opBranchHead, ""},
 				{"reading the target file in the freshness check", opReadFile + " " + sourcePath, ""},
-				{"finding the pull request", opList, ""},
+				// Not "finding the pull request": a refused read of the branch's pull requests is retried until the
+				// deadline (#688); see the cells "adoption on unknown from a 403" and "expire without a recorded
+				// pull request on unknown from a 403".
 				{"reading the head of the pull request branch", opBranchHead, opList},
 				{"creating the branch", opCreateBranch, ""},
 				{"reading the target file on the pull request branch", opReadFile + " " + sourcePath,
@@ -3457,58 +3494,138 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		})
 	})
 
-	// Every caller that reads a pull request goes through changeOf (#688), and each gets every verdict here, so a
-	// missing cell is a missing entry of the table. The phase after the call, "held" or "released" for the lock,
-	// "deleted" or "finalizer kept" for the deletion. Unknown never ends, releases or deletes anything.
+	// Every caller that reads a pull request goes through changeOf (#688), and each gets every verdict here, in each
+	// of the ways it arises, so a missing cell is a missing entry of the table. Each cell checks what the caller
+	// did, not only the phase: which pull request it closed, the lock, the finalizer and how it asked to be called
+	// again. Unknown never ends, releases or deletes anything.
 	Context("for each caller and each verdict of changeOf (#688)", func() {
-		// verdictOn makes the Git host answer v for pull request n of the request.
-		verdictOn := func(v changeState, n int64) {
+		// verdictCase is one way the Git host makes changeOf answer state.
+		type verdictCase struct {
+			state changeState
+			how   string
+		}
+		var (
+			isOpen         = verdictCase{changeOpen, ""}
+			isMerged       = verdictCase{changeMerged, ""}
+			isClosed       = verdictCase{changeClosed, ""}
+			isGone         = verdictCase{changeGone, ""}
+			goneOtherOpen  = verdictCase{changeGone, "another pull request open on the branch"}
+			failedRead     = verdictCase{changeUnknown, "a server error"}
+			unconfirmed404 = verdictCase{changeUnknown, "an unconfirmed 404"}
+			contradicting  = verdictCase{changeUnknown, "contradicting reads"}
+			forbidden      = verdictCase{changeUnknown, "a 403"}
+			cases          = []verdictCase{isOpen, isMerged, isClosed, isGone, goneOtherOpen, failedRead,
+				unconfirmed404, contradicting, forbidden}
+		)
+		name := func(c verdictCase) string {
+			if c.how == "" {
+				return c.state.String()
+			}
+			return c.state.String() + " from " + c.how
+		}
+		// openOther opens a pull request without the request's marker from its branch, as a person can.
+		openOther := func() int64 {
 			GinkgoHelper()
-			switch v {
-			case changeMerged:
-				_, err := git.Merge(n)
-				Expect(err).NotTo(HaveOccurred())
-			case changeClosed:
-				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
-			case changeGone:
-				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
-				got := fetch()
-				got.Status.PullRequest.Number = 9999
-				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
-			case changeUnknown:
+			other, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(fetch()),
+				BaseBranch: mainBranch, Title: "opened by a person", Body: "no marker"})
+			Expect(err).NotTo(HaveOccurred())
+			return other.Number
+		}
+		// fault makes the reads of pull request n fail as c says; n is 0 for a request with none recorded, whose
+		// read is the listing of the branch. It replaces faulty, which then counts the caller's calls only.
+		fault := func(c verdictCase, n int64) {
+			faulty = newFaultyGit(git)
+			switch c {
+			case failedRead:
 				git.SetFail(func(op string) error {
 					if op == opGet || op == opList {
 						return &providers.RetryableError{Err: errors.New("server error")}
 					}
 					return nil
 				})
+			case forbidden:
+				git.SetFail(func(op string) error {
+					if op == opGet || op == opList {
+						return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+					}
+					return nil
+				})
+			case unconfirmed404:
+				// The listing of the branch still has the number, so the 404 is not believed.
+				op := opGet
+				if n == 0 {
+					op = opList
+				}
+				faulty.failOn(op, fmt.Errorf("status 404: %w", providers.ErrNotFound))
+			case contradicting:
+				// Read as closed by its number while the branch lists it open: a lagging read.
+				faulty.stale[n] = providers.ChangeRequestClosed
 			}
 		}
-		// unrecorded leaves the request in PolicyChecked with a pull request of its own whose recording was lost,
-		// in the state v; for gone there is none at all.
-		unrecorded := func(v changeState) {
+		// recordedIn leaves a recorded pull request in the state c; it returns its number and that of another
+		// pull request opened from the branch, if any.
+		recordedIn := func(c verdictCase, n int64) (own, other int64) {
 			GinkgoHelper()
-			if v == changeGone {
+			switch c {
+			case isMerged:
+				_, err := git.Merge(n)
+				Expect(err).NotTo(HaveOccurred())
+			case isClosed:
+				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+			case isGone, goneOtherOpen:
+				// Closed, and the status records a number the host has not: a confirmed 404.
+				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+				got := fetch()
+				got.Status.PullRequest.Number = 9999
+				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+				if c == goneOtherOpen {
+					other = openOther()
+				}
+			}
+			fault(c, n)
+			return n, other
+		}
+		recorded := func(c verdictCase) (int64, int64) {
+			GinkgoHelper()
+			return recordedIn(c, drive(remediationv1alpha1.PhaseAwaitingApproval).Status.PullRequest.Number)
+		}
+		// unrecorded leaves the request in PolicyChecked with a pull request of its own whose recording was lost,
+		// in the state c; for gone there is none of its own.
+		unrecorded := func(c verdictCase) (own, other int64) {
+			GinkgoHelper()
+			if c.state == changeGone {
 				faulty = newFaultyGit(git)
 				for faulty.count(opCommit) == 0 {
 					Expect(reconcileOnce()).To(Succeed())
 				}
-				return
+				if c == goneOtherOpen {
+					other = openOther()
+				}
+				fault(c, 0)
+				return 0, other
 			}
 			lostOpen()
-			n := openRequests()[0].Number
-			switch v {
-			case changeMerged:
-				_, err := git.Merge(n)
+			own = openRequests()[0].Number
+			switch c {
+			case isMerged:
+				_, err := git.Merge(own)
 				Expect(err).NotTo(HaveOccurred())
-			case changeClosed:
-				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
-			case changeUnknown:
-				verdictOn(changeUnknown, n)
+			case isClosed:
+				Expect(git.CloseChangeRequest(ctx, own)).To(Succeed())
 			}
+			fault(c, 0)
+			return own, other
+		}
+		// outcome is what a caller did. closed names the pull requests it called the close on ("own", "other"; a
+		// close of a merged one is refused by the host and retried after the watch records the merge), lock and
+		// finalizer are "-" once the request is deleted, and result is how it asked to be called again: "requeue"
+		// with a delay, "error" for the error backoff, or "done".
+		type outcome struct {
+			phase, closed, lock, finalizer, result string
 		}
 		const (
-			held, released, deleted, kept = "held", "released", "deleted", "finalizer kept"
+			held, released, kept, removed, none = "held", "released", "kept", "removed", "none"
+			requeue, failed, done, deleted      = "requeue", "error", "done", "deleted"
 		)
 		var (
 			awaiting = string(remediationv1alpha1.PhaseAwaitingApproval)
@@ -3519,109 +3636,253 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			created  = string(remediationv1alpha1.PhasePRCreated)
 			checked  = string(remediationv1alpha1.PhasePolicyChecked)
 		)
-		phase := func() string { return string(fetch().Status.Phase) }
-		deleteOnce := func() string {
-			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
-			_ = reconcileOnce()
-			if gone() {
-				return deleted
-			}
-			return kept
-		}
-		recorded := func(v changeState) {
+		observe := func(own, other int64, res reconcile.Result, err error) outcome {
 			GinkgoHelper()
-			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
-			verdictOn(v, got.Status.PullRequest.Number)
+			git.SetFail(nil)
+			var closed []string
+			if faulty != nil {
+				for _, n := range []int64{own, other} {
+					if n != 0 && faulty.count(opClose+" "+strconv.FormatInt(n, 10)) > 0 {
+						closed = append(closed, map[bool]string{true: "own", false: "other"}[n == own])
+					}
+				}
+				Expect(faulty.count(opClose)).To(Equal(len(closed)), "no other pull request is closed")
+			}
+			o := outcome{phase: deleted, closed: none, lock: "-", finalizer: "-", result: done}
+			if len(closed) > 0 {
+				o.closed = strings.Join(closed, ",")
+			}
+			switch {
+			case err != nil && !errors.Is(err, errStopped) && !errors.Is(err, ErrSuperseded):
+				o.result = failed
+			case res.RequeueAfter > 0:
+				o.result = requeue
+			}
+			got := &remediationv1alpha1.RemediationRequest{}
+			if apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(request), got)) {
+				return o
+			}
+			o.phase, o.lock, o.finalizer = string(got.Status.Phase), released, removed
+			if holdsLock(got) {
+				o.lock = held
+			}
+			if controllerutil.ContainsFinalizer(got, FinalizerName) {
+				o.finalizer = kept
+			}
+			return o
+		}
+		deleteOnce := func(own, other int64) outcome {
+			GinkgoHelper()
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			res, err := reconcileResult()
+			return observe(own, other, res, err)
 		}
 		staleErr := &freshness.StaleError{Reason: freshness.ReasonTargetFileChanged, Message: "stale"}
+		cleanUp := func(own, other int64) outcome {
+			GinkgoHelper()
+			return observe(own, other, reconcile.Result{}, reconciler().cleanUpStale(ctx, fetch(), staleErr))
+		}
+		// o builds an outcome: phase, closed, lock, finalizer, result.
+		o := func(phase, closed, lock, finalizer, result string) outcome {
+			return outcome{phase, closed, lock, finalizer, result}
+		}
+		na := outcome{phase: "n/a"}
 		callers := map[string]struct {
-			run  func(changeState) string
-			want map[changeState]string
+			run  func(verdictCase) outcome
+			want map[verdictCase]outcome
 		}{
 			"watch": {
-				run: func(v changeState) string { recorded(v); _ = reconcileOnce(); return phase() },
-				want: map[changeState]string{changeOpen: awaiting, changeMerged: merged,
-					changeClosed: stopped, changeGone: stopped, changeUnknown: awaiting},
+				run: func(c verdictCase) outcome {
+					own, other := recorded(c)
+					res, err := reconcileResult()
+					return observe(own, other, res, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(awaiting, none, held, kept, requeue),
+					isMerged:       o(merged, none, released, kept, done),
+					isClosed:       o(stopped, none, released, kept, done),
+					isGone:         o(stopped, none, held, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, done),
+					failedRead:     o(awaiting, none, held, kept, requeue),
+					unconfirmed404: o(awaiting, none, held, kept, requeue),
+					contradicting:  o(awaiting, none, held, kept, requeue),
+					forbidden:      o(awaiting, none, held, kept, requeue),
+				},
 			},
 			"checkHeld": {
-				run: func(v changeState) string {
-					got := stopHeadMoved()
-					verdictOn(v, got.Status.PullRequest.Number)
-					_ = reconcileOnce()
-					if h := fetch().Status.HoldsTarget; h != nil && *h {
-						return held
-					}
-					return released
+				run: func(c verdictCase) outcome {
+					own, other := recordedIn(c, stopHeadMoved().Status.PullRequest.Number)
+					res, err := reconcileResult()
+					return observe(own, other, res, err)
 				},
-				want: map[changeState]string{changeOpen: held, changeMerged: released, changeClosed: released,
-					changeGone: released, changeUnknown: held},
+				want: map[verdictCase]outcome{
+					isOpen:         o(stopped, none, held, kept, requeue),
+					isMerged:       o(stopped, none, released, kept, done),
+					isClosed:       o(stopped, none, released, kept, done),
+					isGone:         o(stopped, none, released, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, requeue),
+					failedRead:     o(stopped, none, held, kept, requeue),
+					unconfirmed404: o(stopped, none, held, kept, requeue),
+					contradicting:  o(stopped, none, held, kept, requeue),
+					forbidden:      o(stopped, none, held, kept, requeue),
+				},
 			},
 			"finalize": {
-				run: func(v changeState) string { recorded(v); return deleteOnce() },
-				want: map[changeState]string{changeOpen: deleted, changeMerged: deleted, changeClosed: deleted,
-					changeGone: deleted, changeUnknown: kept},
+				run: func(c verdictCase) outcome { return deleteOnce(recorded(c)) },
+				want: map[verdictCase]outcome{
+					isOpen:         o(deleted, "own", "-", "-", done),
+					isMerged:       o(deleted, none, "-", "-", done),
+					isClosed:       o(deleted, none, "-", "-", done),
+					isGone:         o(deleted, none, "-", "-", done),
+					goneOtherOpen:  o(deleted, none, "-", "-", done),
+					failedRead:     o(awaiting, none, held, kept, failed),
+					unconfirmed404: o(awaiting, none, held, kept, failed),
+					contradicting:  o(awaiting, none, held, kept, failed),
+					forbidden:      o(awaiting, none, held, kept, failed),
+				},
 			},
 			"cleanUpStale": {
 				// A recorded merge is the watch's to record, which runs first: the close is retried meanwhile.
-				run: func(v changeState) string {
-					recorded(v)
-					_ = reconciler().cleanUpStale(ctx, fetch(), staleErr)
-					return phase()
+				run: func(c verdictCase) outcome { return cleanUp(recorded(c)) },
+				want: map[verdictCase]outcome{
+					isOpen:         o(stale, "own", held, kept, done),
+					isMerged:       o(awaiting, "own", held, kept, failed),
+					isClosed:       o(stale, "own", held, kept, done),
+					isGone:         o(stopped, none, held, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, done),
+					failedRead:     o(awaiting, none, held, kept, failed),
+					unconfirmed404: o(awaiting, none, held, kept, failed),
+					contradicting:  o(awaiting, none, held, kept, failed),
+					forbidden:      o(stopped, none, held, kept, done),
 				},
-				want: map[changeState]string{changeOpen: stale, changeMerged: awaiting,
-					changeClosed: stale, changeGone: stopped, changeUnknown: awaiting},
 			},
 			"expire": {
-				run: func(v changeState) string { recorded(v); _, _ = reconciler().expire(ctx, fetch()); return phase() },
-				want: map[changeState]string{changeOpen: expired, changeMerged: awaiting,
-					changeClosed: expired, changeGone: expired, changeUnknown: awaiting},
+				run: func(c verdictCase) outcome {
+					own, other := recorded(c)
+					res, err := reconciler().expire(ctx, fetch())
+					return observe(own, other, res, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(expired, "own", held, kept, done),
+					isMerged:       o(awaiting, "own", held, kept, failed),
+					isClosed:       o(expired, "own", held, kept, done),
+					isGone:         o(expired, none, held, kept, done),
+					goneOtherOpen:  o(expired, none, held, kept, done),
+					failedRead:     o(awaiting, none, held, kept, failed),
+					unconfirmed404: o(awaiting, none, held, kept, failed),
+					contradicting:  o(awaiting, none, held, kept, failed),
+					forbidden:      o(expired, none, held, kept, done),
+				},
 			},
 			"refuseWaiting": {
-				run: func(v changeState) string {
-					recorded(v)
-					_ = reconciler().refuseWaiting(ctx, fetch(), &renderRefusal{reason: ReasonBranchDiverged, message: "m"})
-					return phase()
+				run: func(c verdictCase) outcome {
+					own, other := recorded(c)
+					err := reconciler().refuseWaiting(ctx, fetch(), &renderRefusal{reason: ReasonBranchDiverged, message: "m"})
+					return observe(own, other, reconcile.Result{}, err)
 				},
-				want: map[changeState]string{changeOpen: stopped, changeMerged: awaiting,
-					changeClosed: stopped, changeGone: stopped, changeUnknown: awaiting},
+				want: map[verdictCase]outcome{
+					isOpen:         o(stopped, "own", held, kept, done),
+					isMerged:       o(awaiting, "own", held, kept, failed),
+					isClosed:       o(stopped, "own", held, kept, done),
+					isGone:         o(stopped, none, held, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, done),
+					failedRead:     o(awaiting, none, held, kept, failed),
+					unconfirmed404: o(awaiting, none, held, kept, failed),
+					contradicting:  o(awaiting, none, held, kept, failed),
+					forbidden:      o(awaiting, none, held, kept, failed),
+				},
 			},
 			"adoption": {
-				run: func(v changeState) string { unrecorded(v); _ = reconcileOnce(); return phase() },
-				want: map[changeState]string{changeOpen: created, changeMerged: merged,
-					changeClosed: stopped, changeGone: created, changeUnknown: checked},
+				run: func(c verdictCase) outcome {
+					own, other := unrecorded(c)
+					res, err := reconcileResult()
+					return observe(own, other, res, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(created, none, held, kept, done),
+					isMerged:       o(merged, none, released, kept, done),
+					isClosed:       o(stopped, none, held, kept, done),
+					isGone:         o(created, none, held, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, done),
+					failedRead:     o(checked, none, held, kept, failed),
+					unconfirmed404: o(checked, none, held, kept, failed),
+					contradicting:  na,
+					forbidden:      o(checked, none, held, kept, failed),
+				},
 			},
 			"expire without a recorded pull request": {
-				run: func(v changeState) string {
-					unrecorded(v)
+				run: func(c verdictCase) outcome {
+					own, other := unrecorded(c)
 					clock = fetch().Status.Deadline.Add(time.Minute)
-					_ = reconcileOnce()
-					return phase()
+					res, err := reconcileResult()
+					return observe(own, other, res, err)
 				},
-				want: map[changeState]string{changeOpen: expired, changeMerged: merged, changeClosed: expired,
-					changeGone: expired, changeUnknown: checked},
+				want: map[verdictCase]outcome{
+					isOpen:         o(expired, "own", held, kept, done),
+					isMerged:       o(merged, none, released, kept, done),
+					isClosed:       o(expired, none, held, kept, done),
+					isGone:         o(expired, none, held, kept, done),
+					goneOtherOpen:  o(expired, none, held, kept, done),
+					failedRead:     o(checked, none, held, kept, failed),
+					unconfirmed404: o(checked, none, held, kept, failed),
+					contradicting:  na,
+					forbidden:      o(expired, none, held, kept, done),
+				},
+			},
+			"cleanUpStale without a recorded pull request": {
+				run: func(c verdictCase) outcome { return cleanUp(unrecorded(c)) },
+				want: map[verdictCase]outcome{
+					isOpen:         o(stale, "own", held, kept, done),
+					isMerged:       o(merged, none, released, kept, done),
+					isClosed:       o(stale, none, held, kept, done),
+					isGone:         o(stale, none, held, kept, done),
+					goneOtherOpen:  o(stale, none, held, kept, done),
+					failedRead:     o(checked, none, held, kept, failed),
+					unconfirmed404: o(checked, none, held, kept, failed),
+					contradicting:  na,
+					forbidden:      o(stopped, none, held, kept, done),
+				},
 			},
 			"finalize without a recorded pull request": {
-				run: func(v changeState) string { unrecorded(v); return deleteOnce() },
-				want: map[changeState]string{changeOpen: deleted, changeMerged: deleted, changeClosed: deleted,
-					changeGone: deleted, changeUnknown: kept},
+				run: func(c verdictCase) outcome { return deleteOnce(unrecorded(c)) },
+				want: map[verdictCase]outcome{
+					isOpen:         o(deleted, "own", "-", "-", done),
+					isMerged:       o(deleted, none, "-", "-", done),
+					isClosed:       o(deleted, none, "-", "-", done),
+					isGone:         o(deleted, none, "-", "-", done),
+					goneOtherOpen:  o(deleted, none, "-", "-", done),
+					failedRead:     o(checked, none, held, kept, failed),
+					unconfirmed404: o(checked, none, held, kept, failed),
+					contradicting:  na,
+					forbidden:      o(checked, none, held, kept, failed),
+				},
 			},
 		}
-		entries := make([]TableEntry, 0, len(callers)*len(changeStates))
-		for _, name := range slices.Sorted(maps.Keys(callers)) {
-			for _, v := range changeStates {
-				entries = append(entries, Entry(name+" on "+v.String(), name, v))
+		entries := make([]TableEntry, 0, len(callers)*len(cases))
+		for _, caller := range slices.Sorted(maps.Keys(callers)) {
+			for i, c := range cases {
+				if callers[caller].want[c] == na {
+					// The listing of the branch is one read: there is nothing for it to contradict.
+					continue
+				}
+				entries = append(entries, Entry(caller+" on "+name(c), caller, i))
 			}
 		}
-		It("has a cell for every caller and every verdict", func() {
-			for name, c := range callers {
-				Expect(c.want).To(HaveLen(len(changeStates)), name)
+		It("has a cell for every caller and every way to each verdict", func() {
+			states := map[changeState]bool{}
+			for _, c := range cases {
+				states[c.state] = true
+			}
+			Expect(states).To(HaveLen(len(changeStates)))
+			for caller, c := range callers {
+				Expect(c.want).To(HaveLen(len(cases)), caller)
 			}
 		})
-		DescribeTable("answers each verdict as its rule says", func(name string, v changeState) {
-			c := callers[name]
-			want, ok := c.want[v]
-			Expect(ok).To(BeTrue(), "no expected result for %s on %s", name, v)
-			Expect(c.run(v)).To(Equal(want))
+		DescribeTable("answers each verdict as its rule says", func(caller string, i int) {
+			c := callers[caller]
+			want, ok := c.want[cases[i]]
+			Expect(ok).To(BeTrue(), "no expected result for %s on %s", caller, name(cases[i]))
+			Expect(c.run(cases[i])).To(Equal(want))
 		}, entries)
 	})
 
@@ -3719,10 +3980,13 @@ type faultyGit struct {
 	crash  string
 	block  string
 	before map[string]func()
+	// stale, per number, is the state GetChangeRequest answers instead of the host's, as a lagging read.
+	stale map[int64]providers.ChangeRequestState
 }
 
 func newFaultyGit(g *fakegit.Git) *faultyGit {
-	return &faultyGit{Git: g, calls: map[string]int{}, before: map[string]func(){}}
+	return &faultyGit{Git: g, calls: map[string]int{}, before: map[string]func(){},
+		stale: map[int64]providers.ChangeRequestState{}}
 }
 
 // failOn makes op ("ReadFile <path>" for one file) fail with fault before it runs; a nil fault fails nothing.
@@ -3888,6 +4152,11 @@ func (f *faultyGit) GetChangeRequest(ctx context.Context, n int64) (providers.Ch
 	if err = f.leave(ctx, opGet, err); err != nil {
 		return providers.ChangeRequest{}, err
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st, ok := f.stale[n]; ok {
+		cr.State = st
+	}
 	return cr, nil
 }
 
@@ -3914,7 +4183,7 @@ func (f *faultyGit) ListChangeRequests(ctx context.Context, branch string, openO
 }
 
 func (f *faultyGit) CloseChangeRequest(ctx context.Context, n int64) error {
-	if err := f.enter(opClose, ""); err != nil {
+	if err := f.enter(opClose, strconv.FormatInt(n, 10)); err != nil {
 		return err
 	}
 	return f.leave(ctx, opClose, f.Git.CloseChangeRequest(ctx, n))

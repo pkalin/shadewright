@@ -407,19 +407,20 @@ func TestSettleLock(t *testing.T) {
 		rr   *remediationv1alpha1.RemediationRequest
 		want *bool
 	}{
-		"Merged releases":                   {rr(remediationv1alpha1.PhaseMerged, yes, ReasonPullRequestOpened, true), no},
-		"Inconclusive releases":             {rr(remediationv1alpha1.PhaseInconclusive, yes, ReasonPullRequestOpened, true), no},
-		"Superseded releases":               {rr(remediationv1alpha1.PhaseSuperseded, yes, "", false), no},
-		"merged by a person releases":       {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestMerged, true), no},
-		"closed without a merge keeps":      {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestClosed, true), yes},
-		"closed by Shadewright keeps":       {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestClosed, true), yes},
-		"Superseded after a close keeps":    {rr(remediationv1alpha1.PhaseSuperseded, yes, ReasonPullRequestClosed, true), yes},
-		"head moved keeps":                  {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestOpened, true), yes},
-		"gone keeps":                        {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestGone, true), yes},
-		"none recorded keeps for a look-up": {rr(remediationv1alpha1.PhaseExpired, yes, "", false), yes},
-		"still moved on keeps":              {rr(remediationv1alpha1.PhaseAwaitingApproval, yes, ReasonPullRequestClosed, true), yes},
-		"released stays released":           {rr(remediationv1alpha1.PhaseNeedsIntervention, no, ReasonPullRequestOpened, true), no},
-		"never taken is not taken":          {rr(remediationv1alpha1.PhaseNeedsIntervention, nil, ReasonPullRequestOpened, true), nil},
+		"Merged releases":       {rr(remediationv1alpha1.PhaseMerged, yes, ReasonPullRequestOpened, true), no},
+		"Inconclusive releases": {rr(remediationv1alpha1.PhaseInconclusive, yes, ReasonPullRequestOpened, true), no},
+		// The stale cleanup closes only pull requests with the marker: an unmarked one may be open (#688).
+		"Superseded with none recorded keeps for a look-up": {rr(remediationv1alpha1.PhaseSuperseded, yes, "", false), yes},
+		"merged by a person releases":                       {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestMerged, true), no},
+		"closed without a merge keeps":                      {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestClosed, true), yes},
+		"closed by Shadewright keeps":                       {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestClosed, true), yes},
+		"Superseded after a close keeps":                    {rr(remediationv1alpha1.PhaseSuperseded, yes, ReasonPullRequestClosed, true), yes},
+		"head moved keeps":                                  {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestOpened, true), yes},
+		"gone keeps":                                        {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestGone, true), yes},
+		"none recorded keeps for a look-up":                 {rr(remediationv1alpha1.PhaseExpired, yes, "", false), yes},
+		"still moved on keeps":                              {rr(remediationv1alpha1.PhaseAwaitingApproval, yes, ReasonPullRequestClosed, true), yes},
+		"released stays released":                           {rr(remediationv1alpha1.PhaseNeedsIntervention, no, ReasonPullRequestOpened, true), no},
+		"never taken is not taken":                          {rr(remediationv1alpha1.PhaseNeedsIntervention, nil, ReasonPullRequestOpened, true), nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			settleLock(c.rr)

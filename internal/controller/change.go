@@ -134,7 +134,8 @@ func unknownChange(err error) changeVerdict {
 // to the target branch has none with that number; when it has one, or the listing fails, the verdict is unknown.
 // With q.openOnBranch it also lists the open pull requests of the branch, and a pull request read as closed,
 // merged or missing that the listing has open is unknown (conflicting reads): the lock and the finalizer then
-// hold and retry rather than trust either read.
+// hold and retry rather than trust either read. A pull request read as closed is checked against that listing
+// for every caller, so a stale closed answer never ends a request or a handoff while the pull request is open.
 //
 // Without a number (none recorded) it reads every pull request of the branch to the target branch, in any state
 // (ListChangeRequests), since the newest may hide an older open or merged one, and sorts them by this request's
@@ -158,7 +159,10 @@ func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git provide
 	if v.state == changeUnknown {
 		return v
 	}
-	if q.openOnBranch {
+	// A pull request read as closed is checked against the open listing of the branch even when the caller did
+	// not ask for it: a stale closed answer must not end, release or cancel anything while the pull request is
+	// open (one extra read, on closed only).
+	if q.openOnBranch || v.state == changeClosed {
 		open, err := git.ListChangeRequests(ctx, freshness.BranchName(rr), true)
 		if err != nil {
 			return unknownChange(freshness.WrapProvider("list the open change requests of the branch", err))
@@ -167,7 +171,9 @@ func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git provide
 		if listed && v.state != changeOpen {
 			return unknownChange(fmt.Errorf("%w: #%d", errConflictingReads, n))
 		}
-		v.open = open
+		if q.openOnBranch {
+			v.open = open
+		}
 	}
 	if q.marker && v.state != changeGone {
 		switch ours, err := r.ownsMarker(ctx, v.pr.Body, rr); {

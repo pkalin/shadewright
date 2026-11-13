@@ -1188,9 +1188,10 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
 			"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
 	}
+	// changeOf read the recorded number and answers about it only, so cr is that pull request.
 	cr := v.pr
-	if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
-		if cr.Number == rr.Status.PullRequest.Number && intent(rr) != nil {
+	if cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
+		if intent(rr) != nil {
 			// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
 			// what happens to the pull request from here, and this request waits for it.
 			switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
@@ -1403,23 +1404,26 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 	}
 	if reason, _, ok := refusal(err); ok {
 		// The deadline has passed either way; waiting for a permission or a rule to change would only keep
-		// the request open longer. The message says that a pull request of its own may be left open.
-		// The lock on the target stays: a pull request of its own may be open (settleLock keeps it, since none
-		// is recorded), until checkHeld finds none open.
+		// the request open longer. The message says that a pull request of its own may be left open, and
+		// whether the host refused the read of the pull requests (an unknown verdict, isUnknownChange) or the
+		// close. The lock on the target stays: the status rule keeps it (prMayBeOpen), until checkHeld's read of
+		// the branch finds none open that may deliver the change.
+		what := "to close a pull request Shadewright may have opened on the branch"
+		if isUnknownChange(err) {
+			what = "to read the pull requests of the branch, so none was closed"
+		}
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
 			ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and the "+
-				"Git host refused ("+reason+") to find or close a pull request Shadewright may have opened on the "+
-				"branch; if one is open, close it by hand. The target stays locked until none is found open"))
+				"Git host refused ("+reason+") "+what+"; if one is open, close it by hand. The target stays "+
+				"locked until none is found open"))
 	}
 	if err != nil && !errors.Is(err, errRepositoryGone) && !errors.Is(err, errTargetBranchChanged) &&
 		!errors.Is(err, freshness.ErrRepositoryUnusable) && !errors.Is(err, errChangeRequestNotOurs) {
 		return r.retry(ctx, rr, err)
 	}
-	if err == nil && rr.Status.HoldsTarget != nil && rr.Status.PullRequest == nil {
-		// The cleanup closed the branch's pull request of this request, or found none of its own: none is open. A
-		// recorded one, closed by its number, releases the lock only through the read of the branch (checkHeld).
-		rr.Status.HoldsTarget = new(false)
-	}
+	// The lock is not released here, even when the cleanup closed every pull request of the branch with this
+	// request's marker: one without the marker may be open on the branch and still deliver the change. The read
+	// of the branch after the stop (checkHeld, through openHolding) releases it.
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
 		ReasonPullRequestDeadline, "The pull request was not opened before the deadline"))
 }
@@ -1450,9 +1454,15 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 // request ends in NeedsIntervention, while one whose pull request waits for review (PRCreated,
 // AwaitingApproval) keeps its phase, says why on PlanFresh (Unknown) and keeps watching the pull request, so
 // a later merge is still recorded (a close without a merge is decided once the freshness check runs again).
-// Any other error goes to waitOrFail.
+// Any other error goes to waitOrFail, and so does a failed read of a pull request (isUnknownChange), whatever
+// its class: a read refused with 403 or 422 is retried, never taken for a refused write.
 func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
+	if isUnknownChange(err) {
+		// A read of a pull request that failed, whatever its class (a 403 included), is never a refusal of a
+		// write: it is retried, until the request's own deadline (expire) or the handoff's (retryRecovery).
+		return r.waitOrFail(ctx, rr, err)
+	}
 	reason, message, ok := refusal(err)
 	if !ok {
 		return r.waitOrFail(ctx, rr, err)
@@ -1606,11 +1616,11 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if closes && ended(rr.Status.Phase) {
 		// A request that ended was not active until it was deleted, so another may have been let through
 		// meanwhile: the close waits for a slot under the cap (waitForCapOnDelete).
-		release, res, wait, err := r.waitForCapOnDelete(ctx, rr)
+		freeSlot, res, wait, err := r.waitForCapOnDelete(ctx, rr)
 		if wait || err != nil {
 			return res, err
 		}
-		defer release()
+		defer freeSlot()
 	}
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)

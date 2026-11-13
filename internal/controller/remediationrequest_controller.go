@@ -527,7 +527,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		reserveOnAdmission(rr)
 	} else if rr.Status.HoldsTarget == nil {
 		// A refusal never takes the lock; false keeps it out of the limits' lock list (limitsSelectors).
-		rr.Status.HoldsTarget = new(false)
+		release(rr)
 	}
 
 	rr.Status.ObservedGeneration = rr.Generation
@@ -1365,11 +1365,16 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		if !ok {
 			return err
 		}
-		// The Git host refuses the close for good (a permission the App lacks, a rule): the plan is stale
-		// and nothing more may be written for it, so a person has to close the change request.
+		// The Git host refuses the close, or the read of the change request before it, for good (a permission
+		// the App lacks, a rule): the plan is stale and nothing more may be written for it, so a person has to
+		// close the change request. The lock stays (prMayBeOpen keeps it) until checkHeld finds none open.
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, refused
 		message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to close its " +
 			"change request; it was not closed"
+		if isUnknownChange(err) {
+			message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to read its " +
+				"change request; it was not closed"
+		}
 	}
 	return r.endFreshness(ctx, rr, phase, reason, message)
 }
@@ -1607,16 +1612,7 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 // merged since the read, or the host refused for another reason), is returned for a retry, which reads again.
 func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest) error {
-	closeOurs := func(cr providers.ChangeRequest) error {
-		if cr.State != providers.ChangeRequestOpen {
-			return nil
-		}
-		switch ours, err := r.ownsMarker(ctx, cr.Body, rr); {
-		case err != nil:
-			return err
-		case !ours:
-			return nil
-		}
+	closeIt := func(cr providers.ChangeRequest) error {
 		if err := r.stillOwns(ctx, rr); err != nil {
 			return err
 		}
@@ -1630,7 +1626,8 @@ func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git prov
 	case finalizeRetry:
 		return v.err
 	case finalizeClose:
-		if err := closeOurs(v.pr); err != nil {
+		// Open with this request's marker: changeOf checked both (an unmarked one is gone).
+		if err := closeIt(v.pr); err != nil {
 			return err
 		}
 	}
@@ -1638,7 +1635,13 @@ func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git prov
 		if o.Number == v.pr.Number && v.state == changeOpen {
 			continue
 		}
-		if err := closeOurs(o); err != nil {
+		switch ours, err := r.ownsMarker(ctx, o.Body, rr); {
+		case err != nil:
+			return err
+		case !ours:
+			continue
+		}
+		if err := closeIt(o); err != nil {
 			return err
 		}
 	}

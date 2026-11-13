@@ -1152,8 +1152,9 @@ const branchPullsPerPage = 50
 // whole call, never skipped. An answer that is not a JSON array (null included) is an error, never an empty list.
 // More than MaxBranchChangeRequests, or a next page past them, is ErrTooLarge. A pull
 // request that moves between pages while they are read (one opened shifts the older ones down a page) is read
-// twice and kept once; one that closes during an openOnly read may be missed, which is right, since it is no
-// longer open.
+// twice and kept once when both answers agree; when they differ in state or head, the listing contradicts itself
+// and is an error (retried, never an answer). One that closes during an openOnly read may be missed, which is
+// right, since it is no longer open.
 func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) (
 	[]providers.ChangeRequest, error) {
 	if !isHeadBranch(headBranch) {
@@ -1165,7 +1166,7 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
-	seen := map[int64]bool{}
+	seen := map[int64]providers.ChangeRequest{}
 	var out []providers.ChangeRequest
 	const maxPages = providers.MaxBranchChangeRequests / branchPullsPerPage
 	for page := 1; ; page++ {
@@ -1194,14 +1195,19 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", opListCR,
 					providers.ErrUntrustedAnswer)
 			}
-			if seen[pr.Number] {
-				continue
-			}
-			seen[pr.Number] = true
 			cr, err := p.toChangeRequest(opListCR, pr)
 			if err != nil {
 				return nil, err
 			}
+			if prev, ok := seen[pr.Number]; ok {
+				if prev.State != cr.State || prev.HeadSHA != cr.HeadSHA {
+					// Two pages answered differently about one pull request: neither answer is believed.
+					return nil, fmt.Errorf("%s: GitHub listed pull request #%d twice with a different state or head",
+						opListCR, pr.Number)
+				}
+				continue
+			}
+			seen[pr.Number] = cr
 			if out = append(out, cr); len(out) > providers.MaxBranchChangeRequests {
 				return nil, fmt.Errorf("%s: more than %d pull requests: %w", opListCR,
 					providers.MaxBranchChangeRequests, providers.ErrTooLarge)

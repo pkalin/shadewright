@@ -308,7 +308,8 @@ Nothing is force-pushed or rebuilt.
 A request that has not opened its pull request by its deadline closes what it opened and becomes `Expired` (`PullRequestDeadline`). This also holds while the freshness check keeps failing.
 
 - If the cleanup of a stale plan has started (the mark), the request finishes the cleanup past its deadline and ends `Superseded` (or `NeedsIntervention` if the close is refused).
-- If the Git host refuses the look-up or the close for good, the request still becomes `Expired`, with the reason `PullRequestDeadlineCleanupRefused` (not `PullRequestDeadline`). It keeps the lock on its target (10.7). The message says that a pull request of its own may be left open and must be closed by hand.
+- If the Git host refuses the look-up or the close for good, the request still becomes `Expired`, with the reason `PullRequestDeadlineCleanupRefused` (not `PullRequestDeadline`). It keeps the lock on its target (10.7). The message says whether the host refused to read the pull requests of the branch or to close one, and that a pull request of its own may be left open and must be closed by hand.
+- The expiry never releases the lock itself, even when its cleanup closed every pull request with the request's marker: the look-up of the branch after it does, once no pull request open on the branch may deliver the change (10.7).
 - A replacement whose handoff is `Reserved` first looks for its own commit on the branch (the recovery of the handoff, below). If that look fails for a reason worth retrying (the repository cannot be opened, the Git host does not answer), it is retried, past the deadline too, after the delay the host asked for (`Retry-After`) or with the error backoff, for at most 15 minutes after the deadline; the deadline alone does not end it, since its commit may be on the pull request already. Then it ends `NeedsIntervention` with the reason `HandoffRecoveryFailed`, its handoff `Aborted`. A pause, a final refusal or settings that cannot reach the repository end or hold it as for any request.
 
 ### 6.5.1. What the Git host refuses
@@ -318,7 +319,7 @@ A refusal the Git host gives for good does not wait for the deadline. The GitHub
 | GitHub answers | Class | The request |
 | --- | --- | --- |
 | 429 (any), or 403 with `Retry-After`, with `x-ratelimit-remaining: 0`, with the secondary rate limit message (searched in at most 16 KiB of the body, never kept), or with a body that cannot be read | retryable, with the delay asked for (`Retry-After`, else until `x-ratelimit-reset`, else one minute) | waits in place up to 15 seconds, else requeues after the delay, cut to `status.deadline` |
-| 403 without those signals (a permission the App lacks, a rule of the repository), on a call or when the installation refuses the token | final, `ErrForbidden` | `NeedsIntervention` (`GitForbidden`); with a pull request recorded, see below |
+| 403 without those signals (a permission the App lacks, a rule of the repository), on a call or when the installation refuses the token | final, `ErrForbidden` | `NeedsIntervention` (`GitForbidden`); with a pull request recorded, or on a read of a pull request, see below |
 | 422 that the state explains: the branch exists (at the same commit; at another, a conflict the next reconcile reads again), or an open pull request of the branch | resolved by the adapter | goes on; a pull request without the request's marker is `NeedsIntervention` (`ForeignChangeRequest`) |
 | 422 that the state does not explain (a branch name or rule GitHub refuses, a pull request it will not open). A create of the branch or the pull request is sent again first, up to four attempts with backoff, because a read may come from a replica that does not show the branch, the pull request of a lost response or the commit just pushed yet; when the call runs out of time before the last attempt, it is retryable | final, `ErrRejected` | `NeedsIntervention` (`GitRejected`); with a pull request recorded, see below |
 | 408, 5xx, network errors and timeouts | retryable | retried with backoff until `status.deadline`, then `Expired` |
@@ -332,7 +333,9 @@ The stop is written with fixed text, never with the response. It applies whereve
 - Each recheck still looks at the pull request first, so a later merge (or a moved head, or a pull request that is gone) is recorded. A close without a merge is decided once the freshness check can run again.
 - The condition is removed once the freshness check passes again.
 
-**A stale plan whose close the Git host refuses for good** ends in `NeedsIntervention` with `PlanFresh` `False` (`GitForbidden`, `GitRejected`). The condition says that the plan is stale and its change request was not closed. That request no longer watches its pull request.
+**A read of a pull request the Git host refuses** (403 or 422 on the read by number or the listing of the branch, #688) is a failed read, not a refused write: the open step's look for a pull request of its own and the recovery of a handoff retry it until their own deadline (`status.deadline`, then `Expired`; the handoff's grace, then `HandoffRecoveryFailed`). Only the paths whose deadline has already passed end on it: the deadline's cleanup (`PullRequestDeadlineCleanupRefused`, the message says the read was refused) and a stale plan's cleanup (below). Both keep the lock.
+
+**A stale plan whose close the Git host refuses for good** ends in `NeedsIntervention` with `PlanFresh` `False` (`GitForbidden`, `GitRejected`). The condition says that the plan is stale and its change request was not closed, and whether the host refused the close or the read before it. That request no longer watches its pull request, and keeps the lock until the look-up of its branch finds none open (10.7).
 
 **Still retried** whatever the status:
 

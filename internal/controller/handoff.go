@@ -695,7 +695,7 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 	if from := rr.Status.Handoff.From; from.Phase == remediationv1alpha1.HandoffReserved {
 		from.Phase = remediationv1alpha1.HandoffAborted
 	}
-	rr.Status.HoldsTarget = new(false)
+	release(rr)
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, reason, message)
 }
 
@@ -915,7 +915,7 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 	if h := hintByRef(pred, to.Hint); h != nil {
 		h.State = remediationv1alpha1.HintConsumed
 	}
-	pred.Status.HoldsTarget = new(false)
+	release(pred)
 	err := r.stop(ctx, pred, remediationv1alpha1.PhaseSuperseded, remediationv1alpha1.ReasonHandedOff,
 		fmt.Sprintf("RemediationRequest %s took over the pull request and its branch with a new plan", rr.Name))
 	if !errors.Is(err, errStopped) {
@@ -968,7 +968,9 @@ const ReasonHandoffRecoveryFailed = "HandoffRecoveryFailed"
 // the request ends NeedsIntervention with ReasonHandoffRecoveryFailed, and its handoff Aborted (declineOnEnd).
 func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
+	// A read of a pull request that failed is retried until the grace ends, whatever its class (#688).
 	_, _, final := refusal(err)
+	final = final && !isUnknownChange(err)
 	if rr.Status.Deadline == nil || !r.now().After(rr.Status.Deadline.Time) || final || ctx.Err() != nil ||
 		errors.Is(err, freshness.ErrPaused) || errors.Is(err, freshness.ErrRepositoryUnusable) ||
 		errors.Is(err, errTargetBranchChanged) || errors.Is(err, errRepositoryGone) {

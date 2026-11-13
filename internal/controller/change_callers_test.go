@@ -22,6 +22,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -39,9 +40,32 @@ var pullRequestReads = map[string]map[string]bool{
 	opBranchHead: {"pullRequestStep": true, "takeOver": true, "recoverStep": true, "gatedGit.BranchHead": true},
 }
 
-// TestPullRequestReadsGoThroughChangeOf fails when a function of this package outside pullRequestReads calls one
-// of its methods.
+// TestPullRequestReadsGoThroughChangeOf fails when code of this package outside the functions pullRequestReads
+// allows refers to one of its methods: a call, a method value (f := git.GetChangeRequest) or a method expression,
+// in a function or in a package-level initializer, which no function owns and so is never allowed.
 func TestPullRequestReadsGoThroughChangeOf(t *testing.T) {
+	forEachSource(t, func(fset *token.FileSet, owner string, n ast.Node) {
+		if read, ok := forbiddenRead(owner, n); ok {
+			t.Errorf("%s: %q refers to %s; read pull requests through changeOf", fset.Position(n.Pos()), owner, read)
+		}
+	})
+}
+
+// forbiddenRead reports whether n, in the function owner ("" for a package-level declaration), refers to a
+// method of pullRequestReads that owner may not use, and which.
+func forbiddenRead(owner string, n ast.Node) (string, bool) {
+	sel, ok := n.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	allowed, read := pullRequestReads[sel.Sel.Name]
+	return sel.Sel.Name, read && !allowed[owner]
+}
+
+// forEachSource calls visit for every node of the non-test files of this package, with the name of the function
+// it is in (funcName), or "" for a package-level declaration.
+func forEachSource(t *testing.T, visit func(fset *token.FileSet, owner string, n ast.Node)) {
+	t.Helper()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -59,29 +83,109 @@ func TestPullRequestReadsGoThroughChangeOf(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				allowed, read := pullRequestReads[sel.Sel.Name]
-				if read && !allowed[funcName(fn)] {
-					t.Errorf("%s: %s calls %s; read pull requests through changeOf", fset.Position(call.Pos()),
-						funcName(fn), sel.Sel.Name)
-				}
-				return true
-			})
-		}
+		forEachDecl(f, func(owner string, n ast.Node) { visit(fset, owner, n) })
 	}
+}
+
+// forEachDecl calls visit for every node of f, with the name of the function it is in, or "".
+func forEachDecl(f *ast.File, visit func(owner string, n ast.Node)) {
+	for _, decl := range f.Decls {
+		owner := ""
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			owner = funcName(fn)
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			if n != nil {
+				visit(owner, n)
+			}
+			return true
+		})
+	}
+}
+
+// TestPullRequestReadGuardCatchesEveryReference checks the guard above on code it must refuse: a method value
+// and a package-level initializer, besides a call.
+func TestPullRequestReadGuardCatchesEveryReference(t *testing.T) {
+	const src = `package controller
+var get = providers.GitProvider.GetChangeRequest
+func other(git providers.GitProvider) {
+	f := git.ListChangeRequests
+	_ = f
+	_, _ = git.GetChangeRequest(nil, 1)
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "x.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	forEachDecl(f, func(owner string, n ast.Node) {
+		if read, ok := forbiddenRead(owner, n); ok {
+			found = append(found, owner+":"+read)
+		}
+	})
+	want := []string{":GetChangeRequest", "other:ListChangeRequests", "other:GetChangeRequest"}
+	if !slices.Equal(found, want) {
+		t.Errorf("found %v, want %v", found, want)
+	}
+}
+
+// lockWriters are the functions that may assign status.holdsTarget, and releasers those that may call release.
+// release is the one place that writes it false; the release on a pull request's account goes through the lock
+// rule only (settleLock, checkHeld with openHolding). The others release a lock that no pull request of the
+// request holds: a refusal or a queued duplicate never took it, and the two ends of a handoff (endHandoff,
+// supersedePredecessor) leave the pull request to the replacement, which holds it.
+var (
+	lockWriters = map[string]bool{"release": true, "reconcile": true, "backfill": true}
+	releasers   = map[string]bool{
+		"settleLock": true, "checkHeld": true, "reconcile": true, "supersedeDuplicate": true,
+		"endHandoff": true, "supersedePredecessor": true,
+	}
+)
+
+// TestLockClearedInOnePlace fails when a function outside lockWriters assigns status.holdsTarget, a function
+// outside releasers calls release, or reconcile and backfill write it false (#688): a caller such as the
+// deadline's cleanup, which closes only the pull requests with this request's marker, never releases the lock on
+// its own.
+func TestLockClearedInOnePlace(t *testing.T) {
+	forEachSource(t, func(fset *token.FileSet, owner string, n ast.Node) {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range n.Lhs {
+				sel, ok := lhs.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "HoldsTarget" {
+					continue
+				}
+				if !lockWriters[owner] {
+					t.Errorf("%s: %q writes status.holdsTarget; release the lock through release", fset.Position(sel.Pos()), owner)
+				}
+				if owner != "release" && i < len(n.Rhs) && writesFalse(n.Rhs[i]) {
+					t.Errorf("%s: %q writes status.holdsTarget false; use release", fset.Position(sel.Pos()), owner)
+				}
+			}
+		case *ast.KeyValueExpr:
+			if id, ok := n.Key.(*ast.Ident); ok && id.Name == "HoldsTarget" {
+				t.Errorf("%s: %q sets status.holdsTarget in a literal", fset.Position(id.Pos()), owner)
+			}
+		case *ast.CallExpr:
+			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "release" && !releasers[owner] {
+				t.Errorf("%s: %q releases the lock; only the lock rule does (settleLock, checkHeld)",
+					fset.Position(id.Pos()), owner)
+			}
+		}
+	})
+}
+
+// writesFalse reports whether e is a literal false or new(false), ptr.To(false) and the like.
+func writesFalse(e ast.Expr) bool {
+	switch e := e.(type) {
+	case *ast.Ident:
+		return e.Name == "false"
+	case *ast.CallExpr:
+		return len(e.Args) == 1 && writesFalse(e.Args[0])
+	}
+	return false
 }
 
 // funcName is the name of fn, with the receiver's type for a method of gatedGit.

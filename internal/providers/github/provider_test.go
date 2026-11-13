@@ -1492,6 +1492,20 @@ func TestListChangeRequestsRefused(t *testing.T) {
 	}
 }
 
+// TestListChangeRequestsContradicting checks that a pull request two pages list with a different state is an
+// error, never the first answer: the listing contradicts itself (#688).
+func TestListChangeRequestsContradicting(t *testing.T) {
+	h := newHarness(t,
+		listBranch("all", 1, 2, branchPull(14, stateOpen, branch, "acme/fleet", target),
+			branchPull(12, stateOpen, branch, "acme/fleet", target)),
+		listBranch("all", 2, 2, branchPull(12, stateClosed, branch, "acme/fleet", target)))
+	got, err := h.p.ListChangeRequests(ctx, branch, false)
+	if err == nil || got != nil || providers.IsNotFound(err) {
+		t.Fatalf("got %+v, %v; want an error", got, err)
+	}
+	assertSafe(t, err)
+}
+
 // jsonNull is a JSON null as a whole answer.
 const jsonNull = "null"
 

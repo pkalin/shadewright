@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -297,5 +299,38 @@ func TestRecoverHandoffJudgesTheMergedHeadWhenTheBranchIsGone(t *testing.T) {
 	}
 	if !recovered || rr.Status.Phase != api.PhaseMerged {
 		t.Fatalf("the merge of the handoff's commit was not recovered: recovered=%v, phase=%s", recovered, rr.Status.Phase)
+	}
+}
+
+// A read of the predecessor's pull request that the Git host refuses (403) is an unknown verdict, not a refused
+// write (#688): the recovery retries it before the deadline, and once the grace after it is over ends with the
+// recovery's own reason, never with a refusal of a close.
+func TestRecoverHandoffRetriesARefusedReadUntilTheGraceEnds(t *testing.T) {
+	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	g.SetFail(func(op string) error {
+		switch op {
+		case opBranchHead:
+			return fmt.Errorf("branch: %w", providers.ErrNotFound)
+		case opGet, opList:
+			return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+		}
+		return nil
+	})
+	if _, err := r.recheck(ctx, rr); err == nil {
+		t.Fatal("a refused read was not handed back for a retry")
+	}
+	if rr.Status.Phase != api.PhasePolicyChecked {
+		t.Fatalf("a refused read before the deadline ended the replacement: %s", rr.Status.Phase)
+	}
+	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
+	if _, err := r.recheck(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != api.PhaseNeedsIntervention {
+		t.Fatalf("phase %s", rr.Status.Phase)
+	}
+	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened); c == nil || c.Reason != ReasonHandoffRecoveryFailed {
+		t.Fatalf("PullRequestOpened: %+v", c)
 	}
 }

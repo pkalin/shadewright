@@ -157,8 +157,8 @@ func healthyObjects() []client.Object {
 	for _, name := range doctorCRDs {
 		objs = append(objs, healthyCRD(name))
 	}
-	return append(objs, healthySettings(), healthyDeployment("analyzer"), healthyDeployment("executor"),
-		healthySource(), healthyKustomization(), unrelated)
+	return append(objs, healthySettings(), watchingAnalyzer(testWatched), healthyDeployment("executor"),
+		healthySource(), healthyKustomization(), unrelated, workload(testWatched, "web", testFluxNS, testKs))
 }
 
 // replace returns objs with each object of the same type, namespace and name as one of with replaced by it.
@@ -282,9 +282,9 @@ var errForbidden = apierrors.NewForbidden(schema.GroupResource{Resource: "x"}, "
 // TestDoctorAllPass runs every check on a healthy install: each passes and the diagnosis has not failed.
 func TestDoctorAllPass(t *testing.T) {
 	d := runChecks(t, healthyObjects(), nil)
-	// 4 CRDs, settings, kill switch, 2 Deployments, 1 repository, 1 GitRepository, 1 Kustomization.
-	if len(d.Checks) != 11 {
-		t.Fatalf("got %d checks, want 11: %+v", len(d.Checks), d.Checks)
+	// 4 CRDs, settings, kill switch, 2 Deployments, 1 repository, 1 GitRepository, 1 Kustomization, delivery.
+	if len(d.Checks) != 12 {
+		t.Fatalf("got %d checks, want 12: %+v", len(d.Checks), d.Checks)
 	}
 	for _, c := range d.Checks {
 		if c.Level != levelPass {
@@ -537,6 +537,14 @@ func TestDoctorChecks(t *testing.T) {
 				if strings.HasPrefix(c.Name, tc.check) {
 					continue
 				}
+				if c.Name == chkDelivery {
+					// It reports the same Flux objects from the workloads' side (delivery_test.go), and never
+					// fails.
+					if c.Level == levelFail {
+						t.Errorf("%s: fail %q", c.Name, c.Detail)
+					}
+					continue
+				}
 				for prefix, l := range tc.also {
 					if strings.HasPrefix(c.Name, prefix) {
 						want = l
@@ -687,7 +695,7 @@ func TestDoctorText(t *testing.T) {
 		"      Reported by the analyzer (shown only): platform none detected, generic active\n",
 		"FAIL  Flux Kustomization flux-system/apps: failing, Ready BuildFailed: badoutput\n      See " + doctorURL +
 			anchorFlux + "\n",
-		"9 passed, 1 warnings, 1 failed\n",
+		"9 passed, 2 warnings, 1 failed\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text lacks %q:\n%s", want, text)
@@ -772,7 +780,7 @@ func TestDoctorAnchors(t *testing.T) {
 		}
 	}
 	for _, a := range []string{anchorCRDs, anchorSettings, anchorKillSwitch, anchorDeployments, anchorRepositories,
-		anchorFlux} {
+		anchorFlux, anchorDelivery} {
 		if !slices.Contains(sections, strings.TrimPrefix(a, "#")) {
 			t.Errorf("anchor %s is no section of the page (sections: %v)", a, sections)
 		}

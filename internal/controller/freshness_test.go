@@ -484,6 +484,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			got.Status.GoneSeen = &remediationv1alpha1.GoneSeen{At: metav1.NewTime(time.Now().Add(-confirmWait - time.Second)),
 				Number: foreign.Number}
 		})
+		// The request's own pull request lost its marker (a person edited it out): a listing that shows a pull
+		// request of this request is never gone (#688).
+		Expect(git.SetBody(cr.Number, unmarkedBody)).To(Succeed())
 		// The look at the recorded pull request fails once, so the cleanup is reached with the forged number.
 		finds := 0
 		git.SetFail(func(op string) error {
@@ -675,6 +678,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 		// A 404 the branch confirms is an answer once it was seen before (#688): no merged pull request of this
 		// request with that number. The first such look only records the mark.
+		// The merged one loses the marker, since a listing that shows a pull request of this request is never gone.
+		Expect(git.SetBody(cr.Number, unmarkedBody)).To(Succeed())
 		gone := &closeConflictError{number: 9999, err: fmt.Errorf("close: %w", providers.ErrConflict)}
 		err = reconciler().mergedUnrecorded(ctx, fetch(), gone)
 		Expect(errors.Is(err, errGoneUnconfirmed)).To(BeTrue(), "a first confirmed 404 waits: %v", err)

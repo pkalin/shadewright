@@ -170,7 +170,8 @@ func release(rr *remediationv1alpha1.RemediationRequest) {
 //   - unknown (a read that failed, conflicting reads such as the recorded number read closed while the branch
 //     lists it open, or an answer about another pull request), or a repository that cannot be opened: the lock
 //     is kept and nothing else is written. A read the host refuses sets condition PullRequestUnreadable
-//     (changeOf), and so does a repository that left the settings (reason RepositoryUnavailable).
+//     (changeOf), and so does a repository that cannot be opened as the settings stand (reason RepositoryUnavailable,
+//     TargetBranchChanged or RepositoryUnusable).
 //
 // TargetHeld is written when it changes. Every outcome but unknown is looked at again after heldRecheckInterval
 // while the lock is kept, and so is unknown; only the caller's cancellation and a failed write of
@@ -198,10 +199,11 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, err
 	}
 	rule := lockRule[v.state]
-	if errors.Is(err, errRepositoryGone) {
-		// No read can be made: the lock is kept, and condition PullRequestUnreadable says why (once), until the
-		// repository can be opened again (changeOf removes it then) or the request is deleted.
-		if werr := r.setUnreadable(ctx, rr, repositoryGoneRead(rr)); werr != nil {
+	if c := repositoryRead(rr, err); c != nil {
+		// No read can be made: the lock is kept, and condition PullRequestUnreadable says why as the settings stand
+		// now (once per reason), until the repository can be opened again (changeOf removes it then) or the
+		// request is deleted.
+		if werr := r.setUnreadable(ctx, rr, c); werr != nil {
 			return reconcile.Result{}, werr
 		}
 	}

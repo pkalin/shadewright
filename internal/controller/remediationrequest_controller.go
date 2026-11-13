@@ -333,6 +333,19 @@ const (
 // recorded), so its change request cannot be closed safely.
 var errRepositoryGone = errors.New("the repository of the plan is not configured")
 
+// afterRecheckEnd is what reconcile does after the recheck ended the request, with the recheck's result and error.
+// A step not recorded is not retried for an ended request: the next reconcile does not run it. An end that closed
+// the recorded pull request or found it closed kept the lock, because only the read of the branch may release it
+// then (settleLock): that read is made now.
+func (r *RemediationRequestReconciler) afterRecheckEnd(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	res ctrl.Result, err error) (ctrl.Result, error) {
+	if err != nil || !ptr.Deref(rr.Status.HoldsTarget, false) || !closedOnly(rr) {
+		return res, err
+	}
+	held, err := r.checkHeld(ctx, rr)
+	return earlier(res, held), err
+}
+
 // errChangeRequestNotOurs means a pull request is recorded but cannot be confirmed as this request's: the Git host
 // has no pull request with that number and the branch confirms it, or it is from another branch or base branch, or
 // lacks this request's marker (changeOf's gone). An answer about another pull request and a 404 the
@@ -466,14 +479,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		if !progresses(rr) {
 			// The recheck ended the request (Merged, Superseded, NeedsIntervention, ...): it is never looked at again.
 			r.forget(req.NamespacedName)
-			if err != nil || !ptr.Deref(rr.Status.HoldsTarget, false) || !closedOnly(rr) {
-				// A step not recorded is not retried for an ended request: the next reconcile does not run it.
-				return res, err
-			}
-			// The end closed the recorded pull request or found it closed, and kept the lock, because only the
-			// read of the branch may release it then (settleLock): that read is made now.
-			held, err := r.checkHeld(ctx, rr)
-			return earlier(res, held), err
+			return r.afterRecheckEnd(ctx, rr, res, err)
 		}
 		return orStepErr(res, err, stepErr)
 	}

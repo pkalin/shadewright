@@ -668,7 +668,7 @@ func (r *RemediationRequestReconciler) checkPlanned(ctx context.Context, git pro
 // pull request unrecorded.
 func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, ref *renderRefusal) error {
-	before := rr.Status.DeepCopy()
+	before, rv := rr.Status.DeepCopy(), rr.ResourceVersion
 	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,
@@ -677,10 +677,10 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 		Message:            fmt.Sprintf("Pull request #%d is open", cr.Number),
 		ObservedGeneration: rr.Generation,
 	})
-	// retry hands err back with the status as it was: nothing is decided, and the next reconcile finds the
-	// pull request again by its branch and checks it again.
+	// retry hands err back with the status as it was, except what changeOf wrote meanwhile (restoreStatus):
+	// nothing is decided, and the next reconcile finds the pull request again by its branch and checks it again.
 	retry := func(err error) error {
-		rr.Status = *before
+		restoreStatus(rr, before, rv)
 		return err
 	}
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)

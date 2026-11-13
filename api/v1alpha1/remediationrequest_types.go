@@ -316,11 +316,13 @@ const (
 	// It is written when the executor finds that, not on every look, and removed when the lock is released.
 	ConditionTargetHeld = "TargetHeld"
 	// ConditionPullRequestUnreadable is True while the executor cannot read the request's pull requests (#688):
-	// with reason GitForbidden or GitRejected while the Git host refuses the read (403 or 422), and with reason
-	// RepositoryUnavailable while the repository of the plan is not in RemediationSettings any more. The message
-	// names the read; lastTransitionTime is when it started. Nothing is decided on such a read: it is retried,
-	// and a request that holds the lock on its target keeps it. The condition is removed by the next read that
-	// works (for RepositoryUnavailable, once the repository can be opened again). One Warning Event,
+	// with reason GitForbidden or GitRejected while the Git host refuses the read (403 or 422), and, on a request
+	// that keeps the lock on its target, with reason RepositoryUnavailable while the repository of the plan is not
+	// in RemediationSettings any more, TargetBranchChanged while its entry names another target branch, or
+	// RepositoryUnusable while its entry cannot be used. The message names the read; lastTransitionTime is when
+	// it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
+	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
+	// once the repository can be opened again). One Warning Event,
 	// PullRequestUnreadable, is recorded when it is set or its reason changes, and one Normal Event,
 	// PullRequestReadable, when it is removed.
 	ConditionPullRequestUnreadable = "PullRequestUnreadable"

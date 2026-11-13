@@ -32,7 +32,7 @@ import (
 // verdict holds for all of them. gatedGit only passes the calls on (killswitch.go).
 var pullRequestReads = map[string]map[string]bool{
 	opGet:  {"changeByNumber": true, "gatedGit.GetChangeRequest": true},
-	opList: {"readByNumber": true, "changeByNumber": true, "changeOnBranch": true, "gatedGit.ListChangeRequests": true},
+	opList: {"checkOpenListing": true, "changeByNumber": true, "changeOnBranch": true, "gatedGit.ListChangeRequests": true},
 	opFind: {"gatedGit.FindChangeRequest": true},
 	// BranchHead reads a head, never whether a pull request exists: the step reads it to cut the branch (a 404
 	// creates it, and CreateBranch refuses one that exists at another commit), the handoff to update it, and the

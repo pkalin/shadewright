@@ -97,10 +97,10 @@ flowchart TB
     dec --> act
     act -.-> ver
     classDef planned stroke-dasharray: 5 5
-    class rb,ver planned
+    class rb planned
 ```
 
-Dashed boxes are <span class="sw-status sw-planned">planned</span>: no runbook exists yet and the verifier is not built. The model path is <span class="sw-status sw-built">built</span> but off by default (`--triage-model`), and until the analyzer checks the evaluation results and fails closed, a run with a real model is a lab evaluation, not production use (see the note at the top). So the model never tries a fix, checks the result and tries again on its own. Its output is one proposal, and the loop around it stays the same as in any other controller.
+Dashed boxes are <span class="sw-status sw-planned">planned</span>: no runbook exists yet. The verifier is <span class="sw-status sw-built">built</span>: it samples the pods of a rollout and writes a `VerificationReport`, but the executor does not read the report yet (#683), so no request ends `Succeeded` from it. The model path is <span class="sw-status sw-built">built</span> but off by default (`--triage-model`), and until the analyzer checks the evaluation results and fails closed, a run with a real model is a lab evaluation, not production use (see the note at the top). So the model never tries a fix, checks the result and tries again on its own. Its output is one proposal, and the loop around it stays the same as in any other controller.
 
 A known problem with a known fix belongs in a runbook, which makes no model call; the model is for incidents no runbook matched ([design 3.3](design/3-observation-and-deduplication.md#33-analysis)). No runbook ships yet, so today every analysis takes the model path.
 

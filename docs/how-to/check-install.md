@@ -29,17 +29,24 @@ PASS  Repository fleet: complete: provider GitHub, target branch main
 PASS  Flux GitRepository flux-system/fleet (repository fleet): Ready
 FAIL  Flux Kustomization flux-system/apps: failing, Ready BuildFailed: <the controller's message>
       See https://shadewright.io/how-to/check-install/#flux
+WARN  Delivery sources: 1 watched namespaces, 4 workloads: 2 from Kustomizations, 1 from a HelmRelease, 1 without Flux labels; 2 sources: 0 ok, 1 refused, 1 not ready, 0 unknown
+      See https://shadewright.io/how-to/check-install/#delivery-sources
 
-9 passed, 1 warnings, 1 failed
+Delivery sources of the watched namespaces
+  Namespace demo: 4 workloads: 2 from Kustomizations, 1 from a HelmRelease (HelmManaged), 1 without Flux labels (NoFluxLabels), 0 with invalid Flux labels (InvalidFluxLabels)
+  NOT-READY  Kustomization flux-system/apps (1 workloads), GitRepository flux-system/fleet github.com/acme/fleet branch main, settings: repository fleet; KustomizationNotReady: the Kustomization is not Ready for its current generation
+  REFUSED    Kustomization flux-system/podinfo (1 workloads), GitRepository flux-system/podinfo github.com/acme/podinfo branch main, settings: not named; RepositoryNotConfigured: no single repository of the RemediationSettings has the URL of its GitRepository exactly
+
+9 passed, 2 warnings, 1 failed
 ```
 
-The JSON output holds `namespace`, `failed` and `checks`, each with `name`, `level`, `detail`, `link` and, on the settings check, `reported`.
+The JSON output holds `namespace`, `failed` and `checks`, each with `name`, `level`, `detail`, `link` and, on the settings check, `reported`; and `delivery`, the report of [delivery sources](#delivery-sources) with `watchedNamespaces`, `unchecked`, `namespaces` (per namespace `workloads`, `kustomization`, `helmRelease`, `noFluxLabels`, `invalidFluxLabels` and `unchecked`) and `sources` (per Kustomization `kustomization`, `workloads`, `gitRepository`, `url`, `branch`, `settings`, `repository`, `state`, `reason` and `detail`).
 
 **Exit status.** The command exits 1 when any check fails, and 0 when every check passes or warns. A warn alone never fails it, so a script or a pipeline step can run it after an upgrade. An error before any check runs (a kubeconfig that does not load, a bad flag) exits 1 too.
 
 **Reads you may not make.** A read your permissions do not allow is a warn ("not readable with your permissions, so it was not checked"), never a fail: it says nothing about the install. Any other read error is a fail, since the check could not run. The reads are listed under [permissions](#permissions).
 
-An install in observe-only mode, as [install](../install.md) leaves it, warns three times and fails nothing: the kill switch is on, the daily analysis limit is 0, and no repository is configured.
+An install in observe-only mode, as [install](../install.md) leaves it, warns four times and fails nothing: the kill switch is on, the daily analysis limit is 0, no repository is configured, and the analyzer watches no namespace (the chart's default), so there are no [delivery sources](#delivery-sources) to report.
 
 ## CRDs
 
@@ -112,9 +119,30 @@ For each repository with a URL: the Flux `GitRepository` objects, in every names
 | warn: does not serve Flux | Flux is not installed in the cluster | Install Flux, or expect every request to stop at the source mapping |
 | warn: more than 10000 objects: only the first 10000 were read | The cluster holds more GitRepositories or Kustomizations than doctor lists (20 pages of 500); a "none among the ones read" warn below may be one it did not reach | Check the objects of that repository with `flux get sources git -A` and `flux get kustomizations -A` |
 
+## Delivery sources
+
+The report above starts from the other side: from the workloads of the namespaces the analyzer watches, it lists the Flux objects that deliver them and says for each whether the executor's source mapping would accept it ([ADR-0012](../adr/0012-object-to-source-mapping.md)). Use it before you onboard a namespace, to see which repositories and branches the settings must name, and after, to see why requests for a workload would stop.
+
+- **Watched namespaces** come from the `--watch-namespaces` argument of the analyzer Deployment (the chart's `analyzer.watchNamespaces`), parsed as the analyzer parses it. At most 256 are read.
+- **Workloads** are the Deployments and StatefulSets there, the kinds the action catalog changes through Git. Only their metadata is read. Each is counted by its labels, in the mapping's order: `helm.toolkit.fluxcd.io/name` means a HelmRelease installed it (`HelmManaged`: the mapping does not edit Helm values); no `kustomize.toolkit.fluxcd.io/name` and `/namespace` labels is `NoFluxLabels`; labels that are not a valid name are `InvalidFluxLabels`. The others count for the Kustomization they name.
+- **Sources** are one line per Kustomization those labels name, with its GitRepository, the GitRepository's URL as host and path only (no scheme, user, password, port, query or fragment, since `spec.url` may carry credentials), the branch it tracks, and the settings repository whose `url` equals `spec.url` exactly, as the executor matches it.
+
+Each source has a state and, unless it is `ok`, the reason a request for its workloads would get. Doctor calls the mapping's own rules (`KustomizationSpecRefusal`, `CheckGitRepository` and `CompareSource`), so the reasons cannot differ from the executor's. The rules that need a target object (`status.inventory`), the policy's `repositoryRef`, the branch in the code host and the files in Git are not checked: doctor calls no Git host.
+
+| State | Meaning | What to do |
+| --- | --- | --- |
+| `ok` | The Kustomization and its GitRepository pass the mapping's rules, both are Ready, the Kustomization has applied what its source last fetched, and exactly one settings repository has the URL with the branch as its `targetBranch` | Nothing |
+| `refused` | The mapping stops on it whatever Flux does next. On the Kustomization: `KustomizationNotFound`, `KustomizationSuspended`, `RemoteCluster`, `KustomizationTransforms`, `Decryption`, `UnsupportedSource` (its source is not a GitRepository); on the GitRepository: `SourceNotFound`, `SourceOptions` (a suspended source is one), `SourceIncludes`, `SourceNotBranch`; against the settings: `RepositoryNotConfigured` (no repository, or more than one, has the URL; `settings: not named`) or `BranchMismatch` | Remove the field, add or correct the repository in the settings, or accept that requests for these workloads stop with that reason; see [delivery from Flux](../troubleshooting.md#delivery-from-flux) |
+| `not-ready` | Flux has not reconciled it: `KustomizationNotReady`, `KustomizationReconciling`, `SourceNotReady`, or `RevisionMismatch` (it has not applied the revision its GitRepository last fetched) | Run doctor again after the next reconcile; if it stays, see the Flux checks above |
+| `unknown` | A read was not allowed or failed, the list was cut short, or the settings were not read | The detail names the read; see below |
+
+The check line `Delivery sources` passes only when every workload comes from a source in state `ok` and every read was made; otherwise it warns. It never fails: a cluster may deliver some workloads by other means on purpose, and a missing permission says nothing about the install.
+
+**Reads not made.** A read your permissions do not allow, or that fails, is printed as `NOT CHECKED` with its verb, resource and namespace (for example `list statefulsets.apps in namespace demo: not allowed with your permissions`), and the counts and sources it would have given are missing or `unknown`, never `ok`. An unreadable analyzer Deployment leaves the watched namespaces unknown.
+
 ## Permissions
 
-Doctor reads with `get` and `list` only. Beyond the reads of [`status`](check-status.md#permissions) it needs these; without one, its check warns.
+Doctor reads with `get` and `list` only. Beyond the reads of [`status`](check-status.md#permissions) it needs these; without one, its check warns. The [delivery sources](#delivery-sources) report adds one read: `list` on `deployments` and `statefulsets` in each watched namespace (the Role `shadewright-doctor-workloads` below, bound in each one). It reads the analyzer Deployment's arguments with the `list` on `deployments` in the operator namespace, and the Flux objects with the `list` of the Flux checks.
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -145,6 +173,17 @@ rules:
   verbs: ["list"]
 - apiGroups: ["kustomize.toolkit.fluxcd.io"]
   resources: ["kustomizations"]
+  verbs: ["list"]
+---
+# In each watched namespace, for the delivery sources report.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shadewright-doctor-workloads
+  namespace: demo
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets"]
   verbs: ["list"]
 ```
 

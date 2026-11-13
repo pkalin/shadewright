@@ -137,7 +137,7 @@ type OccurrenceRecord struct {
 
 // IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)",message="resolvedTime cannot change while the phase stays Resolved"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(r, r in self.revertsProposed))",message="revertsProposed only grows: an entry is never removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || n.state == 'Created'))))",message="revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created"
 type IncidentStatus struct {
 	// phase summarizes the incident.
 	// +optional
@@ -204,14 +204,16 @@ type IncidentStatus struct {
 	RemediationRequests []Name `json:"remediationRequests,omitempty"`
 
 	// revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert
-	// proposer created a revert for (ADR-0030 section 8, #96), oldest first. The proposer writes an entry once the
-	// revert exists and never creates a revert for a request listed here, so a failed request gets one revert for
-	// good, also after that revert was deleted. Entries are never removed; a full list stops new reverts for this
-	// incident instead.
-	// +listType=atomic
+	// proposer decided to revert (ADR-0030 section 8, #96), oldest first. The proposer writes an entry in state
+	// Pending before it creates the revert and moves it to Created once the revert exists; it never takes a new
+	// decision for a request listed here, so a failed request gets one revert for good, also after that revert
+	// was deleted. Entries are never removed and a state never moves back; a full list stops new reverts for this
+	// incident instead (condition RevertsStopped).
+	// +listType=map
+	// +listMapKey=uid
 	// +kubebuilder:validation:MaxItems=20
 	// +optional
-	RevertsProposed []RequestRef `json:"revertsProposed,omitempty"`
+	RevertsProposed []ProposedRevert `json:"revertsProposed,omitempty"`
 
 	// conditions explain the phase.
 	// +listType=map

@@ -156,3 +156,44 @@ func TestAdoptedLatestOccurrenceCountsUnderTheCap(t *testing.T) {
 		t.Fatalf("cap 2 exceeded: %d objects, %d reserved names", len(list.Items), len(c.names))
 	}
 }
+
+// An occurrence write that read the Incident before the revert proposer added an entry to
+// status.revertsProposed gets a conflict and is done again from a fresh read: the entry stays and the
+// observation is counted.
+func TestOccurrenceWriteKeepsRevertsProposed(t *testing.T) {
+	c, cl, old := fakeController(t)
+	entry := remediationv1alpha1.ProposedRevert{RequestRef: remediationv1alpha1.RequestRef{Name: "remediation-a",
+		UID: "27272727-2727-4727-8727-272727272727"}, State: remediationv1alpha1.RevertPending}
+	w := &countingClient{Client: cl}
+	raced := false
+	w.before = func(ctx context.Context, _ *remediationv1alpha1.Incident) {
+		if raced {
+			return
+		}
+		raced = true
+		live := &remediationv1alpha1.Incident{}
+		if err := cl.Get(ctx, client.ObjectKeyFromObject(old), live); err != nil {
+			t.Fatal(err)
+		}
+		live.Status.RevertsProposed = append(live.Status.RevertsProposed, entry)
+		if err := cl.Status().Update(ctx, live); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.client = w
+	c.consume(t.Context(), immediate(seenAt(100, triggerNow.Add(-24*time.Hour))))
+	c.flush(t.Context(), fp(1))
+	got := &remediationv1alpha1.Incident{}
+	if err := cl.Get(t.Context(), client.ObjectKeyFromObject(old), got); err != nil {
+		t.Fatal(err)
+	}
+	if !raced || w.updates.Load() < 2 {
+		t.Fatalf("setup: raced %v, %d updates, want a refused write and its retry", raced, w.updates.Load())
+	}
+	if len(got.Status.RevertsProposed) != 1 || got.Status.RevertsProposed[0] != entry {
+		t.Errorf("status.revertsProposed = %+v, want the proposer's entry", got.Status.RevertsProposed)
+	}
+	if got.Status.Phase != remediationv1alpha1.IncidentEscalated {
+		t.Errorf("phase %s, want Escalated: the observation was not written", got.Status.Phase)
+	}
+}

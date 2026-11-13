@@ -329,7 +329,8 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Expect(made.Spec.ApprovalRequired).To(Equal(new(true)))
 		recorded := &remediationv1alpha1.Incident{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(inc), recorded)).To(Succeed())
-		Expect(recorded.Status.RevertsProposed).To(ConsistOf(*made.Spec.Reverts))
+		Expect(recorded.Status.RevertsProposed).To(ConsistOf(remediationv1alpha1.ProposedRevert{
+			RequestRef: *made.Spec.Reverts, State: remediationv1alpha1.RevertCreated}))
 
 		_, err = reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())

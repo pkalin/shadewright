@@ -39,6 +39,37 @@ const (
 // proposer creates no revert for an Incident whose list is full, so no entry is ever dropped.
 const MaxRevertsProposed = 20
 
+// ConditionRevertsStopped is the Incident condition the revert proposer sets (True) when status.revertsProposed
+// is full: it proposes no more reverts for that Incident, and a person decides on its other failed requests.
+const ConditionRevertsStopped = "RevertsStopped"
+
+// ReasonRevertListFull is the reason of ConditionRevertsStopped: status.revertsProposed holds
+// MaxRevertsProposed entries.
+const ReasonRevertListFull = "RevertListFull"
+
+// RevertState is the state of an entry of an Incident's status.revertsProposed.
+// +kubebuilder:validation:Enum=Pending;Created
+type RevertState string
+
+const (
+	// RevertPending: the proposer decided to revert the request and has not seen its create succeed yet. A
+	// later pass creates the revert (the create is idempotent) and moves the entry to Created.
+	RevertPending RevertState = "Pending"
+	// RevertCreated: the revert exists or existed. Nothing more is done for the request, also after the revert
+	// was deleted.
+	RevertCreated RevertState = "Created"
+)
+
+// ProposedRevert is an entry of an Incident's status.revertsProposed: a failed request, by name and UID, and
+// how far the proposer got with its revert.
+type ProposedRevert struct {
+	RequestRef `json:",inline"`
+
+	// state is Pending from the decision until the revert exists, then Created. It never moves back.
+	// +required
+	State RevertState `json:"state"`
+}
+
 // RevertName is the name of the revert of the request with UID failed: "revert-" and, in hex, the first 12
 // bytes of the SHA-256 of "revert/" and that UID. The name derives from the failed request only, so a retried or
 // repeated create finds the revert already made and a failed request has at most one revert at a time (invariant

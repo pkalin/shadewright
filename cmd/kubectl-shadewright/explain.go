@@ -325,7 +325,7 @@ type RequestExplanation struct {
 	// section 8).
 	Reverts string `json:"reverts,omitempty"`
 	// RevertedBy is the name of the revert the analyzer's revert proposer made of this request: shown when the
-	// Incident's status.revertsProposed records the request by name and UID. The revert may have been deleted
+	// Incident's status.revertsProposed records the request by name and UID as Created. The revert may have been deleted
 	// since; the proposer never makes a second one (#96).
 	RevertedBy string `json:"revertedBy,omitempty"`
 	// HandoffFrom is status.handoff.from: the request this one took the pull request over from.
@@ -502,11 +502,12 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 	return e, nil
 }
 
-// revertedBy returns the name of the revert of rr when inc's status.revertsProposed records rr by name and UID,
-// else "".
+// revertedBy returns the name of the revert of rr when inc's status.revertsProposed records rr by name and UID
+// in state Created, else "". A Pending entry is a revert not created yet.
 func revertedBy(inc *remediationv1alpha1.Incident, rr *remediationv1alpha1.RemediationRequest) string {
 	ref := remediationv1alpha1.RequestRef{Name: rr.Name, UID: remediationv1alpha1.UID(rr.UID)}
-	if !slices.Contains(inc.Status.RevertsProposed, ref) {
+	if !slices.Contains(inc.Status.RevertsProposed,
+		remediationv1alpha1.ProposedRevert{RequestRef: ref, State: remediationv1alpha1.RevertCreated}) {
 		return ""
 	}
 	return string(remediationv1alpha1.RevertName(ref.UID))

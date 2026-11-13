@@ -370,7 +370,9 @@ func TestExplainRevertedBy(t *testing.T) {
 		cond(remediationv1alpha1.ConditionVerified, metav1.ConditionFalse, "OOMKilled", "OOM killed", time.Minute))
 	rr.UID = "uid-failed"
 	inc := testIncident("incident-a", "a", testSubject, "OOM")
-	inc.Status.RevertsProposed = []remediationv1alpha1.RequestRef{{Name: testRR, UID: "uid-failed"}}
+	inc.Status.RevertsProposed = []remediationv1alpha1.ProposedRevert{{
+		RequestRef: remediationv1alpha1.RequestRef{Name: testRR, UID: "uid-failed"},
+		State:      remediationv1alpha1.RevertCreated}}
 	want := string(remediationv1alpha1.RevertName("uid-failed"))
 	for _, name := range []string{testRR, "incident-a"} {
 		e, err := explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, name)
@@ -385,8 +387,17 @@ func TestExplainRevertedBy(t *testing.T) {
 			t.Errorf("explain %s: JSON lacks revertedBy:\n%s", name, js)
 		}
 	}
-	inc.Status.RevertsProposed[0].UID = "uid-other"
+	inc.Status.RevertsProposed[0].State = remediationv1alpha1.RevertPending
 	e, err := explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, testRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := explainOut(t, e); strings.Contains(text, "Reverted by:") {
+		t.Errorf("a Pending entry shows a revert:\n%s", text)
+	}
+	inc.Status.RevertsProposed[0].State = remediationv1alpha1.RevertCreated
+	inc.Status.RevertsProposed[0].UID = "uid-other"
+	e, err = explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, testRR)
 	if err != nil {
 		t.Fatal(err)
 	}

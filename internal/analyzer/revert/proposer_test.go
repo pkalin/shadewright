@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -28,9 +29,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -47,9 +50,13 @@ const (
 	failedUID   = "21212121-2121-4121-8121-212121212121"
 	incidentUID = "22222222-2222-4222-8222-222222222222"
 	targetUID   = "33333333-3333-4333-8333-333333333333"
+	incName     = "incident-a"
 )
 
 var errBoom = errors.New("boom")
+
+// now is the proposer's clock in every case; the failed request's Verified condition moved an hour before.
+var now = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 
 // world is the objects of one case: a request that ended Failed with Verified False, its Incident and its
 // target, each edited by the case before the client is built.
@@ -64,11 +71,11 @@ type world struct {
 func newWorld() *world {
 	failed := fx.MemoryLimitRequest(ns, failedName)
 	failed.UID = failedUID
-	failed.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: "incident-a", UID: incidentUID}
+	failed.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: incName, UID: incidentUID}
 	failed.Status.Phase = remediationv1alpha1.PhaseFailed
 	meta.SetStatusCondition(&failed.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionVerified,
-		Status: metav1.ConditionFalse, Reason: "OOMKilled"})
-	inc := fx.Incident(ns, "incident-a")
+		Status: metav1.ConditionFalse, Reason: "OOMKilled", LastTransitionTime: metav1.NewTime(now.Add(-time.Hour))})
+	inc := fx.Incident(ns, incName)
 	inc.UID = incidentUID
 	target := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: fx.TargetNamespace, Name: fx.WorkloadName,
 		UID: targetUID}}
@@ -93,7 +100,22 @@ func (w *world) build(t *testing.T) (*Proposer, client.Client) {
 	k := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
 		WithStatusSubresource(&remediationv1alpha1.Incident{}, &remediationv1alpha1.RemediationRequest{}).
 		WithInterceptorFuncs(w.funcs).Build()
-	return &Proposer{Client: k, Reader: k, Namespace: ns}, k
+	return &Proposer{Client: k, Reader: k, Namespace: ns, Recorder: record.NewFakeRecorder(20),
+		Now: func() time.Time { return now }}, k
+}
+
+// events returns the events p wrote so far.
+func events(p *Proposer) []string {
+	rec := p.Recorder.(*record.FakeRecorder)
+	var out []string
+	for {
+		select {
+		case e := <-rec.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
 }
 
 func isNil(o client.Object) bool {
@@ -130,16 +152,32 @@ func revertOf(t *testing.T, k client.Client) *remediationv1alpha1.RemediationReq
 	return rr
 }
 
-func recorded(t *testing.T, k client.Client) []remediationv1alpha1.RequestRef {
+func incidentOf(t *testing.T, k client.Client) *remediationv1alpha1.Incident {
 	t.Helper()
 	inc := &remediationv1alpha1.Incident{}
-	if err := k.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "incident-a"}, inc); err != nil {
+	if err := k.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: incName}, inc); err != nil {
 		t.Fatal(err)
 	}
-	return inc.Status.RevertsProposed
+	return inc
 }
 
-var link0 = remediationv1alpha1.RequestRef{Name: failedName, UID: failedUID}
+func recorded(t *testing.T, k client.Client) []remediationv1alpha1.ProposedRevert {
+	t.Helper()
+	return incidentOf(t, k).Status.RevertsProposed
+}
+
+var (
+	link0    = remediationv1alpha1.RequestRef{Name: failedName, UID: failedUID}
+	created0 = remediationv1alpha1.ProposedRevert{RequestRef: link0, State: remediationv1alpha1.RevertCreated}
+	pending0 = remediationv1alpha1.ProposedRevert{RequestRef: link0, State: remediationv1alpha1.RevertPending}
+)
+
+// onlyCreated reports whether k's Incident records exactly the failed request, as Created.
+func onlyCreated(t *testing.T, k client.Client) bool {
+	t.Helper()
+	got := recorded(t, k)
+	return len(got) == 1 && got[0] == created0
+}
 
 // TestProposesTheRevert: a request that ended Failed with Verified False gets its revert, with approval
 // required (it is never merged without a person), and the Incident records it.
@@ -180,8 +218,8 @@ func TestProposesTheRevert(t *testing.T) {
 	if s.Replaces != nil || s.ChainRoot != "" {
 		t.Error("a revert never replaces a request")
 	}
-	if got := recorded(t, k); !equality.Semantic.DeepEqual(got, []remediationv1alpha1.RequestRef{link0}) {
-		t.Errorf("status.revertsProposed = %+v, want the failed request", got)
+	if !onlyCreated(t, k) {
+		t.Errorf("status.revertsProposed = %+v, want the failed request as Created", recorded(t, k))
 	}
 }
 
@@ -252,12 +290,12 @@ func TestNeverProposes(t *testing.T) {
 		"an Incident of another UID": func(w *world) {
 			w.inc.UID = "25252525-2525-4525-8525-252525252525"
 		},
-		"a full revertsProposed": func(w *world) {
-			for i := range remediationv1alpha1.MaxRevertsProposed {
-				w.inc.Status.RevertsProposed = append(w.inc.Status.RevertsProposed, remediationv1alpha1.RequestRef{
-					Name: "remediation-other", UID: remediationv1alpha1.UID(strings.Repeat(string(rune('a'+i%6)), 8) +
-						"-0000-4000-8000-" + strings.Repeat("0", 10) + string(rune('a'+i/6)) + string(rune('a'+i%6)))})
-			}
+		"a full revertsProposed": fill,
+		"a target of a kind the action cannot target": func(w *world) {
+			w.failed.Spec.TargetRef.APIVersion, w.failed.Spec.TargetRef.Kind = "v1", "ConfigMap"
+		},
+		"failed more than a day ago": func(w *world) {
+			w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(-MaxAge - time.Second))
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -272,7 +310,7 @@ func TestNeverProposes(t *testing.T) {
 			}
 			if w.inc != nil && w.inc.UID == incidentUID {
 				for _, r := range recorded(t, k) {
-					if r == link0 {
+					if r.RequestRef == link0 {
 						t.Error("the failed request was recorded")
 					}
 				}
@@ -344,13 +382,14 @@ func TestAlreadyExistsWithTheSameLink(t *testing.T) {
 	if err := reconcileFailed(p); err != nil {
 		t.Fatal(err)
 	}
-	if got := recorded(t, k); len(got) != 1 || got[0] != link0 {
-		t.Errorf("status.revertsProposed = %+v, want the failed request", got)
+	if !onlyCreated(t, k) {
+		t.Errorf("status.revertsProposed = %+v, want the failed request as Created", recorded(t, k))
 	}
 }
 
 // TestAlreadyExistsWithAnotherLink: a request at the derived name that reverts something else, or nothing, is
-// an error, and is left as it is.
+// a terminal error (no retry with backoff: retrying does not move it), with a Warning event on the failed
+// request, and is left as it is.
 func TestAlreadyExistsWithAnotherLink(t *testing.T) {
 	for name, reverts := range map[string]*remediationv1alpha1.RequestRef{
 		"another UID":  {Name: failedName, UID: "26262626-2626-4626-8626-262626262626"},
@@ -365,15 +404,24 @@ func TestAlreadyExistsWithAnotherLink(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: revertKey.Name}, Spec: spec}
 			w.extra = append(w.extra, squat)
 			p, k := w.build(t)
-			if err := reconcileFailed(p); err == nil {
-				t.Error("an existing request with another link was taken as the revert")
+			err := reconcileFailed(p)
+			if err == nil {
+				t.Fatal("an existing request with another link was taken as the revert")
+			}
+			if !errors.Is(err, reconcile.TerminalError(nil)) {
+				t.Errorf("error %v is retried with backoff, want a terminal error", err)
+			}
+			if ev := events(p); len(ev) != 1 || !strings.Contains(ev[0], "Warning "+EventNameTaken) {
+				t.Errorf("events = %q, want one Warning %s", ev, EventNameTaken)
 			}
 			got := revertOf(t, k)
 			if got == nil || !equality.Semantic.DeepEqual(got.Spec.Reverts, reverts) {
 				t.Errorf("the existing request was changed: %+v", got)
 			}
-			if len(recorded(t, k)) != 0 {
-				t.Error("the failed request was recorded")
+			for _, r := range recorded(t, k) {
+				if r.State == remediationv1alpha1.RevertCreated {
+					t.Error("the failed request was recorded as Created")
+				}
 			}
 		})
 	}
@@ -398,8 +446,8 @@ func TestLostCreateAnswer(t *testing.T) {
 	if err := reconcileFailed(p); err == nil {
 		t.Fatal("a lost create answer was not returned as an error")
 	}
-	if len(recorded(t, k)) != 0 {
-		t.Error("the revert was recorded although its create did not answer")
+	if got := recorded(t, k); len(got) != 1 || got[0] != pending0 {
+		t.Errorf("status.revertsProposed = %+v, want the failed request as Pending", got)
 	}
 	if err := reconcileFailed(p); err != nil {
 		t.Fatalf("the retry: %v", err)
@@ -407,13 +455,13 @@ func TestLostCreateAnswer(t *testing.T) {
 	if revertOf(t, k) == nil {
 		t.Fatal("no revert")
 	}
-	if got := recorded(t, k); len(got) != 1 || got[0] != link0 {
-		t.Errorf("status.revertsProposed = %+v, want the failed request", got)
+	if !onlyCreated(t, k) {
+		t.Errorf("status.revertsProposed = %+v, want the failed request as Created", recorded(t, k))
 	}
 }
 
-// TestLostRecordWrite: a record write that fails returns an error; the retry finds the revert and records it.
-func TestLostRecordWrite(t *testing.T) {
+// TestLostPendingWrite: a decision whose Pending entry was not written creates nothing; the retry decides again.
+func TestLostPendingWrite(t *testing.T) {
 	w := newWorld()
 	fail := true
 	w.funcs.SubResourceUpdate = func(ctx context.Context, c client.Client, sub string, obj client.Object,
@@ -426,16 +474,262 @@ func TestLostRecordWrite(t *testing.T) {
 	}
 	p, k := w.build(t)
 	if err := reconcileFailed(p); err == nil {
-		t.Fatal("a failed record write was not returned as an error")
+		t.Fatal("a failed Pending write was not returned as an error")
 	}
-	if revertOf(t, k) == nil {
-		t.Fatal("no revert after the first pass")
+	if revertOf(t, k) != nil {
+		t.Fatal("a revert was created before its decision was recorded")
 	}
 	if err := reconcileFailed(p); err != nil {
 		t.Fatalf("the retry: %v", err)
 	}
-	if got := recorded(t, k); len(got) != 1 || got[0] != link0 {
-		t.Errorf("status.revertsProposed = %+v, want the failed request", got)
+	if revertOf(t, k) == nil || !onlyCreated(t, k) {
+		t.Errorf("after the retry: revert %v, status.revertsProposed = %+v", revertOf(t, k), recorded(t, k))
+	}
+}
+
+// TestDecisionRecordedBeforeCreate: when the revert is created, the Incident already holds the failed request
+// as Pending, so a lost record after the create cannot lead to a new decision.
+func TestDecisionRecordedBeforeCreate(t *testing.T) {
+	w := newWorld()
+	var atCreate []remediationv1alpha1.ProposedRevert
+	w.funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		inc := &remediationv1alpha1.Incident{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: incName}, inc); err != nil {
+			return err
+		}
+		atCreate = inc.Status.RevertsProposed
+		return c.Create(ctx, obj, opts...)
+	}
+	p, k := w.build(t)
+	if err := reconcileFailed(p); err != nil {
+		t.Fatal(err)
+	}
+	if len(atCreate) != 1 || atCreate[0] != pending0 {
+		t.Errorf("status.revertsProposed at the create = %+v, want the failed request as Pending", atCreate)
+	}
+	if !onlyCreated(t, k) {
+		t.Errorf("status.revertsProposed = %+v, want the failed request as Created", recorded(t, k))
+	}
+}
+
+// TestPendingKeepsTheDecision: a Pending entry leads to the create and the move to Created, also when the
+// request has since passed the age bound, its target is gone or the list is full: the decision was taken.
+func TestPendingKeepsTheDecision(t *testing.T) {
+	w := newWorld()
+	w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(-2 * MaxAge))
+	w.target = nil
+	fill(w)
+	w.inc.Status.RevertsProposed[len(w.inc.Status.RevertsProposed)-1] = pending0
+	p, k := w.build(t)
+	if err := reconcileFailed(p); err != nil {
+		t.Fatal(err)
+	}
+	if revertOf(t, k) == nil {
+		t.Fatal("a Pending decision did not lead to the create")
+	}
+	got := recorded(t, k)
+	if got[len(got)-1] != created0 {
+		t.Errorf("the entry is %+v, want Created", got[len(got)-1])
+	}
+}
+
+// TestLostMarkWrite: a create that succeeded whose move to Created failed is finished by the retry, with one
+// revert. If the revert is deleted before that retry, the retry creates it once more: the known limit of
+// ADR-0030 (#96), which a Pending entry cannot tell apart from a create that never happened.
+func TestLostMarkWrite(t *testing.T) {
+	for _, deleted := range []bool{false, true} {
+		w := newWorld()
+		writes := 0
+		w.funcs.SubResourceUpdate = func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if writes++; writes == 2 {
+				return errBoom
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		}
+		p, k := w.build(t)
+		if err := reconcileFailed(p); err == nil {
+			t.Fatal("a failed move to Created was not returned as an error")
+		}
+		rr := revertOf(t, k)
+		if rr == nil {
+			t.Fatal("no revert after the first pass")
+		}
+		if deleted {
+			if err := k.Delete(context.Background(), rr); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := reconcileFailed(p); err != nil {
+			t.Fatalf("the retry: %v", err)
+		}
+		if revertOf(t, k) == nil || !onlyCreated(t, k) {
+			t.Errorf("deleted %v: revert %v, status.revertsProposed = %+v", deleted, revertOf(t, k), recorded(t, k))
+		}
+	}
+}
+
+// fill fills the Incident's status.revertsProposed with other requests, each Created.
+func fill(w *world) {
+	for i := range remediationv1alpha1.MaxRevertsProposed {
+		w.inc.Status.RevertsProposed = append(w.inc.Status.RevertsProposed, remediationv1alpha1.ProposedRevert{
+			RequestRef: remediationv1alpha1.RequestRef{
+				Name: "remediation-other", UID: remediationv1alpha1.UID(strings.Repeat(string(rune('a'+i%6)), 8) +
+					"-0000-4000-8000-" + strings.Repeat("0", 10) + string(rune('a'+i/6)) + string(rune('a'+i%6)))},
+			State: remediationv1alpha1.RevertCreated})
+	}
+}
+
+// TestFullList: a full status.revertsProposed gives no revert and no retry: the Incident gets the condition
+// RevertsStopped and one Warning event, and a second pass adds no second event.
+func TestFullList(t *testing.T) {
+	w := newWorld()
+	fill(w)
+	p, k := w.build(t)
+	for range 2 {
+		if err := reconcileFailed(p); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+	}
+	if revertOf(t, k) != nil {
+		t.Error("a revert was created")
+	}
+	c := meta.FindStatusCondition(incidentOf(t, k).Status.Conditions, remediationv1alpha1.ConditionRevertsStopped)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != remediationv1alpha1.ReasonRevertListFull {
+		t.Errorf("condition %s = %+v, want True with %s", remediationv1alpha1.ConditionRevertsStopped, c,
+			remediationv1alpha1.ReasonRevertListFull)
+	}
+	if ev := events(p); len(ev) != 1 || !strings.Contains(ev[0], "Warning "+EventListFull) {
+		t.Errorf("events = %q, want one Warning %s", ev, EventListFull)
+	}
+}
+
+// TestFullListAfterTheTargetCheck: a list that filled up between the first read and the Pending write gives no
+// revert either, and no error for a retry loop.
+func TestFullListAfterTheTargetCheck(t *testing.T) {
+	w := newWorld()
+	filled := false
+	w.funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+		opts ...client.GetOption) error {
+		if _, ok := obj.(*unstructured.Unstructured); ok && !filled {
+			filled = true
+			full := newWorld()
+			fill(full)
+			inc := &remediationv1alpha1.Incident{}
+			if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: incName}, inc); err != nil {
+				return err
+			}
+			inc.Status.RevertsProposed = full.inc.Status.RevertsProposed
+			if err := c.Status().Update(ctx, inc); err != nil {
+				return err
+			}
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}
+	p, k := w.build(t)
+	if err := reconcileFailed(p); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if revertOf(t, k) != nil {
+		t.Error("a revert was created")
+	}
+	if !meta.IsStatusConditionTrue(incidentOf(t, k).Status.Conditions, remediationv1alpha1.ConditionRevertsStopped) {
+		t.Error("no RevertsStopped condition")
+	}
+}
+
+// TestIncidentGoneEvent: a failed request whose Incident is gone or has another UID gets a Warning event, so a
+// person sees why no revert was proposed; one past the age bound gets none.
+func TestIncidentGoneEvent(t *testing.T) {
+	for name, edit := range map[string]func(w *world){
+		"gone":        func(w *world) { w.inc = nil },
+		"another UID": func(w *world) { w.inc.UID = "25252525-2525-4525-8525-252525252525" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld()
+			edit(w)
+			p, _ := w.build(t)
+			if err := reconcileFailed(p); err != nil {
+				t.Fatal(err)
+			}
+			if ev := events(p); len(ev) != 1 || !strings.Contains(ev[0], "Warning "+EventIncidentGone) {
+				t.Errorf("events = %q, want one Warning %s", ev, EventIncidentGone)
+			}
+		})
+	}
+	w := newWorld()
+	w.inc = nil
+	w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(-2 * MaxAge))
+	p, _ := w.build(t)
+	if err := reconcileFailed(p); err != nil {
+		t.Fatal(err)
+	}
+	if ev := events(p); len(ev) != 0 {
+		t.Errorf("events = %q for a request past the age bound, want none", ev)
+	}
+}
+
+// TestAgeBound: a request whose Verified condition moved at most MaxAge ago gets its revert; one older, or
+// without a transition time, gets none and no event.
+func TestAgeBound(t *testing.T) {
+	for name, c := range map[string]struct {
+		at   time.Time
+		want bool
+	}{
+		"just within": {now.Add(-MaxAge), true},
+		"older":       {now.Add(-MaxAge - time.Second), false},
+		"no time":     {time.Time{}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld()
+			w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(c.at)
+			p, k := w.build(t)
+			if err := reconcileFailed(p); err != nil {
+				t.Fatal(err)
+			}
+			if got := revertOf(t, k) != nil; got != c.want {
+				t.Errorf("revert created = %v, want %v", got, c.want)
+			}
+			if ev := events(p); len(ev) != 0 {
+				t.Errorf("events = %q, want none", ev)
+			}
+		})
+	}
+}
+
+// TestTargetForbidden: a target the analyzer may not read gives no revert, and no error retried for ever.
+func TestTargetForbidden(t *testing.T) {
+	w := newWorld()
+	w.funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+		opts ...client.GetOption) error {
+		if objKind(c, obj) == "Deployment" {
+			return apierrors.NewForbidden(appsv1.Resource("deployments"), key.Name, errBoom)
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}
+	p, k := w.build(t)
+	if err := reconcileFailed(p); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if revertOf(t, k) != nil || len(recorded(t, k)) != 0 {
+		t.Error("a revert was proposed for a target the analyzer may not read")
+	}
+}
+
+// TestUnknownTargetKindNotRead: a target of a kind the action cannot target is never read.
+func TestUnknownTargetKindNotRead(t *testing.T) {
+	w := newWorld()
+	w.failed.Spec.TargetRef.APIVersion, w.failed.Spec.TargetRef.Kind = "v1", "Secret"
+	w.funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+		opts ...client.GetOption) error {
+		if _, ok := obj.(*unstructured.Unstructured); ok {
+			t.Errorf("the target %s was read", obj.GetObjectKind().GroupVersionKind().Kind)
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}
+	p, _ := w.build(t)
+	if err := reconcileFailed(p); err != nil {
+		t.Fatal(err)
 	}
 }
 

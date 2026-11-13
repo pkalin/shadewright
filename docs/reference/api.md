@@ -30,7 +30,7 @@ Incident groups repeated symptoms of one problem on one workload.
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [IncidentSpec](#incidentspec) | Yes | spec identifies the incident.<br>Rule: spec is immutable; a different symptom is a new Incident<br>Rule: occurrenceNumber and previousIncident are set together<br>Rule: previousIncident must be the occurrence before this one of the same fingerprint |
-| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: revertsProposed only grows: an entry is never removed |
+| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created |
 
 ## RemediationPolicy
 
@@ -678,7 +678,7 @@ IncidentStatus holds the deduplication state that must survive restarts (ADR-000
 Validation rules:
 
 - resolvedTime cannot change while the phase stays Resolved: `!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)`
-- revertsProposed only grows: an entry is never removed: `!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(r, r in self.revertsProposed))`
+- revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created: `!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || n.state == 'Created'))))`
 
 Used by: [Incident](#incident).
 
@@ -695,7 +695,7 @@ Used by: [Incident](#incident).
 | `handledHint` | [HintRef](#hintref) | No | handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3): written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint. Absent for an analysis without a hint. The trigger also writes it, with the Analyzed reason CoolingDown or BudgetSpent, for a hint it refuses without an analysis. |
 | `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).<br>Maximum items: 20<br>Maximum length: 200<br>Minimum length: 1<br>Pattern: `^[a-z0-9][a-z0-9-]{0,199}$`<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
-| `revertsProposed` | [RequestRef](#requestref) array | No | revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert proposer created a revert for (ADR-0030 section 8, #96), oldest first. The proposer writes an entry once the revert exists and never creates a revert for a request listed here, so a failed request gets one revert for good, also after that revert was deleted. Entries are never removed; a full list stops new reverts for this incident instead.<br>Maximum items: 20<br>List type: atomic |
+| `revertsProposed` | [ProposedRevert](#proposedrevert) array | No | revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert proposer decided to revert (ADR-0030 section 8, #96), oldest first. The proposer writes an entry in state Pending before it creates the revert and moves it to Created once the revert exists; it never takes a new decision for a request listed here, so a failed request gets one revert for good, also after that revert was deleted. Entries are never removed and a state never moves back; a full list stops new reverts for this incident instead (condition RevertsStopped).<br>Maximum items: 20<br>List type: map<br>List key: `uid` |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase.<br>List type: map<br>List key: `type` |
 
 ### IncomingHandoff
@@ -1021,6 +1021,20 @@ Used by: [RemediationPolicySpec](#remediationpolicyspec).
 | `namespaces` | [Name](#name) array | Yes | namespaces the policy covers. Required: there is no "all namespaces".<br>Maximum items: 64<br>Maximum length: 63<br>Minimum items: 1<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: set |
 | `objectSelector` | [LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#labelselector-v1-meta) | No | objectSelector further limits targets by label. |
 
+### ProposedRevert
+
+ProposedRevert is an entry of an Incident's status.revertsProposed: a failed request, by name and UID, and
+how far the proposer got with its revert.
+
+
+Used by: [IncidentStatus](#incidentstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | Yes | name of the request.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
+| `uid` | [UID](#uid) | Yes | uid of the request, so a request recreated under the same name is never taken for it.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `state` | [RevertState](#revertstate) | Yes | state is Pending from the decision until the revert exists, then Created. It never moves back.<br>One of `Pending`, `Created` |
+
 ### PullRequestStatus
 
 PullRequestStatus records the pull request that carries the plan.
@@ -1255,7 +1269,7 @@ Used by: [RemediationSettings](#remediationsettings).
 RequestRef names another RemediationRequest in the same namespace.
 
 
-Used by: [IncidentStatus](#incidentstatus), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus).
+Used by: [ProposedRevert](#proposedrevert), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1314,6 +1328,20 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `path` | [GitFilePath](#gitfilepath) | Yes | path is the file that declares the target.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$` |
 | `buildPath` | [GitDirPath](#gitdirpath) | No | buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root). Before every commit the pull request step renders it with and without the change and refuses anything but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan digest covers it; a request without it is never committed.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: <code>^(\.&#124;&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*(/&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*)*)$</code> |
 | `baseCommit` | string | Yes | baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch is created; later merges to the target branch do not change it.<br>Pattern: `^[0-9a-f]{40}$` |
+
+### RevertState
+
+RevertState is the state of an entry of an Incident's status.revertsProposed.
+
+- Underlying type: string
+- One of `Pending`, `Created`
+
+Used by: [ProposedRevert](#proposedrevert).
+
+| Value | Description |
+| --- | --- |
+| `Pending` | RevertPending: the proposer decided to revert the request and has not seen its create succeed yet. A later pass creates the revert (the create is idempotent) and moves the entry to Created. |
+| `Created` | RevertCreated: the revert exists or existed. Nothing more is done for the request, also after the revert was deleted. |
 
 ### ReviewCheck
 
@@ -1443,7 +1471,7 @@ already holds, so the API server can bound the cost of CEL rules that read the f
 - Maximum length: 36
 - Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 
-Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [OOMKill](#oomkill), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [PodBaseline](#podbaseline), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestRef](#requestref), [RequestReplacement](#requestreplacement), [VerificationReportSpec](#verificationreportspec).
+Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [OOMKill](#oomkill), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [PodBaseline](#podbaseline), [ProposedRevert](#proposedrevert), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestRef](#requestref), [RequestReplacement](#requestreplacement), [VerificationReportSpec](#verificationreportspec).
 
 ### Verification
 

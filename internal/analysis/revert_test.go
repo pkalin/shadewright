@@ -17,13 +17,17 @@ limitations under the License.
 package analysis
 
 import (
+	"context"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	kfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -152,5 +156,88 @@ func fieldNamed(typ reflect.Type, part string, seen map[reflect.Type]bool) strin
 func TestFieldNamedFindsReverts(t *testing.T) {
 	if fieldNamed(reflect.TypeFor[remediationv1alpha1.RemediationRequestSpec](), "revert", map[reflect.Type]bool{}) != "Reverts" {
 		t.Error("fieldNamed does not find spec.reverts")
+	}
+}
+
+// proposerRace is a client whose Incident status writes are each preceded, on the attempts listed in before, by
+// a write of the revert proposer: an entry added to status.revertsProposed, as the proposer's Pending write does.
+type proposerRace struct {
+	client.Client
+	t       *testing.T
+	before  map[int]remediationv1alpha1.ProposedRevert
+	writes  int
+	refused int
+}
+
+func (c *proposerRace) Status() client.SubResourceWriter {
+	return &proposerRaceStatus{c.Client.Status(), c}
+}
+
+type proposerRaceStatus struct {
+	client.SubResourceWriter
+	c *proposerRace
+}
+
+func (s *proposerRaceStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	s.c.writes++
+	if entry, ok := s.c.before[s.c.writes]; ok {
+		live := &remediationv1alpha1.Incident{}
+		if err := env.admin.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+			s.c.t.Fatal(err)
+		}
+		live.Status.RevertsProposed = append(live.Status.RevertsProposed, entry)
+		if err := env.admin.Status().Update(ctx, live); err != nil {
+			s.c.t.Fatal(err)
+		}
+	}
+	err := s.SubResourceWriter.Update(ctx, obj, opts...)
+	if apierrors.IsConflict(err) || apierrors.IsInvalid(err) {
+		s.c.refused++
+	}
+	return err
+}
+
+// TestAnalysisKeepsRevertsProposed: the analysis controller writes the whole Incident status with Update. When
+// the revert proposer adds an entry to status.revertsProposed between the controller's read and its claim, and
+// again before its outcome write, each write is refused (a conflict) and done again from a fresh read: both
+// entries stay, and the analysis still ends Proposed, with no error and no stuck claim.
+func TestAnalysisKeepsRevertsProposed(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	f := newFixture()
+	f.triage.steps = []step{reply(validResult)}
+	c, _ := newController(t, ns, f)
+	a := remediationv1alpha1.ProposedRevert{RequestRef: remediationv1alpha1.RequestRef{Name: "remediation-a",
+		UID: "27272727-2727-4727-8727-272727272727"}, State: remediationv1alpha1.RevertPending}
+	b := remediationv1alpha1.ProposedRevert{RequestRef: remediationv1alpha1.RequestRef{Name: "remediation-b",
+		UID: "28282828-2828-4828-8828-282828282828"}, State: remediationv1alpha1.RevertPending}
+	race := &proposerRace{Client: c.Client, t: t, before: map[int]remediationv1alpha1.ProposedRevert{1: a, 3: b}}
+	c.Client = race
+
+	for i := 0; ; i++ {
+		res, err := c.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(inc)})
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if res.RequeueAfter == 0 {
+			break
+		}
+		if i == 3 {
+			t.Fatal("the controller is still requeued after three passes")
+		}
+	}
+	if race.refused != 2 {
+		t.Errorf("%d writes were refused, want the claim and the outcome", race.refused)
+	}
+	got := &remediationv1alpha1.Incident{}
+	if err := env.admin.Get(t.Context(), client.ObjectKeyFromObject(inc), got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Status.RevertsProposed, []remediationv1alpha1.ProposedRevert{a, b}) {
+		t.Errorf("status.revertsProposed = %+v, want both entries", got.Status.RevertsProposed)
+	}
+	if got.Status.Phase != remediationv1alpha1.IncidentProposed {
+		t.Errorf("phase %s, want Proposed", got.Status.Phase)
 	}
 }

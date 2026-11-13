@@ -141,17 +141,17 @@ func doctor(ctx context.Context, c client.Reader, namespace, plugin string) *Dia
 	settings, state := checkSettings(ctx, c, d)
 	checkKillSwitch(d, settings, state)
 	var analyzers []appsv1.Deployment
-	analyzersRead := false
+	var analyzersErr error
 	for _, comp := range doctorComponents {
-		deps, ok := checkDeployments(ctx, c, d, namespace, comp)
+		deps, err := checkDeployments(ctx, c, d, namespace, comp)
 		if comp == componentAnalyzer {
-			analyzers, analyzersRead = deps, ok
+			analyzers, analyzersErr = deps, err
 		}
 	}
 	checkRepositories(d, settings)
 	flux := &fluxLists{c: c}
 	checkFlux(ctx, flux, d, settings)
-	checkDelivery(ctx, c, flux, d, settings, analyzers, analyzersRead)
+	checkDelivery(ctx, c, flux, d, settings, namespace, analyzers, analyzersErr)
 	return d
 }
 
@@ -309,26 +309,26 @@ func checkKillSwitch(d *Diagnosis, s *remediationv1alpha1.RemediationSettings, s
 }
 
 // checkDeployments checks that the Deployments of one component in the operator namespace are available, and
-// returns them; ok is false when they could not be read.
+// returns them, or the error of the list when they could not be read.
 func checkDeployments(ctx context.Context, c client.Reader, d *Diagnosis, namespace, comp string) (
-	deps []appsv1.Deployment, ok bool) {
+	[]appsv1.Deployment, error) {
 	check := "Deployment " + comp
 	list := &appsv1.DeploymentList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace), client.MatchingLabels{componentLabel: comp}); err != nil {
 		level, detail := readLevel(err, "the Deployments of namespace "+clean(namespace, maxName))
 		d.add(check, level, detail, anchorDeployments)
-		return nil, false
+		return nil, err
 	}
 	if len(list.Items) == 0 {
 		d.add(check, levelFail, fmt.Sprintf("no Deployment labelled %s=%s in namespace %s; is this the operator "+
 			"namespace? Pass it with -n", componentLabel, comp, clean(namespace, maxName)), anchorDeployments)
-		return nil, true
+		return nil, nil
 	}
 	for i := range list.Items {
 		level, detail := deploymentLevel(&list.Items[i])
 		d.add(check+" "+clean(list.Items[i].Name, maxName), level, detail, anchorDeployments)
 	}
-	return list.Items, true
+	return list.Items, nil
 }
 
 // deploymentLevel says whether a Deployment is available: pass when its Available condition is True for the

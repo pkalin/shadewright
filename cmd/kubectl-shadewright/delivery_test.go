@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"strings"
 	"testing"
@@ -201,13 +202,18 @@ func TestDoctorDeliveryNotReady(t *testing.T) {
 	behind.Object[fieldStatus].(map[string]any)["lastAppliedRevision"] = testBranch + "@sha1:" +
 		strings.Repeat("1", 40)
 	failing := fluxObj(fluxstatus.KindKustomization, testKs, ksSpec(testSource), "False", "BuildFailed", "x")
+	patchedSpec := ksSpec(testSource)
+	patchedSpec["patches"] = []any{map[string]any{"patch": "x"}}
 	srcFailing := fluxObj(fluxstatus.KindGitRepository, testSource, gitSpec(testRepo, testBranch), "False",
 		"GitOperationFailed", "x")
 	for name, tc := range map[string]struct {
 		with   client.Object
 		reason sourcemap.Reason
 	}{
-		"behind":        {behind, sourcemap.ReasonRevisionMismatch},
+		"behind": {behind, sourcemap.ReasonRevisionMismatch},
+		// The executor checks Ready right after spec.suspend, before the transforms.
+		"patched": {fluxObj(fluxstatus.KindKustomization, testKs, patchedSpec, "False", "BuildFailed", "x"),
+			sourcemap.ReasonKustomizationNotReady},
 		"kustomization": {failing, sourcemap.ReasonKustomizationNotReady},
 		"gitrepository": {srcFailing, sourcemap.ReasonSourceNotReady},
 	} {
@@ -223,16 +229,27 @@ func TestDoctorDeliveryNotReady(t *testing.T) {
 	}
 }
 
-// TestHostPath checks that a source URL prints as host and path only: no credentials, port, query or fragment.
+// TestHostPath checks that a source URL prints as host and path only: no credentials, port, query or fragment,
+// and no part of a user name or password that holds an unescaped "/", "?" or "#".
 func TestHostPath(t *testing.T) {
 	for raw, want := range map[string]string{
 		// #nosec G101 -- a made-up credential, to check that it is dropped.
-		"https://user:s3cret-token@github.com:443/acme/fleet.git?token=abc#frag": testHostPath + ".git",
-		"ssh://git@github.com/acme/fleet":                                        testHostPath,
-		testRepo:                                                                 testHostPath,
-		"git@github.com:acme/fleet":                                              notAURL,
-		"":                                                                       notAURL,
-		"https://github.com/acme/\x1b[2Jfleet":                                   notAURL,
+		"https://user:s3cret-token" + "@github.com:443/acme/fleet.git?token=abc#frag": testHostPath + ".git",
+		"ssh://git@github.com/acme/fleet":                                             testHostPath,
+		testRepo:                                                                      testHostPath,
+		"git@github.com:acme/fleet":                                                   testHostPath,
+		"github.com:acme/fleet":                                                       notAURL,
+		"tok:s3cret":                                                                  notAURL,
+		"git@github.com:/acme/fleet":                                                  testHostPath,
+		"https://user:12/secret" + "@github.com/a/b":                                  notAURL,
+		"https://tok:123456#x" + "@github.com/a/b":                                    notAURL,
+		"https://tok:12?x" + "@github.com/a/b":                                        notAURL,
+		"ftp://github.com/acme/fleet":                                                 notAURL,
+		"file:///srv/fleet":                                                           notAURL,
+		"us:er" + "@github.com:acme/fleet":                                            notAURL,
+		"git@github.com:acme/f@leet":                                                  notAURL,
+		"":                                                                            notAURL,
+		"https://github.com/acme/\x1b[2Jfleet":                                        notAURL,
 	} {
 		if got := hostPath(raw); got != want {
 			t.Errorf("hostPath(%q) = %q, want %q", raw, got, want)
@@ -308,8 +325,16 @@ func TestDoctorDeliveryUnchecked(t *testing.T) {
 		if c := level(t, d, chkDelivery); c.Level != levelWarn || !strings.Contains(c.Detail, "unknown") {
 			t.Errorf("delivery check %s: %s", c.Level, c.Detail)
 		}
-		if len(d.Delivery.Unchecked) != 1 {
-			t.Errorf("unchecked %v", d.Delivery.Unchecked)
+		want := "list deployments.apps in namespace " + testNS + ": not allowed with your permissions"
+		if len(d.Delivery.Unchecked) != 1 || !strings.HasPrefix(d.Delivery.Unchecked[0], want) {
+			t.Errorf("unchecked %v, want %q", d.Delivery.Unchecked, want)
+		}
+		var out bytes.Buffer
+		if err := renderDoctorText(&out, d); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "NOT CHECKED  "+want) {
+			t.Errorf("text lacks %q:\n%s", want, out.String())
 		}
 	})
 	t.Run("settings not read", func(t *testing.T) {
@@ -331,6 +356,11 @@ func TestWatchedNamespaces(t *testing.T) {
 		d.Spec.Template.Spec.Containers = []corev1.Container{{Name: "analyzer", Args: args}}
 		return *d
 	}
+	withCommand := func(command []string, args ...string) appsv1.Deployment {
+		d := dep(args...)
+		d.Spec.Template.Spec.Containers[0].Command = command
+		return d
+	}
 	for name, tc := range map[string]struct {
 		deps    []appsv1.Deployment
 		want    string
@@ -344,6 +374,19 @@ func TestWatchedNamespaces(t *testing.T) {
 		"union":      {deps: []appsv1.Deployment{dep("--watch-namespaces=a"), dep("--watch-namespaces=c")}, want: "a,c"},
 		"invalid":    {deps: []appsv1.Deployment{dep("--watch-namespaces=*")}, wantErr: true},
 		"other flag": {deps: []appsv1.Deployment{dep("--watch-namespaces-x=a")}, want: ""},
+		"last real flag wins": {deps: []appsv1.Deployment{dep("--watch-namespaces=a", "--leader-elect",
+			"--watch-namespaces", "b", "--", "--watch-namespaces=c")}, want: "b"},
+		"after terminator": {deps: []appsv1.Deployment{dep("--leader-elect", "--", "--watch-namespaces=a")}, want: ""},
+		"after positional": {deps: []appsv1.Deployment{dep("--leader-elect", "serve", "--watch-namespaces=a")},
+			want: ""},
+		"after single dash": {deps: []appsv1.Deployment{dep("-", "--watch-namespaces=a")}, want: ""},
+		"value of a flag": {deps: []appsv1.Deployment{dep("--cluster-id", "lab", "--watch-namespaces=a")},
+			want: "a"},
+		"bool with value": {deps: []appsv1.Deployment{dep("--pod-logs=false", "--watch-namespaces=a")}, want: "a"},
+		"command": {deps: []appsv1.Deployment{withCommand([]string{"/analyzer", "--watch-namespaces=a"},
+			"--leader-elect")}, want: "a"},
+		"command not a flag": {deps: []appsv1.Deployment{withCommand([]string{"/analyzer", "run"},
+			"--watch-namespaces=a")}, want: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := watchedNamespaces(tc.deps)
@@ -370,5 +413,37 @@ func TestDoctorDeliveryNoWatched(t *testing.T) {
 	}
 	if len(d.Delivery.Sources) != 0 {
 		t.Errorf("sources %+v", d.Delivery.Sources)
+	}
+}
+
+// TestDoctorDeliverySourceCap checks that the sources listed are bounded, with the number left out in both
+// outputs, while the summary counts them all.
+func TestDoctorDeliverySourceCap(t *testing.T) {
+	const extra = 3
+	objs := healthyObjects()
+	for i := range maxSources + extra {
+		objs = append(objs, workload(testWatched, fmt.Sprintf("web-%03d", i), testFluxNS, fmt.Sprintf("ks-%03d", i)))
+	}
+	d := runChecks(t, objs, nil)
+	// The healthy install's own Kustomization is one more source.
+	if len(d.Delivery.Sources) != maxSources || d.Delivery.SourcesNotListed != extra+1 {
+		t.Errorf("listed %d, not listed %d, want %d and %d", len(d.Delivery.Sources), d.Delivery.SourcesNotListed,
+			maxSources, extra+1)
+	}
+	if c := level(t, d, chkDelivery); !strings.Contains(c.Detail, fmt.Sprintf("; %d sources:", maxSources+extra+1)) {
+		t.Errorf("delivery check: %s", c.Detail)
+	}
+	var out, js bytes.Buffer
+	if err := renderDoctorText(&out, d); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("  and %d more sources, not listed\n", extra+1); !strings.Contains(out.String(), want) {
+		t.Errorf("text lacks %q", want)
+	}
+	if err := renderJSON(&js, d); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf(`"sourcesNotListed": %d`, extra+1); !strings.Contains(js.String(), want) {
+		t.Errorf("JSON lacks %q", want)
 	}
 }

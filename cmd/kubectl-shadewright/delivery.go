@@ -18,13 +18,16 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"maps"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +37,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analyzer"
+	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/fluxstatus"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -66,6 +70,9 @@ const watchNamespacesFlag = "watch-namespaces"
 // it reads pod logs or Prometheus.
 const maxWatched = 256
 
+// maxSources bounds the sources the report lists; the summary still counts them all.
+const maxSources = 256
+
 // workloadKinds are the kinds the action catalog changes through the source mapping: the workloads counted.
 var workloadKinds = []struct{ list, resource string }{
 	{list: "DeploymentList", resource: "deployments.apps"},
@@ -84,6 +91,8 @@ type Delivery struct {
 	Namespaces []NamespaceDelivery `json:"namespaces"`
 	// Sources are the Kustomizations named by the labels of those workloads, with their GitRepositories.
 	Sources []DeliverySource `json:"sources"`
+	// SourcesNotListed is how many sources were checked but left out of Sources, beyond the first maxSources.
+	SourcesNotListed int `json:"sourcesNotListed,omitempty"`
 }
 
 // NamespaceDelivery counts the Deployments and StatefulSets of one watched namespace by how they are delivered.
@@ -131,17 +140,21 @@ type DeliverySource struct {
 
 // checkDelivery makes the delivery report: from the watched namespaces of the analyzer's Deployments, the
 // workloads there, and the Flux objects their labels name, each checked by the source mapping's own rules
-// (sourcemap.KustomizationSpecRefusal, CheckGitRepository and CompareSource). It adds one check, never a
+// (sourcemap.KustomizationRefusal, CheckGitRepository and CompareSource). It adds one check, never a
 // fail: a read it may not make or that fails is listed as not checked.
 func checkDelivery(ctx context.Context, c client.Reader, flux *fluxLists, d *Diagnosis,
-	s *remediationv1alpha1.RemediationSettings, analyzers []appsv1.Deployment, analyzersRead bool) {
+	s *remediationv1alpha1.RemediationSettings, namespace string, analyzers []appsv1.Deployment, analyzersErr error) {
 	const check = "Delivery sources"
 	rep := &Delivery{WatchedNamespaces: []string{}, Namespaces: []NamespaceDelivery{}, Sources: []DeliverySource{}}
 	d.Delivery = rep
-	if !analyzersRead || len(analyzers) == 0 {
-		rep.Unchecked = append(rep.Unchecked, "no analyzer Deployment was read, so the watched namespaces "+
-			"are unknown")
-		d.add(check, levelWarn, "not checked: the watched namespaces are unknown", anchorDelivery)
+	if analyzersErr != nil || len(analyzers) == 0 {
+		why := "no analyzer Deployment was found in namespace " + clean(namespace, maxName)
+		if analyzersErr != nil {
+			why = couldNotList("deployments.apps", clean(namespace, maxName), analyzersErr)
+		}
+		why += ", so the watched namespaces are unknown"
+		rep.Unchecked = append(rep.Unchecked, why)
+		d.add(check, levelWarn, "not checked: "+why, anchorDelivery)
 		return
 	}
 	watched, err := watchedNamespaces(analyzers)
@@ -176,6 +189,10 @@ func checkDelivery(ctx context.Context, c client.Reader, flux *fluxLists, d *Dia
 	}
 	level, detail := deliveryLevel(rep)
 	d.add(check, level, detail, anchorDelivery)
+	if len(rep.Sources) > maxSources {
+		rep.SourcesNotListed = len(rep.Sources) - maxSources
+		rep.Sources = rep.Sources[:maxSources]
+	}
 }
 
 // watchedNamespaces reads --watch-namespaces from the containers of the analyzer Deployments, as the analyzer
@@ -186,7 +203,7 @@ func watchedNamespaces(analyzers []appsv1.Deployment) ([]string, error) {
 	found := false
 	for i := range analyzers {
 		for _, ctr := range analyzers[i].Spec.Template.Spec.Containers {
-			value, ok := flagValue(append(slices.Clone(ctr.Command), ctr.Args...), watchNamespacesFlag)
+			value, ok := flagValue(containerArgs(ctr), watchNamespacesFlag)
 			if !ok {
 				continue
 			}
@@ -206,18 +223,55 @@ func watchedNamespaces(analyzers []appsv1.Deployment) ([]string, error) {
 	return slices.Compact(all), nil
 }
 
-// flagValue returns the value of the last -name or --name flag in args, in the forms -name=value and -name value.
+// containerArgs are the arguments the analyzer's flag parsing sees: those after the program name when the
+// container sets command, else its args (the image's entrypoint is the program alone).
+func containerArgs(ctr corev1.Container) []string {
+	if len(ctr.Command) > 0 {
+		return append(slices.Clone(ctr.Command[1:]), ctr.Args...)
+	}
+	return ctr.Args
+}
+
+// analyzerBoolFlags are the boolean flags of the analyzer, which take no separate value: the shared flags of
+// internal/cmdutil, read from their definitions, and the analyzer's own (cmd/analyzer).
+var analyzerBoolFlags = func() map[string]bool {
+	fs := flag.NewFlagSet("analyzer", flag.ContinueOnError)
+	var opts cmdutil.Options
+	opts.BindFlags(fs)
+	bools := map[string]bool{"pod-logs": true}
+	fs.VisitAll(func(f *flag.Flag) {
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			bools[f.Name] = true
+		}
+	})
+	return bools
+}()
+
+// flagValue returns the value of the last -name or --name flag in args, in the forms -name=value and -name value,
+// by the rules of Go's flag package that the analyzer parses its arguments with: parsing stops at "--", at the
+// first argument that is not a flag ("-" included) and at a malformed one, and a flag that is not boolean and
+// has no "=" takes the next argument as its value.
 func flagValue(args []string, name string) (string, bool) {
 	value, found := "", false
-	for i, a := range args {
-		trimmed := strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
-		if trimmed == a {
-			continue
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if len(a) < 2 || a[0] != '-' || a == "--" {
+			break
 		}
-		if v, ok := strings.CutPrefix(trimmed, name+"="); ok {
+		trimmed := strings.TrimPrefix(a[1:], "-")
+		if trimmed == "" || trimmed[0] == '-' || trimmed[0] == '=' {
+			break
+		}
+		flagName, v, hasValue := strings.Cut(trimmed, "=")
+		if !hasValue && !analyzerBoolFlags[flagName] {
+			if i+1 >= len(args) {
+				break
+			}
+			i++
+			v = args[i]
+		}
+		if flagName == name {
 			value, found = v, true
-		} else if trimmed == name && i+1 < len(args) {
-			value, found = args[i+1], true
 		}
 	}
 	return value, found
@@ -300,7 +354,7 @@ func listMetadata(ctx context.Context, c client.Reader, ns, listKind string) (
 }
 
 // evalSource checks the Kustomization key (namespace/name) and its GitRepository by the source mapping's rules,
-// in its order, and matches the GitRepository's URL to the settings repositories exactly. The rules that need a
+// in its sequence, and matches the GitRepository's URL to the settings repositories exactly. The rules that need a
 // target object (status.inventory) are not checked.
 func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.RemediationSettings) DeliverySource {
 	out := DeliverySource{Kustomization: cleanKey(key), Settings: settingsUnknown}
@@ -318,14 +372,8 @@ func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.
 		}
 		return out
 	}
-	stop := sourcemap.KustomizationSpecRefusal(ks)
-	notReady := ""
-	if stop == nil && !fluxstatus.Ready(ks.Object) {
-		notReady = string(sourcemap.ReasonKustomizationNotReady)
-		if fluxstatus.Reconciling(ks.Object) {
-			notReady = string(sourcemap.ReasonKustomizationReconciling)
-		}
-	}
+	// The mapping's own sequence: suspend, Ready, kubeConfig, then the build rules.
+	stop := sourcemap.KustomizationRefusal(ks)
 	ref, _, _ := unstructured.NestedStringMap(ks.Object, "spec", "sourceRef")
 	srcNS := ref["namespace"]
 	if srcNS == "" {
@@ -333,21 +381,21 @@ func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.
 	}
 	if ref["kind"] != fluxstatus.KindGitRepository || len(validation.IsDNS1123Subdomain(ref["name"])) > 0 ||
 		len(validation.IsDNS1123Label(srcNS)) > 0 {
-		return finish(out, stop, notReady, sourceRefused, string(sourcemap.ReasonUnsupportedSource),
+		return finish(out, stop, sourceRefused, string(sourcemap.ReasonUnsupportedSource),
 			"its source is not a GitRepository")
 	}
 	out.GitRepository = clean(srcNS, maxName) + "/" + clean(ref["name"], maxName)
 	if srcList.err != nil {
-		return finish(out, stop, notReady, sourceUnknown, "",
+		return finish(out, stop, sourceUnknown, "",
 			"could not check: "+couldNotList(gitRepositoriesResource, "", srcList.err))
 	}
 	src := find(srcList.items, srcNS+"/"+ref["name"])
 	if src == nil {
 		if srcList.truncated {
-			return finish(out, stop, notReady, sourceUnknown, "",
+			return finish(out, stop, sourceUnknown, "",
 				"its GitRepository is not among the ones read (the list was cut short)")
 		}
-		return finish(out, stop, notReady, sourceRefused, string(sourcemap.ReasonSourceNotFound),
+		return finish(out, stop, sourceRefused, string(sourcemap.ReasonSourceNotFound),
 			"its GitRepository does not exist")
 	}
 	rawURL, _, _ := unstructured.NestedString(src.Object, "spec", "url")
@@ -358,10 +406,10 @@ func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.
 	}
 	target := matchSettings(&out, rawURL, s)
 	switch {
-	case stop != nil || notReady != "":
-		return finish(out, stop, notReady, "", "", "")
+	case stop != nil:
+		return finish(out, stop, "", "", "")
 	case srcStop != nil:
-		return finish(out, srcStop, "", "", "", "")
+		return finish(out, srcStop, "", "", "")
 	case !fluxstatus.Ready(src.Object):
 		out.State, out.Reason = sourceNotReady, string(sourcemap.ReasonSourceNotReady)
 		out.Detail = "its GitRepository is not Ready for its current generation"
@@ -389,16 +437,16 @@ const (
 	gitRepositoriesResource = "gitrepositories.source.toolkit.fluxcd.io"
 )
 
-// finish sets the state of out from the first stop that applies: a Kustomization spec refusal, then a
-// Kustomization that is not Ready, then the given state, reason and detail.
-func finish(out DeliverySource, stop *sourcemap.Result, notReady, state, reason, detail string) DeliverySource {
+// finish sets the state of out from the mapping's stop on the Kustomization when there is one (not-ready for a
+// Kustomization that is not Ready, refused for any other), else from the given state, reason and detail.
+func finish(out DeliverySource, stop *sourcemap.Result, state, reason, detail string) DeliverySource {
 	switch {
 	case stop != nil:
-		out.State, out.Reason, out.Detail = sourceRefused, clean(string(stop.Reason), maxName), clean(stop.Message,
-			maxMessage)
-	case notReady != "":
-		out.State, out.Reason, out.Detail = sourceNotReady, notReady, "the Kustomization is not Ready for its "+
-			"current generation"
+		out.State = sourceRefused
+		if stop.Reason == sourcemap.ReasonKustomizationNotReady || stop.Reason == sourcemap.ReasonKustomizationReconciling {
+			out.State = sourceNotReady
+		}
+		out.Reason, out.Detail = clean(string(stop.Reason), maxName), clean(stop.Message, maxMessage)
 	default:
 		out.State, out.Reason, out.Detail = state, reason, detail
 	}
@@ -435,14 +483,26 @@ func matchSettings(out *DeliverySource, rawURL string, s *remediationv1alpha1.Re
 }
 
 // hostPath reduces a Git URL to its host and path: no scheme, user, password, port, query or fragment, since
-// spec.url may carry credentials. A value that is not a URL with a host prints as "(not a URL)".
+// spec.url may carry credentials. An scp-style address (user@host:path) is read as ssh://host/path. Anything
+// else prints as "(not a URL)": a value that does not parse, a scheme other than ssh, http or https, no host,
+// or an "@" anywhere after the user part, which is how a user name or password holding an unescaped "/", "?"
+// or "#" would end up in the host, path, query or fragment.
 func hostPath(raw string) string {
+	const notURL = "(not a URL)"
+	if m := scpAddress.FindStringSubmatch(raw); m != nil && !strings.Contains(raw, "://") {
+		raw = "ssh://" + m[1] + "/" + strings.TrimPrefix(m[2], "/")
+	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
-		return "(not a URL)"
+	if err != nil || u.Hostname() == "" || !slices.Contains([]string{"ssh", "http", "https"}, u.Scheme) ||
+		strings.Contains(u.Host+u.Path+u.RawQuery+u.Fragment, "@") {
+		return notURL
 	}
 	return clean(u.Hostname()+u.EscapedPath(), maxName)
 }
+
+// scpAddress matches the scp-style address of Git, user@host:path, with a plain user name and host name. The
+// user is required, so a bare "name:value" is never read as a host and path.
+var scpAddress = regexp.MustCompile(`^[A-Za-z0-9._-]+@([A-Za-z0-9.-]+):(.*)$`)
 
 // find returns the object of items with the key namespace/name, or nil.
 func find(items []unstructured.Unstructured, key string) *unstructured.Unstructured {
@@ -529,6 +589,9 @@ func renderDeliveryText(p *printer, rep *Delivery) {
 			line += ": " + src.Detail
 		}
 		p.line("%s", line)
+	}
+	if rep.SourcesNotListed > 0 {
+		p.line("  and %d more sources, not listed", rep.SourcesNotListed)
 	}
 }
 

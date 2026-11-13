@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1380 710" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<title id="t">Shadewright verification outcomes</title>
+<desc id="d">Overview of ADR-0030: the path of a RemediationRequest after the merge. Everything shown is planned. 1. The merge receipt, status.mergeReceipt, is written once in the status write that sets Merged and records repository.url and repository.installationID, targetBranch, pullRequest, headSHA, mergeCommitSHA and mergedAt; without a merge commit from the host the request ends Inconclusive with reason NoMergeReceipt. 2. Delivery is checked against the receipt: Merged moves to WaitingForDelivery with status.deadline one hour after mergedAt, the check asks about mergeCommitSHA on targetBranch, and when Flux applied the merge commit or a descendant the condition Delivered is True and the phase is Verifying; Flux failing on the merge commit itself ends Failed with reason DeliveryFailed. 3. Three outcomes are kept apart, each with its own condition: rolled out (Delivered and RolledOut, read with get on the Kustomization and the target and the host's ancestry answer), configured (Configured, the live field equals the desired value, read with get on the target) and cleared (Cleared, container status of the pods read with the new list grant on pods). The executor writes them and Verified sums them up. 4. The stable window runs while the request is Verifying, with a sample every 30 seconds; a bad sample moves windowStart forward and records lastReset; success needs a good sample at or after windowStart plus stableFor. 5. Terminal phases: Succeeded (Cleared True, Verified True), Inconclusive (Verified Unknown with a reason) and Failed (Verified False with a reason). From Failed the analyzer creates a revert request with spec.reverts and approvalRequired true, which goes through policy (#96); Inconclusive never leads to a revert.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+<style>
+.pl{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4;stroke-dasharray:5 4}
+.ple{fill:#16222a;stroke:#2f5d63;stroke-width:1.4;stroke-dasharray:5 4}
+.lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.12em}
+.h{fill:#f1edff;font-size:15px;font-weight:650}
+.s{fill:#a9a4c4;font-size:12.5px}
+.lbl{fill:#c6a8ff;font-size:12.5px}
+.no{fill:#ff8fa3;font-size:12.5px;font-weight:600}
+.f{stroke:#a879ff;stroke-width:1.8;fill:none;stroke-dasharray:7 5}
+</style></defs>
+<rect width="1380" height="710" rx="18" fill="#0e0e16"/>
+<text class="lanet" x="20" y="62">1  MERGE RECEIPT</text>
+<text class="lanet" x="280" y="62">2  DELIVERY</text>
+<text class="lanet" x="540" y="62">3  THREE OUTCOMES</text>
+<text class="lanet" x="910" y="62">4  STABLE WINDOW</text>
+<text class="lanet" x="1120" y="62">5  TERMINAL PHASES</text>
+<rect class="pl" x="20" y="80" width="230" height="420" rx="10"/>
+<text class="h" x="34" y="106">Merge receipt</text>
+<text class="s" x="34" y="128">status.mergeReceipt</text>
+<text class="s" x="34" y="147">written once, in the same</text>
+<text class="s" x="34" y="166">status write that sets Merged;</text>
+<text class="s" x="34" y="185">never changed (CEL rule)</text>
+<text class="s" x="34" y="204"></text>
+<text class="lbl" x="34" y="223">repository.url</text>
+<text class="lbl" x="34" y="242">repository.installationID</text>
+<text class="lbl" x="34" y="261">targetBranch</text>
+<text class="lbl" x="34" y="280">pullRequest</text>
+<text class="lbl" x="34" y="299">headSHA</text>
+<text class="lbl" x="34" y="318">mergeCommitSHA</text>
+<text class="lbl" x="34" y="337">mergedAt</text>
+<text class="s" x="34" y="356"></text>
+<text class="s" x="34" y="375">No merge commit from the host:</text>
+<text class="s" x="34" y="394">phase Merged, no receipt,</text>
+<text class="s" x="34" y="413">then Inconclusive</text>
+<text class="s" x="34" y="432">(NoMergeReceipt)</text>
+<rect class="pl" x="280" y="80" width="230" height="420" rx="10"/>
+<text class="h" x="294" y="106">Delivery against the receipt</text>
+<text class="s" x="294" y="128">Merged to WaitingForDelivery</text>
+<text class="s" x="294" y="147">status.deadline: mergedAt</text>
+<text class="s" x="294" y="166">plus one hour</text>
+<text class="s" x="294" y="185"></text>
+<text class="s" x="294" y="204">The check asks about</text>
+<text class="s" x="294" y="223">mergeCommitSHA on</text>
+<text class="s" x="294" y="242">targetBranch, through the</text>
+<text class="s" x="294" y="261">repository in the receipt</text>
+<text class="s" x="294" y="280"></text>
+<text class="s" x="294" y="299">Flux applied the merge commit</text>
+<text class="s" x="294" y="318">or a descendant, Ready:</text>
+<text class="s" x="294" y="337">Delivered True, phase</text>
+<text class="s" x="294" y="356">Verifying</text>
+<text class="s" x="294" y="375"></text>
+<text class="s" x="294" y="394">Flux failed on the merge</text>
+<text class="s" x="294" y="413">commit: Failed (DeliveryFailed)</text>
+<rect class="pl" x="540" y="80" width="330" height="150" rx="10"/>
+<text class="h" x="554" y="106">Rolled out</text>
+<text class="s" x="554" y="128">Conditions: Delivered, RolledOut</text>
+<text class="s" x="554" y="147">Evidence: Flux applied the merge commit</text>
+<text class="s" x="554" y="166">or a descendant; every pod runs the</text>
+<text class="s" x="554" y="185">applied template</text>
+<text class="s" x="554" y="204">Read with: get on the Kustomization and</text>
+<text class="s" x="554" y="223">the target, the host's ancestry answer</text>
+<rect class="pl" x="540" y="245" width="330" height="120" rx="10"/>
+<text class="h" x="554" y="271">Configured</text>
+<text class="s" x="554" y="293">Condition: Configured (new type)</text>
+<text class="s" x="554" y="312">Evidence: the live field equals the</text>
+<text class="s" x="554" y="331">desired value (sourcemap.FieldFor)</text>
+<text class="s" x="554" y="350">Read with: get on the target</text>
+<rect class="pl" x="540" y="380" width="330" height="158" rx="10"/>
+<text class="h" x="554" y="406">Cleared</text>
+<text class="s" x="554" y="428">Condition: Cleared (new type)</text>
+<text class="s" x="554" y="447">Evidence: container status of the pods:</text>
+<text class="s" x="554" y="466">no OOM kill of the action's container</text>
+<text class="s" x="554" y="485">since appliedObservedAt, restarts flat,</text>
+<text class="s" x="554" y="504">workload available</text>
+<text class="s" x="554" y="523">Read with: list on pods (new grant)</text>
+<text class="lbl" x="540" y="565">Verified sums the three up and decides the phase.</text>
+<text class="lbl" x="540" y="585">The executor writes them; kubectl shadewright</text>
+<text class="lbl" x="540" y="605">explain shows three lines.</text>
+<rect class="pl" x="910" y="80" width="190" height="420" rx="10"/>
+<text class="h" x="924" y="106">Stable window</text>
+<text class="s" x="924" y="128">Phase Verifying</text>
+<text class="s" x="924" y="147"></text>
+<text class="s" x="924" y="166">A sample every 30 s:</text>
+<text class="s" x="924" y="185">pods listed, bounded</text>
+<text class="s" x="924" y="204"></text>
+<text class="s" x="924" y="223">Good sample: rolled out,</text>
+<text class="s" x="924" y="242">configured, workload</text>
+<text class="s" x="924" y="261">available, no restart</text>
+<text class="s" x="924" y="280"></text>
+<text class="s" x="924" y="299">windowStart: first good</text>
+<text class="s" x="924" y="318">sample; a bad one moves</text>
+<text class="s" x="924" y="337">it forward (lastReset,</text>
+<text class="s" x="924" y="356">resets)</text>
+<text class="s" x="924" y="375"></text>
+<text class="s" x="924" y="394">stableFor, then timeout</text>
+<text class="s" x="924" y="413">from appliedObservedAt</text>
+<rect class="pl" x="1120" y="80" width="240" height="100" rx="10"/>
+<text class="h" x="1134" y="106">Succeeded</text>
+<text class="s" x="1134" y="128">Cleared True (NoRecurrence)</text>
+<text class="s" x="1134" y="147">Verified True</text>
+<text class="s" x="1134" y="166">after stableFor, good sample</text>
+<rect class="pl" x="1120" y="205" width="240" height="170" rx="10"/>
+<text class="h" x="1134" y="231">Inconclusive</text>
+<text class="s" x="1134" y="253">Verified Unknown, with a reason:</text>
+<text class="s" x="1134" y="272">TargetGone, TargetReplaced,</text>
+<text class="s" x="1134" y="291">ValueChanged, DeliveryNotObserved,</text>
+<text class="s" x="1134" y="310">DeliveryBlocked, EvidenceMissing,</text>
+<text class="s" x="1134" y="329">ObservationGap, and more</text>
+<rect class="pl" x="1120" y="400" width="240" height="130" rx="10"/>
+<text class="h" x="1134" y="426">Failed</text>
+<text class="s" x="1134" y="448">Verified False, with a reason:</text>
+<text class="s" x="1134" y="467">OOMKilled, Restarted,</text>
+<text class="s" x="1134" y="486">NotAvailable, RolloutStuck,</text>
+<text class="s" x="1134" y="505">DeliveryFailed, KedaNotReady</text>
+<rect class="ple" x="1120" y="565" width="240" height="115" rx="10"/>
+<text class="h" x="1134" y="591">Revert request</text>
+<text class="s" x="1134" y="613">analyzer, no model call (#96)</text>
+<text class="s" x="1134" y="632">spec.reverts, approvalRequired</text>
+<text class="s" x="1134" y="651">true; goes through policy</text>
+<text class="no" x="1134" y="670">Inconclusive never leads to one</text>
+<path class="f" d="M250 290H280" marker-end="url(#a)"/>
+<path class="f" d="M510 290H525" marker-end="url(#a)"/>
+<path class="f" d="M525 155V455" />
+<path class="f" d="M525 155H540" marker-end="url(#a)"/>
+<path class="f" d="M525 305H540" marker-end="url(#a)"/>
+<path class="f" d="M525 455H540" marker-end="url(#a)"/>
+<path class="f" d="M870 155H890M870 305H890M870 455H890"/><path class="f" d="M890 155V455"/>
+<path class="f" d="M890 290H910" marker-end="url(#a)"/>
+<path class="f" d="M1100 290H1105"/><path class="f" d="M1105 130V485"/>
+<path class="f" d="M1105 130H1120" marker-end="url(#a)"/>
+<path class="f" d="M1105 290H1120" marker-end="url(#a)"/>
+<path class="f" d="M1105 485H1120" marker-end="url(#a)"/>
+<path class="f" d="M1240 530V565" marker-end="url(#a)"/>
+<text class="lbl" x="1120" y="195" style="display:none"></text>
+<rect class="pl" x="20" y="640" width="26" height="14" rx="3"/><text class="s" x="56" y="652">dashed: planned, not built (the rollout report and Merged are built)</text>
+<rect class="ple" x="20" y="664" width="26" height="14" rx="3"/><text class="s" x="56" y="676">dashed teal: planned, in the analyzer (#96)</text>
+</svg>

@@ -27,6 +27,8 @@ What is missing is a receipt that binds the merge to its repository, branch and 
 
 ## Decision
 
+[![Planned path after the merge: the merge receipt (repository, targetBranch, pullRequest, headSHA, mergeCommitSHA, mergedAt), delivery checked against the receipt, three outcomes kept apart (rolled out, configured, cleared) each with its evidence and how the executor reads it, the stable window, and the terminal phases Succeeded, Inconclusive and Failed, with Failed leading to a revert request that the analyzer creates.](../assets/diagrams/verification-outcomes.svg)](../assets/diagrams/verification-outcomes.svg "Open full size")
+
 ### 1. The merge receipt
 
 A new status field, `status.mergeReceipt`, written once in the same status write that sets `Merged`, on the three paths above, and never changed after:

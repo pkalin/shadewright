@@ -167,7 +167,7 @@ On `PolicyAllowed`; all `Denied` unless marked. These are the checks of the poli
 | `BelowMinimum` | `desired` is below `min` | Choose a value in bounds |
 | `AboveMaximum` | `desired` is above `max` | As above |
 | `IncreaseTooLarge` | The increase is more than `maxIncreasePercent` of `previous` | Smaller step, or raise the limit deliberately. On a request the analyzer proposed, its context showed these bounds (design 3.3, #493): check the analyzer's `Context sources` line says `policyBounds=true`, and that it may `get` the policy (`analyzer-policy-reader`; an analyzer whose role leaves out a policy of `--action-policies` refuses to start, and a failed read at analysis time is logged as `Failed to read RemediationPolicy`) |
-| `DecreaseNotAllowed` | A decrease, and `maxDecreasePercent` is 0 or unset | Decreases are refused by default |
+| `DecreaseNotAllowed` | A decrease, and `maxDecreasePercent` is 0 or unset | Decreases are refused by default. A revert of an increase ends with this reason today, because no policy rule for reverts is decided |
 | `DecreaseTooLarge` | The decrease is more than `maxDecreasePercent` | Smaller step |
 | `ModuleNotEnabled` | The action belongs to an integration module (`AdjustKedaMaxReplicas`: `keda`) that `spec.modules.integrations` does not list | Enable the module in the settings. Also a freshness reason |
 | `ScaledObjectNotReady` | NeedsIntervention. The ScaledObject is not ready (`Ready` not true, paused, on fallback, `HPAActive` false, being deleted, or malformed), so raising `maxReplicaCount` is not the fix. Also reached when KEDA did not report within 10 minutes | Fix the autoscaler first |

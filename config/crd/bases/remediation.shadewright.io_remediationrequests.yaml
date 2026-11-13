@@ -268,7 +268,7 @@ spec:
                   the link before the policy check: the named request exists with this UID, ended Failed with Verified
                   False, is not a revert itself, has the same Incident, target and action type (and container), and this
                   request's previous and desired values are its desired and previous values; this request's name is
-                  RevertName of that UID, so a failed request has at most one revert. Otherwise the request ends Denied
+                  RevertName of that UID, so a failed request has at most one revert at a time (a revert that was deleted can be created again; the proposer must cover that). Otherwise the request ends Denied
                   with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier
                   writes no report for it, and once rolled out, configured and available for stableFor it ends
                   Inconclusive with reason RevertApplied, never Succeeded.

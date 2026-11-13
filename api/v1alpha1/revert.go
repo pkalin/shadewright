@@ -35,7 +35,7 @@ const (
 
 // RevertName is the name of the revert of the request with UID failed: "revert-" and, in hex, the first 12
 // bytes of the SHA-256 of "revert/" and that UID. The name derives from the failed request only, so a retried or
-// repeated create finds the revert already made and a failed request has at most one revert (invariant 5).
+// repeated create finds the revert already made and a failed request has at most one revert at a time (invariant 5). The name does not stop a new revert with the same name after one was deleted; the proposer (#96, second part, planned) must cover that.
 func RevertName(failed UID) Name {
 	h := sha256.Sum256([]byte("revert/" + string(failed)))
 	return Name("revert-" + hex.EncodeToString(h[:12]))

@@ -207,7 +207,7 @@ type RemediationRequestSpec struct {
 	// the link before the policy check: the named request exists with this UID, ended Failed with Verified
 	// False, is not a revert itself, has the same Incident, target and action type (and container), and this
 	// request's previous and desired values are its desired and previous values; this request's name is
-	// RevertName of that UID, so a failed request has at most one revert. Otherwise the request ends Denied
+	// RevertName of that UID, so a failed request has at most one revert at a time (a revert that was deleted can be created again; the proposer must cover that). Otherwise the request ends Denied
 	// with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier
 	// writes no report for it, and once rolled out, configured and available for stableFor it ends
 	// Inconclusive with reason RevertApplied, never Succeeded.
@@ -494,7 +494,7 @@ type VerificationReset struct {
 
 // VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 // to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
-// never compared with a time of the report. A restart of the executor loses nothing of it. A lastReset is
+// never compared with a time of the report. No window counts time from before the executor process began reconciling, so after a restart or a leader change every open window needs a full stableFor again. A lastReset is
 // counted: resets is at least 1 when it is set.
 // +kubebuilder:validation:XValidation:rule="!has(self.lastReset) || (has(self.resets) && self.resets >= 1)",message="lastReset requires resets of at least 1"
 type VerificationWindow struct {

@@ -1,0 +1,97 @@
+# Argo CD v3.6.1 spike, kind cluster. targetRevision v* (a semver constraint over tags).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rev-semver
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: v*
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:36:08Z'
+    message: Deployment/web is part of applications argocd/rev-semver and multi-source
+    type: SharedResourceWarning
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:07Z'
+    message: Caused by apps/Deployment:demo/web
+    status: Progressing
+  history:
+  - deployStartedAt: '2026-11-13T18:36:07Z'
+    deployedAt: '2026-11-13T18:36:08Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    source:
+      path: apps/demo
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: v*
+  operationState:
+    finishedAt: '2026-11-13T18:36:08Z'
+    message: successfully synced (all tasks run)
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+        source:
+          path: apps/demo
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: v*
+    phase: Succeeded
+    startedAt: '2026-11-13T18:36:07Z'
+    syncResult:
+      resources:
+      - group: apps
+        hookPhase: Running
+        images:
+        - registry.k8s.io/pause:3.10
+        kind: Deployment
+        message: deployment.apps/web configured
+        name: web
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+      source:
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: v*
+  reconciledAt: '2026-11-13T18:36:08Z'
+  resourceHealthSource: appTree
+  resources:
+  - group: apps
+    kind: Deployment
+    name: web
+    namespace: demo
+    status: OutOfSync
+    version: v1
+  sourceHydrator: {}
+  sourceType: Kustomize
+  summary:
+    images:
+    - registry.k8s.io/pause:3.10
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: v*
+    revision: fa13b73b64a1f8f79096681a5a46b5372964f324
+    status: OutOfSync

@@ -1,0 +1,97 @@
+# Argo CD v3.6.1 spike, kind cluster. targetRevision is a full commit ID.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rev-sha
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    path: apps/demo
+    repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+    targetRevision: 023f21f2fb283378cb80d817a9e2fe136080706b
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:36:08Z'
+    message: Deployment/web is part of applications argocd/rev-sha and multi-source
+    type: SharedResourceWarning
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:36:07Z'
+    message: Caused by apps/Deployment:demo/web
+    status: Progressing
+  history:
+  - deployStartedAt: '2026-11-13T18:36:07Z'
+    deployedAt: '2026-11-13T18:36:08Z'
+    id: 0
+    initiatedBy:
+      automated: true
+    revision: 023f21f2fb283378cb80d817a9e2fe136080706b
+    source:
+      path: apps/demo
+      repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+      targetRevision: 023f21f2fb283378cb80d817a9e2fe136080706b
+  operationState:
+    finishedAt: '2026-11-13T18:36:08Z'
+    message: successfully synced (all tasks run)
+    operation:
+      initiatedBy:
+        automated: true
+      retry:
+        limit: 5
+      sync:
+        revision: 023f21f2fb283378cb80d817a9e2fe136080706b
+        source:
+          path: apps/demo
+          repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+          targetRevision: 023f21f2fb283378cb80d817a9e2fe136080706b
+    phase: Succeeded
+    startedAt: '2026-11-13T18:36:07Z'
+    syncResult:
+      resources:
+      - group: apps
+        hookPhase: Running
+        images:
+        - registry.k8s.io/pause:3.10
+        kind: Deployment
+        message: deployment.apps/web configured
+        name: web
+        namespace: demo
+        status: Synced
+        syncPhase: Sync
+        version: v1
+      revision: 023f21f2fb283378cb80d817a9e2fe136080706b
+      source:
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: 023f21f2fb283378cb80d817a9e2fe136080706b
+  reconciledAt: '2026-11-13T18:36:08Z'
+  resourceHealthSource: appTree
+  resources:
+  - group: apps
+    kind: Deployment
+    name: web
+    namespace: demo
+    status: OutOfSync
+    version: v1
+  sourceHydrator: {}
+  sourceType: Kustomize
+  summary:
+    images:
+    - registry.k8s.io/pause:3.10
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        path: apps/demo
+        repoURL: git://gitsrv.gitsrv.svc.cluster.local:9418/fleet.git
+        targetRevision: 023f21f2fb283378cb80d817a9e2fe136080706b
+    revision: 023f21f2fb283378cb80d817a9e2fe136080706b
+    status: OutOfSync

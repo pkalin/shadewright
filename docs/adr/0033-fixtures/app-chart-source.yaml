@@ -1,0 +1,44 @@
+# Argo CD v3.6.1 spike, kind cluster. spec.source.chart set (a Helm repository source); sync.revision 1.0.0, a chart version.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: chart-source
+  namespace: argocd
+spec:
+  destination:
+    namespace: demo
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    chart: example
+    repoURL: https://charts.invalid/repo
+    targetRevision: 1.0.0
+  syncPolicy:
+    automated: {}
+status:
+  conditions:
+  - lastTransitionTime: '2026-11-13T18:56:12Z'
+    message: 'Failed to load target state: failed to generate manifest for source 1 of 1: rpc error: code
+      = Unknown desc = error fetching chart: failed to fetch chart: failed running helm: `helm pull --destination
+      /tmp/e172a318-6ed9-4f07-8583-0857fd5c812f --version 1.0.0 --repo https://charts.invalid/repo example`
+      failed exit status 1: Error: looks like "https://charts.invalid/repo" is not a valid chart repository
+      or cannot be reached: Get "https://charts.invalid/repo/index.yaml": dial tcp: lookup charts.invalid
+      on <ip>: no such host'
+    type: ComparisonError
+  controllerNamespace: argocd
+  health:
+    lastTransitionTime: '2026-11-13T18:46:38Z'
+    status: Healthy
+  reconciledAt: '2026-11-13T18:56:12Z'
+  resourceHealthSource: appTree
+  sync:
+    comparedTo:
+      destination:
+        namespace: demo
+        server: https://kubernetes.default.svc
+      source:
+        chart: example
+        repoURL: https://charts.invalid/repo
+        targetRevision: 1.0.0
+    revision: 1.0.0
+    status: Unknown

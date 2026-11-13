@@ -1,0 +1,8 @@
+# Argo CD v3.6.1 spike, kind cluster. Only the label app.kubernetes.io/instance: any chart can set it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/instance: demo
+  name: labelled
+  namespace: demo

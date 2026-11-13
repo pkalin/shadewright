@@ -1,0 +1,8 @@
+# Argo CD v3.6.1 spike, kind cluster. A Deployment applied by Argo CD: the annotation argocd.argoproj.io/tracking-id and no instance label.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: demo:apps/Deployment:demo/web
+  name: web
+  namespace: demo

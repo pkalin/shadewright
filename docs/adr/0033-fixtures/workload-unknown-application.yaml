@@ -1,0 +1,8 @@
+# Argo CD v3.6.1 spike, kind cluster. A tracking-id annotation that names an Application that does not exist.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: nosuchapp:apps/Deployment:demo/forged-missing
+  name: forged-missing
+  namespace: demo

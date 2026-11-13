@@ -10,7 +10,7 @@ Status: draft for the MVP.
 - The semantic diff check of section 8.2.
 - The GitHub and Key Vault adapters.
 - The pull request step of section 6: branch, commit and pull request, up to `Merged`, and after the merge the merge receipt, `WaitingForDelivery` and `Verifying` with the conditions `Delivered`, `Configured`, `RolledOut` (whether the change reached the pods, or why not) and `Cleared` (judged from the verifier's report, #683), ending `Succeeded`, `Failed` or `Inconclusive`, behind the executor flag `--verify-outcomes` (off by default).
-- The receiving side of a revert (`spec.reverts`, #96 first part, ADR-0030 section 8): its CEL rules, the link check before the policy check ending `Denied` with `InvalidRevert`, no verifier report, and the end `Inconclusive` with `RevertApplied`. The analyzer's revert proposer is planned (#96 second part).
+- The revert of a failed request (`spec.reverts`, #96, ADR-0030 section 8): the analyzer's deterministic revert proposer, which creates one revert per request that ended `Failed` with `Verified` False and records it for good in the Incident's `status.revertsProposed`; the CEL rules, the link check before the policy check ending `Denied` with `InvalidRevert`, no verifier report, and the end `Inconclusive` with `RevertApplied`.
 - The kill switch of section 5.4: `spec.paused`, one gate right before every Git write.
 - The concurrency limit, the lock per target and the circuit breaker of section 10.7. Retry limits and cooldowns between attempts are not built.
 - The collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects.

@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/analyzer/revert"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
@@ -291,6 +292,46 @@ var _ = Describe("RemediationRequest Controller", func() {
 		create(func() { liveLimit("384Mi"); allowDecreases() })
 		asRevertOf(nil)
 		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseDenied), "conditions %+v", got.Status.Conditions)
+		Expect(condition(got).Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	// End to end from the analyzer's side (#96, second part): the revert proposer turns a request that ended
+	// Failed with Verified False into a revert, records it on the Incident, and the executor's link check lets
+	// that revert through to a policy that allows its decrease.
+	It("lets the revert the analyzer's proposer made through the link check", func() {
+		inc := fx.Incident(requestNamespace, "incident-proposer")
+		create(func() {
+			liveLimit("384Mi")
+			allowDecreases()
+			Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+			DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, inc))).To(Succeed()) })
+			request.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: inc.Name, UID: remediationv1alpha1.UID(inc.UID)}
+		})
+		failed := request.DeepCopy()
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, failed))).To(Succeed()) })
+		failed.Status.Phase = remediationv1alpha1.PhaseFailed
+		meta.SetStatusCondition(&failed.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionVerified,
+			Status: metav1.ConditionFalse, Reason: ReasonOOMKilled, Message: "OOM killed under the desired limit"})
+		Expect(k8sClient.Status().Update(ctx, failed)).To(Succeed())
+
+		proposer := &revert.Proposer{Client: k8sClient, Reader: k8sClient, Namespace: requestNamespace}
+		_, err := proposer.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(failed)})
+		Expect(err).NotTo(HaveOccurred())
+
+		request = &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace,
+			Name: string(remediationv1alpha1.RevertName(remediationv1alpha1.UID(failed.UID)))}}
+		made := fetch()
+		Expect(made.Spec.Reverts).To(Equal(&remediationv1alpha1.RequestRef{Name: failed.Name,
+			UID: remediationv1alpha1.UID(failed.UID)}))
+		Expect(made.Spec.ApprovalRequired).To(Equal(new(true)))
+		recorded := &remediationv1alpha1.Incident{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(inc), recorded)).To(Succeed())
+		Expect(recorded.Status.RevertsProposed).To(ConsistOf(*made.Spec.Reverts))
+
+		_, err = reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
 		got := fetch()
 		Expect(got.Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseDenied), "conditions %+v", got.Status.Conditions)

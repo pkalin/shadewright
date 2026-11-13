@@ -324,6 +324,10 @@ type RequestExplanation struct {
 	// Reverts is the name in spec.reverts: the failed request whose change this revert undoes (ADR-0030
 	// section 8).
 	Reverts string `json:"reverts,omitempty"`
+	// RevertedBy is the name of the revert the analyzer's revert proposer made of this request: shown when the
+	// Incident's status.revertsProposed records the request by name and UID. The revert may have been deleted
+	// since; the proposer never makes a second one (#96).
+	RevertedBy string `json:"revertedBy,omitempty"`
 	// HandoffFrom is status.handoff.from: the request this one took the pull request over from.
 	HandoffFrom *HandoffReport `json:"handoffFrom,omitempty"`
 	// HandoffTo is status.handoff.to: the request that took the pull request over from this one.
@@ -458,6 +462,7 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 		e.IncidentState = stateOK
 		r := incidentReport(inc)
 		e.Incident = &r
+		e.Requests[0].RevertedBy = revertedBy(inc, rr)
 		return e, nil
 	case !apierrors.IsNotFound(err):
 		return nil, fmt.Errorf("reading RemediationRequest %s: %w", e.Name, err)
@@ -490,9 +495,21 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 		return cmp.Or(b.CreationTimestamp.Compare(a.CreationTimestamp.Time), cmp.Compare(a.Name, b.Name))
 	})
 	for _, rr := range own {
-		e.Requests = append(e.Requests, explainRequest(rr, settings))
+		r := explainRequest(rr, settings)
+		r.RevertedBy = revertedBy(inc, rr)
+		e.Requests = append(e.Requests, r)
 	}
 	return e, nil
+}
+
+// revertedBy returns the name of the revert of rr when inc's status.revertsProposed records rr by name and UID,
+// else "".
+func revertedBy(inc *remediationv1alpha1.Incident, rr *remediationv1alpha1.RemediationRequest) string {
+	ref := remediationv1alpha1.RequestRef{Name: rr.Name, UID: remediationv1alpha1.UID(rr.UID)}
+	if !slices.Contains(inc.Status.RevertsProposed, ref) {
+		return ""
+	}
+	return string(remediationv1alpha1.RevertName(ref.UID))
 }
 
 // explainRequest takes the fields of one request explain shows, each string cleaned.
@@ -741,6 +758,9 @@ func requestLines(p *printer, e *Explanation, r *RequestExplanation, now time.Ti
 	}
 	if r.Reverts != "" {
 		p.line("  Reverts:      %s", r.Reverts)
+	}
+	if r.RevertedBy != "" {
+		p.line("  Reverted by:  %s", r.RevertedBy)
 	}
 	if r.ChainRoot != "" {
 		p.line("  Chain root:   %s", r.ChainRoot)

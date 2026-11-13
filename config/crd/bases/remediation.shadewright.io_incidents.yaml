@@ -384,12 +384,45 @@ spec:
                   without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident.
                 format: date-time
                 type: string
+              revertsProposed:
+                description: |-
+                  revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert
+                  proposer created a revert for (ADR-0030 section 8, #96), oldest first. The proposer writes an entry once the
+                  revert exists and never creates a revert for a request listed here, so a failed request gets one revert for
+                  good, also after that revert was deleted. Entries are never removed; a full list stops new reverts for this
+                  incident instead.
+                items:
+                  description: RequestRef names another RemediationRequest in the
+                    same namespace.
+                  properties:
+                    name:
+                      description: name of the request.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    uid:
+                      description: uid of the request, so a request recreated under
+                        the same name is never taken for it.
+                      maxLength: 36
+                      pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                      type: string
+                  required:
+                  - name
+                  - uid
+                  type: object
+                maxItems: 20
+                type: array
+                x-kubernetes-list-type: atomic
             type: object
             x-kubernetes-validations:
             - message: resolvedTime cannot change while the phase stays Resolved
               rule: '!(has(oldSelf.phase) && oldSelf.phase == ''Resolved'' && has(oldSelf.resolvedTime)
                 && has(self.phase) && self.phase == ''Resolved'') || (has(self.resolvedTime)
                 && self.resolvedTime == oldSelf.resolvedTime)'
+            - message: 'revertsProposed only grows: an entry is never removed'
+              rule: '!has(oldSelf.revertsProposed) || (has(self.revertsProposed) &&
+                oldSelf.revertsProposed.all(r, r in self.revertsProposed))'
         required:
         - spec
         type: object

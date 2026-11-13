@@ -444,6 +444,11 @@ func (in *IncidentStatus) DeepCopyInto(out *IncidentStatus) {
 		*out = make([]Name, len(*in))
 		copy(*out, *in)
 	}
+	if in.RevertsProposed != nil {
+		in, out := &in.RevertsProposed, &out.RevertsProposed
+		*out = make([]RequestRef, len(*in))
+		copy(*out, *in)
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

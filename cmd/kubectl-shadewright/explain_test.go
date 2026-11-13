@@ -362,6 +362,39 @@ func TestExplainRevert(t *testing.T) {
 	}
 }
 
+// TestExplainRevertedBy: a failed request whose Incident records it in status.revertsProposed shows the revert
+// the analyzer proposed, by its derived name, when the request is explained and when its Incident is; a request
+// of the same name and another UID shows none.
+func TestExplainRevertedBy(t *testing.T) {
+	rr := explainRequestObj(testRR, remediationv1alpha1.PhaseFailed, time.Hour,
+		cond(remediationv1alpha1.ConditionVerified, metav1.ConditionFalse, "OOMKilled", "OOM killed", time.Minute))
+	rr.UID = "uid-failed"
+	inc := testIncident("incident-a", "a", testSubject, "OOM")
+	inc.Status.RevertsProposed = []remediationv1alpha1.RequestRef{{Name: testRR, UID: "uid-failed"}}
+	want := string(remediationv1alpha1.RevertName("uid-failed"))
+	for _, name := range []string{testRR, "incident-a"} {
+		e, err := explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text, js := explainOut(t, e)
+		if !strings.Contains(text, "Reverted by:  "+want) {
+			t.Errorf("explain %s: text lacks the revert %s:\n%s", name, want, text)
+		}
+		if !strings.Contains(js, `"revertedBy": "`+want+`"`) && !strings.Contains(js, `"revertedBy":"`+want+`"`) {
+			t.Errorf("explain %s: JSON lacks revertedBy:\n%s", name, js)
+		}
+	}
+	inc.Status.RevertsProposed[0].UID = "uid-other"
+	e, err := explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, testRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := explainOut(t, e); strings.Contains(text, "Reverted by:") {
+		t.Errorf("a record of another UID shows a revert:\n%s", text)
+	}
+}
+
 // TestExplainIncident explains an Incident: its requests, newest first, without the requests of another
 // Incident of the same name (another UID).
 func TestExplainIncident(t *testing.T) {

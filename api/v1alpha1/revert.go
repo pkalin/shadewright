@@ -19,6 +19,8 @@ package v1alpha1
 import (
 	"crypto/sha256"
 	"encoding/hex"
+
+	"k8s.io/apimachinery/pkg/api/equality"
 )
 
 // Reasons of a revert (ADR-0030 section 8).
@@ -33,9 +35,16 @@ const (
 	ReasonRevertApplied = "RevertApplied"
 )
 
+// MaxRevertsProposed is the most failed requests an Incident's status.revertsProposed records. The revert
+// proposer creates no revert for an Incident whose list is full, so no entry is ever dropped.
+const MaxRevertsProposed = 20
+
 // RevertName is the name of the revert of the request with UID failed: "revert-" and, in hex, the first 12
 // bytes of the SHA-256 of "revert/" and that UID. The name derives from the failed request only, so a retried or
-// repeated create finds the revert already made and a failed request has at most one revert at a time (invariant 5). The name does not stop a new revert with the same name after one was deleted; the proposer (#96, second part, planned) must cover that.
+// repeated create finds the revert already made and a failed request has at most one revert at a time (invariant
+// 5). The name does not stop a new revert with the same name after one was deleted: the analyzer's revert
+// proposer records each failed request it made a revert for in the Incident's status.revertsProposed and never
+// makes a second one.
 func RevertName(failed UID) Name {
 	h := sha256.Sum256([]byte("revert/" + string(failed)))
 	return Name("revert-" + hex.EncodeToString(h[:12]))
@@ -44,4 +53,40 @@ func RevertName(failed UID) Name {
 // IsRevert reports whether rr is a revert: its spec.reverts is set.
 func IsRevert(rr *RemediationRequest) bool {
 	return rr != nil && rr.Spec.Reverts != nil
+}
+
+// InverseAction returns the action that undoes a exactly: the same action type and, where the action names one,
+// the same container, with previous and desired swapped, and no other member set. ok is false when a cannot be
+// inverted: an action type this version does not know, its member missing, or a value missing, not positive or
+// equal on both sides. The revert proposer builds a revert's action with it and the executor's link check
+// compares against it ([IsInverseAction]), so the two cannot drift.
+func InverseAction(a Action) (inverse Action, ok bool) {
+	inverse = Action{Type: a.Type}
+	switch a.Type {
+	case ActionSetContainerMemoryLimit:
+		m := a.SetContainerMemoryLimit
+		if m == nil || m.Container == "" || m.Previous.Sign() <= 0 || m.Desired.Sign() <= 0 ||
+			m.Previous.Cmp(m.Desired) == 0 {
+			return Action{}, false
+		}
+		inverse.SetContainerMemoryLimit = &SetContainerMemoryLimit{
+			Container: m.Container, Previous: m.Desired.DeepCopy(), Desired: m.Previous.DeepCopy(),
+		}
+	case ActionAdjustKedaMaxReplicas:
+		k := a.AdjustKedaMaxReplicas
+		if k == nil || k.PreviousValue <= 0 || k.DesiredValue <= 0 || k.PreviousValue == k.DesiredValue {
+			return Action{}, false
+		}
+		inverse.AdjustKedaMaxReplicas = &AdjustKedaMaxReplicas{PreviousValue: k.DesiredValue, DesiredValue: k.PreviousValue}
+	default:
+		return Action{}, false
+	}
+	return inverse, true
+}
+
+// IsInverseAction reports whether b undoes a exactly: b equals [InverseAction] of a, and a can be inverted.
+// Quantities compare by value, so 1Gi and 1024Mi are the same limit.
+func IsInverseAction(a, b Action) bool {
+	want, ok := InverseAction(a)
+	return ok && equality.Semantic.DeepEqual(want, b)
 }

@@ -878,6 +878,28 @@ var _ = Describe("Incident", func() {
 		Expect(k8sClient.Status().Update(ctx, escalated)).To(Succeed())
 	})
 
+	It("keeps every entry of revertsProposed", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		first := v1alpha1.RequestRef{Name: "remediation-a", UID: "27272727-2727-4727-8727-272727272727"}
+		second := v1alpha1.RequestRef{Name: "remediation-b", UID: "28282828-2828-4828-8828-282828282828"}
+		// The rule is a transition rule of the status object, so it runs while the status has another field, as
+		// every Incident status the analyzer writes has (its phase).
+		inc.Status.Phase = v1alpha1.IncidentEscalated
+		inc.Status.RevertsProposed = []v1alpha1.RequestRef{first}
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		inc.Status.RevertsProposed = append(inc.Status.RevertsProposed, second)
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "an entry may be added")
+
+		for _, kept := range [][]v1alpha1.RequestRef{{second}, nil, {first, {Name: second.Name, UID: first.UID}}} {
+			changed := inc.DeepCopy()
+			changed.Status.RevertsProposed = kept
+			err := k8sClient.Status().Update(ctx, changed)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error for %v: %v", kept, err)
+			Expect(err.Error()).To(ContainSubstring("revertsProposed only grows"))
+		}
+	})
+
 	It("refuses adding an occurrence number later", func() {
 		inc := fx.Incident("default", unique("inc"))
 		Expect(k8sClient.Create(ctx, inc)).To(Succeed())

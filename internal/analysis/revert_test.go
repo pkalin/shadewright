@@ -18,6 +18,7 @@ package analysis
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,6 +28,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	"github.com/pkalin/shadewright/internal/testutil/importguard"
 )
 
 // TestModelCannotProposeARevert: a model proposal has no way to set spec.reverts (ADR-0030 section 8). The
@@ -68,6 +70,18 @@ func TestModelCannotProposeARevert(t *testing.T) {
 	}
 	if spec.ApprovalRequired == nil || !*spec.ApprovalRequired {
 		t.Error("the spec of a model plan does not require approval")
+	}
+}
+
+// TestAnalysisCannotReachTheRevertProposer: the analysis loop, which holds the model's proposal, depends on no
+// package of the deterministic revert proposer, so no model output reaches the code that sets spec.reverts
+// (ADR-0030 section 8, #96). The proposer's own test checks the other direction: it reaches no model.
+func TestAnalysisCannotReachTheRevertProposer(t *testing.T) {
+	proposer := importguard.Module + "internal/analyzer/revert"
+	for _, pkg := range importguard.Deps(t, importguard.ModuleRoot(t), importguard.Module+"internal/analysis") {
+		if pkg.ImportPath == proposer || slices.Contains(pkg.Imports, proposer) {
+			t.Errorf("%s reaches the revert proposer", pkg.ImportPath)
+		}
 	}
 }
 

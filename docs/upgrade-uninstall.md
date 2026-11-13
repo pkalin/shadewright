@@ -213,4 +213,4 @@ A new `helm install` with `settings.create=true` over a leftover object keeps th
 
 ## Not covered
 
-- Rolling back after a merged pull request: merging is outside Shadewright's control, and undoing it is a revert pull request (the proposal of one is **planned**, [#96](https://github.com/pkalin/shadewright/issues/96)).
+- Rolling back after a merged pull request: merging is outside Shadewright's control, and undoing it is a revert pull request. After a request ends `Failed` with `Verified` False the analyzer proposes one revert request for it ([#96](https://github.com/pkalin/shadewright/issues/96)), which a person approves like any other; for anything else, revert in Git by hand. On the first start after an upgrade to a version with the proposer, every request that already ended that way gets its revert proposed.

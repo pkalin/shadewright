@@ -30,7 +30,7 @@ Incident groups repeated symptoms of one problem on one workload.
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [IncidentSpec](#incidentspec) | Yes | spec identifies the incident.<br>Rule: spec is immutable; a different symptom is a new Incident<br>Rule: occurrenceNumber and previousIncident are set together<br>Rule: previousIncident must be the occurrence before this one of the same fingerprint |
-| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved |
+| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: revertsProposed only grows: an entry is never removed |
 
 ## RemediationPolicy
 
@@ -678,6 +678,7 @@ IncidentStatus holds the deduplication state that must survive restarts (ADR-000
 Validation rules:
 
 - resolvedTime cannot change while the phase stays Resolved: `!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)`
+- revertsProposed only grows: an entry is never removed: `!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(r, r in self.revertsProposed))`
 
 Used by: [Incident](#incident).
 
@@ -694,6 +695,7 @@ Used by: [Incident](#incident).
 | `handledHint` | [HintRef](#hintref) | No | handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3): written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint. Absent for an analysis without a hint. The trigger also writes it, with the Analyzed reason CoolingDown or BudgetSpent, for a hint it refuses without an analysis. |
 | `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).<br>Maximum items: 20<br>Maximum length: 200<br>Minimum length: 1<br>Pattern: `^[a-z0-9][a-z0-9-]{0,199}$`<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
+| `revertsProposed` | [RequestRef](#requestref) array | No | revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert proposer created a revert for (ADR-0030 section 8, #96), oldest first. The proposer writes an entry once the revert exists and never creates a revert for a request listed here, so a failed request gets one revert for good, also after that revert was deleted. Entries are never removed; a full list stops new reverts for this incident instead.<br>Maximum items: 20<br>List type: atomic |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase.<br>List type: map<br>List key: `type` |
 
 ### IncomingHandoff
@@ -1179,7 +1181,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `verification` | [Verification](#verification) | No | verification says when the change counts as a success.<br>Default: `{}`<br>Rule: stableFor must be at least 1m<br>Rule: timeout must be at most 24h<br>Rule: timeout must be longer than stableFor |
 | `replaces` | [RequestReplacement](#requestreplacement) | No | replaces names the request this one replaces and the reviewer hint of that request it answers (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of the plan, so it is part of the request's name: the same plan answering another hint is another request. The executor checks the link once, at the policy check, and then takes the pull request over (the handoff). |
 | `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (shadewright/&lt;chainRoot>), so every request of a chain works on the same branch and pull request.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
-| `reverts` | [RequestRef](#requestref) | No | reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a revert. A deterministic revert proposer in the analyzer is planned (#96, second part) to create one for a request that ended Failed with Verified False; none is built, so no component creates a revert yet. A model proposal has no such field. A revert requires approvalRequired: true, never replaces another request, and is never changed after create (the spec is immutable). The executor checks the link before the policy check: the named request exists with this UID, ended Failed with Verified False, is not a revert itself, has the same Incident, target and action type (and container), and this request's previous and desired values are its desired and previous values; this request's name is RevertName of that UID, so a failed request has at most one revert at a time (a revert that was deleted can be created again; the proposer must cover that). Otherwise the request ends Denied with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier writes no report for it, and once rolled out, configured and available for stableFor it ends Inconclusive with reason RevertApplied, never Succeeded. |
+| `reverts` | [RequestRef](#requestref) | No | reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a revert, which the analyzer's deterministic revert proposer creates, with no model call, for a request that ended Failed with Verified False. A model proposal has no such field. A revert requires approvalRequired: true, never replaces another request, and is never changed after create (the spec is immutable). The executor checks the link before the policy check: the named request exists with this UID, ended Failed with Verified False, is not a revert itself, has the same Incident, target and action type (and container), and this request's previous and desired values are its desired and previous values; this request's name is RevertName of that UID, so a failed request has at most one revert at a time (the proposer also records it in the Incident's status.revertsProposed and never makes a second one). Otherwise the request ends Denied with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier writes no report for it, and once rolled out, configured and available for stableFor it ends Inconclusive with reason RevertApplied, never Succeeded. |
 
 ### RemediationRequestStatus
 
@@ -1253,7 +1255,7 @@ Used by: [RemediationSettings](#remediationsettings).
 RequestRef names another RemediationRequest in the same namespace.
 
 
-Used by: [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus).
+Used by: [IncidentStatus](#incidentstatus), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |

@@ -61,9 +61,9 @@ type check struct {
 }
 
 // Counter is the executor's memory of a report's sample counter (ADR-0030 section 4): per check, the counter
-// it read and the time of the check by its own clock. It lives in memory only; a restart of the executor
-// forgets it, which delays success by one check. The zero value is ready to use. It is not safe for
-// concurrent use.
+// it read and the time by its own clock taken before that read, a lower bound of when the counter it read was
+// true. It lives in memory only; a restart of the executor forgets it, which delays success by one check. The
+// zero value is ready to use. It is not safe for concurrent use.
 type Counter struct {
 	report  types.UID
 	highest int64
@@ -71,12 +71,18 @@ type Counter struct {
 	checks  []check
 }
 
-// Observe records a check at now (the executor's clock) that read sample from the report with UID report,
-// and returns the report's freshness. A report with another UID than the one remembered (deleted and
-// created again) starts the memory over, as a restart would.
-func (c *Counter) Observe(report types.UID, sample int64, now time.Time) Freshness {
+// Observe records a check that read sample from the report with UID report, and returns the report's
+// freshness. readAt is the executor's clock taken before the read and now the one taken after it (a readAt
+// after now is taken as now). The check is remembered at readAt, while freshness and staleness are judged at
+// now: a rise counts as fresh only when now minus the readAt of an earlier check is at most one poll interval,
+// so a slow read can make a report look older, never fresher. A report with another UID than the one
+// remembered (deleted and created again) starts the memory over, as a restart would.
+func (c *Counter) Observe(report types.UID, sample int64, readAt, now time.Time) Freshness {
+	if readAt.After(now) {
+		readAt = now
+	}
 	if c.report != report || len(c.checks) == 0 {
-		*c = Counter{report: report, highest: sample, risenAt: now, checks: []check{{sample, now}}}
+		*c = Counter{report: report, highest: sample, risenAt: readAt, checks: []check{{sample, readAt}}}
 		return Freshness{}
 	}
 	var f Freshness
@@ -86,19 +92,21 @@ func (c *Counter) Observe(report types.UID, sample int64, now time.Time) Freshne
 		}
 	}
 	if sample > c.highest {
-		c.highest, c.risenAt = sample, now
+		c.highest, c.risenAt = sample, readAt
 	}
 	f.Stale = now.Sub(c.risenAt) > StaleAfter
-	c.checks = append(c.checks, check{sample, now})
-	// Keep only the checks that can still prove freshness, at most maxChecks.
+	c.checks = append(c.checks, check{sample, readAt})
+	// Keep only the checks that can still prove freshness and the newest one, at most maxChecks.
 	c.checks = keepRecent(c.checks, now)
 	return f
 }
 
+// keepRecent keeps the checks of the last poll interval before now, and always the newest one, so the memory is
+// never emptied by a slow read whose readAt is already more than one poll interval old.
 func keepRecent(checks []check, now time.Time) []check {
 	kept := checks[:0]
-	for _, ch := range checks {
-		if age := now.Sub(ch.at); age >= 0 && age <= PollInterval {
+	for i, ch := range checks {
+		if age := now.Sub(ch.at); i == len(checks)-1 || age >= 0 && age <= PollInterval {
 			kept = append(kept, ch)
 		}
 	}
@@ -249,10 +257,14 @@ type Timeout struct {
 // lastTroubleReset) at any sample, whatever its last reset says: a crash loop after the window opened shows one
 // Restarted reset per restart and PodNotReady resets in between, so the last reset alone would hide it. A
 // Restarted reset that is not recorded as trouble (before the window first opened, or shown only by a node's
-// termination time, see [Window.Reset]) does not fail the request. Otherwise Inconclusive with the last reset
-// reason. Recorded state decides, never an order of times from two clocks: the executor's own last reset
-// reason is taken first, then the report's, then ClearingNotChecked for a ScaledObject, StaleReport without a
-// report, and EvidenceMissing otherwise.
+// termination time, see [Window.Reset]) does not fail the request. Otherwise Inconclusive with the reason that
+// holds the window closed. Recorded state decides, never an order of times from two clocks: first the
+// executor's own reset when its window is closed by a report that is no evidence (StaleReport,
+// ReportMismatch); then the report's reset when the report's window is closed (the verifier's pod-level reason,
+// such as PodNotReady, names why the target is not available); then the executor's reset of a closed window
+// (NotAvailable, PartialRollout); then, with both windows open, the last reset of the report and then of the
+// executor; then ClearingNotChecked for a ScaledObject, StaleReport without a report, and EvidenceMissing
+// otherwise.
 //
 // Recorded trouble counts only in a report that matches the request (spec check), but it stands even when the
 // report is no longer fresh: like the OOM record it is affirmative evidence, and the report's troubleResets
@@ -264,23 +276,39 @@ func AtTimeout(t Timeout) (Verdict, string) {
 	case t.ScaledObject && !t.KedaReady:
 		return VerdictFailed, ReasonKedaNotReady
 	}
-	var reportReset *v1alpha1.WindowReset
+	var report *Window
 	if t.Report != nil && matches(t.Report, t.Expected) {
 		w := ReportWindow(&t.Report.Status)
 		if w.Troubled() {
 			return VerdictFailed, string(v1alpha1.ResetRestarted)
 		}
-		reportReset = w.LastReset
+		report = &w
 	}
+	exec := t.Executor
+	execClosed := exec.LastReset != nil && !exec.Open()
 	switch {
-	case t.Executor.LastReset != nil:
-		return VerdictInconclusive, string(t.Executor.LastReset.Reason)
-	case reportReset != nil:
-		return VerdictInconclusive, string(reportReset.Reason)
+	case execClosed && untrusted(exec.LastReset.Reason):
+		// The report is missing, stale or not this request's: what it says is no reason.
+		return VerdictInconclusive, string(exec.LastReset.Reason)
+	case report != nil && report.LastReset != nil && !report.Open():
+		// The verifier's pod-level reason names the cause of a target that is not available.
+		return VerdictInconclusive, string(report.LastReset.Reason)
+	case execClosed:
+		return VerdictInconclusive, string(exec.LastReset.Reason)
+	case report != nil && report.LastReset != nil:
+		return VerdictInconclusive, string(report.LastReset.Reason)
+	case exec.LastReset != nil:
+		return VerdictInconclusive, string(exec.LastReset.Reason)
 	case t.ScaledObject:
 		return VerdictInconclusive, ReasonClearingNotChecked
 	case t.Report == nil:
 		return VerdictInconclusive, string(v1alpha1.ResetStaleReport)
 	}
 	return VerdictInconclusive, string(v1alpha1.ResetEvidenceMissing)
+}
+
+// untrusted reports whether an executor's reset says the report itself is no evidence: missing, stale or bound
+// to something else.
+func untrusted(r v1alpha1.ResetReason) bool {
+	return r == v1alpha1.ResetStaleReport || r == v1alpha1.ResetReportMismatch
 }

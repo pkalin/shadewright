@@ -262,6 +262,70 @@ func TestExplainMidFlight(t *testing.T) {
 	}
 }
 
+// TestExplainOutcomeLines shows the three outcomes of verification as three lines (ADR-0030 section 3): rolled
+// out, configured and cleared, with "not reported yet" for one the executor has not written, and in JSON under
+// outcome. A request before the merge has none of them and no outcome lines.
+func TestExplainOutcomeLines(t *testing.T) {
+	rolled := cond(conditionRolledOut, metav1.ConditionTrue, "RolloutComplete", "Every pod runs the applied template",
+		5*time.Minute)
+	configured := cond(remediationv1alpha1.ConditionConfigured, metav1.ConditionTrue, "ValueConfigured",
+		"The live target holds the desired value", 5*time.Minute)
+	cleared := cond(remediationv1alpha1.ConditionCleared, metav1.ConditionTrue, "NoRecurrence",
+		"No OOM kill and no restart for 11m0s", time.Minute)
+	for _, tc := range []struct {
+		name  string
+		phase remediationv1alpha1.RemediationPhase
+		conds []metav1.Condition
+		want  []string
+	}{
+		{"succeeded", remediationv1alpha1.PhaseSucceeded, []metav1.Condition{rolled, configured, cleared}, []string{
+			"Rolled out:   True, RolloutComplete: Every pod runs the applied template",
+			"Configured:   True, ValueConfigured: The live target holds the desired value",
+			"Cleared:      True, NoRecurrence: No OOM kill and no restart for 11m0s",
+		}},
+		{"verifying", remediationv1alpha1.PhaseVerifying, []metav1.Condition{configured}, []string{
+			"Rolled out:   not reported yet",
+			"Configured:   True, ValueConfigured",
+			"Cleared:      not reported yet",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := explainRequestObj(testRR, tc.phase, time.Hour, tc.conds...)
+			c := explainClient(t, rr, testIncident("incident-a", "a", testSubject, "OOM"), testSettings())
+			e, err := explain(context.Background(), c, testNS, testRR)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text, js := explainOut(t, e)
+			for _, want := range tc.want {
+				if !strings.Contains(text, want) {
+					t.Errorf("text lacks %q:\n%s", want, text)
+				}
+			}
+			var got struct {
+				Requests []struct {
+					Outcome map[string]any `json:"outcome"`
+				} `json:"requests"`
+			}
+			if err := json.Unmarshal([]byte(js), &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Requests) != 1 || got.Requests[0].Outcome["configured"] == nil {
+				t.Errorf("JSON outcome = %+v", got.Requests)
+			}
+		})
+	}
+	rr := explainRequestObj(testRR, remediationv1alpha1.PhaseAwaitingApproval, time.Hour)
+	c := explainClient(t, rr, testIncident("incident-a", "a", testSubject, "OOM"), testSettings())
+	e, err := explain(context.Background(), c, testNS, testRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := explainOut(t, e); strings.Contains(text, "Rolled out:") || e.Requests[0].Outcome != nil {
+		t.Errorf("a request before the merge shows outcome lines:\n%s", text)
+	}
+}
+
 // TestExplainIncident explains an Incident: its requests, newest first, without the requests of another
 // Incident of the same name (another UID).
 func TestExplainIncident(t *testing.T) {

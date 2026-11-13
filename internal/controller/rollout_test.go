@@ -187,7 +187,7 @@ func newRolloutWorld(t *testing.T, ss *appsv1.StatefulSet) *rolloutWorld {
 	settings.Spec.Repositories[0].TargetBranch = mainBranch
 	merged := time.Date(2026, 11, 8, 10, 35, 14, 0, time.UTC)
 	rr := fx.MemoryLimitRequest(requestNamespace, "rr")
-	rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: "StatefulSet",
+	rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: "apps/v1", Kind: kindStatefulSet,
 		Namespace: rolloutNamespace, Name: rolloutName, UID: rolloutUID}
 	rr.Status.Phase = remediationv1alpha1.PhaseMerged
 	rr.Status.LastPhaseTransitionTime = new(metav1.NewMicroTime(merged))

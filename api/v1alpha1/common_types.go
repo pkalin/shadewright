@@ -55,7 +55,9 @@ type ObjectRef struct {
 	UID UID `json:"uid,omitempty"`
 }
 
-// UID is a Kubernetes object UID in its canonical lower-case form.
+// UID is a Kubernetes object UID in its canonical lower-case form. MaxLength states the bound the pattern
+// already holds, so the API server can bound the cost of CEL rules that read the field.
+// +kubebuilder:validation:MaxLength=36
 // +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 type UID string
 

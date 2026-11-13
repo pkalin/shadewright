@@ -347,9 +347,10 @@ func (r *Reconciler) sample(ctx context.Context, rr *v1alpha1.RemediationRequest
 }
 
 // isRevert reports whether the request is a revert of a failed request (spec.reverts, #96), which the verifier
-// never samples. The field does not exist yet, so no request is a revert; #96 adds it and this check.
-func isRevert(*v1alpha1.RemediationRequest) bool {
-	return false
+// never samples: a revert is exempt from the OOM rule and from Cleared (ADR-0030 section 8), so it gets no
+// report.
+func isRevert(rr *v1alpha1.RemediationRequest) bool {
+	return v1alpha1.IsRevert(rr)
 }
 
 // readTarget reads the target with a get. A target that does not exist is nil, which the sample reads as no

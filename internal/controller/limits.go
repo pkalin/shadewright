@@ -241,7 +241,8 @@ const (
 // nothing about whether the changes work, and a request without a plan digest never got through the policy
 // check, so neither counts. Nor does a request without lastPhaseTransitionTime (one that ended before the
 // field existed): it cannot be ordered. A request in Merged that carries the NoMergeReceipt mark (merge.go) is
-// read like the Inconclusive it ends in, never as a success. The limits read a request that is still undecided
+// read like the Inconclusive it ends in, never as a success. A revert (spec.reverts) is never a success, in any
+// phase and whatever VerifyOutcomes says; its failures count. The limits read a request that is still undecided
 // (verificationPending, which depends on VerifyOutcomes) as no outcome over this.
 func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 	if rr.Status.PlanDigest == "" || rr.Status.LastPhaseTransitionTime == nil {
@@ -250,6 +251,10 @@ func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 	switch {
 	case noReceiptMerge(rr):
 		// Merged without a receipt: it ends Inconclusive at the next reconcile, and is read as that already.
+		return outcomeNone
+	case remediationv1alpha1.IsRevert(rr) && slices.Contains(successPhases, rr.Status.Phase):
+		// A revert is never a success (ADR-0030 section 8): it clears nothing, so the failure it reverts stays
+		// counted. With --verify-outcomes off it stays Merged, which would otherwise read as one.
 		return outcomeNone
 	case slices.Contains(successPhases, rr.Status.Phase):
 		return outcomeSuccess
@@ -638,10 +643,10 @@ func undecided(phase remediationv1alpha1.RemediationPhase) bool {
 // one of undecidedPhases, or, with VerifyOutcomes on, Merged with a merge receipt, which the next reconcile
 // moves to WaitingForDelivery (afterReceipt). Read as a success in that gap, a probe that has just merged would
 // close the breaker and let another request through as an ordinary one before its outcome is known. With
-// VerifyOutcomes off such a request stays Merged, a success as before #681. A Merged request without a receipt
-// is classified by breakerOutcome alone (noReceiptMerge). status.breakerCounts does not depend on the flag
-// (countsForBreaker reads Merged as a success), so a request merged while the flag was on is still read when
-// it is turned off.
+// VerifyOutcomes off such a request stays Merged, a success as before #681 (never a revert, breakerOutcome). A
+// Merged request without a receipt is classified by breakerOutcome alone (noReceiptMerge).
+// status.breakerCounts does not depend on the flag (countsForBreaker reads Merged as a success), so a request
+// merged while the flag was on is still read when it is turned off.
 func (r *RemediationRequestReconciler) verificationPending(rr *remediationv1alpha1.RemediationRequest) bool {
 	return undecided(rr.Status.Phase) || (r.VerifyOutcomes && rr.Status.Phase == remediationv1alpha1.PhaseMerged &&
 		rr.Status.MergeReceipt != nil)

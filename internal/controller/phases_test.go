@@ -203,8 +203,9 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		w.r = w.reconciler()
 	}
 
-	// newWorld creates the target and a request Merged an hour's fraction ago with its merge receipt.
-	newWorld := func(edit func(*appsv1.StatefulSet)) *phasesWorld {
+	// newWorldWith creates the target and a request Merged an hour's fraction ago with its merge receipt; edit
+	// changes the target and editRequest the request before they are created.
+	newWorldWith := func(edit func(*appsv1.StatefulSet), editRequest func(*remediationv1alpha1.RemediationRequest)) *phasesWorld {
 		seq++
 		name := fmt.Sprintf("phases-%d", seq)
 		w := &phasesWorld{reader: &rolloutReader{Reader: k8sClient}}
@@ -221,9 +222,14 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		rr := fx.MemoryLimitRequest(phasesNamespace, name)
 		rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: linkAPI, Kind: kindStatefulSet,
 			Namespace: phasesNamespace, Name: name, UID: remediationv1alpha1.UID(ss.UID)}
+		if editRequest != nil {
+			editRequest(rr)
+		}
 		mergedRequest(w, rr)
 		return w
 	}
+	// newWorld is newWorldWith without a change to the request.
+	newWorld := func(edit func(*appsv1.StatefulSet)) *phasesWorld { return newWorldWith(edit, nil) }
 
 	reconcileAt := func(w *phasesWorld, at time.Time) (reconcile.Result, error) {
 		w.now = at
@@ -818,6 +824,66 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionUnknown))
 		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonClearingNotChecked))
 	})
+	It("ends a revert of a ScaledObject Inconclusive with RevertApplied after stableFor", func() {
+		w := newKedaWorldWith(15, "True", func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: "remediation-failed",
+				UID: "12121212-1212-4212-8212-121212121212"}
+		})
+		applied := w.merged.Add(time.Minute)
+		stepAt(w, applied)
+		Expect(condition(fetch(w), remediationv1alpha1.ConditionCleared).Reason).To(
+			Equal(remediationv1alpha1.ReasonRevertApplied))
+		stepAt(w, applied.Add(3*time.Minute))
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.ReasonRevertApplied)
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionUnknown))
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(remediationv1alpha1.ReasonRevertApplied))
+	})
+	// A check that resets the window and whose status write is lost must not let the next check, which reads the
+	// window from before it, end the request across the bad interval.
+	It("keeps a ScaledObject's reset whose status write was lost, so it does not end across it", func() {
+		w := newKedaWorld(15, "True")
+		applied := w.merged.Add(time.Minute)
+		stepAt(w, applied)
+		ref := fetch(w).Spec.TargetRef
+		w.reader.objects = []*unstructured.Unstructured{scaledObject(ref.Name, types.UID(ref.UID), 15, "False")}
+		w.r.Client = &statusRecorder{Client: k8sClient,
+			fail: func(*remediationv1alpha1.RemediationRequest) bool { return true }}
+		bad := applied.Add(time.Minute)
+		w.now = bad
+		_, err := w.r.afterMerge(ctx, fetch(w))
+		Expect(err).To(HaveOccurred())
+		Expect(fetch(w).Status.Verification.LastReset).To(BeNil(), "the reset was not stored")
+		w.r.Client = k8sClient
+		w.reader.objects = []*unstructured.Unstructured{scaledObject(ref.Name, types.UID(ref.UID), 15, "True")}
+		stepAt(w, applied.Add(3*time.Minute))
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying),
+			"the stored window spans stableFor, but a check inside it was bad")
+		Expect(rr.Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		Expect(rr.Status.Verification.LastReset.Time.Time).To(BeTemporally("==", bad))
+	})
+	// A restart loses the resets kept in memory, so no window time from before it counts (ADR-0030 section 4,
+	// amendment of 2026-11-13): the ScaledObject needs a full stableFor after the restart, and the stored
+	// windowStart is kept.
+	It("counts no ScaledObject window time from before an executor restart", func() {
+		w := newKedaWorld(15, "True")
+		applied := w.merged.Add(time.Minute)
+		stepAt(w, applied)
+		w.r = w.reconciler()
+		restart := applied.Add(2 * time.Minute)
+		stepAt(w, restart)
+		before := fetch(w)
+		stepAt(w, applied.Add(3*time.Minute))
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying),
+			"the stored window spans stableFor, but only one minute of it after the restart")
+		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally("==", applied))
+		Expect(rr.ResourceVersion).To(Equal(before.ResourceVersion), "no status write while the window runs")
+		stepAt(w, restart.Add(3*time.Minute-time.Second))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		stepAt(w, restart.Add(3*time.Minute))
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+	})
 	It("ends a ScaledObject that names QueueBacklogDecreasing Inconclusive with CheckNotAvailable", func() {
 		w := newKedaWorldWith(15, "True", func(rr *remediationv1alpha1.RemediationRequest) {
 			rr.Spec.Verification.Checks = []remediationv1alpha1.VerificationCheck{
@@ -1051,6 +1117,166 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(cleared.Reason).To(Equal(ReasonOOMKilled))
 	})
 
+	// A revert (ADR-0030 section 8, #96): no report is read, the OOM rule and Cleared do not apply, and it ends
+	// Inconclusive with RevertApplied once rolled out, configured and available held for stableFor, never
+	// Succeeded.
+	asRevert := func(rr *remediationv1alpha1.RemediationRequest) {
+		rr.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: "remediation-failed",
+			UID: "12121212-1212-4212-8212-121212121212"}
+	}
+	expectRevertCleared := func(rr *remediationv1alpha1.RemediationRequest) {
+		cleared := condition(rr, remediationv1alpha1.ConditionCleared)
+		ExpectWithOffset(1, cleared.Status).To(Equal(metav1.ConditionUnknown))
+		ExpectWithOffset(1, cleared.Reason).To(Equal(remediationv1alpha1.ReasonRevertApplied))
+	}
+
+	It("ends a revert Inconclusive with RevertApplied after stableFor, without a report and never Succeeded", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		stableFor := verification.MinStableForMemory
+		t, _ := drive(w, applied.Add(verification.PollInterval), applied.Add(stableFor), verification.PollInterval, 1, nil)
+		during := fetch(w)
+		expectRevertCleared(during)
+		Expect(during.Status.Verification.WindowStart.Time).To(BeTemporally("==", applied),
+			"the window opened at the first check, with no report")
+		Expect(during.Status.Verification.LastReset).To(BeNil(), "a missing report is no reset for a revert")
+		mustReconcileAt(w, t)
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.ReasonRevertApplied)
+		expectRevertCleared(rr)
+		Expect(rr.Status.HoldsTarget).To(Equal(new(false)))
+	})
+
+	It("never fails a revert for an OOM kill a report records", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		putReport(w, 1, applied, applied, func(vr *remediationv1alpha1.VerificationReport) {
+			vr.Status.OOMKill = &remediationv1alpha1.OOMKill{PodUID: "78787878-7878-4878-8878-787878787878",
+				Container: workerContainer}
+		})
+		t, _ := drive(w, applied.Add(verification.PollInterval), applied.Add(verification.MinStableForMemory),
+			verification.PollInterval, 2, nil)
+		mustReconcileAt(w, t)
+		expectRevertCleared(expectEnd(w, remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.ReasonRevertApplied))
+	})
+
+	It("ends a revert that is not available Inconclusive with NotAvailable at the timeout", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		deadline := fetch(w).Status.Deadline.Time
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		drive(w, applied.Add(verification.PollInterval), deadline, verification.PollInterval, 1, nil)
+		Expect(fetch(w).Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		mustReconcileAt(w, deadline)
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetNotAvailable))
+		expectRevertCleared(rr)
+	})
+
+	It("resets a revert's window while it is not rolled out, so an earlier span does not carry over", func() {
+		w := newWorldWith(nil, asRevert)
+		setTargetStatus(w, 0, 2, revisionOld, revisionNew)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		applied := w.merged.Add(time.Minute)
+		mustReconcileAt(w, applied)
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		Expect(meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut)).To(BeFalse())
+		// A window recorded earlier and open, a second after the applied time (and after any reset there).
+		start := metav1.NewTime(applied.Add(time.Second))
+		if rr.Status.Verification == nil {
+			rr.Status.Verification = &remediationv1alpha1.VerificationWindow{}
+		}
+		rr.Status.Verification.WindowStart = &start
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+
+		mustReconcileAt(w, applied.Add(verification.PollInterval))
+		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+		rolledOut := start.Add(verification.MinStableForMemory)
+		mustReconcileAt(w, rolledOut)
+		rr = fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying),
+			"the window opens when the rollout completes, not at the earlier start")
+		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally("==", rolledOut))
+		Expect(rr.Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetPartialRollout))
+	})
+
+	It("never counts a revert of a target scaled to zero as available", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		ss := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, w.ssKey, ss)).To(Succeed())
+		ss.Spec.Replicas = ptr.To[int32](0)
+		Expect(k8sClient.Update(ctx, ss)).To(Succeed())
+		setTargetStatus(w, 0, 0, revisionNew, revisionNew)
+		deadline := fetch(w).Status.Deadline.Time
+		drive(w, applied.Add(verification.PollInterval), deadline, verification.PollInterval, 1, nil)
+		Expect(fetch(w).Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		mustReconcileAt(w, deadline)
+		expectRevertCleared(expectEnd(w, remediationv1alpha1.PhaseInconclusive,
+			string(remediationv1alpha1.ResetNotAvailable)))
+	})
+
+	// stableFor 10m: the window opens at applied; halfway the target is not available and that check's status
+	// write is lost; at applied+stableFor the target is available again. The stored window spans stableFor, but
+	// the check that reset it is kept in memory, so the revert does not end across the bad interval.
+	It("keeps a revert's reset whose status write was lost, so it does not end across it", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		stableFor := verification.MinStableForMemory
+		bad := applied.Add(stableFor / 2)
+		drive(w, applied.Add(verification.PollInterval), bad, verification.PollInterval, 1, nil)
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		w.r.Client = &statusRecorder{Client: k8sClient,
+			fail: func(*remediationv1alpha1.RemediationRequest) bool { return true }}
+		_, err := reconcileAt(w, bad)
+		Expect(err).To(HaveOccurred())
+		Expect(fetch(w).Status.Verification.LastReset).To(BeNil(), "the reset was not stored")
+		w.r.Client = k8sClient
+		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+		mustReconcileAt(w, applied.Add(stableFor))
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying),
+			"the stored window spans stableFor, but a check inside it was bad")
+		Expect(rr.Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		Expect(rr.Status.Verification.LastReset.Time.Time).To(BeTemporally("==", bad))
+	})
+
+	// The scenario a lost reset leaves after a restart: halfway the target is not available, that check's
+	// status write is lost and the executor restarts. The new process has no memory of the reset, so it counts
+	// the window only from its own start (ADR-0030 section 4, amendment of 2026-11-13) and the revert does not
+	// end across the bad interval; it ends a full stableFor after the restart, the stored windowStart kept.
+	It("counts no revert window time from before an executor restart that lost a reset", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		stableFor := verification.MinStableForMemory
+		bad := applied.Add(stableFor / 2)
+		drive(w, applied.Add(verification.PollInterval), bad, verification.PollInterval, 1, nil)
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		w.r.Client = &statusRecorder{Client: k8sClient,
+			fail: func(*remediationv1alpha1.RemediationRequest) bool { return true }}
+		_, err := reconcileAt(w, bad)
+		Expect(err).To(HaveOccurred())
+		w.r = w.reconciler()
+		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+		restart := bad.Add(verification.PollInterval)
+		mustReconcileAt(w, restart)
+		before := fetch(w)
+		t, _ := drive(w, restart.Add(verification.PollInterval), restart.Add(stableFor), verification.PollInterval, 1, nil)
+		rr := fetch(w)
+		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally("==", applied), "windowStart is not rewritten")
+		Expect(rr.Status.Verification.LastReset).To(BeNil(), "the lost reset is gone with the old process")
+		Expect(rr.ResourceVersion).To(Equal(before.ResourceVersion), "no status write while the window runs")
+		mustReconcileAt(w, t)
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.ReasonRevertApplied)
+	})
+
+	It("ends a revert VerificationDisabled with --verify-outcomes off, Cleared still RevertApplied", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		w.r.VerifyOutcomes = false
+		mustReconcileAt(w, applied.Add(verification.PollInterval))
+		expectRevertCleared(expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonVerificationDisabled))
+	})
+
 	// The timeout table: trouble the report recorded fails the request whatever its last reset; a pod that is
 	// not Ready without a restart is no evidence and gives PodNotReady.
 	It("ends Failed with Restarted at the timeout when the report recorded trouble", func() {
@@ -1121,24 +1347,53 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonCheckNotAvailable)
 	})
 
-	// A restart of the executor forgets the report's counter, so success waits one more check, and loses no
-	// window: windowStart is read back from the status.
-	It("delays success by one check after an executor restart and keeps the window", func() {
-		w := newWorld(nil)
+	// A restart of the executor loses the resets it kept in memory (unwrittenResets), so the new process counts
+	// no window time from before it began reconciling (ADR-0030 section 4, amendment of 2026-11-13): the stored
+	// window already spans stableFor plus the node grace, yet success needs that much again after the restart.
+	// The stored windowStart is kept as it is and nothing is written while the window runs.
+	It("counts no window time from before an executor restart and keeps the stored windowStart", func() {
+		w := newWorldWith(nil, func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Spec.Verification.Timeout = &metav1.Duration{Duration: time.Hour}
+		})
 		applied := verifying(w)
 		start := applied.Add(30 * time.Second)
 		t, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
 		w.r = w.reconciler()
+		restart := t
 		putReport(w, n, t, start, nil)
-		res := mustReconcileAt(w, t)
+		mustReconcileAt(w, t)
+		before := fetch(w)
+		Expect(before.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		t, n = drive(w, restart.Add(verification.PollInterval), restart.Add(need), verification.PollInterval, n+1,
+			quiet(w, start))
 		rr := fetch(w)
-		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying), "the counter was forgotten")
-		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally("==", start))
-		Expect(res.RequeueAfter).To(Equal(verification.FastPollInterval))
-		t = t.Add(verification.FastPollInterval)
-		putReport(w, n+1, t, start, nil)
+		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally("==", start), "windowStart is not rewritten")
+		Expect(rr.ResourceVersion).To(Equal(before.ResourceVersion), "no status write while the window runs")
+		putReport(w, n, t, start, nil)
 		mustReconcileAt(w, t)
 		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseSucceeded))
+	})
+
+	// The cost of that rule: a restart closer to the timeout than stableFor plus the node grace leaves no time
+	// for a full window, so the request ends at its timeout Inconclusive (here with StaleReport, the last reset
+	// of its window), never Failed and never Succeeded. Without the rule the stored window spans stableFor plus
+	// the node grace at the deadline and the request would succeed.
+	It("ends Inconclusive at the timeout when a restart leaves no time for a full window", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		deadline := fetch(w).Status.Deadline.Time
+		start := deadline.Add(-need)
+		Expect(start.After(applied.Add(verification.PollInterval))).To(BeTrue())
+		t, n := drive(w, applied.Add(verification.PollInterval), start, verification.PollInterval, 1, nil)
+		t, n = drive(w, t, deadline.Add(-need/2), verification.PollInterval, n, quiet(w, t))
+		opened := fetch(w).Status.Verification.WindowStart.Time
+		w.r = w.reconciler()
+		t, n = drive(w, t, deadline, verification.PollInterval, n, quiet(w, opened))
+		Expect(t).To(BeTemporally("==", deadline))
+		putReport(w, n, t, opened, nil)
+		mustReconcileAt(w, t)
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetStaleReport))
+		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally("==", opened))
 	})
 
 	// The executor's own window only moves forward (validation rules on the object).
@@ -1330,6 +1585,57 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		putReport(w, n+1, t1, start, nil)
 		mustReconcileAt(w, t1)
 		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseSucceeded))
+	})
+
+	// The same lost write on the Cleared path: the report stays quiet (NotAvailable is the executor's own reset),
+	// so only the executor's window can hold the request back.
+	It("keeps a reset whose status write was lost, so the request does not succeed across it", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		bad, n := drive(w, start, start.Add(need/2), verification.PollInterval, 1, quiet(w, start))
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		putReport(w, n, bad, start, nil)
+		stored := fetch(w).Status.Verification
+		w.r.Client = &statusRecorder{Client: k8sClient,
+			fail: func(*remediationv1alpha1.RemediationRequest) bool { return true }}
+		_, err := reconcileAt(w, bad)
+		Expect(err).To(HaveOccurred())
+		Expect(fetch(w).Status.Verification).To(Equal(stored), "the reset was not stored")
+		w.r.Client = k8sClient
+		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+		t, n := drive(w, bad.Add(verification.PollInterval), start.Add(need), verification.PollInterval, n+1,
+			quiet(w, start))
+		putReport(w, n, t, start, nil)
+		mustReconcileAt(w, t)
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying),
+			"the stored window spans the need, but a check inside it was bad")
+		Expect(rr.Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		Expect(rr.Status.Verification.LastReset.Time.Time).To(BeTemporally("==", bad))
+	})
+
+	It("drops a kept reset when another writer ended the request", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		bad, n := drive(w, start, start.Add(need/2), verification.PollInterval, 1, quiet(w, start))
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		putReport(w, n, bad, start, nil)
+		w.r.Client = &statusRecorder{Client: k8sClient,
+			fail: func(*remediationv1alpha1.RemediationRequest) bool { return true }}
+		_, err := reconcileAt(w, bad)
+		Expect(err).To(HaveOccurred())
+		w.r.Client = k8sClient
+		_, kept := w.r.unwrittenResets.get(fetch(w))
+		Expect(kept).To(BeTrue(), "the reset of the lost write is kept")
+
+		rr := fetch(w)
+		rr.Status.Phase = remediationv1alpha1.PhaseInconclusive
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		mustReconcileAt(w, bad.Add(verification.PollInterval))
+		_, kept = w.r.unwrittenResets.get(fetch(w))
+		Expect(kept).To(BeFalse(), "an ended request keeps no reset")
 	})
 
 	// ADR-0030 section 4: available replicas equal spec.replicas; more than desired is no quiet window.

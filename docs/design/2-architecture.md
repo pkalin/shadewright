@@ -167,7 +167,7 @@ The verifier (`shadewright-verifier`, <span class="sw-status sw-built">built</sp
 
 What it does: every 30 seconds, for each `RemediationRequest` in phase `Verifying` that has a merge receipt and `status.rollout.templateRevision` and whose target is a Deployment or StatefulSet in a watched namespace, it gets the target, lists the pods its selector matches (pages of 100, at most 2), proves their owner chain by UID and selector (one ReplicaSet `get`), trims each pod to the fields ADR-0030 section 7 names (the termination message is never read), runs the pure sampling logic of `internal/verification/clearing`, and writes the report `vr-<request UID>`. The report spec holds the request UID, the receipt's merge commit, the target UID, the template revision and the container; its owner reference points to the request with `blockOwnerDeletion` false. Each sample is one status update. A failed read is retried and is not a sample.
 
-The executor reads the report as untrusted evidence and decides the outcome (<span class="sw-status sw-built">built</span>, #683, 2.2.3 and 6). Planned: skipping requests with `spec.reverts` (<span class="sw-status sw-planned">planned</span>, the field arrives with #96; the verifier has a hook for it).
+The executor reads the report as untrusted evidence and decides the outcome (<span class="sw-status sw-built">built</span>, #683, 2.2.3 and 6). It writes no report for a revert, a request with `spec.reverts` (<span class="sw-status sw-built">built</span>, #96, ADR-0030 section 8).
 
 None of the three binaries can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 

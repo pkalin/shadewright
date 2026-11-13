@@ -1059,6 +1059,43 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(get(repl).Status.PullRequest.Number).To(Equal(number))
 	})
 
+	It("reads the recorded pull request again after an answer about another pull request around the update, and takes it over (#688)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		appended, missedBefore, missedAfter := false, false, false
+		git.SetAfter(func(op string) error {
+			if op == opAppend {
+				appended = true
+			}
+			return nil
+		})
+		git.SetFail(func(op string) error {
+			switch {
+			case op != opGet:
+			case !appended && !missedBefore:
+				missedBefore = true
+				return fmt.Errorf("another pull request: %w", providers.ErrUntrustedAnswer)
+			case appended && !missedAfter:
+				missedAfter = true
+				return fmt.Errorf("another pull request: %w", providers.ErrUntrustedAnswer)
+			}
+			return nil
+		})
+		pollOf(repl)
+		Expect(missedBefore).To(BeTrue())
+		Expect(get(repl).Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseCancelled),
+			"an answer about another pull request says nothing about the recorded one")
+		Expect(head()).To(Equal(oldHead), "nothing was pushed on it")
+		pollOf(repl)
+		pollOf(repl)
+		git.SetAfter(nil)
+		git.SetFail(nil)
+		Expect(missedAfter).To(BeTrue())
+		Expect(get(repl).Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseCancelled), "not after the update either")
+		pollUntil(tookOver)
+		Expect(get(repl).Status.PullRequest.Number).To(Equal(number))
+	})
+
 	It("reads the recorded pull request again after a 404 before the update, and takes it over (#688)", func() {
 		replace("512Mi", ref(hint))
 		untilIntent()

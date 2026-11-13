@@ -1149,7 +1149,8 @@ const branchPullsPerPage = 50
 // first: the open ones when openOnly is true, all of them otherwise. It asks GitHub for that head and base and
 // pages through the answer by its Link header. Every entry must be from headBranch of this repository to the
 // target branch of this repository (with openOnly, also open): any other entry is ErrUntrustedAnswer for the
-// whole call, never skipped. More than MaxBranchChangeRequests, or a next page past them, is ErrTooLarge. A pull
+// whole call, never skipped. An answer that is not a JSON array (null included) is an error, never an empty list.
+// More than MaxBranchChangeRequests, or a next page past them, is ErrTooLarge. A pull
 // request that moves between pages while they are read (one opened shifts the older ones down a page) is read
 // twice and kept once; one that closes during an openOnly read may be missed, which is right, since it is no
 // longer open.
@@ -1179,11 +1180,16 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 		if !r.ok() {
 			return nil, statusError(opListCR, r.status)
 		}
-		var prs []pullJSON
+		// A pointer, so that a JSON null (or an empty body) is told apart from an empty list: only an array is an
+		// answer, anything else is a broken one, retried like any unclassified failure, never "none".
+		var prs *[]pullJSON
 		if err := decode(opListCR, r, &prs); err != nil {
 			return nil, err
 		}
-		for _, pr := range prs {
+		if prs == nil {
+			return nil, errors.New(opListCR + ": GitHub answered without a list of pull requests")
+		}
+		for _, pr := range *prs {
 			if !p.ours(pr) || pr.Head.Ref != headBranch || (openOnly && (pr.State != stateOpen || pr.MergedAt != nil)) {
 				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", opListCR,
 					providers.ErrUntrustedAnswer)

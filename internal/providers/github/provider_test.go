@@ -1492,6 +1492,26 @@ func TestListChangeRequestsRefused(t *testing.T) {
 	}
 }
 
+// jsonNull is a JSON null as a whole answer.
+const jsonNull = "null"
+
+// TestListChangeRequestsNotAList checks that an answer that is not a JSON array (null, an object) is an error,
+// never an empty list that would read as "no pull request on the branch" (#688).
+func TestListChangeRequestsNotAList(t *testing.T) {
+	for name, raw := range map[string]string{"a JSON null": jsonNull, "an object": `{"message":"ok"}`} {
+		t.Run(name, func(t *testing.T) {
+			st := listBranch("all", 1, 1)
+			st.raw = raw
+			h := newHarness(t, st)
+			got, err := h.p.ListChangeRequests(ctx, branch, false)
+			if err == nil || got != nil || providers.IsNotFound(err) || errors.Is(err, providers.ErrUntrustedAnswer) {
+				t.Fatalf("got %+v, %v; want an unclassified error", got, err)
+			}
+			assertSafe(t, err)
+		})
+	}
+}
+
 func TestGetChangeRequest(t *testing.T) {
 	h := newHarness(t, get("/pulls/12", "pull_merged.json"))
 	cr, err := h.p.GetChangeRequest(ctx, 12)

@@ -604,6 +604,26 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
 	})
 
+	It("records an unrecorded merge that a newer closed pull request of the branch hides (#688)", func() {
+		markCleanup(forgetPullRequest)
+		sha, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: cr.HeadBranch,
+			BaseBranch: mainBranch, Title: "opened after the merge", Body: cr.Body})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.CloseChangeRequest(ctx, next.Number)).To(Succeed())
+		newest, err := git.FindChangeRequest(ctx, cr.HeadBranch)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(newest.Number).To(Equal(next.Number), "the newest of the branch is the closed one")
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest).NotTo(BeNil())
+		Expect(got.Status.PullRequest.Number).To(Equal(cr.Number))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
+	})
+
 	It("binds the look-up of an unrecorded merge to the number it tried and to the target branch (#688)", func() {
 		markCleanup(forgetPullRequest)
 		_, err := git.Merge(cr.Number)

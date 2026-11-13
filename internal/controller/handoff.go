@@ -589,9 +589,11 @@ func (r *RemediationRequestReconciler) afterUpdate(ctx context.Context, git prov
 
 // findHanded is findRecorded for the handoff: it reads the predecessor's recorded pull request by its number. A
 // 404 alone never aborts a handoff, since it may be a passing fault of the Git host while the pull request is
-// open: it is returned as an error that keeps the provider's, for a retry within the handoff's deadline
-// (retryRecovery after the update, the request's deadline before it). Only a real answer (another pull request,
-// another branch or base branch) is gone, and the caller ends the handoff on it.
+// open, and neither does an answer about another pull request (ErrUntrustedAnswer, or another number), which says
+// nothing about the recorded one (#688): each is returned as an error that keeps the provider's, for a retry
+// within the handoff's deadline (retryRecovery after the update, the request's deadline before it). Only an answer
+// about the recorded number itself (from another branch or to another base branch) is gone, and the caller ends
+// the handoff on it.
 func findHanded(ctx context.Context, git providers.GitProvider, pred *remediationv1alpha1.RemediationRequest) (
 	providers.ChangeRequest, string, error) {
 	src := pred.Status.Source
@@ -603,6 +605,8 @@ func findHanded(ctx context.Context, git providers.GitProvider, pred *remediatio
 	switch {
 	case ok && providers.IsNotFound(err):
 		return providers.ChangeRequest{}, "", fmt.Errorf("%s; it is read again: %w", g.reason, g.cause)
+	case ok && g.untrusted:
+		return providers.ChangeRequest{}, "", g.retry()
 	case ok:
 		return providers.ChangeRequest{}, g.reason, nil
 	}

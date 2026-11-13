@@ -159,9 +159,12 @@ func release(rr *remediationv1alpha1.RemediationRequest) {
 // (its branch when none is recorded) and marker. It records one the status does not record yet, and marks a
 // closed or merged one so in PullRequestOpened (unless a closed reason is there already); it releases the lock
 // when that pull request is closed or merged, or when the branch has none of the request's own (and none is
-// recorded). A recorded one that is closed without a merge releases the lock only when the open pull requests of
-// the branch hold none that may still deliver this request's change (openHolding; ADR-0028 section 4, ADR-0030
-// section 1); a merged one delivered it, and releases the lock as the status rule does for a merge. When one does, the lock is kept and condition TargetHeld names it, written when it changes. An open
+// recorded). Without a recorded number every pull request of the branch with the marker is read (ownOnBranch,
+// pickOwn), not only the newest. One that is closed without a merge releases the lock only when the open pull
+// requests of the branch hold none that may still deliver this request's change (openHolding; ADR-0028 section 4,
+// ADR-0030 section 1); a merged one delivered it, and releases the lock as the status rule does for a merge. When
+// one does, the lock is kept and condition TargetHeld names it, written when it changes; every other outcome of the
+// look-up clears TargetHeld (released, or the request's own pull request open again). An open
 // one keeps the lock and is looked at again after heldRecheckInterval. A look-up that fails for any reason (the
 // repository left the settings, writes are paused, the Git host refused or failed, or answered that it has no
 // pull request with the recorded number) keeps the lock and is tried again after the same interval; only the
@@ -181,7 +184,6 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		log.Info("Released the target lock of RemediationRequest: its status shows the pull request closed or merged")
 		return reconcile.Result{}, nil
 	}
-	recorded := rr.Status.PullRequest != nil
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	// A status that says the recorded pull request is closed (closedOnly) was written from a read of it, or from
 	// Shadewright's own close by its number: the read by number then needs no marker, which a person may have
@@ -189,8 +191,8 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	git, cr, err := r.findOwnWith(lookCtx, rr, !closedOnly(rr))
 	free := err == nil && (cr == nil || cr.State != providers.ChangeRequestOpen)
 	var holding *providers.ChangeRequest
-	if free && recorded && cr.State == providers.ChangeRequestClosed {
-		holding, err = r.openHolding(lookCtx, git, rr)
+	if free && cr != nil && cr.State == providers.ChangeRequestClosed {
+		holding, err = r.openHolding(lookCtx, git, rr, cr.Number)
 		free = err == nil && holding == nil
 	}
 	err = boundErr(ctx, lookCtx, "look-up of the change request", err)
@@ -219,6 +221,10 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 				"the target stays locked until it is closed or merged", holding.Number),
 			ObservedGeneration: rr.Generation,
 		})
+	default:
+		// The request's own pull request is open: it holds the lock itself, and TargetHeld, which names another
+		// one, no longer says why (one that held it closed, and the recorded one was reopened).
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
 	}
 	if equality.Semantic.DeepEqual(before, &rr.Status) {
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
@@ -255,9 +261,11 @@ const ReasonOpenOnBranch = "PullRequestOpenOnBranch"
 // took the pull request over, ADR-0028 section 4): that request's own lock keeps the target locked while the
 // pull request is open, since a request never releases its lock while its recorded pull request is open, so a
 // predecessor and its live successor never wait on each other and never both let go. The other requests are read
-// from the API server, not the cache. A read that fails is returned, and keeps the lock.
+// from the API server, not the cache. A read that fails is returned, and keeps the lock. The request's own pull
+// request (closed) is skipped: the read by its number has just found it closed, and a listing that lags behind
+// that read would otherwise keep the lock on its account and name it as another pull request.
 func (r *RemediationRequestReconciler) openHolding(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest) (*providers.ChangeRequest, error) {
+	rr *remediationv1alpha1.RemediationRequest, closed int64) (*providers.ChangeRequest, error) {
 	open, err := git.ListChangeRequests(ctx, freshness.BranchName(rr), true)
 	if err != nil {
 		return nil, freshness.WrapProvider("list the open change requests of the branch", err)
@@ -280,7 +288,7 @@ func (r *RemediationRequestReconciler) openHolding(ctx context.Context, git prov
 		heldByOther[o.Status.PullRequest.Number] = true
 	}
 	for i := range open {
-		if !heldByOther[open[i].Number] {
+		if open[i].Number != closed && !heldByOther[open[i].Number] {
 			return &open[i], nil
 		}
 	}
@@ -356,22 +364,29 @@ func (r *RemediationRequestReconciler) findOwnWith(ctx context.Context, rr *reme
 		}
 		return git, &cr, nil
 	}
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
-	switch {
-	case providers.IsNotFound(err):
-		return git, nil, nil
-	case err != nil:
-		return nil, nil, freshness.WrapProvider("find the change request", err)
-	}
-	switch ours, err := r.ownsMarker(ctx, cr.Body, rr); {
-	case err != nil:
+	// None recorded: every pull request of the branch with this request's marker, in any state, since the newest
+	// of the branch may hide an older open or merged one. A pull request without the marker is someone else's, or
+	// another plan's: none of this request's own, as closeChangeRequest also finds.
+	own, err := r.ownOnBranch(ctx, git, rr)
+	if err != nil {
 		return nil, nil, err
-	case !ours:
-		// Someone else's pull request on the branch name: none of this request's own was opened, as the close of
-		// closeChangeRequest also finds.
-		return git, nil, nil
 	}
-	return git, &cr, nil
+	return git, pickOwn(own), nil
+}
+
+// pickOwn returns the pull request a look-up by branch stands for among those with the request's marker, newest
+// first: an open one (it holds the lock), else a merged one (the change landed), else the newest closed one; nil
+// when there is none.
+func pickOwn(own []providers.ChangeRequest) *providers.ChangeRequest {
+	for _, state := range []providers.ChangeRequestState{providers.ChangeRequestOpen, providers.ChangeRequestMerged} {
+		if i := slices.IndexFunc(own, func(cr providers.ChangeRequest) bool { return cr.State == state }); i >= 0 {
+			return &own[i]
+		}
+	}
+	if len(own) == 0 {
+		return nil
+	}
+	return &own[0]
 }
 
 // lockWaiters maps a change of a request to the requests queued behind the lock on the same target, so they

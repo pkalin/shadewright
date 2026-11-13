@@ -199,26 +199,39 @@ func setVerifiedUnknown(rr *remediationv1alpha1.RemediationRequest, reason, mess
 // by branch would return the newest pull request of the branch, which after a merge may be another one (a
 // supersede chain shares its branch), so the merge of the recorded one would never be recorded.
 //
-// It returns, besides the pull request, why the recorded one is gone, when it is (lookUpRecorded). Each is final;
-// the caller stops the request with the cause in its message. A 404 is believed only when the branch confirms it
-// (confirmGone): otherwise it is a failed read, like any other failure, returned as it is for a retry, and never
-// reads as gone. So a passing 404 on the watch of a predecessor whose handoff intent stands only requeues it.
+// It returns, besides the pull request, why the recorded one is gone, when it is (readRecorded). Each is final;
+// the caller stops the request with the cause in its message. No single read ends anything: a 404 the branch does
+// not confirm and an answer about another pull request are failed reads, returned for a retry, and never read as
+// gone. So a passing 404 on the watch of a predecessor whose handoff intent stands only requeues it.
 func findRecorded(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest) (
 	cr providers.ChangeRequest, gone string, err error) {
 	src := rr.Status.Source
 	if rr.Status.PullRequest == nil || src == nil {
 		return providers.ChangeRequest{}, "", errors.New("no pull request or source recorded")
 	}
-	cr, err = lookUpRecorded(ctx, git, rr, string(src.TargetBranch))
-	if g, ok := errors.AsType[*recordedGoneError](err); ok {
-		if providers.IsNotFound(err) {
-			if err := confirmGone(ctx, git, rr); err != nil {
-				return providers.ChangeRequest{}, "", err
-			}
+	return readRecorded(ctx, git, rr, string(src.TargetBranch))
+}
+
+// readRecorded is lookUpRecorded with the rule that no single read ends anything (#688): it returns the recorded
+// pull request, or why it is gone, or an error for a retry. Gone is an answer about the recorded number itself
+// (from another branch or to another base branch), or a 404 the branch confirms (confirmGone). A 404 the branch
+// does not confirm, an answer about another pull request (ErrUntrustedAnswer, or another number) and any other
+// failure are returned as errors, never as gone, and never wrap errRecordedNotFound.
+func readRecorded(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest,
+	target string) (providers.ChangeRequest, string, error) {
+	cr, err := lookUpRecorded(ctx, git, rr, target)
+	g, ok := errors.AsType[*recordedGoneError](err)
+	switch {
+	case !ok:
+		return cr, "", err
+	case g.untrusted:
+		return providers.ChangeRequest{}, "", g.retry()
+	case providers.IsNotFound(err):
+		if err := confirmGone(ctx, git, rr); err != nil {
+			return providers.ChangeRequest{}, "", err
 		}
-		return providers.ChangeRequest{}, g.reason, nil
 	}
-	return cr, "", err
+	return providers.ChangeRequest{}, g.reason, nil
 }
 
 // errUnconfirmedNotFound means the Git host answered 404 for the recorded number, but the request's branch still
@@ -252,6 +265,16 @@ type recordedGoneError struct {
 }
 
 func (e *recordedGoneError) Error() string { return e.reason }
+
+// retry is the failed read an untrusted answer is: its reason with the provider's error, or ErrUntrustedAnswer
+// when the provider returned another number without one. It does not wrap errRecordedNotFound.
+func (e *recordedGoneError) retry() error {
+	cause := e.cause
+	if cause == nil {
+		cause = providers.ErrUntrustedAnswer
+	}
+	return fmt.Errorf("%s; it is read again: %w", e.reason, cause)
+}
 
 func (e *recordedGoneError) Unwrap() []error {
 	if e.cause == nil {

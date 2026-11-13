@@ -65,6 +65,11 @@ Validation rules:
 
 - status.pullRequest.mergeCommitSHA is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)`
 - status.pullRequest.appliedObservedAt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt) && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)`
+- status.mergeReceipt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || (has(self.status) && has(self.status.mergeReceipt) && self.status.mergeReceipt == oldSelf.status.mergeReceipt)`
+- status.mergeReceipt.mergeCommitSHA must equal status.pullRequest.mergeCommitSHA: `!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.mergeReceipt.mergeCommitSHA == self.status.pullRequest.mergeCommitSHA)`
+- status.mergeReceipt.pullRequest, headSHA and mergedAt must equal status.pullRequest.number, headSHA and mergedAt: `!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && self.status.mergeReceipt.pullRequest == self.status.pullRequest.number && self.status.mergeReceipt.headSHA == self.status.pullRequest.headSHA && has(self.status.pullRequest.mergedAt) && self.status.mergeReceipt.mergedAt == self.status.pullRequest.mergedAt)`
+- status.mergeCommitAwaitedSince is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)`
+- status.mergeReceipt is set only in Merged or a phase after it: `!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))`
 - status.hints: a stored hint is never removed: `!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status) && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h, h.source == o.source && h.commentID == o.commentID)))`
 - status.handoff.from is never removed: `!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.from) || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.from))`
 - status.handoff.to is never removed: `!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.to) || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.to))`
@@ -296,7 +301,7 @@ Validation rules:
 
 - must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock': `!self.contains('..') && !self.endsWith('.lock') && !self.contains('.lock/') && self != 'HEAD' && !self.startsWith('refs/') && !self.startsWith('shadewright/')`
 
-Used by: [GitRepository](#gitrepository), [ResolvedSource](#resolvedsource).
+Used by: [GitRepository](#gitrepository), [MergeReceipt](#mergereceipt), [ResolvedSource](#resolvedsource).
 
 ### GitDirPath
 
@@ -757,6 +762,25 @@ Used by: [PolicyAction](#policyaction).
 | `maxIncreasePercent` | integer | No | maxIncreasePercent limits one increase relative to the previous value.<br>Default: `50`<br>Maximum: 1000<br>Minimum: 1 |
 | `maxDecreasePercent` | integer | No | maxDecreasePercent limits one decrease relative to the previous value; 0 refuses every decrease.<br>Default: `0`<br>Maximum: 90<br>Minimum: 0 |
 
+### MergeReceipt
+
+MergeReceipt binds a merge to the repository, branch, pull request and head it was made from (ADR-0030
+section 1). The executor writes it in the status write that sets Merged, only for a merge that holds exactly
+the planned change and has a full merge commit ID, and never changes it after; every later check of the
+merge (delivery, ancestry) reads it instead of the live settings.
+
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `repository` | [PlanRepository](#planrepository) | Yes | repository is the repository the plan was made for, copied from status.planRepository. |
+| `targetBranch` | [GitBranch](#gitbranch) | Yes | targetBranch is the branch the pull request merged into, copied from status.source.targetBranch.<br>Maximum length: 255<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$`<br>Rule: must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock' |
+| `pullRequest` | integer | Yes | pullRequest is the number of the merged pull request.<br>Minimum: 1 |
+| `headSHA` | string | Yes | headSHA is the head that was merged: the commit Shadewright pushed, or the replacement's commit after a handoff. It equals status.pullRequest.headSHA when the receipt is written.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
+| `mergeCommitSHA` | string | Yes | mergeCommitSHA is the commit the Git host reports for the merge. It equals status.pullRequest.mergeCommitSHA (a validation rule on the object).<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
+| `mergedAt` | [MicroTime](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#microtime-v1-meta) | Yes | mergedAt is when the executor recorded the merge: status.pullRequest.mergedAt of the same status write. |
+
 ### ModelDeployment
 
 ModelDeployment is one model deployment behind an inference endpoint, for example in Microsoft Foundry
@@ -893,7 +917,7 @@ RemediationSettings when planDigest was fixed. Cleanup of a superseded plan touc
 settings entry that now points elsewhere can never get an unrelated pull request closed.
 
 
-Used by: [RemediationRequestStatus](#remediationrequeststatus).
+Used by: [MergeReceipt](#mergereceipt), [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1049,7 +1073,7 @@ Used by: [RemediationRequestSpec](#remediationrequestspec).
 RemediationPhase summarizes where a request is. Conditions carry the reasons.
 
 - Underlying type: string
-- One of `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`, `Merged`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`
+- One of `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`, `Merged`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`, `Inconclusive`
 
 Used by: [RemediationRequestStatus](#remediationrequeststatus).
 
@@ -1070,6 +1094,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `Cancelled` | PhaseCancelled means the request was cancelled before the change was merged. Terminal. |
 | `Superseded` | PhaseSuperseded means a plan input changed, or the ScaledObject is no longer ready, or the module that contributes the action was disabled, so the pull request is closed and a new request is needed. With reason HandedOff (ADR-0028) a replacement took over the pull request instead, which stays open. With reason AnotherRequestMerged (on PlanFresh) another request of the same Incident and target was merged while this one waited, before it took the target lock or opened a pull request. With reason AnotherRequestClosed (on PlanFresh) this one waited behind the target lock of another request for the same target and field (status.queuedBehind) whose pull request was closed without a merge, before it took the lock or opened a pull request. Terminal. |
 | `NeedsIntervention` | PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target is not declared in a plain manifest; a human must act. |
+| `Inconclusive` | PhaseInconclusive means the change was merged and neither success nor failure could be shown; condition Verified is Unknown and its reason says why, for example NoMergeReceipt when the merge could not be bound to a merge receipt (ADR-0030 section 5). Terminal. |
 
 ### RemediationPolicySpec
 
@@ -1141,7 +1166,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `observedGeneration` | integer | No | observedGeneration is the generation the status describes. |
-| `phase` | [RemediationPhase](#remediationphase) | No | phase summarizes progress. It is a selectable field (field selector status.phase), so the executor's limits list only the phases they need from the API server.<br>One of `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`, `Merged`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention` |
+| `phase` | [RemediationPhase](#remediationphase) | No | phase summarizes progress. It is a selectable field (field selector status.phase), so the executor's limits list only the phases they need from the API server.<br>One of `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`, `Merged`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`, `Inconclusive` |
 | `lastPhaseTransitionTime` | [MicroTime](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#microtime-v1-meta) | No | lastPhaseTransitionTime is when phase last changed, to the microsecond. The circuit breaker orders the outcomes of requests by it. |
 | `breakerProbe` | boolean | No | breakerProbe is true on a request the policy check let through while the circuit breaker was tripped (half-open): it is the breaker's probe. It is written with the allowed decision and never cleared. The breaker finds a running probe, or one that ended without a success, by this field only; a request without it is not a probe. It is a selectable field (field selector status.breakerProbe). |
 | `holdsTarget` | boolean | No | holdsTarget is true while the request holds the executor's lock on its target: it is set in the status write of the allowed decision and cleared only once the request's pull request is known merged or closed, or a look-up by its branch and marker found none of its own open. While it is true no other request on the same target goes through the policy check. Unset on a request not yet decided, and on one written before the field existed; the executor then derives it once from the request's phase and pull request, keeping the lock when in doubt. A refused request gets false with its refusal. It is a selectable field (field selector status.holdsTarget), so the executor's lock reads only holders. |
@@ -1155,6 +1180,8 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyRevision` | string | No | policyRevision is the policy name and generation the decision used, as name/generation. The policy UID is recorded next to it, because a deleted and recreated policy can reach the same generation again.<br>Maximum length: 128 |
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA<br>Rule: reviewCheck names the recorded head |
+| `mergeReceipt` | [MergeReceipt](#mergereceipt) | No | mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed after (validation rules on the object). A request merged without a full merge commit ID gets none and ends Inconclusive with reason NoMergeReceipt; a merge with a foreign change (MergedWithForeignChange) gets none either. Unset on a request merged before the field existed (condition Verified Unknown, reason MergedBeforeVerification). |
+| `mergeCommitAwaitedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a change it cannot check. Set once and never changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset when the commit was reported at once. |
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up. |
 | `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all, and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed, so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: status.hints: at most 3 hints are Consumed or Reserved (`self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3`) |

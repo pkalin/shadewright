@@ -523,7 +523,8 @@ func declineOnEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv
 	reason := ReasonHintRequestEnded
 	switch closed := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened); {
 	case phase == remediationv1alpha1.PhaseMerged || phase == remediationv1alpha1.PhaseWaitingForDelivery ||
-		phase == remediationv1alpha1.PhaseVerifying || phase == remediationv1alpha1.PhaseSucceeded:
+		phase == remediationv1alpha1.PhaseVerifying || phase == remediationv1alpha1.PhaseSucceeded ||
+		phase == remediationv1alpha1.PhaseInconclusive:
 		reason = ReasonHintPullRequestMerged
 	case closed == nil:
 	case closed.Reason == ReasonChangeRequestMerged:

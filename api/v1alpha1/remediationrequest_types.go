@@ -199,7 +199,7 @@ type RemediationRequestSpec struct {
 }
 
 // RemediationPhase summarizes where a request is. Conditions carry the reasons.
-// +kubebuilder:validation:Enum=Pending;PolicyChecked;PRCreated;AwaitingApproval;AutoMergeQueued;Merged;WaitingForDelivery;Verifying;Succeeded;Denied;Failed;Expired;Cancelled;Superseded;NeedsIntervention
+// +kubebuilder:validation:Enum=Pending;PolicyChecked;PRCreated;AwaitingApproval;AutoMergeQueued;Merged;WaitingForDelivery;Verifying;Succeeded;Denied;Failed;Expired;Cancelled;Superseded;NeedsIntervention;Inconclusive
 type RemediationPhase string
 
 // Phases of a RemediationRequest (design section 6).
@@ -243,6 +243,10 @@ const (
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
 	// is not declared in a plain manifest; a human must act.
 	PhaseNeedsIntervention RemediationPhase = "NeedsIntervention"
+	// PhaseInconclusive means the change was merged and neither success nor failure could be shown; condition
+	// Verified is Unknown and its reason says why, for example NoMergeReceipt when the merge could not be bound
+	// to a merge receipt (ADR-0030 section 5). Terminal.
+	PhaseInconclusive RemediationPhase = "Inconclusive"
 )
 
 // Condition types on a RemediationRequest.
@@ -421,6 +425,45 @@ type PlanRepository struct {
 	InstallationID int64 `json:"installationID,omitempty"`
 }
 
+// MergeReceipt binds a merge to the repository, branch, pull request and head it was made from (ADR-0030
+// section 1). The executor writes it in the status write that sets Merged, only for a merge that holds exactly
+// the planned change and has a full merge commit ID, and never changes it after; every later check of the
+// merge (delivery, ancestry) reads it instead of the live settings.
+type MergeReceipt struct {
+	// repository is the repository the plan was made for, copied from status.planRepository.
+	// +required
+	Repository PlanRepository `json:"repository"`
+
+	// targetBranch is the branch the pull request merged into, copied from status.source.targetBranch.
+	// +required
+	TargetBranch GitBranch `json:"targetBranch"`
+
+	// pullRequest is the number of the merged pull request.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	PullRequest int64 `json:"pullRequest"`
+
+	// headSHA is the head that was merged: the commit Shadewright pushed, or the replacement's commit after a
+	// handoff. It equals status.pullRequest.headSHA when the receipt is written.
+	// +kubebuilder:validation:MinLength=40
+	// +kubebuilder:validation:MaxLength=40
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +required
+	HeadSHA string `json:"headSHA"`
+
+	// mergeCommitSHA is the commit the Git host reports for the merge. It equals
+	// status.pullRequest.mergeCommitSHA (a validation rule on the object).
+	// +kubebuilder:validation:MinLength=40
+	// +kubebuilder:validation:MaxLength=40
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +required
+	MergeCommitSHA string `json:"mergeCommitSHA"`
+
+	// mergedAt is when the executor recorded the merge: status.pullRequest.mergedAt of the same status write.
+	// +required
+	MergedAt metav1.MicroTime `json:"mergedAt"`
+}
+
 // RemediationRequestStatus is written only by the remediation controller.
 type RemediationRequestStatus struct {
 	// observedGeneration is the generation the status describes.
@@ -523,6 +566,24 @@ type RemediationRequestStatus struct {
 	// +optional
 	PullRequest *PullRequestStatus `json:"pullRequest,omitempty"`
 
+	// mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit
+	// (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed
+	// after (validation rules on the object). A request merged without a full merge commit ID gets none and ends
+	// Inconclusive with reason NoMergeReceipt; a merge with a foreign change (MergedWithForeignChange) gets none
+	// either. Unset on a request merged before the field existed (condition Verified Unknown, reason
+	// MergedBeforeVerification).
+	// +optional
+	MergeReceipt *MergeReceipt `json:"mergeReceipt,omitempty"`
+
+	// mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
+	// merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
+	// from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a
+	// receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
+	// change it cannot check. Set once and never changed or removed (a validation rule on the object), so a
+	// restart does not start the wait again. Unset when the commit was reported at once.
+	// +optional
+	MergeCommitAwaitedSince *metav1.Time `json:"mergeCommitAwaitedSince,omitempty"`
+
 	// rollout is what the check after the merge keeps between reconciles (the RolledOut condition).
 	// +optional
 	Rollout *RolloutStatus `json:"rollout,omitempty"`
@@ -593,6 +654,15 @@ type RemediationRequestStatus struct {
 // pullRequest (or the whole status) and writing it again cannot change a recorded value.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)",message="status.pullRequest.mergeCommitSHA is set once and never changed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt) && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)",message="status.pullRequest.appliedObservedAt is set once and never changed"
+// status.mergeReceipt is set once: once written it is never changed, also by removing it or the whole status and
+// writing it again. Its pull request, head, merge commit and merge time are always the ones status.pullRequest
+// records, so while a receipt exists status.pullRequest.number and headSHA cannot change either; and it exists
+// only in Merged or a phase after it (ADR-0030 section 1).
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || (has(self.status) && has(self.status.mergeReceipt) && self.status.mergeReceipt == oldSelf.status.mergeReceipt)",message="status.mergeReceipt is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.mergeReceipt.mergeCommitSHA == self.status.pullRequest.mergeCommitSHA)",message="status.mergeReceipt.mergeCommitSHA must equal status.pullRequest.mergeCommitSHA"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && self.status.mergeReceipt.pullRequest == self.status.pullRequest.number && self.status.mergeReceipt.headSHA == self.status.pullRequest.headSHA && has(self.status.pullRequest.mergedAt) && self.status.mergeReceipt.mergedAt == self.status.pullRequest.mergedAt)",message="status.mergeReceipt.pullRequest, headSHA and mergedAt must equal status.pullRequest.number, headSHA and mergedAt"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)",message="status.mergeCommitAwaitedSince is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))",message="status.mergeReceipt is set only in Merged or a phase after it"
 // The hints and the handoff follow the same pattern: a hint once stored is never removed, and neither side of
 // the handoff is (their pin and phase rules live on their types). A side written for the first time starts in
 // its first phase.

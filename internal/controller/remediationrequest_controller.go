@@ -360,6 +360,26 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return res, err
 }
 
+// afterStop handles a request that no longer progresses: nothing is written to Git any more, but a lock still
+// held waits for its pull request, and a merged request is followed after its merge. stepErr is the error of a
+// step after the handoff whose status write failed, returned after this for a retry with backoff.
+func (r *RemediationRequestReconciler) afterStop(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	stepErr error) (ctrl.Result, error) {
+	res, err := r.checkHeld(ctx, rr)
+	if err != nil || rr.Status.Phase != remediationv1alpha1.PhaseMerged {
+		return orStepErr(res, err, stepErr)
+	}
+	// A merge recorded without a receipt ends Inconclusive here, and one recorded before receipts existed is
+	// marked once (merge.go).
+	if done, err := r.settleReceipt(ctx, rr); done || err != nil {
+		return orStepErr(res, err, stepErr)
+	}
+	// A merged request is followed until its rollout is reported (rollout.go); it only reads and writes its own
+	// status and one Event.
+	after, err := r.afterMerge(ctx, rr)
+	return orStepErr(earlier(res, after), err, stepErr)
+}
+
 // reconcile is Reconcile before its handling of a cancellation.
 func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -394,15 +414,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		if !progresses(rr) {
 			r.forget(req.NamespacedName)
-			// Stopped: nothing is written to Git any more, but a lock still held waits for its pull request.
-			res, err := r.checkHeld(ctx, rr)
-			if err != nil || rr.Status.Phase != remediationv1alpha1.PhaseMerged {
-				return orStepErr(res, err, stepErr)
-			}
-			// A merged request is followed until its rollout is reported (rollout.go); it only reads and
-			// writes its own status and one Event.
-			after, err := r.afterMerge(ctx, rr)
-			return orStepErr(earlier(res, after), err, stepErr)
+			return r.afterStop(ctx, rr, stepErr)
 		}
 		res, err := r.recheck(ctx, rr)
 		if !progresses(rr) {
@@ -1038,6 +1050,10 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		var lookErr error
 		if outcome, lookErr = r.watchPullRequest(ctx, rr); outcome == prStopped {
 			return ctrl.Result{}, nil
+		}
+		if outcome == prMergeCommitPending {
+			// Merged without a merge commit yet: looked at again until the host reports one or the wait ends.
+			return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, nil
 		}
 		if pe, ok := errors.AsType[*freshness.ProviderError](lookErr); ok && pe.RetryAfter > 0 && lookOnly(rr) {
 			// The Git host asked for a delay (a rate limit): the freshness check would ask it again at once. A

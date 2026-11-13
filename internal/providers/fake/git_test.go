@@ -258,6 +258,62 @@ func TestGitOpenChangeRequestIdempotent(t *testing.T) {
 	}
 }
 
+// TestGitGetChangeRequest checks the look-up by number: it finds a change request in any state, also when a
+// newer one was opened on the same branch, and does not find a missing one or one from another branch.
+func TestGitGetChangeRequest(t *testing.T) {
+	g, head := newRepo(t)
+	ctx := context.Background()
+	_, first := mustOpen(t, g, head)
+	merge, err := g.Merge(first.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: branch, BaseBranch: base, Title: "again"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Number == first.Number {
+		t.Fatal("no second change request on the branch")
+	}
+	got, err := g.GetChangeRequest(ctx, first.Number)
+	if err != nil || got.Number != first.Number || got.State != providers.ChangeRequestMerged || got.MergeCommit != merge ||
+		got.HeadBranch != branch || got.BaseBranch != base {
+		t.Errorf("get = %+v, %v", got, err)
+	}
+	if _, err := g.GetChangeRequest(ctx, 99); !providers.IsNotFound(err) {
+		t.Errorf("missing: %v", err)
+	}
+	if err := g.CreateBranch(ctx, "feature/x", head); err != nil {
+		t.Fatal(err)
+	}
+	other, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: "feature/x", BaseBranch: base, Title: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.GetChangeRequest(ctx, other.Number); !providers.IsNotFound(err) {
+		t.Errorf("foreign branch: %v", err)
+	}
+	if err := g.SetMergeCommit(first.Number, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := g.GetChangeRequest(ctx, first.Number); got.MergeCommit != "" {
+		t.Errorf("merge commit = %q after SetMergeCommit", got.MergeCommit)
+	}
+	if err := g.SetMergeCommit(second.Number, merge); !providers.IsConflict(err) {
+		t.Errorf("SetMergeCommit on an open change request: %v", err)
+	}
+	failed := errors.New("503")
+	g.SetFail(func(op string) error {
+		if op == "GetChangeRequest" {
+			return failed
+		}
+		return nil
+	})
+	if _, err := g.GetChangeRequest(ctx, first.Number); !errors.Is(err, failed) {
+		t.Errorf("fail hook: %v", err)
+	}
+}
+
 func TestGitConcurrentOpenMakesOne(t *testing.T) {
 	g, head := newRepo(t)
 	ctx := context.Background()

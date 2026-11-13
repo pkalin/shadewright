@@ -856,6 +856,10 @@ func TestClassifyBreaker(t *testing.T) {
 			if !c.digest {
 				o.Status.PlanDigest = ""
 			}
+			if c.phase == remediationv1alpha1.PhaseMerged {
+				// A merge bound to a receipt: one without is read as Inconclusive (TestSetPhaseMergedCarriesReceiptOrMark).
+				o.Status.MergeReceipt = &remediationv1alpha1.MergeReceipt{}
+			}
 			r := &RemediationRequestReconciler{Now: func() time.Time { return limitsNow }}
 			o.Status.Phase = remediationv1alpha1.PhasePolicyChecked
 			r.setPhase(o, c.phase)

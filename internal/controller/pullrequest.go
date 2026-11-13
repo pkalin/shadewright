@@ -786,6 +786,14 @@ func (r *RemediationRequestReconciler) requireOnTarget(ctx context.Context, git 
 // returned for a retry, with the status unchanged.
 func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
+	// Without a full merge commit ID it waits for the host to report one, a bounded time (awaitMergeCommit), and
+	// is retried after what is left of the wait; nothing is recorded meanwhile.
+	switch left, err := r.awaitMergeCommit(ctx, rr, cr); {
+	case err != nil:
+		return err
+	case left > 0:
+		return &freshness.ProviderError{Op: "wait for the merge commit", Class: providers.ErrRetryable, RetryAfter: left}
+	}
 	ref, err := r.checkMerged(ctx, git, rr, cr)
 	if err != nil {
 		return err
@@ -819,8 +827,10 @@ func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git prov
 	diverged := &renderRefusal{reason: ReasonBranchDiverged,
 		message: "The pull request's head is not one commit that changes only the target file on top of the " +
 			"target branch as it was before the merge"}
-	if cr.MergeCommit == "" {
-		return diverged, nil
+	if !shaPattern.MatchString(cr.MergeCommit) {
+		// After the wait for it (endMerged): what the merge brought cannot be checked without the merge commit.
+		return &renderRefusal{reason: ReasonBranchDiverged, message: "The Git host reported no full merge commit " +
+			"ID for the merged pull request, so what the merge brought cannot be checked"}, nil
 	}
 	state, parent, err := git.CheckMerged(ctx, cr.HeadSHA, cr.MergeCommit, path)
 	switch {
@@ -972,6 +982,9 @@ const (
 	// prClosed: closed without a merge. That is a rejection only if the plan is still fresh; a stale plan's
 	// own close that was cut short looks the same and ends Superseded.
 	prClosed
+	// prMergeCommitPending: merged, and the executor waits for the Git host to report the merge commit
+	// (awaitMergeCommit). Nothing else is done meanwhile: a merged change makes the plan look stale.
+	prMergeCommitPending
 )
 
 // watchPullRequest looks at the recorded pull request: a merge ends the request (Merged), a pull request
@@ -995,6 +1008,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prStopped, nil
 	case errors.Is(err, errClosed):
 		return prClosed, nil
+	case errors.Is(err, errMergeCommitPending):
+		return prMergeCommitPending, nil
 	}
 	caughtUp := false
 	if ctx.Err() == nil {
@@ -1037,13 +1052,14 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	if err != nil {
 		return hintLook{}, err
 	}
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	// By its number, not its branch: the branch may carry a newer pull request (ADR-0030 section 1).
+	cr, gone, err := findRecorded(ctx, git, rr)
 	switch {
-	case errors.Is(err, providers.ErrNotFound):
-		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
-			"The recorded pull request cannot be found any more; automation stopped")
 	case err != nil:
 		return hintLook{}, freshness.WrapProvider("find the change request", err)
+	case gone != "":
+		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
+			"The recorded pull request cannot be found any more ("+gone+"); automation stopped")
 	}
 	if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
 		if cr.Number == rr.Status.PullRequest.Number && intent(rr) != nil {
@@ -1060,6 +1076,13 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
+		// Without a full merge commit ID it waits for the host to report one, a bounded time (awaitMergeCommit).
+		switch left, err := r.awaitMergeCommit(ctx, rr, cr); {
+		case err != nil:
+			return hintLook{}, err
+		case left > 0:
+			return hintLook{}, errMergeCommitPending
+		}
 		recordMerge(ctx, rr, cr)
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
 			"The pull request was merged")

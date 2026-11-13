@@ -237,12 +237,16 @@ const (
 // comes from Git host outages and deadlines, not from a bad change. Denied, Cancelled and Superseded say
 // nothing about whether the changes work, and a request without a plan digest never got through the policy
 // check, so neither counts. Nor does a request without lastPhaseTransitionTime (one that ended before the
-// field existed): it cannot be ordered.
+// field existed): it cannot be ordered. A request in Merged that carries the NoMergeReceipt mark (merge.go) is
+// read like the Inconclusive it ends in, never as a success.
 func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 	if rr.Status.PlanDigest == "" || rr.Status.LastPhaseTransitionTime == nil {
 		return outcomeNone
 	}
 	switch {
+	case noReceiptMerge(rr):
+		// Merged without a receipt: it ends Inconclusive at the next reconcile, and is read as that already.
+		return outcomeNone
 	case slices.Contains(successPhases, rr.Status.Phase):
 		return outcomeSuccess
 	case slices.Contains(failurePhases, rr.Status.Phase):
@@ -625,8 +629,11 @@ var (
 	failurePhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseFailed,
 		remediationv1alpha1.PhaseNeedsIntervention}
 	// neutralPhases end a request without saying whether its change works.
+	// Inconclusive (ADR-0030 section 5) is one: merged, and neither success nor failure could be shown, so it is
+	// read like Expired (a probe that ends in it opens the breaker again for a full cool-down).
 	neutralPhases = []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseExpired,
-		remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded}
+		remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.PhaseSuperseded,
+		remediationv1alpha1.PhaseInconclusive}
 	// endedPhases are the phases that end a probe (ended), and those the first list of the limits leaves out
 	// (limitsSelectors).
 	endedPhases = slices.Concat(successPhases, failurePhases, neutralPhases)
@@ -681,6 +688,17 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 		// The merge's own time, which no later phase moves: duplicates created before it end Superseded (#556).
 		merged := t
 		rr.Status.PullRequest.MergedAt = &merged
+	}
+	if mr := rr.Status.MergeReceipt; phase == remediationv1alpha1.PhaseMerged && mr != nil && mr.MergedAt.IsZero() &&
+		rr.Status.PullRequest != nil && rr.Status.PullRequest.MergedAt != nil {
+		// The receipt recordMerge built is completed with the time of this write (ADR-0030 section 1).
+		mr.MergedAt = *rr.Status.PullRequest.MergedAt
+	}
+	if phase == remediationv1alpha1.PhaseMerged && rr.Status.MergeReceipt == nil && !noReceiptMerge(rr) {
+		// The write that sets Merged carries the receipt or the NoMergeReceipt mark, never neither, also on a path
+		// that did not go through recordMerge: settleReceipt reads a request with neither as one merged before
+		// receipts existed.
+		markNoMergeReceipt(rr)
 	}
 	// The breaker's watermark is set in the same status write that ends the request (breakercounts.go).
 	classifyBreaker(rr)

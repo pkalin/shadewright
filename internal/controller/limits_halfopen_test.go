@@ -148,6 +148,7 @@ func TestBreakerProbeOutcome(t *testing.T) {
 		remediationv1alpha1.PhaseCancelled:          false,
 		remediationv1alpha1.PhaseSuperseded:         false,
 		remediationv1alpha1.PhaseDenied:             false,
+		remediationv1alpha1.PhaseInconclusive:       false,
 	}
 	for phase, closes := range cases {
 		t.Run(string(phase), func(t *testing.T) {

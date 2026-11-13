@@ -366,7 +366,7 @@ func TestLimitsReadThreeLists(t *testing.T) {
 	}
 	want := []string{"status.phase!=Merged,status.phase!=WaitingForDelivery,status.phase!=Verifying," +
 		"status.phase!=Succeeded,status.phase!=Failed,status.phase!=NeedsIntervention,status.phase!=Expired," +
-		"status.phase!=Denied,status.phase!=Cancelled,status.phase!=Superseded",
+		"status.phase!=Denied,status.phase!=Cancelled,status.phase!=Superseded,status.phase!=Inconclusive",
 		"status.holdsTarget!=false", "status.breakerCounts!=false"}
 	if !slices.Equal(sels, want) {
 		t.Fatalf("lists read = %q, want %q", sels, want)

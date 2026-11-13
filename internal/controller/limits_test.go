@@ -407,6 +407,7 @@ func TestSettleLock(t *testing.T) {
 		want *bool
 	}{
 		"Merged releases":                   {rr(remediationv1alpha1.PhaseMerged, yes, ReasonPullRequestOpened, true), no},
+		"Inconclusive releases":             {rr(remediationv1alpha1.PhaseInconclusive, yes, ReasonPullRequestOpened, true), no},
 		"Superseded releases":               {rr(remediationv1alpha1.PhaseSuperseded, yes, "", false), no},
 		"closed without a merge releases":   {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestClosed, true), no},
 		"closed by Shadewright releases":    {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestClosed, true), no},
@@ -646,6 +647,28 @@ func TestLimitsCircuitBreaker(t *testing.T) {
 			o("e2", remediationv1alpha1.PhaseExpired, 2*time.Minute), o("e3", remediationv1alpha1.PhaseExpired, time.Minute))
 		_, got, err := reconcileLimits(t, r, rr)
 		expectAdmitted(t, err, got)
+	})
+	// ADR-0030 section 5 (#678): Inconclusive is read like Expired, neither a failure nor a success.
+	t.Run("inconclusive is not a failure", func(t *testing.T) {
+		r, _, rr, _ := limitsWorld(t, 20, o("i1", remediationv1alpha1.PhaseInconclusive, 3*time.Minute),
+			o("i2", remediationv1alpha1.PhaseInconclusive, 2*time.Minute),
+			o("i3", remediationv1alpha1.PhaseInconclusive, time.Minute))
+		_, got, err := reconcileLimits(t, r, rr)
+		expectAdmitted(t, err, got)
+	})
+	// A merge recorded without a receipt is read as the Inconclusive it ends in, also in the reconcile before.
+	t.Run("a merge without a receipt does not close it", func(t *testing.T) {
+		m := o("m", remediationv1alpha1.PhaseMerged, time.Minute)
+		setVerifiedUnknown(m, ReasonNoMergeReceipt, "no receipt")
+		r, _, rr, stub := limitsWorld(t, 20, append(failed(), m)...)
+		res, got, err := reconcileLimits(t, r, rr)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonCircuitOpen)
+	})
+	t.Run("inconclusive does not close it", func(t *testing.T) {
+		others := append(failed(), o("i", remediationv1alpha1.PhaseInconclusive, time.Minute))
+		r, _, rr, stub := limitsWorld(t, 20, others...)
+		res, got, err := reconcileLimits(t, r, rr)
+		expectQueued(t, r, rr, res, err, got, stub, ReasonCircuitOpen)
 	})
 	t.Run("ordered below the second", func(t *testing.T) {
 		// Three failures and then a success, all within one second: the success is the latest outcome, so the

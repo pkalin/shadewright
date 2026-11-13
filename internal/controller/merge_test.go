@@ -42,11 +42,15 @@ func TestRecordMerge(t *testing.T) {
 		{"no pull request recorded", providers.ChangeRequest{State: providers.ChangeRequestMerged, MergeCommit: merge}, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rr := &remediationv1alpha1.RemediationRequest{}
-			if !tc.noPR {
-				rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 1}
+			// A request whose merge can be bound to a receipt, so only the commit decides (#678: the commit is
+			// written only with the receipt).
+			rr, bound := receiptRequest()
+			if tc.noPR {
+				rr.Status.PullRequest = nil
 			}
-			recordMerge(t.Context(), rr, tc.cr)
+			cr := tc.cr
+			cr.Number, cr.HeadSHA, cr.BaseBranch = bound.Number, bound.HeadSHA, bound.BaseBranch
+			recordMerge(t.Context(), rr, cr)
 			if tc.noPR {
 				if rr.Status.PullRequest != nil {
 					t.Fatalf("a pull request was recorded: %+v", rr.Status.PullRequest)

@@ -485,7 +485,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		finds := 0
 		git.SetFail(func(op string) error {
 			switch op {
-			case opFind:
+			case opGet:
 				if finds++; finds == 1 {
 					return &providers.RetryableError{Err: errors.New("connection reset")}
 				}

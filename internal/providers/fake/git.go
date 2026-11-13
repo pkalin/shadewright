@@ -529,6 +529,24 @@ func (g *Git) FindChangeRequest(ctx context.Context, headBranch string) (provide
 	return providers.ChangeRequest{}, fmt.Errorf("change request for %q: %w", headBranch, providers.ErrNotFound)
 }
 
+// GetChangeRequest returns the change request with number n, ErrNotFound when there is none or when it is not
+// from a shadewright/ branch to the target branch.
+func (g *Git) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	if err := g.before("GetChangeRequest"); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	if !strings.HasPrefix(cr.HeadBranch, "shadewright/") || cr.BaseBranch != g.target {
+		return providers.ChangeRequest{}, fmt.Errorf("change request %d is not a Shadewright one: %w", n, providers.ErrNotFound)
+	}
+	return *cr, nil
+}
+
 func (g *Git) get(n int64) (*providers.ChangeRequest, error) {
 	if n < 1 || n > int64(len(g.crs)) {
 		return nil, fmt.Errorf("change request %d: %w", n, providers.ErrNotFound)
@@ -653,6 +671,22 @@ func (g *Git) merge(n int64, withCommit bool) (string, error) {
 	cr.State = providers.ChangeRequestMerged
 	cr.MergeCommit = sha
 	return sha, nil
+}
+
+// SetMergeCommit replaces the merge commit the fake reports for the merged change request n, as a host that
+// reports none (empty) or a value that is not a full commit ID would.
+func (g *Git) SetMergeCommit(n int64, sha string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return err
+	}
+	if cr.State != providers.ChangeRequestMerged {
+		return fmt.Errorf("change request %d is %s: %w", n, cr.State, providers.ErrConflict)
+	}
+	cr.MergeCommit = sha
+	return nil
 }
 
 func (g *Git) mergeBase(a, b string) string {

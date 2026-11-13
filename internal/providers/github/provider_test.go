@@ -1394,6 +1394,84 @@ func TestFindChangeRequestNone(t *testing.T) {
 	}
 }
 
+func TestGetChangeRequest(t *testing.T) {
+	h := newHarness(t, get("/pulls/12", "pull_merged.json"))
+	cr, err := h.p.GetChangeRequest(ctx, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Number != 12 || cr.State != providers.ChangeRequestMerged || cr.HeadBranch != branch ||
+		cr.BaseBranch != target || cr.HeadSHA != strings.Repeat("7", 40) || cr.MergeCommit != strings.Repeat("d", 40) {
+		t.Errorf("got %+v", cr)
+	}
+	h = newHarness(t, get("/pulls/12", "pull_open.json"))
+	if cr, err := h.p.GetChangeRequest(ctx, 12); err != nil || cr.State != providers.ChangeRequestOpen || cr.MergeCommit != "" {
+		t.Errorf("open: got %+v, %v", cr, err)
+	}
+}
+
+// TestGetChangeRequestNotOurs checks that a pull request that is not from a shadewright/ branch of this
+// repository to the target branch is not found, and that a missing one is not found either.
+func TestGetChangeRequestNotOurs(t *testing.T) {
+	h := newHarness(t, get("/pulls/13", "pull_foreign.json"))
+	if _, err := h.p.GetChangeRequest(ctx, 13); !providers.IsNotFound(err) {
+		t.Fatalf("foreign branch: got %v", err)
+	}
+	h = newHarness(t, status(http.MethodGet, "/pulls/12", http.StatusNotFound, fxForbidden))
+	_, err := h.p.GetChangeRequest(ctx, 12)
+	if !providers.IsNotFound(err) {
+		t.Fatalf("missing: got %v", err)
+	}
+	assertSafe(t, err)
+}
+
+// TestGetChangeRequestFailures checks that an answer that cannot be trusted, or a refusal, is an error and never
+// a pull request or not found.
+func TestGetChangeRequestFailures(t *testing.T) {
+	h := newHarness(t, get("/pulls/13", "pull_merged.json")) // GitHub answered with #12
+	if _, err := h.p.GetChangeRequest(ctx, 13); !errors.Is(err, providers.ErrUntrustedAnswer) || providers.IsNotFound(err) ||
+		providers.IsRetryable(err) {
+		t.Errorf("another number: got %v, want ErrUntrustedAnswer", err)
+	}
+	h = newHarness(t, get("/pulls/12", "pull_empty.json")) // a body without a number, then the real answer
+	if _, err := h.p.GetChangeRequest(ctx, 12); err == nil || errors.Is(err, providers.ErrUntrustedAnswer) ||
+		providers.IsNotFound(err) {
+		t.Errorf("no number: got %v, want an unclassified error that is retried", err)
+	}
+	h = newHarness(t, status(http.MethodGet, "/pulls/12", http.StatusForbidden, fxForbidden))
+	if _, err := h.p.GetChangeRequest(ctx, 12); !errors.Is(err, providers.ErrForbidden) {
+		t.Errorf("forbidden: got %v", err)
+	}
+	h = newHarness(t)
+	if _, err := h.p.GetChangeRequest(ctx, 0); err == nil || providers.IsNotFound(err) {
+		t.Errorf("number 0: got %v", err)
+	}
+}
+
+// TestGetChangeRequestMergedWithoutCommit checks that a merged pull request for which GitHub reports no merge
+// commit yet, or one that is not a full commit ID, is returned merged with an empty merge commit, as an answer:
+// the executor waits for the commit a bounded time (#678), instead of retrying without an end.
+func TestGetChangeRequestMergedWithoutCommit(t *testing.T) {
+	merged, err := os.ReadFile("testdata/pull_merged.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = `"merge_commit_sha":"dddddddddddddddddddddddddddddddddddddddd"`
+	for name, value := range map[string]string{
+		"null": `"merge_commit_sha":null`, "missing": `"merge_commit_sha_x":null`, "empty string": `"merge_commit_sha":""`,
+		"abbreviated": `"merge_commit_sha":"ddddddd"`, "upper case": `"merge_commit_sha":"` + strings.Repeat("D", 40) + `"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(string(merged), sha, value, 1)
+			h := newHarness(t, raw("/pulls/12", body))
+			cr, err := h.p.GetChangeRequest(ctx, 12)
+			if err != nil || cr.State != providers.ChangeRequestMerged || cr.MergeCommit != "" || cr.Number != 12 {
+				t.Fatalf("got %+v, %v; want merged without a merge commit", cr, err)
+			}
+		})
+	}
+}
+
 func TestCloseChangeRequest(t *testing.T) {
 	patch := status(http.MethodPatch, "/pulls/12", http.StatusOK, "pull_closed.json")
 	patch.check = func(t *testing.T, b map[string]any) {

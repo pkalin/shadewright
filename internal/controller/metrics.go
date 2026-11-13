@@ -123,6 +123,7 @@ var requestPhaseList = []remediationv1alpha1.RemediationPhase{
 	remediationv1alpha1.PhaseCancelled,
 	remediationv1alpha1.PhaseSuperseded,
 	remediationv1alpha1.PhaseNeedsIntervention,
+	remediationv1alpha1.PhaseInconclusive,
 }
 
 // denialReasons are the reasons policyDenials reports by name: the reasons the controller, package policy and

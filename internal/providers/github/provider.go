@@ -45,6 +45,7 @@ const (
 	opCheckCommit  = "GitHub check commit"
 	opOpenCR       = "GitHub open pull request"
 	opFindCR       = "GitHub find pull request"
+	opGetCR        = "GitHub get pull request"
 	opCloseCR      = "GitHub close pull request"
 	opCommentCR    = "GitHub comment on pull request"
 	opAutoMerge    = "GitHub auto-merge"
@@ -980,10 +981,12 @@ func (p *Provider) toChangeRequest(op string, pr pullJSON) (providers.ChangeRequ
 	switch {
 	case pr.MergedAt != nil:
 		cr.State = providers.ChangeRequestMerged
-		if pr.MergeCommitSHA == nil || !validSHA(*pr.MergeCommitSHA) {
-			return providers.ChangeRequest{}, errors.New(op + ": GitHub returned a merged pull request without its commit")
+		// GitHub computes the merge commit after the merge: for a moment, or for good, a merged pull request may
+		// report none. Such a merge is returned without one (also for a value that is not a full commit ID), and
+		// the caller decides how long to wait for it.
+		if pr.MergeCommitSHA != nil && validSHA(*pr.MergeCommitSHA) {
+			cr.MergeCommit = *pr.MergeCommitSHA
 		}
-		cr.MergeCommit = *pr.MergeCommitSHA
 	case pr.State == stateOpen:
 		cr.State = providers.ChangeRequestOpen
 	case pr.State == stateClosed:
@@ -1127,6 +1130,44 @@ func (p *Provider) FindChangeRequest(ctx context.Context, headBranch string) (pr
 		}
 	}
 	return providers.ChangeRequest{}, fmt.Errorf("%s: %w", opFindCR, providers.ErrNotFound)
+}
+
+// GetChangeRequest returns pull request number of this repository, in any state. ErrNotFound when GitHub has
+// none with that number (404, 410), and also when it is not from a shadewright/ branch of this repository to
+// the target branch, such as a fork's pull request: that one is never Shadewright's. An answer with another
+// number is ErrUntrustedAnswer, never retried; an answer without a number is an unclassified error, retried. A
+// merged pull request without a full merge commit ID is returned with none (toChangeRequest).
+func (p *Provider) GetChangeRequest(ctx context.Context, number int64) (providers.ChangeRequest, error) {
+	if number < 1 {
+		return providers.ChangeRequest{}, errors.New(opGetCR + ": the pull request number must be positive")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	r, err := p.do(ctx, call{op: opGetCR, method: http.MethodGet, path: "/pulls/" + strconv.FormatInt(number, 10)})
+	if err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	if !r.ok() {
+		return providers.ChangeRequest{}, statusError(opGetCR, r.status)
+	}
+	var pr pullJSON
+	if err := decode(opGetCR, r, &pr); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	if pr.Number == 0 {
+		// An empty or null body decodes to no number. That is a broken answer, not another pull request: it is
+		// retried like any unclassified failure and decides nothing.
+		return providers.ChangeRequest{}, errors.New(opGetCR + ": GitHub answered without a pull request number")
+	}
+	if pr.Number != number {
+		return providers.ChangeRequest{}, fmt.Errorf("%s: GitHub returned another pull request: %w", opGetCR,
+			providers.ErrUntrustedAnswer)
+	}
+	if !p.ours(pr) {
+		return providers.ChangeRequest{}, fmt.Errorf("%s: not a Shadewright pull request to the target branch: %w",
+			opGetCR, providers.ErrNotFound)
+	}
+	return p.toChangeRequest(opGetCR, pr)
 }
 
 func (p *Provider) pull(ctx context.Context, number int64) (pullJSON, error) {

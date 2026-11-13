@@ -929,6 +929,89 @@ spec:
                   outcomes of requests by it.
                 format: date-time
                 type: string
+              mergeCommitAwaitedSince:
+                description: |-
+                  mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
+                  merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
+                  from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a
+                  receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
+                  change it cannot check. Set once and never changed or removed (a validation rule on the object), so a
+                  restart does not start the wait again. Unset when the commit was reported at once.
+                format: date-time
+                type: string
+              mergeReceipt:
+                description: |-
+                  mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit
+                  (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed
+                  after (validation rules on the object). A request merged without a full merge commit ID gets none and ends
+                  Inconclusive with reason NoMergeReceipt; a merge with a foreign change (MergedWithForeignChange) gets none
+                  either. Unset on a request merged before the field existed (condition Verified Unknown, reason
+                  MergedBeforeVerification).
+                properties:
+                  headSHA:
+                    description: |-
+                      headSHA is the head that was merged: the commit Shadewright pushed, or the replacement's commit after a
+                      handoff. It equals status.pullRequest.headSHA when the receipt is written.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  mergeCommitSHA:
+                    description: |-
+                      mergeCommitSHA is the commit the Git host reports for the merge. It equals
+                      status.pullRequest.mergeCommitSHA (a validation rule on the object).
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  mergedAt:
+                    description: 'mergedAt is when the executor recorded the merge:
+                      status.pullRequest.mergedAt of the same status write.'
+                    format: date-time
+                    type: string
+                  pullRequest:
+                    description: pullRequest is the number of the merged pull request.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  repository:
+                    description: repository is the repository the plan was made for,
+                      copied from status.planRepository.
+                    properties:
+                      installationID:
+                        description: installationID is the provider installation that
+                          covers the repository; 0 when the provider has none.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      url:
+                        description: url is the repository URL from RemediationSettings.
+                        maxLength: 512
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  targetBranch:
+                    description: targetBranch is the branch the pull request merged
+                      into, copied from status.source.targetBranch.
+                    maxLength: 255
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must be a plain branch name, not HEAD, refs/..., shadewright/...
+                        or one containing '..' or '.lock'
+                      rule: '!self.contains(''..'') && !self.endsWith(''.lock'') &&
+                        !self.contains(''.lock/'') && self != ''HEAD'' && !self.startsWith(''refs/'')
+                        && !self.startsWith(''shadewright/'')'
+                required:
+                - headSHA
+                - mergeCommitSHA
+                - mergedAt
+                - pullRequest
+                - repository
+                - targetBranch
+                type: object
               observedGeneration:
                 description: observedGeneration is the generation the status describes.
                 format: int64
@@ -953,6 +1036,7 @@ spec:
                 - Cancelled
                 - Superseded
                 - NeedsIntervention
+                - Inconclusive
                 type: string
               planDigest:
                 description: |-
@@ -1330,6 +1414,28 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt)
             || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt)
             && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)'
+        - message: status.mergeReceipt is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || (has(self.status)
+            && has(self.status.mergeReceipt) && self.status.mergeReceipt == oldSelf.status.mergeReceipt)'
+        - message: status.mergeReceipt.mergeCommitSHA must equal status.pullRequest.mergeCommitSHA
+          rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest)
+            && has(self.status.pullRequest.mergeCommitSHA) && self.status.mergeReceipt.mergeCommitSHA
+            == self.status.pullRequest.mergeCommitSHA)'
+        - message: status.mergeReceipt.pullRequest, headSHA and mergedAt must equal
+            status.pullRequest.number, headSHA and mergedAt
+          rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest)
+            && self.status.mergeReceipt.pullRequest == self.status.pullRequest.number
+            && self.status.mergeReceipt.headSHA == self.status.pullRequest.headSHA
+            && has(self.status.pullRequest.mergedAt) && self.status.mergeReceipt.mergedAt
+            == self.status.pullRequest.mergedAt)'
+        - message: status.mergeCommitAwaitedSince is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince)
+            || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince
+            == oldSelf.status.mergeCommitAwaitedSince)'
+        - message: status.mergeReceipt is set only in Merged or a phase after it
+          rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
+            && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',
+            ''AwaitingApproval'', ''AutoMergeQueued'']))'
         - message: 'status.hints: a stored hint is never removed'
           rule: '!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status)
             && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h,

@@ -55,7 +55,8 @@ const (
 	// so it moved to Resolved at once.
 	ReasonRequestSucceeded = "RequestSucceeded"
 	// ReasonRequestDenied, ReasonRequestExpired, ReasonRequestFailed, ReasonRequestCancelled,
-	// ReasonRequestNeedsIntervention and ReasonRequestSuperseded: the newest request naming the Incident ended
+	// ReasonRequestNeedsIntervention, ReasonRequestSuperseded and ReasonRequestInconclusive: the newest request
+	// naming the Incident ended
 	// in that phase, so it moved to Escalated for a person. A Superseded request is the newest only when no
 	// newer request names the Incident.
 	ReasonRequestDenied            = "RequestDenied"
@@ -64,6 +65,7 @@ const (
 	ReasonRequestCancelled         = "RequestCancelled"
 	ReasonRequestNeedsIntervention = "RequestNeedsIntervention"
 	ReasonRequestSuperseded        = "RequestSuperseded"
+	ReasonRequestInconclusive      = "RequestInconclusive"
 	// ReasonReopened: the Incident was Resolved by quiet time before any analysis, and its symptom came back
 	// within RecurrenceWindow of resolvedTime, so it is Open again, with no resolvedTime, and is analyzed as
 	// usual ([reopens]). It is the one Lifecycle reason the observation writer sets.
@@ -91,6 +93,7 @@ var endedWithoutSuccess = map[remediationv1alpha1.RemediationPhase]string{
 	remediationv1alpha1.PhaseCancelled:         ReasonRequestCancelled,
 	remediationv1alpha1.PhaseNeedsIntervention: ReasonRequestNeedsIntervention,
 	remediationv1alpha1.PhaseSuperseded:        ReasonRequestSuperseded,
+	remediationv1alpha1.PhaseInconclusive:      ReasonRequestInconclusive,
 }
 
 // lifecycleMessages are the fixed messages of the Lifecycle condition. They hold nothing from the cluster.
@@ -103,6 +106,7 @@ var lifecycleMessages = map[string]string{
 	ReasonRequestCancelled:         "The newest request naming the Incident was cancelled; a person decides",
 	ReasonRequestNeedsIntervention: "The newest request naming the Incident needs intervention; a person decides",
 	ReasonRequestSuperseded:        "The newest request naming the Incident was superseded and no newer one names it; a person decides",
+	ReasonRequestInconclusive:      "The newest request naming the Incident was merged, and its effect could not be shown; a person decides",
 	ReasonReopened:                 "The symptom came back within 24 hours of a quiet resolution before any analysis; the Incident is Open again",
 	ReasonRequestActive:            "A request naming the Incident is active; it is Proposed again until the request ends",
 }

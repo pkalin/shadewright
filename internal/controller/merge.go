@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -199,8 +200,9 @@ func setVerifiedUnknown(rr *remediationv1alpha1.RemediationRequest, reason, mess
 // supersede chain shares its branch), so the merge of the recorded one would never be recorded.
 //
 // It returns, besides the pull request, why the recorded one is gone, when it is (lookUpRecorded). Each is final;
-// the caller stops the request with the cause in its message. Any other failure is returned as it is, for a
-// retry, and never reads as gone.
+// the caller stops the request with the cause in its message. A 404 is believed only when the branch confirms it
+// (confirmGone): otherwise it is a failed read, like any other failure, returned as it is for a retry, and never
+// reads as gone. So a passing 404 on the watch of a predecessor whose handoff intent stands only requeues it.
 func findRecorded(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest) (
 	cr providers.ChangeRequest, gone string, err error) {
 	src := rr.Status.Source
@@ -209,17 +211,44 @@ func findRecorded(ctx context.Context, git providers.GitProvider, rr *remediatio
 	}
 	cr, err = lookUpRecorded(ctx, git, rr, string(src.TargetBranch))
 	if g, ok := errors.AsType[*recordedGoneError](err); ok {
+		if providers.IsNotFound(err) {
+			if err := confirmGone(ctx, git, rr); err != nil {
+				return providers.ChangeRequest{}, "", err
+			}
+		}
 		return providers.ChangeRequest{}, g.reason, nil
 	}
 	return cr, "", err
 }
 
+// errUnconfirmedNotFound means the Git host answered 404 for the recorded number, but the request's branch still
+// lists a pull request with that number: the 404 was a passing fault, and the read is retried.
+var errUnconfirmedNotFound = errors.New("the Git host answered 404 for the recorded pull request, which its branch still lists")
+
+// confirmGone checks a 404 for the recorded number against the branch: it returns nil only when the listing of
+// every pull request of the request's branch to the target branch (ListChangeRequests, in any state) has none with
+// that number. A listing that has it is errUnconfirmedNotFound, and a listing that fails is returned as it is;
+// both are failed reads, never an answer.
+func confirmGone(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest) error {
+	all, err := git.ListChangeRequests(ctx, freshness.BranchName(rr), false)
+	if err != nil {
+		return freshness.WrapProvider("list the change requests of the branch", err)
+	}
+	n := rr.Status.PullRequest.Number
+	if slices.ContainsFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == n }) {
+		return fmt.Errorf("%w: #%d", errUnconfirmedNotFound, n)
+	}
+	return nil
+}
+
 // recordedGoneError is lookUpRecorded's answer that rules the recorded pull request out. It wraps
 // errRecordedNotFound, and the provider's error when there was one, so providers.IsNotFound tells a 404 apart
-// from an answer about another pull request.
+// from an answer about another pull request. untrusted is true when the host answered with another pull request
+// than the one asked for: not an answer about the recorded one.
 type recordedGoneError struct {
-	reason string
-	cause  error
+	reason    string
+	cause     error
+	untrusted bool
 }
 
 func (e *recordedGoneError) Error() string { return e.reason }
@@ -250,12 +279,12 @@ func lookUpRecorded(ctx context.Context, git providers.GitProvider, rr *remediat
 		return providers.ChangeRequest{}, &recordedGoneError{cause: err, reason: fmt.Sprintf(
 			"the Git host has no pull request #%d of Shadewright to the target branch", pr.Number)}
 	case providers.IsUntrustedAnswer(err):
-		return providers.ChangeRequest{}, &recordedGoneError{cause: err, reason: fmt.Sprintf(
+		return providers.ChangeRequest{}, &recordedGoneError{cause: err, untrusted: true, reason: fmt.Sprintf(
 			"the Git host answered with another pull request than #%d", pr.Number)}
 	case err != nil:
 		return providers.ChangeRequest{}, err
 	case cr.Number != pr.Number:
-		return providers.ChangeRequest{}, &recordedGoneError{reason: fmt.Sprintf(
+		return providers.ChangeRequest{}, &recordedGoneError{untrusted: true, reason: fmt.Sprintf(
 			"the Git host answered with another pull request than #%d", pr.Number)}
 	case cr.HeadBranch != freshness.BranchName(rr):
 		return providers.ChangeRequest{}, &recordedGoneError{reason: fmt.Sprintf(

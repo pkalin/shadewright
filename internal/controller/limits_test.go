@@ -391,7 +391,8 @@ func TestLimitsAdmissionTakesTheLock(t *testing.T) {
 }
 
 // TestSettleLock checks the release of the lock at a stop: only a status that proves no pull request of the
-// request open releases it, and it never takes the lock.
+// request open releases it, a closed one only after the read of its branch (checkHeld), and it never takes the
+// lock.
 func TestSettleLock(t *testing.T) {
 	rr := func(phase remediationv1alpha1.RemediationPhase, holds *bool, prReason string, recorded bool) *remediationv1alpha1.RemediationRequest {
 		o := otherRequest("o", limitsTarget, phase, time.Minute)
@@ -409,8 +410,10 @@ func TestSettleLock(t *testing.T) {
 		"Merged releases":                   {rr(remediationv1alpha1.PhaseMerged, yes, ReasonPullRequestOpened, true), no},
 		"Inconclusive releases":             {rr(remediationv1alpha1.PhaseInconclusive, yes, ReasonPullRequestOpened, true), no},
 		"Superseded releases":               {rr(remediationv1alpha1.PhaseSuperseded, yes, "", false), no},
-		"closed without a merge releases":   {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestClosed, true), no},
-		"closed by Shadewright releases":    {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestClosed, true), no},
+		"merged by a person releases":       {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestMerged, true), no},
+		"closed without a merge keeps":      {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestClosed, true), yes},
+		"closed by Shadewright keeps":       {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestClosed, true), yes},
+		"Superseded after a close keeps":    {rr(remediationv1alpha1.PhaseSuperseded, yes, ReasonPullRequestClosed, true), yes},
 		"head moved keeps":                  {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestOpened, true), yes},
 		"gone keeps":                        {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestGone, true), yes},
 		"none recorded keeps for a look-up": {rr(remediationv1alpha1.PhaseExpired, yes, "", false), yes},
@@ -459,11 +462,20 @@ func TestBackfillLock(t *testing.T) {
 	}
 }
 
-// TestCheckHeldReleasesOnStatus checks that a stopped holder whose status already shows its pull request closed
-// is released without a look-up (the reconciler here has no Git provider, so a look-up would keep the lock).
+// TestCheckHeldReleasesOnStatus checks that a stopped holder whose status already shows its pull request merged
+// is released without a look-up (the reconciler here has no Git provider, so a look-up would keep the lock), and
+// that one whose status shows it closed is not: that needs the read of its branch (#688).
 func TestCheckHeldReleasesOnStatus(t *testing.T) {
-	o := holding(withPullRequest(otherRequest("o", limitsTarget, remediationv1alpha1.PhaseNeedsIntervention,
+	closed := holding(withPullRequest(otherRequest("c", limitsTarget, remediationv1alpha1.PhaseNeedsIntervention,
 		time.Minute), ReasonChangeRequestClosed), true)
+	r, _, _, _ := limitsWorld(t, 20, closed)
+	if res, err := r.checkHeld(context.Background(), closed); err != nil || res.RequeueAfter != heldRecheckInterval ||
+		!ptr.Deref(closed.Status.HoldsTarget, false) {
+		t.Fatalf("closed: checkHeld = %+v, %v, holdsTarget %v; want kept and looked at again",
+			res, err, closed.Status.HoldsTarget)
+	}
+	o := holding(withPullRequest(otherRequest("o", limitsTarget, remediationv1alpha1.PhaseNeedsIntervention,
+		time.Minute), ReasonChangeRequestMerged), true)
 	r, c, _, _ := limitsWorld(t, 20, o)
 	res, err := r.checkHeld(context.Background(), o)
 	if err != nil || res.RequeueAfter != 0 {

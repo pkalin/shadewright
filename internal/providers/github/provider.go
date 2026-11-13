@@ -46,6 +46,7 @@ const (
 	opOpenCR       = "GitHub open pull request"
 	opFindCR       = "GitHub find pull request"
 	opGetCR        = "GitHub get pull request"
+	opListCR       = "GitHub list pull requests of a branch"
 	opCloseCR      = "GitHub close pull request"
 	opCommentCR    = "GitHub comment on pull request"
 	opAutoMerge    = "GitHub auto-merge"
@@ -1000,8 +1001,8 @@ func (p *Provider) toChangeRequest(op string, pr pullJSON) (providers.ChangeRequ
 // pulls lists the pull requests of a head branch in a state ("open" or "all"), newest first, keeping only
 // those from this repository. A branch of Shadewright has one or a few; the first page of 100 is enough.
 func (p *Provider) pulls(ctx context.Context, op, branch, state string) ([]pullJSON, error) {
-	r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: "/pulls", query: url.Values{
-		"head": {p.repo.Owner + ":" + branch}, "state": {state},
+	r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: pathPulls, query: url.Values{
+		"head": {p.repo.Owner + ":" + branch}, paramState: {state},
 		"sort": {"created"}, "direction": {"desc"}, paramPerPage: {"100"},
 	}})
 	if err != nil {
@@ -1132,6 +1133,81 @@ func (p *Provider) FindChangeRequest(ctx context.Context, headBranch string) (pr
 	return providers.ChangeRequest{}, fmt.Errorf("%s: %w", opFindCR, providers.ErrNotFound)
 }
 
+// branchPullsPerPage is the page size of ListChangeRequests: MaxBranchChangeRequests fit in two pages.
+const branchPullsPerPage = 50
+
+// ListChangeRequests returns the pull requests from headBranch of this repository to the target branch, newest
+// first: the open ones when openOnly is true, all of them otherwise. It asks GitHub for that head and base and
+// pages through the answer by its Link header. Every entry must be from headBranch of this repository to the
+// target branch of this repository (with openOnly, also open): any other entry is ErrUntrustedAnswer for the
+// whole call, never skipped. More than MaxBranchChangeRequests, or a next page past them, is ErrTooLarge. A pull
+// request that moves between pages while they are read (one opened shifts the older ones down a page) is read
+// twice and kept once; one that closes during an openOnly read may be missed, which is right, since it is no
+// longer open.
+func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	if !isHeadBranch(headBranch) {
+		return nil, errors.New(opListCR + ": head branch is not a Shadewright branch")
+	}
+	state := "all"
+	if openOnly {
+		state = stateOpen
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	seen := map[int64]bool{}
+	var out []providers.ChangeRequest
+	const maxPages = providers.MaxBranchChangeRequests / branchPullsPerPage
+	for page := 1; ; page++ {
+		r, err := p.do(ctx, call{op: opListCR, method: http.MethodGet, path: pathPulls, query: url.Values{
+			"head": {p.repo.Owner + ":" + headBranch}, "base": {p.target}, paramState: {state},
+			"sort": {"created"}, "direction": {"desc"}, paramPerPage: {strconv.Itoa(branchPullsPerPage)},
+			paramPage: {strconv.Itoa(page)},
+		}})
+		if err != nil {
+			return nil, err
+		}
+		if !r.ok() {
+			return nil, statusError(opListCR, r.status)
+		}
+		var prs []pullJSON
+		if err := decode(opListCR, r, &prs); err != nil {
+			return nil, err
+		}
+		for _, pr := range prs {
+			if !p.ours(pr) || pr.Head.Ref != headBranch || (openOnly && (pr.State != stateOpen || pr.MergedAt != nil)) {
+				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", opListCR,
+					providers.ErrUntrustedAnswer)
+			}
+			if seen[pr.Number] {
+				continue
+			}
+			seen[pr.Number] = true
+			cr, err := p.toChangeRequest(opListCR, pr)
+			if err != nil {
+				return nil, err
+			}
+			if out = append(out, cr); len(out) > providers.MaxBranchChangeRequests {
+				return nil, fmt.Errorf("%s: more than %d pull requests: %w", opListCR,
+					providers.MaxBranchChangeRequests, providers.ErrTooLarge)
+			}
+		}
+		last, err := lastLinkPage(r.header.Get("Link"))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", opListCR, err)
+		}
+		if last <= page {
+			break
+		}
+		if page >= maxPages {
+			return nil, fmt.Errorf("%s: more than %d pull requests: %w", opListCR,
+				providers.MaxBranchChangeRequests, providers.ErrTooLarge)
+		}
+	}
+	slices.SortFunc(out, func(a, b providers.ChangeRequest) int { return cmp.Compare(b.Number, a.Number) })
+	return out, nil
+}
+
 // GetChangeRequest returns pull request number of this repository, in any state. ErrNotFound when GitHub has
 // none with that number (404, 410), and also when it is not from a shadewright/ branch of this repository to
 // the target branch, such as a fork's pull request: that one is never Shadewright's. An answer with another
@@ -1198,6 +1274,13 @@ func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJS
 
 // paramPerPage is the REST query parameter that sets the page size.
 const paramPerPage = "per_page"
+
+// REST query parameters and the path of the pull requests of the repository.
+const (
+	paramPage  = "page"
+	paramState = "state"
+	pathPulls  = "/pulls"
+)
 
 // Comment pages CommentChangeRequest reads for its marker: commentsPerPage comments of at most 64 KiB each fit
 // in maxJSONBody, and a pull request with more than maxCommentPages pages is not commented on (fail closed).
@@ -1342,7 +1425,7 @@ func (p *Provider) hasComment(ctx context.Context, number int64, marker string, 
 func (p *Provider) commentPage(ctx context.Context, number int64, page int) ([]markedCommentJSON, int, error) {
 	r, err := p.do(ctx, call{op: opCommentCR, method: http.MethodGet,
 		path:  "/issues/" + strconv.FormatInt(number, 10) + "/comments",
-		query: url.Values{paramPerPage: {strconv.Itoa(commentsPerPage)}, "page": {strconv.Itoa(page)}}})
+		query: url.Values{paramPerPage: {strconv.Itoa(commentsPerPage)}, paramPage: {strconv.Itoa(page)}}})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1389,7 +1472,7 @@ func lastLinkPage(link string) (int, error) {
 		if !okL || !okR || err != nil {
 			return 0, errors.New("GitHub returned a malformed Link header")
 		}
-		n, err := strconv.Atoi(u.Query().Get("page"))
+		n, err := strconv.Atoi(u.Query().Get(paramPage))
 		if err != nil || n < 1 || n > maxLinkPage {
 			return 0, errors.New("GitHub returned a malformed Link header")
 		}

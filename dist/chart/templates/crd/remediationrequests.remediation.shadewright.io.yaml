@@ -923,8 +923,9 @@ spec:
               holdsTarget:
                 description: |-
                   holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
-                  write of the allowed decision and cleared only once the request's pull request is known merged or closed,
-                  or a look-up by its branch and marker found none of its own open. While it is true no other request on the
+                  write of the allowed decision and cleared only once the request's pull request is known merged or closed and
+                  no other pull request that may deliver its change is open on its branch (condition TargetHeld says when one
+                  is), or a look-up by its branch and marker found none of its own open. While it is true no other request on the
                   same target goes through the policy check. Unset on a request not yet decided, and on one written before the
                   field existed; the executor then derives it once from the request's phase and pull request, keeping the
                   lock when in doubt.

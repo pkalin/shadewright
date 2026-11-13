@@ -31,6 +31,6 @@
 | [0027](0027-default-models-for-triage-and-escalation.md) | Default models for triage and escalation | Proposed |
 | [0028](0028-reviewer-hints-through-the-pull-request.md) | Reviewer hints through the pull request, the coordinator for other integrations, and the supersede handoff | Accepted, amended |
 | [0029](0029-azure-module-environment-and-cluster-layers.md) | An Azure module with dedicated services, environment and cluster layers, restricted by default and private on request | Proposed |
-| [0030](0030-merge-receipt-and-verification-outcomes.md) | The merge receipt and the three outcomes of verification | Accepted |
+| [0030](0030-merge-receipt-and-verification-outcomes.md) | The merge receipt and the three outcomes of verification | Accepted, amended |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

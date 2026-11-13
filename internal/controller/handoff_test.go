@@ -1039,6 +1039,26 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(get(repl).Status.PullRequest.Number).To(Equal(number))
 	})
 
+	It("only requeues the predecessor whose intent stands on a 404 its branch does not confirm (#688)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		pollOf(pred)
+		pollOf(pred)
+		git.SetFail(nil)
+		p := get(pred)
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the 404 is a failed read")
+		Expect(intent(p)).NotTo(BeNil(), "the intent still stands")
+		Expect(get(repl).Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseCancelled))
+		pollUntil(tookOver)
+		Expect(get(repl).Status.PullRequest.Number).To(Equal(number))
+	})
+
 	It("reads the recorded pull request again after a 404 before the update, and takes it over (#688)", func() {
 		replace("512Mi", ref(hint))
 		untilIntent()

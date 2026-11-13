@@ -286,6 +286,11 @@ const (
 	// when the holder changes, behind a lock held by a request that stopped); the condition is removed once the
 	// limits let the request through, or at the decision of the policy check.
 	ConditionQueued = "Queued"
+	// ConditionTargetHeld is True, with reason PullRequestOpenOnBranch, while a request that stopped keeps the
+	// lock on its target (status.holdsTarget) because its recorded pull request is closed or merged but another
+	// pull request is open on its branch and may still deliver its change; the message names that pull request.
+	// It is written when the executor finds that, not on every look, and removed when the lock is released.
+	ConditionTargetHeld = "TargetHeld"
 )
 
 // PullRequestStatus records the pull request that carries the plan.
@@ -498,8 +503,9 @@ type RemediationRequestStatus struct {
 	BreakerProbe bool `json:"breakerProbe,omitempty"`
 
 	// holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
-	// write of the allowed decision and cleared only once the request's pull request is known merged or closed,
-	// or a look-up by its branch and marker found none of its own open. While it is true no other request on the
+	// write of the allowed decision and cleared only once the request's pull request is known merged or closed and
+	// no other pull request that may deliver its change is open on its branch (condition TargetHeld says when one
+	// is), or a look-up by its branch and marker found none of its own open. While it is true no other request on the
 	// same target goes through the policy check. Unset on a request not yet decided, and on one written before the
 	// field existed; the executor then derives it once from the request's phase and pull request, keeping the
 	// lock when in doubt.

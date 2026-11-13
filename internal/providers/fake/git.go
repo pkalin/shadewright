@@ -529,6 +529,48 @@ func (g *Git) FindChangeRequest(ctx context.Context, headBranch string) (provide
 	return providers.ChangeRequest{}, fmt.Errorf("change request for %q: %w", headBranch, providers.ErrNotFound)
 }
 
+// ListChangeRequests returns the change requests from headBranch to the target branch, newest first: the open
+// ones when openOnly is true, all of them otherwise. More than providers.MaxBranchChangeRequests is ErrTooLarge.
+func (g *Git) ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) ([]providers.ChangeRequest, error) {
+	if err := g.before("ListChangeRequests"); err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []providers.ChangeRequest
+	for _, cr := range slices.Backward(g.crs) {
+		if cr.HeadBranch != headBranch || cr.BaseBranch != g.target || (openOnly && cr.State != providers.ChangeRequestOpen) {
+			continue
+		}
+		if out = append(out, *cr); len(out) > providers.MaxBranchChangeRequests {
+			return nil, fmt.Errorf("change requests for %q: %w", headBranch, providers.ErrTooLarge)
+		}
+	}
+	return out, nil
+}
+
+// Reopen opens a closed change request again, as a person can on the host. It fails with ErrConflict when the
+// change request is merged, or when another change request of its head branch is open (one open per head).
+func (g *Git) Reopen(n int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return err
+	}
+	if cr.State == providers.ChangeRequestMerged {
+		return fmt.Errorf("change request %d is merged: %w", n, providers.ErrConflict)
+	}
+	for _, o := range g.crs {
+		if o != cr && o.HeadBranch == cr.HeadBranch && o.State == providers.ChangeRequestOpen {
+			return fmt.Errorf("change request %d is open on the branch: %w", o.Number, providers.ErrConflict)
+		}
+	}
+	cr.State = providers.ChangeRequestOpen
+	cr.HeadSHA = g.branches[cr.HeadBranch]
+	return nil
+}
+
 // GetChangeRequest returns the change request with number n, ErrNotFound when there is none or when it is not
 // from a shadewright/ branch to the target branch.
 func (g *Git) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {

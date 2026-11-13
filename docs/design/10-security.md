@@ -153,7 +153,8 @@ The lock is per target object, not per file in Git. Two targets declared in one 
 The executor records the lock in `status.holdsTarget` (#294, #376). It is set in the status write of the allowed decision and cleared only when the release is proven. The release is proven by one of these:
 
 - the pull request merged (`Merged` or a later phase, or seen merged after a stop);
-- the pull request closed by Shadewright or seen closed (`Superseded`, written only after the close, or `PullRequestOpened` with reason `PullRequestClosed`, `ChangeRequestClosed` or `ChangeRequestMerged`);
+- the pull request seen merged (`PullRequestOpened` with reason `ChangeRequestMerged`);
+- the pull request closed by Shadewright or seen closed (`Superseded`, written only after the close, or `PullRequestOpened` with reason `PullRequestClosed` or `ChangeRequestClosed`), and a read of the branch that finds no other open pull request that may deliver the change (see [stopped holders](#stopped-holders));
 - a cleanup or a look-up that found none of the request's own open.
 
 Everything else keeps the lock (fail closed):
@@ -167,7 +168,7 @@ A request that waits behind a holder of the same Incident whose pull request is 
 
 ### Stopped holders
 
-A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its recorded number, or by its branch when none is recorded, and its marker (`AGENTS.md` invariant 5), and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A recorded pull request releases it only when a read by the branch finds no open pull request there either, since another one on a shared branch may carry the request's commit (#688, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 1); that read only keeps the lock and changes nothing in the status. A look-up that fails keeps the lock, and so does a 404 for the recorded number.
+A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its recorded number, or by its branch when none is recorded, and its marker (`AGENTS.md` invariant 5), and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A recorded pull request closed without a merge releases it only after a read of every open pull request of the branch (#688, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md) amendment of 2026-11-13): any open one keeps the lock, since it has the branch head and so the request's commit, unless it is the recorded pull request of another request on the same target and branch that holds the lock itself (a replacement that took it over). The status alone never releases the lock on a closed pull request, so the stop of the watch, the close of a stale plan and the close at the deadline all go through that read, in the same reconcile. While an open pull request keeps the lock, condition `TargetHeld` (reason `PullRequestOpenOnBranch`) names it. A look-up that fails keeps the lock, and so does a 404 for the recorded number.
 
 A request queued behind a stopped holder checks the limits every 10 minutes instead of every 30 seconds, and at once when the holder changes.
 

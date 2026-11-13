@@ -1287,8 +1287,9 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 		!errors.Is(err, freshness.ErrRepositoryUnusable) && !errors.Is(err, errChangeRequestNotOurs) {
 		return r.retry(ctx, rr, err)
 	}
-	if err == nil && rr.Status.HoldsTarget != nil {
-		// The cleanup closed the branch's pull request of this request, or found none of its own: none is open.
+	if err == nil && rr.Status.HoldsTarget != nil && rr.Status.PullRequest == nil {
+		// The cleanup closed the branch's pull request of this request, or found none of its own: none is open. A
+		// recorded one, closed by its number, releases the lock only through the read of the branch (checkHeld).
 		rr.Status.HoldsTarget = new(false)
 	}
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
@@ -1443,9 +1444,10 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
 // Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
 // request that holds the lock on its target (status.holdsTarget), whatever its phase; a merged one refuses the
-// close with a conflict, and one without this request's marker is left alone. A 404 on the recorded number is
-// not taken alone as the end of the pull request (closeOnDeleteOf): the finalizer stays while the branch has an
-// open pull request that may be it. While writes are paused the deletion waits, because closing is a write.
+// close with a conflict, and one without this request's marker is left alone. With a pull request recorded, every
+// open pull request of the branch that carries this request's marker is closed too, whatever its number, and a
+// 404 on the recorded number, an answer about another pull request or any failed read keeps the finalizer for a
+// retry (closeAllOwn). While writes are paused the deletion waits, because closing is a write.
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {

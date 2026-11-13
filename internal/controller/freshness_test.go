@@ -577,6 +577,33 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha), "delivery is checked against this commit")
 	})
 
+	It("records the merge of the pull request it tried to close, not a newer one of the branch (#688)", func() {
+		markCleanup(forgetPullRequest)
+		var sha string
+		var next providers.ChangeRequest
+		git.SetFail(func(op string) error {
+			if op != opClose || sha != "" {
+				return nil
+			}
+			// A person merges right before the close, and a newer pull request is opened on the same branch.
+			var err error
+			sha, err = git.Merge(cr.Number)
+			Expect(err).NotTo(HaveOccurred())
+			next, err = git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: cr.HeadBranch,
+				BaseBranch: mainBranch, Title: "opened after the merge", Body: cr.Body})
+			Expect(err).NotTo(HaveOccurred())
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.Number).NotTo(Equal(cr.Number))
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.PullRequest.Number).To(Equal(cr.Number))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
+	})
+
 	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {
 		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
 		_, err := reconcileOnce()

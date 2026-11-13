@@ -1473,12 +1473,15 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	if err != nil {
 		return freshness.WrapProvider("open the repository", err)
 	}
-	// The pull request is found by the request's branch, also when one is recorded: it may exist although the
-	// status write that records it failed (design section 6), and a recorded number is closed only when the
-	// branch's pull request is that number and carries this request's marker.
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	// Without a recorded pull request it is found by the request's branch: it may exist although the status
+	// write that records it failed (design section 6). A recorded one is read by its number, so a newer pull
+	// request on the same branch never stands in for it (ADR-0030 section 1), and it is closed only when it is
+	// from the request's branch and carries this request's marker.
+	cr, err := lookUpOwn(ctx, git, rr)
 	recorded := rr.Status.PullRequest
 	switch {
+	case errors.Is(err, errRecordedNotFound):
+		return errChangeRequestNotOurs
 	case errors.Is(err, providers.ErrNotFound) && recorded == nil:
 		return nil
 	case errors.Is(err, providers.ErrNotFound):
@@ -1505,7 +1508,23 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 		return err
 	}
 	if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
-		return freshness.WrapProvider("close the change request", err)
+		err = freshness.WrapProvider("close the change request", err)
+		if recorded == nil && providers.IsConflict(err) {
+			// Maybe merged between the look-up and the close: mergedUnrecorded reads this number again.
+			return &closeConflictError{number: cr.Number, err: err}
+		}
+		return err
 	}
 	return nil
 }
+
+// closeConflictError is closeChangeRequest's answer when the close of a pull request it found by the branch of a
+// request with none recorded was a conflict: number is the pull request it tried to close.
+type closeConflictError struct {
+	number int64
+	err    error
+}
+
+func (e *closeConflictError) Unwrap() error { return e.err }
+
+func (e *closeConflictError) Error() string { return e.err.Error() }

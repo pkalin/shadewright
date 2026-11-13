@@ -1550,6 +1550,40 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		expectClosedElsewhere(reconcileSecond())
 	})
 
+	It("frees the target of a stopped holder once its recorded pull request is closed, whatever else is on the branch (#688)", func() {
+		got := stopHeadMoved()
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		// A newer pull request on the same branch, with this request's own marker.
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: "opened after the close", Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.Number).NotTo(Equal(n))
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).To(Equal(reconcile.Result{}), "a released lock is not looked at again")
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(got.Status.PullRequest.Number).To(Equal(n))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+			To(Equal(ReasonChangeRequestClosed))
+	})
+
+	It("closes a request's pull request by its recorded number, never a newer one of the branch (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: "opened later", Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.Number).NotTo(Equal(n))
+		Expect(reconciler().closeChangeRequest(ctx, fetch())).To(Succeed(),
+			"the recorded pull request is this request's, and closing a closed one succeeds")
+		crs := git.ChangeRequests()
+		Expect(crs[n-1].State).To(Equal(providers.ChangeRequestClosed))
+		Expect(crs[next.Number-1].State).To(Equal(providers.ChangeRequestOpen), "the newer pull request is not touched")
+	})
+
 	It("frees the target once a person merges the pull request of a stopped holder", func() {
 		got := stopHeadMoved()
 		_, err := git.Merge(got.Status.PullRequest.Number)
@@ -1644,7 +1678,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	// Issue #87: the kill switch is read right before every write, not only by the freshness check at the start
 	// of the reconcile. pauseOnLookup sets spec.paused in the API server when the pull request step (or the close)
-	// looks up the change request, which it does after the freshness check passed and before any write.
+	// looks up the change request, by its branch or by its recorded number, which it does after the freshness check
+	// passed and before any write.
 	Context("when writes are paused right before a write (kill switch)", func() {
 		var (
 			armed  bool
@@ -1663,7 +1698,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			armed, writes = false, nil
 			recorder = record.NewFakeRecorder(20)
 			git.SetFail(func(op string) error {
-				if op == opFind && armed {
+				if (op == opFind || op == opGet) && armed {
 					armed = false
 					setPaused(true)
 				}

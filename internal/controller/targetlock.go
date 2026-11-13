@@ -43,19 +43,44 @@ import (
 // until its pull request is known merged or closed. While the executor moves the request on, the lock is
 // simply held. When the request stops (stop, endFreshness) the status rule prMayBeOpen decides at once whether
 // it is released; a request that stopped and still holds it is looked at again every heldRecheckInterval
-// (checkHeld): its pull request is found by its branch and marker (invariant 5), recorded when its status
-// write was lost, and the lock is released once that pull request is closed or merged, or none of the
-// request's own exists. A look-up that fails keeps the lock (fail closed). Deleting the request releases the
-// lock once its finalizer is gone.
+// (checkHeld): its pull request is found by its recorded number, or by its branch when none is recorded, and its
+// marker (invariant 5, ADR-0030 section 1), recorded when its status write was lost, and the lock is released
+// once that pull request is closed or merged, or none of the request's own exists. A look-up that fails keeps
+// the lock (fail closed). Deleting the request releases the lock once its finalizer is gone.
 
 // heldRecheckInterval is how often a stopped request that still holds the lock looks its pull request up, and
 // how often a request queued behind such a request checks the limits again (besides the wake-up when the
 // holder changes, lockWaiters).
 const heldRecheckInterval = 10 * time.Minute
 
-// errRecordedNotFound means the branch has no pull request with the recorded number and this request's
-// marker: the recorded one cannot be seen, so the lock is kept.
-var errRecordedNotFound = errors.New("the recorded pull request is not the branch's pull request with this request's marker")
+// errRecordedNotFound means the recorded pull request cannot be seen as this request's: the Git host has no
+// Shadewright pull request with the recorded number, answered with another one, or the one with that number is
+// from another branch or lacks this request's marker. The lock is kept.
+var errRecordedNotFound = errors.New("the recorded pull request is not this request's pull request with its marker")
+
+// lookUpOwn reads the request's pull request: by its recorded number when one is recorded, so a newer pull request
+// on the same branch (a supersede chain shares it) never stands in for it (ADR-0030 section 1), and by its branch
+// when none is recorded. With a number recorded, an answer about that number that rules it out (none with that
+// number, another pull request in the answer, ErrUntrustedAnswer included, or one from another branch) wraps
+// errRecordedNotFound and is final for the caller; every other failure is returned as it is, for a retry.
+func lookUpOwn(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest) (
+	providers.ChangeRequest, error) {
+	branch := freshness.BranchName(rr)
+	recorded := rr.Status.PullRequest
+	if recorded == nil {
+		return git.FindChangeRequest(ctx, branch)
+	}
+	cr, err := git.GetChangeRequest(ctx, recorded.Number)
+	switch {
+	case providers.IsNotFound(err), providers.IsUntrustedAnswer(err):
+		return providers.ChangeRequest{}, fmt.Errorf("%w: %w", errRecordedNotFound, err)
+	case err != nil:
+		return providers.ChangeRequest{}, err
+	case cr.Number != recorded.Number, cr.HeadBranch != branch:
+		return providers.ChangeRequest{}, errRecordedNotFound
+	}
+	return cr, nil
+}
 
 // shaPattern is the schema's pattern of status.pullRequest.headSHA.
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -122,12 +147,12 @@ func settleLock(rr *remediationv1alpha1.RemediationRequest) {
 	}
 }
 
-// checkHeld looks up the pull request of a request that stopped and still holds the lock, by its branch and
-// marker. It records one the status does not record yet; it releases the lock when that pull request is
-// closed or merged, or when the branch has none of the request's own (and none is recorded). An open one keeps
-// the lock and is looked at again after heldRecheckInterval. A look-up that fails for any reason (the
-// repository left the settings, writes are paused, the Git host refused or failed) keeps the lock and is
-// tried again after the same interval; only the caller's cancellation is returned as an error.
+// checkHeld looks up the pull request of a request that stopped and still holds the lock, by its recorded number
+// (its branch when none is recorded) and marker. It records one the status does not record yet; it releases the
+// lock when that pull request is closed or merged, or when the branch has none of the request's own (and none is
+// recorded). An open one keeps the lock and is looked at again after heldRecheckInterval. A look-up that fails
+// for any reason (the repository left the settings, writes are paused, the Git host refused or failed) keeps the
+// lock and is tried again after the same interval; only the caller's cancellation is returned as an error.
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !ptr.Deref(rr.Status.HoldsTarget, false) || progresses(rr) {
@@ -199,10 +224,11 @@ func recordFound(rr *remediationv1alpha1.RemediationRequest, cr providers.Change
 	return changed
 }
 
-// findOwnChangeRequest finds the request's pull request by its branch, in the repository the plan was made for
-// and nowhere else, reading only. It returns nil and no error when the branch has no pull request with this
-// request's marker and none is recorded (none of its own was opened), and errRecordedNotFound when a recorded
-// one is not the branch's pull request with the marker. Every other failure is returned as it is.
+// findOwnChangeRequest finds the request's pull request by its recorded number, or by its branch when none is
+// recorded (lookUpOwn), in the repository the plan was made for and nowhere else, reading only. It returns nil
+// and no error when the branch has no pull request with this request's marker and none is recorded (none of its
+// own was opened), and errRecordedNotFound when the recorded one is not this request's pull request with the
+// marker. Every other failure is returned as it is.
 func (r *RemediationRequestReconciler) findOwnChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	*providers.ChangeRequest, error) {
 	if r.OpenRepository == nil {
@@ -215,9 +241,11 @@ func (r *RemediationRequestReconciler) findOwnChangeRequest(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	cr, err := lookUpOwn(ctx, git, rr)
 	recorded := rr.Status.PullRequest
 	switch {
+	case errors.Is(err, errRecordedNotFound):
+		return nil, err
 	case errors.Is(err, providers.ErrNotFound) && recorded == nil:
 		return nil, nil
 	case errors.Is(err, providers.ErrNotFound):

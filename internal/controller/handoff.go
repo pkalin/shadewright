@@ -359,16 +359,15 @@ func (r *RemediationRequestReconciler) takeOver(ctx context.Context, rr, pred *r
 				"request was left as it is")
 	}
 	branch := freshness.BranchName(rr)
-	cr, err := git.FindChangeRequest(ctx, branch)
+	// The predecessor's pull request is read by its recorded number (ADR-0030 section 1): a newer pull request on
+	// the shared branch never stands in for it.
+	cr, gone, err := findRecorded(ctx, git, pred)
 	switch {
-	case errors.Is(err, providers.ErrNotFound):
-		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
-			"The pull request of the request it replaces cannot be found; nothing was taken over")
 	case err != nil:
 		return reconcile.Result{}, freshness.WrapProvider("find the change request", err)
-	case cr.Number != predPR.Number:
+	case gone != "":
 		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
-			"The branch's pull request is not the one the request it replaces recorded; nothing was taken over")
+			"The pull request of the request it replaces cannot be found ("+gone+"); nothing was taken over")
 	}
 	head, err := git.BranchHead(ctx, branch)
 	if err != nil {
@@ -564,18 +563,19 @@ func (r *RemediationRequestReconciler) expectedHandoffHead(ctx context.Context, 
 	return r.isHandoffCommit(ctx, git, repl, rr, to, head)
 }
 
-// afterUpdate reads the pull request after the branch update (ADR-0028 section 4 item 5): open, the replacement
-// records it (step 4); merged with the new commit as its head, the replacement owns the merge; merged with
-// another head, or closed, the handoff is abandoned.
+// afterUpdate reads the pull request after the branch update (ADR-0028 section 4 item 5), by the number the
+// predecessor recorded (ADR-0030 section 1): open, the replacement records it (step 4); merged with the new
+// commit as its head, the replacement owns the merge; merged with another head, or closed, the handoff is
+// abandoned.
 func (r *RemediationRequestReconciler) afterUpdate(ctx context.Context, git providers.GitProvider,
 	rr, pred *remediationv1alpha1.RemediationRequest, newHead string) (reconcile.Result, error) {
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	cr, gone, err := findRecorded(ctx, git, pred)
 	switch {
 	case err != nil:
 		return reconcile.Result{}, freshness.WrapProvider("find the change request after the update", err)
-	case cr.Number != pred.Status.PullRequest.Number:
+	case gone != "":
 		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffAborted,
-			"The branch's pull request is not the one the request it replaces recorded; nothing was taken over")
+			"The pull request of the request it replaces cannot be found ("+gone+"); nothing was taken over")
 	}
 	switch {
 	case cr.State == providers.ChangeRequestOpen,

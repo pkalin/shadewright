@@ -852,19 +852,26 @@ func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git prov
 
 // mergedUnrecorded ends a request whose stale plan's cleanup found its change request merged (closing a merged
 // one is a conflict) before any status recorded it: the merge of its own pull request is what made the plan
-// stale. It looks the pull request up again and ends the request through endMerged. A look-up that fails is
-// returned with closeErr for a retry; one that finds no merged pull request of this request returns closeErr.
+// stale. It looks the pull request up again, by the number the close tried (ADR-0030 section 1: a newer pull
+// request on the same branch never stands in for it), and ends the request through endMerged. A look-up that
+// fails is returned with closeErr for a retry; one that finds no merged pull request of this request from its
+// branch returns closeErr.
 func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	closeErr error) error {
 	git, err := r.openPlanRepository(ctx, rr)
 	if err != nil {
 		return errors.Join(closeErr, err)
 	}
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	var cr providers.ChangeRequest
+	if tried, ok := errors.AsType[*closeConflictError](closeErr); ok {
+		cr, err = git.GetChangeRequest(ctx, tried.number)
+	} else {
+		cr, err = git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	}
 	if err != nil {
 		return errors.Join(closeErr, freshness.WrapProvider("find the merged change request", err))
 	}
-	if !hasMarker(cr.Body, rr) || cr.State != providers.ChangeRequestMerged {
+	if cr.HeadBranch != freshness.BranchName(rr) || !hasMarker(cr.Body, rr) || cr.State != providers.ChangeRequestMerged {
 		return closeErr
 	}
 	return r.endMerged(ctx, git, rr, cr)

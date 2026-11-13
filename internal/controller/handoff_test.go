@@ -418,7 +418,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		// request right before the update is what finds it merged.
 		merged := false
 		git.SetFail(func(op string) error {
-			if op == opFind && !merged {
+			if op == opGet && !merged {
 				merged = true
 				_, err := git.Merge(number)
 				return err
@@ -984,7 +984,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(get(pred).Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
 	})
 
-	It("keeps a lock while another pull request of the branch may merge the replacement's commit", func() {
+	It("reads the recorded pull request after the update, not a newer one of the branch, and releases the lock once it is closed (#688)", func() {
 		replace("512Mi", ref(hint))
 		untilIntent()
 		git.SetAfter(func(op string) error {
@@ -1000,9 +1000,42 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		})
 		pollOf(repl)
 		git.SetAfter(nil)
+		r := get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		c := condition(r, remediationv1alpha1.ConditionPROpened)
+		Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonHandoffAborted))
+		Expect(c.Message).To(ContainSubstring("was closed around the handoff"), "the recorded pull request was read")
 		drive(3)
-		Expect(holdsLock(get(pred)) || holdsLock(get(repl))).To(BeTrue(),
-			"an open pull request carries the replacement's commit")
+		// ADR-0030 section 1: the lock follows the recorded pull request, whatever else is on the branch.
+		Expect(holdsLock(get(pred))).To(BeFalse(), "the recorded pull request is closed")
+		Expect(holdsLock(get(repl))).To(BeFalse())
+	})
+
+	It("reads the recorded pull request before the update, not a newer one of the branch (#688)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		done := false
+		git.SetFail(func(op string) error {
+			if (op == opGet || op == opFind) && !done {
+				done = true
+				if err := git.CloseChangeRequest(ctx, number); err != nil {
+					return err
+				}
+				_, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: branch(),
+					BaseBranch: mainBranch, Title: "newer", Body: "opened by hand"})
+				return err
+			}
+			return nil
+		})
+		pollOf(repl)
+		git.SetFail(nil)
+		Expect(done).To(BeTrue())
+		r := get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		c := condition(r, remediationv1alpha1.ConditionPROpened)
+		Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonHandoffAborted))
+		Expect(c.Message).To(ContainSubstring("was closed before the handoff"), "the recorded pull request was read")
+		Expect(head()).To(Equal(oldHead), "no update of a closed pull request")
 	})
 
 	It("lets one of two replacements racing for one hint take the pull request over", func() {
@@ -1034,7 +1067,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		untilIntent()
 		closed := false
 		git.SetFail(func(op string) error {
-			if op == opFind && !closed {
+			if op == opGet && !closed {
 				closed = true
 				return git.CloseChangeRequest(ctx, number)
 			}

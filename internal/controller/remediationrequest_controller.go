@@ -204,6 +204,11 @@ type RemediationRequestReconciler struct {
 	// unwrittenResets holds, per request in Verifying, a reset of the executor's window whose status write was lost
 	// (clearing.go), applied again by the next check. Memory only; dropped like reportCounters.
 	unwrittenResets unwrittenResets
+	// mergeReadings holds, per request after the merge, the reading of its Incident's count at the merge that
+	// this process took (incidentcount.go), the only one to which it adds a reading at the applied time. Memory
+	// only: after a restart or a change of leader no reading at the applied time is taken. Dropped like
+	// reportCounters.
+	mergeReadings mergeReadings
 	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
 	// it. Memory only, set once.
 	since reconcilingSince
@@ -424,6 +429,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 			r.forget(req.NamespacedName)
 			r.reportCounters.forget(req.NamespacedName)
 			r.unwrittenResets.forget(req.NamespacedName)
+			r.mergeReadings.forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -431,6 +437,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		r.forget(req.NamespacedName)
 		r.reportCounters.forget(req.NamespacedName)
 		r.unwrittenResets.forget(req.NamespacedName)
+		r.mergeReadings.forget(req.NamespacedName)
 		return r.finalize(ctx, rr)
 	}
 	if err := r.backfill(ctx, rr); err != nil {

@@ -515,6 +515,7 @@ func (r *RemediationRequestReconciler) succeed(ctx context.Context, rr *remediat
 	}
 	r.reportCounters.forget(client.ObjectKeyFromObject(rr))
 	r.unwrittenResets.forget(client.ObjectKeyFromObject(rr))
+	r.mergeReadings.forget(client.ObjectKeyFromObject(rr))
 	if r.Recorder != nil {
 		r.Recorder.Event(rr, corev1.EventTypeNormal, ReasonNoRecurrence, message)
 	}

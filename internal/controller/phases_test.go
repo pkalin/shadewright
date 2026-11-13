@@ -1884,16 +1884,16 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 			Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonNoRecurrence))
 		})
 
-		It("keeps each reading once set", func() {
+		It("never changes a reading, but lets a write without them through", func() {
 			w, _ := incidentWorld(3)
 			read := waiting(w)
 			w.reader.ks = kustomization(ksStatus{applied: w.merge})
 			mustReconcileAt(w, read.Add(time.Minute))
 			Expect(readings(w).AtApplied).NotTo(BeNil())
 			refusals := map[string]func(c *remediationv1alpha1.IncidentCountReadings){
-				"atMerge is set once and never changed":   func(c *remediationv1alpha1.IncidentCountReadings) { c.AtMerge.Count++ },
-				"atApplied is set once and never changed": func(c *remediationv1alpha1.IncidentCountReadings) { c.AtApplied.Count++ },
-				"atApplied requires atMerge":              func(c *remediationv1alpha1.IncidentCountReadings) { c.AtMerge = nil },
+				"atMerge is never changed once set":   func(c *remediationv1alpha1.IncidentCountReadings) { c.AtMerge.Count++ },
+				"atApplied is never changed once set": func(c *remediationv1alpha1.IncidentCountReadings) { c.AtApplied.Count++ },
+				"atApplied requires atMerge":          func(c *remediationv1alpha1.IncidentCountReadings) { c.AtMerge = nil },
 			}
 			for message, edit := range refusals {
 				changed := fetch(w)
@@ -1902,11 +1902,71 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 				Expect(err).To(HaveOccurred(), message)
 				Expect(err.Error()).To(ContainSubstring(message))
 			}
+			// An executor that predates the field (a rolled back release) drops it in its typed status write.
+			noApplied := fetch(w)
+			noApplied.Status.Verification.IncidentCount.AtApplied = nil
+			Expect(k8sClient.Status().Update(ctx, noApplied)).To(Succeed())
 			gone := fetch(w)
 			gone.Status.Verification.IncidentCount = nil
-			err := k8sClient.Status().Update(ctx, gone)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("atMerge is set once and never changed"))
+			Expect(k8sClient.Status().Update(ctx, gone)).To(Succeed())
+			Expect(readings(w)).To(BeNil())
+		})
+
+		It("takes no reading again after an older executor dropped them, and keeps NoRecurrence", func() {
+			w, _ := incidentWorld(3)
+			read := waiting(w)
+			Expect(readings(w).AtMerge).NotTo(BeNil())
+			dropped := fetch(w)
+			dropped.Status.Verification.IncidentCount = nil
+			Expect(k8sClient.Status().Update(ctx, dropped)).To(Succeed())
+			rr := toSuccess(w, read.Add(span))
+			Expect(rr.Status.Verification.IncidentCount).To(BeNil(), "a dropped reading is never taken again")
+			Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonNoRecurrence))
+		})
+
+		It("never takes the reading at the applied time again after an older executor dropped it", func() {
+			w, _ := incidentWorld(3)
+			read := waiting(w)
+			applied := read.Add(span)
+			w.reader.ks = kustomization(ksStatus{applied: w.merge})
+			mustReconcileAt(w, applied)
+			Expect(readings(w).AtApplied).NotTo(BeNil())
+			dropped := fetch(w)
+			dropped.Status.Verification.IncidentCount.AtApplied = nil
+			Expect(k8sClient.Status().Update(ctx, dropped)).To(Succeed())
+			start := applied.Add(30 * time.Second)
+			t, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
+			putReport(w, n, t, start, nil)
+			mustReconcileAt(w, t)
+			rr := fetch(w)
+			Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseSucceeded))
+			Expect(rr.Status.Verification.IncidentCount.AtMerge).NotTo(BeNil())
+			Expect(rr.Status.Verification.IncidentCount.AtApplied).To(BeNil())
+			Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonNoRecurrence))
+		})
+
+		It("takes no reading at the applied time in a process that did not take the one at the merge", func() {
+			w, _ := incidentWorld(3)
+			read := waiting(w)
+			// A restart or another leader: its clock may disagree with the one that gave atMerge's readAt.
+			w.r = w.reconciler()
+			rr := toSuccess(w, read.Add(span))
+			Expect(rr.Status.Verification.IncidentCount.AtMerge).NotTo(BeNil())
+			Expect(rr.Status.Verification.IncidentCount.AtApplied).To(BeNil())
+			Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonNoRecurrence))
+		})
+
+		It("writes Merged with the receipt and without the reading when the step's deadline is tight", func() {
+			w, _ := incidentWorld(5)
+			w.now = w.merged.Add(10 * time.Second)
+			tight, cancel := context.WithTimeout(ctx, countWriteReserve+DefaultIncidentReadTimeout-time.Second)
+			defer cancel()
+			Expect(w.r.stop(tight, fetch(w), remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "merged")).
+				To(MatchError(errStopped))
+			got := fetch(w)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+			Expect(got.Status.MergeReceipt).NotTo(BeNil())
+			Expect(readings(w)).To(BeNil(), "the optional read never takes from the write's allowance")
 		})
 	})
 })

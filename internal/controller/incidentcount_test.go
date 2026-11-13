@@ -139,3 +139,69 @@ func TestIncidentCountUnusableIsLogged(t *testing.T) {
 		})
 	}
 }
+
+// TestCountReadTimeout: the read of the Incident's count is taken only when the step's deadline leaves the
+// read's own deadline plus countWriteReserve (the API server's default request timeout), so the status write
+// keeps what it had without the read.
+func TestCountReadTimeout(t *testing.T) {
+	cases := []struct {
+		name       string
+		left       time.Duration
+		configured time.Duration
+		want       time.Duration
+		ok         bool
+	}{
+		{"no deadline", 0, 0, DefaultIncidentReadTimeout, true},
+		{"a full step", 2 * time.Minute, 0, DefaultIncidentReadTimeout, true},
+		{"a configured read", 2 * time.Minute, 2 * time.Second, 2 * time.Second, true},
+		{"half a second left", 500 * time.Millisecond, 0, 0, false},
+		{"one second short of read plus reserve", DefaultIncidentReadTimeout + countWriteReserve - time.Second, 0, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.left > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.left)
+				defer cancel()
+			}
+			got, ok := countReadTimeout(ctx, tc.configured)
+			if got != tc.want || ok != tc.ok {
+				t.Errorf("countReadTimeout = %v, %v, want %v, %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// TestMergeReadingsTook: only the reading at the merge this process took counts, for the same request: not a
+// reading another process wrote after this one's write was lost, and not one of an earlier request with the
+// same name.
+func TestMergeReadingsTook(t *testing.T) {
+	at := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	mine := &remediationv1alpha1.IncidentCountReading{UID: "incident-uid", Count: 3, ReadAt: metav1.NewTime(at)}
+	request := func(uid types.UID, m *remediationv1alpha1.IncidentCountReading) *remediationv1alpha1.RemediationRequest {
+		rr := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "rr", UID: uid}}
+		rr.Status.Verification = &remediationv1alpha1.VerificationWindow{
+			IncidentCount: &remediationv1alpha1.IncidentCountReadings{AtMerge: m}}
+		return rr
+	}
+	var k mergeReadings
+	if k.took(request("a", mine)) {
+		t.Error("took a reading this process never noted")
+	}
+	k.note(request("a", mine), mine)
+	if !k.took(request("a", mine.DeepCopy())) {
+		t.Error("did not recognise the reading this process took")
+	}
+	other := mine.DeepCopy()
+	other.ReadAt = metav1.NewTime(at.Add(30 * time.Minute))
+	if k.took(request("a", other)) {
+		t.Error("took a reading another process wrote")
+	}
+	if k.took(request("b", mine.DeepCopy())) {
+		t.Error("took the reading of an earlier request with the same name")
+	}
+	if k.took(request("a", mine.DeepCopy())) {
+		t.Error("kept the entry of an earlier request after a request with another UID was seen")
+	}
+}

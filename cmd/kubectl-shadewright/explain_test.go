@@ -320,6 +320,12 @@ func TestExplainOutcomeLines(t *testing.T) {
 			}
 		})
 	}
+	// The reason table sends ResolvedBeforeRollout to the section after the merge, like NoRecurrence's other
+	// outcomes.
+	link, listed := troubleshootingLink(remediationv1alpha1.ConditionCleared, "ResolvedBeforeRollout")
+	if want := troubleshootingURL + "#" + secAfterMerge; !listed || link != want {
+		t.Errorf("troubleshootingLink(Cleared, ResolvedBeforeRollout) = %q, %v, want %q, true", link, listed, want)
+	}
 	rr := explainRequestObj(testRR, remediationv1alpha1.PhaseAwaitingApproval, time.Hour)
 	c := explainClient(t, rr, testIncident("incident-a", "a", testSubject, "OOM"), testSettings())
 	e, err := explain(context.Background(), c, testNS, testRR)

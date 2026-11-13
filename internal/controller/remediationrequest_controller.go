@@ -201,6 +201,9 @@ type RemediationRequestReconciler struct {
 	// ends, is being deleted or is gone, not with forget, which runs on every reconcile of a request after the
 	// merge.
 	reportCounters reportCounters
+	// unwrittenResets holds, per request in Verifying, a reset of the executor's window whose status write was lost
+	// (clearing.go), applied again by the next check. Memory only; dropped like reportCounters.
+	unwrittenResets unwrittenResets
 }
 
 // forget drops what this process keeps in memory about a request: its last full recheck, its last
@@ -417,12 +420,14 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		if apierrors.IsNotFound(err) {
 			r.forget(req.NamespacedName)
 			r.reportCounters.forget(req.NamespacedName)
+			r.unwrittenResets.forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !rr.DeletionTimestamp.IsZero() {
 		r.forget(req.NamespacedName)
 		r.reportCounters.forget(req.NamespacedName)
+		r.unwrittenResets.forget(req.NamespacedName)
 		return r.finalize(ctx, rr)
 	}
 	if err := r.backfill(ctx, rr); err != nil {

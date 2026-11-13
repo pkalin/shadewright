@@ -51,7 +51,9 @@ import (
 //     ReportMismatch, incomplete coverage is PartialRollout) and the target reports exactly the desired
 //     replicas available (else NotAvailable). A good check opens the executor's own window, a bad one resets
 //     it, but only when it closes an open window or names another reason than the last reset (resetWindow);
-//     the window lives in status.verification, so a restart loses nothing of it. Before RolledOut is True
+//     the window lives in status.verification, so a restart loses nothing of it. A reset whose status write
+//     failed is kept in memory (unwrittenResets) and applied again by the next check, so the retry, which
+//     reads the window from before it, cannot end the request across that bad check. Before RolledOut is True
 //     nothing opens or resets the window.
 //   - Success (clearing.Succeeds) needs a good check, a report whose sample counter rose since a check at most
 //     one poll interval earlier by the executor's clock, taken again after the report read (the counter is
@@ -107,6 +109,49 @@ func (c *reportCounters) counter(key types.NamespacedName) *verification.Counter
 // forget drops the counter of the request with key.
 func (c *reportCounters) forget(key types.NamespacedName) {
 	c.m.Delete(key)
+}
+
+// unwrittenResets keeps, per request, the last reset of the executor's window that a check recorded and no
+// status write has stored yet. The next check applies it again to the window it reads (checkWindow), so a lost
+// write cannot drop a bad check: without it the retry would read the window from before that check, and a good
+// state then could end the request across the bad interval. It is memory only, cleared once a write of the
+// window succeeds (keepVerifying) and dropped when the request ends, is being deleted or is gone.
+type unwrittenResets struct {
+	m sync.Map
+}
+
+// note remembers the reset of w when the check left it closed. An open w changes nothing: a reset still kept was
+// applied to it (checkWindow) and stays until a write stores it.
+func (u *unwrittenResets) note(key types.NamespacedName, w verification.Window) {
+	if !w.Open() && w.LastReset != nil {
+		u.m.Store(key, *w.LastReset.DeepCopy())
+	}
+}
+
+// get returns the reset kept for the request with key.
+func (u *unwrittenResets) get(key types.NamespacedName) (remediationv1alpha1.WindowReset, bool) {
+	v, ok := u.m.Load(key)
+	if !ok {
+		return remediationv1alpha1.WindowReset{}, false
+	}
+	return v.(remediationv1alpha1.WindowReset), true
+}
+
+// forget drops the reset kept for the request with key.
+func (u *unwrittenResets) forget(key types.NamespacedName) {
+	u.m.Delete(key)
+}
+
+// checkWindow returns the executor's window a check starts from: the stored one, with a reset of an earlier
+// check whose write was lost applied again. resetWindow keeps the times from moving back, so a reset already
+// stored changes nothing, and one older than a later windowStart closes that window too, which can only delay
+// an end.
+func (r *RemediationRequestReconciler) checkWindow(rr *remediationv1alpha1.RemediationRequest) verification.Window {
+	w := executorWindow(rr)
+	if lost, ok := r.unwrittenResets.get(client.ObjectKeyFromObject(rr)); ok {
+		resetWindow(&w, lost.Reason, lost.Time.Time)
+	}
+	return w
 }
 
 // executorWindow returns the executor's own window from the request's status.
@@ -211,7 +256,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	ref := rr.Spec.TargetRef
 	stableFor := verification.StableFor(rr.Spec.Verification.StableFor, rr.Spec.Action.Type)
 	need := stableFor + r.nodeGrace()
-	w := executorWindow(rr)
+	w := r.checkWindow(rr)
 	interval := verification.PollInterval
 	if rolloutTarget(ref) == nil {
 		return r.clearScaledStep(ctx, rr, target, now, deadline, stableFor, changed, stuck)
@@ -287,6 +332,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 		}
 	}
 	changed = storeWindow(rr, w) || changed
+	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
 	if good && verification.Succeeds(verification.Success{Report: sampled, Contract: contract, Freshness: fresh,
 		Executor: w, Now: now, StableFor: stableFor, NodeGrace: r.nodeGrace()}) {
 		if namesBacklogCheck(rr) {
@@ -324,8 +370,11 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 func (r *RemediationRequestReconciler) keepVerifying(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	now, deadline time.Time, interval time.Duration, changed bool, stuck *rollout.Result) (reconcile.Result, error) {
 	if err := r.writeIf(ctx, rr, changed); err != nil {
+		// A reset of this check stays in unwrittenResets, so the retry cannot read it away.
 		return reconcile.Result{}, err
 	}
+	// The window of this check is stored now (or was already, when nothing changed).
+	r.unwrittenResets.forget(client.ObjectKeyFromObject(rr))
 	r.reportStuck(rr, stuck)
 	return reconcile.Result{RequeueAfter: max(min(interval, deadline.Sub(now)), time.Second)}, nil
 }
@@ -397,6 +446,7 @@ func (r *RemediationRequestReconciler) succeed(ctx context.Context, rr *remediat
 		return err
 	}
 	r.reportCounters.forget(client.ObjectKeyFromObject(rr))
+	r.unwrittenResets.forget(client.ObjectKeyFromObject(rr))
 	if r.Recorder != nil {
 		r.Recorder.Event(rr, corev1.EventTypeNormal, ReasonNoRecurrence, message)
 	}
@@ -430,7 +480,7 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, target client.Object, now, deadline time.Time,
 	stableFor time.Duration, changed bool, stuck *rollout.Result) (reconcile.Result, error) {
 	ref := rr.Spec.TargetRef
-	w := executorWindow(rr)
+	w := r.checkWindow(rr)
 	interval := verification.PollInterval
 	state := kedaready.Ready
 	if isScaledObject(ref) {
@@ -443,6 +493,7 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 		resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
 	}
 	changed = storeWindow(rr, w) || changed
+	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
 	revert := remediationv1alpha1.IsRevert(rr)
 	if w.Span(now) >= stableFor {
 		reason, message := ReasonClearingNotChecked, fmt.Sprintf("The %s was rolled out and configured for %s; "+
@@ -497,7 +548,7 @@ func revertAppliedMessage(kind string, stableFor time.Duration) string {
 func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, target client.Object, now, deadline time.Time,
 	stableFor time.Duration, changed bool, stuck *rollout.Result) (reconcile.Result, error) {
-	w := executorWindow(rr)
+	w := r.checkWindow(rr)
 	good := false
 	desired, available := replicasOf(target)
 	switch {
@@ -512,6 +563,7 @@ func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
 		good = true
 	}
 	changed = storeWindow(rr, w) || changed
+	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
 	if good && w.Span(now) >= stableFor {
 		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
 			remediationv1alpha1.ReasonRevertApplied, revertAppliedMessage(rr.Spec.TargetRef.Kind, stableFor))

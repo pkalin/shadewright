@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -280,9 +281,26 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Expect(condition(got).Reason).To(Equal("DecreaseNotAllowed"))
 	})
 
+	// allowDecreases lets the policy allow the revert's decrease (384Mi to 256Mi, or 128Mi), so only the link
+	// check can deny it.
+	allowDecreases := func() {
+		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxDecreasePercent = ptr.To[int32](90)
+	}
+
+	It("lets a valid revert through the link to a policy that allows its decrease", func() {
+		create(func() { liveLimit("384Mi"); allowDecreases() })
+		asRevertOf(nil)
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseDenied), "conditions %+v", got.Status.Conditions)
+		Expect(condition(got).Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	// The policy allows every one of these as a plain decrease: only the link check denies them.
 	DescribeTable("denies a revert whose link does not hold with InvalidRevert, before the policy check",
 		func(edit func(failed, revert *remediationv1alpha1.RemediationRequest), why string) {
-			create(func() { liveLimit("384Mi") })
+			create(func() { liveLimit("384Mi"); allowDecreases() })
 			failed := asRevertOf(edit)
 			if why == "does not exist" {
 				Expect(k8sClient.Delete(ctx, failed)).To(Succeed())

@@ -697,6 +697,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 		return err
 	}
 	r.reportCounters.forget(client.ObjectKeyFromObject(rr))
+	r.unwrittenResets.forget(client.ObjectKeyFromObject(rr))
 	if r.Recorder != nil {
 		r.Recorder.Event(rr, eventType, reason, message)
 	}

@@ -21,6 +21,10 @@ import (
 	"strings"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	kfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
@@ -64,6 +68,47 @@ func TestModelCannotProposeARevert(t *testing.T) {
 	}
 	if spec.ApprovalRequired == nil || !*spec.ApprovalRequired {
 		t.Error("the spec of a model plan does not require approval")
+	}
+}
+
+// TestAnalysisNeverTakesUpAnExistingRevert: a request at the name of the loop's plan that holds exactly that
+// plan is taken up as the loop's own, unless it carries spec.reverts. A revert is made only by the deterministic
+// revert proposer (ADR-0030 section 8), so the loop refuses it instead of recording it as its proposal.
+func TestAnalysisNeverTakesUpAnExistingRevert(t *testing.T) {
+	_, action, err := DecodeResult(validResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inc := fx.Incident("default", "incident-a")
+	inc.UID = "18181818-1818-4818-8818-181818181818"
+	spec := requestSpec(inc, Plan{Action: *action, PolicyRef: "mem-policy"})
+	name, err := requestName(inc, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheme := runtime.NewScheme()
+	if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		reverts *remediationv1alpha1.RequestRef
+		accept  bool
+	}{
+		{nil, true},
+		{&remediationv1alpha1.RequestRef{Name: "remediation-failed", UID: "19191919-1919-4919-8919-191919191919"}, false},
+	} {
+		existing := &remediationv1alpha1.RemediationRequest{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "shadewright-system", Name: string(name)}, Spec: *spec.DeepCopy()}
+		existing.Spec.Reverts = tc.reverts
+		k := kfake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+		c := &Controller{Client: k, Reader: k, Namespace: existing.Namespace}
+		got, err := c.createRequest(t.Context(), inc, spec)
+		switch {
+		case tc.accept && (err != nil || got != name):
+			t.Errorf("the same plan without reverts: %q, %v", got, err)
+		case !tc.accept && err == nil:
+			t.Errorf("an existing request with spec.reverts was taken up as the plan's request %q", got)
+		}
 	}
 }
 

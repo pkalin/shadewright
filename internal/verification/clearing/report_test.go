@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -274,5 +275,36 @@ func TestTimeoutVerdict(t *testing.T) {
 				t.Fatalf("AtTimeout = %s %s, want %s %s", v, reason, c.verdict, c.reason)
 			}
 		})
+	}
+}
+
+// A crash loop ends Failed at the timeout: one restart followed by samples where the pod is only not Ready
+// leaves a no-evidence reset last, but the trouble stays recorded for the window.
+func TestCrashLoopFailsAtTimeout(t *testing.T) {
+	st := samples(t, 2)
+	crashing := func(restarts int32) []corev1.Pod {
+		ps := pods(3)
+		ps[0].Status.ContainerStatuses[0].RestartCount = restarts
+		ps[0].Status.Conditions[0].Status = corev1.ConditionFalse
+		return ps
+	}
+	r := sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, crashing(1)))
+	if r.Reason != v1alpha1.ResetRestarted {
+		t.Fatalf("restart: reason %q, want Restarted", r.Reason)
+	}
+	st = r.Status
+	for i := range 8 {
+		r = sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, crashing(1)))
+		if r.Reason != v1alpha1.ResetPodNotReady {
+			t.Fatalf("sample %d after the restart: reason %q, want PodNotReady", i, r.Reason)
+		}
+		st = r.Status
+	}
+	if st.TroubleResets != 1 || st.LastTroubleReset == nil || st.LastReset.Reason != v1alpha1.ResetPodNotReady {
+		t.Fatalf("trouble %d %+v, last reset %+v; want the restart kept as trouble", st.TroubleResets, st.LastTroubleReset, st.LastReset)
+	}
+	v, reason := AtTimeout(Timeout{RolledOut: true, Report: report(st), Expected: expected()})
+	if v != VerdictFailed || reason != string(v1alpha1.ResetRestarted) {
+		t.Fatalf("AtTimeout = %s %s, want Failed Restarted", v, reason)
 	}
 }

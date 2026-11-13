@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 // Package clearing decides whether a change cleared its symptom: the stable window of ADR-0030 sections 4
-// and 7 as pure functions over typed objects. The verifier (#93c) samples the pods of a rollout with
-// [Sample] and writes the result into the request's VerificationReport; the executor (#93b) checks that
+// and 7 as pure functions over typed objects. The verifier (#682) samples the pods of a rollout with
+// [Sample] and writes the result into the request's VerificationReport; the executor (#683) checks that
 // report with [CheckReport] and a [Counter], and decides with [Succeeds], [OOMFails] and [AtTimeout].
 //
 // Nothing here reads the cluster or a clock: callers pass the objects they read and the time of their own
@@ -58,22 +58,57 @@ const (
 	DefaultNodeGrace = time.Minute
 )
 
-// Window is a verification window: the report's (status.windowStart, lastReset, resets) or the executor's own.
+// Class is the class of a reset reason (ADR-0030 section 4). It follows from the reason and is not stored.
+type Class string
+
+// The reset classes.
+const (
+	// ClassTrouble: a restart was observed. Recorded trouble ends a request Failed at the timeout.
+	ClassTrouble Class = "Trouble"
+	// ClassNoEvidence: nothing could be shown either way.
+	ClassNoEvidence Class = "NoEvidence"
+)
+
+// ClassOf returns the class of a reset reason: ClassTrouble for Restarted, ClassNoEvidence for every other.
+func ClassOf(r v1alpha1.ResetReason) Class {
+	if r == v1alpha1.ResetRestarted {
+		return ClassTrouble
+	}
+	return ClassNoEvidence
+}
+
+// Window is a verification window: windowStart, the last reset, the reset count and the trouble recorded.
 // Its times are all on the clock of its one writer. A window is open while Start is later than LastReset.Time:
 // a reset closes it, and the next good sample or check opens it again at that sample's time.
+//
+// The report's window is stored in its status ([ReportWindow]). The checks here also take the executor's own
+// window as a Window, held in memory, but its resets carry the executor's reasons (NotAvailable, StaleReport,
+// ReportMismatch), which the enum of the report's WindowReset.reason refuses: the executor keeps its own
+// reasons in request status with its own type (#683), not in this API type.
 type Window struct {
 	Start     *metav1.Time
 	LastReset *v1alpha1.WindowReset
 	Resets    int64
+	// LastTrouble is the last reset of the trouble class and TroubleResets their count. A later no-evidence
+	// reset leaves both as they are.
+	LastTrouble   *v1alpha1.WindowReset
+	TroubleResets int64
 }
 
 // ReportWindow returns the window of a report's status.
 func ReportWindow(s *v1alpha1.VerificationReportStatus) Window {
-	return Window{Start: s.WindowStart, LastReset: s.LastReset, Resets: s.Resets}
+	return Window{Start: s.WindowStart, LastReset: s.LastReset, Resets: s.Resets,
+		LastTrouble: s.LastTroubleReset, TroubleResets: s.TroubleResets}
 }
 
 func (w Window) store(s *v1alpha1.VerificationReportStatus) {
 	s.WindowStart, s.LastReset, s.Resets = w.Start, w.LastReset, w.Resets
+	s.LastTroubleReset, s.TroubleResets = w.LastTrouble, w.TroubleResets
+}
+
+// Troubled reports whether the window recorded a reset of the trouble class.
+func (w Window) Troubled() bool {
+	return w.TroubleResets > 0 || w.LastTrouble != nil
 }
 
 // Open reports whether the window has a start after its last reset.
@@ -103,9 +138,9 @@ func (w *Window) Good(now time.Time) {
 	w.Start = &start
 }
 
-// Reset records a sample or check that was not good: it closes the window and counts the reset. The time
-// recorded is never earlier than Start or the previous reset, so a clock that went back cannot leave the
-// window open.
+// Reset records a sample or check that was not good: it closes the window and counts the reset, and a reset
+// of the trouble class is also recorded as the last trouble. The time recorded is never earlier than Start or
+// the previous reset, so a clock that went back cannot leave the window open or move a reset back.
 func (w *Window) Reset(reason v1alpha1.ResetReason, now time.Time) {
 	at := seconds(now)
 	if w.Start != nil && w.Start.After(at.Time) {
@@ -114,8 +149,12 @@ func (w *Window) Reset(reason v1alpha1.ResetReason, now time.Time) {
 	if w.LastReset != nil && w.LastReset.Time.After(at.Time) {
 		at = *w.LastReset.Time.DeepCopy()
 	}
-	w.LastReset = &v1alpha1.WindowReset{Reason: reason, Class: v1alpha1.ClassOf(reason), Time: at}
+	w.LastReset = &v1alpha1.WindowReset{Reason: reason, Time: at}
 	w.Resets++
+	if ClassOf(reason) == ClassTrouble {
+		w.LastTrouble = w.LastReset.DeepCopy()
+		w.TroubleResets++
+	}
 }
 
 // seconds truncates t to the precision a metav1.Time keeps in the API, so a value read back compares as the

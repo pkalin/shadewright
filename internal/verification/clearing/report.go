@@ -245,10 +245,16 @@ type Timeout struct {
 }
 
 // AtTimeout returns the verdict at the timeout (ADR-0030 section 4): Failed when the rollout is stuck, when a
-// ScaledObject's KedaReady does not hold, or when the report's last reset is of the trouble class (Restarted);
-// otherwise Inconclusive with the last no-evidence reason. Recorded state decides, never an order of times
-// from two clocks: the executor's own last reset reason is taken first, then the report's, then
-// ClearingNotChecked for a ScaledObject, StaleReport without a report, and EvidenceMissing otherwise.
+// ScaledObject's KedaReady does not hold, or when the report recorded a reset of the trouble class
+// (Restarted) at any sample, whatever its last reset says: a crash loop shows one Restarted reset per restart
+// and PodNotReady resets in between, so the last reset alone would hide it. Otherwise Inconclusive with the
+// last no-evidence reason. Recorded state decides, never an order of times from two clocks: the executor's own
+// last reset reason is taken first, then the report's, then ClearingNotChecked for a ScaledObject,
+// StaleReport without a report, and EvidenceMissing otherwise.
+//
+// Recorded trouble counts only in a report that matches the request (spec check), but it stands even when the
+// report is no longer fresh: like the OOM record it is affirmative evidence, and troubleResets and
+// lastTroubleReset never move back (CEL), so an old report cannot have recorded less than it did.
 func AtTimeout(t Timeout) (Verdict, string) {
 	switch {
 	case !t.RolledOut:
@@ -258,10 +264,11 @@ func AtTimeout(t Timeout) (Verdict, string) {
 	}
 	var reportReset *v1alpha1.WindowReset
 	if t.Report != nil && matches(t.Report, t.Expected) {
-		reportReset = t.Report.Status.LastReset
-	}
-	if reportReset != nil && v1alpha1.ClassOf(reportReset.Reason) == v1alpha1.ResetClassTrouble {
-		return VerdictFailed, string(v1alpha1.ResetRestarted)
+		w := ReportWindow(&t.Report.Status)
+		if w.Troubled() || (w.LastReset != nil && ClassOf(w.LastReset.Reason) == ClassTrouble) {
+			return VerdictFailed, string(v1alpha1.ResetRestarted)
+		}
+		reportReset = w.LastReset
 	}
 	switch {
 	case t.Executor.LastReset != nil:

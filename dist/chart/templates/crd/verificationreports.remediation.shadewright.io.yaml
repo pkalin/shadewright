@@ -127,8 +127,9 @@ spec:
                       type: string
                     restarts:
                       description: |-
-                        restarts is the sum of the restart counts of the pod's containers when the baseline was last taken. A
-                        later sample that shows a higher sum is a Restarted reset.
+                        restarts is the sum of the restart counts of the pod's containers and native sidecars (init containers
+                        with restartPolicy Always) when the baseline was last taken. A later sample that shows a higher sum is a
+                        Restarted reset.
                       format: int64
                       minimum: 0
                       type: integer
@@ -148,14 +149,9 @@ spec:
                 minimum: 0
                 type: integer
               lastReset:
-                description: lastReset is the last reset of the window.
+                description: lastReset is the last reset of the window. Once set it
+                  is kept, and its time never moves back.
                 properties:
-                  class:
-                    description: class is the class of reason.
-                    enum:
-                    - Trouble
-                    - NoEvidence
-                    type: string
                   reason:
                     description: 'reason says why the window was reset: one of the
                       reasons the verifier sets.'
@@ -170,19 +166,44 @@ spec:
                   time:
                     description: |-
                       time is when the reset was recorded, on the clock of the writer of the window. It is never earlier than
-                      the window's start at that moment, so a window is open only while windowStart is later than it.
+                      the window's start at that moment or the previous reset, so a window is open only while windowStart is
+                      later than it.
                     format: date-time
                     type: string
                 required:
-                - class
+                - reason
+                - time
+                type: object
+              lastTroubleReset:
+                description: |-
+                  lastTroubleReset is the last reset of the trouble class. Once set it is kept, and its time never moves
+                  back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.
+                properties:
+                  reason:
+                    description: 'reason says why the window was reset: one of the
+                      reasons the verifier sets.'
+                    enum:
+                    - Restarted
+                    - PodNotReady
+                    - PartialRollout
+                    - EvidenceMissing
+                    - ScaledToZero
+                    - ObservationGap
+                    type: string
+                  time:
+                    description: |-
+                      time is when the reset was recorded, on the clock of the writer of the window. It is never earlier than
+                      the window's start at that moment or the previous reset, so a window is open only while windowStart is
+                      later than it.
+                    format: date-time
+                    type: string
+                required:
                 - reason
                 - time
                 type: object
                 x-kubernetes-validations:
-                - message: class must be Trouble for Restarted and NoEvidence for
-                    every other reason
-                  rule: 'self.class == (self.reason == ''Restarted'' ? ''Trouble''
-                    : ''NoEvidence'')'
+                - message: lastTroubleReset.reason must be Restarted
+                  rule: self.reason == 'Restarted'
               oomKill:
                 description: |-
                   oomKill is the first OOM kill of the action's container on a pod of the rollout. Once set it never
@@ -234,6 +255,13 @@ spec:
                   clock.
                 format: date-time
                 type: string
+              troubleResets:
+                description: |-
+                  troubleResets counts the resets of the trouble class (Restarted) over the life of the report. It never
+                  decreases: a later no-evidence reset does not hide that a restart was observed.
+                format: int64
+                minimum: 0
+                type: integer
               windowStart:
                 description: |-
                   windowStart is the time of the first good sample of the current window, on the verifier's clock. It
@@ -256,9 +284,18 @@ spec:
         - message: status.resets never decreases
           rule: '!has(oldSelf.status) || !has(oldSelf.status.resets) || (has(self.status)
             && has(self.status.resets) && self.status.resets >= oldSelf.status.resets)'
-        - message: status.lastReset is kept once set
+        - message: status.lastReset is kept once set and its time never moves back
           rule: '!has(oldSelf.status) || !has(oldSelf.status.lastReset) || (has(self.status)
-            && has(self.status.lastReset))'
+            && has(self.status.lastReset) && timestamp(self.status.lastReset.time)
+            >= timestamp(oldSelf.status.lastReset.time))'
+        - message: status.troubleResets never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.troubleResets) || (has(self.status)
+            && has(self.status.troubleResets) && self.status.troubleResets >= oldSelf.status.troubleResets)'
+        - message: status.lastTroubleReset is kept once set and its time never moves
+            back
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.lastTroubleReset) ||
+            (has(self.status) && has(self.status.lastTroubleReset) && timestamp(self.status.lastTroubleReset.time)
+            >= timestamp(oldSelf.status.lastTroubleReset.time))'
         - message: status.oomKill is set once and never changed
           rule: '!has(oldSelf.status) || !has(oldSelf.status.oomKill) || (has(self.status)
             && has(self.status.oomKill) && self.status.oomKill == oldSelf.status.oomKill)'

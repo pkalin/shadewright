@@ -26,14 +26,15 @@ import (
 const MaxReportBaselines = 200
 
 // ResetReason says why a verification window was reset (ADR-0030 section 4). The verifier sets Restarted,
-// PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report; the executor
-// sets NotAvailable, StaleReport, ReportMismatch and PartialRollout in its own window.
+// PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report, the only reasons
+// the enum of WindowReset.reason accepts. NotAvailable, StaleReport and ReportMismatch are the executor's
+// reasons for its own window; it keeps them in request status with its own field (#683), never in a report.
 type ResetReason string
 
 // The reset reasons.
 const (
-	// ResetRestarted: a container of a pod of the rollout restarted above its baseline, or terminated after the
-	// window started. Trouble class.
+	// ResetRestarted: a container of a pod of the rollout (a native sidecar included) restarted above its
+	// baseline, or terminated after the window started. Trouble class.
 	ResetRestarted ResetReason = "Restarted"
 	// ResetPodNotReady: a pod of the rollout is not Ready and did not restart. No evidence.
 	ResetPodNotReady ResetReason = "PodNotReady"
@@ -57,42 +58,17 @@ const (
 	ResetReportMismatch ResetReason = "ReportMismatch"
 )
 
-// ResetClass is the class of a reset reason: Trouble (a restart was observed) or NoEvidence (nothing could be
-// shown either way). At the timeout a last reset of the trouble class ends a request Failed, any other
-// Inconclusive.
-// +kubebuilder:validation:Enum=Trouble;NoEvidence
-type ResetClass string
-
-// The reset classes.
-const (
-	// ResetClassTrouble is the class of Restarted.
-	ResetClassTrouble ResetClass = "Trouble"
-	// ResetClassNoEvidence is the class of every other reason.
-	ResetClassNoEvidence ResetClass = "NoEvidence"
-)
-
-// ClassOf returns the class of a reset reason: Trouble for Restarted, NoEvidence for every other.
-func ClassOf(r ResetReason) ResetClass {
-	if r == ResetRestarted {
-		return ResetClassTrouble
-	}
-	return ResetClassNoEvidence
-}
-
-// WindowReset is the last reset of a verification window.
-// +kubebuilder:validation:XValidation:rule="self.class == (self.reason == 'Restarted' ? 'Trouble' : 'NoEvidence')",message="class must be Trouble for Restarted and NoEvidence for every other reason"
+// WindowReset is a reset of a verification window. Its class (Restarted is trouble, every other reason no
+// evidence) follows from reason and is not stored.
 type WindowReset struct {
 	// reason says why the window was reset: one of the reasons the verifier sets.
 	// +kubebuilder:validation:Enum=Restarted;PodNotReady;PartialRollout;EvidenceMissing;ScaledToZero;ObservationGap
 	// +required
 	Reason ResetReason `json:"reason"`
 
-	// class is the class of reason.
-	// +required
-	Class ResetClass `json:"class"`
-
 	// time is when the reset was recorded, on the clock of the writer of the window. It is never earlier than
-	// the window's start at that moment, so a window is open only while windowStart is later than it.
+	// the window's start at that moment or the previous reset, so a window is open only while windowStart is
+	// later than it.
 	// +required
 	Time metav1.Time `json:"time"`
 }
@@ -122,8 +98,9 @@ type PodBaseline struct {
 	// +required
 	PodUID UID `json:"podUID"`
 
-	// restarts is the sum of the restart counts of the pod's containers when the baseline was last taken. A
-	// later sample that shows a higher sum is a Restarted reset.
+	// restarts is the sum of the restart counts of the pod's containers and native sidecars (init containers
+	// with restartPolicy Always) when the baseline was last taken. A later sample that shows a higher sum is a
+	// Restarted reset.
 	// +kubebuilder:validation:Minimum=0
 	// +required
 	Restarts int64 `json:"restarts"`
@@ -200,9 +177,21 @@ type VerificationReportStatus struct {
 	// +optional
 	Resets int64 `json:"resets,omitempty"`
 
-	// lastReset is the last reset of the window.
+	// lastReset is the last reset of the window. Once set it is kept, and its time never moves back.
 	// +optional
 	LastReset *WindowReset `json:"lastReset,omitempty"`
+
+	// troubleResets counts the resets of the trouble class (Restarted) over the life of the report. It never
+	// decreases: a later no-evidence reset does not hide that a restart was observed.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TroubleResets int64 `json:"troubleResets,omitempty"`
+
+	// lastTroubleReset is the last reset of the trouble class. Once set it is kept, and its time never moves
+	// back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.
+	// +kubebuilder:validation:XValidation:rule="self.reason == 'Restarted'",message="lastTroubleReset.reason must be Restarted"
+	// +optional
+	LastTroubleReset *WindowReset `json:"lastTroubleReset,omitempty"`
 
 	// oomKill is the first OOM kill of the action's container on a pod of the rollout. Once set it never
 	// changes.
@@ -232,7 +221,9 @@ type VerificationReportStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.sample) || (has(self.status) && has(self.status.sample) && self.status.sample >= oldSelf.status.sample)",message="status.sample never decreases"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.windowStart) || (has(self.status) && has(self.status.windowStart) && timestamp(self.status.windowStart) >= timestamp(oldSelf.status.windowStart))",message="status.windowStart only moves forward"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.resets) || (has(self.status) && has(self.status.resets) && self.status.resets >= oldSelf.status.resets)",message="status.resets never decreases"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.lastReset) || (has(self.status) && has(self.status.lastReset))",message="status.lastReset is kept once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.lastReset) || (has(self.status) && has(self.status.lastReset) && timestamp(self.status.lastReset.time) >= timestamp(oldSelf.status.lastReset.time))",message="status.lastReset is kept once set and its time never moves back"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.troubleResets) || (has(self.status) && has(self.status.troubleResets) && self.status.troubleResets >= oldSelf.status.troubleResets)",message="status.troubleResets never decreases"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.lastTroubleReset) || (has(self.status) && has(self.status.lastTroubleReset) && timestamp(self.status.lastTroubleReset.time) >= timestamp(oldSelf.status.lastTroubleReset.time))",message="status.lastTroubleReset is kept once set and its time never moves back"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.oomKill) || (has(self.status) && has(self.status.oomKill) && self.status.oomKill == oldSelf.status.oomKill)",message="status.oomKill is set once and never changed"
 
 // VerificationReport is the verifier's evidence for one RemediationRequest in Verifying: whether the pods of

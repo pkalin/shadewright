@@ -56,8 +56,10 @@ func reportWithStatus() *v1alpha1.VerificationReport {
 	start, at := metav1.NewTime(reportTime), metav1.NewTime(reportTime.Add(time.Minute))
 	vr.Status = v1alpha1.VerificationReportStatus{
 		Sample: 5, SampledAt: &at, WindowStart: &start, DesiredReplicas: 1, PodsCovered: 1, Resets: 2,
-		LastReset: &v1alpha1.WindowReset{
-			Reason: v1alpha1.ResetPodNotReady, Class: v1alpha1.ResetClassNoEvidence, Time: metav1.NewTime(reportTime.Add(-time.Minute)),
+		LastReset:     &v1alpha1.WindowReset{Reason: v1alpha1.ResetPodNotReady, Time: metav1.NewTime(reportTime.Add(-time.Minute))},
+		TroubleResets: 1,
+		LastTroubleReset: &v1alpha1.WindowReset{
+			Reason: v1alpha1.ResetRestarted, Time: metav1.NewTime(reportTime.Add(-2 * time.Minute)),
 		},
 		OOMKill:   &v1alpha1.OOMKill{PodUID: reportUID(3), Container: reportContainer},
 		Baselines: []v1alpha1.PodBaseline{{PodUID: reportUID(3), Restarts: 1}},
@@ -80,6 +82,14 @@ var _ = Describe("VerificationReport", func() {
 		later := metav1.NewTime(reportTime.Add(2 * time.Minute))
 		vr.Status.Sample, vr.Status.SampledAt, vr.Status.WindowStart = 6, &later, &later
 		vr.Status.Resets = 3
+		Expect(k8sClient.Status().Update(ctx, vr)).To(Succeed())
+	})
+
+	It("accepts a reset without a class, which follows from its reason", func() {
+		vr := newReport()
+		expectAccepted(vr)
+		vr.Status.Resets = 1
+		vr.Status.LastReset = &v1alpha1.WindowReset{Reason: v1alpha1.ResetRestarted, Time: metav1.NewTime(reportTime)}
 		Expect(k8sClient.Status().Update(ctx, vr)).To(Succeed())
 	})
 
@@ -137,6 +147,15 @@ var _ = Describe("VerificationReport", func() {
 			s.OOMKill = &v1alpha1.OOMKill{PodUID: reportUID(4), Container: reportContainer}
 		}, "status.oomKill is set once and never changed"),
 		Entry("lastReset removed", func(s *v1alpha1.VerificationReportStatus) { s.LastReset = nil }, "status.lastReset is kept once set"),
+		Entry("lastReset moves back", func(s *v1alpha1.VerificationReportStatus) {
+			s.LastReset.Time = metav1.NewTime(reportTime.Add(-time.Minute - time.Second))
+		}, "status.lastReset is kept once set and its time never moves back"),
+		Entry("troubleResets decreases", func(s *v1alpha1.VerificationReportStatus) { s.TroubleResets = 0 }, "status.troubleResets never decreases"),
+		Entry("lastTroubleReset removed", func(s *v1alpha1.VerificationReportStatus) { s.LastTroubleReset = nil },
+			"status.lastTroubleReset is kept once set"),
+		Entry("lastTroubleReset moves back", func(s *v1alpha1.VerificationReportStatus) {
+			s.LastTroubleReset.Time = metav1.NewTime(reportTime.Add(-3 * time.Minute))
+		}, "status.lastTroubleReset is kept once set and its time never moves back"),
 		Entry("oomKill removed", func(s *v1alpha1.VerificationReportStatus) { s.OOMKill = nil }, "status.oomKill is set once and never changed"),
 	)
 
@@ -166,11 +185,13 @@ var _ = Describe("VerificationReport", func() {
 		}, "status.baselines[0].restarts"),
 		Entry("more than 200 pods covered", func(s *v1alpha1.VerificationReportStatus) { s.PodsCovered = 201 }, "status.podsCovered"),
 		Entry("a reset reason the verifier does not set", func(s *v1alpha1.VerificationReportStatus) {
-			s.LastReset = &v1alpha1.WindowReset{Reason: v1alpha1.ResetStaleReport, Class: v1alpha1.ResetClassNoEvidence, Time: metav1.NewTime(reportTime)}
+			s.LastReset = &v1alpha1.WindowReset{Reason: v1alpha1.ResetStaleReport, Time: metav1.NewTime(reportTime)}
 		}, "status.lastReset.reason"),
-		Entry("a reset of the wrong class", func(s *v1alpha1.VerificationReportStatus) {
-			s.LastReset = &v1alpha1.WindowReset{Reason: v1alpha1.ResetRestarted, Class: v1alpha1.ResetClassNoEvidence, Time: metav1.NewTime(reportTime)}
-		}, "class must be Trouble for Restarted"),
+		Entry("a trouble reset that is not Restarted", func(s *v1alpha1.VerificationReportStatus) {
+			s.TroubleResets = 1
+			s.LastTroubleReset = &v1alpha1.WindowReset{Reason: v1alpha1.ResetPodNotReady, Time: metav1.NewTime(reportTime)}
+		}, "lastTroubleReset.reason must be Restarted"),
+		Entry("a negative trouble count", func(s *v1alpha1.VerificationReportStatus) { s.TroubleResets = -1 }, "status.troubleResets"),
 	)
 
 	It("accepts 200 baselines", func() {

@@ -125,7 +125,9 @@ Validation rules:
 - status.sample never decreases: `!has(oldSelf.status) || !has(oldSelf.status.sample) || (has(self.status) && has(self.status.sample) && self.status.sample >= oldSelf.status.sample)`
 - status.windowStart only moves forward: `!has(oldSelf.status) || !has(oldSelf.status.windowStart) || (has(self.status) && has(self.status.windowStart) && timestamp(self.status.windowStart) >= timestamp(oldSelf.status.windowStart))`
 - status.resets never decreases: `!has(oldSelf.status) || !has(oldSelf.status.resets) || (has(self.status) && has(self.status.resets) && self.status.resets >= oldSelf.status.resets)`
-- status.lastReset is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.lastReset) || (has(self.status) && has(self.status.lastReset))`
+- status.lastReset is kept once set and its time never moves back: `!has(oldSelf.status) || !has(oldSelf.status.lastReset) || (has(self.status) && has(self.status.lastReset) && timestamp(self.status.lastReset.time) >= timestamp(oldSelf.status.lastReset.time))`
+- status.troubleResets never decreases: `!has(oldSelf.status) || !has(oldSelf.status.troubleResets) || (has(self.status) && has(self.status.troubleResets) && self.status.troubleResets >= oldSelf.status.troubleResets)`
+- status.lastTroubleReset is kept once set and its time never moves back: `!has(oldSelf.status) || !has(oldSelf.status.lastTroubleReset) || (has(self.status) && has(self.status.lastTroubleReset) && timestamp(self.status.lastTroubleReset.time) >= timestamp(oldSelf.status.lastTroubleReset.time))`
 - status.oomKill is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.oomKill) || (has(self.status) && has(self.status.oomKill) && self.status.oomKill == oldSelf.status.oomKill)`
 
 | Field | Type | Required | Description |
@@ -929,7 +931,7 @@ Used by: [VerificationReportStatus](#verificationreportstatus).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `podUID` | [UID](#uid) | Yes | podUID is the UID of the pod.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
-| `restarts` | integer | Yes | restarts is the sum of the restart counts of the pod's containers when the baseline was last taken. A later sample that shows a higher sum is a Restarted reset.<br>Minimum: 0 |
+| `restarts` | integer | Yes | restarts is the sum of the restart counts of the pod's containers and native sidecars (init containers with restartPolicy Always) when the baseline was last taken. A later sample that shows a higher sum is a Restarted reset.<br>Minimum: 0 |
 
 ### PolicyAction
 
@@ -1218,27 +1220,12 @@ Used by: [RemediationRequestSpec](#remediationrequestspec).
 | `uid` | [UID](#uid) | Yes | uid of the replaced request, so a request recreated under the same name is never taken for it.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `hint` | [HintRef](#hintref) | Yes | hint is the pinned hint of the replaced request that this plan answers. |
 
-### ResetClass
-
-ResetClass is the class of a reset reason: Trouble (a restart was observed) or NoEvidence (nothing could be
-shown either way). At the timeout a last reset of the trouble class ends a request Failed, any other
-Inconclusive.
-
-- Underlying type: string
-- One of `Trouble`, `NoEvidence`
-
-Used by: [WindowReset](#windowreset).
-
-| Value | Description |
-| --- | --- |
-| `Trouble` | ResetClassTrouble is the class of Restarted. |
-| `NoEvidence` | ResetClassNoEvidence is the class of every other reason. |
-
 ### ResetReason
 
 ResetReason says why a verification window was reset (ADR-0030 section 4). The verifier sets Restarted,
-PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report; the executor
-sets NotAvailable, StaleReport, ReportMismatch and PartialRollout in its own window.
+PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report, the only reasons
+the enum of WindowReset.reason accepts. NotAvailable, StaleReport and ReportMismatch are the executor's
+reasons for its own window; it keeps them in request status with its own field (#683), never in a report.
 
 - Underlying type: string
 
@@ -1246,7 +1233,7 @@ Used by: [WindowReset](#windowreset).
 
 | Value | Description |
 | --- | --- |
-| `Restarted` | ResetRestarted: a container of a pod of the rollout restarted above its baseline, or terminated after the window started. Trouble class. |
+| `Restarted` | ResetRestarted: a container of a pod of the rollout (a native sidecar included) restarted above its baseline, or terminated after the window started. Trouble class. |
 | `PodNotReady` | ResetPodNotReady: a pod of the rollout is not Ready and did not restart. No evidence. |
 | `PartialRollout` | ResetPartialRollout: fewer pods on the applied revision than the desired replicas, or a pod of the target on another revision; for the executor, a report that does not cover every desired replica. No evidence. |
 | `EvidenceMissing` | ResetEvidenceMissing: a pod without a status for every container, more pods than the bound, or a target that is not the one the report names. No evidence. |
@@ -1480,23 +1467,21 @@ Used by: [VerificationReport](#verificationreport).
 | `desiredReplicas` | integer | No | desiredReplicas is the target's spec.replicas at the last sample.<br>Minimum: 0 |
 | `podsCovered` | integer | No | podsCovered is the number of pods of the rollout at the last sample: pods whose ownership by the target was proven and that run the report's template revision.<br>Maximum: 200<br>Minimum: 0 |
 | `resets` | integer | No | resets counts the resets of the window. It never decreases.<br>Minimum: 0 |
-| `lastReset` | [WindowReset](#windowreset) | No | lastReset is the last reset of the window.<br>Rule: class must be Trouble for Restarted and NoEvidence for every other reason |
+| `lastReset` | [WindowReset](#windowreset) | No | lastReset is the last reset of the window. Once set it is kept, and its time never moves back. |
+| `troubleResets` | integer | No | troubleResets counts the resets of the trouble class (Restarted) over the life of the report. It never decreases: a later no-evidence reset does not hide that a restart was observed.<br>Minimum: 0 |
+| `lastTroubleReset` | [WindowReset](#windowreset) | No | lastTroubleReset is the last reset of the trouble class. Once set it is kept, and its time never moves back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.<br>Rule: lastTroubleReset.reason must be Restarted (`self.reason == 'Restarted'`) |
 | `oomKill` | [OOMKill](#oomkill) | No | oomKill is the first OOM kill of the action's container on a pod of the rollout. Once set it never changes. |
 | `baselines` | [PodBaseline](#podbaseline) array | No | baselines are the restart baselines of the pods, one per pod UID, at most 200. A baseline whose pod is gone from the pod list is pruned in the same write.<br>Maximum items: 200<br>List type: map<br>List key: `podUID` |
 
 ### WindowReset
 
-WindowReset is the last reset of a verification window.
+WindowReset is a reset of a verification window. Its class (Restarted is trouble, every other reason no
+evidence) follows from reason and is not stored.
 
-
-Validation rules:
-
-- class must be Trouble for Restarted and NoEvidence for every other reason: `self.class == (self.reason == 'Restarted' ? 'Trouble' : 'NoEvidence')`
 
 Used by: [VerificationReportStatus](#verificationreportstatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: one of the reasons the verifier sets.<br>One of `Restarted`, `PodNotReady`, `PartialRollout`, `EvidenceMissing`, `ScaledToZero`, `ObservationGap` |
-| `class` | [ResetClass](#resetclass) | Yes | class is the class of reason.<br>One of `Trouble`, `NoEvidence` |
-| `time` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | time is when the reset was recorded, on the clock of the writer of the window. It is never earlier than the window's start at that moment, so a window is open only while windowStart is later than it. |
+| `time` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | time is when the reset was recorded, on the clock of the writer of the window. It is never earlier than the window's start at that moment or the previous reset, so a window is open only while windowStart is later than it. |

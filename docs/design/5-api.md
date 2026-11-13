@@ -2,7 +2,7 @@
 
 Group `remediation.shadewright.io`, version `v1alpha1` ([ADR-0009](../adr/0009-api-group-and-docs-domain.md)). Schemas are generated from Go types by Kubebuilder.
 
-This section covers the four objects: the request (5.1), the incident (5.2), the policy (5.3) and the settings (5.4). Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (5.5). A fifth kind, `VerificationReport`, is the verifier's evidence for one request in `Verifying`: one per request in the operator namespace, owned by it, `spec` immutable, `status` forward only by CEL. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 7 defines it, and the [API reference](../reference/api.md#verificationreport) lists its fields. The type and the checks that judge it are built (#679); nothing creates or reads a report until the verifier (#93c) and the executor's wiring (#93b) are built.
+This section covers the four objects: the request (5.1), the incident (5.2), the policy (5.3) and the settings (5.4). Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (5.5). A fifth kind, `VerificationReport`, is the verifier's evidence for one request in `Verifying`: one per request in the operator namespace, owned by it, `spec` immutable, `status` forward only by CEL. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 7 defines it, and the [API reference](../reference/api.md#verificationreport) lists its fields. The type and the checks that judge it are built (#679); nothing creates or reads a report until the verifier (#682) and the executor's wiring (#683) are built.
 
 ## 5.1. RemediationRequest
 

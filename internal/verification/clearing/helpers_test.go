@@ -48,6 +48,7 @@ const (
 	otherUID      = "d0000000-0000-4000-8000-0000000000ff"
 	mergeSHA      = "0123456789abcdef0123456789abcdef01234567"
 	rsName        = "web-2"
+	reasonError   = "Error"
 	oldRSName     = "web-1"
 )
 

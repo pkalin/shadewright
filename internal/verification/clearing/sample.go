@@ -135,15 +135,39 @@ func evaluate(spec v1alpha1.VerificationReportSpec, prev, st *v1alpha1.Verificat
 		st.PodsCovered = 0
 		return v1alpha1.ResetScaledToZero, false, nil
 	}
-	if in.Truncated || len(in.Pods) > PageSize*MaxPages || replicas > MaxPods {
-		// The sample cannot cover every pod: the baselines stay as they are, none is dropped to fit.
-		st.PodsCovered = 0
-		return v1alpha1.ResetEvidenceMissing, false, nil
-	}
+	// A list longer than the pages hold, or more desired replicas than the bound, cannot be covered.
+	coverable := !in.Truncated && len(in.Pods) <= PageSize*MaxPages && replicas <= MaxPods
 
 	pods, otherRevision, err := rolloutPods(spec, in)
 	if err != nil {
 		return "", false, err
+	}
+	// An OOM kill of the action's container on a returned pod of the rollout is affirmative evidence on its
+	// own: a pod of the rollout is proven to run the applied template with the desired limit. It is recorded
+	// before any bound rejects coverage.
+	var oom *v1alpha1.OOMKill
+	for _, p := range pods {
+		if p.oom != nil {
+			oom = p.oom
+			break
+		}
+	}
+	recorded := false
+	if oom != nil && st.OOMKill == nil {
+		st.OOMKill = oom
+		recorded = true
+	}
+	// uncovered ends a sample that cannot cover every pod: the baselines stay as they are, none is dropped to
+	// fit. It is EvidenceMissing, or Restarted when an OOM kill was seen.
+	uncovered := func() (v1alpha1.ResetReason, bool, error) {
+		st.PodsCovered = 0
+		if oom != nil {
+			return v1alpha1.ResetRestarted, recorded, nil
+		}
+		return v1alpha1.ResetEvidenceMissing, false, nil
+	}
+	if !coverable {
+		return uncovered()
 	}
 	listed := make(map[types.UID]bool, len(in.Pods))
 	for i := range in.Pods {
@@ -162,8 +186,7 @@ func evaluate(spec v1alpha1.VerificationReportSpec, prev, st *v1alpha1.Verificat
 		next[p.uid] = p.restarts
 	}
 	if len(pods) > MaxPods || len(next) > MaxPods {
-		st.PodsCovered = 0
-		return v1alpha1.ResetEvidenceMissing, false, nil
+		return uncovered()
 	}
 
 	c := compare(pods, baselines, prev, now, gap)
@@ -174,13 +197,8 @@ func evaluate(spec v1alpha1.VerificationReportSpec, prev, st *v1alpha1.Verificat
 	}
 	slices.SortFunc(st.Baselines, func(a, b v1alpha1.PodBaseline) int { return strings.Compare(string(a.PodUID), string(b.PodUID)) })
 
-	recorded := false
-	if c.oom != nil && st.OOMKill == nil {
-		st.OOMKill = c.oom
-		recorded = true
-	}
 	switch {
-	case c.oom != nil || c.restarted:
+	case oom != nil || c.restarted:
 		return v1alpha1.ResetRestarted, recorded, nil
 	case c.newAfterGap:
 		return v1alpha1.ResetObservationGap, false, nil
@@ -197,8 +215,6 @@ func evaluate(spec v1alpha1.VerificationReportSpec, prev, st *v1alpha1.Verificat
 // comparison is what the pods of the rollout showed against the baselines.
 type comparison struct {
 	restarted, newAfterGap, incomplete, notReady bool
-	// oom is the first OOM kill of the action's container.
-	oom *v1alpha1.OOMKill
 }
 
 // compare checks the pods of the rollout against the stored baselines (those of pods still listed): a count
@@ -233,9 +249,6 @@ func compare(pods []podSample, baselines map[types.UID]int64, prev *v1alpha1.Ver
 		}
 		if p.restarts > base || slices.ContainsFunc(p.terminatedAt, func(t time.Time) bool { return !t.Before(since) }) {
 			c.restarted = true
-		}
-		if p.oom != nil && c.oom == nil {
-			c.oom = p.oom
 		}
 		c.incomplete = c.incomplete || !p.complete
 		c.notReady = c.notReady || !p.ready
@@ -386,7 +399,32 @@ func hasContainer(pod *corev1.Pod, name string, limit *resource.Quantity) bool {
 	return ok && got.Cmp(*limit) == 0
 }
 
-// observe keeps what a sample needs of one pod of the rollout: typed fields only, never a message.
+// watchedContainer is a container whose restarts count: one of the pod's containers, or a native sidecar (an
+// init container with restartPolicy Always), which runs beside them for the pod's life. An ordinary init
+// container runs to completion before them and does not count.
+type watchedContainer struct {
+	name string
+	// statuses is the status list the container's status is in.
+	statuses []corev1.ContainerStatus
+	// regular is true for one of the pod's containers, the only kind the action's container can be.
+	regular bool
+}
+
+func watchedContainers(pod *corev1.Pod) []watchedContainer {
+	out := make([]watchedContainer, 0, len(pod.Spec.Containers)+len(pod.Spec.InitContainers))
+	for _, c := range pod.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			out = append(out, watchedContainer{name: c.Name, statuses: pod.Status.InitContainerStatuses})
+		}
+	}
+	for _, c := range pod.Spec.Containers {
+		out = append(out, watchedContainer{name: c.Name, statuses: pod.Status.ContainerStatuses, regular: true})
+	}
+	return out
+}
+
+// observe keeps what a sample needs of one pod of the rollout: typed fields only, never a message. A watched
+// container without a status, or whose current termination has no finish time, leaves the pod incomplete.
 func observe(pod *corev1.Pod, container string) podSample {
 	p := podSample{uid: pod.UID, complete: true}
 	for _, c := range pod.Status.Conditions {
@@ -394,14 +432,18 @@ func observe(pod *corev1.Pod, container string) podSample {
 			p.ready = c.Status == corev1.ConditionTrue
 		}
 	}
-	for _, c := range pod.Spec.Containers {
-		i := slices.IndexFunc(pod.Status.ContainerStatuses, func(s corev1.ContainerStatus) bool { return s.Name == c.Name })
+	for _, c := range watchedContainers(pod) {
+		i := slices.IndexFunc(c.statuses, func(s corev1.ContainerStatus) bool { return s.Name == c.name })
 		if i < 0 {
 			p.complete = false
 			continue
 		}
-		s := pod.Status.ContainerStatuses[i]
+		s := c.statuses[i]
 		p.restarts += int64(max(s.RestartCount, 0))
+		if s.State.Terminated != nil && s.State.Terminated.FinishedAt.IsZero() {
+			// A termination without a time cannot be placed against the window.
+			p.complete = false
+		}
 		for _, term := range []*corev1.ContainerStateTerminated{s.State.Terminated, s.LastTerminationState.Terminated} {
 			if term == nil {
 				continue
@@ -409,7 +451,7 @@ func observe(pod *corev1.Pod, container string) podSample {
 			if !term.FinishedAt.IsZero() {
 				p.terminatedAt = append(p.terminatedAt, term.FinishedAt.Time)
 			}
-			if container != "" && s.Name == container && term.Reason == ReasonOOMKilled && p.oom == nil {
+			if c.regular && container != "" && s.Name == container && term.Reason == ReasonOOMKilled && p.oom == nil {
 				p.oom = &v1alpha1.OOMKill{PodUID: v1alpha1.UID(pod.UID), Container: s.Name}
 				if !term.FinishedAt.IsZero() {
 					at := metav1.NewTime(term.FinishedAt.UTC().Truncate(time.Second))

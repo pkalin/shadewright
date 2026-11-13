@@ -121,8 +121,8 @@ func TestForgedOwnerReferenceIsNotCounted(t *testing.T) {
 	t.Run("ReplicaSet whose labels the Deployment does not select", func(t *testing.T) {
 		in := input(t0, 3, pods(3))
 		rs := replicaSet(rsName, rsUID, revision)
+		// The ReplicaSet still selects the pods; only its own labels fall outside the Deployment's selector.
 		rs.Labels = map[string]string{labelApp: "other"}
-		rs.Spec.Selector.MatchLabels = rs.Labels
 		in.ReplicaSets = getter(rs)
 		if r := sample(t, spec(), v1alpha1.VerificationReportStatus{}, in); r.Status.PodsCovered != 0 {
 			t.Fatalf("covered %d, want 0", r.Status.PodsCovered)
@@ -194,8 +194,9 @@ func TestRestartDuringAGapResetsAsRestarted(t *testing.T) {
 	ps := pods(3)
 	ps[1].Status.ContainerStatuses[0].RestartCount = 1
 	r := sample(t, spec(), st, input(st.SampledAt.Add(10*time.Minute), 3, ps))
-	if r.Reason != v1alpha1.ResetRestarted || r.Status.LastReset.Class != v1alpha1.ResetClassTrouble {
-		t.Fatalf("reason %q, last reset %+v; want Restarted of the trouble class", r.Reason, r.Status.LastReset)
+	if r.Reason != v1alpha1.ResetRestarted || r.Status.TroubleResets != 1 || r.Status.LastTroubleReset == nil ||
+		!r.Status.LastTroubleReset.Time.Equal(&r.Status.LastReset.Time) {
+		t.Fatalf("reason %q, trouble %d %+v; want Restarted recorded as trouble", r.Reason, r.Status.TroubleResets, r.Status.LastTroubleReset)
 	}
 	if r.Status.Resets != 1 || ReportWindow(&r.Status).Open() {
 		t.Fatalf("resets %d, open %v; want 1 and a closed window", r.Status.Resets, ReportWindow(&r.Status).Open())
@@ -214,8 +215,8 @@ func TestNewPodAfterAGap(t *testing.T) {
 	ps := pods(4)[1:] // pod 0 deleted, pod 3 is its replacement
 	t.Run("after a gap", func(t *testing.T) {
 		r := sample(t, spec(), st, input(st.SampledAt.Add(GapAfter+time.Second), 3, ps))
-		if r.Reason != v1alpha1.ResetObservationGap || r.Status.LastReset.Class != v1alpha1.ResetClassNoEvidence {
-			t.Fatalf("reason %q, want ObservationGap of the no-evidence class", r.Reason)
+		if r.Reason != v1alpha1.ResetObservationGap || r.Status.TroubleResets != 0 || r.Status.LastTroubleReset != nil {
+			t.Fatalf("reason %q, trouble %d; want ObservationGap and no trouble recorded", r.Reason, r.Status.TroubleResets)
 		}
 	})
 	t.Run("without a gap", func(t *testing.T) {
@@ -271,7 +272,7 @@ func TestTerminationInsideTheWindowIsARestart(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ps := pods(3)
 			ps[0].Status.ContainerStatuses[1].LastTerminationState.Terminated = &corev1.ContainerStateTerminated{
-				Reason: "Error", FinishedAt: metav1.NewTime(c.finished),
+				Reason: reasonError, FinishedAt: metav1.NewTime(c.finished),
 			}
 			if r := sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, ps)); r.Reason != c.want {
 				t.Fatalf("reason %q, want %q", r.Reason, c.want)
@@ -312,7 +313,7 @@ func TestOOMKill(t *testing.T) {
 			t.Fatalf("second sample: OOMKilled %v, record %+v", again.OOMKilled, again.Status.OOMKill)
 		}
 		// An OOM record of a container other than the action's does not fail the request.
-		forged := report(r.Status)
+		forged := report(*r.Status.DeepCopy())
 		forged.Status.OOMKill.Container = sidecar
 		if OOMFails(forged, expected()) {
 			t.Fatal("an OOM record of another container failed the request")
@@ -431,5 +432,98 @@ func TestVerifierClockGoingBack(t *testing.T) {
 	}
 	if good.Status.WindowStart.Before(st.WindowStart) {
 		t.Fatal("windowStart moved back")
+	}
+}
+
+// withInit adds a native sidecar (an init container with restartPolicy Always) and an ordinary init
+// container that completed, with their statuses, to the pod.
+func withInit(p corev1.Pod, completedAt time.Time) corev1.Pod {
+	always := corev1.ContainerRestartPolicyAlways
+	p.Spec.InitContainers = []corev1.Container{{Name: "migrate"}, {Name: "mesh", RestartPolicy: &always}}
+	p.Status.InitContainerStatuses = []corev1.ContainerStatus{
+		{Name: "migrate", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "Completed", FinishedAt: metav1.NewTime(completedAt),
+		}}},
+		{Name: "mesh"},
+	}
+	return p
+}
+
+// Native sidecars count like the pod's containers: a restart, a termination inside the window or a missing
+// status resets the window. An ordinary init container that completed does not.
+func TestNativeSidecarsCount(t *testing.T) {
+	podsWithInit := func() []corev1.Pod {
+		ps := pods(3)
+		for i := range ps {
+			// Completed inside the window: an ordinary init container's termination is no restart.
+			ps[i] = withInit(ps[i], t0.Add(time.Minute))
+		}
+		return ps
+	}
+	var st v1alpha1.VerificationReportStatus
+	for i := range 4 {
+		r := sample(t, spec(), st, input(t0.Add(time.Duration(i)*PollInterval), 3, podsWithInit()))
+		if r.Reason != "" {
+			t.Fatalf("quiet sample %d: reason %q, want a good sample", i, r.Reason)
+		}
+		st = r.Status
+	}
+	cases := map[string]struct {
+		mod  func(*corev1.ContainerStatus)
+		want v1alpha1.ResetReason
+	}{
+		"a sidecar restart at the last sample": {func(s *corev1.ContainerStatus) { s.RestartCount = 1 }, v1alpha1.ResetRestarted},
+		"a sidecar termination inside the window": {func(s *corev1.ContainerStatus) {
+			s.LastTerminationState.Terminated = &corev1.ContainerStateTerminated{Reason: reasonError, FinishedAt: metav1.NewTime(t0.Add(time.Minute))}
+		}, v1alpha1.ResetRestarted},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			ps := podsWithInit()
+			c.mod(&ps[1].Status.InitContainerStatuses[1])
+			if r := sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, ps)); r.Reason != c.want {
+				t.Fatalf("reason %q, want %q", r.Reason, c.want)
+			}
+		})
+	}
+	t.Run("a sidecar without a status", func(t *testing.T) {
+		ps := podsWithInit()
+		ps[1].Status.InitContainerStatuses = ps[1].Status.InitContainerStatuses[:1]
+		if r := sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, ps)); r.Reason != v1alpha1.ResetEvidenceMissing {
+			t.Fatalf("reason %q, want EvidenceMissing", r.Reason)
+		}
+	})
+}
+
+// An OOM kill of the action's container on a returned pod of the rollout is affirmative evidence even when
+// the bound rejects coverage: the sample records it and fails the request, and no baseline is dropped.
+func TestOOMKillBeforeTheBound(t *testing.T) {
+	st := sample(t, spec(), v1alpha1.VerificationReportStatus{}, input(t0, MaxPods, pods(MaxPods))).Status
+	ps := pods(MaxPods)
+	ps[7].Status.ContainerStatuses[0].RestartCount = 1
+	ps[7].Status.ContainerStatuses[0].LastTerminationState.Terminated = &corev1.ContainerStateTerminated{
+		Reason: ReasonOOMKilled, ExitCode: 137, FinishedAt: metav1.NewTime(t0),
+	}
+	in := input(t0.Add(PollInterval), MaxPods, ps)
+	in.Truncated = true
+	r := sample(t, spec(), st, in)
+	if !r.OOMKilled || r.Status.OOMKill == nil || r.Status.OOMKill.PodUID != v1alpha1.UID(podUID(7)) {
+		t.Fatalf("reason %q, OOMKilled %v, record %+v; want the OOM kill recorded", r.Reason, r.OOMKilled, r.Status.OOMKill)
+	}
+	if r.Reason != v1alpha1.ResetRestarted || !OOMFails(report(r.Status), expected()) {
+		t.Fatalf("reason %q; want Restarted and the request failed", r.Reason)
+	}
+	if r.Status.PodsCovered != 0 || !equality.Semantic.DeepEqual(r.Status.Baselines, st.Baselines) {
+		t.Fatalf("covered %d, baselines changed; want 0 and the baselines kept", r.Status.PodsCovered)
+	}
+}
+
+// A container whose current termination has no finish time is no evidence: the sample is incomplete.
+func TestTerminationWithoutFinishTimeIsIncomplete(t *testing.T) {
+	st := samples(t, 2)
+	ps := pods(3)
+	ps[2].Status.ContainerStatuses[1].State.Terminated = &corev1.ContainerStateTerminated{Reason: reasonError, ExitCode: 1}
+	if r := sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, ps)); r.Reason != v1alpha1.ResetEvidenceMissing {
+		t.Fatalf("reason %q, want EvidenceMissing", r.Reason)
 	}
 }

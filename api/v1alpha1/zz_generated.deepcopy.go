@@ -1476,6 +1476,11 @@ func (in *VerificationReportStatus) DeepCopyInto(out *VerificationReportStatus) 
 		*out = new(WindowReset)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.LastTroubleReset != nil {
+		in, out := &in.LastTroubleReset, &out.LastTroubleReset
+		*out = new(WindowReset)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.OOMKill != nil {
 		in, out := &in.OOMKill, &out.OOMKill
 		*out = new(OOMKill)

@@ -209,6 +209,7 @@ var troubleshootingSections = map[string][]string{
 	"UnsupportedSource":                 {secFlux},
 	"ValueChanged":                      {secAfterMerge},
 	"ValueMismatch":                     {secRequest},
+	"VerificationDisabled":              {secAfterMerge},
 	"WaitingForReview":                  {secPullRequest},
 	"WithinApprovedBounds":              {secRequest},
 }

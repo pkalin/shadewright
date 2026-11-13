@@ -172,7 +172,7 @@ executor:
     # @section -- Executor
     enabled: false
   verification:
-    # -- Turns outcome verification on (ADR-0030): passes `--verify-outcomes`, so a merged request moves through `WaitingForDelivery` and `Verifying` and ends `Failed` or `Inconclusive`. Off by default until the executor reads the verifier's report (#683): before that no request can end `Succeeded`, so every merge would end `Inconclusive` or `Failed`, the circuit breaker would not close again after it trips, and every Incident would end Escalated. Off, a merged request keeps `Merged` with its rollout report (`RolledOut`).
+    # -- Turns outcome verification on (ADR-0030): passes `--verify-outcomes`, so a merged request moves through `WaitingForDelivery` and `Verifying` and ends `Failed` or `Inconclusive`. Off by default until the executor reads the verifier's report (#683): before that no request can end `Succeeded`, so every merge would end `Inconclusive` or `Failed`, the circuit breaker would not close again after it trips, and every Incident would end Escalated. Off, a merged request keeps `Merged` with its rollout report (`RolledOut`), and turning it off ends a request in `WaitingForDelivery` or `Verifying` `Inconclusive` (`VerificationDisabled`).
     # @section -- Executor
     enabled: false
     # -- How long past the stable window a verification verdict waits, so that the pods of a node that stopped reporting are marked not Ready first (ADR-0030 section 4): passes `--node-grace`. Set it to at least the cluster's node monitor grace period (`--node-monitor-grace-period` of kube-controller-manager, under a minute by default). It is part of the verification timeout, which is 21 minutes for a memory fix with the defaults. A Go duration such as `1m` or `90s`.

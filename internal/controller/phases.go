@@ -99,6 +99,9 @@ const (
 	// be read until the end of the timeout and its grace with no rollout verdict recorded, or the action's field
 	// could not be read on it (Inconclusive).
 	ReasonTargetNotChecked = "TargetNotChecked"
+	// ReasonVerificationDisabled: the executor runs without --verify-outcomes and found the request in
+	// WaitingForDelivery or Verifying, which nothing moves on with the flag off (Inconclusive at once).
+	ReasonVerificationDisabled = "VerificationDisabled"
 	// ReasonKedaNotReady: a ScaledObject target is not ready by the KedaReady rule at the timeout (Failed).
 	ReasonKedaNotReady = verification.ReasonKedaNotReady
 )

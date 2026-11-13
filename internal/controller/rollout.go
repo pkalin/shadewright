@@ -153,8 +153,11 @@ func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remed
 	switch rr.Status.Phase {
 	case remediationv1alpha1.PhaseWaitingForDelivery, remediationv1alpha1.PhaseVerifying:
 		if !r.VerifyOutcomes {
-			// Off, a request in a phase after Merged is left as it is, as before #681.
-			return reconcile.Result{}, nil
+			// Off, nothing moves such a request on, and the breaker would wait for it for ever (a probe in it
+			// still runs): it ends Inconclusive, read like any other Inconclusive end.
+			return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
+				ReasonVerificationDisabled, fmt.Sprintf("The executor runs without --verify-outcomes, so the "+
+					"outcome of a request in %s is not verified", rr.Status.Phase))
 		}
 		return r.afterReceipt(ctx, rr)
 	case remediationv1alpha1.PhaseMerged:

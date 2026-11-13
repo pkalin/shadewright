@@ -126,8 +126,10 @@ type RemediationRequestReconciler struct {
 	// receipt moves to WaitingForDelivery and Verifying and ends Failed or Inconclusive. It is off by default;
 	// cmd/main.go sets it from the executor flag --verify-outcomes (chart value executor.verification.enabled).
 	// Until the executor reads the verifier's report (#683) no request can end Succeeded, so with it on every
-	// merge would end Inconclusive or Failed and the circuit breaker would never close again. Off, a Merged request
-	// keeps the rollout report of #532, and a request already in WaitingForDelivery or Verifying is left as it is.
+	// merge would end Inconclusive or Failed and the circuit breaker would never close again. On, the breaker reads
+	// a Merged request with a merge receipt as undecided (verificationPending). Off, a Merged request keeps the
+	// rollout report of #532 and is a success for the breaker, and a request found in WaitingForDelivery or
+	// Verifying ends Inconclusive with reason VerificationDisabled.
 	VerifyOutcomes bool
 	// RolloutDeadline is how long after the merge commit is seen applied the target's rollout may take before it
 	// is reported stuck (RolledOut False, RolloutStuck). Zero means rollout.DefaultDeadline; it is bounded to

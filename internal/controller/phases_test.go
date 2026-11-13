@@ -570,10 +570,11 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
 	})
 
-	// --verify-outcomes off: the phases after the merge are exactly as before #681. A Merged request with a
-	// receipt keeps Merged with its rollout report (#532), and one already in WaitingForDelivery or Verifying is
-	// left as it is: no read, no write, no requeue.
-	It("keeps the behaviour before #681 with --verify-outcomes off", func() {
+	// --verify-outcomes off: a Merged request with a receipt keeps Merged with its rollout report (#532), as
+	// before #681. One found in WaitingForDelivery or Verifying, which nothing moves on with the flag off, ends
+	// Inconclusive with VerificationDisabled at the next reconcile, with no requeue, so no request stays in those
+	// phases (and a probe in one of them does not hold the circuit breaker half-open for ever).
+	It("keeps Merged and ends the later phases VerificationDisabled with --verify-outcomes off", func() {
 		for _, tc := range []struct {
 			phase   remediationv1alpha1.RemediationPhase
 			applied func(*phasesWorld) string
@@ -590,21 +591,21 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 				Expect(fetch(w).Status.Phase).To(Equal(tc.phase))
 			}
 			w.r.VerifyOutcomes = false
-			before := fetch(w)
-			w.now = w.merged.Add(2 * time.Minute)
-			res, err := w.r.afterMerge(ctx, before.DeepCopy())
-			Expect(err).NotTo(HaveOccurred())
-			after := fetch(w)
-			Expect(after.Status.Phase).To(Equal(tc.phase))
+			res := mustReconcileAt(w, w.merged.Add(2*time.Minute))
 			if tc.phase == remediationv1alpha1.PhaseMerged {
 				// The rollout report of #532: it waits for the delivery and never moves the phase.
+				after := fetch(w)
+				Expect(after.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 				Expect(res.RequeueAfter).To(BeNumerically(">", 0))
 				Expect(meta.FindStatusCondition(after.Status.Conditions, remediationv1alpha1.ConditionDelivered)).To(BeNil())
 				Expect(after.Status.Deadline).To(BeNil())
 				continue
 			}
 			Expect(res).To(Equal(reconcile.Result{}))
-			Expect(after.ResourceVersion).To(Equal(before.ResourceVersion))
+			after := expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonVerificationDisabled)
+			Expect(condition(after, remediationv1alpha1.ConditionVerified).Message).To(ContainSubstring("--verify-outcomes"))
+			Expect(after.Status.LastPhaseTransitionTime.Time).To(BeTemporally("==", w.merged.Add(2*time.Minute)))
+			Expect(after.Status.HoldsTarget).To(Equal(new(false)))
 		}
 	})
 

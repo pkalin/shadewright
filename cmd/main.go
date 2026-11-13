@@ -90,7 +90,8 @@ func bindExecutorFlags(fs *flag.FlagSet) *executorFlags {
 		"Move merged requests through WaitingForDelivery and Verifying to Failed or Inconclusive (ADR-0030). Off "+
 			"by default until the executor reads the verifier's report (#683): before that no request can end "+
 			"Succeeded, so every merge would end Inconclusive or Failed and the circuit breaker would not close "+
-			"again. Off, a merged request keeps Merged with its rollout report.")
+			"again. Off, a merged request keeps Merged with its rollout report, and a request in "+
+			"WaitingForDelivery or Verifying ends Inconclusive (VerificationDisabled).")
 	return f
 }
 

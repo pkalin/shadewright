@@ -17,7 +17,7 @@ export GOTOOLCHAIN=go1.27.4   # the toolchain line of go.mod
 make test                      # unit tests and envtest
 ```
 
-`make test` regenerates the manifests, formats and vets the code, downloads the pinned `setup-envtest` and a real `kube-apiserver` and `etcd` on first use (it needs network access then), and runs every package except `test/e2e` and `test/chart` with the race detector (`-race`), then `internal/redact` once more without it, for the timing tests and the 100,000 seeded keys of the key-name test, which skip under `-race`. `make fuzz` runs each Go fuzz target for 30 s (`FUZZTIME=5m` for longer); CI runs it weekly. The envtest suites start those two binaries locally, so no cluster, Docker or cloud account is involved. The CRD validation rules (CEL), the controllers and the RBAC checks all run against that API server.
+`make test` regenerates the manifests, formats and vets the code, downloads the pinned `setup-envtest` and a real `kube-apiserver` and `etcd` on first use (it needs network access then), and runs every package except `test/e2e` and `test/chart` with the race detector (`-race`), then the whole of `internal/redact` once more without it (no test selected by name, so a renamed one cannot drop out), for the timing tests and the 100,000 seeded keys of the key-name test, which skip under `-race`. `make fuzz` runs each Go fuzz target for 30 s (`FUZZTIME=5m` for longer); CI runs it weekly. The envtest suites start those two binaries locally, so no cluster, Docker or cloud account is involved. The CRD validation rules (CEL), the controllers and the RBAC checks all run against that API server.
 
 Other checks that need no cluster:
 

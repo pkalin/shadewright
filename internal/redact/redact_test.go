@@ -589,6 +589,20 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"flag list":      `"--secret", `,
 		"glued flags":    "a--token ",
 		"camel sas keys": "aSas=",
+		// Fix round of #585: flags glued to other text, multi-line, escaped and continued separators, values
+		// that open a quote, and compound key names before a blank.
+		"glued flag chains":    "=--token ",
+		"flag yaml list":       "- --token\n",
+		"flag pretty json":     "\"--token\",\n  ",
+		"flag escaped json":    `\"--token\",`,
+		"flag escaped lines":   `\"--token\",\n`,
+		"flag continuation":    "--token \\\n",
+		"flag quote values":    "--token \"",
+		"flag escaped values":  `--token \"`,
+		"flag separators only": ", \n- \\\n",
+		"compound keys":        "a_token ",
+		"compound chains":      "a_token a_token\t",
+		"secret ids":           "--secret-id x ",
 	} {
 		in := rep(unit, size/len(unit))
 		start := time.Now()
@@ -964,7 +978,8 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 			keyParts(entraSecret), []string{"-p ", " --tenant t"}},
 	})
 	// A key whose shortest windows score as words but whose whole window scores as base64.
-	if in, out := "aws configure set aws_secret_access_key "+seededKey(68276), String("aws configure set aws_secret_access_key "+seededKey(68276)); out != "aws configure set aws_secret_access_key [REDACTED:token]" {
+	// No key name before it: after "aws_secret_access_key" the compound key rule takes it whole (#585).
+	if in, out := "rotated "+seededKey(68276)+" today", String("rotated "+seededKey(68276)+" today"); out != "rotated [REDACTED:token] today" {
 		t.Errorf("String(%q) = %q, want the whole key redacted", in, out)
 	}
 	// Two keys with a path between them are redacted each on its own; the path stays.
@@ -1294,8 +1309,7 @@ func TestSeededKeysAfterAKeyNameAreRedacted(t *testing.T) {
 
 // A key name counts only before "=", ":" (with optional quotes) or, as a flag starting with "--", before
 // blanks or a comma and a value (#585). A key name inside a path, a Kubernetes resource name or a command
-// argument without that separator stays readable, and so does a flag that names a reference to a secret or
-// that a second flag follows.
+// argument without that separator stays readable, and so does a flag that names a reference to a secret.
 func TestKeyNameSignalKeepsPathsAndNames(t *testing.T) {
 	for _, in := range []string{
 		"/etc/secret/app/config",
@@ -1308,7 +1322,6 @@ func TestKeyNameSignalKeepsPathsAndNames(t *testing.T) {
 		"--secret-name foo",
 		"--token-ttl 5m",
 		"--password-file /etc/app/pw",
-		"--use-token --verbose",
 		"a--token x",
 		"sasl_mechanism PLAIN",
 		"kansas=1 KANSAS=2 Arkansas: 3",
@@ -1317,6 +1330,93 @@ func TestKeyNameSignalKeepsPathsAndNames(t *testing.T) {
 	} {
 		if out := String(in); out != in {
 			t.Errorf("changed useful text:\n in: %s\nout: %s", in, out)
+		}
+	}
+}
+
+// Forms of a secret-named flag or key name and its value that leaked before (#585 review): {k} stands for
+// the value. The value is a key the long-token rule keeps whole (knownLeakKeys), so only the key name signal
+// can catch it.
+func TestFlagAndKeyNameFormsAreRedacted(t *testing.T) {
+	k := seededKey(39781)
+	for name, in := range map[string]string{
+		// A secret-named flag is judged on its own, also when an earlier flag took it as its value.
+		"chain in an argument list": `args: ["--enable-auth", "--client-secret", "{k}"]`,
+		"chain of flags":            "run --use-token --password {k}",
+		"chain in yaml":             "args:\n- --enable-auth\n- --client-secret\n- {k}",
+		// The value after a secret-named flag goes whatever it starts with.
+		"value with two dashes": "run --password --{k}",
+		"value with one dash":   "run --client-secret -{k}",
+		// Line ends, a YAML list dash, a JSON comma, quotes and a shell continuation between flag and value.
+		"yaml list":         "args:\n- --client-secret\n- {k}\n- --region\n- x",
+		"yaml list quoted":  "args:\n  - \"--client-secret\"\n  - \"{k}\"",
+		"pretty json":       "\"args\": [\n  \"--client-secret\",\n  \"{k}\"\n]",
+		"crlf yaml list":    "args:\r\n- --client-secret\r\n- {k}\r\n",
+		"next line":         "--client-secret\n{k}",
+		"continuation":      "app --client-secret \\\n  {k} \\\n  --region x",
+		"continuation crlf": "app --client-secret \\\r\n  {k}",
+		// A flag glued to "=", ".", "/" or "_".
+		"after =": "EXTRA_ARGS=--client-secret {k}",
+		"after .": "x.--password {k}",
+		"after /": "opts/--client-secret {k}",
+		"after _": "ARGS_--password {k}",
+		// Escaped JSON (an annotation in -o json), once and twice.
+		"escaped json":       `"args":"[\"--client-secret\",\"{k}\"]"`,
+		"escaped json space": `"args":"[\"--client-secret\", \"{k}\"]"`,
+		"escaped json lines": `"args":"[\n  \"--client-secret\",\n  \"{k}\"\n]"`,
+		"escaped twice":      `"a":"{\"args\":\"[\\\"--client-secret\\\",\\\"{k}\\\"]\"}"`,
+		// A Vault AppRole secret ID is a secret, in every form.
+		"--secret-id":         "vault write auth/approle/login role_id=r --secret-id {k}",
+		"secret_id=":          "role_id=r secret_id={k}",
+		"secretId:":           "secretId: {k}",
+		"SECRET_ID=":          "VAULT_SECRET_ID={k}",
+		"secret-id in a list": `["--secret-id", "{k}"]`,
+		// A key name of two or more words joined by "_", a blank and the value.
+		"aws configure":        "aws configure set aws_secret_access_key {k}",
+		"secret_access_key":    "set secret_access_key {k}",
+		"client_secret":        "login client_secret {k}",
+		"api_key":              "set api_key {k}",
+		"access_key":           "set access_key {k}",
+		"private_key":          "set private_key {k}",
+		"connection_string":    "set connection_string {k}",
+		"upper-case compound":  "set AWS_SECRET_ACCESS_KEY\t{k}",
+		"quoted compound":      `set client_secret "{k}"`,
+		"single-dash compound": "app -client_secret {k}",
+	} {
+		in = strings.ReplaceAll(in, "{k}", k)
+		if out := String(in); strings.Contains(out, k) || strings.Contains(out, k[:12]) || strings.Contains(out, k[len(k)-12:]) {
+			t.Errorf("%s: value leaks:\n in: %q\nout: %q", name, in, out)
+		}
+	}
+}
+
+// What the flag and compound key rules keep: references to a secret, one-word key names before a blank
+// (Kubernetes commands name a Secret that way), and the text after a redacted value (#585).
+func TestFlagAndKeyNameReferencesStay(t *testing.T) {
+	for _, in := range []string{
+		"kubectl get secret foo",
+		"kubectl create token sa",
+		"docker login --password-stdin -u bob",
+		"kubectl create token sa --token-audience api",
+		"--client-id app --key-id k1",
+		"client_id app",
+		"access_key_id AKID",
+		"role_id=r",
+		"secret_names a,b",
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed useful text:\n in: %q\nout: %q", in, out)
+		}
+	}
+	// The value goes, the flag and the text after it stay; a flag after a boolean secret-named flag is
+	// taken as its value (accepted over-redaction).
+	for in, want := range map[string]string{
+		"run --password hunter2abc --region y":  "run --password [REDACTED] --region y",
+		"run --use-token --verbose":             "run --use-token ***",
+		"run --client-secret hunter2abc\n--dbg": "run --client-secret [REDACTED]\n--dbg",
+	} {
+		if out := String(in); out != want {
+			t.Errorf("%q: got %q, want %q", in, out, want)
 		}
 	}
 }

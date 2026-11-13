@@ -254,6 +254,16 @@ func ofIncident(o *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.
 	return o
 }
 
+// sidecarContainer is another container of the target than the one the test fixtures' requests change.
+const sidecarContainer = "sidecar"
+
+// otherField moves o to another container of the same target, so it changes another field than the request
+// the limits check (duplicates.go, #643).
+func otherField(o *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.RemediationRequest {
+	o.Spec.Action.SetContainerMemoryLimit.Container = sidecarContainer
+	return o
+}
+
 // TestLimitsLockHeldWhilePullRequestMayBeOpen checks #294 and #376: status.holdsTarget decides the lock, and a
 // request written before the field existed derives it from its status, keeping the lock while a recorded pull
 // request is not shown closed or merged (fail closed). A request queued behind a stopped holder checks again

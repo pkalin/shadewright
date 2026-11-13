@@ -16,6 +16,7 @@ stateDiagram-v2
     Pending --> Denied: policy refuses
     Pending --> NeedsIntervention: source unclear or ScaledObject not ready
     Pending --> Superseded: another request of the Incident was merged
+    Pending --> Superseded: the pull request it waited behind was closed without a merge
     PolicyChecked --> PRCreated: branch, commit, pull request
     PRCreated --> AwaitingApproval: review required
     AwaitingApproval --> Merged: a person merges it
@@ -48,7 +49,7 @@ stateDiagram-v2
 | `Merged` | The pull request was merged; `status.pullRequest.mergeCommitSHA` records the merge commit that delivery will be checked against (that commit or a later one of the target branch that holds it). The phase stays here today; `RolledOut` then reports whether the pods rolled out | Reads only: the Flux Kustomization and the target's rollout status (verification is planned) | Check your GitOps controller, then that the pods rolled out ([after the merge](#after-the-merge-did-it-reach-the-pods)) |
 | `Denied` | Policy or settings refuse the plan | Nothing, final | [Find the reason](how-to/find-why-refused.md), fix, apply a new request |
 | `NeedsIntervention` | The executor cannot continue safely alone: a pull request closed without a merge (`ChangeRequestClosed`), a moved head (`HeadMoved`), a render refusal, a ScaledObject that is not ready | Nothing, final | Read the reason, then apply a new request if the change is still wanted |
-| `Superseded` | A plan input changed before merge (policy, settings, target, file in Git). If a pull request was open, Shadewright closed it. Or, reason `AnotherRequestMerged`, another request of the same Incident, target and field was merged while this one waited, before it took the target lock or opened a pull request | Nothing, final | Apply a new request; for `AnotherRequestMerged`, nothing: the merged request is the fix |
+| `Superseded` | A plan input changed before merge (policy, settings, target, file in Git). If a pull request was open, Shadewright closed it. Or, reason `AnotherRequestMerged`, another request of the same Incident, target and field was merged while this one waited, before it took the target lock or opened a pull request. Or, reason `AnotherRequestClosed`, the pull request of another request for the same target and field was closed without a merge while this one waited, so it opens none for that field | Nothing, final | Apply a new request; for `AnotherRequestMerged`, nothing: the merged request is the fix; for `AnotherRequestClosed`, nothing unless the change is still wanted: a new analysis proposes again if the symptom continues |
 | `Expired` | No pull request opened within 30 minutes of the decision | Nothing, final | Find why the Git calls failed, apply a new request |
 
 The API also defines `AutoMergeQueued`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Failed` and `Cancelled`. Nothing sets them yet (planned). Auto-merge is not built: even with a policy that has `approval: Optional` and a request with `approvalRequired: false`, a person decides.

@@ -1110,8 +1110,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	// second creates another request on the same target as request, and reconciles it with a new reconciler
 	// each time, as after a restart. It is deleted after the spec.
-	second := func() (*remediationv1alpha1.RemediationRequest, func() *remediationv1alpha1.RemediationRequest) {
-		rr := fx.MemoryLimitRequest(requestNamespace, request.Name+"-second")
+	// another is a request named request.Name plus suffix for the same target and field as request.
+	another := func(suffix string) (*remediationv1alpha1.RemediationRequest, func() *remediationv1alpha1.RemediationRequest) {
+		rr := fx.MemoryLimitRequest(requestNamespace, request.Name+suffix)
 		rr.Spec.PolicyRef = request.Spec.PolicyRef
 		rr.Spec.TargetRef = request.Spec.TargetRef
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
@@ -1131,6 +1132,19 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
 			return got
 		}
+	}
+	second := func() (*remediationv1alpha1.RemediationRequest, func() *remediationv1alpha1.RemediationRequest) {
+		return another("-second")
+	}
+	// expectClosedElsewhere checks that a request that waited behind the closed pull request ended (#643), and
+	// that a request for the same field created after the lock was released goes through: the target is free.
+	expectClosedElsewhere := func(waited *remediationv1alpha1.RemediationRequest) {
+		GinkgoHelper()
+		Expect(waited.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(meta.FindStatusCondition(waited.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
+			To(Equal(remediationv1alpha1.ReasonAnotherRequestClosed))
+		_, reconcileThird := another("-third")
+		Expect(reconcileThird().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 	}
 	expectLocked := func(got *remediationv1alpha1.RemediationRequest) {
 		GinkgoHelper()
@@ -1193,7 +1207,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
 		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
 			To(Equal(ReasonChangeRequestClosed))
-		Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		expectClosedElsewhere(reconcileSecond())
 	})
 
 	It("frees the target once a person merges the pull request of a stopped holder", func() {
@@ -1239,7 +1253,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		expectLocked(reconcileSecond()) // the first request still waits for review in its status
 		Expect(reconcileOnce()).To(Succeed())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
-		Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		expectClosedElsewhere(reconcileSecond())
 	})
 
 	It("never closes a pull request without its marker, also on deletion", func() {

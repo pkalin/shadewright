@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -168,6 +169,10 @@ type limitsState struct {
 	// or deleted): the lock then lasts until a person or a look-up of checkHeld frees it, so the request
 	// waits longer between checks and is woken by lockWaiters when the holder changes.
 	stoppedLock bool
+	// holders are the requests that hold the lock on the target, those for rr's field first, then by name, at
+	// most MaxQueuedBehind, whatever
+	// reason holds the request back: what waitForLimits records in status.queuedBehind (duplicates.go, #643).
+	holders []remediationv1alpha1.RequestRef
 	// clear is what the check found the breaker no longer needs (staleOutcomes), cleared after the decision.
 	clear clearing
 	// endedDeleting are the active requests, other than the one checked, that ended and are being deleted
@@ -284,6 +289,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		return limitsState{}, err
 	}
 	locked, lockMoving := false, false
+	var holders []lockHolder
 	var lastSuccess, lastFailure time.Time
 	var failures []time.Time
 	var probes []remediationv1alpha1.RemediationRequest
@@ -307,6 +313,8 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		if e.target == rr.Spec.TargetRef.UID && e.lock && uid != predecessor {
 			locked = true
 			lockMoving = lockMoving || e.active
+			holders = append(holders, lockHolder{ref: remediationv1alpha1.RequestRef{Name: e.name, UID: remediationv1alpha1.UID(uid)},
+				same: e.sameField(ctx, rr)})
 		}
 		switch e.outcome {
 		case outcomeSuccess:
@@ -321,6 +329,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		}
 	}
 	s.active -= chainPairs(seen, rr.UID, predecessor)
+	s.holders = recordedHolders(holders)
 	// The failures in a row are those after the latest success; one at the very same time counts as a failure.
 	inRow := make([]time.Time, 0, len(failures))
 	for _, t := range failures {
@@ -382,6 +391,45 @@ type limitsEntry struct {
 	// admitted the replacement with its checked chain link (admittedPredecessor); empty for any other, so a
 	// spec.replaces nobody checked never frees a slot.
 	replaces types.UID
+	// fix is the request's spec.action and spec.targetRef, kept only for a request that holds a target lock:
+	// checkLimits records first the holders that change the waiter's field (sameField, #643).
+	fix *remediationv1alpha1.RemediationRequest
+}
+
+// sameField reports whether e holds a target lock for the field rr changes (sameField in duplicates.go).
+func (e limitsEntry) sameField(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) bool {
+	return e.fix != nil && sameField(ctx, e.fix, rr)
+}
+
+// lockHolder is a request that holds the lock on the target of the request checked, and whether it changes
+// the same field.
+type lockHolder struct {
+	ref  remediationv1alpha1.RequestRef
+	same bool
+}
+
+// recordedHolders returns the holders status.queuedBehind records, at most MaxQueuedBehind: those for the
+// checked request's field first, since only their pull request closed without a merge ends it, then by name,
+// so the cut is the same on every check (#643).
+func recordedHolders(holders []lockHolder) []remediationv1alpha1.RequestRef {
+	slices.SortFunc(holders, func(a, b lockHolder) int {
+		if a.same != b.same {
+			if a.same {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.ref.Name, b.ref.Name)
+	})
+	if len(holders) == 0 {
+		return nil
+	}
+	holders = holders[:min(len(holders), remediationv1alpha1.MaxQueuedBehind)]
+	refs := make([]remediationv1alpha1.RequestRef, 0, len(holders))
+	for _, h := range holders {
+		refs = append(refs, h.ref)
+	}
+	return refs
 }
 
 // admittedPredecessor returns the UID of the request o takes over when the executor admitted o as its
@@ -473,6 +521,10 @@ func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace
 				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero(),
 				ended: ended(o.Status.Phase)}
 			e.replaces = admittedPredecessor(o)
+			if e.lock {
+				e.fix = &remediationv1alpha1.RemediationRequest{Spec: remediationv1alpha1.RemediationRequestSpec{
+					Action: *o.Spec.Action.DeepCopy(), TargetRef: o.Spec.TargetRef}}
+			}
 			e.final = e.outcome == outcomeSuccess && o.Status.Phase == remediationv1alpha1.PhaseSucceeded
 			if o.Status.LastPhaseTransitionTime != nil {
 				e.at = o.Status.LastPhaseTransitionTime.Time
@@ -581,9 +633,11 @@ var (
 )
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
-// the reason, writes the status when that changed, and checks again after s.recheckDelay. A wait for the
-// target's state that the request was in before ends here (endWait): the policy check let it through, so a later
-// wait is a new one with its own clock, not one that already lasted the whole time the request was Queued (#556).
+// the reason and, when the target is locked, records its holders in status.queuedBehind (#643; holdBack checked
+// the recorded ones first), writes the status when that changed, and checks again after s.recheckDelay. A
+// record is kept while the target is not locked. A wait for the target's state that the request was in before
+// ends here (endWait): the policy check let it through, so a later wait is a new one with its own clock, not
+// one that already lasted the whole time the request was Queued (#556).
 func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	s limitsState) (reconcile.Result, error) {
 	reason := s.reason
@@ -594,7 +648,12 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 		Message:            queuedMessages[reason],
 		ObservedGeneration: rr.Generation,
 	})
-	if endWait(&rr.Status.Conditions) || queued {
+	recorded := false
+	if len(s.holders) > 0 && !slices.Equal(rr.Status.QueuedBehind, s.holders) {
+		rr.Status.QueuedBehind = s.holders
+		recorded = true
+	}
+	if endWait(&rr.Status.Conditions) || queued || recorded {
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 		}
@@ -703,6 +762,18 @@ func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remedia
 			return reconcile.Result{}, false, true, clearing{}, err
 		}
 		if s.reason != "" {
+			// Other holders than the recorded ones: the recorded ones are checked before the record is replaced,
+			// so a holder whose pull request was closed while another request took the lock still ends this one
+			// (duplicates.go, #643).
+			if len(s.holders) > 0 && len(rr.Status.QueuedBehind) > 0 &&
+				!slices.Equal(rr.Status.QueuedBehind, s.holders) {
+				if ended, err := r.endIfDuplicate(ctx, rr); ended || err != nil {
+					if ended {
+						r.forget(client.ObjectKeyFromObject(rr))
+					}
+					return reconcile.Result{}, false, true, clr, err
+				}
+			}
 			res, err = r.waitForLimits(ctx, rr, s)
 			return res, false, true, clr, err
 		}

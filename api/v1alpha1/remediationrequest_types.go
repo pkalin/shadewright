@@ -44,6 +44,24 @@ type IncidentRef struct {
 	UID UID `json:"uid"`
 }
 
+// RequestRef names another RemediationRequest in the same namespace.
+type RequestRef struct {
+	// name of the request.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +required
+	Name string `json:"name"`
+
+	// uid of the request, so a request recreated under the same name is never taken for it.
+	// +required
+	UID UID `json:"uid"`
+}
+
+// MaxQueuedBehind is the most requests status.queuedBehind names. The lock lets one request hold a target, two
+// during a handoff (ADR-0028); a request that finds more holders records the first ones by name.
+const MaxQueuedBehind = 4
+
 // ResolvedSource is where the controller found the target's declaration in Git (ADR-0012). It is derived from
 // the Flux objects that deliver the target and from RemediationSettings, never taken from the request.
 type ResolvedSource struct {
@@ -216,7 +234,10 @@ const (
 	// contributes the action was disabled, so the pull request is closed and a new request is needed. With
 	// reason HandedOff (ADR-0028) a replacement took over the pull request instead, which stays open. With
 	// reason AnotherRequestMerged (on PlanFresh) another request of the same Incident and target was merged
-	// while this one waited, before it took the target lock or opened a pull request.
+	// while this one waited, before it took the target lock or opened a pull request. With reason
+	// AnotherRequestClosed (on PlanFresh) this one waited behind the target lock of another request for the same
+	// target and field (status.queuedBehind) whose pull request was closed without a merge, before it took the
+	// lock or opened a pull request.
 	// Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
@@ -454,6 +475,21 @@ type RemediationRequestStatus struct {
 	// +kubebuilder:validation:MaxLength=253
 	BreakerClearedBy string `json:"breakerClearedBy,omitempty"`
 
+	// queuedBehind names the requests that held the lock on the target when the executor last held this one back
+	// (Queued, with any reason) while the target was locked, written in that status write (#643). When a later check finds other
+	// holders, the executor first reads the recorded ones from the API server and only then replaces them. Until
+	// the request is decided, it ends Superseded (PlanFresh False, reason AnotherRequestClosed) when a recorded
+	// request ended NeedsIntervention because its pull request for the same target and field was closed without a
+	// merge. A request that never waited behind that one has no record of it and is decided as usual. Only the
+	// executor writes it; once set it is never removed or emptied (a validation rule refuses that). At most four
+	// holders are recorded, those for the same field first: a request behind more holders than that may have no
+	// record of one, and is then decided as usual when that one's pull request is closed.
+	// +listType=map
+	// +listMapKey=uid
+	// +kubebuilder:validation:MaxItems=4
+	// +optional
+	QueuedBehind []RequestRef `json:"queuedBehind,omitempty"`
+
 	// effectiveApprovalRequired is what policy decided, which may be stricter than spec.approvalRequired.
 	// +optional
 	EffectiveApprovalRequired *bool `json:"effectiveApprovalRequired,omitempty"`
@@ -582,6 +618,9 @@ type RemediationRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince) || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince) || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince",message="status.rollout.pausedSince is never moved while set"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds) && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)",message="status.rollout.pausedSeconds never decreases"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)",message="status.rollout.ended never goes back to false"
+// status.queuedBehind is kept once set: its entries may be replaced, but the field is never removed or emptied,
+// so a write cannot drop the record that ends a request queued behind a pull request closed unmerged (#643).
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind) == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind) > 0)",message="status.queuedBehind is kept once set"
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

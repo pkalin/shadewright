@@ -66,6 +66,13 @@ const (
 // merged request instead of this one.
 const ReasonAnotherRequestMerged = "AnotherRequestMerged"
 
+// ReasonAnotherRequestClosed is the PlanFresh reason of a request that ended Superseded because it waited behind
+// the target lock of another request for the same target and field (of any Incident, recorded in
+// status.queuedBehind) whose pull request was then closed without a merge, before this one took the lock or
+// opened a pull request (#643). A reviewer who closed that pull request said no to the change; the Incident's
+// next analysis is the way to a new proposal.
+const ReasonAnotherRequestClosed = "AnotherRequestClosed"
+
 // HintSource is the system a hint came from. GitHub is the only one; Azure DevOps is planned.
 // +kubebuilder:validation:Enum=GitHub
 type HintSource string

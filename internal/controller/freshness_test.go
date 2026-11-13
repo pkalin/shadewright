@@ -480,6 +480,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		markCleanup(func(got *remediationv1alpha1.RemediationRequest) {
 			got.Status.PullRequest.Number = foreign.Number
+			// Seen missing from the host and the branch once before, long enough ago to be believed (#688).
+			got.Status.GoneSeen = &remediationv1alpha1.GoneSeen{At: metav1.NewTime(time.Now().Add(-confirmWait - time.Second)),
+				Number: foreign.Number}
 		})
 		// The look at the recorded pull request fails once, so the cleanup is reached with the forged number.
 		finds := 0
@@ -670,8 +673,16 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(isUnknownChange(err)).To(BeTrue(), "a 404 the branch does not confirm is a failed read")
 		Expect(errors.Is(err, errUnconfirmedNotFound)).To(BeTrue())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
-		// A 404 the branch confirms is an answer: no merged pull request of this request with that number.
+		// A 404 the branch confirms is an answer once it was seen before (#688): no merged pull request of this
+		// request with that number. The first such look only records the mark.
 		gone := &closeConflictError{number: 9999, err: fmt.Errorf("close: %w", providers.ErrConflict)}
+		err = reconciler().mergedUnrecorded(ctx, fetch(), gone)
+		Expect(errors.Is(err, errGoneUnconfirmed)).To(BeTrue(), "a first confirmed 404 waits: %v", err)
+		got := fetch()
+		Expect(got.Status.GoneSeen).NotTo(BeNil())
+		Expect(got.Status.GoneSeen.Number).To(Equal(int64(9999)))
+		got.Status.GoneSeen.At = metav1.NewTime(time.Now().Add(-confirmWait - time.Second))
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 		Expect(reconciler().mergedUnrecorded(ctx, fetch(), gone)).To(BeIdenticalTo(error(gone)))
 	})
 

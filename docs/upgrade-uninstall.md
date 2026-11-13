@@ -16,7 +16,7 @@ When a request is deleted, the executor:
 
 - closes its pull request if the request is before merge (`PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`), stopped in `NeedsIntervention` or `Expired`, or holds the lock on its target (`status.holdsTarget`) in any phase, then removes the finalizer, which also releases that lock. It also closes every other open pull request of the request's branch that carries the marker, whatever its number. A pull request is closed only if it carries the request's marker; one without it is left alone. The branch `shadewright/<request UID>` is left in place;
 - leaves a merged pull request alone (the close is refused with a conflict and the deletion goes on);
-- does not wait when the repository left the settings, the target branch changed, or the pull request is already gone (the Git host answers 404 and the listing of the branch does not show it either);
+- does not wait when the repository left the settings or the target branch changed, and waits only about two minutes when the pull request is already gone: the Git host must answer 404 and the listing of the branch must not show it either on two looks at least two minutes apart (`status.goneSeen` records the first), so deleting such a request takes at least two minutes;
 - **waits** while `spec.paused` is true, because closing is a write (see the [emergency stop](emergency.md));
 - **retries without end** on any other error, for example a 404 the listing of the branch does not confirm, an answer about another pull request, a Git host that refuses the App (`GitForbidden`) or a Key Vault key it cannot sign with. The request stays `Terminating` until the cause is gone.
 

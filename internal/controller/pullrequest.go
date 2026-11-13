@@ -1089,26 +1089,28 @@ func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remedia
 		ReasonChangeRequestClosed, "The pull request was closed without a merge; automation stopped"))
 }
 
-// conflictConfirmWait is how long, on the executor's clock, a merge conflict the Git host reports must last before
-// it ends the request. GitHub computes mergeability lazily: after the target branch moves (and moves back) it may
-// answer "dirty" for a pull request that merges cleanly, until it computes the answer again.
-const conflictConfirmWait = 2 * time.Minute
+// confirmWait is how long, on the executor's clock, an answer of the Git host that ends something must last
+// before it is believed: a merge conflict before it ends the request (GitHub computes mergeability lazily: after
+// the target branch moves, and moves back, it may answer "dirty" for a pull request that merges cleanly, until it
+// computes the answer again), and a pull request missing by its number and from the listing of its branch before
+// it is gone (status.goneSeen, #688), since both reads may come from a replica that lags.
+const confirmWait = 2 * time.Minute
 
-// conflictWaitRemaining is what is left of conflictConfirmWait since the conflict was first seen, never negative.
+// confirmWaitRemaining is what is left of confirmWait since the answer was first seen, never negative.
 // ok is false when the recorded time lies more than mergeCommitClockSlack after now: the clock went back and the
 // wait can no longer be measured, so the caller starts it again rather than end the request on it. Inside the
-// slack the wait is at most conflictConfirmWait plus the slack.
-func conflictWaitRemaining(since, now time.Time) (left time.Duration, ok bool) {
+// slack the wait is at most confirmWait plus the slack.
+func confirmWaitRemaining(since, now time.Time) (left time.Duration, ok bool) {
 	if since.After(now.Add(mergeCommitClockSlack)) {
 		return 0, false
 	}
-	return max(since.Add(conflictConfirmWait).Sub(now), 0), true
+	return max(since.Add(confirmWait).Sub(now), 0), true
 }
 
 // conflicted handles a fresh plan whose open pull request the Git host reports with a merge conflict (#680). A
 // first report is recorded in status.pullRequest.conflictSeen, with the time on the executor's clock, the
 // recorded head and the target branch head the freshness check read, and the request waits. It ends only on a
-// conflicted read at least conflictConfirmWait later on the same recorded head; a clock that went back records
+// conflicted read at least confirmWait later on the same recorded head; a clock that went back records
 // the report anew. The target branch head is recorded as what the first report was about and decides nothing:
 // a branch that moves more often than the wait would otherwise start the wait again without end. A failed status write is returned for a retry and decides
 // nothing.
@@ -1120,7 +1122,7 @@ func (r *RemediationRequestReconciler) conflicted(ctx context.Context, rr *remed
 	fresh freshness.Result) (reconcile.Result, error) {
 	pr := rr.Status.PullRequest
 	if seen := pr.ConflictSeen; seen != nil && seen.HeadSHA == pr.HeadSHA {
-		left, ok := conflictWaitRemaining(seen.At.Time, r.now())
+		left, ok := confirmWaitRemaining(seen.At.Time, r.now())
 		if ok && left == 0 {
 			return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 				ReasonChangeRequestConflict, "The Git host reports that the pull request conflicts with the target "+
@@ -1139,8 +1141,8 @@ func (r *RemediationRequestReconciler) conflicted(ctx context.Context, rr *remed
 			rr.Namespace, rr.Name, err)
 	}
 	logf.FromContext(ctx).Info("The Git host reports a merge conflict; waiting to see it again",
-		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "wait", conflictConfirmWait)
-	return reconcile.Result{RequeueAfter: max(min(conflictConfirmWait, r.pullRequestPollInterval()), stepDelay)}, nil
+		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "wait", confirmWait)
+	return reconcile.Result{RequeueAfter: max(min(confirmWait, r.pullRequestPollInterval()), stepDelay)}, nil
 }
 
 // endLooked handles a fresh plan on what the look at its pull request found: closed without a merge (rejected)

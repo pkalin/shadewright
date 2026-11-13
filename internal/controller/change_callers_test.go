@@ -136,8 +136,10 @@ func other(git providers.GitProvider) {
 // rule only (settleLock, checkHeld with openHolding). The others release a lock that no pull request of the
 // request holds: a refusal or a queued duplicate never took it, and the two ends of a handoff (endHandoff,
 // supersedePredecessor) leave the pull request to the replacement, which holds it.
+const releaseFunc = "release"
+
 var (
-	lockWriters = map[string]bool{"release": true, "reconcile": true, "backfill": true}
+	lockWriters = map[string]bool{releaseFunc: true, "reconcile": true, "backfill": true}
 	releasers   = map[string]bool{
 		"settleLock": true, "checkHeld": true, "reconcile": true, "supersedeDuplicate": true,
 		"endHandoff": true, "supersedePredecessor": true,
@@ -160,7 +162,7 @@ func TestLockClearedInOnePlace(t *testing.T) {
 				if !lockWriters[owner] {
 					t.Errorf("%s: %q writes status.holdsTarget; release the lock through release", fset.Position(sel.Pos()), owner)
 				}
-				if owner != "release" && i < len(n.Rhs) && writesFalse(n.Rhs[i]) {
+				if owner != releaseFunc && i < len(n.Rhs) && writesFalse(n.Rhs[i]) {
 					t.Errorf("%s: %q writes status.holdsTarget false; use release", fset.Position(sel.Pos()), owner)
 				}
 			}
@@ -169,7 +171,7 @@ func TestLockClearedInOnePlace(t *testing.T) {
 				t.Errorf("%s: %q sets status.holdsTarget in a literal", fset.Position(id.Pos()), owner)
 			}
 		case *ast.CallExpr:
-			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "release" && !releasers[owner] {
+			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == releaseFunc && !releasers[owner] {
 				t.Errorf("%s: %q releases the lock; only the lock rule does (settleLock, checkHeld)",
 					fset.Position(id.Pos()), owner)
 			}

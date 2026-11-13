@@ -393,6 +393,19 @@ type ConflictSeen struct {
 	TargetHead string `json:"targetHead"`
 }
 
+// GoneSeen is when the executor first saw a pull request number of the request missing from the Git host
+// (RemediationRequestStatus.goneSeen).
+type GoneSeen struct {
+	// at is when the executor saw it missing, on its own clock.
+	// +required
+	At metav1.Time `json:"at"`
+
+	// number is the pull request number the Git host answered 404 for.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	Number int64 `json:"number"`
+}
+
 // RolloutStatus is what the check after the merge records about the target's rollout. Only the executor writes
 // it; once status.rollout exists it is never removed, each field is set once and never changed (pausedSince is
 // only set or cleared, never moved, and pausedSeconds never decreases), and ended never goes back to false.
@@ -658,6 +671,16 @@ type RemediationRequestStatus struct {
 	// pullRequest is set once the pull request exists.
 	// +optional
 	PullRequest *PullRequestStatus `json:"pullRequest,omitempty"`
+
+	// goneSeen records the first look in which the Git host answered 404 for a pull request number of this
+	// request while the listing of every pull request of its branch had none with that number either (#688). One
+	// such look does not make the pull request gone: it is gone only on a later look, at least two minutes after
+	// at on the executor's clock, that finds the same, as for a merge conflict (pullRequest.conflictSeen). Any
+	// other answer about that number removes it (a read that fails answers nothing and leaves it), and a clock that went back more than a minute records it anew. It
+	// sits here rather than in pullRequest because the number read may not be recorded yet (the read after a
+	// close that a merge refused, before any status recorded the pull request). Only the executor writes it.
+	// +optional
+	GoneSeen *GoneSeen `json:"goneSeen,omitempty"`
 
 	// mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit
 	// (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed

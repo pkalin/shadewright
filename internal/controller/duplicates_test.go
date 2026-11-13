@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -476,9 +477,10 @@ func createdAt(t *testing.T, c client.Client, rr *remediationv1alpha1.Remediatio
 	}
 }
 
-// expectEndedByClosed checks that got ended Superseded with AnotherRequestClosed, naming by.
-func expectEndedByClosed(t *testing.T, err error, got *remediationv1alpha1.RemediationRequest, by string) {
+// expectEndedByClosed checks that got ended Superseded with AnotherRequestClosed, naming closedHolder.
+func expectEndedByClosed(t *testing.T, err error, got *remediationv1alpha1.RemediationRequest) {
 	t.Helper()
+	const by = closedHolder
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -555,7 +557,7 @@ func TestQueuedBehindStoppedHolderEndsWhenItsPullRequestCloses(t *testing.T) {
 		between(t, c)
 		calls := stub.calls.Load()
 		_, got, err = reconcileLimits(t, r, rr)
-		expectEndedByClosed(t, err, got, closedHolder)
+		expectEndedByClosed(t, err, got)
 		if n := stub.calls.Load(); n != calls {
 			t.Fatalf("the ended request read Git: %d resolver calls, want %d", n, calls)
 		}
@@ -619,7 +621,7 @@ func TestClosedHolderIsReadLive(t *testing.T) {
 		},
 	})
 	_, got, err = reconcileLimits(t, r, rr)
-	expectEndedByClosed(t, err, got, closedHolder)
+	expectEndedByClosed(t, err, got)
 }
 
 // TestQueuedBehindRecordedWhateverTheReason checks that the holders of the lock are recorded when another limit
@@ -662,5 +664,37 @@ func TestQueuedBehindRecordedWhateverTheReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, got, err = reconcileLimits(t, r, rr)
-	expectEndedByClosed(t, err, got, closedHolder)
+	expectEndedByClosed(t, err, got)
+}
+
+// TestQueuedBehindRecordsSameFieldHoldersFirst checks the cut of status.queuedBehind to MaxQueuedBehind (#643):
+// with five holders of the lock, the one for the waiter's field is recorded although it sorts last by name, so
+// its pull request closed without a merge still ends the waiter.
+func TestQueuedBehindRecordsSameFieldHoldersFirst(t *testing.T) {
+	others := make([]*remediationv1alpha1.RemediationRequest, 0, 1+remediationv1alpha1.MaxQueuedBehind)
+	others = append(others, ofIncident(holding(withPullRequest(otherRequest(closedHolder,
+		limitsTarget, remediationv1alpha1.PhaseAwaitingApproval, time.Hour), ReasonPullRequestOpened), true)))
+	for i := range remediationv1alpha1.MaxQueuedBehind {
+		others = append(others, otherField(holding(withPullRequest(otherRequest(fmt.Sprintf("a%d", i), limitsTarget,
+			remediationv1alpha1.PhaseAwaitingApproval, time.Hour), ReasonPullRequestOpened), true)))
+	}
+	r, c, rr, stub := limitsWorld(t, 20, others...)
+	res, got, err := reconcileLimits(t, r, rr)
+	expectQueued(t, r, rr, res, err, got, stub, ReasonTargetLocked)
+	if n := len(got.Status.QueuedBehind); n != remediationv1alpha1.MaxQueuedBehind ||
+		got.Status.QueuedBehind[0].Name != closedHolder {
+		t.Fatalf("queuedBehind = %+v, want %d holders, %s first", got.Status.QueuedBehind,
+			remediationv1alpha1.MaxQueuedBehind, closedHolder)
+	}
+	ctx := context.Background()
+	holder := &remediationv1alpha1.RemediationRequest{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: requestNamespace, Name: closedHolder}, holder); err != nil {
+		t.Fatal(err)
+	}
+	closeUnmerged(holder, limitsNow.Add(-2*time.Minute))
+	if err := c.Status().Update(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	_, got, err = reconcileLimits(t, r, rr)
+	expectEndedByClosed(t, err, got)
 }

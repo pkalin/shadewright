@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -275,6 +276,33 @@ var _ = Describe("RemediationRequest", func() {
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
 			Expect(err.Error()).To(ContainSubstring(tc.msg), name)
 		}
+	})
+
+	// #643: status.queuedBehind names the holders a queued request waited behind; dropping it would let a request
+	// behind a pull request closed without a merge open a second one for the same field.
+	It("keeps status.queuedBehind once set", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		rr.Status.QueuedBehind = []v1alpha1.RequestRef{{Name: "first", UID: "11111111-1111-4111-8111-111111111111"}}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write is allowed")
+		rr.Status.QueuedBehind = []v1alpha1.RequestRef{{Name: "second", UID: "22222222-2222-4222-8222-222222222222"}}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "replacing the entries is allowed")
+
+		for name, patch := range map[string]client.Patch{
+			"removed": client.RawPatch(types.MergePatchType, []byte(`{"status":{"queuedBehind":null}}`)),
+			"emptied": client.RawPatch(types.MergePatchType, []byte(`{"status":{"queuedBehind":[]}}`)),
+		} {
+			err := k8sClient.Status().Patch(ctx, rr.DeepCopy(), patch)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring("status.queuedBehind is kept once set"), name)
+		}
+		got := &v1alpha1.RemediationRequest{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+		got.Status = v1alpha1.RemediationRequestStatus{}
+		err := k8sClient.Status().Update(ctx, got)
+		Expect(err).To(HaveOccurred(), "the API server accepted: status emptied")
+		Expect(err.Error()).To(ContainSubstring("status.queuedBehind is kept once set"))
 	})
 
 	It("never moves status.rollout.pausedSince and never lowers pausedSeconds", func() {

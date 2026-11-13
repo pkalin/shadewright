@@ -481,7 +481,9 @@ type RemediationRequestStatus struct {
 	// the request is decided, it ends Superseded (PlanFresh False, reason AnotherRequestClosed) when a recorded
 	// request ended NeedsIntervention because its pull request for the same target and field was closed without a
 	// merge. A request that never waited behind that one has no record of it and is decided as usual. Only the
-	// executor writes it; it is never cleared.
+	// executor writes it; once set it is never removed or emptied (a validation rule refuses that). At most four
+	// holders are recorded, those for the same field first: a request behind more holders than that may have no
+	// record of one, and is then decided as usual when that one's pull request is closed.
 	// +listType=map
 	// +listMapKey=uid
 	// +kubebuilder:validation:MaxItems=4
@@ -616,6 +618,9 @@ type RemediationRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince) || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince) || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince",message="status.rollout.pausedSince is never moved while set"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds) || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds) && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)",message="status.rollout.pausedSeconds never decreases"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended) || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.ended) && self.status.rollout.ended)",message="status.rollout.ended never goes back to false"
+// status.queuedBehind is kept once set: its entries may be replaced, but the field is never removed or emptied,
+// so a write cannot drop the record that ends a request queued behind a pull request closed unmerged (#643).
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind) == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind) > 0)",message="status.queuedBehind is kept once set"
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

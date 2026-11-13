@@ -216,7 +216,9 @@ const (
 	// contributes the action was disabled, so the pull request is closed and a new request is needed. With
 	// reason HandedOff (ADR-0028) a replacement took over the pull request instead, which stays open. With
 	// reason AnotherRequestMerged (on PlanFresh) another request of the same Incident and target was merged
-	// while this one waited, before it took the target lock or opened a pull request.
+	// while this one waited, before it took the target lock or opened a pull request. With reason
+	// AnotherRequestClosed (on PlanFresh) the pull request of another request for the same target and field was
+	// closed without a merge while this one waited, before it took the target lock or opened a pull request.
 	// Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target

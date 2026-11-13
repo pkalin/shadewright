@@ -74,6 +74,7 @@ var troubleshootingSections = map[string][]string{
 	"ActionUnknown":                     {secPolicy},
 	"AmbiguousDeclaration":              {secFiles},
 	"AmbiguousTarget":                   {secRender},
+	"AnotherRequestClosed":              {secPhases},
 	"AnotherRequestMerged":              {secPhases},
 	"BelowMinimum":                      {secPolicy},
 	"BranchDiverged":                    {secPullRequest},

@@ -254,6 +254,16 @@ func ofIncident(o *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.
 	return o
 }
 
+// sidecarContainer is another container of the target than the one the test fixtures' requests change.
+const sidecarContainer = "sidecar"
+
+// otherField moves o to another container of the same target, so its pull request closed without a merge tests
+// the lock and not the end of a request for the same field (duplicates.go, #643).
+func otherField(o *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.RemediationRequest {
+	o.Spec.Action.SetContainerMemoryLimit.Container = sidecarContainer
+	return o
+}
+
 // TestLimitsLockHeldWhilePullRequestMayBeOpen checks #294 and #376: status.holdsTarget decides the lock, and a
 // request written before the field existed derives it from its status, keeping the lock while a recorded pull
 // request is not shown closed or merged (fail closed). A request queued behind a stopped holder checks again
@@ -275,8 +285,9 @@ func TestLimitsLockHeldWhilePullRequestMayBeOpen(t *testing.T) {
 		"derived: no phase with a pull request somehow": stopped("", ReasonPullRequestOpened),
 		"field: stopped without a recorded pull request": holding(otherRequest("stopped", limitsTarget,
 			remediationv1alpha1.PhaseNeedsIntervention, time.Minute), true),
-		"field: true although the status says closed": holding(stopped(remediationv1alpha1.PhaseNeedsIntervention,
-			ReasonChangeRequestClosed), true),
+		// For another container: a closed pull request for the same field ends the request instead (#643).
+		"field: true although the status says closed": otherField(holding(stopped(remediationv1alpha1.PhaseNeedsIntervention,
+			ReasonChangeRequestClosed), true)),
 	}
 	for name, o := range held {
 		t.Run("held: "+name, func(t *testing.T) {
@@ -299,7 +310,8 @@ func TestLimitsLockHeldWhilePullRequestMayBeOpen(t *testing.T) {
 	})
 	released := map[string]*remediationv1alpha1.RemediationRequest{
 		"derived: closed by Shadewright": stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonPullRequestClosed),
-		"derived: closed by a person":    stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestClosed),
+		// For another container: a closed pull request for the same field ends the request instead (#643).
+		"derived: closed by a person":    otherField(stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestClosed)),
 		"derived: merged after the stop": stopped(remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestMerged),
 		// Of another Incident: a merged request of the same one supersedes the request instead (duplicates.go).
 		"derived: Merged":     ofIncident(stopped(remediationv1alpha1.PhaseMerged, ReasonPullRequestOpened)),

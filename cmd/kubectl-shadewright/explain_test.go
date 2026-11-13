@@ -283,6 +283,11 @@ func TestExplainOutcomeLines(t *testing.T) {
 			"Configured:   True, ValueConfigured: The live target holds the desired value",
 			"Cleared:      True, NoRecurrence: No OOM kill and no restart for 11m0s",
 		}},
+		{"resolved before the rollout", remediationv1alpha1.PhaseSucceeded, []metav1.Condition{rolled, configured,
+			cond(remediationv1alpha1.ConditionCleared, metav1.ConditionTrue, "ResolvedBeforeRollout",
+				"The symptom had already stopped when the change arrived", time.Minute)}, []string{
+			"Cleared:      True, ResolvedBeforeRollout: The symptom had already stopped when the change arrived",
+		}},
 		{"verifying", remediationv1alpha1.PhaseVerifying, []metav1.Condition{configured}, []string{
 			"Rolled out:   not reported yet",
 			"Configured:   True, ValueConfigured",
@@ -314,6 +319,12 @@ func TestExplainOutcomeLines(t *testing.T) {
 				t.Errorf("JSON outcome = %+v", got.Requests)
 			}
 		})
+	}
+	// The reason table sends ResolvedBeforeRollout to the section after the merge, like NoRecurrence's other
+	// outcomes.
+	link, listed := troubleshootingLink(remediationv1alpha1.ConditionCleared, "ResolvedBeforeRollout")
+	if want := troubleshootingURL + "#" + secAfterMerge; !listed || link != want {
+		t.Errorf("troubleshootingLink(Cleared, ResolvedBeforeRollout) = %q, %v, want %q, true", link, listed, want)
 	}
 	rr := explainRequestObj(testRR, remediationv1alpha1.PhaseAwaitingApproval, time.Hour)
 	c := explainClient(t, rr, testIncident("incident-a", "a", testSubject, "OOM"), testSettings())

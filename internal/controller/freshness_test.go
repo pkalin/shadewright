@@ -628,23 +628,33 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		markCleanup(forgetPullRequest)
 		_, err := git.Merge(cr.Number)
 		Expect(err).NotTo(HaveOccurred())
-		for name, bend := range map[string]func(*providers.ChangeRequest){
-			"another number":      func(c *providers.ChangeRequest) { c.Number++ },
-			"another base branch": func(c *providers.ChangeRequest) { c.BaseBranch = "maintenance" },
+		for name, c := range map[string]struct {
+			bend func(*providers.ChangeRequest)
+			// retried: an answer about another pull request is a failed read, never an answer.
+			retried bool
+		}{
+			"another number":      {func(c *providers.ChangeRequest) { c.Number++ }, true},
+			"another base branch": {func(c *providers.ChangeRequest) { c.BaseBranch = "maintenance" }, false},
 		} {
 			r := reconciler()
 			r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
-				return &bentAnswer{Git: git, bend: bend}, nil
+				return &bentAnswer{Git: git, bend: c.bend}, nil
 			}
 			closeErr := &closeConflictError{number: cr.Number, err: fmt.Errorf("close: %w", providers.ErrConflict)}
-			Expect(r.mergedUnrecorded(ctx, fetch(), closeErr)).To(BeIdenticalTo(error(closeErr)), name)
+			err := r.mergedUnrecorded(ctx, fetch(), closeErr)
+			if c.retried {
+				Expect(isUnknownChange(err)).To(BeTrue(), name)
+				Expect(errors.Is(err, closeErr)).To(BeTrue(), name)
+			} else {
+				Expect(err).To(BeIdenticalTo(error(closeErr)), name)
+			}
 			got := fetch()
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), name)
 			Expect(got.Status.PullRequest).To(BeNil(), name)
 		}
 	})
 
-	It("does not retry an unrecorded merge whose number the Git host answers 404 for (#688)", func() {
+	It("retries an unrecorded merge whose number the Git host answers 404 for while the branch lists it (#688)", func() {
 		markCleanup(forgetPullRequest)
 		_, err := git.Merge(cr.Number)
 		Expect(err).NotTo(HaveOccurred())
@@ -656,8 +666,13 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		})
 		defer git.SetFail(nil)
 		closeErr := &closeConflictError{number: cr.Number, err: fmt.Errorf("close: %w", providers.ErrConflict)}
-		Expect(reconciler().mergedUnrecorded(ctx, fetch(), closeErr)).To(BeIdenticalTo(error(closeErr)),
-			"like findRecorded, a 404 is an answer: no merged pull request of this request with that number")
+		err = reconciler().mergedUnrecorded(ctx, fetch(), closeErr)
+		Expect(isUnknownChange(err)).To(BeTrue(), "a 404 the branch does not confirm is a failed read")
+		Expect(errors.Is(err, errUnconfirmedNotFound)).To(BeTrue())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		// A 404 the branch confirms is an answer: no merged pull request of this request with that number.
+		gone := &closeConflictError{number: 9999, err: fmt.Errorf("close: %w", providers.ErrConflict)}
+		Expect(reconciler().mergedUnrecorded(ctx, fetch(), gone)).To(BeIdenticalTo(error(gone)))
 	})
 
 	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {

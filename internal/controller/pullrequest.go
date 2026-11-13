@@ -490,12 +490,21 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	branch := freshness.BranchName(rr)
 	src := rr.Status.Source
 
-	// The pull request may exist although the status write that records it failed (design section 6).
-	switch cr, err := git.FindChangeRequest(ctx, branch); {
-	case err == nil:
-		return reconcile.Result{}, r.adoptChangeRequest(ctx, git, rr, cr, fresh.File)
-	case !errors.Is(err, providers.ErrNotFound):
-		return reconcile.Result{}, freshness.WrapProvider("find the change request", err)
+	// The pull request may exist although the status write that records it failed (design section 6). Every pull
+	// request of the branch is read (changeOf), since the newest may hide an older one of this request: an open one
+	// of its own is adopted, else a merged one, else a closed one. With none of its own, a pull request of the
+	// branch without its marker stops the request; with none at all the branch steps go on. Unknown is retried.
+	switch v := r.changeOf(ctx, git, rr, changeQuery{}); adoptRule[v.state] {
+	case adoptRetry:
+		return reconcile.Result{}, v.err
+	case adoptIt:
+		return reconcile.Result{}, r.adoptChangeRequest(ctx, git, rr, v.pr, fresh.File)
+	case adoptNone:
+		if v.foreign {
+			return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+				ReasonForeignChangeRequest, "A pull request for the branch exists without this request's marker; "+
+					"it was not touched")
+		}
 	}
 
 	head, err := git.BranchHead(ctx, branch)
@@ -597,6 +606,21 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	return reconcile.Result{}, r.recordPullRequest(ctx, rr, cr)
 }
 
+// adoptOutcome is what pullRequestStep does per verdict on the pull requests of the branch.
+type adoptOutcome int
+
+const (
+	adoptRetry adoptOutcome = iota
+	adoptIt
+	adoptNone
+)
+
+// adoptRule is pullRequestStep's rule per verdict: open, merged and closed adopt the pull request (record it, end
+// Merged, or stop as closed), gone goes on to the branch steps, unknown is retried.
+var adoptRule = map[changeState]adoptOutcome{
+	changeOpen: adoptIt, changeMerged: adoptIt, changeClosed: adoptIt, changeGone: adoptNone, changeUnknown: adoptRetry,
+}
+
 // checkPlanned checks a branch head whose file holds the planned value before its pull request is opened or
 // recorded (#524): data, the file at head, must be byte for byte the planned change of the target file the
 // freshness check read (freshFile), exactly what Shadewright commits, and head must be one commit on top of
@@ -675,8 +699,8 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	// A person may have merged or closed it since the open: that is looked at first, because closing a closed
 	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
 	// decides nothing; the close by number below still runs.
-	if found, err := git.FindChangeRequest(cleanCtx, freshness.BranchName(rr)); err == nil && found.Number == cr.Number {
-		if ok, err := ended(found); ok {
+	if v := r.changeOf(cleanCtx, git, rr, changeQuery{number: cr.Number}); v.state == changeMerged || v.state == changeClosed {
+		if ok, err := ended(v.pr); ok {
 			return err
 		}
 	}
@@ -689,13 +713,13 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	case providers.IsConflict(err):
 		// A merge between the look-up and the close is a conflict, but so is any other 409 of the host: only a
 		// look-up that shows the pull request merged (or closed) decides; anything else is retried.
-		found, findErr := git.FindChangeRequest(cleanCtx, freshness.BranchName(rr))
-		if findErr == nil && found.Number == cr.Number {
-			if ok, err := ended(found); ok {
+		v := r.changeOf(cleanCtx, git, rr, changeQuery{number: cr.Number})
+		if v.state == changeMerged || v.state == changeClosed {
+			if ok, err := ended(v.pr); ok {
 				return err
 			}
 		}
-		return retry(errors.Join(freshness.WrapProvider("close the pull request", err), findErr))
+		return retry(errors.Join(freshness.WrapProvider("close the pull request", err), v.err))
 	default:
 		if _, _, final := refusal(err); !final {
 			// A host failure, the deadline or paused writes: retried (a pause waits for the kill switch).
@@ -860,11 +884,11 @@ func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git prov
 
 // mergedUnrecorded ends a request whose stale plan's cleanup found its change request merged (closing a merged
 // one is a conflict) before any status recorded it: the merge of its own pull request is what made the plan
-// stale. It reads the pull request again by the number the close tried (closeConflictError; ADR-0030 section 1:
-// a newer pull request on the same branch never stands in for it), binds the answer to that number, the request's
-// branch and its target branch as findRecorded does, and ends the request through endMerged. A look-up that fails
-// is returned with closeErr for a retry. An answer that rules that number out (404, another pull request, another
-// branch or base, as lookUpRecorded classes them), one without this request's marker or not merged, or a closeErr
+// stale, or whose close at the deadline was refused the same way. It reads the pull request again by the number
+// the close tried (closeConflictError; changeOf with the marker; ADR-0030 section 1: a newer pull request on the
+// same branch never stands in for it), and ends the request through endMerged when it is merged. Unknown (a failed
+// read, a 404 the branch does not confirm, an answer about another pull request) is returned joined with closeErr
+// for a retry. Open, closed or gone (a 404 the branch confirms, another branch or base, no marker), or a closeErr
 // without a number, returns closeErr.
 func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	closeErr error) error {
@@ -877,18 +901,13 @@ func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr 
 		return errors.Join(closeErr, err)
 	}
 	// openPlanRepository returned, so the source is recorded and its target branch is the repository's.
-	cr, err := git.GetChangeRequest(ctx, tried.number)
-	switch {
-	case providers.IsNotFound(err), providers.IsUntrustedAnswer(err):
-		return closeErr
-	case err != nil:
-		return errors.Join(closeErr, freshness.WrapProvider("find the merged change request", err))
-	case cr.Number != tried.number, cr.HeadBranch != freshness.BranchName(rr),
-		cr.BaseBranch != string(rr.Status.Source.TargetBranch),
-		!hasMarker(cr.Body, rr), cr.State != providers.ChangeRequestMerged:
-		return closeErr
+	switch v := r.changeOf(ctx, git, rr, changeQuery{number: tried.number, marker: true}); v.state {
+	case changeMerged:
+		return r.endMerged(ctx, git, rr, v.pr)
+	case changeUnknown:
+		return errors.Join(closeErr, v.err)
 	}
-	return r.endMerged(ctx, git, rr, cr)
+	return closeErr
 }
 
 // mergedForeign ends a request whose recorded pull request a person merged although its head failed a check
@@ -1160,14 +1179,16 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{}, err
 	}
 	// By its number, not its branch: the branch may carry a newer pull request (ADR-0030 section 1).
-	cr, gone, err := findRecorded(ctx, git, rr)
-	switch {
-	case err != nil:
-		return hintLook{}, freshness.WrapProvider("find the change request", err)
-	case gone != "":
+	// Unknown is returned for a retry and ends nothing; gone is confirmed (changeOf).
+	v := r.changeOf(ctx, git, rr, changeQuery{})
+	switch v.state {
+	case changeUnknown:
+		return hintLook{}, v.err
+	case changeGone:
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
-			"The recorded pull request cannot be found any more ("+gone+"); automation stopped")
+			"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
 	}
+	cr := v.pr
 	if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
 		if cr.Number == rr.Status.PullRequest.Number && intent(rr) != nil {
 			// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
@@ -1372,6 +1393,14 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 	err := r.closeChangeRequest(cleanCtx, rr)
 	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
+	if done, err := r.endUnrecordedMerge(ctx, rr, err); done {
+		// Its own pull request was merged before any status recorded it: it ends Merged (or
+		// MergedWithForeignChange), never Expired, as for a stale plan's cleanup (cleanUpStale).
+		if err != nil && !errors.Is(err, errStopped) {
+			return r.retry(ctx, rr, err)
+		}
+		return reconcile.Result{}, nil
+	}
 	if reason, _, ok := refusal(err); ok {
 		// The deadline has passed either way; waiting for a permission or a rule to change would only keep
 		// the request open longer. The message says that a pull request of its own may be left open.
@@ -1589,10 +1618,14 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 		cancel()
 		switch {
+		case isUnknownChange(err):
+			// A read that failed is never an answer, whatever its class (ErrConflict included): retried.
+			return r.waitOrFail(ctx, rr, err)
 		case err == nil, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
-			errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, providers.ErrConflict),
+			errors.Is(err, freshness.ErrRepositoryUnusable), isMergedUnrecorded(err),
 			errors.Is(err, errChangeRequestNotOurs):
-			// Closed, nothing reachable to close, already merged, or not ours to close.
+			// Closed, nothing reachable to close, the open ones closed and a merged one read as merged, or not
+			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
 		case errors.Is(err, freshness.ErrPaused):
 			return r.waitWhilePaused(ctx, rr)
 		default:

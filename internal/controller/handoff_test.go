@@ -864,10 +864,10 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(r.Status.PullRequest.ReviewCheck.State).To(Equal(remediationv1alpha1.ReviewCheckRefused))
 		Expect(condition(r, remediationv1alpha1.ConditionApproved).Reason).To(Equal(ReasonReviewCheckRefused))
 		Expect(git.CheckRuns(r.Status.PullRequest.HeadSHA)).To(BeEmpty())
-		cr, err := reconciler().findOwnChangeRequest(ctx, r)
-		Expect(err).NotTo(HaveOccurred(), "the body still carries the predecessor's marker, which stays accepted")
-		Expect(cr).NotTo(BeNil())
-		Expect(cr.Number).To(Equal(number))
+		v, _, err := reconciler().lookHeld(ctx, r)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(v.state).To(Equal(changeOpen), "the body still carries the predecessor's marker, which stays accepted")
+		Expect(v.pr.Number).To(Equal(number))
 	})
 
 	It("owns a merge of its commit after a restart that lost the record of the handoff", func() {

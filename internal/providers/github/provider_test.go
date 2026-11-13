@@ -1495,21 +1495,18 @@ func TestListChangeRequestsRefused(t *testing.T) {
 // jsonNull is a JSON null as a whole answer.
 const jsonNull = "null"
 
-// TestListChangeRequestsNotAList checks that an answer that is not a JSON array (null, an object) is an error,
-// never an empty list that would read as "no pull request on the branch" (#688).
+// TestListChangeRequestsNotAList checks that a JSON null as the whole answer is an error, never an empty list that
+// would read as "no pull request on the branch" (#688). An object instead of an array already fails to decode, so
+// it needs no case of its own.
 func TestListChangeRequestsNotAList(t *testing.T) {
-	for name, raw := range map[string]string{"a JSON null": jsonNull, "an object": `{"message":"ok"}`} {
-		t.Run(name, func(t *testing.T) {
-			st := listBranch("all", 1, 1)
-			st.raw = raw
-			h := newHarness(t, st)
-			got, err := h.p.ListChangeRequests(ctx, branch, false)
-			if err == nil || got != nil || providers.IsNotFound(err) || errors.Is(err, providers.ErrUntrustedAnswer) {
-				t.Fatalf("got %+v, %v; want an unclassified error", got, err)
-			}
-			assertSafe(t, err)
-		})
+	st := listBranch("all", 1, 1)
+	st.raw = jsonNull
+	h := newHarness(t, st)
+	got, err := h.p.ListChangeRequests(ctx, branch, false)
+	if err == nil || got != nil || providers.IsNotFound(err) || errors.Is(err, providers.ErrUntrustedAnswer) {
+		t.Fatalf("got %+v, %v; want an unclassified error", got, err)
 	}
+	assertSafe(t, err)
 }
 
 func TestGetChangeRequest(t *testing.T) {

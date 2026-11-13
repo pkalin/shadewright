@@ -445,7 +445,7 @@ The policy is configuration, but the block is treated like the others: it is ren
 
 - A Deployment, StatefulSet, ReplicaSet or Pod can be the subject.
 - The context describes at most 50 pods, most troubled first, and labels the set capped when there are more, giving the real count.
-- A workload whose labels or selector are larger than the bounds the collector also uses (64 labels, 64 selector terms; `internal/analyzer/ownership`), or whose selector is empty, is described without pods, never as gone.
+- A workload whose labels or selector are larger than the bounds the collector also uses (64 labels, 64 selector terms; `internal/ownership`), or whose selector is empty, is described without pods, never as gone.
 - A subject that no longer exists (or exists under another UID) is reported as such in the status, and a kind the analyzer does not read is "not available". Neither is a failure.
 
 **Redaction.**

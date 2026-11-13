@@ -16,6 +16,7 @@ API group and version: `remediation.shadewright.io/v1alpha1`
 | [RemediationPolicy](#remediationpolicy) | Cluster |  | RemediationPolicy says which actions are allowed, on which targets, within which bounds, and whether a human must approve. |
 | [RemediationRequest](#remediationrequest) | Namespaced | `rr` | RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request after deterministic policy allows it. |
 | [RemediationSettings](#remediationsettings) | Cluster |  | RemediationSettings is the single cluster-wide configuration object, named default. |
+| [VerificationReport](#verificationreport) | Namespaced | `vr` | VerificationReport is the verifier's evidence for one RemediationRequest in Verifying: whether the pods of the rollout stayed up without a restart or an OOM kill over a window (ADR-0030 section 7). |
 
 ## Incident
 
@@ -107,6 +108,33 @@ Validation rules:
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [RemediationSettingsSpec](#remediationsettingsspec) | Yes | spec holds the settings. |
 | `status` | [RemediationSettingsStatus](#remediationsettingsstatus) | No | status is the analyzer's detection report. It does not report whether repositories or signers are usable. |
+
+## VerificationReport
+
+VerificationReport is the verifier's evidence for one RemediationRequest in Verifying: whether the pods of
+the rollout stayed up without a restart or an OOM kill over a window (ADR-0030 section 7). Only the verifier
+writes it; the executor reads it as untrusted evidence, bound by spec to the request, and writes the
+request's Cleared condition from it. Its name derives from the request UID.
+
+- API version: `remediation.shadewright.io/v1alpha1`
+- Kind: `VerificationReport`
+- Scope: Namespaced
+
+Validation rules:
+
+- status.sample never decreases: `!has(oldSelf.status) || !has(oldSelf.status.sample) || (has(self.status) && has(self.status.sample) && self.status.sample >= oldSelf.status.sample)`
+- status.windowStart only moves forward: `!has(oldSelf.status) || !has(oldSelf.status.windowStart) || (has(self.status) && has(self.status.windowStart) && timestamp(self.status.windowStart) >= timestamp(oldSelf.status.windowStart))`
+- status.resets never decreases: `!has(oldSelf.status) || !has(oldSelf.status.resets) || (has(self.status) && has(self.status.resets) && self.status.resets >= oldSelf.status.resets)`
+- status.lastReset is kept once set and its time never moves back: `!has(oldSelf.status) || !has(oldSelf.status.lastReset) || (has(self.status) && has(self.status.lastReset) && timestamp(self.status.lastReset.time) >= timestamp(oldSelf.status.lastReset.time))`
+- status.troubleResets never decreases: `!has(oldSelf.status) || !has(oldSelf.status.troubleResets) || (has(self.status) && has(self.status.troubleResets) && self.status.troubleResets >= oldSelf.status.troubleResets)`
+- status.lastTroubleReset is kept once set and its time never moves back: `!has(oldSelf.status) || !has(oldSelf.status.lastTroubleReset) || (has(self.status) && has(self.status.lastTroubleReset) && timestamp(self.status.lastTroubleReset.time) >= timestamp(oldSelf.status.lastTroubleReset.time))`
+- status.oomKill is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.oomKill) || (has(self.status) && has(self.status.oomKill) && self.status.oomKill == oldSelf.status.oomKill)`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
+| `spec` | [VerificationReportSpec](#verificationreportspec) | Yes | spec binds the report to the request.<br>Rule: spec is immutable |
+| `status` | [VerificationReportStatus](#verificationreportstatus) | No | status is the verifier's window. |
 
 
 ## Types
@@ -791,6 +819,19 @@ Name is a DNS label used to reference other Shadewright objects or entries.
 
 Used by: [GitRepository](#gitrepository), [IncidentStatus](#incidentstatus), [IncomingHandoff](#incominghandoff), [OutgoingHandoff](#outgoinghandoff), [PolicyGitOps](#policygitops), [PolicyTargets](#policytargets), [RemediationPolicySpec](#remediationpolicyspec), [RemediationRequestSpec](#remediationrequestspec), [RequestReplacement](#requestreplacement), [ResolvedSource](#resolvedsource).
 
+### OOMKill
+
+OOMKill records an OOM kill of the action's container on a pod of the rollout (ADR-0030 section 4).
+
+
+Used by: [VerificationReportStatus](#verificationreportstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `podUID` | [UID](#uid) | Yes | podUID is the UID of the pod.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `container` | string | Yes | container is the name of the container, the action's container.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+| `finishedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | finishedAt is the finish time of the termination, written by the node's clock. It is shown, never compared: no time decides the OOM rule. |
+
 ### ObjectRef
 
 ObjectRef identifies one Kubernetes object. The UID pins it, so an object recreated under the same name is
@@ -879,6 +920,18 @@ Used by: [RemediationSettingsStatus](#remediationsettingsstatus).
 | --- | --- | --- | --- |
 | `detected` | [ModuleName](#modulename) | No | detected is the platform that claims every node with certainty. Left out when none does.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$` |
 | `active` | [ModuleName](#modulename) | Yes | active is the platform whose module contributes hooks: detected when it is enabled in spec.modules.platforms, generic otherwise.<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$` |
+
+### PodBaseline
+
+PodBaseline is the restart baseline of one pod of the rollout.
+
+
+Used by: [VerificationReportStatus](#verificationreportstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `podUID` | [UID](#uid) | Yes | podUID is the UID of the pod.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `restarts` | integer | Yes | restarts is the sum of the restart counts of the pod's containers and native sidecars (init containers with restartPolicy Always) when the baseline was last taken. A later sample that shows a higher sum is a Restarted reset.<br>Minimum: 0 |
 
 ### PolicyAction
 
@@ -1167,6 +1220,29 @@ Used by: [RemediationRequestSpec](#remediationrequestspec).
 | `uid` | [UID](#uid) | Yes | uid of the replaced request, so a request recreated under the same name is never taken for it.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `hint` | [HintRef](#hintref) | Yes | hint is the pinned hint of the replaced request that this plan answers. |
 
+### ResetReason
+
+ResetReason says why a verification window was reset (ADR-0030 section 4). The verifier sets Restarted,
+PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report, the only reasons
+the enum of WindowReset.reason accepts. NotAvailable, StaleReport and ReportMismatch are the executor's
+reasons for its own window; it keeps them in request status with its own field (#683), never in a report.
+
+- Underlying type: string
+
+Used by: [WindowReset](#windowreset).
+
+| Value | Description |
+| --- | --- |
+| `Restarted` | ResetRestarted: a container of a pod of the rollout (a native sidecar included) restarted above its baseline, or terminated after the window started. Trouble class; recorded in troubleResets only for a restart count above its baseline after the window first opened. |
+| `PodNotReady` | ResetPodNotReady: a pod of the rollout is not Ready and did not restart. No evidence. |
+| `PartialRollout` | ResetPartialRollout: fewer pods on the applied revision than the desired replicas, or a pod of the target on another revision; for the executor, a report that does not cover every desired replica. No evidence. |
+| `EvidenceMissing` | ResetEvidenceMissing: a pod without a status for every container, more pods than the bound, or a target that is not the one the report names. No evidence. |
+| `ScaledToZero` | ResetScaledToZero: the target's spec.replicas is 0. No evidence. |
+| `ObservationGap` | ResetObservationGap: no sample for more than two poll intervals, and a pod not in the baselines after it. No evidence. |
+| `NotAvailable` | ResetNotAvailable: the target reports fewer available replicas than desired (executor). No evidence. |
+| `StaleReport` | ResetStaleReport: the report is missing or its sample counter stopped rising (executor). No evidence. |
+| `ReportMismatch` | ResetReportMismatch: the report's spec names another request, merge commit, target or template revision (executor). No evidence. |
+
 ### ResolvedSource
 
 ResolvedSource is where the controller found the target's declaration in Git (ADR-0012). It is derived from
@@ -1309,7 +1385,7 @@ UID is a Kubernetes object UID in its canonical lower-case form.
 - Underlying type: string
 - Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 
-Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestRef](#requestref), [RequestReplacement](#requestreplacement).
+Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [OOMKill](#oomkill), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [PodBaseline](#podbaseline), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestRef](#requestref), [RequestReplacement](#requestreplacement), [VerificationReportSpec](#verificationreportspec).
 
 ### Verification
 
@@ -1353,3 +1429,59 @@ Used by: [Verification](#verification).
 | `KedaReady` |  |
 | `QueueBacklogDecreasing` |  |
 | `NoNewOOMKills` |  |
+
+### VerificationReportSpec
+
+VerificationReportSpec binds a report to one request, its merge, its target and the template revision it
+judges. It is set when the verifier creates the report and never changes. It holds no time of the executor's
+clock.
+
+
+Validation rules:
+
+- spec is immutable: `self == oldSelf`
+
+Used by: [VerificationReport](#verificationreport).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `requestUID` | [UID](#uid) | Yes | requestUID is the UID of the RemediationRequest the report is about.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `mergeCommitSHA` | string | Yes | mergeCommitSHA is the merge commit of the request's merge receipt.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
+| `targetUID` | [UID](#uid) | Yes | targetUID is the UID of the target workload.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `templateRevision` | string | Yes | templateRevision is the template revision of the rollout, from the request's status.rollout: a Deployment's revision annotation or a StatefulSet's update revision.<br>Maximum length: 253<br>Minimum length: 1 |
+| `container` | string | No | container is the name of the action's container, for an action that names one (SetContainerMemoryLimit). An OOM kill of this container ends the request Failed.<br>Maximum length: 63<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
+
+### VerificationReportStatus
+
+VerificationReportStatus is the verifier's pod-level window: its samples, its resets, its restart baselines
+and an OOM kill once seen. Typed fields only: nothing is copied from the cluster as text.
+
+
+Used by: [VerificationReport](#verificationreport).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sample` | integer | No | sample counts the samples written: the verifier raises it by one with every sample. It never decreases. The executor judges the age of the report by this counter on its own clock, never by sampledAt.<br>Minimum: 0 |
+| `sampledAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | sampledAt is when the last sample was taken, on the verifier's clock. |
+| `windowStart` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | windowStart is the time of the first good sample of the current window, on the verifier's clock. It only moves forward. The window is open while windowStart is later than lastReset.time; its span is sampledAt - windowStart. |
+| `desiredReplicas` | integer | No | desiredReplicas is the target's spec.replicas at the last sample.<br>Minimum: 0 |
+| `podsCovered` | integer | No | podsCovered is the number of pods of the rollout at the last sample: pods whose ownership by the target was proven and that run the report's template revision.<br>Maximum: 200<br>Minimum: 0 |
+| `resets` | integer | No | resets counts the resets of the window. It never decreases.<br>Minimum: 0 |
+| `lastReset` | [WindowReset](#windowreset) | No | lastReset is the last reset of the window. Once set it is kept, and its time never moves back. |
+| `troubleResets` | integer | No | troubleResets counts the Restarted resets recorded as trouble over the life of the report: those with a restart count above its baseline after the window first opened (the first good sample). A Restarted reset before that, or one shown only by a termination time (a node's clock), is not counted. It never decreases: a later no-evidence reset does not hide that a restart was observed.<br>Minimum: 0 |
+| `lastTroubleReset` | [WindowReset](#windowreset) | No | lastTroubleReset is the last Restarted reset recorded as trouble. Once set it is kept, and its time never moves back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.<br>Rule: lastTroubleReset.reason must be Restarted (`self.reason == 'Restarted'`) |
+| `oomKill` | [OOMKill](#oomkill) | No | oomKill is the first OOM kill of the action's container on a pod of the rollout. Once set it never changes. |
+| `baselines` | [PodBaseline](#podbaseline) array | No | baselines are the restart baselines of the pods, one per pod UID, at most 200. A baseline whose pod is gone from the pod list is pruned in the same write.<br>Maximum items: 200<br>List type: map<br>List key: `podUID` |
+
+### WindowReset
+
+WindowReset is a reset of a verification window. Its class (Restarted is trouble, every other reason no
+evidence) follows from reason and is not stored.
+
+
+Used by: [VerificationReportStatus](#verificationreportstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: one of the reasons the verifier sets.<br>One of `Restarted`, `PodNotReady`, `PartialRollout`, `EvidenceMissing`, `ScaledToZero`, `ObservationGap` |
+| `time` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | time is when the reset was recorded, on the clock of the writer of the window. It is never earlier than the window's start at that moment or the previous reset, so a window is open only while windowStart is later than it. |

@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -296,6 +297,9 @@ func deployment(d *appsv1.Deployment) (bool, string) {
 func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	want := replicas(ss.Spec.Replicas)
 	s := ss.Status
+	// The revisions are names the cluster reports; only capped copies go into a message, which becomes a condition
+	// message and an Event.
+	current, update := capRevision(s.CurrentRevision), capRevision(s.UpdateRevision)
 	if s.ObservedGeneration < ss.Generation {
 		return false, "the StatefulSet controller has not observed the new template yet", nil
 	}
@@ -328,7 +332,7 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 			}
 			return true, fmt.Sprintf("The rolling update is complete as its partition %d asks, but pods below the "+
 				"partition stay on the old revision %q on purpose: %s. They are no evidence for the change until "+
-				"the partition is lowered", partition, s.CurrentRevision, names), old
+				"the partition is lowered", partition, current, names), old
 		}
 	default:
 		if s.UpdateRevision == s.CurrentRevision && updated >= want && allReady {
@@ -337,7 +341,7 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	}
 
 	notReady := fmt.Sprintf("%d of %d pods are not Ready, %d of %d run update revision %q", want-ready, want,
-		updated, want, s.UpdateRevision)
+		updated, want, update)
 	if onDelete {
 		return false, notReady + "; the update strategy is OnDelete, so the StatefulSet controller replaces a pod " +
 			"only after it is deleted. Shadewright does not delete pods: check the new template, then delete the " +
@@ -349,7 +353,7 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	msg := notReady
 	if len(old) > 0 {
 		msg += fmt.Sprintf("; pods on the old revision %q (inferred by ordinal from the StatefulSet status): %s",
-			s.CurrentRevision, names)
+			current, names)
 	}
 	if ready >= want {
 		return false, msg, old
@@ -359,17 +363,33 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 		"not delete pods"
 	if updated > 0 {
 		msg += fmt.Sprintf(". If a pod on update revision %q is not Ready, the new template fails and deleting pods "+
-			"does not help: fix the template", s.UpdateRevision)
+			"does not help: fix the template", update)
 	}
 	if ready == 0 && partition == 0 && len(old) > 0 {
 		// Every pod is not Ready, so the lowest ordinal is certainly a pod that is not Ready on the old revision.
 		blocker := fmt.Sprintf("%s-%d", ss.Name, start)
 		return false, msg + fmt.Sprintf(". Check that the new template is correct, then delete %s yourself so it "+
-			"is recreated from update revision %q", blocker, s.UpdateRevision), old
+			"is recreated from update revision %q", blocker, update), old
 	}
 	return false, msg + fmt.Sprintf(". Find the pod that is not Ready (kubectl get pods -L "+
 		"controller-revision-hash); if it runs the old revision %q, check that the new template is correct and "+
-		"delete that pod yourself, never a Ready one", s.CurrentRevision), old
+		"delete that pod yourself, never a Ready one", current), old
+}
+
+// maxRevisionInMessage is the most bytes of a revision name a message carries. A ControllerRevision name is a
+// DNS subdomain of up to 253 characters; the name of a StatefulSet's revision is far shorter in practice.
+const maxRevisionInMessage = 80
+
+// capRevision returns rev cut to maxRevisionInMessage bytes, on a character boundary, with "..." when cut.
+func capRevision(rev string) string {
+	if len(rev) <= maxRevisionInMessage {
+		return rev
+	}
+	cut := maxRevisionInMessage
+	for cut > 0 && !utf8.RuneStart(rev[cut]) {
+		cut--
+	}
+	return rev[:cut] + "..."
 }
 
 // oldPods names the pods of the StatefulSet name with the ordinal indexes from high down to low (offset by

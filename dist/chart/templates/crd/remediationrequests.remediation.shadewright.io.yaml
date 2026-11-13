@@ -1444,6 +1444,12 @@ spec:
           rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
             && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',
             ''AwaitingApproval'', ''AutoMergeQueued'']))'
+        - message: status.phase WaitingForDelivery and Verifying require status.mergeReceipt
+          rule: '!has(self.status) || !has(self.status.phase) || !(self.status.phase
+            in [''WaitingForDelivery'', ''Verifying'']) || has(self.status.mergeReceipt)'
+        - message: status.phase Verifying requires status.pullRequest.appliedObservedAt
+          rule: '!has(self.status) || !has(self.status.phase) || self.status.phase
+            != ''Verifying'' || (has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt))'
         - message: 'status.hints: a stored hint is never removed'
           rule: '!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status)
             && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h,

@@ -31,7 +31,7 @@ func TestReviewerHintsFollowTheValue(t *testing.T) {
 		set  []string
 		want bool
 	}{
-		"default": {nil, false},
+		defaultCase: {nil, false},
 		// A null value drops the key from the merged values; the chart reads it as off and does not fail.
 		"null": {[]string{"executor.reviewerHints=null"}, false},
 		"off":  {[]string{"executor.reviewerHints.enabled=false"}, false},

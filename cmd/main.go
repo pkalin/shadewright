@@ -62,9 +62,10 @@ func init() {
 
 // executorFlags are the executor's own flags that set fields of the RemediationRequest reconciler.
 type executorFlags struct {
-	pollInterval  time.Duration
-	reviewerHints bool
-	nodeGrace     time.Duration
+	pollInterval   time.Duration
+	reviewerHints  bool
+	nodeGrace      time.Duration
+	verifyOutcomes bool
 }
 
 // bindExecutorFlags registers the executor's reconciler flags on fs.
@@ -85,6 +86,11 @@ func bindExecutorFlags(fs *flag.FlagSet) *executorFlags {
 			"reporting are marked not Ready first (ADR-0030). Set it to at least the cluster's node monitor grace "+
 			"period (kube-controller-manager --node-monitor-grace-period). Part of the verification timeout; 0 uses "+
 			"the default, a negative value refuses to start.")
+	fs.BoolVar(&f.verifyOutcomes, "verify-outcomes", false,
+		"Move merged requests through WaitingForDelivery and Verifying to Failed or Inconclusive (ADR-0030). Off "+
+			"by default until the executor reads the verifier's report (#683): before that no request can end "+
+			"Succeeded, so every merge would end Inconclusive or Failed and the circuit breaker would not close "+
+			"again. Off, a merged request keeps Merged with its rollout report.")
 	return f
 }
 
@@ -102,6 +108,7 @@ func (f *executorFlags) newReconciler(c client.Client, s *runtime.Scheme, namesp
 		PullRequestPollInterval: f.pollInterval,
 		ReviewerHints:           f.reviewerHints,
 		NodeGrace:               f.nodeGrace,
+		VerifyOutcomes:          f.verifyOutcomes,
 	}
 }
 
@@ -174,6 +181,7 @@ func main() {
 		hintsLog = append(hintsLog, "requiredCheck", "shadewright/review from the Shadewright App on the target branch")
 	}
 	setupLog.Info("Configured reviewer hints", hintsLog...)
+	setupLog.Info("Configured outcome verification", "enabled", ef.verifyOutcomes)
 	// After the merge the executor reads the Flux Kustomization that applies the target, with the get it holds
 	// for the source mapping, and asks the plan's Git host (a read) whether a later applied commit holds the
 	// merge commit; then it reports the target's rollout (#532).

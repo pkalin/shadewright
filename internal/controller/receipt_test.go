@@ -78,7 +78,7 @@ func (w *recordingStatus) Update(ctx context.Context, obj client.Object, opts ..
 func receiptRequest() (*remediationv1alpha1.RemediationRequest, providers.ChangeRequest) {
 	head, merge := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	rr := &remediationv1alpha1.RemediationRequest{}
-	rr.Status.PlanRepository = &remediationv1alpha1.PlanRepository{URL: "https://github.com/example/fleet", InstallationID: 3}
+	rr.Status.PlanRepository = &remediationv1alpha1.PlanRepository{URL: testFleetURL, InstallationID: 3}
 	rr.Status.Source = &remediationv1alpha1.ResolvedSource{TargetBranch: mainBranch}
 	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 7, HeadSHA: head}
 	return rr, providers.ChangeRequest{Number: 7, HeadSHA: head, BaseBranch: mainBranch,

@@ -155,31 +155,28 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(k8sClient.Status().Update(ctx, ss)).To(Succeed())
 	}
 
-	// newWorld creates the target and a request Merged an hour's fraction ago with its merge receipt.
-	newWorld := func(edit func(*appsv1.StatefulSet)) *phasesWorld {
-		seq++
-		name := fmt.Sprintf("phases-%d", seq)
-		git := fakegit.NewGit(mainBranch, map[string][]byte{phasesTargetPath: []byte("old")})
-		base, err := git.BranchHead(ctx, mainBranch)
+	// newGit is the GitOps repository of a world: a base commit and the merge commit after it.
+	newGit := func(w *phasesWorld) {
+		w.git = fakegit.NewGit(mainBranch, map[string][]byte{phasesTargetPath: []byte("old")})
+		var err error
+		w.base, err = w.git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())
-		merge, err := git.Push(mainBranch, phasesTargetPath, []byte("new"))
+		w.merge, err = w.git.Push(mainBranch, phasesTargetPath, []byte("new"))
 		Expect(err).NotTo(HaveOccurred())
-
-		ss := statefulSet(name, edit)
-		Expect(k8sClient.Create(ctx, ss)).To(Succeed())
-		w := &phasesWorld{git: git, base: base, merge: merge, rec: record.NewFakeRecorder(20),
-			reader: &rolloutReader{Reader: k8sClient}, ssKey: client.ObjectKeyFromObject(ss),
-			merged: time.Date(2026, 11, 8, 10, 35, 14, 0, time.UTC)}
+		w.rec = record.NewFakeRecorder(20)
+		w.merged = time.Date(2026, 11, 8, 10, 35, 14, 0, time.UTC)
 		w.now = w.merged.Add(time.Minute)
-		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+	}
 
+	// mergedRequest creates rr and writes its status Merged at w.merged with its merge receipt.
+	mergedRequest := func(w *phasesWorld, rr *remediationv1alpha1.RemediationRequest) {
 		settings := fx.RemediationSettings()
 		settings.Spec.Repositories[0].TargetBranch = mainBranch
 		w.settingsRepo = freshness.RepositoryOf(settings.Spec.Repositories[0])
-		rr := fx.MemoryLimitRequest(phasesNamespace, name)
-		rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: linkAPI, Kind: "StatefulSet",
-			Namespace: phasesNamespace, Name: name, UID: remediationv1alpha1.UID(ss.UID)}
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, rr))).To(Succeed())
+		})
 		mergedAt := metav1.NewMicroTime(w.merged)
 		head := strings.Repeat("c", 40)
 		rr.Status = remediationv1alpha1.RemediationRequestStatus{
@@ -192,18 +189,34 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 				Path: phasesTargetPath, BuildPath: testAppsPath, BaseCommit: strings.Repeat("b", 40)},
 			PlanRepository: w.settingsRepo,
 			PullRequest: &remediationv1alpha1.PullRequestStatus{Number: 56,
-				URL: "https://github.com/example/fleet/pull/56", HeadSHA: head, MergeCommitSHA: merge, MergedAt: &mergedAt},
+				URL: testPullRequest56URL, HeadSHA: head, MergeCommitSHA: w.merge, MergedAt: &mergedAt},
 			MergeReceipt: &remediationv1alpha1.MergeReceipt{Repository: *w.settingsRepo, TargetBranch: mainBranch,
-				PullRequest: 56, HeadSHA: head, MergeCommitSHA: merge, MergedAt: mergedAt},
+				PullRequest: 56, HeadSHA: head, MergeCommitSHA: w.merge, MergedAt: mergedAt},
 		}
 		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
 		w.key = client.ObjectKeyFromObject(rr)
 		w.r = w.reconciler()
+	}
+
+	// newWorld creates the target and a request Merged an hour's fraction ago with its merge receipt.
+	newWorld := func(edit func(*appsv1.StatefulSet)) *phasesWorld {
+		seq++
+		name := fmt.Sprintf("phases-%d", seq)
+		w := &phasesWorld{reader: &rolloutReader{Reader: k8sClient}}
+		newGit(w)
+		ss := statefulSet(name, edit)
+		Expect(k8sClient.Create(ctx, ss)).To(Succeed())
+		w.ssKey = client.ObjectKeyFromObject(ss)
 		DeferCleanup(func() {
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, rr))).To(Succeed())
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
 				Namespace: w.ssKey.Namespace, Name: w.ssKey.Name}}))).To(Succeed())
 		})
+		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+
+		rr := fx.MemoryLimitRequest(phasesNamespace, name)
+		rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: linkAPI, Kind: "StatefulSet",
+			Namespace: phasesNamespace, Name: name, UID: remediationv1alpha1.UID(ss.UID)}
+		mergedRequest(w, rr)
 		return w
 	}
 
@@ -556,12 +569,255 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		mustReconcileAt(w, w.merged.Add(time.Minute))
 		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
 	})
+
+	// --verify-outcomes off: the phases after the merge are exactly as before #681. A Merged request with a
+	// receipt keeps Merged with its rollout report (#532), and one already in WaitingForDelivery or Verifying is
+	// left as it is: no read, no write, no requeue.
+	It("keeps the behaviour before #681 with --verify-outcomes off", func() {
+		for _, tc := range []struct {
+			phase   remediationv1alpha1.RemediationPhase
+			applied func(*phasesWorld) string
+		}{
+			{remediationv1alpha1.PhaseMerged, func(w *phasesWorld) string { return w.base }},
+			{remediationv1alpha1.PhaseWaitingForDelivery, func(w *phasesWorld) string { return w.base }},
+			{remediationv1alpha1.PhaseVerifying, func(w *phasesWorld) string { return w.merge }},
+		} {
+			By(string(tc.phase))
+			w := newWorld(nil)
+			w.reader.ks = kustomization(ksStatus{applied: tc.applied(w)})
+			if tc.phase != remediationv1alpha1.PhaseMerged {
+				mustReconcileAt(w, w.merged.Add(time.Minute))
+				Expect(fetch(w).Status.Phase).To(Equal(tc.phase))
+			}
+			w.r.VerifyOutcomes = false
+			before := fetch(w)
+			w.now = w.merged.Add(2 * time.Minute)
+			res, err := w.r.afterMerge(ctx, before.DeepCopy())
+			Expect(err).NotTo(HaveOccurred())
+			after := fetch(w)
+			Expect(after.Status.Phase).To(Equal(tc.phase))
+			if tc.phase == remediationv1alpha1.PhaseMerged {
+				// The rollout report of #532: it waits for the delivery and never moves the phase.
+				Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+				Expect(meta.FindStatusCondition(after.Status.Conditions, remediationv1alpha1.ConditionDelivered)).To(BeNil())
+				Expect(after.Status.Deadline).To(BeNil())
+				continue
+			}
+			Expect(res).To(Equal(reconcile.Result{}))
+			Expect(after.ResourceVersion).To(Equal(before.ResourceVersion))
+		}
+	})
+
+	// Without a delivery verifier a request after the merge still gets a requeue or an end: Verifying needs no
+	// verifier, and WaitingForDelivery retries the read and ends DeliveryNotChecked past the window and its grace,
+	// naming the cause.
+	It("keeps checking without a delivery verifier", func() {
+		w := newWorld(nil)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		mustReconcileAt(w, w.merged.Add(time.Minute))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		w.r.Delivery = nil
+		res := mustReconcileAt(w, w.merged.Add(2*time.Minute))
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		mustReconcileAt(w, fetch(w).Status.Deadline.Time)
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+
+		w = newWorld(nil)
+		w.reader.ks = kustomization(ksStatus{applied: w.base})
+		mustReconcileAt(w, w.merged.Add(time.Minute))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+		w.r.Delivery = nil
+		_, err := reconcileAt(w, w.merged.Add(2*time.Minute))
+		Expect(err).To(HaveOccurred())
+		Expect(condition(fetch(w), remediationv1alpha1.ConditionDelivered).Message).To(
+			ContainSubstring("without a delivery verifier"))
+		mustReconcileAt(w, windowEnd(w).Add(finalGrace+time.Second))
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonDeliveryNotChecked)
+		Expect(condition(rr, remediationv1alpha1.ConditionVerified).Message).To(
+			ContainSubstring("without a delivery verifier"))
+	})
+
+	// A GitOps controller that alternates between two applied commits on every read never lets the delivery be
+	// recorded. Within the window it is checked again at once; past the window and its grace it ends
+	// DeliveryNotChecked instead of waiting for ever.
+	It("ends a delivery that keeps moving at the end of the window and its grace", func() {
+		w := newWorld(nil)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		w.reader.alternate = kustomization(ksStatus{applied: later(w, "apps/other.yaml")})
+		res := mustReconcileAt(w, w.merged.Add(time.Minute))
+		Expect(res.RequeueAfter).To(Equal(time.Second))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+		_, err := reconcileAt(w, windowEnd(w).Add(time.Minute))
+		Expect(err).To(HaveOccurred(), "past the window a delivery that moves is a failed read")
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+		mustReconcileAt(w, windowEnd(w).Add(finalGrace+time.Second))
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonDeliveryNotChecked)
+		Expect(condition(rr, remediationv1alpha1.ConditionVerified).Message).To(ContainSubstring("kept moving"))
+	})
+
+	// A cause that does not clear by itself (here: the receipt's repository left the settings) is retried for the
+	// whole window, and named in Delivered while it waits and in the final message, not only in the log.
+	It("names a lasting cause of a failed delivery read in the conditions", func() {
+		w := newWorld(nil)
+		s := &remediationv1alpha1.RemediationSettings{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, s)).To(Succeed())
+		s.Spec.Repositories[0].URL = "https://github.com/example/elsewhere"
+		Expect(k8sClient.Update(ctx, s)).To(Succeed())
+		w.reader.ks = kustomization(ksStatus{applied: later(w, "apps/other.yaml")})
+		_, err := w.r.afterMerge(ctx, fetch(w))
+		Expect(err).To(HaveOccurred())
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+		Expect(condition(rr, remediationv1alpha1.ConditionDelivered).Message).To(
+			ContainSubstring("not in RemediationSettings"))
+		w.now = windowEnd(w).Add(finalGrace + time.Second)
+		Expect(w.r.afterMerge(ctx, fetch(w))).Error().NotTo(HaveOccurred())
+		rr = expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonDeliveryNotChecked)
+		Expect(condition(rr, remediationv1alpha1.ConditionVerified).Message).To(
+			ContainSubstring("not in RemediationSettings"))
+	})
+
+	// A target that cannot be read from the timeout to its grace keeps a rollout verdict recorded before: Failed
+	// with RolloutStuck. With none recorded the end is Inconclusive with TargetNotChecked.
+	failTarget := func(w *phasesWorld) {
+		w.reader.fail = func(obj client.Object) error {
+			if _, ok := obj.(*appsv1.StatefulSet); ok {
+				return errors.New("the API server is unavailable")
+			}
+			return nil
+		}
+	}
+	It("ends Failed with the recorded RolloutStuck when the target cannot be read at the timeout", func() {
+		w := newWorld(nil)
+		setTargetStatus(w, 0, 1, revisionOld, revisionNew)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		applied := w.merged.Add(time.Minute)
+		mustReconcileAt(w, applied)
+		mustReconcileAt(w, applied.Add(rollout.DefaultDeadline+time.Second))
+		Expect(condition(fetch(w), rollout.ConditionRolledOut).Reason).To(Equal(rollout.ReasonRolloutStuck))
+		deadline := fetch(w).Status.Deadline.Time
+		failTarget(w)
+		_, err := reconcileAt(w, deadline)
+		Expect(err).To(HaveOccurred())
+		mustReconcileAt(w, deadline.Add(finalGrace))
+		expectEnd(w, remediationv1alpha1.PhaseFailed, rollout.ReasonRolloutStuck)
+	})
+	It("ends Inconclusive with TargetNotChecked when the target cannot be read to the end", func() {
+		w := newWorld(nil)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		mustReconcileAt(w, w.merged.Add(time.Minute))
+		deadline := fetch(w).Status.Deadline.Time
+		failTarget(w)
+		_, err := reconcileAt(w, deadline.Add(finalGrace-time.Second))
+		Expect(err).To(HaveOccurred())
+		mustReconcileAt(w, deadline.Add(finalGrace))
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonTargetNotChecked)
+	})
+
+	// A clock a little behind (a leader failover to a node whose clock is less than a minute behind) does not
+	// end a live verification; one set back further ends it Inconclusive at once, never Failed.
+	It("tolerates a clock a little behind in Verifying and ends at once when it went back further", func() {
+		w := newWorld(nil)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		applied := w.merged.Add(time.Minute)
+		mustReconcileAt(w, applied)
+		mustReconcileAt(w, applied.Add(-mergeCommitClockSlack))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		mustReconcileAt(w, applied.Add(-mergeCommitClockSlack-time.Second))
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+	})
+
+	// The upgrade path: the applied time was recorded while the request was Merged (the rollout report of #532,
+	// --verify-outcomes off), with a stuck rollout; the flag is turned on after the timeout measured from that
+	// time. Nothing was verified in time: Inconclusive, never Failed and never a success.
+	It("ends Inconclusive when outcome verification starts after the timeout of a recorded applied time", func() {
+		w := newWorld(nil)
+		setTargetStatus(w, 0, 1, revisionOld, revisionNew)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		w.r.VerifyOutcomes = false
+		applied := w.merged.Add(time.Minute)
+		mustReconcileAt(w, applied)
+		mustReconcileAt(w, applied.Add(rollout.DefaultDeadline+time.Second))
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(rr.Status.PullRequest.AppliedObservedAt).NotTo(BeNil())
+		Expect(condition(rr, rollout.ConditionRolledOut).Reason).To(Equal(rollout.ReasonRolloutStuck))
+		w.r = w.reconciler()
+		mustReconcileAt(w, applied.Add(2*time.Hour))
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+	})
+
+	// The KEDA path: a ScaledObject target, read as an unstructured object with the get the executor holds on
+	// the target kinds. Configured reads spec.maxReplicaCount; RolledOut is not checked; at the timeout the
+	// ScaledObject must be ready by the KedaReady rule, else the request ends Failed with KedaNotReady.
+	scaledObject := func(name string, uid types.UID, maxReplicas int, ready string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		Expect(u.UnmarshalJSON([]byte(fmt.Sprintf(`{
+  "apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject",
+  "metadata": {"name": %q, "namespace": %q, "uid": %q, "generation": 1,
+    "labels": {"kustomize.toolkit.fluxcd.io/name": "apps", "kustomize.toolkit.fluxcd.io/namespace": "flux-system"}},
+  "spec": {"scaleTargetRef": {"name": "worker"}, "maxReplicaCount": %d},
+  "status": {"conditions": [{"type": "Ready", "status": %q, "reason": "ScaledObjectReady"}]}}`,
+			name, phasesNamespace, uid, maxReplicas, ready)))).To(Succeed())
+		return u
+	}
+	newKedaWorld := func(maxReplicas int, ready string) *phasesWorld {
+		seq++
+		name := fmt.Sprintf("phases-keda-%d", seq)
+		w := &phasesWorld{reader: &rolloutReader{Reader: k8sClient}}
+		newGit(w)
+		uid := types.UID(fmt.Sprintf("44444444-4444-4444-8444-%012d", seq))
+		w.reader.objects = []*unstructured.Unstructured{scaledObject(name, uid, maxReplicas, ready)}
+		rr := fx.RemediationRequest(phasesNamespace, name)
+		rr.Spec.TargetRef.Namespace = phasesNamespace
+		rr.Spec.TargetRef.Name = name
+		rr.Spec.TargetRef.UID = remediationv1alpha1.UID(uid)
+		mergedRequest(w, rr)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		return w
+	}
+	// stepAt runs the phases after the merge once at at, as the reconcile does after its earlier steps (which
+	// read the target from the cache, and the test API server has no ScaledObject kind).
+	stepAt := func(w *phasesWorld, at time.Time) reconcile.Result {
+		w.now = at
+		res, err := w.r.afterMerge(ctx, fetch(w))
+		Expect(err).NotTo(HaveOccurred())
+		return res
+	}
+	It("verifies a ScaledObject and ends Inconclusive at the timeout when it is ready", func() {
+		w := newKedaWorld(15, "True")
+		applied := w.merged.Add(time.Minute)
+		stepAt(w, applied)
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		Expect(rr.Status.Deadline.Time).To(BeTemporally("==", applied.Add(14*time.Minute)))
+		Expect(condition(rr, remediationv1alpha1.ConditionConfigured).Status).To(Equal(metav1.ConditionTrue))
+		Expect(condition(rr, rollout.ConditionRolledOut).Reason).To(Equal(rollout.ReasonKindNotChecked))
+		stepAt(w, rr.Status.Deadline.Time)
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+	})
+	It("ends Failed with KedaNotReady when the ScaledObject is not ready at the timeout", func() {
+		w := newKedaWorld(15, "False")
+		applied := w.merged.Add(time.Minute)
+		stepAt(w, applied)
+		deadline := fetch(w).Status.Deadline.Time
+		stepAt(w, deadline.Add(-time.Second))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying), "not ready before the timeout")
+		stepAt(w, deadline)
+		rr := expectEnd(w, remediationv1alpha1.PhaseFailed, ReasonKedaNotReady)
+		Expect(condition(rr, remediationv1alpha1.ConditionVerified).Message).To(ContainSubstring("NotReady"))
+	})
+	It("ends a ScaledObject that does not hold the desired maxReplicaCount ValueChanged", func() {
+		w := newKedaWorld(12, "True")
+		stepAt(w, w.merged.Add(time.Minute))
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonValueChanged)
+	})
 })
 
 // reconciler is the executor of the world; a new one is a restart.
 func (w *phasesWorld) reconciler() *RemediationRequestReconciler {
 	return &RemediationRequestReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), APIReader: w.reader,
-		Recorder: w.rec, Now: func() time.Time { return w.now },
+		Recorder: w.rec, Now: func() time.Time { return w.now }, VerifyOutcomes: true,
 		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
 			return w.git, nil
 		},

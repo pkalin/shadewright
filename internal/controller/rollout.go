@@ -99,6 +99,10 @@ var errTargetReplaced = fmt.Errorf("%w: an object of that name has another UID",
 // that commit or that Kustomization produced: nothing is recorded, the delivery is checked again at once.
 var errDeliveryMoved = errors.New("the delivery moved to another commit while it was checked")
 
+// errNoDeliveryVerifier means the executor runs without a delivery verifier (Delivery is nil), so the delivery
+// of a merge commit cannot be read. It does not clear by itself.
+var errNoDeliveryVerifier = errors.New("the executor has no delivery verifier")
+
 // maxPaused bounds the paused time added to the delivery window, so a corrupt pausedSeconds cannot overflow it.
 const maxPaused = 365 * 24 * time.Hour
 
@@ -140,29 +144,30 @@ func rolloutTarget(ref remediationv1alpha1.ObjectRef) client.Object {
 	return nil
 }
 
-// afterMerge runs the phases after the merge of a request with a merge receipt (afterReceipt, phases.go), and
-// the check after the merge of a Merged request without one; see the comment at the top of this file. It
-// returns when to look again (zero when the check is over or does not apply) and an error only for a failed read
-// or status write, which is retried with backoff.
+// afterMerge runs the phases after the merge of a request with a merge receipt (afterReceipt, phases.go) when
+// VerifyOutcomes is on, and otherwise the check after the merge of a Merged request; see the comment at the top
+// of this file. It returns when to look again (zero when the check is over or does not apply) and an error only
+// for a failed read or status write, which is retried with backoff.
 func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
-	if r.Delivery == nil {
-		return reconcile.Result{}, nil
-	}
 	switch rr.Status.Phase {
 	case remediationv1alpha1.PhaseWaitingForDelivery, remediationv1alpha1.PhaseVerifying:
+		if !r.VerifyOutcomes {
+			// Off, a request in a phase after Merged is left as it is, as before #681.
+			return reconcile.Result{}, nil
+		}
 		return r.afterReceipt(ctx, rr)
 	case remediationv1alpha1.PhaseMerged:
-		if rr.Status.MergeReceipt != nil {
+		if r.VerifyOutcomes && rr.Status.MergeReceipt != nil {
 			return r.afterReceipt(ctx, rr)
 		}
 	default:
 		return reconcile.Result{}, nil
 	}
-	// A request merged before merge receipts existed (MergedBeforeVerification) keeps Merged; its rollout is
-	// still reported once, as before #681.
-	if rr.Status.Source == nil || rr.Status.PullRequest == nil || rr.Status.PullRequest.MergeCommitSHA == "" ||
-		rolloutEnded(rr) {
+	// With VerifyOutcomes off, and for a request merged before merge receipts existed (MergedBeforeVerification),
+	// the request keeps Merged and its rollout is reported once (#532).
+	if r.Delivery == nil || rr.Status.Source == nil || rr.Status.PullRequest == nil ||
+		rr.Status.PullRequest.MergeCommitSHA == "" || rolloutEnded(rr) {
 		return reconcile.Result{}, nil
 	}
 	now := r.now()
@@ -580,6 +585,9 @@ func (r *RemediationRequestReconciler) delivered(ctx context.Context, rr *remedi
 	name, namespace, ok := kustomizationOf(target)
 	if !ok {
 		return delivery{target: target}, nil
+	}
+	if r.Delivery == nil {
+		return delivery{target: target}, errNoDeliveryVerifier
 	}
 	verifier, err := r.Delivery(q.ancestry)
 	if err != nil {

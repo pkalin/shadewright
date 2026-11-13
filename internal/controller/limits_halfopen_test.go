@@ -132,23 +132,21 @@ func TestBreakerHalfOpenLetsOneProbeThrough(t *testing.T) {
 	expectProbe(t, got3, false)
 }
 
-// TestBreakerProbeOutcome checks what ends the half-open state: the probe's success (Merged or a later phase)
+// TestBreakerProbeOutcome checks what ends the half-open state: the probe's success (Merged or Succeeded)
 // closes the breaker, and anything else (a failure, or a final phase that is neither, such as Expired or
 // Denied) opens it again for a full cool-down from the end of the probe, after which the next request goes
 // through as the new probe.
 func TestBreakerProbeOutcome(t *testing.T) {
 	cases := map[remediationv1alpha1.RemediationPhase]bool{ // phase of the probe: whether it closes the breaker
-		remediationv1alpha1.PhaseMerged:             true,
-		remediationv1alpha1.PhaseWaitingForDelivery: true,
-		remediationv1alpha1.PhaseVerifying:          true,
-		remediationv1alpha1.PhaseSucceeded:          true,
-		remediationv1alpha1.PhaseFailed:             false,
-		remediationv1alpha1.PhaseNeedsIntervention:  false,
-		remediationv1alpha1.PhaseExpired:            false,
-		remediationv1alpha1.PhaseCancelled:          false,
-		remediationv1alpha1.PhaseSuperseded:         false,
-		remediationv1alpha1.PhaseDenied:             false,
-		remediationv1alpha1.PhaseInconclusive:       false,
+		remediationv1alpha1.PhaseMerged:            true,
+		remediationv1alpha1.PhaseSucceeded:         true,
+		remediationv1alpha1.PhaseFailed:            false,
+		remediationv1alpha1.PhaseNeedsIntervention: false,
+		remediationv1alpha1.PhaseExpired:           false,
+		remediationv1alpha1.PhaseCancelled:         false,
+		remediationv1alpha1.PhaseSuperseded:        false,
+		remediationv1alpha1.PhaseDenied:            false,
+		remediationv1alpha1.PhaseInconclusive:      false,
 	}
 	for phase, closes := range cases {
 		t.Run(string(phase), func(t *testing.T) {
@@ -163,6 +161,50 @@ func TestBreakerProbeOutcome(t *testing.T) {
 			expectProbeEnd(t, r, rr2, ended, closes)
 		})
 	}
+}
+
+// TestBreakerUndecidedProbeStaysTheProbe: a probe in WaitingForDelivery or Verifying has not shown whether its
+// change works. It neither closes the breaker nor opens it again: it stays the probe, so the next request waits
+// (CircuitHalfOpen), also long after the cool-down and for a new reconciler, until the probe ends.
+func TestBreakerUndecidedProbeStaysTheProbe(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseWaitingForDelivery,
+		remediationv1alpha1.PhaseVerifying} {
+		t.Run(string(phase), func(t *testing.T) {
+			r, c, rr, rr2 := halfOpenWorld(t)
+			_, got, err := reconcileLimits(t, r, rr)
+			expectAdmitted(t, err, got)
+
+			moved := limitsNow.Add(2 * time.Minute)
+			endProbe(t, c, rr, phase, moved)
+			for _, at := range []time.Time{moved, moved.Add(halfOpenCooldown), moved.Add(80 * time.Minute)} {
+				r.Now = func() time.Time { return at }
+				res, got2, err := reconcileLimits(t, r, rr2)
+				expectHeld(t, res, err, got2, ReasonCircuitHalfOpen)
+				expectProbe(t, got2, false)
+			}
+			// It ends Failed: the breaker opens again for a full cool-down from then.
+			ended := moved.Add(81 * time.Minute)
+			endProbe(t, c, rr, remediationv1alpha1.PhaseFailed, ended)
+			expectProbeEnd(t, r, rr2, ended, false)
+		})
+	}
+}
+
+// TestBreakerUndecidedMergeDoesNotClose: a request merged before three failures in a row, which then moves on to
+// WaitingForDelivery (a later lastPhaseTransitionTime), is not a success newer than those failures: the breaker
+// stays open.
+func TestBreakerUndecidedMergeDoesNotClose(t *testing.T) {
+	old := otherRequest("old-merge", "uid-target-old-merge", remediationv1alpha1.PhaseMerged, 40*time.Minute)
+	r, c, _, rr2 := halfOpenWorld(t, old)
+	r.BreakerCooldown = time.Hour
+	res, got, err := reconcileLimits(t, r, rr2)
+	expectHeld(t, res, err, got, ReasonCircuitOpen)
+	endProbe(t, c, old, remediationv1alpha1.PhaseWaitingForDelivery, limitsNow.Add(-time.Minute))
+	res, got, err = reconcileLimits(t, r, rr2)
+	expectHeld(t, res, err, got, ReasonCircuitOpen)
+	endProbe(t, c, old, remediationv1alpha1.PhaseVerifying, limitsNow.Add(-30*time.Second))
+	res, got, err = reconcileLimits(t, r, rr2)
+	expectHeld(t, res, err, got, ReasonCircuitOpen)
 }
 
 // expectProbeEnd checks the breaker after a probe ended at ended: closed at once when it closes, else open for

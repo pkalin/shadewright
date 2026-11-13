@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 450" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">RemediationRequest phases</title>
-  <desc id="d">Main path: Pending, PolicyChecked, PRCreated, then AwaitingApproval or AutoMergeQueued (planned), Merged, WaitingForDelivery, Verifying and Succeeded (planned). Built up to Verifying. A merged request without a merge receipt ends Inconclusive. WaitingForDelivery ends Failed when Flux failed on the merge commit at the end of the delivery window, and Inconclusive when the delivery was not seen, was blocked or suspended, or the target is gone. Verifying ends Inconclusive at once on a changed value, template or target, and at the timeout Failed when the rollout is stuck, otherwise Inconclusive. Before the merge any step can instead end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention; after the merge a deadline never ends a request Expired.</desc>
+  <desc id="d">Main path: Pending, PolicyChecked, PRCreated, then AwaitingApproval or AutoMergeQueued (planned), Merged, WaitingForDelivery, Verifying and Succeeded (planned). Built up to Verifying; the steps after Merged run only with the executor flag --verify-outcomes, off by default until the verifier's report is read, and without it a merged request stays Merged. A merged request without a merge receipt ends Inconclusive. WaitingForDelivery ends Failed when Flux failed on the merge commit at the end of the delivery window, and Inconclusive when the delivery was not seen, was blocked or suspended, or the target is gone. Verifying ends Inconclusive at once on a changed value, template or target, and at the timeout Failed when the rollout is stuck or a ScaledObject is not ready, otherwise Inconclusive. Before the merge any step can instead end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention; after the merge a deadline never ends a request Expired.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -41,6 +41,8 @@
   <path class="f" d="M770 74Q795 74 795 94T814 114" marker-end="url(#a)"/>
   <path class="f plan" d="M770 154Q795 154 795 134T814 114" marker-end="url(#a)"/>
   <path class="f" d="M885 136V180H405V216" marker-end="url(#a)"/>
+  <text class="lbl" x="395" y="200" text-anchor="end">with --verify-outcomes</text>
+  <text class="lbl" x="395" y="214" text-anchor="end">(off by default)</text>
   <path class="f" d="M510 244H554" marker-end="url(#a)"/>
   <path class="f plan" d="M710 244H754" marker-end="url(#a)"/>
   <text class="lbl" x="930" y="242">fresh report of a quiet</text>
@@ -54,8 +56,9 @@
   <text class="lbl" x="40" y="308">suspended, Flux failed on</text>
   <text class="lbl" x="40" y="324">the merge commit, target gone</text>
   <text class="lbl" x="730" y="300">value or template changed, target</text>
-  <text class="lbl" x="730" y="316">gone; at the timeout rollout stuck</text>
-  <text class="lbl" x="730" y="332">(Failed) or no evidence yet</text>
+  <text class="lbl" x="730" y="316">gone; at the timeout rollout stuck or</text>
+  <text class="lbl" x="730" y="332">ScaledObject not ready (Failed),</text>
+  <text class="lbl" x="730" y="348">or no evidence yet</text>
   <rect class="bad" x="40" y="372" width="1040" height="52" rx="12"/>
   <text class="badt" x="62" y="403">Before the merge any step can end in: Denied · Failed · Expired · Cancelled · Superseded · NeedsIntervention</text>
 </svg>

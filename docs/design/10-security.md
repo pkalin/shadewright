@@ -193,7 +193,8 @@ Requests that ended before `lastPhaseTransitionTime` existed are not counted, so
 **It trips** when three failures came after the latest success, among the requests that went through the policy check.
 
 - Failures: `Failed`, `NeedsIntervention`, a rejected pull request included.
-- Successes: `Merged` or a later phase (`WaitingForDelivery`, `Verifying`, `Succeeded`).
+- Successes: `Merged` and `Succeeded`.
+- Undecided: `WaitingForDelivery` and `Verifying` (#681) are neither. The move to them refreshes `lastPhaseTransitionTime`, so a merge older than later failures would otherwise read as a newer success and close the breaker.
 - It stays tripped until a success.
 
 **While tripped** it is open for 30 minutes after the latest failure: nothing goes through. After that it is half-open (#295): one request goes through as the probe, and the others wait while it runs.
@@ -207,7 +208,7 @@ Requests that ended before `lastPhaseTransitionTime` existed are not counted, so
 **The probe is marked.** The policy check sets `status.breakerProbe` on a request it lets through while the breaker is tripped, in the same status write as the allowed decision. The breaker finds the probe by that field only, so leaders with different clocks agree on it and a restart keeps it.
 
 - A request without the field (let through before the trip, or before the field existed) is not a probe.
-- A probe runs until it reaches a final phase or `Merged`, also while it is being deleted. A phase after `Merged` (`WaitingForDelivery`, `Verifying`, `Succeeded`) counts as its success.
+- A probe runs until it reaches a final phase or `Merged`, also while it is being deleted. `Merged` and `Succeeded` count as its success. A probe in `WaitingForDelivery` or `Verifying` stays the probe until it ends, so the others keep waiting (`CircuitHalfOpen`).
 - One that ended without `lastPhaseTransitionTime` (written by hand) is taken to have ended one cool-down after the trip. It holds the breaker open for one more cool-down at most.
 - Requests let through before the trip that still run are not probes. They are not stopped, and a failure among them opens the breaker again.
 
@@ -218,7 +219,7 @@ Requests that ended before `lastPhaseTransitionTime` existed are not counted, so
 The breaker reads only the outcomes it may still need (#390). Each request carries `status.breakerCounts`, a selectable field:
 
 - **Set** in the status write that ends the request: `true` for a success, a failure, or a probe that ended any other way (`Expired`, `Cancelled`, `Superseded`, `Denied`, `Inconclusive`); `false` for any other end (a refusal, `Expired` outside a probe).
-- **Cleared** to `false` only on outcomes that ended before the latest request in `Succeeded`, the only final success. The same write names that request in `status.breakerClearedBy`, also a selectable field. `Merged`, `WaitingForDelivery` and `Verifying` count as successes for the decision, as before, but clear nothing: the phases after the merge (#681) may still move them to `Failed`, and that write sets the field `true` again.
+- **Cleared** to `false` only on outcomes that ended before the latest request in `Succeeded`, the only final success. The same write names that request in `status.breakerClearedBy`, also a selectable field. `Merged` counts as a success for the decision, as before, but clears nothing: the phases after the merge (#681) may still move it to `Failed`, and that write sets the field `true` again. `WaitingForDelivery` and `Verifying` are no outcome: the write that moves a request to one of them sets the field `false`, or `true` for a probe, which the breaker must keep reading.
 - **Restored** to `true` when the request in `Succeeded` is deleted: its finalizer lists the requests that name it and sets the field back on each before it removes itself. A restore that fails keeps the finalizer, and the deletion is retried.
 - **Unset** while the request has not ended, and on one that ended before the field existed. An unset request is read (fail closed). A one-time pass sets the field on an older ended request from its status, in the same status write as `status.holdsTarget`.
 

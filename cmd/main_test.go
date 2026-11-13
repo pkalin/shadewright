@@ -25,22 +25,28 @@ import (
 	"github.com/pkalin/shadewright/internal/controller"
 )
 
-// TestExecutorFlagsConfigureTheReconciler: --reviewer-hints is off unless given, and the flags reach the
-// ReviewerHints, PullRequestPollInterval and NodeGrace of the reconciler newReconciler builds, the one main runs.
+// TestExecutorFlagsConfigureTheReconciler: --reviewer-hints and --verify-outcomes are off unless given, and the
+// flags reach the ReviewerHints, PullRequestPollInterval, NodeGrace and VerifyOutcomes of the reconciler
+// newReconciler builds, the one main runs.
 func TestExecutorFlagsConfigureTheReconciler(t *testing.T) {
 	cases := map[string]struct {
 		args      []string
 		wantHints bool
 		wantPoll  time.Duration
 		wantGrace time.Duration
+		wantOut   bool
 	}{
-		"defaults": {nil, false, controller.DefaultPullRequestPollInterval, time.Minute},
-		"hints on": {[]string{"--reviewer-hints"}, true, controller.DefaultPullRequestPollInterval, time.Minute},
+		"defaults": {nil, false, controller.DefaultPullRequestPollInterval, time.Minute, false},
+		"hints on": {[]string{"--reviewer-hints"}, true, controller.DefaultPullRequestPollInterval, time.Minute, false},
 		"hints off": {[]string{"--reviewer-hints=false"}, false, controller.DefaultPullRequestPollInterval,
-			time.Minute},
-		"poll interval only": {[]string{"--pull-request-poll-interval=2m"}, false, 2 * time.Minute, time.Minute},
+			time.Minute, false},
+		"poll interval only": {[]string{"--pull-request-poll-interval=2m"}, false, 2 * time.Minute, time.Minute, false},
 		"node grace": {[]string{"--node-grace=90s"}, false, controller.DefaultPullRequestPollInterval,
-			90 * time.Second},
+			90 * time.Second, false},
+		"outcomes on": {[]string{"--verify-outcomes"}, false, controller.DefaultPullRequestPollInterval,
+			time.Minute, true},
+		"outcomes off": {[]string{"--verify-outcomes=false"}, false, controller.DefaultPullRequestPollInterval,
+			time.Minute, false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -62,6 +68,9 @@ func TestExecutorFlagsConfigureTheReconciler(t *testing.T) {
 			}
 			if r.NodeGrace != c.wantGrace {
 				t.Errorf("NodeGrace = %v, want %v", r.NodeGrace, c.wantGrace)
+			}
+			if r.VerifyOutcomes != c.wantOut {
+				t.Errorf("VerifyOutcomes = %v, want %v", r.VerifyOutcomes, c.wantOut)
 			}
 		})
 	}

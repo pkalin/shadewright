@@ -364,8 +364,8 @@ func TestLimitsReadThreeLists(t *testing.T) {
 	for _, c := range p.calls {
 		sels = append(sels, c.selector)
 	}
-	want := []string{"status.phase!=Merged,status.phase!=WaitingForDelivery,status.phase!=Verifying," +
-		"status.phase!=Succeeded,status.phase!=Failed,status.phase!=NeedsIntervention,status.phase!=Expired," +
+	want := []string{"status.phase!=Merged,status.phase!=Succeeded,status.phase!=WaitingForDelivery," +
+		"status.phase!=Verifying,status.phase!=Failed,status.phase!=NeedsIntervention,status.phase!=Expired," +
 		"status.phase!=Denied,status.phase!=Cancelled,status.phase!=Superseded,status.phase!=Inconclusive",
 		"status.holdsTarget!=false", "status.breakerCounts!=false"}
 	if !slices.Equal(sels, want) {
@@ -374,7 +374,8 @@ func TestLimitsReadThreeLists(t *testing.T) {
 }
 
 // TestEveryPhaseIsClassified checks that every phase the API allows (the enum marker of RemediationPhase) is
-// Pending, a phase before the merge, or in exactly one of successPhases, failurePhases and neutralPhases, so a
+// Pending, a phase before the merge, or in exactly one of successPhases, undecidedPhases, failurePhases and
+// neutralPhases, so a
 // phase added to the API is not silently left out of the breaker or the lock.
 func TestEveryPhaseIsClassified(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", "remediationrequest_types.go"))
@@ -389,7 +390,8 @@ func TestEveryPhaseIsClassified(t *testing.T) {
 		p := remediationv1alpha1.RemediationPhase(v)
 		n := 0
 		for _, in := range []bool{p == remediationv1alpha1.PhasePending, beforeMerge(p),
-			slices.Contains(successPhases, p), slices.Contains(failurePhases, p), slices.Contains(neutralPhases, p)} {
+			slices.Contains(successPhases, p), slices.Contains(undecidedPhases, p), slices.Contains(failurePhases, p),
+			slices.Contains(neutralPhases, p)} {
 			if in {
 				n++
 			}

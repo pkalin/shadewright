@@ -103,7 +103,7 @@ var closedReasons = map[string]bool{
 // else, a stop that left the pull request open (HeadMoved, a refused close), one the executor could not find
 // (ChangeRequestGone), Failed or an unknown phase included, may still be open (fail closed).
 func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
-	if slices.Contains(successPhases, rr.Status.Phase) || rr.Status.Phase == remediationv1alpha1.PhaseInconclusive ||
+	if slices.Contains(successPhases, rr.Status.Phase) || undecided(rr.Status.Phase) || rr.Status.Phase == remediationv1alpha1.PhaseInconclusive ||
 		(rr.Status.Phase == remediationv1alpha1.PhaseSuperseded && !handedOff(rr)) {
 		return false
 	}

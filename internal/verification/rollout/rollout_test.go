@@ -394,3 +394,29 @@ func TestPartitionedStatefulSetNamesTheOldPods(t *testing.T) {
 		t.Errorf("after the partition was lowered: %+v, want RolloutComplete", res)
 	}
 }
+
+// TestStatefulSetMessageCapsRevisionNames: the revision names a StatefulSet reports go into the RolledOut message
+// and its Event only cut to maxRevisionInMessage bytes, whatever their length.
+func TestStatefulSetMessageCapsRevisionNames(t *testing.T) {
+	long := strings.Repeat("r", 4000)
+	ss := cacheStatefulSet()
+	ss.Status.CurrentRevision = "old-" + long
+	ss.Status.UpdateRevision = "new-" + long
+	res, err := Evaluate(ss, "", applied, applied.Add(DefaultDeadline), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != Stuck {
+		t.Fatalf("got %v, want Stuck", res.State)
+	}
+	if strings.Contains(res.Message, long[:200]) {
+		t.Errorf("message carries more than %d bytes of a revision name (%d bytes)", 200,
+			len(res.Message))
+	}
+	if !strings.Contains(res.Message, "old-rrr") || !strings.Contains(res.Message, "...") {
+		t.Error("message does not name the cut current revision")
+	}
+	if len(res.Message) > 2000 {
+		t.Errorf("message is %d bytes", len(res.Message))
+	}
+}

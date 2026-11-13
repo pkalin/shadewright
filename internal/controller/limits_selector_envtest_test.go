@@ -20,6 +20,7 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -59,6 +60,18 @@ var _ = Describe("RemediationRequest selectable fields", Ordered, func() {
 				continue
 			}
 			rr.Status.Phase = p
+			if undecided(p) {
+				// Both phases need a merge receipt, and Verifying the applied time (validation rules).
+				mergedAt := metav1.NewMicroTime(time.Date(2026, 11, 8, 10, 35, 14, 0, time.UTC))
+				applied := metav1.NewTime(mergedAt.Add(time.Minute))
+				merge, head := strings.Repeat("d", 40), strings.Repeat("c", 40)
+				rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 1,
+					URL: "https://github.com/example/fleet/pull/1", HeadSHA: head, MergeCommitSHA: merge,
+					MergedAt: &mergedAt, AppliedObservedAt: &applied}
+				rr.Status.MergeReceipt = &remediationv1alpha1.MergeReceipt{
+					Repository:   remediationv1alpha1.PlanRepository{URL: testFleetURL, InstallationID: 7},
+					TargetBranch: mainBranch, PullRequest: 1, HeadSHA: head, MergeCommitSHA: merge, MergedAt: mergedAt}
+			}
 			// The breaker's watermark: one it needs, one it no longer needs; the others never had the field.
 			switch p {
 			case remediationv1alpha1.PhaseMerged:

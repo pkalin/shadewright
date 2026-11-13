@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,6 +35,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	verification "github.com/pkalin/shadewright/internal/verification/clearing"
@@ -91,8 +93,14 @@ const (
 	// commit overwrote it (Inconclusive at once).
 	ReasonValueChanged = "ValueChanged"
 	// ReasonClearingNotChecked: the request reached its timeout without evidence that the symptom cleared,
-	// which the executor does not read yet (#683), or its own reads could not be made to the end (Inconclusive).
+	// which the executor does not read yet (#683), or the timeout could not be measured (Inconclusive).
 	ReasonClearingNotChecked = verification.ReasonClearingNotChecked
+	// ReasonTargetNotChecked: the executor's own evidence on the target could not be read: the target could not
+	// be read until the end of the timeout and its grace with no rollout verdict recorded, or the action's field
+	// could not be read on it (Inconclusive).
+	ReasonTargetNotChecked = "TargetNotChecked"
+	// ReasonKedaNotReady: a ScaledObject target is not ready by the KedaReady rule at the timeout (Failed).
+	ReasonKedaNotReady = verification.ReasonKedaNotReady
 )
 
 // DefaultVerificationTimeout is the default of spec.verification.timeout.
@@ -142,16 +150,31 @@ func (r *RemediationRequestReconciler) afterReceipt(ctx context.Context, rr *rem
 			ReasonNoMergeReceipt, fmt.Sprintf("Phase %s without a merge receipt; nothing after the merge can be "+
 				"checked", rr.Status.Phase))
 	}
+	if rr.Status.MergeReceipt.MergedAt.IsZero() {
+		// The API refuses a receipt without mergedAt; one read without it (written into an older schema, or a
+		// decoding fault) would put the end of the delivery window in year 1.
+		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
+			ReasonNoMergeReceipt, "The merge receipt has no merge time, so it is unusable: no wait after the merge "+
+				"can be measured")
+	}
 	now := r.now()
 	stepCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
 	defer cancel()
 	switch rr.Status.Phase {
-	case remediationv1alpha1.PhaseMerged:
-		if err := r.enterDelivery(ctx, rr, now); err != nil {
-			return reconcile.Result{}, err
+	case remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseWaitingForDelivery:
+		if applied := rr.Status.PullRequest.AppliedObservedAt; applied != nil &&
+			!now.Before(applied.Add(r.verificationTimeout(rr))) {
+			// The applied time was recorded by the rollout report in Merged (#532, before #681 or with
+			// --verify-outcomes off) and the timeout measured from it has passed: nothing was verified in time.
+			return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
+				ReasonClearingNotChecked, "The verification timeout, measured from the applied time recorded "+
+					"before outcome verification started for this request, had already passed; nothing was verified")
 		}
-		fallthrough
-	case remediationv1alpha1.PhaseWaitingForDelivery:
+		if rr.Status.Phase == remediationv1alpha1.PhaseMerged {
+			if err := r.enterDelivery(ctx, rr, now); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
 		var fresh client.Object
 		if rr.Status.PullRequest.AppliedObservedAt == nil {
 			res, target, err := r.deliveryStep(ctx, stepCtx, rr, now)
@@ -258,12 +281,15 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 	if ctx.Err() != nil {
 		return reconcile.Result{}, nil, err
 	}
+	back := clockWentBack(start, now)
 	switch {
 	case errors.Is(err, errTargetReplaced):
 		return reconcile.Result{}, nil, r.endTargetGone(ctx, rr, true)
 	case errors.Is(err, errTargetGone):
 		return reconcile.Result{}, nil, r.endTargetGone(ctx, rr, false)
-	case errors.Is(err, errDeliveryMoved):
+	case errors.Is(err, errDeliveryMoved) && !back && now.Before(windowEnd):
+		// Checked again at once within the window; past it, a delivery that keeps moving is a failed read like
+		// any other, retried until the end of the grace period.
 		return reconcile.Result{RequeueAfter: time.Second}, nil, nil
 	}
 	if err == nil && d.applied && recordApplied(rr, now) {
@@ -278,10 +304,9 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 			"appliedRevision", st.AppliedRevision, "targetGeneration", st.TargetGeneration)
 		return reconcile.Result{}, d.target, nil
 	}
-	back := clockWentBack(start, now)
 	if !back && now.Before(windowEnd) {
 		if err != nil {
-			return reconcile.Result{}, nil, err
+			return reconcile.Result{}, nil, r.deliveryReadFailed(ctx, rr, err)
 		}
 		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, nil, nil
 	}
@@ -302,10 +327,52 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 	case now.After(windowEnd.Add(finalGrace)):
 		logf.FromContext(ctx).Info("The delivery of RemediationRequest could not be checked",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		why := "the executor log has the error"
+		if cause := lastingCause(err); cause != "" {
+			why = cause
+		}
 		return reconcile.Result{}, nil, r.endDeliveryNotChecked(ctx, rr, "it could not be read until the end of the "+
-			"delivery window and its grace (the executor log has the error)")
+			"delivery window and its grace ("+why+")")
 	}
-	return reconcile.Result{}, nil, err
+	return reconcile.Result{}, nil, r.deliveryReadFailed(ctx, rr, err)
+}
+
+// lastingCause names, in a fixed text, an error of the delivery read that does not clear by itself while the
+// settings or the executor stay as they are, and errDeliveryMoved; it is empty for any other error. Only this
+// text goes into a condition, never the error, which may carry what the Git host or the API server said.
+func lastingCause(err error) string {
+	switch {
+	case errors.Is(err, errRepositoryGone):
+		return "the repository of the merge receipt is not in RemediationSettings any more"
+	case errors.Is(err, freshness.ErrRepositoryUnusable):
+		return "the settings of the merge receipt's repository cannot be used to open it"
+	case errors.Is(err, errNoAncestry):
+		return "the Git provider of the merge receipt's repository cannot check commit ancestry"
+	case errors.Is(err, errNoDeliveryVerifier):
+		return "the executor runs without a delivery verifier"
+	case errors.Is(err, errDeliveryMoved):
+		return "the GitOps controller kept moving to another commit while it was read"
+	}
+	return ""
+}
+
+// deliveryReadFailed returns err, a failed delivery read, for a retry with backoff. When it has a lasting cause
+// (lastingCause, errDeliveryMoved aside), Delivered Unknown names it first, in a status write, so the cause is not
+// only in the log.
+func (r *RemediationRequestReconciler) deliveryReadFailed(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, err error) error {
+	cause := lastingCause(err)
+	if cause == "" || errors.Is(err, errDeliveryMoved) {
+		return err
+	}
+	mr := rr.Status.MergeReceipt
+	changed := setCondition(rr, remediationv1alpha1.ConditionDelivered, metav1.ConditionUnknown, ReasonDeliveryPending,
+		fmt.Sprintf("Waiting for the GitOps controller to apply merge commit %s of branch %s, or a later commit that "+
+			"holds it; the delivery cannot be read: %s", mr.MergeCommitSHA, mr.TargetBranch, cause))
+	if werr := r.writeIf(ctx, rr, changed); werr != nil {
+		return errors.Join(err, werr)
+	}
+	return err
 }
 
 // endDelivery ends a request whose delivery window ended without the merge commit seen applied, by what the
@@ -434,14 +501,27 @@ func (r *RemediationRequestReconciler) verifyStep(ctx, stepCtx context.Context,
 		case err != nil && !now.Before(deadline.Add(finalGrace)):
 			logf.FromContext(ctx).Info("The target of RemediationRequest could not be read", "remediationRequest",
 				client.ObjectKeyFromObject(rr), "error", err.Error())
+			if c := stuckRecorded(rr); c != nil {
+				// The rollout verdict recorded before the reads failed still stands.
+				return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseFailed,
+					rollout.ReasonRolloutStuck, "The rollout did not complete by the verification timeout: "+c.Message)
+			}
 			return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
-				ReasonClearingNotChecked, "The target could not be read until the end of the verification timeout "+
+				ReasonTargetNotChecked, "The target could not be read until the end of the verification timeout "+
 					"and its grace (the executor log has the error)")
 		case err != nil:
 			return reconcile.Result{}, err
 		}
 	}
-	if why, ok := configured(rr, target); !ok {
+	why, ok, err := configured(rr, target)
+	if err != nil {
+		// Evidence that cannot be read is not a changed value.
+		logf.FromContext(ctx).Info("The action's field of RemediationRequest could not be read on its target",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
+			ReasonTargetNotChecked, why)
+	}
+	if !ok {
 		cond := metav1.Condition{Type: remediationv1alpha1.ConditionConfigured, Status: metav1.ConditionFalse,
 			Reason: ReasonValueChanged, Message: why, ObservedGeneration: rr.Generation}
 		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
@@ -455,7 +535,7 @@ func (r *RemediationRequestReconciler) verifyStep(ctx, stepCtx context.Context,
 			fmt.Sprintf("The rollout check covers Deployments and StatefulSets only; a %s is not checked", ref.Kind)) ||
 			changed
 	} else {
-		superseded, result, ch := r.checkRollout(rr, target, appliedAt, now)
+		superseded, result, ch := r.checkRollout(ctx, rr, target, appliedAt, now)
 		if superseded != "" {
 			cond := metav1.Condition{Type: rollout.ConditionRolledOut, Status: metav1.ConditionUnknown,
 				Reason: rollout.ReasonRolloutSuperseded, Message: superseded, ObservedGeneration: rr.Generation}
@@ -466,10 +546,16 @@ func (r *RemediationRequestReconciler) verifyStep(ctx, stepCtx context.Context,
 		stuck = result
 	}
 	if !now.Before(deadline) {
-		if c := meta.FindStatusCondition(rr.Status.Conditions, rollout.ConditionRolledOut); c != nil &&
-			c.Status == metav1.ConditionFalse && c.Reason == rollout.ReasonRolloutStuck {
+		if c := stuckRecorded(rr); c != nil {
 			return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseFailed,
 				rollout.ReasonRolloutStuck, "The rollout did not complete by the verification timeout: "+c.Message)
+		}
+		if isScaledObject(ref) {
+			if state := kedaState(target); state != kedaready.Ready {
+				return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseFailed,
+					ReasonKedaNotReady, fmt.Sprintf("The ScaledObject is %s by the KedaReady rule at the verification "+
+						"timeout, so it does not scale on its metrics", state))
+			}
 		}
 		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
 			ReasonClearingNotChecked, "The verification timeout passed without evidence that the symptom cleared: "+
@@ -484,14 +570,42 @@ func (r *RemediationRequestReconciler) verifyStep(ctx, stepCtx context.Context,
 	return reconcile.Result{RequeueAfter: pollAfter(deadline.Sub(now))}, nil
 }
 
+// stuckRecorded returns the RolledOut condition when it records the rollout stuck (False, RolloutStuck), else nil.
+func stuckRecorded(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
+	c := meta.FindStatusCondition(rr.Status.Conditions, rollout.ConditionRolledOut)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != rollout.ReasonRolloutStuck {
+		return nil
+	}
+	return c
+}
+
+// isScaledObject reports whether ref names a keda.sh/v1alpha1 ScaledObject, the one KEDA target whose readiness
+// the KedaReady rule reads.
+func isScaledObject(ref remediationv1alpha1.ObjectRef) bool {
+	return ref.APIVersion == kedaready.APIVersion && ref.Kind == kedaready.KindScaledObject
+}
+
+// kedaState is the readiness of a ScaledObject target by the KedaReady rule (kedaready.Readiness, the rule the
+// policy gate and the KEDA module use). An object that cannot be read as JSON is NotReady.
+func kedaState(target client.Object) kedaready.State {
+	if u, ok := target.(*unstructured.Unstructured); ok {
+		return kedaready.Readiness(u.Object)
+	}
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(target)
+	if err != nil {
+		return kedaready.NotReady
+	}
+	return kedaready.Readiness(obj)
+}
+
 // checkRollout reads the rollout of a Verifying Deployment or StatefulSet into rr (not written). superseded is
 // not empty, with why, when the target's template is no longer the one recorded with the applied time (its hash
 // differs, or it names another revision than the one recorded) or Evaluate found a newer revision: the request
 // then ends RolloutSuperseded. Otherwise it records the template revision once (recordRevision), and, until
 // RolledOut is True, sets RolledOut from rollout.Evaluate; stuck is the result when this check first reports the
 // rollout stuck, for its one Event. changed reports whether the status changed.
-func (r *RemediationRequestReconciler) checkRollout(rr *remediationv1alpha1.RemediationRequest, target client.Object,
-	appliedAt, now time.Time) (superseded string, stuck *rollout.Result, changed bool) {
+func (r *RemediationRequestReconciler) checkRollout(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	target client.Object, appliedAt, now time.Time) (superseded string, stuck *rollout.Result, changed bool) {
 	st := rolloutStatus(rr)
 	if st.TemplateHash != "" && rollout.TemplateHash(target) != st.TemplateHash {
 		return "The target's pod template changed after the applied commit was recorded; this change is not " +
@@ -512,6 +626,8 @@ func (r *RemediationRequestReconciler) checkRollout(rr *remediationv1alpha1.Reme
 	result, err := rollout.Evaluate(target, st.TemplateRevision, appliedAt, now,
 		rollout.ClampDeadline(r.RolloutDeadline))
 	if err != nil {
+		logf.FromContext(ctx).Info("The rollout of RemediationRequest could not be evaluated", "remediationRequest",
+			client.ObjectKeyFromObject(rr), "error", err.Error())
 		return "", nil, setCondition(rr, rollout.ConditionRolledOut, metav1.ConditionUnknown,
 			rollout.ReasonRolloutNotDetermined, "The rollout cannot be evaluated") || changed
 	}
@@ -532,28 +648,31 @@ func (r *RemediationRequestReconciler) checkRollout(rr *remediationv1alpha1.Reme
 
 // configured reports whether the live target holds the desired value of the request's action, read with the
 // field accessor of the source mapping, as the duplicate rule's changeInEffect does. When it does not, why says
-// so in a fixed text: the live value is not copied into the status.
-func configured(rr *remediationv1alpha1.RemediationRequest, target client.Object) (why string, ok bool) {
+// so in a fixed text: the live value is not copied into the status. err is set, with why, when the evidence
+// cannot be read at all (the action's field, or the target as an object): that is no changed value.
+func configured(rr *remediationv1alpha1.RemediationRequest, target client.Object) (why string, ok bool, err error) {
 	field, err := sourcemap.FieldFor(rr.Spec.Action, rr.Spec.TargetRef)
 	if err != nil {
-		return "The action's field cannot be read on the target, so the desired value cannot be shown", false
+		return "The action's field cannot be read on the target, so whether it holds the desired value was not " +
+			"checked", false, fmt.Errorf("the field of action %s: %w", rr.Spec.Action.Type, err)
 	}
 	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(target)
 	if err != nil {
-		return "The live target cannot be read as an object, so the desired value cannot be shown", false
+		return "The live target cannot be read as an object, so whether it holds the desired value was not checked",
+			false, fmt.Errorf("convert the target: %w", err)
 	}
 	desired, ok := sourcemap.DesiredValue(rr.Spec.Action)
 	got, found := field.Get(obj)
 	switch {
 	case !ok:
-		return "The action names no desired value to compare with", false
+		return "The action names no desired value to compare with", false, nil
 	case !found:
-		return "The live target has no value at the action's field: a later change removed it", false
+		return "The live target has no value at the action's field: a later change removed it", false, nil
 	case !field.Comparable(got) || !field.Equals(got, desired):
 		return "The live target does not hold the desired value: a later commit or change overwrote it, so this " +
-			"change never ran as merged", false
+			"change never ran as merged", false, nil
 	}
-	return "", true
+	return "", true, nil
 }
 
 // setCondition sets a condition in the status about to be written and reports whether its status, reason or

@@ -92,18 +92,21 @@ func Sample(spec v1alpha1.VerificationReportSpec, prev v1alpha1.VerificationRepo
 	st.Sample = prev.Sample + 1
 	st.SampledAt = &now
 
-	reason, oom, err := evaluate(spec, &prev, &st, in, now.Time, gap)
+	o, err := evaluate(spec, &prev, &st, in, now.Time, gap)
 	if err != nil {
 		return Result{}, err
 	}
 	w := ReportWindow(&st)
-	if reason == "" {
+	switch {
+	case o.reason == "":
 		w.Good(now.Time)
-	} else {
-		w.Reset(reason, now.Time)
+	case o.nodeTimeOnly:
+		w.ResetUnrecorded(o.reason, now.Time)
+	default:
+		w.Reset(o.reason, now.Time)
 	}
 	w.store(&st)
-	return Result{Status: st, Reason: reason, OOMKilled: oom}, nil
+	return Result{Status: st, Reason: o.reason, OOMKilled: o.oomRecorded}, nil
 }
 
 // podSample is what one pod of the rollout showed.
@@ -119,28 +122,38 @@ type podSample struct {
 	oom *v1alpha1.OOMKill
 }
 
-// evaluate fills st (desiredReplicas, podsCovered, baselines, oomKill) and returns the reset reason of the
-// sample, empty for a good one.
+// outcome is what evaluate found in one sample.
+type outcome struct {
+	// reason is the reset reason, empty for a good sample.
+	reason v1alpha1.ResetReason
+	// oomRecorded is true when this sample recorded the OOM kill.
+	oomRecorded bool
+	// nodeTimeOnly is true for a Restarted reset that only a termination time shows: no restart count above
+	// its baseline and no OOM kill. Node times can only delay or deny success, so it is not durable trouble.
+	nodeTimeOnly bool
+}
+
+// evaluate fills st (desiredReplicas, podsCovered, baselines, oomKill) and returns what the sample showed.
 func evaluate(spec v1alpha1.VerificationReportSpec, prev, st *v1alpha1.VerificationReportStatus, in Input,
-	now time.Time, gap bool) (v1alpha1.ResetReason, bool, error) {
+	now time.Time, gap bool) (outcome, error) {
 	replicas, ok := targetReplicas(spec, in.Target)
 	if !ok {
 		// The target is gone, replaced or names another template revision: the executor ends the request on
 		// its own reads; for the report this sample is no evidence.
 		st.PodsCovered = 0
-		return v1alpha1.ResetEvidenceMissing, false, nil
+		return outcome{reason: v1alpha1.ResetEvidenceMissing}, nil
 	}
 	st.DesiredReplicas = replicas
 	if replicas == 0 {
 		st.PodsCovered = 0
-		return v1alpha1.ResetScaledToZero, false, nil
+		return outcome{reason: v1alpha1.ResetScaledToZero}, nil
 	}
 	// A list longer than the pages hold, or more desired replicas than the bound, cannot be covered.
 	coverable := !in.Truncated && len(in.Pods) <= PageSize*MaxPages && replicas <= MaxPods
 
 	pods, otherRevision, err := rolloutPods(spec, in)
 	if err != nil {
-		return "", false, err
+		return outcome{}, err
 	}
 	// An OOM kill of the action's container on a returned pod of the rollout is affirmative evidence on its
 	// own: a pod of the rollout is proven to run the applied template with the desired limit. It is recorded
@@ -159,12 +172,12 @@ func evaluate(spec v1alpha1.VerificationReportSpec, prev, st *v1alpha1.Verificat
 	}
 	// uncovered ends a sample that cannot cover every pod: the baselines stay as they are, none is dropped to
 	// fit. It is EvidenceMissing, or Restarted when an OOM kill was seen.
-	uncovered := func() (v1alpha1.ResetReason, bool, error) {
+	uncovered := func() (outcome, error) {
 		st.PodsCovered = 0
 		if oom != nil {
-			return v1alpha1.ResetRestarted, recorded, nil
+			return outcome{reason: v1alpha1.ResetRestarted, oomRecorded: recorded}, nil
 		}
-		return v1alpha1.ResetEvidenceMissing, false, nil
+		return outcome{reason: v1alpha1.ResetEvidenceMissing}, nil
 	}
 	if !coverable {
 		return uncovered()
@@ -198,23 +211,27 @@ func evaluate(spec v1alpha1.VerificationReportSpec, prev, st *v1alpha1.Verificat
 	slices.SortFunc(st.Baselines, func(a, b v1alpha1.PodBaseline) int { return strings.Compare(string(a.PodUID), string(b.PodUID)) })
 
 	switch {
-	case oom != nil || c.restarted:
-		return v1alpha1.ResetRestarted, recorded, nil
+	case oom != nil || c.counted:
+		return outcome{reason: v1alpha1.ResetRestarted, oomRecorded: recorded}, nil
+	case c.terminated:
+		return outcome{reason: v1alpha1.ResetRestarted, nodeTimeOnly: true}, nil
 	case c.newAfterGap:
-		return v1alpha1.ResetObservationGap, false, nil
+		return outcome{reason: v1alpha1.ResetObservationGap}, nil
 	case otherRevision || len(pods) != int(replicas):
-		return v1alpha1.ResetPartialRollout, false, nil
+		return outcome{reason: v1alpha1.ResetPartialRollout}, nil
 	case c.incomplete:
-		return v1alpha1.ResetEvidenceMissing, false, nil
+		return outcome{reason: v1alpha1.ResetEvidenceMissing}, nil
 	case c.notReady:
-		return v1alpha1.ResetPodNotReady, false, nil
+		return outcome{reason: v1alpha1.ResetPodNotReady}, nil
 	}
-	return "", false, nil
+	return outcome{}, nil
 }
 
 // comparison is what the pods of the rollout showed against the baselines.
 type comparison struct {
-	restarted, newAfterGap, incomplete, notReady bool
+	// counted: a restart count above its baseline. terminated: a termination at or after the window's start
+	// minus TerminationMargin, a node time.
+	counted, terminated, newAfterGap, incomplete, notReady bool
 }
 
 // compare checks the pods of the rollout against the stored baselines (those of pods still listed): a count
@@ -247,9 +264,8 @@ func compare(pods []podSample, baselines map[types.UID]int64, prev *v1alpha1.Ver
 			// A new pod without a gap (a scale-out or a replacement) starts at 0.
 			base = 0
 		}
-		if p.restarts > base || slices.ContainsFunc(p.terminatedAt, func(t time.Time) bool { return !t.Before(since) }) {
-			c.restarted = true
-		}
+		c.counted = c.counted || p.restarts > base
+		c.terminated = c.terminated || slices.ContainsFunc(p.terminatedAt, func(t time.Time) bool { return !t.Before(since) })
 		c.incomplete = c.incomplete || !p.complete
 		c.notReady = c.notReady || !p.ready
 	}

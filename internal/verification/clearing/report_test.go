@@ -308,3 +308,62 @@ func TestCrashLoopFailsAtTimeout(t *testing.T) {
 		t.Fatalf("AtTimeout = %s %s, want Failed Restarted", v, reason)
 	}
 }
+
+// A restart before the window ever opened (a slow rollout, coverage never complete) is not durable trouble:
+// only no-evidence resets follow until the timeout, which ends Inconclusive with the last of them.
+func TestRestartBeforeTheWindowOpenedIsNotTrouble(t *testing.T) {
+	slow := func(restarts int32) []corev1.Pod {
+		ps := pods(3)
+		ps[0].Status.ContainerStatuses[0].RestartCount = restarts
+		ps[2].OwnerReferences = controllerRef("ReplicaSet", oldRSName, oldRSUID)
+		return ps
+	}
+	r := sample(t, spec(), v1alpha1.VerificationReportStatus{}, input(t0, 3, slow(0)))
+	if r.Reason != v1alpha1.ResetPartialRollout {
+		t.Fatalf("first sample: reason %q, want PartialRollout", r.Reason)
+	}
+	r = sample(t, spec(), r.Status, input(r.Status.SampledAt.Add(PollInterval), 3, slow(1)))
+	if r.Reason != v1alpha1.ResetRestarted {
+		t.Fatalf("restart: reason %q, want Restarted", r.Reason)
+	}
+	if r.Status.TroubleResets != 0 || r.Status.LastTroubleReset != nil {
+		t.Fatalf("trouble %d %+v recorded before the window opened", r.Status.TroubleResets, r.Status.LastTroubleReset)
+	}
+	st := r.Status
+	for i := range 8 {
+		r = sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, slow(1)))
+		if r.Reason != v1alpha1.ResetPartialRollout {
+			t.Fatalf("sample %d after the restart: reason %q, want PartialRollout", i, r.Reason)
+		}
+		st = r.Status
+	}
+	if st.WindowStart != nil {
+		t.Fatal("a window opened on a partial rollout")
+	}
+	v, reason := AtTimeout(Timeout{RolledOut: true, Report: report(st), Expected: expected()})
+	if v != VerdictInconclusive || reason != string(v1alpha1.ResetPartialRollout) {
+		t.Fatalf("AtTimeout = %s %s, want Inconclusive PartialRollout", v, reason)
+	}
+}
+
+// A termination time inside the window with a restart count equal to its baseline resets the window, but
+// node times can only delay or deny success: the reset is not durable trouble and never fails the request.
+func TestTerminationTimeAloneIsNotTrouble(t *testing.T) {
+	st := samples(t, 3)
+	ps := pods(3)
+	// The node's clock runs ahead, so a termination before the window looks like one inside it.
+	ps[0].Status.ContainerStatuses[0].LastTerminationState.Terminated = &corev1.ContainerStateTerminated{
+		Reason: reasonError, FinishedAt: metav1.NewTime(st.SampledAt.Add(time.Hour)),
+	}
+	r := sample(t, spec(), st, input(st.SampledAt.Add(PollInterval), 3, ps))
+	if r.Reason != v1alpha1.ResetRestarted || r.Status.Resets != st.Resets+1 || ReportWindow(&r.Status).Open() {
+		t.Fatalf("reason %q, resets %d, open %v; want a Restarted reset that closes the window",
+			r.Reason, r.Status.Resets, ReportWindow(&r.Status).Open())
+	}
+	if r.Status.TroubleResets != st.TroubleResets || r.Status.LastTroubleReset != nil {
+		t.Fatalf("trouble %d %+v recorded from a node time alone", r.Status.TroubleResets, r.Status.LastTroubleReset)
+	}
+	if v, reason := AtTimeout(Timeout{RolledOut: true, Report: report(r.Status), Expected: expected()}); v == VerdictFailed {
+		t.Fatalf("AtTimeout = %s %s, want no Failed from a node time", v, reason)
+	}
+}

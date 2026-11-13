@@ -34,7 +34,8 @@ type ResetReason string
 // The reset reasons.
 const (
 	// ResetRestarted: a container of a pod of the rollout (a native sidecar included) restarted above its
-	// baseline, or terminated after the window started. Trouble class.
+	// baseline, or terminated after the window started. Trouble class; recorded in troubleResets only for a
+	// restart count above its baseline after the window first opened.
 	ResetRestarted ResetReason = "Restarted"
 	// ResetPodNotReady: a pod of the rollout is not Ready and did not restart. No evidence.
 	ResetPodNotReady ResetReason = "PodNotReady"
@@ -181,13 +182,15 @@ type VerificationReportStatus struct {
 	// +optional
 	LastReset *WindowReset `json:"lastReset,omitempty"`
 
-	// troubleResets counts the resets of the trouble class (Restarted) over the life of the report. It never
+	// troubleResets counts the Restarted resets recorded as trouble over the life of the report: those with a
+	// restart count above its baseline after the window first opened (the first good sample). A Restarted reset
+	// before that, or one shown only by a termination time (a node's clock), is not counted. It never
 	// decreases: a later no-evidence reset does not hide that a restart was observed.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	TroubleResets int64 `json:"troubleResets,omitempty"`
 
-	// lastTroubleReset is the last reset of the trouble class. Once set it is kept, and its time never moves
+	// lastTroubleReset is the last Restarted reset recorded as trouble. Once set it is kept, and its time never moves
 	// back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.
 	// +kubebuilder:validation:XValidation:rule="self.reason == 'Restarted'",message="lastTroubleReset.reason must be Restarted"
 	// +optional

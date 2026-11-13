@@ -23,8 +23,8 @@ limitations under the License.
 // clock. Every span is measured on one clock. The report's span is sampledAt - windowStart, both written by
 // the verifier; the executor's span is measured on its clock; the age of a report is judged by its sample
 // counter on the executor's clock, never by sampledAt. Node times (container termination) are compared only
-// with the report's windowStart and can only add resets. So skew between two clocks can only delay or deny
-// success, and missing or stale evidence is never success.
+// with the report's windowStart and can only add resets, never recorded as trouble. So skew between two
+// clocks can only delay or deny success, and missing or stale evidence is never success.
 package clearing
 
 import (
@@ -63,7 +63,8 @@ type Class string
 
 // The reset classes.
 const (
-	// ClassTrouble: a restart was observed. Recorded trouble ends a request Failed at the timeout.
+	// ClassTrouble: a restart was observed. Recorded trouble ends a request Failed at the timeout; what is
+	// recorded is set out at [Window.Reset].
 	ClassTrouble Class = "Trouble"
 	// ClassNoEvidence: nothing could be shown either way.
 	ClassNoEvidence Class = "NoEvidence"
@@ -89,8 +90,8 @@ type Window struct {
 	Start     *metav1.Time
 	LastReset *v1alpha1.WindowReset
 	Resets    int64
-	// LastTrouble is the last reset of the trouble class and TroubleResets their count. A later no-evidence
-	// reset leaves both as they are.
+	// LastTrouble is the last reset of the trouble class recorded as durable trouble ([Window.Reset]) and
+	// TroubleResets their count. A later no-evidence reset leaves both as they are.
 	LastTrouble   *v1alpha1.WindowReset
 	TroubleResets int64
 }
@@ -106,7 +107,7 @@ func (w Window) store(s *v1alpha1.VerificationReportStatus) {
 	s.LastTroubleReset, s.TroubleResets = w.LastTrouble, w.TroubleResets
 }
 
-// Troubled reports whether the window recorded a reset of the trouble class.
+// Troubled reports whether the window recorded durable trouble.
 func (w Window) Troubled() bool {
 	return w.TroubleResets > 0 || w.LastTrouble != nil
 }
@@ -138,10 +139,24 @@ func (w *Window) Good(now time.Time) {
 	w.Start = &start
 }
 
-// Reset records a sample or check that was not good: it closes the window and counts the reset, and a reset
-// of the trouble class is also recorded as the last trouble. The time recorded is never earlier than Start or
-// the previous reset, so a clock that went back cannot leave the window open or move a reset back.
+// Reset records a sample or check that was not good: it closes the window and counts the reset. A reset of
+// the trouble class is also recorded as durable trouble (LastTrouble, TroubleResets), but only once the window
+// first opened (Start is set): a restart before the first good sample, such as a new pod restarting during a
+// slow rollout, resets nothing the window had shown. A crash loop from the very start never opens the window;
+// the executor ends it with RolloutStuck, not with this record. The time recorded is never earlier than Start
+// or the previous reset, so a clock that went back cannot leave the window open or move a reset back.
 func (w *Window) Reset(reason v1alpha1.ResetReason, now time.Time) {
+	w.reset(reason, now, ClassOf(reason) == ClassTrouble)
+}
+
+// ResetUnrecorded is Reset without the durable trouble record, for a Restarted reset that only a node time
+// shows (a termination at or after windowStart minus TerminationMargin, with no restart count above its
+// baseline): a node clock ahead of the verifier's can delay or deny success, never fail a request.
+func (w *Window) ResetUnrecorded(reason v1alpha1.ResetReason, now time.Time) {
+	w.reset(reason, now, false)
+}
+
+func (w *Window) reset(reason v1alpha1.ResetReason, now time.Time, trouble bool) {
 	at := seconds(now)
 	if w.Start != nil && w.Start.After(at.Time) {
 		at = *w.Start.DeepCopy()
@@ -151,7 +166,7 @@ func (w *Window) Reset(reason v1alpha1.ResetReason, now time.Time) {
 	}
 	w.LastReset = &v1alpha1.WindowReset{Reason: reason, Time: at}
 	w.Resets++
-	if ClassOf(reason) == ClassTrouble {
+	if trouble && w.Start != nil {
 		w.LastTrouble = w.LastReset.DeepCopy()
 		w.TroubleResets++
 	}

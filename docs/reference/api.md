@@ -1233,7 +1233,7 @@ Used by: [WindowReset](#windowreset).
 
 | Value | Description |
 | --- | --- |
-| `Restarted` | ResetRestarted: a container of a pod of the rollout (a native sidecar included) restarted above its baseline, or terminated after the window started. Trouble class. |
+| `Restarted` | ResetRestarted: a container of a pod of the rollout (a native sidecar included) restarted above its baseline, or terminated after the window started. Trouble class; recorded in troubleResets only for a restart count above its baseline after the window first opened. |
 | `PodNotReady` | ResetPodNotReady: a pod of the rollout is not Ready and did not restart. No evidence. |
 | `PartialRollout` | ResetPartialRollout: fewer pods on the applied revision than the desired replicas, or a pod of the target on another revision; for the executor, a report that does not cover every desired replica. No evidence. |
 | `EvidenceMissing` | ResetEvidenceMissing: a pod without a status for every container, more pods than the bound, or a target that is not the one the report names. No evidence. |
@@ -1468,8 +1468,8 @@ Used by: [VerificationReport](#verificationreport).
 | `podsCovered` | integer | No | podsCovered is the number of pods of the rollout at the last sample: pods whose ownership by the target was proven and that run the report's template revision.<br>Maximum: 200<br>Minimum: 0 |
 | `resets` | integer | No | resets counts the resets of the window. It never decreases.<br>Minimum: 0 |
 | `lastReset` | [WindowReset](#windowreset) | No | lastReset is the last reset of the window. Once set it is kept, and its time never moves back. |
-| `troubleResets` | integer | No | troubleResets counts the resets of the trouble class (Restarted) over the life of the report. It never decreases: a later no-evidence reset does not hide that a restart was observed.<br>Minimum: 0 |
-| `lastTroubleReset` | [WindowReset](#windowreset) | No | lastTroubleReset is the last reset of the trouble class. Once set it is kept, and its time never moves back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.<br>Rule: lastTroubleReset.reason must be Restarted (`self.reason == 'Restarted'`) |
+| `troubleResets` | integer | No | troubleResets counts the Restarted resets recorded as trouble over the life of the report: those with a restart count above its baseline after the window first opened (the first good sample). A Restarted reset before that, or one shown only by a termination time (a node's clock), is not counted. It never decreases: a later no-evidence reset does not hide that a restart was observed.<br>Minimum: 0 |
+| `lastTroubleReset` | [WindowReset](#windowreset) | No | lastTroubleReset is the last Restarted reset recorded as trouble. Once set it is kept, and its time never moves back. A report that records trouble ends its request Failed at the timeout, whatever its last reset.<br>Rule: lastTroubleReset.reason must be Restarted (`self.reason == 'Restarted'`) |
 | `oomKill` | [OOMKill](#oomkill) | No | oomKill is the first OOM kill of the action's container on a pod of the rollout. Once set it never changes. |
 | `baselines` | [PodBaseline](#podbaseline) array | No | baselines are the restart baselines of the pods, one per pod UID, at most 200. A baseline whose pod is gone from the pod list is pruned in the same write.<br>Maximum items: 200<br>List type: map<br>List key: `podUID` |
 

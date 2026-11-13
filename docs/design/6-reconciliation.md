@@ -46,7 +46,7 @@ stateDiagram-v2
     }
     WaitingForDelivery --> Failed: Flux failed on the merge commit at the end of the window, DeliveryFailed
     WaitingForDelivery --> Inconclusive: not observed, blocked, suspended, not checked, target gone or replaced, or --verify-outcomes off (VerificationDisabled)
-    Verifying --> Verifying: a check that is not good resets status.verification
+    Verifying --> Verifying: a check that is not good resets status.verification (a repeat of the last reason on a closed window writes nothing)
     Verifying --> Failed: OOM kill in the report (OOMKilled); at the timeout RolledOut is False (RolloutStuck), the ScaledObject is not ready (KedaNotReady) or the report recorded a restart (Restarted)
     Verifying --> Inconclusive: value changed, template superseded, target gone, replaced or not readable, a ScaledObject after stableFor (ClearingNotChecked), at the timeout no evidence (StaleReport, PodNotReady, ...), or --verify-outcomes off (VerificationDisabled)
     Pending --> Denied: policy refuses

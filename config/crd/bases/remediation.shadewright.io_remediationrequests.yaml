@@ -1416,8 +1416,8 @@ spec:
                     properties:
                       reason:
                         description: |-
-                          reason says why the window was reset: NotAvailable (the target reports fewer available replicas than
-                          desired, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is
+                          reason says why the window was reset: NotAvailable (the target reports other available replicas than
+                          desired, fewer or more, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is
                           missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another
                           request, merge commit, target, template revision or container) or PartialRollout (the report does not cover
                           every desired replica). Every one is a reset of the no-evidence class.
@@ -1438,8 +1438,10 @@ spec:
                     - time
                     type: object
                   resets:
-                    description: resets counts the resets of the window. It never
-                      decreases.
+                    description: |-
+                      resets counts the resets of the window: a bad check that closes an open window or names another reason
+                      than lastReset. The same reason again on a closed window is not counted and writes nothing. It never
+                      decreases, and it is at least 1 while lastReset is set.
                     format: int64
                     minimum: 0
                     type: integer
@@ -1450,6 +1452,10 @@ spec:
                     format: date-time
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: lastReset requires resets of at least 1
+                  rule: '!has(self.lastReset) || (has(self.resets) && self.resets
+                    >= 1)'
             type: object
         required:
         - spec

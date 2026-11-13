@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -47,16 +48,17 @@ import (
 //     the action's container and is bound to this request (its spec check) ends the request Failed with
 //     OOMKilled at once. Otherwise the check is good when RolledOut is True, the report passes the trust
 //     contract (clearing.CheckReport: missing, never sampled or stale is StaleReport, another spec is
-//     ReportMismatch, incomplete coverage is PartialRollout) and the target reports every desired replica
-//     available (else NotAvailable). A good check opens the executor's own window, a bad one resets it; the
-//     window lives in status.verification, so a restart loses nothing of it. Before RolledOut is True nothing
-//     opens or resets the window.
+//     ReportMismatch, incomplete coverage is PartialRollout) and the target reports exactly the desired
+//     replicas available (else NotAvailable). A good check opens the executor's own window, a bad one resets
+//     it, but only when it closes an open window or names another reason than the last reset (resetWindow);
+//     the window lives in status.verification, so a restart loses nothing of it. Before RolledOut is True
+//     nothing opens or resets the window.
 //   - Success (clearing.Succeeds) needs a good check, a report whose sample counter rose since a check at most
-//     one poll interval earlier by the executor's clock (the counter is kept in memory: a restart delays success
-//     by one check), and both spans at least the effective stableFor plus the node grace, each on its own
-//     writer's clock. One status write then sets Succeeded, Cleared True (NoRecurrence) and Verified True. A
-//     request whose spec.verification.checks names QueueBacklogDecreasing ends Inconclusive with
-//     CheckNotAvailable instead, since no metrics are read.
+//     one poll interval earlier by the executor's clock, taken again after the report read (the counter is
+//     kept in memory: a restart delays success by one check), and both spans at least the effective stableFor
+//     plus the node grace, each on its own writer's clock. One status write then sets Succeeded, Cleared True
+//     (NoRecurrence) and Verified True. A request whose spec.verification.checks names QueueBacklogDecreasing
+//     ends Inconclusive with CheckNotAvailable instead, since no metrics are read.
 //   - A ScaledObject has no pods of its own: its window is good while it is ready by the KedaReady rule (else
 //     NotAvailable), and once it held for the effective stableFor the request ends Inconclusive with
 //     ClearingNotChecked (CheckNotAvailable when QueueBacklogDecreasing is named).
@@ -215,15 +217,25 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	key := client.ObjectKeyFromObject(rr)
 	report, err := r.readReport(stepCtx, rr)
 	err = boundErr(ctx, stepCtx, "report read", err)
+	if apierrors.IsForbidden(err) {
+		// A missing grant does not clear by itself: say so at once, not only at the timeout.
+		logf.FromContext(ctx).Error(err, "The executor may not read the VerificationReport of RemediationRequest; "+
+			"it needs get on verificationreports in the operator namespace", "remediationRequest", key)
+	}
+	// Freshness, both spans and the timeout are judged at the end of this check's reads: a slow read must not
+	// let an old report count as fresh. The clock is never taken back.
+	now = laterOf(now, r.now())
 	readFailed := false
 	switch {
 	case ctx.Err() != nil:
 		return reconcile.Result{}, err
 	case err != nil && now.Before(deadline.Add(finalGrace)):
-		// Retried, never a missing report. What this check read of the target is still recorded.
+		// Retried, never a missing report. What this check read of the target is still recorded, and a rollout
+		// first seen stuck is reported once that record is written.
 		if werr := r.writeIf(ctx, rr, changed); werr != nil {
-			return reconcile.Result{}, werr
+			return reconcile.Result{}, errors.Join(err, werr)
 		}
+		r.reportStuck(rr, stuck)
 		return reconcile.Result{}, err
 	case err != nil:
 		logf.FromContext(ctx).Info("The VerificationReport of RemediationRequest could not be read",
@@ -253,9 +265,11 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 		desired, available := replicasOf(target)
 		switch {
 		case contract != "":
-			w.Reset(contract, now)
-		case available < desired:
-			w.Reset(remediationv1alpha1.ResetNotAvailable, now)
+			resetWindow(&w, contract, now)
+		case available != desired:
+			// ADR-0030 section 4: available replicas equal spec.replicas, so a surge above it is no quiet
+			// window either.
+			resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
 		default:
 			w.Good(now)
 			good = true
@@ -301,10 +315,34 @@ func (r *RemediationRequestReconciler) keepVerifying(ctx context.Context, rr *re
 	if err := r.writeIf(ctx, rr, changed); err != nil {
 		return reconcile.Result{}, err
 	}
+	r.reportStuck(rr, stuck)
+	return reconcile.Result{RequeueAfter: max(min(interval, deadline.Sub(now)), time.Second)}, nil
+}
+
+// reportStuck sends the Warning Event of a rollout first seen stuck in this check, after its status was written.
+func (r *RemediationRequestReconciler) reportStuck(rr *remediationv1alpha1.RemediationRequest, stuck *rollout.Result) {
 	if stuck != nil && r.Recorder != nil {
 		r.Recorder.Event(rr, corev1.EventTypeWarning, rollout.ReasonRolloutStuck, stuck.Message)
 	}
-	return reconcile.Result{RequeueAfter: max(min(interval, deadline.Sub(now)), time.Second)}, nil
+}
+
+// resetWindow records a bad check in the executor's window w at now. It counts as a reset only when it closes an
+// open window or names another reason than the last reset: the same reason again on a closed window changes
+// nothing, so it writes no status, and a status write (which queues the request again) cannot raise resets on
+// every check (ADR-0030 section 4, amendment of 2026-11-13).
+func resetWindow(w *verification.Window, reason remediationv1alpha1.ResetReason, now time.Time) {
+	if !w.Open() && w.LastReset != nil && w.LastReset.Reason == reason {
+		return
+	}
+	w.Reset(reason, now)
+}
+
+// laterOf returns the later of two times of the executor's clock.
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // endAtTimeout ends a request at its timeout with the verdict of clearing.AtTimeout. note is added to the
@@ -316,13 +354,15 @@ func (r *RemediationRequestReconciler) endAtTimeout(ctx context.Context, rr *rem
 		phase = remediationv1alpha1.PhaseFailed
 	}
 	var message string
-	switch reason {
-	case rollout.ReasonRolloutStuck:
+	switch {
+	case reason == rollout.ReasonRolloutStuck:
 		message = "The rollout did not complete by the verification timeout"
 		if c := stuckRecorded(rr); c != nil {
 			message += ": " + c.Message
 		}
-	case ReasonRestarted:
+	case reason == ReasonRestarted && verdict == verification.VerdictFailed:
+		// Only recorded trouble fails the request; a Restarted reset that is not recorded as trouble (before the
+		// window first opened, or shown only by a termination time) is the default case below.
 		message = "The verifier recorded a container restart above its baseline after the window opened; at the " +
 			"verification timeout the change is not shown to work"
 	default:
@@ -354,11 +394,14 @@ func (r *RemediationRequestReconciler) succeed(ctx context.Context, rr *remediat
 	return nil
 }
 
-// clearedAtEnd is the Cleared condition of a request that ends from Verifying with reason: False for the
-// trouble the report recorded (OOMKilled, Restarted), Unknown with the same reason otherwise.
-func clearedAtEnd(rr *remediationv1alpha1.RemediationRequest, reason, message string) metav1.Condition {
+// clearedAtEnd is the Cleared condition of a request that ends from Verifying in phase with reason: False when
+// it ends Failed for the trouble the report recorded (OOMKilled, Restarted), Unknown with the same reason
+// otherwise. The phase decides, not the reason alone: an Inconclusive end can carry Restarted as the reason that
+// held the window closed without any trouble recorded.
+func clearedAtEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv1alpha1.RemediationPhase,
+	reason, message string) metav1.Condition {
 	status := metav1.ConditionUnknown
-	if reason == ReasonOOMKilled || reason == ReasonRestarted {
+	if phase == remediationv1alpha1.PhaseFailed && (reason == ReasonOOMKilled || reason == ReasonRestarted) {
 		status = metav1.ConditionFalse
 	}
 	return metav1.Condition{Type: remediationv1alpha1.ConditionCleared, Status: status, Reason: reason,
@@ -381,7 +424,7 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 	if kedaOK {
 		w.Good(now)
 	} else {
-		w.Reset(remediationv1alpha1.ResetNotAvailable, now)
+		resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
 	}
 	changed = storeWindow(rr, w) || changed
 	if w.Span(now) >= stableFor {

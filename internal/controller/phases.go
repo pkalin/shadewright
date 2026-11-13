@@ -679,7 +679,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 	if rr.Status.Phase == remediationv1alpha1.PhaseVerifying &&
 		!slices.ContainsFunc(conds, func(c metav1.Condition) bool { return c.Type == remediationv1alpha1.ConditionCleared }) {
 		// Every end from Verifying says what became of the clearing (ADR-0030 section 3).
-		conds = append(conds, clearedAtEnd(rr, reason, message))
+		conds = append(conds, clearedAtEnd(rr, phase, reason, message))
 	}
 	for _, c := range conds {
 		meta.SetStatusCondition(&rr.Status.Conditions, c)

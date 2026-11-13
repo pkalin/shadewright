@@ -430,8 +430,8 @@ type RolloutStatus struct {
 // VerificationReset is a reset of the executor's own verification window (ADR-0030 section 4): a check of a
 // Verifying request that was not good.
 type VerificationReset struct {
-	// reason says why the window was reset: NotAvailable (the target reports fewer available replicas than
-	// desired, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is
+	// reason says why the window was reset: NotAvailable (the target reports other available replicas than
+	// desired, fewer or more, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is
 	// missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another
 	// request, merge commit, target, template revision or container) or PartialRollout (the report does not cover
 	// every desired replica). Every one is a reset of the no-evidence class.
@@ -447,7 +447,9 @@ type VerificationReset struct {
 
 // VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 // to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
-// never compared with a time of the report. A restart of the executor loses nothing of it.
+// never compared with a time of the report. A restart of the executor loses nothing of it. A lastReset is
+// counted: resets is at least 1 when it is set.
+// +kubebuilder:validation:XValidation:rule="!has(self.lastReset) || (has(self.resets) && self.resets >= 1)",message="lastReset requires resets of at least 1"
 type VerificationWindow struct {
 	// windowStart is when the current window opened: the first good check after the last reset. It only moves
 	// forward.
@@ -458,7 +460,9 @@ type VerificationWindow struct {
 	// +optional
 	LastReset *VerificationReset `json:"lastReset,omitempty"`
 
-	// resets counts the resets of the window. It never decreases.
+	// resets counts the resets of the window: a bad check that closes an open window or names another reason
+	// than lastReset. The same reason again on a closed window is not counted and writes nothing. It never
+	// decreases, and it is at least 1 while lastReset is set.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Resets int64 `json:"resets,omitempty"`

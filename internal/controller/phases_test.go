@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -36,6 +37,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -1179,6 +1181,169 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		forward.Status.Verification.WindowStart = &later
 		forward.Status.Verification.Resets++
 		Expect(k8sClient.Status().Update(ctx, forward)).To(Succeed(), "moving forward is allowed")
+	})
+
+	// A bad check that repeats the reason of the last reset on a closed window changes nothing: no reset is
+	// counted and no status is written, so the write cannot queue the request again at once and spin until the
+	// timeout. Another reason, or a reset that closes an open window, is counted and written.
+	It("writes no status for a repeated bad check with the same reason and counts no reset", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		Expect(fetch(w).Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetStaleReport))
+		Expect(fetch(w).Status.Verification.Resets).To(Equal(int64(1)))
+		rec := &statusRecorder{Client: k8sClient}
+		w.r.Client = rec
+		t := applied
+		for range 5 {
+			t = t.Add(verification.PollInterval)
+			res := mustReconcileAt(w, t)
+			Expect(res.RequeueAfter).To(Equal(verification.PollInterval))
+		}
+		Expect(rec.written()).To(BeEmpty(), "no report, the same StaleReport on every check")
+		Expect(fetch(w).Status.Verification.Resets).To(Equal(int64(1)))
+
+		// Another reason is counted and written once, then repeats write nothing.
+		start := t
+		mismatch := func(vr *remediationv1alpha1.VerificationReport) { vr.Spec.MergeCommitSHA = w.base }
+		drive(w, t.Add(verification.PollInterval), t.Add(4*verification.PollInterval), verification.PollInterval,
+			1, func(t time.Time, n int64) { putReport(w, n, t, start, mismatch) })
+		Expect(rec.written()).To(HaveLen(1))
+		v := fetch(w).Status.Verification
+		Expect(v.LastReset.Reason).To(Equal(remediationv1alpha1.ResetReportMismatch))
+		Expect(v.Resets).To(Equal(int64(2)))
+	})
+
+	// The timeout verdict decides Cleared, not the reason string: a Restarted reset the report did not record as
+	// trouble holds the window closed and ends Inconclusive, with Cleared Unknown.
+	It("ends Inconclusive with Restarted and Cleared Unknown when no trouble was recorded", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		deadline := fetch(w).Status.Deadline.Time
+		start := applied.Add(30 * time.Second)
+		drive(w, start, deadline, verification.PollInterval, 1, func(t time.Time, n int64) {
+			putReport(w, n, t, start, func(vr *remediationv1alpha1.VerificationReport) {
+				if n < 2 {
+					return
+				}
+				// A restart before the window first opened: a reset, never recorded as trouble.
+				vr.Status.Resets = 1
+				vr.Status.LastReset = &remediationv1alpha1.WindowReset{Reason: remediationv1alpha1.ResetRestarted,
+					Time: metav1.NewTime(start.Add(10 * time.Second))}
+			})
+		})
+		mustReconcileAt(w, deadline)
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonRestarted)
+		cleared := condition(rr, remediationv1alpha1.ConditionCleared)
+		Expect(cleared.Status).To(Equal(metav1.ConditionUnknown))
+		Expect(cleared.Message).NotTo(ContainSubstring("above its baseline"))
+		Expect(condition(rr, remediationv1alpha1.ConditionVerified).Message).NotTo(ContainSubstring("above its baseline"))
+	})
+
+	failReport := func(w *phasesWorld, err error) {
+		w.reader.fail = func(obj client.Object) error {
+			if _, ok := obj.(*remediationv1alpha1.VerificationReport); ok {
+				return err
+			}
+			return nil
+		}
+	}
+	drainEvents := func(w *phasesWorld) []string {
+		var events []string
+		for {
+			select {
+			case e := <-w.rec.Events:
+				events = append(events, e)
+			default:
+				return events
+			}
+		}
+	}
+
+	It("reports a rollout first seen stuck when the report read of that check fails", func() {
+		w := newWorld(nil)
+		setTargetStatus(w, 0, 1, revisionOld, revisionNew)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		applied := w.merged.Add(time.Minute)
+		mustReconcileAt(w, applied)
+		drainEvents(w)
+		failReport(w, errors.New("the API server is unavailable"))
+		_, err := reconcileAt(w, applied.Add(rollout.DefaultDeadline+time.Second))
+		Expect(err).To(HaveOccurred())
+		Expect(condition(fetch(w), rollout.ConditionRolledOut).Reason).To(Equal(rollout.ReasonRolloutStuck))
+		Expect(drainEvents(w)).To(ContainElement(HavePrefix("Warning " + rollout.ReasonRolloutStuck)))
+	})
+
+	// Freshness is judged at the end of the check's reads: a report read that took a minute leaves a report
+	// older than one poll interval by the executor's clock, which decides nothing.
+	It("judges freshness after a slow report read", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
+		w.reader.fail = func(obj client.Object) error {
+			if _, ok := obj.(*remediationv1alpha1.VerificationReport); ok {
+				w.now = w.now.Add(time.Minute)
+			}
+			return nil
+		}
+		putReport(w, n, t, start, nil)
+		mustReconcileAt(w, t)
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+	})
+
+	// ADR-0030 section 4: available replicas equal spec.replicas; more than desired is no quiet window.
+	It("resets the executor's window when more replicas are available than desired", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(2*time.Minute), verification.PollInterval, 1, quiet(w, start))
+		ss := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, w.ssKey, ss)).To(Succeed())
+		ss.Status.Replicas, ss.Status.ReadyReplicas, ss.Status.AvailableReplicas = 3, 3, 3
+		Expect(k8sClient.Status().Update(ctx, ss)).To(Succeed())
+		putReport(w, n, t, start, nil)
+		mustReconcileAt(w, t)
+		v := fetch(w).Status.Verification
+		Expect(v.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		Expect(v.LastReset.Time.Time).To(BeTemporally("==", t))
+	})
+
+	It("refuses a status.verification with lastReset and no resets", func() {
+		w := newWorld(nil)
+		rr := fetch(w)
+		rr.Status.Verification = &remediationv1alpha1.VerificationWindow{LastReset: &remediationv1alpha1.VerificationReset{
+			Reason: remediationv1alpha1.ResetNotAvailable, Time: metav1.NewTime(w.merged)}}
+		err := k8sClient.Status().Update(ctx, rr)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("lastReset requires resets of at least 1"))
+		rr.Status.Verification.Resets = 1
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+	})
+
+	// A failed status write in the retry branch keeps the report read's error, and a Forbidden read is logged at
+	// error level at once, naming the missing grant.
+	It("joins a failed status write with the report read error and logs a Forbidden read", func() {
+		w := newWorld(nil)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		failReport(w, apierrors.NewForbidden(remediationv1alpha1.GroupVersion.WithResource("verificationreports").GroupResource(),
+			"vr", errors.New("no grant")))
+		w.r.Client = &statusRecorder{Client: k8sClient, fail: func(rr *remediationv1alpha1.RemediationRequest) bool {
+			stored := &remediationv1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), stored)).To(Succeed())
+			return stored.Status.Phase == remediationv1alpha1.PhaseVerifying
+		}}
+		var errorLogs []string
+		logger := funcr.New(func(_, args string) {
+			if strings.Contains(args, `"error"=`) {
+				errorLogs = append(errorLogs, args)
+			}
+		}, funcr.Options{})
+		w.now = w.merged.Add(time.Minute)
+		_, err := w.r.Reconcile(logf.IntoContext(ctx, logger), reconcile.Request{NamespacedName: w.key})
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsForbidden(err)).To(BeTrue(), "the read error is kept: %v", err)
+		Expect(err.Error()).To(ContainSubstring("status write lost"))
+		Expect(errorLogs).To(ContainElement(ContainSubstring("needs get on verificationreports")))
 	})
 })
 

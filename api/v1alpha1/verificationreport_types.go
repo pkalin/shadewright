@@ -51,7 +51,8 @@ const (
 	// ResetObservationGap: no sample for more than two poll intervals, and a pod not in the baselines after it.
 	// No evidence.
 	ResetObservationGap ResetReason = "ObservationGap"
-	// ResetNotAvailable: the target reports fewer available replicas than desired (executor). No evidence.
+	// ResetNotAvailable: the target reports other available replicas than desired, fewer or more (executor). No
+	// evidence.
 	ResetNotAvailable ResetReason = "NotAvailable"
 	// ResetStaleReport: the report is missing or its sample counter stopped rising (executor). No evidence.
 	ResetStaleReport ResetReason = "StaleReport"

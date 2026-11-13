@@ -410,6 +410,41 @@ func TestNoReportForRequestsItDoesNotSample(t *testing.T) {
 	}
 }
 
+// TestNoReportForARequestBeingDeleted: a request in Verifying that a finalizer still holds is not sampled and
+// not looked at again.
+func TestNoReportForARequestBeingDeleted(t *testing.T) {
+	w := newWorkload(t, watchedNS)
+	rr := request(t, w, v1alpha1.PhaseVerifying, false)
+	key := client.ObjectKeyFromObject(rr)
+	const hold = "test.shadewright.io/hold"
+	finalizers := func(v string) client.Patch {
+		return client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":`+v+`}}`))
+	}
+	if err := admin.Patch(context.Background(), rr, finalizers(`["`+hold+`"]`)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cur := &v1alpha1.RemediationRequest{}
+		if err := admin.Get(context.Background(), key, cur); err == nil {
+			_ = admin.Patch(context.Background(), cur, finalizers("null"))
+		}
+	})
+	if err := admin.Delete(context.Background(), rr); err != nil {
+		t.Fatal(err)
+	}
+	r := newReconciler(admin, admin, &clock{now: time.Now()})
+	res, err := reconcile(t, r, rr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("requeued after %v, want no requeue", res.RequeueAfter)
+	}
+	if _, ok := getReport(t, rr); ok {
+		t.Error("a report was created for a request being deleted")
+	}
+}
+
 // TestWritesOnlyVerificationReports: across the first sample (create and status update) and later ones, every
 // write the verifier makes is on a VerificationReport, and the request is never written.
 func TestWritesOnlyVerificationReports(t *testing.T) {

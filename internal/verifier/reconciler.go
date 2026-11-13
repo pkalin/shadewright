@@ -221,12 +221,13 @@ type target struct {
 	uid types.UID
 }
 
-// sampled returns the request's target when the verifier samples it: in Verifying, with a merge receipt and a
+// sampled returns the request's target when the verifier samples it: in Verifying and not being deleted, with a merge receipt and a
 // recorded template revision, a Deployment or StatefulSet target in a watched namespace. Otherwise it returns
 // why not. A revert is never sampled (ADR-0030 section 8); see isRevert.
 func (r *Reconciler) sampled(rr *v1alpha1.RemediationRequest) (target, skipReason) {
 	st := &rr.Status
-	if st.Phase != v1alpha1.PhaseVerifying || isRevert(rr) {
+	if st.Phase != v1alpha1.PhaseVerifying || !rr.DeletionTimestamp.IsZero() || isRevert(rr) {
+		// A request being deleted gets no report and no further sample, whatever holds its finalizer.
 		return target{}, skipNotServed
 	}
 	if st.MergeReceipt == nil || templateRevision(rr) == "" {
@@ -250,8 +251,11 @@ var errNotBound = errors.New("the VerificationReport is bound to another request
 // sample reads the report, the target, its pods and their ReplicaSets, takes the time, applies one sample and
 // writes it. The report is created only together with its first sample, after every read of that sample
 // succeeded, so a read that keeps failing leaves no report rather than one with an empty status: the
-// executor reads a missing report as StaleReport and ends the request Inconclusive at the timeout. It returns
-// a skip reason when it wrote nothing for a cause that is not an error.
+// executor reads a missing report as StaleReport and ends the request Inconclusive at the timeout. The one
+// way to a report without a sample is a create that itself takes the observation past MaxObservation (or a
+// status write that fails after it): the sample is dropped, the next reconcile takes a new one, and until
+// then the executor reads the report, which has no sampledAt, as stale like a missing one. It returns a skip
+// reason when it wrote nothing for a cause that is not an error.
 func (r *Reconciler) sample(ctx context.Context, rr *v1alpha1.RemediationRequest, t target) (skipReason, error) {
 	report := &v1alpha1.VerificationReport{}
 	key := client.ObjectKey{Namespace: r.Namespace, Name: clearing.ReportName(rr.UID)}

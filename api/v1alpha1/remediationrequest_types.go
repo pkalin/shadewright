@@ -268,8 +268,10 @@ const (
 	ConditionConfigured = "Configured"
 	// ConditionCleared says whether the symptom cleared after the change (ADR-0030 section 3), judged by the
 	// executor with the verifier's VerificationReport as its evidence: True with reason NoRecurrence when a quiet
-	// window held for the effective stableFor plus the node grace, False with reason OOMKilled or Restarted when
-	// the report recorded that, and Unknown while the window runs (reason Observing) and when the request ends
+	// window held for the effective stableFor plus the node grace (ResolvedBeforeRollout instead when the
+	// Incident's count did not move from the merge to the rollout, status.verification.incidentCount; an
+	// attribution only, nothing decides on it), False with reason OOMKilled or Restarted when the report
+	// recorded that, and Unknown while the window runs (reason Observing) and when the request ends
 	// without evidence (the reason of Verified, for example ClearingNotChecked for a ScaledObject, whose symptom
 	// container status does not show).
 	ConditionCleared = "Cleared"
@@ -495,6 +497,49 @@ type VerificationWindow struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Resets int64 `json:"resets,omitempty"`
+
+	// incidentCount holds two readings of the Incident's status.count, taken by the executor with the merge
+	// receipt and with appliedObservedAt (ADR-0030 section 4, "Resolved before the rollout"). They decide only
+	// the reason of Cleared True: ResolvedBeforeRollout instead of NoRecurrence. Each reading is set once.
+	// +optional
+	IncidentCount *IncidentCountReadings `json:"incidentCount,omitempty"`
+}
+
+// IncidentCountReadings are the executor's two readings of the request's Incident's status.count (ADR-0030
+// section 4). A reading that could not be taken stays absent; atApplied is set only with atMerge.
+// +kubebuilder:validation:XValidation:rule="!has(self.atApplied) || has(self.atMerge)",message="atApplied requires atMerge"
+type IncidentCountReadings struct {
+	// atMerge is the reading taken with the merge receipt, in the status write that sets Merged, or at the
+	// first later reconcile before the delivery whose read succeeds. Set once.
+	// +optional
+	AtMerge *IncidentCountReading `json:"atMerge,omitempty"`
+
+	// atApplied is the reading taken in the status write that sets status.pullRequest.appliedObservedAt. Set
+	// once, and never filled in after that write.
+	// +optional
+	AtApplied *IncidentCountReading `json:"atApplied,omitempty"`
+}
+
+// IncidentCountReading is one reading of an Incident's status.count by the executor.
+type IncidentCountReading struct {
+	// uid is the UID of the Incident read. The reading counts only when it equals spec.incidentRef.uid.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +required
+	UID string `json:"uid"`
+
+	// count is the Incident's status.count as read. MaxIncidentCount is the saturation value; a saturated
+	// reading never counts.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000000
+	// +optional
+	Count int64 `json:"count,omitempty"`
+
+	// readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for
+	// atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is
+	// compared only with the other reading's readAt.
+	// +required
+	ReadAt metav1.Time `json:"readAt"`
 }
 
 // PlanRepository identifies the repository a plan was made for: the URL and provider installation taken from
@@ -684,9 +729,10 @@ type RemediationRequestStatus struct {
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
-	// verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4). Only
-	// the executor writes it; once set it is kept, windowStart and the time of lastReset only move forward and
-	// resets never decreases (validation rules on the object).
+	// verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4), and
+	// the readings of the Incident's count taken from the merge on (incidentCount). Only the executor writes it;
+	// once set it is kept, windowStart and the time of lastReset only move forward, resets never decreases and
+	// each reading is set once (validation rules on the object).
 	// +optional
 	Verification *VerificationWindow `json:"verification,omitempty"`
 
@@ -799,6 +845,10 @@ type RemediationRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.windowStart) || (has(self.status) && has(self.status.verification) && has(self.status.verification.windowStart) && timestamp(self.status.verification.windowStart) >= timestamp(oldSelf.status.verification.windowStart))",message="status.verification.windowStart only moves forward"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.lastReset) || (has(self.status) && has(self.status.verification) && has(self.status.verification.lastReset) && timestamp(self.status.verification.lastReset.time) >= timestamp(oldSelf.status.verification.lastReset.time))",message="status.verification.lastReset is kept once set and its time never moves back"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.resets) || (has(self.status) && has(self.status.verification) && has(self.status.verification.resets) && self.status.verification.resets >= oldSelf.status.verification.resets)",message="status.verification.resets never decreases"
+// The two readings of the Incident's count in status.verification.incidentCount are each set once and never
+// changed (ADR-0030 section 4).
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount) || !has(oldSelf.status.verification.incidentCount.atMerge) || (has(self.status) && has(self.status.verification) && has(self.status.verification.incidentCount) && has(self.status.verification.incidentCount.atMerge) && self.status.verification.incidentCount.atMerge == oldSelf.status.verification.incidentCount.atMerge)",message="status.verification.incidentCount.atMerge is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount) || !has(oldSelf.status.verification.incidentCount.atApplied) || (has(self.status) && has(self.status.verification) && has(self.status.verification.incidentCount) && has(self.status.verification.incidentCount.atApplied) && self.status.verification.incidentCount.atApplied == oldSelf.status.verification.incidentCount.atApplied)",message="status.verification.incidentCount.atApplied is set once and never changed"
 // status.queuedBehind is kept once set: its entries may be replaced, but the field is never removed or emptied,
 // so a write cannot drop the record that ends a request queued behind a pull request closed unmerged (#643).
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind) == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind) > 0)",message="status.queuedBehind is kept once set"

@@ -125,8 +125,11 @@ func storeWindow(rr *remediationv1alpha1.RemediationRequest, w verification.Wind
 	if w.LastReset != nil {
 		next.LastReset = &remediationv1alpha1.VerificationReset{Reason: w.LastReset.Reason, Time: w.LastReset.Time}
 	}
-	if rr.Status.Verification != nil && equalWindow(*rr.Status.Verification, *next) {
-		return false
+	if rr.Status.Verification != nil {
+		if equalWindow(*rr.Status.Verification, *next) {
+			return false
+		}
+		next.IncidentCount = rr.Status.Verification.IncidentCount
 	}
 	rr.Status.Verification = next
 	return true
@@ -287,7 +290,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 				ReasonCheckNotAvailable, fmt.Sprintf("No restart or OOM kill for %s, but the check "+
 					"QueueBacklogDecreasing needs metrics, which no evidence source reads yet", need))
 		}
-		return reconcile.Result{}, r.succeed(ctx, rr, fmt.Sprintf("No OOM kill and no restart on every desired "+
+		return reconcile.Result{}, r.succeed(ctx, rr, stableFor, fmt.Sprintf("No OOM kill and no restart on every desired "+
 			"replica for %s (stableFor %s plus the node grace), by the executor's reads and a fresh report of "+
 			"the verifier", need, stableFor))
 	}
@@ -378,10 +381,13 @@ func (r *RemediationRequestReconciler) endAtTimeout(ctx context.Context, rr *rem
 
 // succeed ends a Verifying request Succeeded in one status write: Cleared True and Verified True with reason
 // NoRecurrence, the executor's window as it is, the phase and its breaker classification, no deadline and the
-// target lock settled. One Normal Event follows.
+// target lock settled. Cleared carries ResolvedBeforeRollout instead when the readings of the Incident's count
+// show it did not move from the merge to the rollout (clearedReason); that changes nothing else. One Normal
+// Event follows.
 func (r *RemediationRequestReconciler) succeed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	message string) error {
-	setCondition(rr, remediationv1alpha1.ConditionCleared, metav1.ConditionTrue, ReasonNoRecurrence, message)
+	stableFor time.Duration, message string) error {
+	clearedBy, clearedMessage := clearedReason(rr, stableFor, message)
+	setCondition(rr, remediationv1alpha1.ConditionCleared, metav1.ConditionTrue, clearedBy, clearedMessage)
 	setCondition(rr, remediationv1alpha1.ConditionVerified, metav1.ConditionTrue, ReasonNoRecurrence, message)
 	r.setPhase(rr, remediationv1alpha1.PhaseSucceeded)
 	rr.Status.Deadline = nil

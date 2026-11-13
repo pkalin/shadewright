@@ -180,6 +180,7 @@ var troubleshootingSections = map[string][]string{
 	"RepositoryUnavailable":             {secPullRequest},
 	"RepositoryUnusable":                {secRepository},
 	"RequestNamespaceNotAllowed":        {secPolicy},
+	"ResolvedBeforeRollout":             {secAfterMerge},
 	"Restarted":                         {secAfterMerge},
 	"ReviewCheckRefused":                {secPullRequest},
 	"ReviewListTooLong":                 {secPullRequest},

@@ -283,6 +283,11 @@ func TestExplainOutcomeLines(t *testing.T) {
 			"Configured:   True, ValueConfigured: The live target holds the desired value",
 			"Cleared:      True, NoRecurrence: No OOM kill and no restart for 11m0s",
 		}},
+		{"resolved before the rollout", remediationv1alpha1.PhaseSucceeded, []metav1.Condition{rolled, configured,
+			cond(remediationv1alpha1.ConditionCleared, metav1.ConditionTrue, "ResolvedBeforeRollout",
+				"The symptom had already stopped when the change arrived", time.Minute)}, []string{
+			"Cleared:      True, ResolvedBeforeRollout: The symptom had already stopped when the change arrived",
+		}},
 		{"verifying", remediationv1alpha1.PhaseVerifying, []metav1.Condition{configured}, []string{
 			"Rolled out:   not reported yet",
 			"Configured:   True, ValueConfigured",

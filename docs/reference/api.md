@@ -94,6 +94,8 @@ Validation rules:
 - status.verification.windowStart only moves forward: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.windowStart) || (has(self.status) && has(self.status.verification) && has(self.status.verification.windowStart) && timestamp(self.status.verification.windowStart) >= timestamp(oldSelf.status.verification.windowStart))`
 - status.verification.lastReset is kept once set and its time never moves back: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.lastReset) || (has(self.status) && has(self.status.verification) && has(self.status.verification.lastReset) && timestamp(self.status.verification.lastReset.time) >= timestamp(oldSelf.status.verification.lastReset.time))`
 - status.verification.resets never decreases: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.resets) || (has(self.status) && has(self.status.verification) && has(self.status.verification.resets) && self.status.verification.resets >= oldSelf.status.verification.resets)`
+- status.verification.incidentCount.atMerge is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount) || !has(oldSelf.status.verification.incidentCount.atMerge) || (has(self.status) && has(self.status.verification) && has(self.status.verification.incidentCount) && has(self.status.verification.incidentCount.atMerge) && self.status.verification.incidentCount.atMerge == oldSelf.status.verification.incidentCount.atMerge)`
+- status.verification.incidentCount.atApplied is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount) || !has(oldSelf.status.verification.incidentCount.atApplied) || (has(self.status) && has(self.status.verification) && has(self.status.verification.incidentCount) && has(self.status.verification.incidentCount.atApplied) && self.status.verification.incidentCount.atApplied == oldSelf.status.verification.incidentCount.atApplied)`
 - status.queuedBehind is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind) == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind) > 0)`
 
 | Field | Type | Required | Description |
@@ -615,6 +617,36 @@ Used by: [Hint](#hint).
 | `Reserved` |  |
 | `Consumed` |  |
 | `Declined` |  |
+
+### IncidentCountReading
+
+IncidentCountReading is one reading of an Incident's status.count by the executor.
+
+
+Used by: [IncidentCountReadings](#incidentcountreadings).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `uid` | string | Yes | uid is the UID of the Incident read. The reading counts only when it equals spec.incidentRef.uid.<br>Maximum length: 128<br>Minimum length: 1 |
+| `count` | integer | No | count is the Incident's status.count as read. MaxIncidentCount is the saturation value; a saturated reading never counts.<br>Maximum: 1000000<br>Minimum: 0 |
+| `readAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is compared only with the other reading's readAt. |
+
+### IncidentCountReadings
+
+IncidentCountReadings are the executor's two readings of the request's Incident's status.count (ADR-0030
+section 4). A reading that could not be taken stays absent; atApplied is set only with atMerge.
+
+
+Validation rules:
+
+- atApplied requires atMerge: `!has(self.atApplied) || has(self.atMerge)`
+
+Used by: [VerificationWindow](#verificationwindow).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `atMerge` | [IncidentCountReading](#incidentcountreading) | No | atMerge is the reading taken with the merge receipt, in the status write that sets Merged, or at the first later reconcile before the delivery whose read succeeds. Set once. |
+| `atApplied` | [IncidentCountReading](#incidentcountreading) | No | atApplied is the reading taken in the status write that sets status.pullRequest.appliedObservedAt. Set once, and never filled in after that write. |
 
 ### IncidentPhase
 
@@ -1206,7 +1238,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `mergeCommitAwaitedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a change it cannot check. Set once and never changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset when the commit was reported at once. |
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up, on the executor's clock. In WaitingForDelivery it is the end of the delivery window: one hour after mergeReceipt.mergedAt, extended by the time writes were paused. In Verifying it is the timeout, written on entering the phase: status.pullRequest.appliedObservedAt plus the larger of spec.verification.timeout and the rollout deadline plus the effective stableFor plus the executor's --node-grace. Past the merge a deadline never ends a request Expired: the evidence decides between Failed and Inconclusive (ADR-0030 sections 2, 4 and 6). |
-| `verification` | [VerificationWindow](#verificationwindow) | No | verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4). Only the executor writes it; once set it is kept, windowStart and the time of lastReset only move forward and resets never decreases (validation rules on the object).<br>Rule: lastReset requires resets of at least 1 |
+| `verification` | [VerificationWindow](#verificationwindow) | No | verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4), and the readings of the Incident's count taken from the merge on (incidentCount). Only the executor writes it; once set it is kept, windowStart and the time of lastReset only move forward, resets never decreases and each reading is set once (validation rules on the object).<br>Rule: lastReset requires resets of at least 1 |
 | `hints` | [Hint](#hint) array | No | hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all, and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed, so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: status.hints: at most 3 hints are Consumed or Reserved (`self.filter(h, h.state in ['Consumed', 'Reserved']).size() <= 3`) |
 | `refusedHints` | [RefusedHint](#refusedhint) array | No | refusedHints are the newest comments with the command that the executor refused, at most MaxRefusedHints, oldest first; the oldest one whose reply is recorded is dropped for a new one, and while every one still waits for its reply a new refusal is not recorded. Only the executor writes them.<br>Maximum items: 10<br>List type: map<br>List key: `source`<br>List key: `commentID`<br>Rule: the reply to a refused hint never changes once set |
 | `commentCursor` | [CommentCursor](#commentcursor) | No | commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028 section 3). Only the executor writes it.<br>Rule: etag is kept only on the first page of a new sweep<br>Rule: evictedAt and evictedID are set together |
@@ -1556,6 +1588,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `windowStart` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | windowStart is when the current window opened: the first good check after the last reset. It only moves forward. |
 | `lastReset` | [VerificationReset](#verificationreset) | No | lastReset is the last reset of the window. Kept once set; its time never moves back. |
 | `resets` | integer | No | resets counts the resets of the window: a bad check that closes an open window or names another reason than lastReset. The same reason again on a closed window is not counted and writes nothing. It never decreases, and it is at least 1 while lastReset is set.<br>Minimum: 0 |
+| `incidentCount` | [IncidentCountReadings](#incidentcountreadings) | No | incidentCount holds two readings of the Incident's status.count, taken by the executor with the merge receipt and with appliedObservedAt (ADR-0030 section 4, "Resolved before the rollout"). They decide only the reason of Cleared True: ResolvedBeforeRollout instead of NoRecurrence. Each reading is set once.<br>Rule: atApplied requires atMerge |
 
 ### WindowReset
 

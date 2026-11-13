@@ -76,6 +76,10 @@ type ChangeRequest struct {
 	// none (GitHub computes it after the merge) or one that is not a full commit ID; the caller decides how long
 	// to wait for it.
 	MergeCommit string
+	// Conflicted is true when State is Open and the host reports that the change request cannot be merged into
+	// its base because of a merge conflict. False means no conflict was reported: none, not computed yet, or a
+	// listing that does not carry it (only GetChangeRequest reads it on GitHub).
+	Conflicted bool
 }
 
 // MaxFileBytes is the largest file GitProvider.ReadFile returns. Shadewright edits small manifests; a

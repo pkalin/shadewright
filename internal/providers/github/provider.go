@@ -61,6 +61,8 @@ const (
 	typeCommit     = "commit"
 	stateOpen      = "open"
 	stateClosed    = "closed"
+	// mergeableDirty is GitHub's mergeable_state of a pull request with a merge conflict.
+	mergeableDirty = "dirty"
 )
 
 func (p *Provider) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -941,6 +943,10 @@ type pullJSON struct {
 	Body           *string `json:"body"`
 	MergedAt       *string `json:"merged_at"`
 	MergeCommitSHA *string `json:"merge_commit_sha"`
+	// Mergeable and MergeableState come only with a single pull request (GET /pulls/{number}), never with a
+	// listing. Mergeable is null while GitHub computes it.
+	Mergeable      *bool  `json:"mergeable"`
+	MergeableState string `json:"mergeable_state"`
 	Head           struct {
 		Ref  string        `json:"ref"`
 		SHA  string        `json:"sha"`
@@ -989,6 +995,9 @@ func (p *Provider) toChangeRequest(op string, pr pullJSON) (providers.ChangeRequ
 		}
 	case pr.State == stateOpen:
 		cr.State = providers.ChangeRequestOpen
+		// A conflict only when GitHub has computed mergeability and says why it is false: "dirty" is a merge
+		// conflict. A missing or null answer, or any other state (blocked by checks or reviews, behind), is none.
+		cr.Conflicted = pr.Mergeable != nil && !*pr.Mergeable && pr.MergeableState == mergeableDirty
 	case pr.State == stateClosed:
 		cr.State = providers.ChangeRequestClosed
 	default:

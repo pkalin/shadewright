@@ -32,6 +32,7 @@
 | [0028](0028-reviewer-hints-through-the-pull-request.md) | Reviewer hints through the pull request, the coordinator for other integrations, and the supersede handoff | Accepted, amended |
 | [0029](0029-azure-module-environment-and-cluster-layers.md) | An Azure module with dedicated services, environment and cluster layers, restricted by default and private on request | Proposed |
 | [0030](0030-merge-receipt-and-verification-outcomes.md) | The merge receipt and the three outcomes of verification | Accepted |
+| [0031](0031-kustomize-transformations-in-the-source-mapping.md) | Kustomize and Flux transformations the source mapping may understand | Proposed |
 | [0032](0032-azure-devops-as-a-second-git-provider.md) | Azure DevOps as a second `GitProvider` | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

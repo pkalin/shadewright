@@ -205,6 +205,16 @@ func TestFindManifestCandidate(t *testing.T) {
 			reason: sourcemap.ReasonInvalidInput,
 		},
 		{
+			name:   "source of another kind with the same name",
+			source: func(src *unstructured.Unstructured) { src.SetKind("Bucket") },
+			reason: sourcemap.ReasonInvalidInput,
+		},
+		{
+			name:   "source of another group with the same name",
+			source: func(src *unstructured.Unstructured) { src.SetAPIVersion("example.org/v1") },
+			reason: sourcemap.ReasonInvalidInput,
+		},
+		{
 			name: "decryption is marked, not refused",
 			change: func(f *fixture) {
 				set(f.ks, map[string]any{"provider": "sops", "secretRef": map[string]any{"name": "sops-age"}}, "spec", "decryption")

@@ -45,7 +45,7 @@ type CandidateInput struct {
 	// status.lastAppliedRevision are read; its conditions are not.
 	Kustomization *unstructured.Unstructured
 	// Source is the live GitRepository the Kustomization's spec.sourceRef names, when the caller has read it,
-	// or nil. Only its name, namespace and the spec fields the mapping refuses (spec.include, spec.suspend,
+	// or nil. An object of another group or kind is refused. Only its name, namespace and the spec fields the mapping refuses (spec.include, spec.suspend,
 	// spec.ignore, spec.recurseSubmodules, spec.sparseCheckout, a spec.ref that names more or other than a
 	// branch) are read; its URL, branch, conditions and fetched revision are not.
 	Source *unstructured.Unstructured
@@ -232,6 +232,11 @@ func candidateDelivery(in CandidateInput) (identity, *unstructured.Unstructured,
 	if len(validation.IsDNS1123Subdomain(srcName)) > 0 || len(validation.IsDNS1123Label(srcNamespace)) > 0 {
 		return id, nil, "", new(noCandidate(ReasonUnsupportedSource,
 			"spec.sourceRef of %s is not a valid object reference", kustomizationRef(ks)))
+	}
+	if in.Source != nil && in.Source.GroupVersionKind().GroupKind() != GitRepositoryGVK.GroupKind() {
+		// An object of another kind with the same name has none of the options read below.
+		return id, nil, "", new(noCandidate(ReasonInvalidInput,
+			"the source given for %s is not a GitRepository", kustomizationRef(ks)))
 	}
 	if in.Source != nil && (in.Source.GetName() != srcName || in.Source.GetNamespace() != srcNamespace) {
 		// The names are valid DNS names, so they can be quoted.

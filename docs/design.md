@@ -9,13 +9,13 @@ Status: draft for the MVP.
 - The YAML patchers.
 - The semantic diff check of section 8.2.
 - The GitHub and Key Vault adapters.
-- The pull request step of section 6: branch, commit and pull request, up to `Merged`, and after the merge the merge receipt, `WaitingForDelivery` and `Verifying` with the conditions `Delivered`, `Configured` and `RolledOut` (whether the change reached the pods, or why not), ending `Failed` or `Inconclusive`, behind the executor flag `--verify-outcomes` (off by default until the executor reads the verifier's report); `Succeeded` and the verifier's report are planned.
+- The pull request step of section 6: branch, commit and pull request, up to `Merged`, and after the merge the merge receipt, `WaitingForDelivery` and `Verifying` with the conditions `Delivered`, `Configured` and `RolledOut` (whether the change reached the pods, or why not), ending `Failed` or `Inconclusive`, behind the executor flag `--verify-outcomes` (off by default until the executor reads the verifier's report); `Succeeded` and the executor reading the verifier's report (#683) are planned.
 - The kill switch of section 5.4: `spec.paused`, one gate right before every Git write.
 - The concurrency limit, the lock per target and the circuit breaker of section 10.7. Retry limits and cooldowns between attempts are not built.
 - The collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects.
 - The Incident lifecycle of section 3.2: the closure rules (`Resolved` after an hour quiet or a request `Succeeded`, `Escalated` on a request that ended without success), recurrence after resolution, and the Warning event `IncidentCapNear` at 80% of the Incident cap.
 - The RBAC of sections 2.2 and 10.
-- The Prometheus metrics of both components ([reference](reference/metrics.md)).
+- The Prometheus metrics of the three components ([reference](reference/metrics.md)).
 - Optional OpenTelemetry traces per analysis, off by default ([reference](reference/traces.md)).
 
 **Built, but not used by the analyzer yet**
@@ -23,7 +23,7 @@ Status: draft for the MVP.
 - The Prometheus `MetricsSource` adapter, with its approved query templates, and the pod logs `LogSource` adapter, bounded and redacted. The analyzer creates both from its flags and gives them to the context builder.
 - The Microsoft Foundry `ModelProvider` adapter for OpenAI-format models (section 11.2), with bounded retries, workload identity and malformed output refused. The analysis loop uses it; the analyzer starts the loop only with `--triage-model`.
 - The missing reference check (section 4). It infers a missing Secret or ConfigMap without reading either.
-- The `VerificationReport` type and the stable window checks of ADR-0030 (`internal/verification/clearing`). Nothing creates or reads a report until the verifier (#682) and the executor's wiring (#683) are built.
+- The `VerificationReport` type and the stable window checks of ADR-0030 (`internal/verification/clearing`). The verifier (`shadewright-verifier`, #682) creates and updates the reports; nothing reads one until the executor's wiring (#683) is built.
 - The context builder (section 3.3). It makes a bounded, redacted context from them and the analyzer's reads. The analyzer creates it; the analysis loop calls it, and the analyzer starts the loop only with `--triage-model` (off by default, #76).
 
 **Built and wired into the analyzer**

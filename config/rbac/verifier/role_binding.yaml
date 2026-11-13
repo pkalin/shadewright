@@ -1,0 +1,18 @@
+# The verifier's Role in the operator namespace only: no ClusterRoleBinding (its role.yaml holds no ClusterRole).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/component: verifier
+    app.kubernetes.io/managed-by: kustomize
+  name: verifier-rolebinding
+  namespace: system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: verifier-role
+subjects:
+- kind: ServiceAccount
+  name: verifier
+  namespace: system

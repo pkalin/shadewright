@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Publish only after Chart verified the images and chart, wrote their notes, and Release plugin uploaded
 # every signed asset. Missing assets leave the release a draft. A rerun of a complete release is a no-op.
-# Usage: publish-release.sh <owner/repo> <tag> <executor digest> <analyzer digest> <chart digest>
+# Usage: publish-release.sh <owner/repo> <tag> <executor digest> <analyzer digest> <verifier digest> <chart digest>
 set -euo pipefail
 
-if [ "$#" -ne 5 ]; then
-  echo "usage: $0 <owner/repo> <tag> <executor digest> <analyzer digest> <chart digest>" >&2
+if [ "$#" -ne 6 ]; then
+  echo "usage: $0 <owner/repo> <tag> <executor digest> <analyzer digest> <verifier digest> <chart digest>" >&2
   exit 2
 fi
 repo="$1" tag="$2"

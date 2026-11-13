@@ -1,0 +1,27 @@
+{{- if include "shadewright.verifierEnabled" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "shadewright.resourceName" (dict "suffix" "verifier-leader-election-role" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "verifier" "context" $) | nindent 4 }}
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resourceNames:
+  - shadewright-verifier-leader-election
+  resources:
+  - leases
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+{{- end }}

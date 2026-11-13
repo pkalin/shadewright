@@ -21,7 +21,11 @@ on:
         type: string
         default: ""
       analyzer_digest:
-        description: Digest of the analyzer image to install by (as executor_digest); both or neither.
+        description: Digest of the analyzer image to install by (as executor_digest); all three or none.
+        type: string
+        default: ""
+      verifier_digest:
+        description: Digest of the verifier image to install by (as executor_digest); all three or none.
         type: string
         default: ""
 
@@ -133,11 +137,12 @@ jobs:
 
       # Pull requests and main build the images from the checkout (the chart's flags need the same commit's
       # binaries) and run the appVersion tag; a release tag installs by the digests chart.yml
-      # resolved and verified, the same pair its publish job writes into the chart.
+      # resolved and verified, the same set its publish job writes into the chart.
       - name: Install the chart on Kind and check the permissions
         env:
           EXECUTOR_DIGEST: ${{ inputs.executor_digest }}
           ANALYZER_DIGEST: ${{ inputs.analyzer_digest }}
+          VERIFIER_DIGEST: ${{ inputs.verifier_digest }}
         run: make test-chart-install
 
       # The cluster is deleted even when a step failed.

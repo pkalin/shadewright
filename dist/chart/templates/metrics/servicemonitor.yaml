@@ -4,7 +4,7 @@ scrapes with its own ServiceAccount token: the endpoint checks it with a TokenRe
 so that ServiceAccount needs the metrics-reader ClusterRole (nothing in the chart binds it). By default the serving
 certificate is self-signed by the binary, so its verification is skipped; the token is still checked. With
 metrics.serviceMonitor.tls.enabled the endpoints serve a certificate the administrator issued (see
-executor.metricsTLS and analyzer.metricsTLS) and the ServiceMonitor verifies it against a CA and a serverName.
+executor.metricsTLS, analyzer.metricsTLS and verifier.metricsTLS) and the ServiceMonitor verifies it against a CA and a serverName.
 */ -}}
 {{- if .Values.metrics.serviceMonitor.enabled }}
 {{- if not .Values.metrics.enabled }}
@@ -23,11 +23,15 @@ executor.metricsTLS and analyzer.metricsTLS) and the ServiceMonitor verifies it 
 {{- if not $tls.serverName }}
 {{- fail "metrics.serviceMonitor.tls.enabled needs metrics.serviceMonitor.tls.serverName" }}
 {{- end }}
-{{- if not (and $.Values.executor.metricsTLS.secretName $.Values.analyzer.metricsTLS.secretName) }}
-{{- fail "metrics.serviceMonitor.tls.enabled needs executor.metricsTLS.secretName and analyzer.metricsTLS.secretName: a component without its certificate serves a self-signed one the CA does not verify" }}
+{{- if not (and $.Values.executor.metricsTLS.secretName $.Values.analyzer.metricsTLS.secretName (or $.Values.verifier.metricsTLS.secretName (not (include "shadewright.verifierEnabled" $)))) }}
+{{- fail "metrics.serviceMonitor.tls.enabled needs executor.metricsTLS.secretName, analyzer.metricsTLS.secretName and, when the verifier is deployed, verifier.metricsTLS.secretName: a component without its certificate serves a self-signed one the CA does not verify" }}
 {{- end }}
 {{- end }}
-{{- range $component := list "executor" "analyzer" }}
+{{- $components := list "executor" "analyzer" }}
+{{- if include "shadewright.verifierEnabled" $ }}
+{{- $components = append $components "verifier" }}
+{{- end }}
+{{- range $component := $components }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

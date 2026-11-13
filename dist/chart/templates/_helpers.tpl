@@ -51,7 +51,7 @@ Dynamically calculates safe truncation to ensure total name length <= 63 chars.
 
 {{/*
 Selector labels of one component (the Deployment selector, the Service and NetworkPolicy selectors).
-Takes a dict with .component ("executor" or "analyzer") and .context.
+Takes a dict with .component ("executor", "analyzer" or "verifier") and .context.
 */}}
 {{- define "shadewright.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "shadewright.name" .context }}
@@ -113,7 +113,7 @@ never a display name.
 {{- end }}
 
 {{/*
-Image pull secrets of one Pod: the global list and the component's own (executor, analyzer or tests), without
+Image pull secrets of one Pod: the global list and the component's own (executor, analyzer, verifier or tests), without
 duplicates. Takes a dict with .component and .context. Renders nothing when both are empty.
 */}}
 {{- define "shadewright.imagePullSecrets" -}}
@@ -146,6 +146,29 @@ kyverno-cluster out without reporting it as missing when it is not listed.
 {{- end }}
 
 {{/*
+The namespaces the verifier watches, as a JSON list (read it with fromJsonArray): verifier.watchNamespaces when it
+is set (a list, [] included, is used as it is), else analyzer.watchNamespaces while verifier.watchNamespaces is
+null. --watch-namespaces and the RoleBindings of verifier-watch-rolebindings.yaml both take this one list.
+*/}}
+{{- define "shadewright.verifierWatchNamespaces" -}}
+{{- $v := .Values.verifier.watchNamespaces -}}
+{{- if kindIs "invalid" $v -}}
+{{- $v = .Values.analyzer.watchNamespaces -}}
+{{- end -}}
+{{- toJson ($v | default list) -}}
+{{- end }}
+
+{{/*
+"true" when the verifier is deployed, else empty: only with at least one namespace in
+shadewright.verifierWatchNamespaces. Without one the chart renders no verifier object at all (Deployment,
+ServiceAccount, Roles, bindings, PDB, metrics Service, NetworkPolicy, Lease, ServiceMonitor, the metrics-auth
+subject), and a merged request can end only Inconclusive.
+*/}}
+{{- define "shadewright.verifierEnabled" -}}
+{{- if (include "shadewright.verifierWatchNamespaces" . | fromJsonArray) -}}true{{- end -}}
+{{- end }}
+
+{{/*
 Flags the chart renders itself in the Deployments. extraArgs may not name them, so a free list cannot turn off
 leader election, the metrics authentication or the watched namespaces. Keep in step with the args in
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
@@ -156,7 +179,7 @@ leader-elect health-probe-bind-address metrics-bind-address metrics-secure metri
 
 {{/*
 Refuses values that would weaken the separate identities (invariant 6) or the flags and labels the chart sets.
-Takes a dict with .component ("executor" or "analyzer") and .context. Renders nothing.
+Takes a dict with .component ("executor", "analyzer" or "verifier") and .context. Renders nothing.
 */}}
 {{- define "shadewright.validate" -}}
 {{- $v := .context.Values -}}
@@ -166,13 +189,17 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- if and $ex $an (eq $ex $an) -}}
 {{- fail "executor.identity.azure.clientId and analyzer.identity.azure.clientId are equal: the executor and the analyzer must have separate identities, never one for both" -}}
 {{- end -}}
+{{- if ne .component "verifier" -}}
 {{- range $k, $_ := $c.serviceAccount.annotations -}}
 {{- if hasPrefix "azure.workload.identity/" $k -}}
 {{- fail (printf "%s.serviceAccount.annotations may not set %q: use %s.identity.azure.clientId" $.component $k $.component) -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
 {{- range $k, $_ := $c.podLabels -}}
-{{- if or (hasPrefix "azure.workload.identity/" $k) (hasPrefix "app.kubernetes.io/" $k) (hasPrefix "helm.sh/" $k) (eq $k "control-plane") -}}
+{{- if and (eq $.component "verifier") (hasPrefix "azure.workload.identity/" $k) -}}
+{{- fail (printf "verifier.podLabels may not set %q: the verifier has no cloud identity" $k) -}}
+{{- else if or (hasPrefix "azure.workload.identity/" $k) (hasPrefix "app.kubernetes.io/" $k) (hasPrefix "helm.sh/" $k) (eq $k "control-plane") -}}
 {{- fail (printf "%s.podLabels may not set %q: the chart sets it (identity labels come from %s.identity.azure.clientId)" $.component $k $.component) -}}
 {{- end -}}
 {{- end -}}
@@ -205,7 +232,7 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- $name := . | trimPrefix "--" | splitList "=" | first -}}
 {{- if and (eq $name "reviewer-hints") (eq $.component "analyzer") -}}
 {{- fail "analyzer.extraArgs may not set --reviewer-hints: it is an executor flag, turned on with executor.reviewerHints.enabled" -}}
-{{- else if eq $name "reviewer-hints" -}}
+{{- else if and (eq $name "reviewer-hints") (eq $.component "executor") -}}
 {{- fail "executor.extraArgs may not set --reviewer-hints: use executor.reviewerHints.enabled" -}}
 {{- else if and (eq $name "node-grace") (eq $.component "executor") -}}
 {{- fail "executor.extraArgs may not set --node-grace: use executor.verification.nodeGrace" -}}
@@ -218,7 +245,7 @@ Takes a dict with .component ("executor" or "analyzer") and .context. Renders no
 {{- end }}
 
 {{/*
-The DNS egress rule of networkPolicy.dns: the one rule the analyzer and executor NetworkPolicies and the helm test
+The DNS egress rule of networkPolicy.dns: the one rule the analyzer, executor and verifier NetworkPolicies and the helm test
 hook's NetworkPolicy all use, so the test passes only if the workloads can resolve too. Mode "kubeDns" (default)
 selects the kube-dns Pods in kube-system; mode "resolverCIDRs" selects the listed resolver addresses (NodeLocal
 DNSCache). Port 53 over UDP and TCP in both.

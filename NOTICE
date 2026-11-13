@@ -1,7 +1,7 @@
 Shadewright
 Copyright 2026 The Shadewright Authors
 
-This repository holds the Shadewright operator (the executor and the analyzer).
+This repository holds the Shadewright operator (the executor, the analyzer and the verifier).
 Project site: https://shadewright.io
 Source: https://github.com/pkalin/shadewright
 

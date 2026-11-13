@@ -1,6 +1,6 @@
 name: Trivy
 
-# Scans the published images ghcr.io/<owner>/shadewright-{executor,analyzer} for known vulnerabilities and uploads
+# Scans the published images ghcr.io/<owner>/shadewright-{executor,analyzer,verifier} for known vulnerabilities and uploads
 # the results to code scanning (Security tab), one category per image. It runs on a v* tag, where it waits for
 # the Images workflow of that tag to push the image (like chart.yml does) and scans that tag's digest, and
 # weekly, where it scans the digests of the latest release (new advisories appear for images that did not change).
@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [executor, analyzer]
+        image: [executor, analyzer, verifier]
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

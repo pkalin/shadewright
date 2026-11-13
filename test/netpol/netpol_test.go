@@ -122,8 +122,8 @@ func TestBuildEmitsPoliciesAndDeployments(t *testing.T) {
 	if len(b.policies) == 0 {
 		t.Fatal("config/default emits no NetworkPolicy: is ../network-policy still listed?")
 	}
-	if len(b.deployments) != 2 {
-		t.Fatalf("expected the analyzer and executor Deployments, got %d", len(b.deployments))
+	if len(b.deployments) != 3 {
+		t.Fatalf("expected the analyzer, executor and verifier Deployments, got %d", len(b.deployments))
 	}
 	for _, d := range b.deployments {
 		if d.Spec.Template.Labels[component] == "" {

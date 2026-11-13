@@ -61,11 +61,11 @@ func TestKustomizationSpecRefusal(t *testing.T) {
 		want Reason
 	}{
 		"plain":      {spec: map[string]any{"path": "./apps"}},
-		"suspended":  {spec: map[string]any{"suspend": true, "kubeConfig": map[string]any{"x": "y"}}, want: ReasonKustomizationSuspended},
-		"remote":     {spec: map[string]any{"kubeConfig": map[string]any{"x": "y"}, "images": []any{"x"}}, want: ReasonRemoteCluster},
+		"suspended":  {spec: map[string]any{fieldSuspend: true, fieldKubeConfig: map[string]any{"x": "y"}}, want: ReasonKustomizationSuspended},
+		"remote":     {spec: map[string]any{fieldKubeConfig: map[string]any{"x": "y"}, "images": []any{"x"}}, want: ReasonRemoteCluster},
 		"transform":  {spec: map[string]any{"postBuild": map[string]any{"x": "y"}}, want: ReasonKustomizationTransforms},
 		"decryption": {spec: map[string]any{"decryption": map[string]any{"provider": "sops"}}, want: ReasonDecryption},
-		"not set":    {spec: map[string]any{"suspend": false, "patches": []any{}}},
+		"not set":    {spec: map[string]any{fieldSuspend: false, "patches": []any{}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ks := &unstructured.Unstructured{Object: map[string]any{"spec": tc.spec}}
@@ -76,6 +76,52 @@ func TestKustomizationSpecRefusal(t *testing.T) {
 			case tc.want == "" && r != nil:
 				t.Fatalf("got %s, want nil", r.Reason)
 			case tc.want != "" && (r == nil || r.Reason != tc.want || r.Outcome != NeedsIntervention):
+				t.Fatalf("got %+v, want %s", r, tc.want)
+			}
+		})
+	}
+}
+
+// Kustomization spec fields the rules read.
+const (
+	fieldKubeConfig = "kubeConfig"
+	fieldSuspend    = "suspend"
+)
+
+// TestKustomizationRefusal checks the mapping's sequence: suspend first, then Ready, then the spec rules, so a
+// Kustomization that is not Ready gives KustomizationNotReady (or Reconciling) whatever else its spec sets.
+func TestKustomizationRefusal(t *testing.T) {
+	cond := func(typ, status string) map[string]any {
+		return map[string]any{"type": typ, "status": status, "observedGeneration": int64(1)}
+	}
+	ready := []any{cond("Ready", "True")}
+	failed := []any{cond("Ready", "False")}
+	reconciling := []any{cond("Ready", "Unknown"), cond("Reconciling", "True")}
+	patches := map[string]any{"patches": []any{"x"}}
+	remote := map[string]any{fieldKubeConfig: map[string]any{"x": "y"}}
+	for name, tc := range map[string]struct {
+		spec       map[string]any
+		conditions []any
+		want       Reason
+	}{
+		"plain":               {spec: map[string]any{}, conditions: ready},
+		"suspended not ready": {spec: map[string]any{fieldSuspend: true}, conditions: failed, want: ReasonKustomizationSuspended},
+		"not ready patched":   {spec: patches, conditions: failed, want: ReasonKustomizationNotReady},
+		"reconciling remote": {spec: remote, conditions: reconciling,
+			want: ReasonKustomizationReconciling},
+		"ready patched": {spec: patches, conditions: ready, want: ReasonKustomizationTransforms},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ks := &unstructured.Unstructured{Object: map[string]any{"spec": tc.spec,
+				"status": map[string]any{"observedGeneration": int64(1), "conditions": tc.conditions}}}
+			ks.SetNamespace("flux-system")
+			ks.SetName("apps")
+			ks.SetGeneration(1)
+			r := KustomizationRefusal(ks)
+			switch {
+			case tc.want == "" && r != nil:
+				t.Fatalf("got %s, want nil", r.Reason)
+			case tc.want != "" && (r == nil || r.Reason != tc.want):
 				t.Fatalf("got %+v, want %s", r, tc.want)
 			}
 		})

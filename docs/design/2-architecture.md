@@ -2,9 +2,9 @@
 
 ## 2.1. Flow
 
-[![Shadewright architecture: cluster signals become incidents; the analyzer proposes a typed RemediationRequest; deterministic policy decides; the controller opens a pull request; review and checks merge it; the GitOps controller (Flux) applies it; the verifier confirms the effect.](../assets/diagrams/architecture.svg)](../assets/diagrams/architecture.svg "Open full size")
+[![Shadewright architecture: cluster signals become incidents; the analyzer proposes a typed RemediationRequest; deterministic policy decides; the controller opens a pull request; review and checks merge it; the GitOps controller (Flux) applies it; the verifier samples the rollout and writes a report as evidence.](../assets/diagrams/architecture.svg)](../assets/diagrams/architecture.svg "Open full size")
 
-The dashed boxes are the two identities: the analyzer can read and call the model, the executor can write request status and use the Git App. The `RemediationRequest` between them is the only thing the analyzer can hand over.
+The dashed boxes are the three identities: the analyzer can read and call the model, the executor can write request status and use the Git App, and the verifier can read the pods of a rollout and write its own report, with no model and no Git App. The `RemediationRequest` between the analyzer and the executor is the only thing the analyzer can hand over; the `VerificationReport` is the only thing the verifier hands over, and the executor is to read it as untrusted evidence (<span class="sw-status sw-planned">planned</span>, #683).
 
 The same flow as a sequence, from a symptom to a verified change. Steps marked *(planned)* are designed but not built yet.
 
@@ -47,7 +47,7 @@ sequenceDiagram
 
 ## 2.2. Components
 
-This section lists the components (2.2), the two binaries and what each may read and write (2.2.1 to 2.2.3). The provider interfaces (2.3), cluster platforms (2.4) and cluster integrations (2.5) follow. Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (2.6).
+This section lists the components (2.2), the three binaries and what each may read and write (2.2.1 to 2.2.4). The provider interfaces (2.3), cluster platforms (2.4) and cluster integrations (2.5) follow. Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (2.6).
 
 | Component | Responsibility | Permission boundary |
 | --- | --- | --- |
@@ -57,20 +57,21 @@ This section lists the components (2.2), the two binaries and what each may read
 | Policy engine | Allowed actions, scope, bounds, whether review is required | Rules owned by the cluster admin |
 | Remediation controller | Reconciles `RemediationRequest`, runs the approved plan, handles failures | CR status, Events about a request in the operator namespace, Git through the GitHub App |
 | GitOps adapter | Reads the repository, prepares the change, branch, commit, PR, auto-merge | One repository, allowed paths |
-| Verifier | Checks the applied revision, workload health and whether the symptom is gone | Read rollout state and metrics |
+| Verifier | Samples the pods of a rollout and writes the `VerificationReport` of a request (<span class="sw-status sw-built">built</span>, #682); the executor reading the report and deciding on it is <span class="sw-status sw-planned">planned</span> (#683) | Own binary, Deployment and ServiceAccount; list pods and get ReplicaSets, Deployments and StatefulSets in the watched namespaces; create reports and update their status in the operator namespace; no model, no Git App, never writes request status |
 
 The base is Go with Kubebuilder, `controller-runtime` and `client-go` ([ADR-0005](../adr/0005-go-kubebuilder-single-module.md)).
 
 A controller compares desired and actual state no matter which event woke it up. The work queue collapses repeated requests for the same key, but that is not incident deduplication.
 
-### 2.2.1. Two binaries
+### 2.2.1. Three binaries
 
-The analyzer and the remediation controller are separate binaries in one Go module (`cmd/analyzer`, `cmd/main.go`). They are deployed as separate Deployments with separate ServiceAccounts and identities. A slow model call must never block the controller's other reconciles.
+The analyzer, the remediation controller and the verifier are separate binaries in one Go module (`cmd/analyzer`, `cmd/main.go`, `cmd/verifier`). They are deployed as separate Deployments with separate ServiceAccounts and identities, and three images (`shadewright-analyzer`, `shadewright-executor`, `shadewright-verifier`). A slow model call must never block the controller's other reconciles.
 
 - The collector, the incident store and the analyzer run in the analyzer binary.
-- The policy engine, the remediation controller, the GitOps adapter and the verifier run in the executor (`cmd/main.go`).
+- The policy engine, the remediation controller and the GitOps adapter run in the executor (`cmd/main.go`).
+- The verifier runs in its own binary (`cmd/verifier`, `internal/verifier`, <span class="sw-status sw-built">built</span> in #682, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 7). It is not part of the executor: it has no model access, no Git App and no Secrets, and it never writes request status or sets a phase.
 
-Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/analyzer/collector`, `internal/controller`).
+Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `internal/analyzer/collector`, `internal/controller`, `internal/verifier`, `internal/verifier/watchrbac`).
 
 A third binary in the module, `cmd/kubectl-shadewright`, is not deployed: it is a kubectl plugin that a person runs with their own kubeconfig and permissions (`kubectl shadewright status`, which `-w` repeats at an interval with the same reads, `explain <name>` for one request or Incident, and `doctor` for read-only checks of an install). It only gets and lists Incidents, RemediationRequests, the RemediationSettings, the analysis budget ConfigMap and the version label of the Shadewright CRDs, and for `doctor` the Shadewright CRDs, the analyzer and executor Deployments and the Flux GitRepositories and Kustomizations; it shows the detection reported in the RemediationSettings status but decides nothing from it (invariant 6). It holds no identity of its own, and cleans every string from the cluster of control characters and terminal escape sequences before printing it (invariant 4); see [check status with kubectl](../how-to/check-status.md).
 
@@ -142,14 +143,28 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 ### 2.2.3. Executor permissions
 
 - It reads (`get` only) policies and settings, always from the API server, never through a cache.
-- It reads (`get` only) the Incident a request names, in the operator namespace and from the API server, to check the name the pull request body shows, and to read its `Analyzed` condition and handled-hint ID, to learn that a reviewer hint was refused (<span class="sw-status sw-built">built</span>, code merged, off by default, opt-in with `--reviewer-hints` (#631), #538, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)). The verifier's read of Incidents is planned.
+- It reads (`get` only) the Incident a request names, in the operator namespace and from the API server, to check the name the pull request body shows, and to read its `Analyzed` condition and handled-hint ID, to learn that a reviewer hint was refused (<span class="sw-status sw-built">built</span>, code merged, off by default, opt-in with `--reviewer-hints` (#631), #538, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)). The verifier reads no Incident.
 - It reads (`get` only, no list or watch) the target kinds (Deployments, StatefulSets, KEDA ScaledObjects) and the Flux Kustomizations and GitRepositories that deliver them, for source mapping.
 - It reads requests, writes their status and patches them to add or remove its finalizer, in the operator namespace only (a Role). Its cache watches requests only there.
 - It records the kill switch's Events about a request (5.4) as core Events in the operator namespace, with the `create` and `patch` on core Events that its leader election Role already holds. The spec of a request is immutable (CEL), so the patch cannot change what was decided.
 - It reads the comments of the pull requests it opened and the commenter's permission in the code host, and writes accepted reviewer hints into request status (<span class="sw-status sw-built">built</span>, code merged, off by default, opt-in with `--reviewer-hints` (#631), #538). <span class="sw-status sw-built">built</span> (#539, off by default too) It moves the branch of a handed-over pull request by one fast-forward commit and rewrites its title and body; on every head of its pull requests it creates the check run `shadewright/review` (`in_progress`) and completes it (`success`) once someone who wrote no hint approves the head, with the Git App's existing permissions and one new one, `checks: write`, which every token request now names. <span class="sw-status sw-built">built</span> (#542, off by default too) It posts one reply per hint or refused command in the same pull request, from a fixed template, only when the redactor would change nothing in it (2.3.3, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)).
 - It cannot create requests or write incidents.
 
-Neither binary can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
+### 2.2.4. Verifier permissions
+
+The verifier (`shadewright-verifier`, <span class="sw-status sw-built">built</span>, #682, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 7) is the third identity. It holds no Azure workload identity, no model access, no Git App and no Secrets.
+
+- In each namespace of the chart value `verifier.watchNamespaces` it may `list` `pods` (no `get`, no `watch`: it keeps no informer on pods) and `get` `replicasets`, `deployments` and `statefulsets` (apps). The value defaults to null, which uses `analyzer.watchNamespaces`; a list, an empty one included, is used as is (unique names, at most 256, `*` refused). The grant is the ClusterRole `verifier-watch-role` bound by one RoleBinding `verifier-watch` per namespace, never by a ClusterRoleBinding.
+- In the operator namespace (a Role, `verifier-role`) it may `get`, `list` and `watch` `remediationrequests`, `get` and `create` `verificationreports`, and `update` `verificationreports/status`. It also holds its own leader election Lease (`get`, `update`, `patch` by name) and `create` and `patch` on core Events.
+- It cannot write a request or its status, create or delete anything else, or read any other kind. Like the executor and analyzer, its ServiceAccount is a subject of the metrics-auth ClusterRoleBinding (TokenReviews and SubjectAccessReviews) while metrics are secure.
+- Its network egress is DNS and the Kubernetes API only.
+- Metrics are on `:8443` (HTTPS with authentication and authorization), health and readiness on `:8081`; the chart knobs are under `verifier.*`.
+
+What it does: every 30 seconds, for each `RemediationRequest` in phase `Verifying` that has a merge receipt and `status.rollout.templateRevision` and whose target is a Deployment or StatefulSet in a watched namespace, it gets the target, lists the pods its selector matches (pages of 100, at most 2), proves their owner chain by UID and selector (one ReplicaSet `get`), trims each pod to the fields ADR-0030 section 7 names (the termination message is never read), runs the pure sampling logic of `internal/verification/clearing`, and writes the report `vr-<request UID>`. The report spec holds the request UID, the receipt's merge commit, the target UID, the template revision and the container; its owner reference points to the request with `blockOwnerDeletion` false. Each sample is one status update. A failed read is retried and is not a sample.
+
+Planned: the executor reading the report as untrusted evidence and deciding the outcome (<span class="sw-status sw-planned">planned</span>, #683; the executor's grants are unchanged until then), and skipping requests with `spec.reverts` (<span class="sw-status sw-planned">planned</span>, the field arrives with #96; the verifier has a hook for it).
+
+None of the three binaries can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
 ## 2.3. Provider interfaces
 
@@ -635,7 +650,7 @@ The command, args and env (which hold the tunnel token, `--token` or `TUNNEL_TOK
 
 ### 2.5.7. Verification checks
 
-Verification checks are resolved by the executor, where the verifier runs (2.2). The verifier is planned ([#19](https://github.com/pkalin/shadewright/issues/19)).
+Verification checks are planned ([#19](https://github.com/pkalin/shadewright/issues/19)). The verifier binary (<span class="sw-status sw-built">built</span>, 2.2.4) runs only the pod sampling; which identity resolves the module checks below is decided with #19, and the verifier holds no grant on `RemediationSettings` today.
 
 - It is to build its own registry from the same compiled-in module list as the analyzer, and look a check up by name among the integrations enabled in `RemediationSettings` `spec.modules`.
 - It runs no detection: a check on an add-on that is not installed finds no object and fails.

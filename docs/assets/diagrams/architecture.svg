@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 760" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright architecture</title>
-  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, the GitOps controller (Flux) applies it, and the verifier confirms the symptom is gone. Built so far: the collector, incidents, the policy engine and the remediation controller up to Merged (the pull request, the wait for approval, and observing a person's merge); the analyzer and its model call, the model provider and the verifier are planned, and so are the arrows into and out of them, drawn dashed.</desc>
+  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, the GitOps controller (Flux) applies it. The verifier, a third identity with no model access and no Git credential, then samples the pods of the rollout and writes a VerificationReport, which is evidence and never a verdict. Built so far: the collector, incidents, the policy engine, the remediation controller up to Merged (the pull request, the wait for approval, and observing a person's merge) and the verifier with its report; the analyzer and its model call, the model provider and the executor's reading of the report are planned, and so are the arrows into and out of them, drawn dashed.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -39,8 +39,10 @@
   <!-- identities -->
   <rect class="id" x="312" y="74" width="496" height="268" rx="12"/>
   <text class="idt" x="794" y="94" text-anchor="end">ANALYZER IDENTITY · read-only + model</text>
-  <rect class="id" x="312" y="424" width="496" height="292" rx="12"/>
+  <rect class="id" x="312" y="424" width="496" height="136" rx="12"/>
   <text class="idt" x="794" y="444" text-anchor="end">EXECUTOR IDENTITY · CR status + Git App</text>
+  <rect class="id" x="312" y="580" width="496" height="120" rx="12"/>
+  <text class="idt" x="332" y="600">VERIFIER IDENTITY</text>
 
   <!-- cluster lane -->
   <rect class="box" x="44" y="110" width="210" height="64" rx="10"/>
@@ -84,10 +86,13 @@
   <text class="h" x="594" y="488">Remediation controller</text>
   <text class="s" x="594" y="509">idempotent state machine</text>
 
-  <rect class="pl" x="578" y="610" width="210" height="64" rx="10"/>
-  <text class="pn" x="772" y="626" text-anchor="end">planned</text>
-  <text class="h" x="594" y="636">Verifier</text>
-  <text class="s" x="594" y="657">revision applied · symptom gone</text>
+  <rect class="box" x="332" y="610" width="210" height="64" rx="10"/>
+  <text class="h" x="348" y="636">Verifier</text>
+  <text class="s" x="348" y="657">samples pods · no model, no Git</text>
+
+  <rect class="box" x="578" y="610" width="210" height="64" rx="10"/>
+  <text class="h" x="594" y="636">VerificationReport</text>
+  <text class="s" x="594" y="657">evidence · never a verdict</text>
 
   <!-- outside -->
   <rect class="ple" x="866" y="250" width="210" height="72" rx="10"/>
@@ -120,12 +125,15 @@
   <text class="lbl" x="796" y="486">opens PR</text>
   <path class="f" d="M971 526V574" marker-end="url(#a)"/>
   <path class="f" d="M971 644V712H149V670" marker-end="url(#a)"/>
-  <text class="lbl" x="560" y="704">merge to the protected branch</text>
-  <path class="fp" d="M254 640H572" marker-end="url(#a)"/>
-  <text class="lbl" x="430" y="660">observes rollout</text>
+  <text class="lbl" x="560" y="730">merge to the protected branch</text>
+  <path class="f" d="M254 640H326" marker-end="url(#a)"/>
+  <text class="lbl" x="262" y="632">observes</text>
 
-  <path class="fp" d="M683 526V604" marker-end="url(#a)"/>
-  <text class="lbl" x="692" y="570">after merge</text>
+  <path class="f" d="M600 526V568H500V604" marker-end="url(#a)"/>
+  <text class="lbl" x="510" y="598">after merge</text>
+  <path class="f" d="M542 642H572" marker-end="url(#a)"/>
+  <path class="fp" d="M740 610V566" marker-end="url(#a)"/>
+  <text class="lbl" x="732" y="598" text-anchor="end">executor reads</text>
 
   <!-- legend -->
   <rect class="box" x="866" y="112" width="30" height="16" rx="4"/>

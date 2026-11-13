@@ -4,7 +4,7 @@ This section is the security design. It states ten security rules (10.1 to 10.10
 
 ## 10.1. Least privilege RBAC
 
-**What it does.** No component has `cluster-admin`. Each reads only selected namespaces and kinds. Analysis, proposal, status and execution have separate roles.
+**What it does.** No component has `cluster-admin`. Each reads only selected namespaces and kinds. Analysis, proposal, status, execution and verification have separate roles. The verifier, a third component, serves its metrics on the same port as the other two (`metrics.port`, behind the same token check) and has its own metrics Service.
 
 **Why.** The analyzer's namespaces are a boundary of its identity, not only a setting. There is one RoleBinding per watched namespace.
 
@@ -102,7 +102,7 @@ The per-component split exists so that narrowing is possible without touching th
 
 ### The `helm test` policies
 
-The chart's `helm test` hook adds two NetworkPolicies while the test runs. One lets only the test Pod (label `app.kubernetes.io/component: test`) send DNS and reach the metrics port of the two components. The other lets only that Pod in to that port. The metrics endpoint still refuses the test Pod without a token.
+The chart's `helm test` hook adds two NetworkPolicies while the test runs. One lets only the test Pod (label `app.kubernetes.io/component: test`) send DNS and reach the metrics port of the three components. The other lets only that Pod in to that port. The metrics endpoint still refuses the test Pod without a token.
 
 Helm deletes both after the test, also when it fails. A `helm test` that is cancelled or killed can leave them behind. Remove them with `kubectl -n <namespace> delete networkpolicy -l app.kubernetes.io/component=test`.
 

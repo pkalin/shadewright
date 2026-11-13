@@ -12,12 +12,13 @@ Everything an operator can set today, checked against `cmd/main.go` (the executo
 | --- | --- | --- | --- |
 | Executor | `/manager` | `ghcr.io/pkalin/shadewright-executor` | Reconciles `RemediationRequest` objects in the operator namespace, decides with the policy, acts through Git |
 | Analyzer | `/analyzer` | `ghcr.io/pkalin/shadewright-analyzer` | Collector, Incident controller, platform and module detection. Creates Incidents and, once the analysis is built, requests. Never acts on them |
+| Verifier | `/verifier` | `ghcr.io/pkalin/shadewright-verifier` | Samples the pods of a rollout for each request in `Verifying` and writes its `VerificationReport` (ADR-0030 section 7). No model, no Git App, no Secrets; never writes request status. The executor does not read the report yet (#683) |
 
-Both images are distroless, run as user 65532, and are published for linux/amd64 and linux/arm64. The manifests in `config/manager` use the placeholder `controller:latest` for both, so every install replaces it (the published chart runs the release's signed images by digest; a chart from a source checkout runs the `appVersion` tag). Pin by digest; the [getting started](../install.md#install-with-kubectl-and-kustomize) page has the digests of the latest release and an overlay that does it. Both Deployments run one replica with `--leader-elect`, restricted Pod Security settings (non-root, `RuntimeDefault` seccomp, read-only root filesystem, all capabilities dropped), requests of 10m CPU and 64Mi, and limits of 500m CPU and 128Mi (the executor's memory limit is 256Mi since #615: headroom for large real GitOps trees; the Git input budgets stay the bound and were measured against 128Mi).
+All three images are distroless, run as user 65532, and are published for linux/amd64 and linux/arm64. The manifests in `config/manager` use the placeholder `controller:latest` for all three, so every install replaces it (the published chart runs the release's signed images by digest; a chart from a source checkout runs the `appVersion` tag). Pin by digest; the [getting started](../install.md#install-with-kubectl-and-kustomize) page has the digests of the latest release and an overlay that does it. All three Deployments run one replica with `--leader-elect`, restricted Pod Security settings (non-root, `RuntimeDefault` seccomp, read-only root filesystem, all capabilities dropped), requests of 10m CPU and 64Mi, and limits of 500m CPU and 128Mi (the executor's memory limit is 256Mi since #615: headroom for large real GitOps trees; the Git input budgets stay the bound and were measured against 128Mi).
 
 ## Helm chart
 
-The chart is `dist/chart`. It was generated with Kubebuilder's `helm/v2-alpha` plugin (Kubebuilder v4.16.0) and then adjusted by hand: the plugin renders one manager, so the two Deployments, their ServiceAccounts and the RBAC are written out. **Do not regenerate it with the plugin**; `make test-chart` renders it and fails if its RBAC, NetworkPolicies, Services or CRDs differ from `kustomize build config/default` plus `config/watch` (any extra or missing verb, resource or subject), so a change to `config/rbac` needs the same change in `dist/chart/templates/rbac`. The Chart workflow runs these checks on every pull request, but they are not required for merge yet (the ruleset requires other checks): a red chart check does not block a merge, so read it. It is published as `oci://ghcr.io/pkalin/charts/shadewright` by the release tag workflow, pre-release tags included; the first published version is `0.2.0-rc.1`, and v0.1.0 has no chart. A pre-release needs an explicit `--version`. From a source checkout, install `./dist/chart` (see [getting started](../install.md#install-with-helm-instead)).
+The chart is `dist/chart`. It was generated with Kubebuilder's `helm/v2-alpha` plugin (Kubebuilder v4.16.0) and then adjusted by hand: the plugin renders one manager, so the three Deployments, their ServiceAccounts and the RBAC are written out. **Do not regenerate it with the plugin**; `make test-chart` renders it and fails if its RBAC, NetworkPolicies, Services or CRDs differ from `kustomize build config/default` plus `config/watch` (any extra or missing verb, resource or subject), so a change to `config/rbac` needs the same change in `dist/chart/templates/rbac`. The Chart workflow runs these checks on every pull request, but they are not required for merge yet (the ruleset requires other checks): a red chart check does not block a merge, so read it. It is published as `oci://ghcr.io/pkalin/charts/shadewright` by the release tag workflow, pre-release tags included; the first published version is `0.2.0-rc.1`, and v0.1.0 has no chart. A pre-release needs an explicit `--version`. From a source checkout, install `./dist/chart` (see [getting started](../install.md#install-with-helm-instead)).
 
 ```bash
 helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
@@ -73,7 +74,7 @@ The optional [TLS trust profile](#tls-trust-profile-helm-chart-optional) (`<comp
 
 ### Go memory limit (Helm chart)
 
-The chart sets `GOMEMLIMIT` on the executor and the analyzer to 90 percent of the container's `resources.limits.memory`, in bytes (the executor's default 256Mi gives 241591910, the analyzer's 128Mi gives 120795955), so the Go runtime collects before the heap reaches the limit instead of being OOM-killed during a large but bounded parse ([#601](https://github.com/pkalin/shadewright/issues/601)). It follows the limit when you change it. `executor.goMemLimit` and `analyzer.goMemLimit` override it with a Go memory limit such as `100MiB`. A memory limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, for example `1.5Gi`) makes the render fail until you set the override. The manifests in `config/manager` do not set `GOMEMLIMIT`.
+The chart sets `GOMEMLIMIT` on the executor, the analyzer and the verifier to 90 percent of the container's `resources.limits.memory`, in bytes (the executor's default 256Mi gives 241591910, the analyzer's and the verifier's 128Mi give 120795955), so the Go runtime collects before the heap reaches the limit instead of being OOM-killed during a large but bounded parse ([#601](https://github.com/pkalin/shadewright/issues/601)). It follows the limit when you change it. `executor.goMemLimit`, `analyzer.goMemLimit` and `verifier.goMemLimit` override it with a Go memory limit such as `100MiB`. A memory limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, for example `1.5Gi`) makes the render fail until you set the override. The manifests in `config/manager` do not set `GOMEMLIMIT`.
 
 ### Reviewer hints (Helm chart, optional)
 
@@ -87,12 +88,12 @@ The chart sets `GOMEMLIMIT` on the executor and the analyzer to 90 percent of th
 
 Flags are passed as container args. A flag given twice takes its last value. The shipped manifests set the ones marked in the last column.
 
-### Both binaries
+### All binaries
 
 | Flag | Default | Meaning | `config/` sets |
 | --- | --- | --- | --- |
 | `--namespace` | `$POD_NAMESPACE` | The operator namespace. Required: the binary exits if both are empty | `POD_NAMESPACE` from the downward API |
-| `--leader-elect` | `false` | Only one replica is active. Leases: `shadewright-executor-leader-election`, `shadewright-analyzer-leader-election` | on |
+| `--leader-elect` | `false` | Only one replica is active. Leases: `shadewright-executor-leader-election`, `shadewright-analyzer-leader-election`, `shadewright-verifier-leader-election` | on |
 | `--health-probe-bind-address` | `:8081` | Serves `/healthz` and `/readyz` | `:8081` |
 | `--metrics-bind-address` | `0` (off) | Address of the metrics endpoint, `:8443` for HTTPS | `:8443` (patch in `config/default`) |
 | `--metrics-secure` | `true` | Serve metrics over HTTPS with authentication and authorization. `--metrics-secure=false` serves plain HTTP with no authentication | default |
@@ -114,6 +115,12 @@ Flags are passed as container args. A flag given twice takes its last value. The
 | `--reviewer-hints` | `false` | Read reviewer hints from the comments of the pull requests the executor opened, and create the check run `shadewright/review` on their heads (ADR-0028). Turn it on only when the target branch requires that check from the Shadewright App ([turn reviewer hints on](../how-to/turn-on-reviewer-hints.md)). Off fails closed: hints stored while it was on are declined (`HintsTurnedOff`) and no replacement takes a pull request over. Logged once at start (`Configured reviewer hints`). Set it in the chart with `executor.reviewerHints.enabled` |
 
 `config/default` installs no admission webhook (the webhook and cert-manager sections are commented out), so the webhook flags have no use in the shipped manifests.
+
+### Verifier only
+
+| Flag | Default | Meaning | `config/` sets |
+| --- | --- | --- | --- |
+| `--watch-namespaces` | required | Comma-separated namespaces whose pods the verifier may list; the verifier does not start with an empty list. A request whose target is in another namespace gets no report. Each needs its own RoleBinding of `verifier-watch-role` (chart: `verifier.watchNamespaces`, `null` by default, which uses `analyzer.watchNamespaces`; a list, `[]` included, is used as it is; unique names, at most 256, `*` refused; with an empty list the chart deploys no verifier) | `demo` (the lab) |
 
 ### Analyzer only
 
@@ -164,10 +171,10 @@ These are compiled in. Changing one needs a code change.
 Three namespaces matter:
 
 - **Operator namespace** (`shadewright-system`: the `namespace` of `config/default`, with the name prefix `shadewright-`). It holds the Deployments, ServiceAccounts, Incidents, RemediationRequests and the analysis budget. The executor reconciles requests only here; a request anywhere else is never seen. A policy must list this namespace in `requestNamespaces`, or the request is `Denied` (`RequestNamespaceNotAllowed`). Renaming it means changing the federated credential subject, every RoleBinding subject, and `--namespace`.
-- **Watched namespaces**, set by `--watch-namespaces`. The analyzer's cache is limited to them, so it asks for no more than its RBAC grants. None by default in the chart: an empty list watches nothing.
+- **Watched namespaces**, set by `--watch-namespaces` (separately for the analyzer and the verifier). The analyzer's cache is limited to them, so it asks for no more than its RBAC grants. None by default in the chart: an empty list watches nothing.
 - **Target namespaces**, set by the policy (`targets.namespaces`). Independent of the watched ones: a policy only allows what a request names.
 
-Each watched namespace needs a RoleBinding that binds the ClusterRole `shadewright-analyzer-watch-role` to the ServiceAccount `shadewright-analyzer` of the operator namespace. `config/watch` is the example and holds only the lab's `demo` binding; it is built on its own because `config/default` sets every namespace to the operator's. Without the binding the API server refuses the analyzer's reads there and nothing is observed in that namespace. A repository test checks that the lab's `--watch-namespaces` and `config/watch` agree; it cannot check yours.
+Each watched namespace needs a RoleBinding that binds the ClusterRole `shadewright-analyzer-watch-role` to the ServiceAccount `shadewright-analyzer` of the operator namespace. `config/watch` is the example and holds only the lab's `demo` binding; it is built on its own because `config/default` sets every namespace to the operator's. Without the binding the API server refuses the analyzer's reads there and nothing is observed in that namespace. The verifier needs its own RoleBinding of `verifier-watch-role` to the ServiceAccount `shadewright-verifier` in each namespace it is given (`config/watch/role_binding_verifier_demo.yaml` for the lab). A repository test checks that the lab's `--watch-namespaces` and `config/watch` agree; it cannot check yours.
 
 The permissions, as installed:
 
@@ -181,9 +188,11 @@ The permissions, as installed:
 | Analyzer, operator namespace | `analyzer-role` Role | `get`, `update` the ConfigMap `shadewright-analysis-budget` only (no create); `create`, `get`, `list`, `watch` Incidents and RemediationRequests; `update` `incidents/status`; its own Lease, and `create`, `patch` on core Events (leader election) |
 | Executor, cluster | `executor-role` ClusterRole | `get` only: Deployments, StatefulSets, KEDA `scaledobjects`, Flux `kustomizations` and `gitrepositories`, `remediationpolicies`, `remediationsettings` |
 | Executor, operator namespace | `executor-role` Role | `get`, `list`, `patch`, `watch` RemediationRequests; `get`, `patch`, `update` `remediationrequests/status`; its own Lease, and `create`, `patch` on core Events (leader election). After v0.1.0 (#265, on main): `get` on the one Incident a request names, to verify the name shown in the pull request body |
-| Metrics | `metrics-auth-role`, bound to both ServiceAccounts | `create` TokenReviews and SubjectAccessReviews |
+| Verifier, each watched namespace | RoleBinding `verifier-watch` to `verifier-watch-role` (never a ClusterRoleBinding) | `list` Pods (no `get`, no `watch`); `get` `apps` ReplicaSets, Deployments and StatefulSets |
+| Verifier, operator namespace | `verifier-role` Role | `get`, `list`, `watch` RemediationRequests; `get`, `create` `verificationreports`; `update` `verificationreports/status`; its own Lease (`get`, `update`, `patch` by name) and `create`, `patch` on core Events |
+| Metrics | `metrics-auth-role`, one ClusterRoleBinding to all three ServiceAccounts (the verifier's only while the chart deploys it) | `create` TokenReviews and SubjectAccessReviews: the verifier's only cluster-wide grant |
 
-Neither identity can read Secrets, and neither is `cluster-admin`. `config/rbac` also installs admin, editor and viewer ClusterRoles for each custom resource; Shadewright does not use them, they are for your people.
+None of the three identities can read Secrets, and none is `cluster-admin`. `config/rbac` also installs admin, editor and viewer ClusterRoles for each custom resource; Shadewright does not use them, they are for your people.
 
 The ConfigMap `shadewright-analysis-budget` holds the analyses started on the current UTC day. It ships without data on purpose; keep `data` out of anything you apply, so a GitOps sync never resets the count. If it is deleted the analyzer cannot recreate it, and nothing is due for analysis until you do (`BudgetNotFound`).
 
@@ -214,9 +223,9 @@ An action contributed by an integration module (`AdjustKedaMaxReplicas` needs `k
 
 ## Metrics endpoint
 
-`config/default` patches both Deployments to serve metrics on `:8443` over HTTPS and creates the Services `shadewright-executor-metrics-service` and `shadewright-analyzer-metrics-service` (port `https`, 8443). With `--metrics-secure=true` each request is authenticated by a TokenReview and authorized by a SubjectAccessReview. A scraper therefore needs a ServiceAccount token, and that identity needs the `get` verb on the non-resource URL `/metrics`: the ClusterRole `shadewright-metrics-reader` grants it, and **nothing binds it by default**, so bind it to your Prometheus ServiceAccount.
+`config/default` patches all three Deployments to serve metrics on `:8443` over HTTPS and creates the Services `shadewright-executor-metrics-service`, `shadewright-analyzer-metrics-service` and `shadewright-verifier-metrics-service` (port `https`, 8443). With `--metrics-secure=true` each request is authenticated by a TokenReview and authorized by a SubjectAccessReview. A scraper therefore needs a ServiceAccount token, and that identity needs the `get` verb on the non-resource URL `/metrics`: the ClusterRole `shadewright-metrics-reader` grants it, and **nothing binds it by default**, so bind it to your Prometheus ServiceAccount.
 
-The shipped NetworkPolicies also gate the network: the namespace is default-deny for ingress and egress, and ingress to port 8443 is allowed only from namespaces labeled `metrics: enabled`. Egress for both components is limited to cluster DNS and TCP 443 and 6443 (the Kubernetes API, Git host and Key Vault are on those ports). With the chart value `networkPolicy.analyzer.prometheus.enabled` (off by default) the analyzer, and only the analyzer, gets one more rule, to the Prometheus Pods you name in one namespace on one port (default 9090); see the chart README. `networkPolicy.analyzer.traceCollector.enabled` (off by default) adds the same kind of rule to the OpenTelemetry collector of the [analysis traces](traces.md) (default port 4317).
+The shipped NetworkPolicies also gate the network: the namespace is default-deny for ingress and egress, and ingress to port 8443 is allowed only from namespaces labeled `metrics: enabled`. Egress for the executor and the analyzer is limited to cluster DNS and TCP 443 and 6443 (the Kubernetes API, Git host and Key Vault are on those ports); the verifier's is DNS and the Kubernetes API only. With the chart value `networkPolicy.analyzer.prometheus.enabled` (off by default) the analyzer, and only the analyzer, gets one more rule, to the Prometheus Pods you name in one namespace on one port (default 9090); see the chart README. `networkPolicy.analyzer.traceCollector.enabled` (off by default) adds the same kind of rule to the OpenTelemetry collector of the [analysis traces](traces.md) (default port 4317).
 
 **DNS egress profile (chart only).** One value, `networkPolicy.dns`, decides where port 53 (UDP and TCP) is open, and the analyzer policy, the executor policy and the NetworkPolicy of the `helm test` Pod all use that same rule, so the test cannot pass where the workloads could not resolve. Pick the profile that matches the resolver your Pods query (`kubectl exec` into a Pod and read `/etc/resolv.conf`):
 

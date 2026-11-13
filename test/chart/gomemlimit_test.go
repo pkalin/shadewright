@@ -52,12 +52,16 @@ func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			r := defaultRender(t, tc.set...)
+			r := defaultRender(t, append([]string{withVerifier}, tc.set...)...)
 			if got := goMemLimit(t, r, executorDeployment); got != tc.wantExecutor {
 				t.Errorf("executor GOMEMLIMIT = %s, want %s", got, tc.wantExecutor)
 			}
 			if got := goMemLimit(t, r, analyzerDeployment); got != tc.wantAnalyzer {
 				t.Errorf("analyzer GOMEMLIMIT = %s, want %s", got, tc.wantAnalyzer)
+			}
+			// The verifier's memory limit is 128Mi in every case here, so its default is 90 percent of that.
+			if got := goMemLimit(t, r, verifierDeployment); got != "120795955" {
+				t.Errorf("verifier GOMEMLIMIT = %s, want 120795955", got)
 			}
 		})
 	}
@@ -74,5 +78,12 @@ func TestChartRefusesAMemoryLimitItCannotReadWithoutAnOverride(t *testing.T) {
 	r := defaultRender(t, "executor.resources.limits.memory=1.5Gi", "executor.goMemLimit=1GiB")
 	if got := goMemLimit(t, r, executorDeployment); got != "1GiB" {
 		t.Errorf("GOMEMLIMIT = %s, want 1GiB", got)
+	}
+	if out := helmFails(t, "verifier.resources.limits.memory=1.5Gi"); !strings.Contains(out, "verifier.goMemLimit") {
+		t.Errorf("error does not ask for verifier.goMemLimit:\n%s", out)
+	}
+	r = defaultRender(t, withVerifier, "verifier.goMemLimit=64MiB")
+	if got := goMemLimit(t, r, verifierDeployment); got != "64MiB" {
+		t.Errorf("verifier GOMEMLIMIT = %s, want 64MiB", got)
 	}
 }

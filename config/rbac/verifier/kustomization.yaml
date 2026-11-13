@@ -1,0 +1,7 @@
+resources:
+- service_account.yaml
+- role.yaml
+# The reads in watched namespaces (ADR-0030 section 7); bound per namespace in config/watch, never cluster-wide.
+- watch/role.yaml
+- role_binding.yaml
+- leader_election.yaml

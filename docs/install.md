@@ -51,6 +51,22 @@ patches:
         value: --cluster-id=my-cluster
 ```
 
+A release whose `config/default` has the verifier (`shadewright-verifier`, the third Deployment, [ADR-0030](adr/0030-merge-receipt-and-verification-outcomes.md)) needs one more patch in the same list, with that release's verifier digest, and the same namespaces as the analyzer:
+
+```yaml
+  - target:
+      kind: Deployment
+      name: shadewright-verifier
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: ghcr.io/pkalin/shadewright-verifier@sha256:<verifier digest of the release>
+      # The base passes --watch-namespaces=demo. The verifier does not start with an empty list.
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --watch-namespaces=default
+```
+
 `watch-rolebinding.yaml` (one RoleBinding per watched namespace, with that namespace in `metadata.namespace`; add one more document for each namespace in the flag):
 
 ```yaml
@@ -66,6 +82,25 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: shadewright-analyzer
+    namespace: shadewright-system
+```
+
+With the verifier, add its RoleBinding in each namespace of its `--watch-namespaces` too, as one more document of the same file:
+
+```yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shadewright-verifier-watch
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: shadewright-verifier-watch-role
+subjects:
+  - kind: ServiceAccount
+    name: shadewright-verifier
     namespace: shadewright-system
 ```
 
@@ -95,13 +130,14 @@ Check it:
 
 ```bash
 kubectl -n shadewright-system rollout status deploy/shadewright-analyzer deploy/shadewright-executor
+kubectl -n shadewright-system rollout status deploy/shadewright-verifier   # with the verifier
 kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep "Watching namespaces"
 kubectl get remediationsettings default -o jsonpath='{.status}{"\n"}'
 kubectl -n shadewright-system get incidents
 kubectl shadewright doctor -n shadewright-system   # the kubectl plugin, read-only
 ```
 
-[`kubectl shadewright doctor`](how-to/check-install.md) checks the CRDs, the settings, the kill switch, the Deployments, the repositories and their Flux sources in one command; in observe-only mode it warns about the kill switch, the analysis limit of 0 and the missing repository, and fails nothing. Expect both Deployments ready, a log line with your namespaces and cluster ID, and in the settings status the platform detection, the `DetectionFailed` condition `False` and `NoWatchedNamespaces` `False`. An analyzer started with no namespace (the Helm chart's default) logs `Watching no namespaces` instead, reports `NoWatchedNamespaces` `True` once a settings object exists, and records no Incident. Incidents appear once a watched namespace has a symptom the collector knows (for example an `OOMKilled` container or a failing pod); each carries the condition `AnalysisDue` with reason `AnalysisDisabled`, which is what `analysis.maxAnalysesPerDay: 0` does. The logs are the controller-runtime development format until you pass `--zap-devel=false`.
+[`kubectl shadewright doctor`](how-to/check-install.md) checks the CRDs, the settings, the kill switch, the Deployments, the repositories and their Flux sources in one command, and lists the Flux sources that deliver the workloads of the watched namespaces; in observe-only mode it warns about the kill switch, the analysis limit of 0, the missing repository and the namespaces the analyzer does not watch, and fails nothing. Expect both Deployments ready, a log line with your namespaces and cluster ID, and in the settings status the platform detection, the `DetectionFailed` condition `False` and `NoWatchedNamespaces` `False`. An analyzer started with no namespace (the Helm chart's default) logs `Watching no namespaces` instead, reports `NoWatchedNamespaces` `True` once a settings object exists, and records no Incident. Incidents appear once a watched namespace has a symptom the collector knows (for example an `OOMKilled` container or a failing pod); each carries the condition `AnalysisDue` with reason `AnalysisDisabled`, which is what `analysis.maxAnalysesPerDay: 0` does. The logs are the controller-runtime development format until you pass `--zap-devel=false`.
 
 The executor Deployment carries the label `azure.workload.identity/use: "true"` and its ServiceAccount a placeholder client ID. Both are inert off AKS and in observe-only mode, where the executor never opens a repository. They matter in [the next step](first-proposal.md).
 
@@ -119,8 +155,8 @@ helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <vers
   --set clusterId=my-cluster --set 'analyzer.watchNamespaces={default}'
 ```
 
-`clusterId` is optional (it defaults to the UID of `kube-system`); `analyzer.watchNamespaces` is what makes the analyzer watch anything. There is no `helm repo add` step because the chart is an OCI artifact, and `--version` is required for a pre-release such as `0.2.0-rc.1`, because Helm does not pick pre-releases by itself. For the strict path, install the digest you verified: `oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>` in place of the reference and `--version` (see the [configuration reference](reference/configuration.md#helm-chart)).
+`clusterId` is optional (it defaults to the UID of `kube-system`); `analyzer.watchNamespaces` is what makes the analyzer watch anything. The verifier follows it while `verifier.watchNamespaces` is unset, and the chart deploys the verifier only when that list is not empty: with no namespace (the default) there is no verifier, so a merged request can end only `Inconclusive`, never `Succeeded`. Reading the verifier's report is the executor's side and follows with #683. There is no `helm repo add` step because the chart is an OCI artifact, and `--version` is required for a pre-release such as `0.2.0-rc.1`, because Helm does not pick pre-releases by itself. For the strict path, install the digest you verified: `oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>` in place of the reference and `--version` (see the [configuration reference](reference/configuration.md#helm-chart)).
 
-For development, install from a clone with `./dist/chart` in place of the OCI reference. A clone has no image digests: pass `--set executor.image.digest=sha256:<digest> --set analyzer.image.digest=sha256:<digest>` for the release whose tag you checked out, or `--set image.allowTag=true` to run the `appVersion` tag with images built from that same clone.
+For development, install from a clone with `./dist/chart` in place of the OCI reference. A clone has no image digests: pass `--set executor.image.digest=sha256:<digest> --set analyzer.image.digest=sha256:<digest> --set verifier.image.digest=sha256:<digest>` for the release whose tag you checked out, or `--set image.allowTag=true` to run the `appVersion` tag with images built from that same clone.
 
 The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values, only when it does not exist; Helm never changes it afterwards). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive. The commands to upgrade the release and to uninstall it, what stays behind (the CRDs and the settings object) and how to remove it are in [upgrade with Helm](upgrade-uninstall.md#upgrade-with-helm), [uninstall with Helm](upgrade-uninstall.md#uninstall-with-helm) and [the settings object](upgrade-uninstall.md#the-settings-object-and-helm).

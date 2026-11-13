@@ -3,6 +3,7 @@ IMG ?= controller:latest
 # Names of the images CI publishes to ghcr.io/pkalin (the executor is the manager binary).
 IMG_EXECUTOR ?= ghcr.io/pkalin/shadewright-executor:dev
 IMG_ANALYZER ?= ghcr.io/pkalin/shadewright-analyzer:dev
+IMG_VERIFIER ?= ghcr.io/pkalin/shadewright-verifier:dev
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 # It defaults to the year in the committed deepcopy header, so regenerating does not rewrite every header
 # on 1 January; the current year is used only if that file has none. Evaluated once, when make starts.
@@ -54,7 +55,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, the executor and analyzer roles, and CustomResourceDefinition objects.
+manifests: controller-gen ## Generate WebhookConfiguration, the executor, analyzer and verifier roles, and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	"$(CONTROLLER_GEN)" rbac:roleName=executor-role paths="./internal/controller/..." output:rbac:artifacts:config=config/rbac/executor
 	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-role paths="./internal/analyzer" output:rbac:artifacts:config=config/rbac/analyzer
@@ -64,6 +65,8 @@ manifests: controller-gen ## Generate WebhookConfiguration, the executor and ana
 	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-watch-kyverno paths="./internal/analyzer/modulerbac/kyverno" output:rbac:artifacts:config=config/rbac/analyzer/modules/kyverno
 	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-kyverno-cluster paths="./internal/analyzer/modulerbac/kyvernocluster" output:rbac:artifacts:config=config/rbac/analyzer/modules/kyverno-cluster
 	"$(CONTROLLER_GEN)" rbac:roleName=analyzer-policy-reader paths="./internal/analyzer/policyrbac" output:rbac:artifacts:config=config/rbac/analyzer/policies
+	"$(CONTROLLER_GEN)" rbac:roleName=verifier-role paths="./internal/verifier" output:rbac:artifacts:config=config/rbac/verifier
+	"$(CONTROLLER_GEN)" rbac:roleName=verifier-watch-role paths="./internal/verifier/watchrbac" output:rbac:artifacts:config=config/rbac/verifier/watch
 	$(MAKE) chart-crds
 
 .PHONY: chart-crds
@@ -197,7 +200,8 @@ vulncheck: govulncheck ## Report known vulnerabilities reached from the code (Go
 # Generated outputs owned by manifests, generate and api-docs. verify-generated deletes them first, because
 # controller-gen never deletes a file it no longer generates.
 GENERATED_FILES = 'config/crd/bases/*.yaml' config/rbac/executor/role.yaml config/rbac/analyzer/role.yaml \
-	config/rbac/analyzer/watch/role.yaml config/webhook/manifests.yaml '*zz_generated.deepcopy.go' \
+	config/rbac/analyzer/watch/role.yaml config/rbac/verifier/role.yaml config/rbac/verifier/watch/role.yaml \
+	config/webhook/manifests.yaml '*zz_generated.deepcopy.go' \
 	docs/reference/api.md 'dist/chart/templates/crd/*.yaml'
 
 .PHONY: verify-generated
@@ -215,9 +219,10 @@ verify-generated: ## Regenerate all generated files from scratch and fail if the
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build the executor (bin/manager) and analyzer binaries.
+build: manifests generate fmt vet ## Build the executor (bin/manager), analyzer and verifier binaries.
 	go build -o bin/manager cmd/main.go
 	go build -o bin/analyzer ./cmd/analyzer
+	go build -o bin/verifier ./cmd/verifier
 
 # PLUGIN_VERSION is stamped into the plugin (kubectl shadewright version); status compares it with the CRDs' version label.
 PLUGIN_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -234,6 +239,10 @@ run: manifests generate fmt vet ## Run the executor from your host (operator nam
 run-analyzer: manifests generate fmt vet ## Run the analyzer from your host.
 	go run ./cmd/analyzer
 
+.PHONY: run-verifier
+run-verifier: manifests generate fmt vet ## Run the verifier from your host (operator namespace from NAMESPACE, watched namespaces from WATCH_NAMESPACES).
+	go run ./cmd/verifier --namespace=$(or $(NAMESPACE),shadewright-system) --watch-namespaces=$(WATCH_NAMESPACES)
+
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
@@ -245,9 +254,10 @@ docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) -t ${IMG} .
 
 .PHONY: docker-build-images
-docker-build-images: ## Build the executor and analyzer images (one binary each, as CI publishes them) for the host platform as IMG_EXECUTOR and IMG_ANALYZER.
+docker-build-images: ## Build the executor, analyzer and verifier images (one binary each, as CI publishes them) for the host platform as IMG_EXECUTOR, IMG_ANALYZER and IMG_VERIFIER.
 	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) --target executor -t $(IMG_EXECUTOR) .
 	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) --target analyzer -t $(IMG_ANALYZER) .
+	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) --target verifier -t $(IMG_VERIFIER) .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -467,16 +477,16 @@ test-chart-pin: ## Test hack/chart-pin-digests.sh with the pinned helm (chart-te
 	HELM="$(HELM)" hack/chart-pin-digests_test.sh
 
 .PHONY: test-chart-install
-test-chart-install: kind ## Install the chart on a Kind cluster (created here) and check the Deployments and the permissions. Without EXECUTOR_DIGEST and ANALYZER_DIGEST (a tag run) it builds the images from this checkout under the chart's repository:appVersion and loads them into Kind.
+test-chart-install: kind ## Install the chart on a Kind cluster (created here) and check the Deployments and the permissions. Without EXECUTOR_DIGEST, ANALYZER_DIGEST and VERIFIER_DIGEST (a tag run) it builds the images from this checkout under the chart's repository:appVersion and loads them into Kind.
 	@$(KIND) get clusters | grep -qx '$(CHART_KIND_CLUSTER)' \
 		&& echo "Kind cluster '$(CHART_KIND_CLUSTER)' already exists." \
 		|| $(KIND) create cluster --name $(CHART_KIND_CLUSTER)
-	@if [ -z "$$EXECUTOR_DIGEST$$ANALYZER_DIGEST" ]; then \
-		if printf '%s\n' "$(CHART_CT_EXECUTOR)" "$(CHART_CT_ANALYZER)" | grep -Evxq '[a-z0-9./_-]+:[0-9A-Za-z.+-]+'; then \
-			echo "no image repository or appVersion in $(CHART_DIR): '$(CHART_CT_EXECUTOR)' '$(CHART_CT_ANALYZER)'" >&2; exit 1; \
+	@if [ -z "$$EXECUTOR_DIGEST$$ANALYZER_DIGEST$$VERIFIER_DIGEST" ]; then \
+		if printf '%s\n' "$(CHART_CT_EXECUTOR)" "$(CHART_CT_ANALYZER)" "$(CHART_CT_VERIFIER)" | grep -Evxq '[a-z0-9./_-]+:[0-9A-Za-z.+-]+'; then \
+			echo "no image repository or appVersion in $(CHART_DIR): '$(CHART_CT_EXECUTOR)' '$(CHART_CT_ANALYZER)' '$(CHART_CT_VERIFIER)'" >&2; exit 1; \
 		fi; \
-		$(MAKE) docker-build-images IMG_EXECUTOR=$(CHART_CT_EXECUTOR) IMG_ANALYZER=$(CHART_CT_ANALYZER) \
-			&& $(KIND) load docker-image --name $(CHART_KIND_CLUSTER) $(CHART_CT_EXECUTOR) $(CHART_CT_ANALYZER); \
+		$(MAKE) docker-build-images IMG_EXECUTOR=$(CHART_CT_EXECUTOR) IMG_ANALYZER=$(CHART_CT_ANALYZER) IMG_VERIFIER=$(CHART_CT_VERIFIER) \
+			&& $(KIND) load docker-image --name $(CHART_KIND_CLUSTER) $(CHART_CT_EXECUTOR) $(CHART_CT_ANALYZER) $(CHART_CT_VERIFIER); \
 	fi
 	$(KUBECTL) config use-context kind-$(CHART_KIND_CLUSTER)
 	hack/chart-install-test.sh "$(KUBECTL)" "$(HELM)"
@@ -496,17 +506,18 @@ CHART_APP_VERSION = $(shell sed -n 's/^appVersion: "\{0,1\}\([0-9A-Za-z.+-]*\)"\
 chart-repository = $(shell awk '/^$(1):/{c=1;next} /^[^ \#]/{c=0} c && /^    repository:/{print $$2; exit}' $(CHART_DIR)/values.yaml)
 CHART_CT_EXECUTOR = $(call chart-repository,executor):$(CHART_APP_VERSION)
 CHART_CT_ANALYZER = $(call chart-repository,analyzer):$(CHART_APP_VERSION)
+CHART_CT_VERIFIER = $(call chart-repository,verifier):$(CHART_APP_VERSION)
 
 .PHONY: chart-ct-cluster
 chart-ct-cluster: kind ## Create the Kind cluster of the chart-testing job and load images built from this checkout under the chart's repository:appVersion.
-	@if printf '%s\n' "$(CHART_CT_EXECUTOR)" "$(CHART_CT_ANALYZER)" | grep -Evxq '[a-z0-9./_-]+:[0-9A-Za-z.+-]+'; then \
-		echo "no image repository or appVersion in $(CHART_DIR): '$(CHART_CT_EXECUTOR)' '$(CHART_CT_ANALYZER)'" >&2; exit 1; \
+	@if printf '%s\n' "$(CHART_CT_EXECUTOR)" "$(CHART_CT_ANALYZER)" "$(CHART_CT_VERIFIER)" | grep -Evxq '[a-z0-9./_-]+:[0-9A-Za-z.+-]+'; then \
+		echo "no image repository or appVersion in $(CHART_DIR): '$(CHART_CT_EXECUTOR)' '$(CHART_CT_ANALYZER)' '$(CHART_CT_VERIFIER)'" >&2; exit 1; \
 	fi
 	@$(KIND) get clusters | grep -qx '$(CHART_CT_KIND_CLUSTER)' \
 		&& echo "Kind cluster '$(CHART_CT_KIND_CLUSTER)' already exists." \
 		|| $(KIND) create cluster --name $(CHART_CT_KIND_CLUSTER)
-	$(MAKE) docker-build-images IMG_EXECUTOR=$(CHART_CT_EXECUTOR) IMG_ANALYZER=$(CHART_CT_ANALYZER)
-	$(KIND) load docker-image --name $(CHART_CT_KIND_CLUSTER) $(CHART_CT_EXECUTOR) $(CHART_CT_ANALYZER)
+	$(MAKE) docker-build-images IMG_EXECUTOR=$(CHART_CT_EXECUTOR) IMG_ANALYZER=$(CHART_CT_ANALYZER) IMG_VERIFIER=$(CHART_CT_VERIFIER)
+	$(KIND) load docker-image --name $(CHART_CT_KIND_CLUSTER) $(CHART_CT_EXECUTOR) $(CHART_CT_ANALYZER) $(CHART_CT_VERIFIER)
 	$(KUBECTL) config use-context kind-$(CHART_CT_KIND_CLUSTER)
 
 .PHONY: test-chart-defaults
@@ -514,7 +525,7 @@ test-chart-defaults: chart-ct-cluster ## Install the chart with the default valu
 	hack/chart-default-install-test.sh "$(KUBECTL)" "$(HELM)" "$(CHART_CT_VALUES)"
 
 .PHONY: test-chart-metrics-tls
-test-chart-metrics-tls: chart-ct-cluster ## Install the chart with the metrics TLS trust profile on the chart-testing Kind cluster and scrape both metrics Services with the right CA (200), a wrong CA and a wrong server name (TLS failure).
+test-chart-metrics-tls: chart-ct-cluster ## Install the chart with the metrics TLS trust profile on the chart-testing Kind cluster and scrape the metrics Services of all three components with the right CA (200), a wrong CA and a wrong server name (TLS failure).
 	hack/chart-metrics-tls-test.sh "$(KUBECTL)" "$(HELM)" "$(CHART_CT_VALUES)"
 
 .PHONY: chart-ct-kind-delete

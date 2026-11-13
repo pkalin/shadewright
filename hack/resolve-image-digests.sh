@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Resolves the digests of the executor and analyzer images of a release tag and verifies each one (cosign
+# Resolves the digests of the executor, analyzer and verifier images of a release tag and verifies each one (cosign
 # signature, and the SPDX SBOM attestation of each platform image) against the identity of the Images workflow
 # on that very tag. Prints
-# `executor=<digest>` and `analyzer=<digest>` on stdout (the format of $GITHUB_OUTPUT); progress goes to stderr.
+# `executor=<digest>`, `analyzer=<digest>` and `verifier=<digest>` on stdout (the format of $GITHUB_OUTPUT); progress goes to stderr.
 # The Chart workflow runs this once, in its `images` job: the install test and the publish job both use these
 # digests, so the chart that is published points at the images that were tested. Usage:
 #   hack/resolve-image-digests.sh <tag, with v> <owner/repository> <owner>
@@ -35,8 +35,8 @@ sboms_verify() { # image reference, index digest
   done
 }
 
-found_executor="" found_analyzer=""
-for image in executor analyzer; do
+found_executor="" found_analyzer="" found_verifier=""
+for image in executor analyzer verifier; do
   ref="ghcr.io/${owner}/shadewright-${image}"
   d=""
   until [ -n "${d}" ]; do
@@ -58,3 +58,4 @@ for image in executor analyzer; do
 done
 echo "executor=${found_executor}"
 echo "analyzer=${found_analyzer}"
+echo "verifier=${found_verifier}"

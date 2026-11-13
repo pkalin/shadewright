@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 300" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 460" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Workload identity chain</title>
-  <desc id="d">Each component's pod uses its own ServiceAccount. A projected token from the cluster's OIDC issuer is exchanged through a federated credential in Microsoft Entra ID for a user-assigned managed identity. The analyzer's identity may only call the model in Foundry and create analysis record blobs in one container; in the cluster its ServiceAccount is read-only, and of the RemediationPolicies it may only get the ones its action policies name; the executor's identity may only sign with the GitHub App key in Key Vault.</desc>
+  <desc id="d">Each component's pod uses its own ServiceAccount. A projected token from the cluster's OIDC issuer is exchanged through a federated credential in Microsoft Entra ID for a user-assigned managed identity. The analyzer's identity may only call the model in Foundry and create analysis record blobs in one container; in the cluster its ServiceAccount is read-only, and of the RemediationPolicies it may only get the ones its action policies name; the executor's identity may only sign with the GitHub App key in Key Vault. The verifier, a third component with its own ServiceAccount, has no Azure identity at all: no model, no Git App, no secrets. In the watched namespaces it may only list pods and get ReplicaSets, Deployments and StatefulSets; in the operator namespace it may only create and update its own VerificationReport, which the executor reads as evidence. It never writes request status.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -17,7 +17,7 @@
       .badt{fill:#ff8fa3;font-size:13px;font-weight:600}
     </style>
   </defs>
-  <rect width="1120" height="300" rx="18" fill="#0e0e16"/>
+  <rect width="1120" height="460" rx="18" fill="#0e0e16"/>
   <text class="lanet" x="40" y="44">ANALYZER</text>
   <text class="lanet" x="40" y="174">EXECUTOR</text>
   <text class="lbl" x="40" y="148">In the cluster: read-only; of the RemediationPolicies, get only those --action-policies names (#493).</text>
@@ -39,5 +39,13 @@
   <path class="f" d="M452 222H478" marker-end="url(#a)"/>
   <path class="f" d="M674 222H700" marker-end="url(#a)"/>
   <path class="f" d="M896 222H922" marker-end="url(#a)"/>
-  <text class="lbl" x="40" y="282">No client secrets anywhere; the two identities never share a token.</text>
+    <text class="lbl" x="40" y="278">Writes request status and moves Git. It reads the verifier's report as untrusted evidence.</text>
+  <text class="lanet" x="40" y="304">VERIFIER</text>
+  <rect class="box" x="40" y="320" width="190" height="64" rx="10"/><text class="h" x="54" y="346">Pod</text><text class="s" x="54" y="367">SA shadewright-verifier</text>
+  <rect class="box" x="262" y="320" width="400" height="64" rx="10"/><text class="h" x="276" y="346">Reads in each watched namespace</text><text class="s" x="276" y="367">list pods; get ReplicaSets, Deployments, StatefulSets</text>
+  <rect class="box" x="694" y="320" width="394" height="64" rx="10"/><text class="h" x="708" y="346">Writes in the operator namespace</text><text class="s" x="708" y="367">create VerificationReport vr-&lt;uid&gt; and its status</text>
+  <path class="f" d="M230 352H256" marker-end="url(#a)"/>
+  <path class="f" d="M662 352H688" marker-end="url(#a)"/>
+  <text class="lbl" x="40" y="408">No Azure identity, no model, no Git App, no secrets. It never writes request status and sets no phase.</text>
+  <text class="lbl" x="40" y="436">No client secrets anywhere; no two components share a token, and the verifier holds none.</text>
 </svg>

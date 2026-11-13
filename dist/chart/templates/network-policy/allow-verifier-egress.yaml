@@ -1,0 +1,28 @@
+{{- if include "shadewright.verifierEnabled" . }}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    {{- include "shadewright.labels" (dict "component" "verifier" "context" $) | nindent 4 }}
+  name: {{ include "shadewright.resourceName" (dict "suffix" "allow-verifier-egress" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  egress:
+  {{- include "shadewright.dnsEgressRule" $ | nindent 2 }}
+  - ports:
+    - port: 443
+      protocol: TCP
+    - port: 6443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: verifier
+      app.kubernetes.io/name: {{ include "shadewright.name" . }}
+  policyTypes:
+  - Egress
+{{- end }}
+{{- end }}

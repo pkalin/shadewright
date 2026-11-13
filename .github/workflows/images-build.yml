@@ -1,6 +1,6 @@
 name: Images build
 
-# Builds the executor and analyzer images for linux/amd64 without pushing. Called by ci.yml on pull requests;
+# Builds the executor, analyzer and verifier images for linux/amd64 without pushing. Called by ci.yml on pull requests;
 # publishing, signing and attestation are in images.yml.
 on:
   workflow_call:
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [executor, analyzer]
+        image: [executor, analyzer, verifier]
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

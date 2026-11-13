@@ -8,18 +8,18 @@
 
 [Shadewright](https://shadewright.io) is a Kubernetes operations agent. It watches a cluster, groups repeated symptoms into incidents, asks an LLM for a diagnosis and proposes a fix only as a pull request to your GitOps repository. The GitOps controller deploys the fix and Shadewright verifies the effect. Model output is never authorization: deterministic policy decides what may run.
 
-This chart installs the two components (the analyzer and the executor), their RBAC, NetworkPolicies, metrics Services and the CRDs.
+This chart installs the three components (the analyzer, the executor and the verifier), their RBAC, NetworkPolicies, metrics Services and the CRDs.
 
 ## Prerequisites
 
 - Kubernetes version `{{ template "chart.kubeVersion" . }}` (the `kubeVersion` of Chart.yaml).
 - Flux, the GitOps controller that deploys the pull requests the executor opens (Argo CD is not supported yet).
-- Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor` and `shadewright-analyzer`, and check them with `helm template` before you create the credential.
+- Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor`, `shadewright-analyzer` and `shadewright-verifier`, and check them with `helm template` before you create the credential.
 - The images: the published chart runs the release's signed images by digest (written into its `values.yaml` when the chart is published). A chart from a source checkout has no digests and refuses to render until you set them, or opt in with `image.allowTag: true` to run the `appVersion` tag with images built from that same checkout (the v0.1.0 images stop at start with an empty watch list).
 
 ## Install
 
-With no values the published chart installs an idle Shadewright. The analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident): it reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists; it still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. The cluster ID defaults to the UID of the `kube-system` namespace. To catch a forgotten watch list, alert on `shadewright_analyzer_watched_namespaces == 0`.
+With no values the published chart installs an idle Shadewright. The analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident): it reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists; it still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. The verifier follows `analyzer.watchNamespaces` (`verifier.watchNamespaces` is `null`), so it reads no pod either. It has no cloud identity of any kind: no model access and no Git credentials, so there is nothing to configure for it. The cluster ID defaults to the UID of the `kube-system` namespace. To catch a forgotten watch list, alert on `shadewright_analyzer_watched_namespaces == 0`.
 
 ```bash
 helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
@@ -69,14 +69,20 @@ settings:
       integrations: [flux]
 ```
 
+## The verifier
+
+`shadewright-verifier` reads pod status to tell whether a merged fix held (ADR-0030). It is deterministic code with no model, no Git credentials and no cloud identity. It writes one `VerificationReport` per request in the operator namespace and never writes request status. Its reads outside the operator namespace are one ClusterRole, `verifier-watch-role` (`list` on `pods`, `get` on `deployments`, `replicasets` and `statefulsets`), bound by one RoleBinding in each namespace of `verifier.watchNamespaces` and never by a ClusterRoleBinding. The same list goes to `--watch-namespaces`. Left at `null` it follows `analyzer.watchNamespaces`; a list of its own, an empty one included, is used as it is, so you can watch fewer namespaces than the analyzer or none.
+
 ## Standby replicas
 
-Both Deployments run one Pod by default. `executor.replicas` and `analyzer.replicas` (each at least 1) add warm standbys:
+The Deployments run one Pod each by default. `executor.replicas`, `analyzer.replicas` and `verifier.replicas` (each at least 1) add warm standbys:
 
 ```yaml
 executor:
   replicas: 2
 analyzer:
+  replicas: 2
+verifier:
   replicas: 2
 ```
 
@@ -90,7 +96,7 @@ analyzer:
 
 On by default (`networkPolicy.enabled: true`). The chart installs a default deny for the release namespace (ingress and egress), one egress policy per component and one ingress policy for the metrics port:
 
-- Both components may send DNS (`networkPolicy.dns`) and TCP 443 and 6443 to any address. 443 is the model endpoint, Key Vault, Entra ID, GitHub and the API server of a managed cluster; 6443 is the API server on kubeadm and kind. The two policies are separate objects, so you can narrow one without touching the other.
+- All three components may send DNS (`networkPolicy.dns`) and TCP 443 and 6443 to any address. 443 is the model endpoint, Key Vault, Entra ID, GitHub and the API server of a managed cluster; 6443 is the API server on kubeadm and kind. The policies are separate objects, so you can narrow one without touching the other.
 - The analyzer gets one more rule when you set `networkPolicy.analyzer.prometheus.enabled`: TCP to the Prometheus Pods you name (default port 9090). It is off by default because the analyzer sends Prometheus nothing unless `--prometheus-url` is set: with `--prometheus-cluster` too, it probes it at startup and every 10 minutes, and it queries it when the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76), on with `analyzer.analysis.triageModel`) calls the context builder or a read tool. The executor never gets it. Allow the analyzer in the ingress policy of the Prometheus namespace as well; the chart changes nothing outside its own namespace.
 - Ingress to the metrics port comes only from namespaces labeled `metrics: enabled`. Nothing else is allowed in.
 
@@ -109,7 +115,7 @@ cosign verify \
   ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>
 ```
 
-The digest is in the run summary of the Chart workflow, or `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` prints it (`Digest:`). Image signatures are verified the same way: use the image name (`ghcr.io/pkalin/shadewright-executor@sha256:<digest>` or `shadewright-analyzer`) and the `images\.yml` workflow in the identity.
+The digest is in the run summary of the Chart workflow, or `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` prints it (`Digest:`). Image signatures are verified the same way: use the image name (`ghcr.io/pkalin/shadewright-executor@sha256:<digest>`, `shadewright-analyzer` or `shadewright-verifier`) and the `images\.yml` workflow in the identity.
 
 ## Upgrade
 

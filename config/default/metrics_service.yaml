@@ -37,3 +37,23 @@ spec:
   selector:
     control-plane: analyzer
     app.kubernetes.io/name: shadewright
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    control-plane: verifier
+    app.kubernetes.io/component: verifier
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/managed-by: kustomize
+  name: verifier-metrics-service
+  namespace: system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    control-plane: verifier
+    app.kubernetes.io/name: shadewright

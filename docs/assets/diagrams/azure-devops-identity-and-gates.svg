@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 540" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">The executor's identity towards Azure DevOps and the rules it meets there</title>
+  <desc id="d">Planned, not built. Left, the cluster: the analyzer and the verifier have no Azure DevOps identity and no token; only the executor has one, through workload identity. Middle, Microsoft Entra ID: a federated credential that trusts the cluster's service account of the executor, and a short-lived access token for Azure DevOps that is short lived, not repo scoped. Right, Azure DevOps: the executor identity is a user of the organization with Basic access and membership of one dedicated group. It may contribute, create branches and contribute to pull requests on the one repository, and it is denied the two bypass-policy permissions, force push, editing policies and managing permissions. The target branch has policies the adapter must find in place before it writes: a minimum number of reviewers with votes reset on new changes and the most recent pusher barred from approving, required reviewers by path who are people, and a required status policy named shadewright/review whose authorized identity is the executor, reset on new changes. People approve and complete the pull request. There is no key in Key Vault and no personal access token.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .no{fill:#241a22;stroke:#6b3a4a;stroke-width:1.2;stroke-dasharray:5 4}
+      .h{fill:#f1edff;font-size:14.5px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .lanet{fill:#7d7999;font-size:12.5px;font-weight:600;letter-spacing:.14em}
+    </style>
+  </defs>
+  <rect width="1120" height="540" rx="18" fill="#0e0e16"/>
+
+  <rect class="lane" x="24" y="24" width="340" height="492" rx="14"/>
+  <text class="lanet" x="44" y="52">THE CLUSTER</text>
+  <rect class="no" x="44" y="68" width="300" height="64" rx="10"/><text class="h" x="58" y="94">Analyzer</text><text class="s" x="58" y="114">no Azure DevOps identity, no token</text>
+  <rect class="key" x="44" y="150" width="300" height="64" rx="10"/><text class="h" x="58" y="176">Executor</text><text class="s" x="58" y="196">the one identity that writes to Git</text>
+  <rect class="no" x="44" y="232" width="300" height="64" rx="10"/><text class="h" x="58" y="258">Verifier</text><text class="s" x="58" y="278">no Azure DevOps identity, no token</text>
+  <rect class="ext" x="44" y="330" width="300" height="86" rx="10"/><text class="h" x="58" y="356">Nothing long lived to steal</text><text class="s" x="58" y="376">no key in Key Vault, no personal</text><text class="s" x="58" y="394">access token, no Secret in the cluster</text>
+
+  <rect class="lane" x="392" y="24" width="208" height="492" rx="14"/>
+  <text class="lanet" x="412" y="52">ENTRA ID</text>
+  <rect class="box" x="412" y="150" width="168" height="64" rx="10"/><text class="h" x="426" y="176">Federated credential</text><text class="s" x="426" y="196">trusts the executor's account</text>
+  <rect class="box" x="412" y="232" width="168" height="84" rx="10"/><text class="h" x="426" y="258">Access token</text><text class="s" x="426" y="278">for Azure DevOps,</text><text class="s" x="426" y="296">short lived, not repo scoped</text>
+
+  <rect class="lane" x="632" y="24" width="464" height="492" rx="14"/>
+  <text class="lanet" x="652" y="52">AZURE DEVOPS</text>
+  <rect class="key" x="652" y="68" width="424" height="64" rx="10"/><text class="h" x="666" y="94">Executor identity</text><text class="s" x="666" y="114">a user of the organization, Basic access, one dedicated group</text>
+  <rect class="box" x="652" y="146" width="424" height="56" rx="10"/><text class="h" x="666" y="170">Allowed, on this one repository</text><text class="s" x="666" y="188">contribute, create branch, contribute to pull requests</text>
+  <rect class="no" x="652" y="214" width="424" height="56" rx="10"/><text class="h" x="666" y="238">Denied</text><text class="s" x="666" y="256">both bypass-policy rights, force push, edit policies, manage permissions</text>
+  <rect class="key" x="652" y="284" width="424" height="132" rx="10"/><text class="h" x="666" y="308">Target branch policies, found in place before any write</text>
+  <text class="s" x="666" y="332">minimum reviewers, votes reset on new changes,</text>
+  <text class="s" x="666" y="352">pusher cannot approve; required reviewers by path</text>
+  <text class="s" x="666" y="372">status shadewright/review: required, applies by default,</text>
+  <text class="s" x="666" y="390">authorized identity is the executor, reset on new changes</text>
+  <rect class="ext" x="652" y="430" width="424" height="58" rx="10"/><text class="h" x="666" y="456">People</text><text class="s" x="666" y="474">approve the pull request and complete it</text>
+
+  <path class="f" d="M344 182H412" marker-end="url(#a)"/>
+  <path class="f" d="M496 214V232" marker-end="url(#a)"/>
+  <path class="f" d="M580 274H616V100H652" marker-end="url(#a)"/>
+  <text class="lbl" x="624" y="196" transform="rotate(-90 624 196)">token</text>
+</svg>

@@ -452,6 +452,11 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		if !progresses(rr) {
 			r.forget(req.NamespacedName)
+			if rr.Status.Phase != remediationv1alpha1.PhaseVerifying {
+				// Windows exist only in Verifying. A request seen in another phase after the merge was ended,
+				// by this executor or by another writer, and a reset kept for a lost write has no window left.
+				r.unwrittenResets.forget(req.NamespacedName)
+			}
 			return r.afterStop(ctx, rr, stepErr)
 		}
 		res, err := r.recheck(ctx, rr)

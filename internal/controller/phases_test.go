@@ -1615,6 +1615,29 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(rr.Status.Verification.LastReset.Time.Time).To(BeTemporally("==", bad))
 	})
 
+	It("drops a kept reset when another writer ended the request", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		bad, n := drive(w, start, start.Add(need/2), verification.PollInterval, 1, quiet(w, start))
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		putReport(w, n, bad, start, nil)
+		w.r.Client = &statusRecorder{Client: k8sClient,
+			fail: func(*remediationv1alpha1.RemediationRequest) bool { return true }}
+		_, err := reconcileAt(w, bad)
+		Expect(err).To(HaveOccurred())
+		w.r.Client = k8sClient
+		_, kept := w.r.unwrittenResets.get(fetch(w))
+		Expect(kept).To(BeTrue(), "the reset of the lost write is kept")
+
+		rr := fetch(w)
+		rr.Status.Phase = remediationv1alpha1.PhaseInconclusive
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		mustReconcileAt(w, bad.Add(verification.PollInterval))
+		_, kept = w.r.unwrittenResets.get(fetch(w))
+		Expect(kept).To(BeFalse(), "an ended request keeps no reset")
+	})
+
 	// ADR-0030 section 4: available replicas equal spec.replicas; more than desired is no quiet window.
 	It("resets the executor's window when more replicas are available than desired", func() {
 		w := newWorld(nil)

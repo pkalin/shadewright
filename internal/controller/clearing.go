@@ -123,21 +123,34 @@ type unwrittenResets struct {
 	m sync.Map
 }
 
+// keptReset is one entry of unwrittenResets: the reset and the UID of the request it belongs to.
+type keptReset struct {
+	uid   types.UID
+	reset remediationv1alpha1.WindowReset
+}
+
 // note remembers the reset of w when the check left it closed. An open w changes nothing: a reset still kept was
 // applied to it (checkWindow) and stays until a write stores it.
-func (u *unwrittenResets) note(key types.NamespacedName, w verification.Window) {
+func (u *unwrittenResets) note(rr *remediationv1alpha1.RemediationRequest, w verification.Window) {
 	if !w.Open() && w.LastReset != nil {
-		u.m.Store(key, *w.LastReset.DeepCopy())
+		u.m.Store(client.ObjectKeyFromObject(rr), keptReset{uid: rr.UID, reset: *w.LastReset.DeepCopy()})
 	}
 }
 
-// get returns the reset kept for the request with key.
-func (u *unwrittenResets) get(key types.NamespacedName) (remediationv1alpha1.WindowReset, bool) {
+// get returns the reset kept for rr. An entry of an earlier request with the same name (another UID) is dropped
+// and not returned: a request never inherits the reset of the one whose name it reuses.
+func (u *unwrittenResets) get(rr *remediationv1alpha1.RemediationRequest) (remediationv1alpha1.WindowReset, bool) {
+	key := client.ObjectKeyFromObject(rr)
 	v, ok := u.m.Load(key)
 	if !ok {
 		return remediationv1alpha1.WindowReset{}, false
 	}
-	return v.(remediationv1alpha1.WindowReset), true
+	kept := v.(keptReset)
+	if kept.uid != rr.UID {
+		u.m.Delete(key)
+		return remediationv1alpha1.WindowReset{}, false
+	}
+	return kept.reset, true
 }
 
 // forget drops the reset kept for the request with key.
@@ -197,7 +210,7 @@ func (r *RemediationRequestReconciler) counted(w verification.Window) verificati
 // an end.
 func (r *RemediationRequestReconciler) checkWindow(rr *remediationv1alpha1.RemediationRequest) verification.Window {
 	w := executorWindow(rr)
-	if lost, ok := r.unwrittenResets.get(client.ObjectKeyFromObject(rr)); ok {
+	if lost, ok := r.unwrittenResets.get(rr); ok {
 		resetWindow(&w, lost.Reason, lost.Time.Time)
 	}
 	return w
@@ -381,7 +394,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 		}
 	}
 	changed = storeWindow(rr, w) || changed
-	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
+	r.unwrittenResets.note(rr, w)
 	if good && verification.Succeeds(verification.Success{Report: sampled, Contract: contract, Freshness: fresh,
 		Executor: r.counted(w), Now: now, StableFor: stableFor, NodeGrace: r.nodeGrace()}) {
 		if namesBacklogCheck(rr) {
@@ -542,7 +555,7 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 		resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
 	}
 	changed = storeWindow(rr, w) || changed
-	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
+	r.unwrittenResets.note(rr, w)
 	revert := remediationv1alpha1.IsRevert(rr)
 	if r.counted(w).Span(now) >= stableFor {
 		reason, message := ReasonClearingNotChecked, fmt.Sprintf("The %s was rolled out and configured for %s; "+
@@ -612,7 +625,7 @@ func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
 		good = true
 	}
 	changed = storeWindow(rr, w) || changed
-	r.unwrittenResets.note(client.ObjectKeyFromObject(rr), w)
+	r.unwrittenResets.note(rr, w)
 	if good && r.counted(w).Span(now) >= stableFor {
 		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
 			remediationv1alpha1.ReasonRevertApplied, revertAppliedMessage(rr.Spec.TargetRef.Kind, stableFor))

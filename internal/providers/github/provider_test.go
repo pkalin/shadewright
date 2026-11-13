@@ -1472,6 +1472,42 @@ func TestGetChangeRequestMergedWithoutCommit(t *testing.T) {
 	}
 }
 
+// TestGetChangeRequestConflicted checks that an open pull request is conflicted only when GitHub has computed
+// its mergeability as false with the state "dirty" (#680): a null answer (still computing), a missing one, a
+// pull request blocked by checks or reviews, and a closed pull request with a stale "dirty" are not.
+func TestGetChangeRequestConflicted(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile("testdata/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	open, closed := read("pull_open.json"), read("pull_closed.json")
+	with := func(body, fields string) string {
+		return strings.Replace(body, `"draft":false,`, `"draft":false,`+fields, 1)
+	}
+	for name, c := range map[string]struct {
+		body string
+		want bool
+	}{
+		"dirty":          {with(open, `"mergeable":false,"mergeable_state":"dirty",`), true},
+		"computing":      {with(open, `"mergeable":null,"mergeable_state":"unknown",`), false},
+		"not reported":   {open, false},
+		"blocked":        {with(open, `"mergeable":true,"mergeable_state":"blocked",`), false},
+		"false, unknown": {with(open, `"mergeable":false,"mergeable_state":"unknown",`), false},
+		"closed, dirty":  {with(closed, `"mergeable":false,"mergeable_state":"dirty",`), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, raw("/pulls/12", c.body))
+			cr, err := h.p.GetChangeRequest(ctx, 12)
+			if err != nil || cr.Conflicted != c.want {
+				t.Fatalf("got %+v, %v; want conflicted %v", cr, err, c.want)
+			}
+		})
+	}
+}
+
 func TestCloseChangeRequest(t *testing.T) {
 	patch := status(http.MethodPatch, "/pulls/12", http.StatusOK, "pull_closed.json")
 	patch.check = func(t *testing.T, b map[string]any) {

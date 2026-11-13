@@ -1389,6 +1389,144 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			got.Status.PullRequest.Number)), "the condition no longer says the pull request is open")
 	})
 
+	// conflictSeen returns the recorded first report of a merge conflict, or nil.
+	conflictSeen := func(rr *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.ConflictSeen {
+		return rr.Status.PullRequest.ConflictSeen
+	}
+
+	It("stops with ChangeRequestConflict, not as a rejection, when the merge conflict lasts past the wait (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.SetConflicted(n, true)).To(Succeed())
+
+		// The first report is recorded, on the executor's clock, and decides nothing. Each reconcile runs on a new
+		// reconciler, as after a restart, so the wait lives in status only.
+		start := clock.Truncate(time.Second)
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		seen := conflictSeen(got)
+		Expect(seen).NotTo(BeNil())
+		Expect(seen.At.Time.Equal(start)).To(BeTrue())
+		Expect(seen.HeadSHA).To(Equal(got.Status.PullRequest.HeadSHA))
+		mainHead, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(seen.TargetHead).To(Equal(mainHead))
+
+		clock = start.Add(conflictConfirmWait - time.Second)
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "still inside the wait")
+		Expect(conflictSeen(got).At.Time.Equal(start)).To(BeTrue(), "the first report is not moved")
+
+		clock = start.Add(conflictConfirmWait)
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(approved.Reason).To(Equal(ReasonChangeRequestConflict))
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Reason).To(Equal(ReasonPullRequestOpened), "the pull request is left open")
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "Shadewright does not close it")
+		Expect(got.Status.HoldsTarget).To(Equal(new(true)), "an open pull request keeps the lock on the target")
+		Expect(breakerOutcome(got)).To(Equal(outcomeFailure), "the circuit breaker counts it as NeedsIntervention")
+
+		// A person who closes it afterwards does not turn it into a rejection: the request has ended.
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestConflict))
+	})
+
+	It("does not end the request on a stale merge conflict that the next read no longer reports (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.SetConflicted(n, true)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(conflictSeen(fetch())).NotTo(BeNil())
+
+		// The host computes the answer again: no conflict. The report is dropped.
+		Expect(git.SetConflicted(n, false)).To(Succeed())
+		clock = clock.Add(conflictConfirmWait + time.Minute)
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(conflictSeen(got)).To(BeNil())
+
+		// A conflict reported again starts a new wait: the earlier report does not count.
+		Expect(git.SetConflicted(n, true)).To(Succeed())
+		clock = clock.Add(time.Second)
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(conflictSeen(got).At.Time.Equal(clock.Truncate(time.Second))).To(BeTrue())
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			NotTo(Equal(ReasonChangeRequestConflict))
+	})
+
+	It("keeps the wait for a merge conflict when the target branch head moves (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.SetConflicted(got.Status.PullRequest.Number, true)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		first := conflictSeen(fetch())
+		Expect(first).NotTo(BeNil())
+
+		// A commit that leaves the target file alone keeps the plan fresh. It does not start the wait again: a
+		// busy target branch would otherwise postpone the end for as long as it keeps moving.
+		_, err := git.Push(mainBranch, "apps/other/notes.yaml", []byte("a: b\n"))
+		Expect(err).NotTo(HaveOccurred())
+		clock = first.At.Add(conflictConfirmWait)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+	})
+
+	It("starts the wait for a merge conflict again when the clock went back (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.SetConflicted(got.Status.PullRequest.Number, true)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(conflictSeen(fetch())).NotTo(BeNil())
+
+		clock = clock.Add(-time.Hour)
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a clock set back ends no wait")
+		Expect(conflictSeen(got).At.Time.Equal(clock)).To(BeTrue())
+	})
+
+	It("supersedes a stale plan whose pull request has a merge conflict, as without one (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.SetConflicted(got.Status.PullRequest.Number, true)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("decides nothing on a merge conflict while the freshness check cannot finish (#680)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.SetConflicted(got.Status.PullRequest.Number, true)).To(Succeed())
+		git.SetFail(func(op string) error {
+			if op == "ReadFile" || op == "BranchHead" {
+				return errors.New("git host down")
+			}
+			return nil
+		})
+		_, _ = reconcileResult()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(conflictSeen(fetch())).To(BeNil(), "a failed check records no conflict")
+		git.SetFail(nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(conflictSeen(fetch())).NotTo(BeNil())
+		clock = clock.Add(conflictConfirmWait)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestConflict))
+	})
+
 	It("expires a request whose freshness check keeps failing", func() {
 		Expect(reconcileOnce()).To(Succeed()) // finalizer
 		Expect(reconcileOnce()).To(Succeed()) // branch

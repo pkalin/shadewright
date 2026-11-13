@@ -228,3 +228,24 @@ func TestMergeCommitWaitIsBoundedWhenTheClockGoesBack(t *testing.T) {
 		}
 	}
 }
+
+// TestConflictWaitIsBoundedWhenTheClockGoesBack checks that the wait to confirm a merge conflict is measured from
+// its recorded start, and that a clock set back by more than the slack starts it again instead of ending it.
+func TestConflictWaitIsBoundedWhenTheClockGoesBack(t *testing.T) {
+	start := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		now    time.Time
+		want   time.Duration
+		wantOK bool
+	}{
+		"just started":              {start, conflictConfirmWait, true},
+		"one minute in":             {start.Add(time.Minute), time.Minute, true},
+		"over":                      {start.Add(conflictConfirmWait + time.Second), 0, true},
+		"clock back inside slack":   {start.Add(-30 * time.Second), conflictConfirmWait + 30*time.Second, true},
+		"clock back past the slack": {start.Add(-mergeCommitClockSlack - time.Second), 0, false},
+	} {
+		if got, ok := conflictWaitRemaining(start, tc.now); got != tc.want || ok != tc.wantOK {
+			t.Errorf("%s: got %s %v, want %s %v", name, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}

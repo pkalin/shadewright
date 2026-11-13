@@ -523,7 +523,10 @@ func (g *Git) FindChangeRequest(ctx context.Context, headBranch string) (provide
 	defer g.mu.Unlock()
 	for _, cr := range slices.Backward(g.crs) {
 		if cr.HeadBranch == headBranch {
-			return *cr, nil
+			found := *cr
+			// A listing does not carry the conflict, as on GitHub: only GetChangeRequest reports it.
+			found.Conflicted = false
+			return found, nil
 		}
 	}
 	return providers.ChangeRequest{}, fmt.Errorf("change request for %q: %w", headBranch, providers.ErrNotFound)
@@ -544,7 +547,22 @@ func (g *Git) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRe
 	if !strings.HasPrefix(cr.HeadBranch, "shadewright/") || cr.BaseBranch != g.target {
 		return providers.ChangeRequest{}, fmt.Errorf("change request %d is not a Shadewright one: %w", n, providers.ErrNotFound)
 	}
-	return *cr, nil
+	found := *cr
+	found.Conflicted = cr.Conflicted && cr.State == providers.ChangeRequestOpen
+	return found, nil
+}
+
+// SetConflicted sets whether the host reports change request n in conflict with its base, as GitHub's
+// mergeable_state "dirty" does. GetChangeRequest reports it only while the change request is open.
+func (g *Git) SetConflicted(n int64, conflicted bool) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return err
+	}
+	cr.Conflicted = conflicted
+	return nil
 }
 
 func (g *Git) get(n int64) (*providers.ChangeRequest, error) {

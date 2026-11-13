@@ -136,6 +136,11 @@ const (
 	// refusal. Nothing is retried.
 	ReasonGitRejected = "GitRejected"
 
+	// ReasonRecordedMissingOtherListed (condition PullRequestUnreadable): the Git host has no pull request of this
+	// request with the recorded number, but the request's branch lists another one with its marker, so the request
+	// cannot tell whether its change is gone and is read again until a person acts (#688).
+	ReasonRecordedMissingOtherListed = "RecordedMissingOtherListed"
+
 	reasonTargetBranchChanged   = "TargetBranchChanged"
 	reasonRepositoryUnavailable = "RepositoryUnavailable"
 )
@@ -699,7 +704,9 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	// A person may have merged or closed it since the open: that is looked at first, because closing a closed
 	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
 	// decides nothing; the close by number below still runs.
-	if v := r.changeOf(cleanCtx, git, rr, changeQuery{number: cr.Number}); v.state == changeMerged || v.state == changeClosed {
+	// recordNumber removed a mark in memory only: changeOf reads the stored one (markRemoved).
+	read := changeQuery{number: cr.Number, markRemoved: before.GoneSeen != nil}
+	if v := r.changeOf(cleanCtx, git, rr, read); v.state == changeMerged || v.state == changeClosed {
 		if ok, err := ended(v.pr); ok {
 			return err
 		}
@@ -713,7 +720,7 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	case providers.IsConflict(err):
 		// A merge between the look-up and the close is a conflict, but so is any other 409 of the host: only a
 		// look-up that shows the pull request merged (or closed) decides; anything else is retried.
-		v := r.changeOf(cleanCtx, git, rr, changeQuery{number: cr.Number})
+		v := r.changeOf(cleanCtx, git, rr, read)
 		if v.state == changeMerged || v.state == changeClosed {
 			if ok, err := ended(v.pr); ok {
 				return err
@@ -1612,9 +1619,10 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
 // request that holds the lock on its target (status.holdsTarget), whatever its phase; a merged one refuses the
 // close with a conflict, and one without this request's marker is left alone. With a pull request recorded, every
-// open pull request of the branch that carries this request's marker is closed too, whatever its number, and a
-// 404 on the recorded number, an answer about another pull request or any failed read keeps the finalizer for a
-// retry (closeAllOwn). While writes are paused the deletion waits, because closing is a write.
+// open pull request of the branch that carries this request's marker is closed too, whatever its number. A 404 on
+// the recorded number that the branch does not confirm, an answer about another pull request or any failed read
+// keeps the finalizer for a retry; a recorded number that is not this request's while the branch lists one with
+// its marker does not (closeAllOwn). While writes are paused the deletion waits, because closing is a write.
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {

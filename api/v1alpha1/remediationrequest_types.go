@@ -321,8 +321,10 @@ const (
 	// with reason GitForbidden or GitRejected while the Git host refuses the read (403 or 422), and, on a request
 	// that keeps the lock on its target, with reason RepositoryUnavailable while the repository of the plan is not
 	// in RemediationSettings any more, TargetBranchChanged while its entry names another target branch, or
-	// RepositoryUnusable while its entry cannot be used. The message names the read; lastTransitionTime is when
-	// it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
+	// RepositoryUnusable while its entry cannot be used, and with reason RecordedMissingOtherListed while the Git
+	// host has no pull request of this request with the recorded number but the request's branch lists another one
+	// with its marker (the message names both numbers and what ends it). The message names the read;
+	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,
 	// PullRequestUnreadable, is recorded when it is set or its reason changes, and one Normal Event,

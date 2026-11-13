@@ -534,7 +534,7 @@ Deleting a request closes its pull request, and every open pull request of its b
 - after it stopped in `NeedsIntervention` or `Expired`;
 - while it holds the lock on its target (`status.holdsTarget`, in any phase, 10.7).
 
-A repository that left the settings or changed its target branch, or a pull request that is already gone (a 404 that the listing of the branch confirms, on two looks at least two minutes apart, so such a deletion takes at least two minutes) or merged, does not block the deletion.
+A repository that left the settings or changed its target branch, or a pull request that is already gone (a 404 that the listing of the branch confirms, on two looks at least two minutes apart, so such a deletion takes at least two minutes) or merged, does not block the deletion. A recorded number that is gone, or not the request's, while the branch lists another pull request with the request's marker is retried on every other path (condition `PullRequestUnreadable`, reason `RecordedMissingOtherListed`); the deletion instead closes each such open one and goes, since a person deleted the holder.
 
 While writes are paused the deletion waits, because closing is a write. Deleting the CR never rolls back a deployment.
 

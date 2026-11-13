@@ -1648,7 +1648,10 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 //   - the recorded one, open with this request's marker, is closed; gone (not this request's, or without its
 //     marker), closed or merged, nothing is closed on its account;
 //   - then every open pull request of the branch that carries this request's marker is this request's change,
-//     whatever its number, and is closed. One without the marker is left alone and does not hold the finalizer.
+//     whatever its number, and is closed. One without the marker is left alone and does not hold the finalizer;
+//   - a recorded number that is missing, or not this request's, while a listing of the branch shows a pull request
+//     with this request's marker (errOwnListed, retried on every other path) is the one exception: a person deleted
+//     the holder, so every open one with the marker is closed and the finalizer goes (closeListedOwn).
 //
 // Every close is preceded by stillOwns. A close that fails, a conflict included (the pull request may have been
 // merged since the read, or the host refused for another reason), is returned for a retry, which reads again.
@@ -1664,6 +1667,13 @@ func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git prov
 		return nil
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: true, openOnBranch: true})
+	if v.state == changeUnknown && v.ownListed {
+		// A person deleted the holder (ADR-0030): the recorded number is not this request's while the branch lists
+		// pull requests with its marker, so those are its change. Each open one is closed, and the finalizer goes,
+		// whatever the recorded number was read as. The verdict carries both listings of the branch (ownListed); one
+		// that a later failure made unknown again does not, and is retried.
+		return r.closeListedOwn(ctx, rr, v, closeIt)
+	}
 	switch finalizeRule[v.state] {
 	case finalizeRetry:
 		return v.err
@@ -1686,6 +1696,38 @@ func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git prov
 		if err := closeIt(o); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// closeListedOwn is closeAllOwn on errOwnListed: it closes every pull request with this request's marker that a
+// listing of the branch in v shows open (v.own, from the listing that checked the 404, and v.open), each once.
+func (r *RemediationRequestReconciler) closeListedOwn(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict, closeIt func(providers.ChangeRequest) error) error {
+	closed := map[int64]bool{}
+	for _, cr := range v.own {
+		if cr.State != providers.ChangeRequestOpen || closed[cr.Number] {
+			continue
+		}
+		if err := closeIt(cr); err != nil {
+			return err
+		}
+		closed[cr.Number] = true
+	}
+	for _, o := range v.open {
+		if closed[o.Number] {
+			continue
+		}
+		switch ours, err := r.ownsMarker(ctx, o.Body, rr); {
+		case err != nil:
+			return err
+		case !ours:
+			continue
+		}
+		if err := closeIt(o); err != nil {
+			return err
+		}
+		closed[o.Number] = true
 	}
 	return nil
 }

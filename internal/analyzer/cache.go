@@ -17,15 +17,11 @@ limitations under the License.
 package analyzer
 
 import (
-	"fmt"
-	"slices"
-	"strings"
-
-	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/cmdutil"
 )
 
 // ParseNamespaces reads the --watch-namespaces flag: a comma-separated list of namespace names. It trims
@@ -34,21 +30,7 @@ import (
 // and the binary starts no collector (design 2.2 and 10.1). A name that is not a valid namespace name, such
 // as "*", is an error.
 func ParseNamespaces(flag string) ([]string, error) {
-	var out []string
-	for part := range strings.SplitSeq(flag, ",") {
-		ns := strings.TrimSpace(part)
-		if ns == "" {
-			continue
-		}
-		if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
-			return nil, fmt.Errorf("watch namespace %q is not a valid namespace name: %s", ns, strings.Join(errs, "; "))
-		}
-		if !slices.Contains(out, ns) {
-			out = append(out, ns)
-		}
-	}
-	slices.Sort(out)
-	return out, nil
+	return cmdutil.ParseNamespaces(flag)
 }
 
 // CacheOptions bounds the analyzer's cache to what its RBAC grants: namespaced objects only in the watched

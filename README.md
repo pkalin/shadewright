@@ -61,10 +61,10 @@ make manifests generate   # after changing API types
 make lint-fix
 make test                 # unit and envtest, no cluster needed
 make run                  # against the current kubeconfig context
-make docker-build-images  # executor and analyzer images for the host platform
+make docker-build-images  # executor, analyzer and verifier images for the host platform
 ```
 
-Images (distroless, non-root, linux/amd64 and linux/arm64) are published from `main` and release tags to `ghcr.io/pkalin/shadewright-executor` and `ghcr.io/pkalin/shadewright-analyzer`.
+Images (distroless, non-root, linux/amd64 and linux/arm64) are published from `main` and release tags to `ghcr.io/pkalin/shadewright-executor`, `ghcr.io/pkalin/shadewright-analyzer` and `ghcr.io/pkalin/shadewright-verifier`.
 
 Contributor and coding-agent guide: [AGENTS.md](AGENTS.md).
 

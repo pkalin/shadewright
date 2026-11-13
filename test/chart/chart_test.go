@@ -58,10 +58,11 @@ const (
 	memoryLimit  = "memory"
 	analyzerComp = "analyzer"
 	executorComp = "executor"
+	verifierComp = "verifier"
 )
 
-// components are the two Deployments of the chart.
-var components = []string{executorComp, analyzerComp}
+// components are the Deployments of the chart.
+var components = []string{executorComp, analyzerComp, verifierComp}
 
 // helperRole matches the admin, editor and viewer ClusterRoles for people; the chart installs them only on request.
 var helperRole = regexp.MustCompile(`-(admin|editor|viewer)-role$`)
@@ -598,7 +599,7 @@ func TestRBACEqualsKustomizeWithEveryToggleOn(t *testing.T) {
 		}
 	}
 	addKustomize(t, &r, "config/analysis-policies")
-	names := []string{"shadewright-analyzer-watch"}
+	names := []string{"shadewright-analyzer-watch", "shadewright-verifier-watch"}
 	for _, m := range moduleRoles {
 		if !m.clusterWide {
 			names = append(names, m.role)

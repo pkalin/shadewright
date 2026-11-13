@@ -1,4 +1,5 @@
 resources:
 - manager.yaml
 - analyzer.yaml
+- verifier.yaml
 - analysis_budget.yaml

@@ -26,10 +26,15 @@ Next:
   - Metrics are scraped only from namespaces labeled "metrics: enabled", by an identity allowed to "get" the
     non-resource URL /metrics (the ClusterRole {{ include "shadewright.resourceName" (dict "suffix" "metrics-reader" "context" $) }}; nothing binds it).
 {{- end }}
-{{- if or (not .Values.executor.image.digest) (not .Values.analyzer.image.digest) }}
+{{- if not (include "shadewright.verifierWatchNamespaces" . | fromJsonArray) }}
+  - The verifier watches no namespace (verifier.watchNamespaces is null and analyzer.watchNamespaces is empty,
+    or verifier.watchNamespaces is empty), so it reads no pod and a remediation cannot be verified. Set
+    verifier.watchNamespaces to a list, or analyzer.watchNamespaces, which it follows while it is null.
+{{- end }}
+{{- if or (not .Values.executor.image.digest) (not .Values.analyzer.image.digest) (not .Values.verifier.image.digest) }}
   - An image has no digest, so it runs by the tag {{ .Chart.AppVersion }} (image.allowTag=true, a source
     checkout). The chart published on a release tag pins the release's signed digests; set
-    executor.image.digest and analyzer.image.digest to pin them here.
+    executor.image.digest, analyzer.image.digest and verifier.image.digest to pin them here.
 {{- end }}
 {{- if not .Values.networkPolicy.enabled }}
 

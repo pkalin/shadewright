@@ -39,6 +39,8 @@ annotations:
       image: ghcr.io/pkalin/shadewright-executor:0.4.0 # x-release-please-version
     - name: analyzer
       image: ghcr.io/pkalin/shadewright-analyzer:0.4.0 # x-release-please-version
+    - name: verifier
+      image: ghcr.io/pkalin/shadewright-verifier:0.4.0 # x-release-please-version
   artifacthub.io/crds: |
     - kind: Incident
       version: v1alpha1

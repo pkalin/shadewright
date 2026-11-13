@@ -3,7 +3,7 @@ name: Chart
 # Publishes the Helm chart in dist/chart (generated with Kubebuilder's helm/v2-alpha plugin, then adjusted by
 # hand). Pull requests and pushes to main lint, render, compare and install it through ci.yml, which calls
 # chart-test.yml; a release tag runs the same tests here first. The images job resolves the digests of the
-# tag's executor and analyzer images once and verifies their signatures and SBOMs; the Kind install test runs
+# tag's executor, analyzer and verifier images once and verifies their signatures and SBOMs; the Kind install test runs
 # those digests (the other chart tests start at once) and the publish job only pins that same pair into
 # values.yaml, so the published chart runs the tested images by digest even if a tag moves meanwhile. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
@@ -41,6 +41,7 @@ jobs:
     outputs:
       executor: ${{ steps.resolve.outputs.executor }}
       analyzer: ${{ steps.resolve.outputs.analyzer }}
+      verifier: ${{ steps.resolve.outputs.verifier }}
     permissions:
       contents: read
       packages: read
@@ -92,6 +93,7 @@ jobs:
       part: install
       executor_digest: ${{ needs.images.outputs.executor }}
       analyzer_digest: ${{ needs.images.outputs.analyzer }}
+      verifier_digest: ${{ needs.images.outputs.verifier }}
     uses: ./.github/workflows/chart-test.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
 
   publish:
@@ -106,6 +108,7 @@ jobs:
     outputs:
       executor_digest: ${{ needs.images.outputs.executor }}
       analyzer_digest: ${{ needs.images.outputs.analyzer }}
+      verifier_digest: ${{ needs.images.outputs.verifier }}
       chart_digest: ${{ steps.push.outputs.digest }}
     permissions:
       contents: read
@@ -155,7 +158,8 @@ jobs:
         env:
           EXECUTOR: ${{ needs.images.outputs.executor }}
           ANALYZER: ${{ needs.images.outputs.analyzer }}
-        run: hack/chart-pin-digests.sh dist/chart "${EXECUTOR}" "${ANALYZER}"
+          VERIFIER: ${{ needs.images.outputs.verifier }}
+        run: hack/chart-pin-digests.sh dist/chart "${EXECUTOR}" "${ANALYZER}" "${VERIFIER}"
 
       # A pre-release has no commit that bumps Chart.yaml, so its version and appVersion come from the tag.
       - name: Package the chart
@@ -249,6 +253,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           EXECUTOR: ${{ needs.publish.outputs.executor_digest }}
           ANALYZER: ${{ needs.publish.outputs.analyzer_digest }}
+          VERIFIER: ${{ needs.publish.outputs.verifier_digest }}
           CHART: ${{ needs.publish.outputs.chart_digest }}
         run: |
           set -euo pipefail
@@ -267,7 +272,7 @@ jobs:
             echo "no GitHub release for ${TAG} after 5 minutes (last error: $(cat "${RUNNER_TEMP}/view.err")); create it, then re-run this job" >&2
             exit 1
           fi
-          hack/release-verify-notes.sh "${GH_REPO}" "${TAG}" "${EXECUTOR}" "${ANALYZER}" "${CHART}" < "${body}" > "${notes}"
+          hack/release-verify-notes.sh "${GH_REPO}" "${TAG}" "${EXECUTOR}" "${ANALYZER}" "${VERIFIER}" "${CHART}" < "${body}" > "${notes}"
           gh release edit "${TAG}" --notes-file "${notes}"
           echo "release ${TAG}: digests and verify commands added" >> "${GITHUB_STEP_SUMMARY}"
 
@@ -293,5 +298,6 @@ jobs:
           TAG: ${{ github.ref_name }}
           EXECUTOR: ${{ needs.publish.outputs.executor_digest }}
           ANALYZER: ${{ needs.publish.outputs.analyzer_digest }}
+          VERIFIER: ${{ needs.publish.outputs.verifier_digest }}
           CHART: ${{ needs.publish.outputs.chart_digest }}
-        run: hack/publish-release.sh "${GH_REPO}" "${TAG}" "${EXECUTOR}" "${ANALYZER}" "${CHART}"
+        run: hack/publish-release.sh "${GH_REPO}" "${TAG}" "${EXECUTOR}" "${ANALYZER}" "${VERIFIER}" "${CHART}"

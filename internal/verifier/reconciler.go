@@ -1,0 +1,422 @@
+/*
+Copyright 2026 The Shadewright Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package verifier
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/ownership"
+	"github.com/pkalin/shadewright/internal/verification/clearing"
+)
+
+// Reconciler samples the pods of every RemediationRequest in Verifying and writes the request's
+// VerificationReport. It holds no state of its own between reconciles: the window, the baselines and the
+// sample counter live in the report, so a restart or a lost lease forgets nothing (ADR-0030 section 4).
+type Reconciler struct {
+	// Client reads RemediationRequests from the manager's cache (operator namespace only) and makes the
+	// verifier's two writes: the create of a report and the update of its status.
+	Client client.Client
+	// APIReader reads reports, targets and ReplicaSets one at a time and lists pods, never through a cache:
+	// the verifier holds get on those kinds and list on pods, and no watch on any of them.
+	APIReader client.Reader
+	// Namespace is the operator namespace, the only namespace whose requests are sampled.
+	Namespace string
+	// Watched are the namespaces of --watch-namespaces. A request whose target is elsewhere is not sampled,
+	// since the verifier holds no grant there: it gets no report, which the executor reads as no evidence.
+	Watched []string
+	// Now is the verifier's clock. Nil uses time.Now.
+	Now func() time.Time
+}
+
+// SetupWithManager registers the reconciler. It watches RemediationRequests only and runs again on a change of
+// phase; while a request is Verifying it requeues itself every poll interval.
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		Named("verifier").
+		For(&v1alpha1.RemediationRequest{}, builder.WithPredicates(phaseChanged())).
+		Complete(r)
+}
+
+// phaseChanged lets through creates and the updates that change a request's phase, not every status write of
+// the executor: the sampling cadence comes from RequeueAfter, so a busy request is not sampled more often.
+func phaseChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			o, ok1 := e.ObjectOld.(*v1alpha1.RemediationRequest)
+			n, ok2 := e.ObjectNew.(*v1alpha1.RemediationRequest)
+			return !ok1 || !ok2 || o.Status.Phase != n.Status.Phase
+		},
+		DeleteFunc: func(event.DeleteEvent) bool { return false },
+	}
+}
+
+// CacheOptions restricts the verifier's cache to RemediationRequests in the operator namespace, the only kind
+// it watches. Nothing else is cached: every other read goes through the API reader.
+func CacheOptions(namespace string) cache.Options {
+	return cache.Options{
+		DefaultTransform: cache.TransformStripManagedFields(),
+		ByObject: map[client.Object]cache.ByObject{
+			&v1alpha1.RemediationRequest{}: {Namespaces: map[string]cache.Config{namespace: {}}},
+		},
+	}
+}
+
+// Reconcile takes one sample for a request in Verifying and writes it into the request's report, creating the
+// report on the first one. A failed read is returned as an error and retried: it is not a sample, and nothing
+// is written.
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if req.Namespace != r.Namespace {
+		return ctrl.Result{}, nil
+	}
+	rr := &v1alpha1.RemediationRequest{}
+	if err := r.Client.Get(ctx, req.NamespacedName, rr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("reading the RemediationRequest: %w", err)
+	}
+	t, ok := r.sampled(rr)
+	if !ok {
+		return ctrl.Result{}, nil
+	}
+	log := logf.FromContext(ctx)
+	if err := r.sample(ctx, rr, t); err != nil {
+		if errors.Is(err, errNotOurs) {
+			// A report of this name exists but is bound to something else: it is not written into, and the
+			// executor's trust contract reads it as a mismatch. Look again at the next poll.
+			log.Info("Found a VerificationReport bound to another request or rollout; not writing it")
+			return ctrl.Result{RequeueAfter: clearing.PollInterval}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: clearing.PollInterval}, nil
+}
+
+// target is what the verifier needs of the request's target to sample it.
+type target struct {
+	kind, namespace, name string
+	// uid is spec.targetRef.uid, empty when the request has none.
+	uid types.UID
+}
+
+// sampled reports whether the request is one the verifier samples, and returns its target: in Verifying, with
+// a merge receipt and a recorded template revision, a Deployment or StatefulSet target in a watched namespace.
+// A revert is never sampled (ADR-0030 section 8); see isRevert.
+func (r *Reconciler) sampled(rr *v1alpha1.RemediationRequest) (target, bool) {
+	st := &rr.Status
+	if st.Phase != v1alpha1.PhaseVerifying || st.MergeReceipt == nil || st.Rollout == nil ||
+		st.Rollout.TemplateRevision == "" || isRevert(rr) {
+		return target{}, false
+	}
+	ref := rr.Spec.TargetRef
+	if ref.APIVersion != appsv1.SchemeGroupVersion.String() || (ref.Kind != ownership.KindDeployment && ref.Kind != ownership.KindStatefulSet) {
+		// A ScaledObject has no pods of its own: clearing is not checked for it (ADR-0030 section 3).
+		return target{}, false
+	}
+	if !slices.Contains(r.Watched, ref.Namespace) {
+		return target{}, false
+	}
+	return target{kind: ref.Kind, namespace: ref.Namespace, name: ref.Name, uid: types.UID(ref.UID)}, true
+}
+
+// errNotOurs marks a report that exists under the request's report name but whose spec is not the one this
+// request and rollout give.
+var errNotOurs = errors.New("the VerificationReport is bound to another request or rollout")
+
+// sample reads the report, the target, its pods and their ReplicaSets, applies one sample and writes it.
+func (r *Reconciler) sample(ctx context.Context, rr *v1alpha1.RemediationRequest, t target) error {
+	now := time.Now
+	if r.Now != nil {
+		now = r.Now
+	}
+	report := &v1alpha1.VerificationReport{}
+	key := client.ObjectKey{Namespace: r.Namespace, Name: clearing.ReportName(rr.UID)}
+	exists := true
+	if err := r.APIReader.Get(ctx, key, report); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("reading the VerificationReport: %w", err)
+		}
+		exists = false
+	}
+
+	obj, err := r.readTarget(ctx, t)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		spec, ok := reportSpec(rr, t, obj)
+		if !ok {
+			// No target UID to bind the report to yet: no report, so no evidence. Look again at the next poll.
+			return nil
+		}
+		report = &v1alpha1.VerificationReport{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: r.Namespace,
+				Name:      key.Name,
+				// The report is deleted with its request. blockOwnerDeletion false needs no permission on the
+				// request beyond the reads the verifier holds.
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion:         v1alpha1.GroupVersion.String(),
+					Kind:               "RemediationRequest",
+					Name:               rr.Name,
+					UID:                rr.UID,
+					Controller:         new(true),
+					BlockOwnerDeletion: new(false),
+				}},
+			},
+			Spec: spec,
+		}
+		if err := r.Client.Create(ctx, report); err != nil {
+			return fmt.Errorf("creating the VerificationReport: %w", err)
+		}
+	} else if !boundTo(report, rr) {
+		return errNotOurs
+	}
+
+	in := clearing.Input{Now: now(), MemoryLimit: memoryLimit(rr)}
+	if obj != nil {
+		in.Target = obj
+		pods, truncated, err := r.listPods(ctx, obj)
+		if err != nil {
+			return err
+		}
+		in.Pods, in.Truncated = pods, truncated
+		in.ReplicaSets = r.replicaSets(ctx, t.namespace)
+	}
+	res, err := clearing.Sample(report.Spec, report.Status, in)
+	if err != nil {
+		return fmt.Errorf("sampling the pods of the rollout: %w", err)
+	}
+	report.Status = res.Status
+	if err := r.Client.Status().Update(ctx, report); err != nil {
+		return fmt.Errorf("writing the VerificationReport status: %w", err)
+	}
+	logf.FromContext(ctx).V(1).Info("Wrote a VerificationReport sample", "sample", res.Status.Sample,
+		"reset", string(res.Reason), "podsCovered", res.Status.PodsCovered, "oomKilled", res.OOMKilled)
+	return nil
+}
+
+// isRevert reports whether the request is a revert of a failed request (spec.reverts, #96), which the verifier
+// never samples. The field does not exist yet, so no request is a revert; #96 adds it and this check.
+func isRevert(*v1alpha1.RemediationRequest) bool {
+	return false
+}
+
+// readTarget reads the target with a get. A target that does not exist is nil, which the sample reads as no
+// evidence; any other failure is an error.
+func (r *Reconciler) readTarget(ctx context.Context, t target) (client.Object, error) {
+	var obj client.Object
+	switch t.kind {
+	case ownership.KindDeployment:
+		obj = &appsv1.Deployment{}
+	case ownership.KindStatefulSet:
+		obj = &appsv1.StatefulSet{}
+	default:
+		return nil, fmt.Errorf("target kind %q is not sampled", t.kind)
+	}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: t.namespace, Name: t.name}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading the target %s: %w", t.kind, err)
+	}
+	return obj, nil
+}
+
+// reportSpec builds the report's spec from the request: its UID, the receipt's merge commit, the template
+// revision of status.rollout, the action's container, and the target's UID: spec.targetRef.uid when the request
+// names one, else the UID of the target read now. ok is false when neither is known.
+func reportSpec(rr *v1alpha1.RemediationRequest, t target, obj client.Object) (v1alpha1.VerificationReportSpec, bool) {
+	uid := t.uid
+	if uid == "" && obj != nil {
+		uid = obj.GetUID()
+	}
+	if uid == "" {
+		return v1alpha1.VerificationReportSpec{}, false
+	}
+	spec := v1alpha1.VerificationReportSpec{
+		RequestUID:       v1alpha1.UID(rr.UID),
+		MergeCommitSHA:   rr.Status.MergeReceipt.MergeCommitSHA,
+		TargetUID:        v1alpha1.UID(uid),
+		TemplateRevision: rr.Status.Rollout.TemplateRevision,
+	}
+	if a := rr.Spec.Action.SetContainerMemoryLimit; a != nil {
+		spec.Container = a.Container
+	}
+	return spec, true
+}
+
+// boundTo reports whether an existing report is the one this request and rollout give: the same request UID,
+// merge commit, template revision and container, and the request's target UID when it names one. A report
+// that is not is never written into.
+func boundTo(report *v1alpha1.VerificationReport, rr *v1alpha1.RemediationRequest) bool {
+	s := report.Spec
+	container := ""
+	if a := rr.Spec.Action.SetContainerMemoryLimit; a != nil {
+		container = a.Container
+	}
+	return types.UID(s.RequestUID) == rr.UID &&
+		s.MergeCommitSHA == rr.Status.MergeReceipt.MergeCommitSHA &&
+		s.TemplateRevision == rr.Status.Rollout.TemplateRevision &&
+		s.Container == container &&
+		(rr.Spec.TargetRef.UID == "" || s.TargetUID == rr.Spec.TargetRef.UID)
+}
+
+// memoryLimit is the desired memory limit of the action's container, nil for an action that names none.
+func memoryLimit(rr *v1alpha1.RemediationRequest) *resource.Quantity {
+	if a := rr.Spec.Action.SetContainerMemoryLimit; a != nil {
+		q := a.Desired.DeepCopy()
+		return &q
+	}
+	return nil
+}
+
+// replicaSets returns the ReplicaSet reader of a sample: one get by name in the target's namespace. A
+// ReplicaSet that does not exist is nil; any other failure is an error, and the sample is not taken.
+func (r *Reconciler) replicaSets(ctx context.Context, namespace string) clearing.ReplicaSetGetter {
+	return func(name string) (*appsv1.ReplicaSet, error) {
+		rs := &appsv1.ReplicaSet{}
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, rs); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return rs, nil
+	}
+}
+
+// listPods lists the pods the target's selector matches in its namespace, in pages of clearing.PageSize and
+// at most clearing.MaxPages pages. truncated is true when more pods remain. Each pod is trimmed to the fields
+// ADR-0030 section 7 names before anything else sees it.
+func (r *Reconciler) listPods(ctx context.Context, obj client.Object) ([]corev1.Pod, bool, error) {
+	var sel *metav1.LabelSelector
+	switch t := obj.(type) {
+	case *appsv1.Deployment:
+		sel = t.Spec.Selector
+	case *appsv1.StatefulSet:
+		sel = t.Spec.Selector
+	}
+	selector, ok := ownership.Selector(sel)
+	if !ok {
+		// A target without a usable selector matches no pod of its own: an empty list, which the sample reads
+		// as fewer pods than desired. It is never listed with an empty selector, which would match every pod.
+		return nil, false, nil
+	}
+	var (
+		pods  []corev1.Pod
+		token string
+	)
+	for range clearing.MaxPages {
+		list := &corev1.PodList{}
+		opts := []client.ListOption{client.InNamespace(obj.GetNamespace()),
+			client.MatchingLabelsSelector{Selector: selector}, client.Limit(clearing.PageSize)}
+		if token != "" {
+			opts = append(opts, client.Continue(token))
+		}
+		if err := r.APIReader.List(ctx, list, opts...); err != nil {
+			return nil, false, fmt.Errorf("listing the pods of the target: %w", err)
+		}
+		for i := range list.Items {
+			pods = append(pods, Trim(&list.Items[i]))
+		}
+		token = list.Continue
+		if token == "" {
+			return pods, false, nil
+		}
+	}
+	return pods, true, nil
+}
+
+// Trim keeps only the pod fields ADR-0030 section 7 names: UID, namespace, owner references, labels, the Ready
+// and PodScheduled conditions (type and status), creation and deletion times, container names (and the
+// restart policy that makes an init container a native sidecar), the containers' memory limits, restart
+// counts, and the reason and finish time of the current and last termination. Every other field is dropped,
+// the termination message included, so nothing else can be stored, logged or put into an Event.
+func Trim(p *corev1.Pod) corev1.Pod {
+	out := corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		UID:               p.UID,
+		Namespace:         p.Namespace,
+		Labels:            p.Labels,
+		OwnerReferences:   p.OwnerReferences,
+		CreationTimestamp: p.CreationTimestamp,
+		DeletionTimestamp: p.DeletionTimestamp,
+	}}
+	for _, c := range p.Spec.InitContainers {
+		out.Spec.InitContainers = append(out.Spec.InitContainers, corev1.Container{Name: c.Name, RestartPolicy: c.RestartPolicy})
+	}
+	for _, c := range p.Spec.Containers {
+		tc := corev1.Container{Name: c.Name}
+		if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+			tc.Resources.Limits = corev1.ResourceList{corev1.ResourceMemory: q}
+		}
+		out.Spec.Containers = append(out.Spec.Containers, tc)
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady || c.Type == corev1.PodScheduled {
+			out.Status.Conditions = append(out.Status.Conditions, corev1.PodCondition{Type: c.Type, Status: c.Status})
+		}
+	}
+	out.Status.InitContainerStatuses = trimStatuses(p.Status.InitContainerStatuses)
+	out.Status.ContainerStatuses = trimStatuses(p.Status.ContainerStatuses)
+	return out
+}
+
+func trimStatuses(in []corev1.ContainerStatus) []corev1.ContainerStatus {
+	if in == nil {
+		return nil
+	}
+	out := make([]corev1.ContainerStatus, 0, len(in))
+	for _, s := range in {
+		out = append(out, corev1.ContainerStatus{
+			Name:                 s.Name,
+			RestartCount:         s.RestartCount,
+			State:                corev1.ContainerState{Terminated: trimTermination(s.State.Terminated)},
+			LastTerminationState: corev1.ContainerState{Terminated: trimTermination(s.LastTerminationState.Terminated)},
+		})
+	}
+	return out
+}
+
+// trimTermination keeps the reason and the finish time of a termination. The reason is only ever compared with
+// the constant OOMKilled; the message is never read.
+func trimTermination(t *corev1.ContainerStateTerminated) *corev1.ContainerStateTerminated {
+	if t == nil {
+		return nil
+	}
+	return &corev1.ContainerStateTerminated{Reason: t.Reason, FinishedAt: t.FinishedAt}
+}

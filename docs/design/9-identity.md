@@ -1,8 +1,8 @@
 # 9. Identity
 
-This section covers who the two workloads are in Azure and how they prove it: the analyzer (9.1), the executor and its GitHub App key (9.2), the workload identity wiring (9.3), how Key Vault signing fails and retries (9.4) and the Go side (9.5). Edge cases and numbers are in the table "Details" at the end (9.6).
+This section covers who the workloads are in Azure and how they prove it: the analyzer (9.1), the executor and its GitHub App key (9.2), the workload identity wiring (9.3), how Key Vault signing fails and retries (9.4) and the Go side (9.5). Edge cases and numbers are in the table "Details" at the end (9.6).
 
-[![Workload identity chain for the analyzer and the executor: pod and ServiceAccount, projected token, federated credential in Entra ID, managed identity, then Foundry and the analysis records container, or a sign-only Key Vault key. In the cluster the analyzer is read-only, and of the RemediationPolicies it may only get those its action policies name.](../assets/diagrams/identity.svg)](../assets/diagrams/identity.svg "Open full size")
+[![Workload identity chain for the analyzer and the executor, and the verifier, which has no Azure identity: pod and ServiceAccount, projected token, federated credential in Entra ID, managed identity, then Foundry and the analysis records container, or a sign-only Key Vault key. In the cluster the analyzer is read-only, and of the RemediationPolicies it may only get those its action policies name. The verifier is a third ServiceAccount that lists pods, gets ReplicaSets, Deployments and StatefulSets, and writes only its own report.](../assets/diagrams/identity.svg)](../assets/diagrams/identity.svg "Open full size")
 
 The rule for everything below: no PATs, no client secrets, no long-lived API keys. Tokens for Foundry, Key Vault and GitHub are never interchangeable.
 
@@ -34,6 +34,10 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 - The token is cached until 5 minutes before it expires, and concurrent callers share one refresh.
 - The App's numeric ID is read once per provider with `GET /app` under a JWT of its own, so one more Key Vault signature (`KeySign`), and then kept, since an App's ID never changes (#542). It is read the first time the executor comments on a pull request, before it looks for the comment's marker: only a comment the App's bot user posted (`performed_via_github_app.id` equal to that ID) counts, so a person cannot paste a marker to suppress a comment. When the read fails, nothing is posted.
 - The token prints as a placeholder, never as its value (`internal/providers/github/auth`).
+
+### 9.2.1. The verifier has no Azure identity
+
+The verifier (`shadewright-verifier`, #682) is the third ServiceAccount. It has no managed identity, no federated credential and no annotation for one: it calls no model, signs nothing and never reaches Azure. Its grants are Kubernetes RBAC only ([2.2.4](2-architecture.md#224-verifier-permissions)).
 
 ## 9.3. Workload identity wiring
 

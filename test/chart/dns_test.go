@@ -28,6 +28,7 @@ import (
 const (
 	analyzerEgressKey = "NetworkPolicy/" + operatorNS + "/shadewright-allow-analyzer-egress"
 	executorEgressKey = "NetworkPolicy/" + operatorNS + "/shadewright-allow-executor-egress"
+	verifierEgressKey = "NetworkPolicy/" + operatorNS + "/shadewright-allow-verifier-egress"
 	testEgressKey     = "NetworkPolicy/" + operatorNS + "/shadewright-test-egress"
 )
 
@@ -88,8 +89,10 @@ func TestDNSEgressProfilesRenderAndTheHookUsesTheWorkloadRule(t *testing.T) {
 			r := defaultRender(t, c.set...)
 			analyzer := dnsRule(t, analyzerEgressKey, r.chart[analyzerEgressKey])
 			executor := dnsRule(t, executorEgressKey, r.chart[executorEgressKey])
+			verifier := dnsRule(t, verifierEgressKey, r.chart[verifierEgressKey])
 			hook := dnsRule(t, testEgressKey, r.tests[testEgressKey])
-			for k, got := range map[string]string{analyzerComp: analyzer, executorComp: executor, "test hook": hook} {
+			rules := map[string]string{analyzerComp: analyzer, executorComp: executor, verifierComp: verifier, "test hook": hook}
+			for k, got := range rules {
 				// Compare the decoded rule, not the text: key order is not part of the rule.
 				var w networkingv1.NetworkPolicyEgressRule
 				if err := json.Unmarshal([]byte(c.want), &w); err != nil {
@@ -111,7 +114,7 @@ func TestDNSEgressProfilesRenderAndTheHookUsesTheWorkloadRule(t *testing.T) {
 // (TestNetworkPoliciesServicesAndCRDsEqualKustomize compares the whole policies; this one names the DNS rule.)
 func TestDNSEgressDefaultEqualsKustomize(t *testing.T) {
 	r := render(t, false)
-	for _, k := range []string{analyzerEgressKey, executorEgressKey} {
+	for _, k := range []string{analyzerEgressKey, executorEgressKey, verifierEgressKey} {
 		if got, want := dnsRule(t, k, r.chart[k]), dnsRule(t, k, r.kustomize[k]); got != want {
 			t.Errorf("%s DNS rule differs from kustomize\n chart:     %s\n kustomize: %s", k, got, want)
 		}

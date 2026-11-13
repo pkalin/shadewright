@@ -1,0 +1,9 @@
+# The Lease is created here because the leader election Role may only get, update and patch it by name
+# (no create). The name is fixed in the binary, so it does not follow the release name.
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: shadewright-verifier-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shadewright.labels" (dict "component" "verifier" "context" $) | nindent 4 }}

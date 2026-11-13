@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Installs the Helm chart (dist/chart) on the current Kubernetes context (a Kind cluster, see make
 # test-chart-install) and checks what the API server made of it: the Deployments become
-# available, the settings object is created from values, and the two ServiceAccounts hold the
+# available, the settings object is created from values, and the three ServiceAccounts hold the
 # permissions the design gives them (a spot-check). Usage:
 #   hack/chart-install-test.sh <kubectl> <helm>
 # Images: pull request and main runs install the appVersion tag (image.allowTag) of images built from the same
 # checkout and loaded into Kind by make test-chart-install: the chart renders the flags of its own commit, which a
-# released image may not know (an analyzer exits on an unknown flag). A tag run gets EXECUTOR_DIGEST and
-# ANALYZER_DIGEST from the Chart workflow, which resolved and verified them once (hack/resolve-image-digests.sh)
-# and publishes the chart with the same pair; giving only one of the two fails.
+# released image may not know (an analyzer exits on an unknown flag). A tag run gets EXECUTOR_DIGEST,
+# ANALYZER_DIGEST and VERIFIER_DIGEST from the Chart workflow, which resolved and verified them once
+# (hack/resolve-image-digests.sh) and publishes the chart with the same set; giving only some of them fails.
 set -euo pipefail
 
 KUBECTL="${1:-kubectl}"
@@ -17,19 +17,19 @@ NS=shadewright-system
 REL=shadewright
 CHART="$(cd "$(dirname "$0")/.." && pwd)/dist/chart"
 
-if [ -n "${EXECUTOR_DIGEST:-}" ] || [ -n "${ANALYZER_DIGEST:-}" ]; then
-  if [ -z "${EXECUTOR_DIGEST:-}" ] || [ -z "${ANALYZER_DIGEST:-}" ]; then
-    echo "set both EXECUTOR_DIGEST and ANALYZER_DIGEST, or neither" >&2
+if [ -n "${EXECUTOR_DIGEST:-}" ] || [ -n "${ANALYZER_DIGEST:-}" ] || [ -n "${VERIFIER_DIGEST:-}" ]; then
+  if [ -z "${EXECUTOR_DIGEST:-}" ] || [ -z "${ANALYZER_DIGEST:-}" ] || [ -z "${VERIFIER_DIGEST:-}" ]; then
+    echo "set all of EXECUTOR_DIGEST, ANALYZER_DIGEST and VERIFIER_DIGEST, or none" >&2
     exit 1
   fi
-  for d in "${EXECUTOR_DIGEST}" "${ANALYZER_DIGEST}"; do
+  for d in "${EXECUTOR_DIGEST}" "${ANALYZER_DIGEST}" "${VERIFIER_DIGEST}"; do
     if ! printf '%s' "${d}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
-      echo "EXECUTOR_DIGEST and ANALYZER_DIGEST must be sha256: and 64 lower case hex digits" >&2
+      echo "EXECUTOR_DIGEST, ANALYZER_DIGEST and VERIFIER_DIGEST must be sha256: and 64 lower case hex digits" >&2
       exit 1
     fi
   done
   echo "using the given image digests"
-  IMAGE_ARGS=(--set "executor.image.digest=${EXECUTOR_DIGEST}" --set "analyzer.image.digest=${ANALYZER_DIGEST}")
+  IMAGE_ARGS=(--set "executor.image.digest=${EXECUTOR_DIGEST}" --set "analyzer.image.digest=${ANALYZER_DIGEST}" --set "verifier.image.digest=${VERIFIER_DIGEST}")
 else
   echo "pull request or main run: using the appVersion images built from this checkout"
   IMAGE_ARGS=(--set image.allowTag=true)
@@ -61,6 +61,7 @@ trap dump EXIT
 "${HELM}" install "${REL}" "${CHART}" --namespace "${NS}" --create-namespace \
   --set clusterId=chart-test \
   --set "analyzer.watchNamespaces={demo}" \
+  --set "verifier.watchNamespaces={demo}" \
   "${IMAGE_ARGS[@]}" \
   --set settings.create=true --set settings.spec.paused=false \
   --wait --timeout 5m
@@ -112,5 +113,28 @@ can shadewright-analyzer no patch remediationrequests.remediation.shadewright.io
 can shadewright-analyzer no update deployments.apps -n demo
 can shadewright-analyzer no get secrets -n demo
 can shadewright-analyzer no create configmaps -n "${NS}"
+# Verifier: lists pods and gets workloads only in its watched namespace, reads requests, creates reports; never
+# writes request status, a workload or a Secret, and holds no cluster-wide read.
+can shadewright-verifier yes list pods -n demo
+can shadewright-verifier yes get deployments.apps -n demo
+can shadewright-verifier yes get replicasets.apps -n demo
+can shadewright-verifier yes get statefulsets.apps -n demo
+can shadewright-verifier no get pods -n demo
+can shadewright-verifier no watch pods -n demo
+can shadewright-verifier no list pods -n kube-system
+can shadewright-verifier no list pods --all-namespaces
+can shadewright-verifier no list deployments.apps -n demo
+can shadewright-verifier yes list remediationrequests.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier yes watch remediationrequests.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier no patch remediationrequests.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier no update remediationrequests/status.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier yes create verificationreports.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier yes update verificationreports/status.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier no create incidents.remediation.shadewright.io -n "${NS}"
+can shadewright-verifier no get secrets -n "${NS}"
+can shadewright-verifier no get secrets -n demo
+can shadewright-verifier no update deployments.apps -n demo
+# The executor gains one read: the reports.
+can shadewright-executor yes get verificationreports.remediation.shadewright.io -n "${NS}"
 
 exit "${fail}"

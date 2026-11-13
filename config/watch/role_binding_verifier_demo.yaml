@@ -1,0 +1,17 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: shadewright
+    app.kubernetes.io/component: verifier
+    app.kubernetes.io/managed-by: kustomize
+  name: shadewright-verifier-watch
+  namespace: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: shadewright-verifier-watch-role
+subjects:
+- kind: ServiceAccount
+  name: shadewright-verifier
+  namespace: shadewright-system

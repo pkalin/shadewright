@@ -59,7 +59,9 @@ func TestEgressIsSeparatePerComponentAndTheAnalyzerHasNoExecutorOnlyRule(t *test
 			t.Errorf("%s not rendered", k)
 		}
 	}
-	for k, comp := range map[string]string{analyzerEgressKey: analyzerComp, executorEgressKey: executorComp} {
+	egress := map[string]string{analyzerEgressKey: analyzerComp, executorEgressKey: executorComp,
+		verifierEgressKey: verifierComp}
+	for k, comp := range egress {
 		np := convert[networkingv1.NetworkPolicy](t, r.chart[k])
 		if got := np.Spec.PodSelector.MatchLabels["app.kubernetes.io/component"]; got != comp {
 			t.Errorf("%s selects component %q, want %q", k, got, comp)
@@ -72,6 +74,15 @@ func TestEgressIsSeparatePerComponentAndTheAnalyzerHasNoExecutorOnlyRule(t *test
 	for _, rule := range nonDNSRules(t, analyzerEgressKey, r) {
 		if !exec[asJSON(t, rule)] {
 			t.Errorf("analyzer has a rule the executor lacks: %s", asJSON(t, rule))
+		}
+	}
+	// The verifier has the executor's rules, not one more: DNS (checked apart) and TCP 443 and 6443.
+	if got, want := len(nonDNSRules(t, verifierEgressKey, r)), len(exec); got != want {
+		t.Errorf("verifier has %d non-DNS egress rules, want the executor's %d", got, want)
+	}
+	for _, rule := range nonDNSRules(t, verifierEgressKey, r) {
+		if !exec[asJSON(t, rule)] {
+			t.Errorf("verifier has a rule the executor lacks: %s", asJSON(t, rule))
 		}
 	}
 }

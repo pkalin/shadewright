@@ -1,9 +1,11 @@
 resources:
-# Two identities (design 2.2, ADR-0005): the executor reconciles requests and writes their status; the
-# analyzer writes incidents and creates requests. Each directory holds a ServiceAccount, the role generated
-# from kubebuilder RBAC markers (make manifests) and its bindings.
+# Three identities (design 2.2, ADR-0005, ADR-0030): the executor reconciles requests and writes their status;
+# the analyzer writes incidents and creates requests; the verifier samples the pods of a request in Verifying and
+# writes its VerificationReport. Each directory holds a ServiceAccount, the role generated from kubebuilder RBAC
+# markers (make manifests) and its bindings.
 - executor
 - analyzer
+- verifier
 # The following RBAC configurations are used to protect
 # the metrics endpoint with authn/authz. These configurations
 # ensure that only authorized users and service accounts

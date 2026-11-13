@@ -5,7 +5,7 @@
 # appVersion tag. It checks what the default install may do. The analyzer is Ready, watches no namespace,
 # holds no RoleBinding outside the operator namespace and cannot list Pods or events anywhere (it still lists
 # Nodes and reads discovery and the settings cluster-wide, and writes only in the operator namespace plus the
-# settings status). Neither ServiceAccount has an Azure workload identity, so the executor cannot reach Key
+# settings status). The verifier follows the analyzer: no watched namespace, so no pod read either. No ServiceAccount has an Azure workload identity, so the executor cannot reach Key
 # Vault to sign for the GitHub App. The cluster ID is the UID of kube-system. Then it runs helm test,
 # uninstalls and deletes the kept CRDs, so a later install on the same cluster (ct install) starts clean.
 # Usage:
@@ -42,6 +42,8 @@ check "cluster ID is the kube-system UID" grep -qxF -- "--cluster-id=${uid}" <<<
 check "the analyzer watches no namespace" grep -qxF -- "--watch-namespaces=" <<<"${args}"
 logs="$("${KUBECTL}" -n "${NS}" logs deployment/shadewright-analyzer)"
 check "the analyzer logs that it watches no namespaces" grep -q "Watching no namespaces" <<<"${logs}"
+vargs="$("${KUBECTL}" -n "${NS}" get deployment shadewright-verifier -o jsonpath='{range .spec.template.spec.containers[0].args[*]}{@}{"\n"}{end}')"
+check "the verifier follows the analyzer and watches no namespace" grep -qxF -- "--watch-namespaces=" <<<"${vargs}"
 bindings="$("${KUBECTL}" get rolebindings --all-namespaces -l "app.kubernetes.io/instance=${REL}" \
   -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' | sort -u)"
 check "no RoleBinding outside ${NS}" test -z "$(grep -vxF "${NS}" <<<"${bindings}" || true)"
@@ -60,8 +62,13 @@ for ns in default kube-system "${NS}"; do
 done
 can shadewright-analyzer no list pods --all-namespaces
 can shadewright-analyzer yes create incidents.remediation.shadewright.io -n "${NS}"
+for ns in default kube-system "${NS}"; do
+  can shadewright-verifier no list pods -n "${ns}"
+done
+can shadewright-verifier no list pods --all-namespaces
+can shadewright-verifier yes create verificationreports.remediation.shadewright.io -n "${NS}"
 
-for sa in shadewright-executor shadewright-analyzer; do
+for sa in shadewright-executor shadewright-analyzer shadewright-verifier; do
   ann="$("${KUBECTL}" -n "${NS}" get serviceaccount "${sa}" -o jsonpath='{.metadata.annotations}')"
   check "${sa} has no workload identity annotation" test -z "$(grep -o 'azure.workload.identity' <<<"${ann}" || true)"
   dep="${sa}"

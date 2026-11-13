@@ -2,4 +2,5 @@ resources:
 - default-deny.yaml
 - allow-analyzer-egress.yaml
 - allow-executor-egress.yaml
+- allow-verifier-egress.yaml
 - allow-metrics-traffic.yaml

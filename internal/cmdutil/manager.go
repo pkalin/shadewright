@@ -14,31 +14,36 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package cmdutil holds the manager setup shared by the executor and the analyzer binaries: flags for
-// metrics, health probes and leader election, and the TLS defaults.
+// Package cmdutil holds the manager setup shared by the executor, the analyzer and the verifier binaries: flags
+// for metrics, health probes and leader election, the TLS defaults, and the parser of --watch-namespaces.
 package cmdutil
 
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-// Leader election Lease names. The manifests create both Leases (config/rbac/<id>/leader_election.yaml, after
-// the kustomize name prefix) and each identity may only get, update and patch its own: neither may create
-// a Lease, so neither can squat the other's before it exists.
+// Leader election Lease names. The manifests create the three Leases (config/rbac/<id>/leader_election.yaml,
+// after the kustomize name prefix) and each identity may only get, update and patch its own: none may create
+// a Lease, so none can squat another's before it exists.
 const (
 	ExecutorLease = "shadewright-executor-leader-election"
 	AnalyzerLease = "shadewright-analyzer-leader-election"
+	VerifierLease = "shadewright-verifier-leader-election"
 )
 
-// Options are the flags both binaries share.
+// Options are the flags the binaries share.
 type Options struct {
 	MetricsAddr          string
 	ProbeAddr            string
@@ -113,4 +118,25 @@ func (o *Options) ManagerOptions(log logr.Logger, scheme *runtime.Scheme, leader
 // NewLogger returns the zap logger configured by the flags.
 func NewLogger(o *Options) logr.Logger {
 	return zap.New(zap.UseFlagOptions(&o.Zap))
+}
+
+// ParseNamespaces reads a --watch-namespaces flag: a comma-separated list of namespace names. It trims spaces,
+// drops duplicates and returns the names sorted. An empty list means no namespace at all, never "all
+// namespaces". A name that is not a valid namespace name, such as "*", is an error.
+func ParseNamespaces(value string) ([]string, error) {
+	var out []string
+	for part := range strings.SplitSeq(value, ",") {
+		ns := strings.TrimSpace(part)
+		if ns == "" {
+			continue
+		}
+		if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
+			return nil, fmt.Errorf("watch namespace %q is not a valid namespace name: %s", ns, strings.Join(errs, "; "))
+		}
+		if !slices.Contains(out, ns) {
+			out = append(out, ns)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
 }

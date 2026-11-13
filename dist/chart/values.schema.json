@@ -5,7 +5,8 @@
   "additionalProperties": false,
   "required": [
     "executor",
-    "analyzer"
+    "analyzer",
+    "verifier"
   ],
   "definitions": {
     "stringMap": {
@@ -566,6 +567,80 @@
           "$ref": "#/definitions/dnsName"
         }
       }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image"
+      ],
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "goMemLimit": {
+          "type": "string",
+          "pattern": "^([0-9]+(B|KiB|MiB|GiB|TiB)?)?$"
+        },
+        "extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^--[a-zA-Z0-9][a-zA-Z0-9.-]*(=.*)?$"
+          },
+          "maxItems": 32
+        },
+        "podLabels": {
+          "$ref": "#/definitions/labelMap"
+        },
+        "podAnnotations": {
+          "$ref": "#/definitions/annotationMap"
+        },
+        "nodeSelector": {
+          "$ref": "#/definitions/labelMap"
+        },
+        "tolerations": {
+          "$ref": "#/definitions/tolerations"
+        },
+        "affinity": {
+          "$ref": "#/definitions/affinity"
+        },
+        "topologySpreadConstraints": {
+          "$ref": "#/definitions/topologySpreadConstraints"
+        },
+        "priorityClassName": {
+          "$ref": "#/definitions/priorityClassName"
+        },
+        "imagePullSecrets": {
+          "$ref": "#/definitions/pullSecrets"
+        },
+        "metricsTLS": {
+          "$ref": "#/definitions/metricsTLS"
+        },
+        "watchNamespaces": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+              }
+            }
+          ]
+        }
+      }
     }
   },
   "properties": {
@@ -703,7 +778,10 @@
           "properties": {
             "mode": {
               "type": "string",
-              "enum": ["kubeDns", "resolverCIDRs"]
+              "enum": [
+                "kubeDns",
+                "resolverCIDRs"
+              ]
             },
             "resolverCIDRs": {
               "type": "array",
@@ -875,6 +953,9 @@
           }
         }
       }
+    },
+    "verifier": {
+      "$ref": "#/definitions/verifier"
     }
   }
 }

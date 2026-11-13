@@ -54,6 +54,7 @@ import (
 const (
 	executor   = "executor"
 	analyzer   = "analyzer"
+	verifierID = "verifier"
 	operatorNS = "shadewright-system"
 	otherNS    = "team-a" // watched by the analyzer
 	unwatched  = "team-b" // not watched
@@ -123,7 +124,7 @@ func setup(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, id := range []string{executor, analyzer} {
+	for _, id := range []string{executor, analyzer, verifierID} {
 		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: operatorNS}}
 		if err := admin.Create(ctx, sa); err != nil {
 			return err
@@ -135,7 +136,26 @@ func setup(ctx context.Context) error {
 			return err
 		}
 	}
-	return bindWatchRole(ctx, otherNS)
+	if err := bindWatchRole(ctx, otherNS); err != nil {
+		return err
+	}
+	return bindVerifierWatchRole(ctx, otherNS)
+}
+
+// verifierWatchRolePath is the generated ClusterRole of the verifier's reads in watched namespaces.
+var verifierWatchRolePath = filepath.Join("..", "..", "config", "rbac", verifierID, "watch", "role.yaml")
+
+// bindVerifierWatchRole creates the verifier's watch ClusterRole and binds it in one namespace with a
+// RoleBinding, as config/watch does for each namespace in the verifier's --watch-namespaces.
+func bindVerifierWatchRole(ctx context.Context, ns string) error {
+	r, err := readClusterRole(verifierWatchRolePath)
+	if err != nil {
+		return err
+	}
+	if err := admin.Create(ctx, r); err != nil {
+		return err
+	}
+	return bindIn(ctx, r.Name, verifierID, ns)
 }
 
 // bindWatchRole creates the analyzer's watch ClusterRole and the KEDA module's read ClusterRole, and binds both
@@ -609,7 +629,8 @@ func TestAnalyzerGrantsNothingOnSecrets(t *testing.T) {
 
 // TestLeasesAreSeparate checks that each identity can renew only its own leader election Lease.
 func TestLeasesAreSeparate(t *testing.T) {
-	leases := map[string]string{executor: cmdutil.ExecutorLease, analyzer: cmdutil.AnalyzerLease}
+	leases := map[string]string{executor: cmdutil.ExecutorLease, analyzer: cmdutil.AnalyzerLease,
+		verifierID: cmdutil.VerifierLease}
 	for id, own := range leases {
 		for other, lease := range leases {
 			want := other == id
@@ -632,7 +653,8 @@ func TestLeasesAreSeparate(t *testing.T) {
 // Role that may renew it, and the LeaderElectionID compiled into each binary. The kustomize name prefix
 // "shadewright-" is applied to the Lease name but not to resourceNames.
 func TestLeaseNamesMatchTheBinaries(t *testing.T) {
-	for id, want := range map[string]string{executor: cmdutil.ExecutorLease, analyzer: cmdutil.AnalyzerLease} {
+	for id, want := range map[string]string{executor: cmdutil.ExecutorLease, analyzer: cmdutil.AnalyzerLease,
+		verifierID: cmdutil.VerifierLease} {
 		f, err := os.Open(filepath.Join("..", "..", "config", "rbac", id, "leader_election.yaml"))
 		if err != nil {
 			t.Fatal(err)
@@ -1001,6 +1023,9 @@ func TestWatchBindingsMatchTheFlag(t *testing.T) {
 			if b.Kind != "RoleBinding" {
 				t.Errorf("%s: %s, want only RoleBindings", res, b.Kind)
 				continue
+			}
+			if b.RoleRef.Name == "shadewright-verifier-watch-role" {
+				continue // the verifier's bindings: TestVerifierWatchBindingsMatchTheFlag
 			}
 			if b.RoleRef.Kind != kindCR || !slices.Contains(watchRoles, b.RoleRef.Name) {
 				t.Errorf("%s: roleRef %s/%s, want a ClusterRole of %v", res, b.RoleRef.Kind, b.RoleRef.Name, watchRoles)

@@ -8,18 +8,18 @@
 
 [Shadewright](https://shadewright.io) is a Kubernetes operations agent. It watches a cluster, groups repeated symptoms into incidents, asks an LLM for a diagnosis and proposes a fix only as a pull request to your GitOps repository. The GitOps controller deploys the fix and Shadewright verifies the effect. Model output is never authorization: deterministic policy decides what may run.
 
-This chart installs the two components (the analyzer and the executor), their RBAC, NetworkPolicies, metrics Services and the CRDs.
+This chart installs the three components (the analyzer, the executor and the verifier), their RBAC, NetworkPolicies, metrics Services and the CRDs.
 
 ## Prerequisites
 
 - Kubernetes version `>=1.32.0-0` (the `kubeVersion` of Chart.yaml).
 - Flux, the GitOps controller that deploys the pull requests the executor opens (Argo CD is not supported yet).
-- Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor` and `shadewright-analyzer`, and check them with `helm template` before you create the credential.
+- Workload identity for the executor: a managed identity (Azure) with a federated credential for the executor ServiceAccount, allowed to sign with the GitHub App key in Key Vault. Its client ID is `executor.identity.azure.clientId`. The ServiceAccount names derive from the release name: install as release `shadewright` in the namespace `shadewright-system` to get `shadewright-executor`, `shadewright-analyzer` and `shadewright-verifier`, and check them with `helm template` before you create the credential.
 - The images: the published chart runs the release's signed images by digest (written into its `values.yaml` when the chart is published). A chart from a source checkout has no digests and refuses to render until you set them, or opt in with `image.allowTag: true` to run the `appVersion` tag with images built from that same checkout (the v0.1.0 images stop at start with an empty watch list).
 
 ## Install
 
-With no values the published chart installs an idle Shadewright. The analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident): it reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists; it still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. The cluster ID defaults to the UID of the `kube-system` namespace. To catch a forgotten watch list, alert on `shadewright_analyzer_watched_namespaces == 0`.
+With no values the published chart installs an idle Shadewright. The analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident): it reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists; it still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. The verifier follows `analyzer.watchNamespaces` (`verifier.watchNamespaces` is `null`), so it reads no pod either. It has no cloud identity of any kind: no model access and no Git credentials, so there is nothing to configure for it. The cluster ID defaults to the UID of the `kube-system` namespace. To catch a forgotten watch list, alert on `shadewright_analyzer_watched_namespaces == 0`.
 
 ```bash
 helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
@@ -69,14 +69,20 @@ settings:
       integrations: [flux]
 ```
 
+## The verifier
+
+`shadewright-verifier` reads pod status to tell whether a merged fix held (ADR-0030). It is deterministic code with no model, no Git credentials and no cloud identity. It writes one `VerificationReport` per request in the operator namespace and never writes request status. Its reads outside the operator namespace are one ClusterRole, `verifier-watch-role` (`list` on `pods`, `get` on `deployments`, `replicasets` and `statefulsets`), bound by one RoleBinding in each namespace of `verifier.watchNamespaces` and never by a ClusterRoleBinding. The same list goes to `--watch-namespaces`. Left at `null` it follows `analyzer.watchNamespaces`; a list of its own, an empty one included, is used as it is, so you can watch fewer namespaces than the analyzer or none.
+
 ## Standby replicas
 
-Both Deployments run one Pod by default. `executor.replicas` and `analyzer.replicas` (each at least 1) add warm standbys:
+The Deployments run one Pod each by default. `executor.replicas`, `analyzer.replicas` and `verifier.replicas` (each at least 1) add warm standbys:
 
 ```yaml
 executor:
   replicas: 2
 analyzer:
+  replicas: 2
+verifier:
   replicas: 2
 ```
 
@@ -90,7 +96,7 @@ analyzer:
 
 On by default (`networkPolicy.enabled: true`). The chart installs a default deny for the release namespace (ingress and egress), one egress policy per component and one ingress policy for the metrics port:
 
-- Both components may send DNS (`networkPolicy.dns`) and TCP 443 and 6443 to any address. 443 is the model endpoint, Key Vault, Entra ID, GitHub and the API server of a managed cluster; 6443 is the API server on kubeadm and kind. The two policies are separate objects, so you can narrow one without touching the other.
+- All three components may send DNS (`networkPolicy.dns`) and TCP 443 and 6443 to any address. 443 is the model endpoint, Key Vault, Entra ID, GitHub and the API server of a managed cluster; 6443 is the API server on kubeadm and kind. The policies are separate objects, so you can narrow one without touching the other.
 - The analyzer gets one more rule when you set `networkPolicy.analyzer.prometheus.enabled`: TCP to the Prometheus Pods you name (default port 9090). It is off by default because the analyzer sends Prometheus nothing unless `--prometheus-url` is set: with `--prometheus-cluster` too, it probes it at startup and every 10 minutes, and it queries it when the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76), on with `analyzer.analysis.triageModel`) calls the context builder or a read tool. The executor never gets it. Allow the analyzer in the ingress policy of the Prometheus namespace as well; the chart changes nothing outside its own namespace.
 - Ingress to the metrics port comes only from namespaces labeled `metrics: enabled`. Nothing else is allowed in.
 
@@ -109,7 +115,7 @@ cosign verify \
   ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>
 ```
 
-The digest is in the run summary of the Chart workflow, or `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` prints it (`Digest:`). Image signatures are verified the same way: use the image name (`ghcr.io/pkalin/shadewright-executor@sha256:<digest>` or `shadewright-analyzer`) and the `images\.yml` workflow in the identity.
+The digest is in the run summary of the Chart workflow, or `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` prints it (`Digest:`). Image signatures are verified the same way: use the image name (`ghcr.io/pkalin/shadewright-executor@sha256:<digest>`, `shadewright-analyzer` or `shadewright-verifier`) and the `images\.yml` workflow in the identity.
 
 ## Upgrade
 
@@ -154,6 +160,9 @@ helm uninstall shadewright --namespace shadewright-system
 | analyzer.image.repository | string | `"ghcr.io/pkalin/shadewright-analyzer"` | Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
 | analyzer.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field. |
 | analyzer.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
+| verifier.image.repository | string | `"ghcr.io/pkalin/shadewright-verifier"` | Repository of the verifier image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
+| verifier.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the verifier image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field. |
+| verifier.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
 
 ### Metrics
 
@@ -177,7 +186,7 @@ helm uninstall shadewright --namespace shadewright-system
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | networkPolicy.enabled | bool | `true` | Install the NetworkPolicies: default deny for the namespace, DNS and TCP 443 and 6443 egress per component (the same two ports for both: a NetworkPolicy cannot tell GitHub from the model endpoint, see the README), an optional Prometheus rule for the analyzer only, and ingress to the metrics port from namespaces labeled `metrics: enabled`. Setting `false` installs no NetworkPolicy at all, so the namespace loses its default deny too and every Pod in it can talk to anything unless you restrict it yourself (`helm install` prints a warning). |
-| networkPolicy.dns.mode | string | `"kubeDns"` | How the analyzer, the executor and the `helm test` Pod may reach cluster DNS (port 53, UDP and TCP). `kubeDns` allows the `kube-dns` Pods of `kube-system` (label `k8s-app: kube-dns`, CoreDNS and kube-dns). `resolverCIDRs` allows only the addresses in `resolverCIDRs`: choose it when Pods query a resolver that is not a `kube-dns` Pod, such as NodeLocal DNSCache on a link-local address. Only `kubeDns` was tried on the lab CNI (Cilium). |
+| networkPolicy.dns.mode | string | `"kubeDns"` | How the analyzer, the executor, the verifier and the `helm test` Pod may reach cluster DNS (port 53, UDP and TCP). `kubeDns` allows the `kube-dns` Pods of `kube-system` (label `k8s-app: kube-dns`, CoreDNS and kube-dns). `resolverCIDRs` allows only the addresses in `resolverCIDRs`: choose it when Pods query a resolver that is not a `kube-dns` Pod, such as NodeLocal DNSCache on a link-local address. Only `kubeDns` was tried on the lab CNI (Cilium). |
 | networkPolicy.dns.resolverCIDRs | list | `["169.254.20.10/32"]` | Resolver addresses for `mode: resolverCIDRs`, at least one IPv4 or IPv6 CIDR such as `169.254.20.10/32`, the default address of NodeLocal DNSCache (check the listen address of your node-local-dns DaemonSet; with kube-proxy in IPVS mode that is the kube-dns Service IP as well). Ignored in `kubeDns` mode. |
 | networkPolicy.analyzer.prometheus.enabled | bool | `false` | Let the analyzer, and only the analyzer, send TCP to the in-cluster Prometheus it queries (the metrics source, ADR-0017). Off by default: the analyzer sends Prometheus nothing unless `--prometheus-url` is set; with `--prometheus-cluster` too it probes it at startup and every 10 minutes, and it queries it when the analysis loop (#76, on with `analyzer.analysis.triageModel`) calls the context builder or a read tool. Set it together with the analyzer's metrics source, and allow the analyzer in the ingress policy of that Prometheus too (a NetworkPolicy of the Prometheus namespace; the chart does not touch other namespaces). |
 | networkPolicy.analyzer.prometheus.namespace | string | `""` | Namespace of the Prometheus (matched by `kubernetes.io/metadata.name`). Required when `enabled`. |
@@ -268,6 +277,28 @@ helm uninstall shadewright --namespace shadewright-system
 | analyzer.topologySpreadConstraints | list | `[]` | Topology spread constraints of the Pod, at most 8 Kubernetes `topologySpreadConstraints` objects. |
 | analyzer.priorityClassName | string | `""` | Priority class of the Pod. Empty uses the cluster default. |
 | analyzer.imagePullSecrets | list | `[]` | Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16). |
+
+### Verifier
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| verifier.replicas | int | `1` | Number of Pods. 1 (the default) runs the one Pod. Above 1 the extra Pods are warm standbys: leader election keeps one of them active and the others idle, and when the leader's Pod fails a standby takes over after about one Lease duration (15 seconds by default). A standby costs an idle Pod and adds no throughput. Above 1 the chart also renders a PodDisruptionBudget (`minAvailable: 1`) and a preferred Pod anti-affinity by node, unless `affinity` sets `podAntiAffinity` itself. |
+| verifier.watchNamespaces | string | `null`, so `analyzer.watchNamespaces` | Namespaces whose pods and workloads the verifier reads (`--watch-namespaces`): `list` on `pods`, `get` on `deployments`, `replicasets` and `statefulsets`, through one read-only RoleBinding in each namespace (each must exist). `null` (the default) uses `analyzer.watchNamespaces`; a list, an empty one included, is used as it is, and an empty list watches none (never all). Names must be unique, at most 256, DNS labels (`*` is refused). |
+| verifier.goMemLimit | string | 90 percent of `resources.limits.memory` | Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit. Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix: the chart then refuses to render) or for another margin. |
+| verifier.resources.limits.cpu | string | `"500m"` | CPU limit (optional; removing it with `null` lets the container use idle CPU). |
+| verifier.resources.limits.memory | string | `"128Mi"` | Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never unbounded. |
+| verifier.resources.requests.cpu | string | `"10m"` | CPU request. |
+| verifier.resources.requests.memory | string | `"64Mi"` | Memory request. |
+| verifier.extraArgs | list | `[]` | Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace` and `--watch-namespaces`. |
+| verifier.metricsTLS.secretName | string | `""` | Name of an existing Secret of type `kubernetes.io/tls` (keys `tls.crt` and `tls.key`) in the release namespace that holds the serving certificate of the metrics endpoint. Empty (the default) keeps the certificate the binary generates for itself. Set, the chart mounts the Secret read-only and passes `--metrics-cert-path`; the key must be in the Secret, never in `values`. Needs `metrics.enabled` and `metrics.secure`. Issuance and renewal stay with you. |
+| verifier.podLabels | object | `{}` | Further Pod labels. The chart refuses `control-plane`, `app.kubernetes.io/*`, `helm.sh/*` and `azure.workload.identity/*`: it sets them itself, and the verifier has no cloud identity. |
+| verifier.podAnnotations | object | `{}` | Further Pod annotations. |
+| verifier.nodeSelector | object | `{}` | Node selector of the Pod, at most 32 labels. |
+| verifier.tolerations | list | `[]` | Tolerations of the Pod, at most 32 Kubernetes toleration objects. |
+| verifier.affinity | object | `{}` | Affinity of the Pod, a Kubernetes affinity object (`nodeAffinity`, `podAffinity`, `podAntiAffinity`). |
+| verifier.topologySpreadConstraints | list | `[]` | Topology spread constraints of the Pod, at most 8 Kubernetes `topologySpreadConstraints` objects. |
+| verifier.priorityClassName | string | `""` | Priority class of the Pod. Empty uses the cluster default. |
+| verifier.imagePullSecrets | list | `[]` | Image pull secrets of this component only, added to the global `imagePullSecrets`, a list of `{name: <secret>}` (at most 16). |
 
 ### Tests
 

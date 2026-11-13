@@ -36,6 +36,7 @@ const (
 	smTLS              = "metrics.serviceMonitor.enabled=true,metrics.serviceMonitor.tls.enabled=true"
 	executorDeployment = "Deployment/" + operatorNS + "/shadewright-executor"
 	analyzerDeployment = "Deployment/" + operatorNS + "/shadewright-analyzer"
+	verifierDeployment = "Deployment/" + operatorNS + "/shadewright-verifier"
 	identityLabel      = "azure.workload.identity/use"
 	componentLabel     = "app.kubernetes.io/component"
 	mirrorSecret       = "mirror"
@@ -238,7 +239,8 @@ func TestImageWithoutDigestFailsClosed(t *testing.T) {
 		t.Errorf("error does not say how to fix it:\n%s", out)
 	}
 	out, err = runErr(t, helmArgsWith(t, nil, "clusterId=chart-test", "image.allowTag=false",
-		"executor.image.digest=sha256:"+strings.Repeat("1", 64)))
+		"executor.image.digest=sha256:"+strings.Repeat("1", 64),
+		"verifier.image.digest=sha256:"+strings.Repeat("3", 64)))
 	if err == nil || !strings.Contains(out, "analyzer.image.digest is empty") {
 		t.Errorf("one digest missing did not fail on that component:\n%s", out)
 	}
@@ -635,8 +637,8 @@ func TestOnlyTheBudgetConfigMapSurvivesUninstall(t *testing.T) {
 			t.Errorf("%s has %s = %q: Leases are recreated and must not be kept", k, keep, v)
 		}
 	}
-	if n != 2 {
-		t.Errorf("rendered %d Leases, want 2", n)
+	if n != 3 {
+		t.Errorf("rendered %d Leases, want 3", n)
 	}
 }
 
@@ -675,8 +677,10 @@ func TestMetricsTLSProfileMountsTheSecretAndVerifiesTheCertificate(t *testing.T)
 			r := render(t, false, "metrics.serviceMonitor.enabled=true", "metrics.serviceMonitor.tls.enabled=true",
 				"metrics.serviceMonitor.tls.serverName=metrics.shadewright.example",
 				"metrics.serviceMonitor.tls.ca."+source+".name=metrics-ca", "metrics.serviceMonitor.tls.ca."+source+".key=ca.pem",
-				"executor.metricsTLS.secretName=executor-metrics-tls", "analyzer.metricsTLS.secretName=analyzer-metrics-tls")
-			secrets := map[string]string{executorComp: "executor-metrics-tls", analyzerComp: "analyzer-metrics-tls"}
+				"executor.metricsTLS.secretName=executor-metrics-tls", "analyzer.metricsTLS.secretName=analyzer-metrics-tls",
+				"verifier.metricsTLS.secretName=verifier-metrics-tls")
+			secrets := map[string]string{executorComp: "executor-metrics-tls", analyzerComp: "analyzer-metrics-tls",
+				verifierComp: "verifier-metrics-tls"}
 			for comp, secret := range secrets {
 				k := "Deployment/" + operatorNS + "/shadewright-" + comp
 				d := convert[appsv1.Deployment](t, r.chart[k])

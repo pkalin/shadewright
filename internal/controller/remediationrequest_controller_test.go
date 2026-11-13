@@ -75,6 +75,20 @@ func (s *stubResolver) Resolve(context.Context, sourcemap.Input) (sourcemap.Resu
 	return s.result, s.err
 }
 
+// failingRequestReader fails every read of the RemediationRequest called name and reads anything else from
+// Reader.
+type failingRequestReader struct {
+	client.Reader
+	name string
+}
+
+func (f failingRequestReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.RemediationRequest); ok && key.Name == f.name {
+		return apierrors.NewServiceUnavailable("the API server is not available")
+	}
+	return f.Reader.Get(ctx, key, obj, opts...)
+}
+
 // splitReader serves the Flux objects from a fake client (envtest has no Flux CRDs) and everything else from
 // the API server.
 type splitReader struct {
@@ -222,6 +236,110 @@ var _ = Describe("RemediationRequest Controller", func() {
 				&remediationv1alpha1.RemediationSettings{}))
 		}).Should(BeTrue())
 		request, policy, settings, deployment = nil, nil, nil, nil
+	})
+
+	// The revert link (ADR-0030 section 8, #96). asRevertOf turns request, as created, into the request a revert
+	// names: it ended Failed with Verified False. It then creates the revert of it, from previous to desired
+	// swapped, under the name derived from its UID, edited by edit before it is created, and makes it the request
+	// the spec reconciles. The failed request is deleted after the spec.
+	asRevertOf := func(edit func(failed, revert *remediationv1alpha1.RemediationRequest)) *remediationv1alpha1.RemediationRequest {
+		failed := request.DeepCopy()
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, failed))).To(Succeed()) })
+		failed.Status.Phase = remediationv1alpha1.PhaseFailed
+		meta.SetStatusCondition(&failed.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionVerified,
+			Status: metav1.ConditionFalse, Reason: ReasonOOMKilled, Message: "OOM killed under the desired limit"})
+		Expect(k8sClient.Status().Update(ctx, failed)).To(Succeed())
+		revert := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace,
+			Name: string(remediationv1alpha1.RevertName(remediationv1alpha1.UID(failed.UID)))}}
+		revert.Spec = *failed.Spec.DeepCopy()
+		m := revert.Spec.Action.SetContainerMemoryLimit
+		m.Previous, m.Desired = m.Desired, m.Previous
+		revert.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: failed.Name,
+			UID: remediationv1alpha1.UID(failed.UID)}
+		if edit != nil {
+			edit(failed, revert)
+		}
+		Expect(k8sClient.Create(ctx, revert)).To(Succeed())
+		request = revert
+		return failed
+	}
+	// liveLimit sets the deployment's memory limit before it is created.
+	liveLimit := func(q string) {
+		deployment.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse(q)
+	}
+
+	It("lets a valid revert through the link to the policy, which refuses its decrease by default", func() {
+		// The failed request raised the limit from 256Mi to 384Mi, which is live; the revert lowers it again.
+		create(func() { liveLimit("384Mi") })
+		asRevertOf(nil)
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))
+		// The link held: the refusal is the policy's (Preflight, before any mapping), not InvalidRevert.
+		Expect(condition(got).Reason).To(Equal("DecreaseNotAllowed"))
+	})
+
+	It("keeps approval required on an allowed revert under an Optional policy", func() {
+		// The failed request lowered the limit from 512Mi to 384Mi; the revert raises it back within the bounds.
+		create(func() {
+			liveLimit("384Mi")
+			policy.Spec.Approval = remediationv1alpha1.ApprovalOptional
+			request.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("512Mi")
+		})
+		asRevertOf(nil)
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		Expect(got.Status.EffectiveApprovalRequired).To(HaveValue(BeTrue()))
+	})
+
+	DescribeTable("denies a revert whose link does not hold with InvalidRevert, before the policy check",
+		func(edit func(failed, revert *remediationv1alpha1.RemediationRequest), why string) {
+			create(func() { liveLimit("384Mi") })
+			failed := asRevertOf(edit)
+			if why == "does not exist" {
+				Expect(k8sClient.Delete(ctx, failed)).To(Succeed())
+			}
+			_, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseDenied))
+			c := condition(got)
+			Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonInvalidRevert))
+			Expect(c.Message).To(ContainSubstring(why))
+			Expect(stub.calls.Load()).To(BeZero(), "nothing was mapped for an invalid revert")
+		},
+		Entry("a missing request", nil, "does not exist"),
+		Entry("a name not derived from the failed UID", func(_, r *remediationv1alpha1.RemediationRequest) {
+			r.Name = "revert-chosen-by-hand"
+		}, "name is not the one derived"),
+		Entry("another UID", func(_, r *remediationv1alpha1.RemediationRequest) {
+			r.Spec.Reverts.UID = "abababab-abab-4bab-8bab-abababababab"
+			r.Name = string(remediationv1alpha1.RevertName(r.Spec.Reverts.UID))
+		}, "another UID"),
+		Entry("a request that did not fail", func(f, _ *remediationv1alpha1.RemediationRequest) {
+			f.Status.Phase = remediationv1alpha1.PhaseInconclusive
+			meta.SetStatusCondition(&f.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionVerified,
+				Status: metav1.ConditionUnknown, Reason: "TargetGone", Message: "gone"})
+			Expect(k8sClient.Status().Update(ctx, f)).To(Succeed())
+		}, "did not end Failed"),
+		Entry("another action value", func(_, r *remediationv1alpha1.RemediationRequest) {
+			r.Spec.Action.SetContainerMemoryLimit.Desired = resource.MustParse("128Mi")
+		}, "not exactly the inverse"),
+	)
+
+	It("retries a failed read of the reverted request, never a refusal", func() {
+		create(func() { liveLimit("384Mi") })
+		failed := asRevertOf(nil)
+		r := &RemediationRequestReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Source: stub,
+			APIReader: failingRequestReader{Reader: k8sClient, name: failed.Name}}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(BeEmpty())
+		Expect(condition(got)).To(BeNil())
 	})
 
 	It("moves an allowed request to PolicyChecked and records the decision", func() {

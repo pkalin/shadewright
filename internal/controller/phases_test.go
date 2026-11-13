@@ -203,8 +203,9 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		w.r = w.reconciler()
 	}
 
-	// newWorld creates the target and a request Merged an hour's fraction ago with its merge receipt.
-	newWorld := func(edit func(*appsv1.StatefulSet)) *phasesWorld {
+	// newWorldWith creates the target and a request Merged an hour's fraction ago with its merge receipt; edit
+	// changes the target and editRequest the request before they are created.
+	newWorldWith := func(edit func(*appsv1.StatefulSet), editRequest func(*remediationv1alpha1.RemediationRequest)) *phasesWorld {
 		seq++
 		name := fmt.Sprintf("phases-%d", seq)
 		w := &phasesWorld{reader: &rolloutReader{Reader: k8sClient}}
@@ -221,9 +222,14 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		rr := fx.MemoryLimitRequest(phasesNamespace, name)
 		rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: linkAPI, Kind: kindStatefulSet,
 			Namespace: phasesNamespace, Name: name, UID: remediationv1alpha1.UID(ss.UID)}
+		if editRequest != nil {
+			editRequest(rr)
+		}
 		mergedRequest(w, rr)
 		return w
 	}
+	// newWorld is newWorldWith without a change to the request.
+	newWorld := func(edit func(*appsv1.StatefulSet)) *phasesWorld { return newWorldWith(edit, nil) }
 
 	reconcileAt := func(w *phasesWorld, at time.Time) (reconcile.Result, error) {
 		w.now = at
@@ -818,6 +824,20 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionUnknown))
 		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonClearingNotChecked))
 	})
+	It("ends a revert of a ScaledObject Inconclusive with RevertApplied after stableFor", func() {
+		w := newKedaWorldWith(15, "True", func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: "remediation-failed",
+				UID: "12121212-1212-4212-8212-121212121212"}
+		})
+		applied := w.merged.Add(time.Minute)
+		stepAt(w, applied)
+		Expect(condition(fetch(w), remediationv1alpha1.ConditionCleared).Reason).To(
+			Equal(remediationv1alpha1.ReasonRevertApplied))
+		stepAt(w, applied.Add(3*time.Minute))
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.ReasonRevertApplied)
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionUnknown))
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(remediationv1alpha1.ReasonRevertApplied))
+	})
 	It("ends a ScaledObject that names QueueBacklogDecreasing Inconclusive with CheckNotAvailable", func() {
 		w := newKedaWorldWith(15, "True", func(rr *remediationv1alpha1.RemediationRequest) {
 			rr.Spec.Verification.Checks = []remediationv1alpha1.VerificationCheck{
@@ -1049,6 +1069,68 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		cleared := condition(rr, remediationv1alpha1.ConditionCleared)
 		Expect(cleared.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cleared.Reason).To(Equal(ReasonOOMKilled))
+	})
+
+	// A revert (ADR-0030 section 8, #96): no report is read, the OOM rule and Cleared do not apply, and it ends
+	// Inconclusive with RevertApplied once rolled out, configured and available held for stableFor, never
+	// Succeeded.
+	asRevert := func(rr *remediationv1alpha1.RemediationRequest) {
+		rr.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: "remediation-failed",
+			UID: "12121212-1212-4212-8212-121212121212"}
+	}
+	expectRevertCleared := func(rr *remediationv1alpha1.RemediationRequest) {
+		cleared := condition(rr, remediationv1alpha1.ConditionCleared)
+		ExpectWithOffset(1, cleared.Status).To(Equal(metav1.ConditionUnknown))
+		ExpectWithOffset(1, cleared.Reason).To(Equal(remediationv1alpha1.ReasonRevertApplied))
+	}
+
+	It("ends a revert Inconclusive with RevertApplied after stableFor, without a report and never Succeeded", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		stableFor := verification.MinStableForMemory
+		t, _ := drive(w, applied.Add(verification.PollInterval), applied.Add(stableFor), verification.PollInterval, 1, nil)
+		during := fetch(w)
+		expectRevertCleared(during)
+		Expect(during.Status.Verification.WindowStart.Time).To(BeTemporally("==", applied),
+			"the window opened at the first check, with no report")
+		Expect(during.Status.Verification.LastReset).To(BeNil(), "a missing report is no reset for a revert")
+		mustReconcileAt(w, t)
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.ReasonRevertApplied)
+		expectRevertCleared(rr)
+		Expect(rr.Status.HoldsTarget).To(Equal(new(false)))
+	})
+
+	It("never fails a revert for an OOM kill a report records", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		putReport(w, 1, applied, applied, func(vr *remediationv1alpha1.VerificationReport) {
+			vr.Status.OOMKill = &remediationv1alpha1.OOMKill{PodUID: "78787878-7878-4878-8878-787878787878",
+				Container: workerContainer}
+		})
+		t, _ := drive(w, applied.Add(verification.PollInterval), applied.Add(verification.MinStableForMemory),
+			verification.PollInterval, 2, nil)
+		mustReconcileAt(w, t)
+		expectRevertCleared(expectEnd(w, remediationv1alpha1.PhaseInconclusive, remediationv1alpha1.ReasonRevertApplied))
+	})
+
+	It("ends a revert that is not available Inconclusive with NotAvailable at the timeout", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		deadline := fetch(w).Status.Deadline.Time
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		drive(w, applied.Add(verification.PollInterval), deadline, verification.PollInterval, 1, nil)
+		Expect(fetch(w).Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		mustReconcileAt(w, deadline)
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetNotAvailable))
+		expectRevertCleared(rr)
+	})
+
+	It("ends a revert VerificationDisabled with --verify-outcomes off, Cleared still RevertApplied", func() {
+		w := newWorldWith(nil, asRevert)
+		applied := verifying(w)
+		w.r.VerifyOutcomes = false
+		mustReconcileAt(w, applied.Add(verification.PollInterval))
+		expectRevertCleared(expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonVerificationDisabled))
 	})
 
 	// The timeout table: trouble the report recorded fails the request whatever its last reset; a pod that is

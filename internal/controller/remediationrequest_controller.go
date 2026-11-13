@@ -722,6 +722,17 @@ func (r *RemediationRequestReconciler) checkChainLink(ctx context.Context, rr *r
 	return outcome{}, false, nil
 }
 
+// checkLinks runs the link checks that come before anything else is read about a request: a replacement's
+// chain link (ADR-0028 section 4 item 2), then a revert's link (ADR-0030 section 8). The API refuses a revert that
+// replaces a request, so the two never meet. refused is true with the Denied outcome of the first that fails.
+func (r *RemediationRequestReconciler) checkLinks(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	out outcome, refused bool, err error) {
+	if out, refused, err := r.checkChainLink(ctx, rr); err != nil || refused {
+		return out, refused, err
+	}
+	return r.checkRevertLink(ctx, rr)
+}
+
 // check gathers the input and decides. The error is non-nil only for a failure worth retrying.
 //
 // The refusal order (design 5.3): a missing policy or settings object, a kind the action cannot change, a missing
@@ -730,8 +741,7 @@ func (r *RemediationRequestReconciler) checkChainLink(ctx context.Context, rr *r
 // Git, and policy.Decide decide on everything, the resolved source included.
 func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	outcome, error) {
-	// A replacement's chain link comes first, before anything else is read about it (ADR-0028 section 4 item 2).
-	if out, refused, err := r.checkChainLink(ctx, rr); err != nil || refused {
+	if out, refused, err := r.checkLinks(ctx, rr); err != nil || refused {
 		return out, err
 	}
 	pol := &remediationv1alpha1.RemediationPolicy{}
@@ -831,7 +841,7 @@ func (r *RemediationRequestReconciler) check(ctx context.Context, rr *remediatio
 
 	in.Source = res.Source
 	d := policy.Decide(in)
-	o := decided(d, pol)
+	o := revertApproval(rr, decided(d, pol))
 	o.source = res.Source
 	if d.Outcome != policy.OutcomeAllowed {
 		return o, nil

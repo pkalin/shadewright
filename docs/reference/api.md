@@ -99,7 +99,7 @@ Validation rules:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
-| `spec` | [RemediationRequestSpec](#remediationrequestspec) | Yes | spec is the plan.<br>Rule: spec is immutable; a changed plan is a new RemediationRequest<br>Rule: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject<br>Rule: SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet<br>Rule: replaces and chainRoot are set together or not at all |
+| `spec` | [RemediationRequestSpec](#remediationrequestspec) | Yes | spec is the plan.<br>Rule: spec is immutable; a changed plan is a new RemediationRequest<br>Rule: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject<br>Rule: SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet<br>Rule: replaces and chainRoot are set together or not at all<br>Rule: a revert (spec.reverts) requires approvalRequired: true<br>Rule: a revert (spec.reverts) never replaces another request |
 | `status` | [RemediationRequestStatus](#remediationrequeststatus) | No | status is the progress, written by the controller. |
 
 ## RemediationSettings
@@ -1163,6 +1163,8 @@ Validation rules:
 - AdjustKedaMaxReplicas can only target a keda.sh ScaledObject: `self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/') && self.targetRef.kind == 'ScaledObject')`
 - SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet: `self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])`
 - replaces and chainRoot are set together or not at all: `has(self.replaces) == has(self.chainRoot)`
+- a revert (spec.reverts) requires approvalRequired: true: `!has(self.reverts) || (has(self.approvalRequired) && self.approvalRequired)`
+- a revert (spec.reverts) never replaces another request: `!has(self.reverts) || !has(self.replaces)`
 
 Used by: [RemediationRequest](#remediationrequest).
 
@@ -1177,6 +1179,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `verification` | [Verification](#verification) | No | verification says when the change counts as a success.<br>Default: `{}`<br>Rule: stableFor must be at least 1m<br>Rule: timeout must be at most 24h<br>Rule: timeout must be longer than stableFor |
 | `replaces` | [RequestReplacement](#requestreplacement) | No | replaces names the request this one replaces and the reviewer hint of that request it answers (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of the plan, so it is part of the request's name: the same plan answering another hint is another request. The executor checks the link once, at the policy check, and then takes the pull request over (the handoff). |
 | `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (shadewright/&lt;chainRoot>), so every request of a chain works on the same branch and pull request.<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `reverts` | [RequestRef](#requestref) | No | reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a revert, which the analyzer's deterministic revert proposer creates for a request that ended Failed with Verified False; a model proposal has no such field. A revert requires approvalRequired: true, never replaces another request, and is never changed after create (the spec is immutable). The executor checks the link before the policy check: the named request exists with this UID, ended Failed with Verified False, is not a revert itself, has the same Incident, target and action type (and container), and this request's previous and desired values are its desired and previous values; this request's name is RevertName of that UID, so a failed request has at most one revert. Otherwise the request ends Denied with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier writes no report for it, and once rolled out, configured and available for stableFor it ends Inconclusive with reason RevertApplied, never Succeeded. |
 
 ### RemediationRequestStatus
 
@@ -1250,7 +1253,7 @@ Used by: [RemediationSettings](#remediationsettings).
 RequestRef names another RemediationRequest in the same namespace.
 
 
-Used by: [RemediationRequestStatus](#remediationrequeststatus).
+Used by: [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |

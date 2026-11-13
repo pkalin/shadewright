@@ -260,6 +260,35 @@ spec:
                 - name
                 - uid
                 type: object
+              reverts:
+                description: |-
+                  reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a
+                  revert, which the analyzer's deterministic revert proposer creates for a request that ended Failed with
+                  Verified False; a model proposal has no such field. A revert requires approvalRequired: true, never
+                  replaces another request, and is never changed after create (the spec is immutable). The executor checks
+                  the link before the policy check: the named request exists with this UID, ended Failed with Verified
+                  False, is not a revert itself, has the same Incident, target and action type (and container), and this
+                  request's previous and desired values are its desired and previous values; this request's name is
+                  RevertName of that UID, so a failed request has at most one revert. Otherwise the request ends Denied
+                  with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier
+                  writes no report for it, and once rolled out, configured and available for stableFor it ends
+                  Inconclusive with reason RevertApplied, never Succeeded.
+                properties:
+                  name:
+                    description: name of the request.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  uid:
+                    description: uid of the request, so a request recreated under
+                      the same name is never taken for it.
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
               targetRef:
                 description: targetRef is the live object the change is about.
                 properties:
@@ -363,6 +392,10 @@ spec:
                 == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])
             - message: replaces and chainRoot are set together or not at all
               rule: has(self.replaces) == has(self.chainRoot)
+            - message: 'a revert (spec.reverts) requires approvalRequired: true'
+              rule: '!has(self.reverts) || (has(self.approvalRequired) && self.approvalRequired)'
+            - message: a revert (spec.reverts) never replaces another request
+              rule: '!has(self.reverts) || !has(self.replaces)'
           status:
             description: status is the progress, written by the controller.
             properties:

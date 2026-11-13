@@ -213,6 +213,10 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	if rolloutTarget(ref) == nil {
 		return r.clearScaledStep(ctx, rr, target, now, deadline, stableFor, changed, stuck)
 	}
+	if remediationv1alpha1.IsRevert(rr) {
+		// A revert has no report: the OOM rule and Cleared do not apply to it (ADR-0030 section 8).
+		return r.clearRevertStep(ctx, rr, target, now, deadline, stableFor, changed, stuck)
+	}
 
 	key := client.ObjectKeyFromObject(rr)
 	// The report's counter is remembered at the time taken before its read, a lower bound of when what the
@@ -401,9 +405,14 @@ func (r *RemediationRequestReconciler) succeed(ctx context.Context, rr *remediat
 // clearedAtEnd is the Cleared condition of a request that ends from Verifying in phase with reason: False when
 // it ends Failed for the trouble the report recorded (OOMKilled, Restarted), Unknown with the same reason
 // otherwise. The phase decides, not the reason alone: an Inconclusive end can carry Restarted as the reason that
-// held the window closed without any trouble recorded.
+// held the window closed without any trouble recorded. A revert's is always Unknown with RevertApplied, whatever
+// ends it: its clearing is never checked (ADR-0030 section 8).
 func clearedAtEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv1alpha1.RemediationPhase,
 	reason, message string) metav1.Condition {
+	if remediationv1alpha1.IsRevert(rr) {
+		return metav1.Condition{Type: remediationv1alpha1.ConditionCleared, Status: metav1.ConditionUnknown,
+			Reason: remediationv1alpha1.ReasonRevertApplied, Message: msgRevertNotCleared, ObservedGeneration: rr.Generation}
+	}
 	status := metav1.ConditionUnknown
 	if phase == remediationv1alpha1.PhaseFailed && (reason == ReasonOOMKilled || reason == ReasonRestarted) {
 		status = metav1.ConditionFalse
@@ -431,10 +440,14 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 		resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
 	}
 	changed = storeWindow(rr, w) || changed
+	revert := remediationv1alpha1.IsRevert(rr)
 	if w.Span(now) >= stableFor {
 		reason, message := ReasonClearingNotChecked, fmt.Sprintf("The %s was rolled out and configured for %s; "+
 			"its symptom is not visible in container status, so clearing is not checked", ref.Kind, stableFor)
-		if namesBacklogCheck(rr) {
+		switch {
+		case revert:
+			reason, message = remediationv1alpha1.ReasonRevertApplied, revertAppliedMessage(ref.Kind, stableFor)
+		case namesBacklogCheck(rr):
 			reason, message = ReasonCheckNotAvailable, fmt.Sprintf("The %s was rolled out and configured for %s; "+
 				"the check QueueBacklogDecreasing needs metrics, which no evidence source reads yet", ref.Kind,
 				stableFor)
@@ -451,8 +464,63 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 		}
 		return reconcile.Result{}, r.endAtTimeout(ctx, rr, verdict, reason, "")
 	}
-	changed = setCondition(rr, remediationv1alpha1.ConditionCleared, metav1.ConditionUnknown,
-		ReasonClearingNotChecked, fmt.Sprintf("A %s's symptom is not visible in container status, so clearing "+
-			"is not checked", ref.Kind)) || changed
+	cleared, message := ReasonClearingNotChecked, fmt.Sprintf("A %s's symptom is not visible in container status, "+
+		"so clearing is not checked", ref.Kind)
+	if revert {
+		cleared, message = remediationv1alpha1.ReasonRevertApplied, msgRevertNotCleared
+	}
+	changed = setCondition(rr, remediationv1alpha1.ConditionCleared, metav1.ConditionUnknown, cleared, message) ||
+		changed
 	return r.keepVerifying(ctx, rr, now, deadline, interval, changed, stuck)
+}
+
+// msgRevertNotCleared is the message of a revert's Cleared condition, Unknown with RevertApplied.
+const msgRevertNotCleared = "A revert is not checked for clearing: the symptom of the change it undoes is " +
+	"expected to come back, so no OOM kill or restart decides it"
+
+// revertAppliedMessage is the message of a revert's end, Inconclusive with RevertApplied.
+func revertAppliedMessage(kind string, stableFor time.Duration) string {
+	return fmt.Sprintf("The revert was rolled out, configured and available on the %s for %s; a revert is never "+
+		"verified as a success, and the Incident stays with a person", kind, stableFor)
+}
+
+// clearRevertStep is clearStep for a revert of a Deployment or StatefulSet (ADR-0030 section 8). It reads no
+// report: the verifier writes none for a revert, so the OOM rule and Cleared do not apply, and Cleared stays
+// Unknown with RevertApplied. The executor's own window is good while RolledOut is True and the target reports
+// exactly the desired replicas available (else NotAvailable); once it spans stableFor on the executor's clock the
+// request ends Inconclusive with RevertApplied, never Succeeded. At the timeout a stuck rollout ends it Failed
+// (RolloutStuck); anything else ends it Inconclusive with the reason that held the window closed.
+func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, target client.Object, now, deadline time.Time,
+	stableFor time.Duration, changed bool, stuck *rollout.Result) (reconcile.Result, error) {
+	w := executorWindow(rr)
+	good := false
+	if meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut) {
+		if desired, available := replicasOf(target); available != desired {
+			resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
+		} else {
+			w.Good(now)
+			good = true
+		}
+	}
+	changed = storeWindow(rr, w) || changed
+	if good && w.Span(now) >= stableFor {
+		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
+			remediationv1alpha1.ReasonRevertApplied, revertAppliedMessage(rr.Spec.TargetRef.Kind, stableFor))
+	}
+	if !now.Before(deadline) {
+		if stuckRecorded(rr) != nil {
+			return reconcile.Result{}, r.endAtTimeout(ctx, rr, verification.VerdictFailed, rollout.ReasonRolloutStuck, "")
+		}
+		// No report is read for a revert, so only the executor's own reset can name the cause.
+		reason := string(remediationv1alpha1.ResetEvidenceMissing)
+		if w.LastReset != nil {
+			reason = string(w.LastReset.Reason)
+		}
+		return reconcile.Result{}, r.endAtTimeout(ctx, rr, verification.VerdictInconclusive, reason,
+			" (a revert is checked for rollout, configuration and availability only)")
+	}
+	changed = setCondition(rr, remediationv1alpha1.ConditionCleared, metav1.ConditionUnknown,
+		remediationv1alpha1.ReasonRevertApplied, msgRevertNotCleared) || changed
+	return r.keepVerifying(ctx, rr, now, deadline, verification.PollInterval, changed, stuck)
 }

@@ -149,6 +149,8 @@ type Verification struct {
 // +kubebuilder:validation:XValidation:rule="self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/') && self.targetRef.kind == 'ScaledObject')",message="AdjustKedaMaxReplicas can only target a keda.sh ScaledObject"
 // +kubebuilder:validation:XValidation:rule="self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])",message="SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet"
 // +kubebuilder:validation:XValidation:rule="has(self.replaces) == has(self.chainRoot)",message="replaces and chainRoot are set together or not at all"
+// +kubebuilder:validation:XValidation:rule="!has(self.reverts) || (has(self.approvalRequired) && self.approvalRequired)",message="a revert (spec.reverts) requires approvalRequired: true"
+// +kubebuilder:validation:XValidation:rule="!has(self.reverts) || !has(self.replaces)",message="a revert (spec.reverts) never replaces another request"
 type RemediationRequestSpec struct {
 	// incidentRef is the incident this plan answers.
 	// +required
@@ -196,6 +198,20 @@ type RemediationRequestSpec struct {
 	// (shadewright/<chainRoot>), so every request of a chain works on the same branch and pull request.
 	// +optional
 	ChainRoot UID `json:"chainRoot,omitempty"`
+
+	// reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a
+	// revert, which the analyzer's deterministic revert proposer creates for a request that ended Failed with
+	// Verified False; a model proposal has no such field. A revert requires approvalRequired: true, never
+	// replaces another request, and is never changed after create (the spec is immutable). The executor checks
+	// the link before the policy check: the named request exists with this UID, ended Failed with Verified
+	// False, is not a revert itself, has the same Incident, target and action type (and container), and this
+	// request's previous and desired values are its desired and previous values; this request's name is
+	// RevertName of that UID, so a failed request has at most one revert. Otherwise the request ends Denied
+	// with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier
+	// writes no report for it, and once rolled out, configured and available for stableFor it ends
+	// Inconclusive with reason RevertApplied, never Succeeded.
+	// +optional
+	Reverts *RequestRef `json:"reverts,omitempty"`
 }
 
 // RemediationPhase summarizes where a request is. Conditions carry the reasons.

@@ -484,7 +484,7 @@ spec:
               conditions:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-                  Verified, Configured, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's
+                  Verified, Configured, Cleared, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's
                   pods run the applied template; True with reason RolloutComplete, or RolloutPartitioned when a partitioned
                   StatefulSet keeps pods on the old revision on purpose; False with reason RolloutStuck or
                   DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or
@@ -1404,6 +1404,52 @@ spec:
                 - repositoryRef
                 - targetBranch
                 type: object
+              verification:
+                description: |-
+                  verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4). Only
+                  the executor writes it; once set it is kept, windowStart and the time of lastReset only move forward and
+                  resets never decreases (validation rules on the object).
+                properties:
+                  lastReset:
+                    description: lastReset is the last reset of the window. Kept once
+                      set; its time never moves back.
+                    properties:
+                      reason:
+                        description: |-
+                          reason says why the window was reset: NotAvailable (the target reports fewer available replicas than
+                          desired, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is
+                          missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another
+                          request, merge commit, target, template revision or container) or PartialRollout (the report does not cover
+                          every desired replica). Every one is a reset of the no-evidence class.
+                        enum:
+                        - NotAvailable
+                        - StaleReport
+                        - ReportMismatch
+                        - PartialRollout
+                        type: string
+                      time:
+                        description: |-
+                          time is when the reset was recorded, on the executor's clock. It is never earlier than windowStart at that
+                          moment or the previous reset, so the window is open only while windowStart is later than it.
+                        format: date-time
+                        type: string
+                    required:
+                    - reason
+                    - time
+                    type: object
+                  resets:
+                    description: resets counts the resets of the window. It never
+                      decreases.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  windowStart:
+                    description: |-
+                      windowStart is when the current window opened: the first good check after the last reset. It only moves
+                      forward.
+                    format: date-time
+                    type: string
+                type: object
             type: object
         required:
         - spec
@@ -1520,6 +1566,22 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended)
             || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout)
             && has(self.status.rollout.ended) && self.status.rollout.ended)'
+        - message: status.verification is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || (has(self.status)
+            && has(self.status.verification))'
+        - message: status.verification.windowStart only moves forward
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.windowStart)
+            || (has(self.status) && has(self.status.verification) && has(self.status.verification.windowStart)
+            && timestamp(self.status.verification.windowStart) >= timestamp(oldSelf.status.verification.windowStart))'
+        - message: status.verification.lastReset is kept once set and its time never
+            moves back
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.lastReset)
+            || (has(self.status) && has(self.status.verification) && has(self.status.verification.lastReset)
+            && timestamp(self.status.verification.lastReset.time) >= timestamp(oldSelf.status.verification.lastReset.time))'
+        - message: status.verification.resets never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.resets)
+            || (has(self.status) && has(self.status.verification) && has(self.status.verification.resets)
+            && self.status.verification.resets >= oldSelf.status.verification.resets)'
         - message: status.queuedBehind is kept once set
           rule: '!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind)
             == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind)

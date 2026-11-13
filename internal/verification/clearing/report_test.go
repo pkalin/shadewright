@@ -243,6 +243,11 @@ func TestTimeoutVerdict(t *testing.T) {
 		w.Reset(reason, e0)
 		return w
 	}
+	reopened := func(reason v1alpha1.ResetReason) Window {
+		w := execReset(reason)
+		w.Good(e0.Add(PollInterval))
+		return w
+	}
 	cases := []struct {
 		name    string
 		in      Timeout
@@ -255,11 +260,19 @@ func TestTimeoutVerdict(t *testing.T) {
 		{"last report reset restarted", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetRestarted)}, VerdictFailed, "Restarted"},
 		{"restarted outweighs the executor's own reset", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetRestarted),
 			Executor: execReset(v1alpha1.ResetStaleReport)}, VerdictFailed, "Restarted"},
-		{"pods not ready", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPodNotReady)}, VerdictInconclusive, "PodNotReady"},
+		{"pods not ready", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPodNotReady)}, VerdictInconclusive, string(v1alpha1.ResetPodNotReady)},
 		{"partial rollout", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPartialRollout)}, VerdictInconclusive, "PartialRollout"},
 		{"more pods than the bound", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetEvidenceMissing)}, VerdictInconclusive, "EvidenceMissing"},
-		{"executor's own reset first", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPodNotReady),
+		{"the report's pod-level reason before the executor's NotAvailable", Timeout{RolledOut: true,
+			Report: withReset(v1alpha1.ResetPodNotReady), Executor: execReset(v1alpha1.ResetNotAvailable)},
+			VerdictInconclusive, string(v1alpha1.ResetPodNotReady)},
+		{"a stale report's reason is no reason", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetPodNotReady),
+			Executor: execReset(v1alpha1.ResetStaleReport)}, VerdictInconclusive, "StaleReport"},
+		{"the executor's closed window when the report's is open", Timeout{RolledOut: true, Report: report(samples(t, 2)),
 			Executor: execReset(v1alpha1.ResetNotAvailable)}, VerdictInconclusive, "NotAvailable"},
+		{"an old reset of an open executor window does not hide the report's", Timeout{RolledOut: true,
+			Report: withReset(v1alpha1.ResetPodNotReady), Executor: reopened(v1alpha1.ResetStaleReport)},
+			VerdictInconclusive, string(v1alpha1.ResetPodNotReady)},
 		{"no report", Timeout{RolledOut: true}, VerdictInconclusive, "StaleReport"},
 		{"a restarted reset in a mismatched report", Timeout{RolledOut: true, Report: withReset(v1alpha1.ResetRestarted),
 			Expected: Expected{RequestUID: otherUID}, Executor: execReset(v1alpha1.ResetReportMismatch)}, VerdictInconclusive, "ReportMismatch"},

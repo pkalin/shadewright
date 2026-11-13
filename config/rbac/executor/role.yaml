@@ -47,6 +47,7 @@ rules:
   - remediation.shadewright.io
   resources:
   - incidents
+  - verificationreports
   verbs:
   - get
 - apiGroups:

@@ -40,6 +40,12 @@ import (
 //
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents,verbs=get
 //
+// A Verifying request's check reads the verifier's VerificationReport of that request (clearing.go, ADR-0030
+// section 7), one object by its name through the API reader: get only, in the operator namespace. The executor
+// never writes a report and holds no grant on pods.
+//
+// +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=verificationreports,verbs=get
+//
 // Source mapping (ADR-0012) reads the target and the Flux objects that deliver it, one object at a time through
 // the manager's API reader (never the cache), so get is enough: no list, no watch. The kinds are the action catalog's targets and the
 // Flux Kustomization and GitRepository; Secrets are never granted.

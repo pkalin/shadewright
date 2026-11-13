@@ -445,6 +445,18 @@ func TestPermissionBoundary(t *testing.T) {
 		{"executor", "list", group, "incidents", "", otherNS, false},
 		// get on the request's Incident only, to check the name the pull request body shows (#264).
 		{"executor", "get", group, "incidents", "", operatorNS, true},
+		// get on the verifier's reports in the operator namespace, its evidence for Cleared (ADR-0030 section 7,
+		// #683): no list or watch, no write, nowhere else, and no grant on pods.
+		{"executor", "get", group, "verificationreports", "", operatorNS, true},
+		{"executor", "get", group, "verificationreports", "", otherNS, false},
+		{"executor", "list", group, "verificationreports", "", operatorNS, false},
+		{"executor", "watch", group, "verificationreports", "", operatorNS, false},
+		{"executor", "update", group, "verificationreports", "status", operatorNS, false},
+		{"executor", "delete", group, "verificationreports", "", operatorNS, false},
+		{"executor", "get", "", "pods", "", otherNS, false},
+		{"executor", "list", "", "pods", "", otherNS, false},
+		{"executor", "list", "", "pods", "", "", false},
+		{"executor", "get", "", "pods", "", operatorNS, false},
 		// The kill switch's Events about a request (WritesPaused, WritesResumed) are core Events, written with
 		// the leader election Role's grant in the operator namespace, where the requests are.
 		{"executor", "create", "", "events", "", operatorNS, true},

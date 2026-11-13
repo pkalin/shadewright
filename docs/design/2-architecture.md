@@ -18,6 +18,7 @@ sequenceDiagram
     participant E as Executor
     participant G as GitHub
     participant F as Flux
+    participant V as Verifier
     K->>A: Warning events, pod status and owners
     A->>A: Redact and fingerprint the symptoms
     A->>K: Group them into an Incident
@@ -39,9 +40,12 @@ sequenceDiagram
         G->>G: Review and required checks, then merge
         F->>G: Fetch the merged revision
         F->>K: Apply it
-        E->>F: Check lastAppliedRevision and Ready (planned)
-        E->>K: Verify health and that the symptom is gone (planned)
-        E->>R: Succeeded or Failed (planned)
+        E->>F: Check that the merge commit is applied (with --verify-outcomes)
+        V->>K: List the pods of the rollout every 30 s
+        V->>V: Write the VerificationReport, evidence only
+        E->>K: Read the target again: configured, rolled out, available
+        E->>V: Read the report as untrusted evidence (get)
+        E->>R: Succeeded, Failed or Inconclusive, with Cleared
     end
 ```
 
@@ -57,7 +61,7 @@ This section lists the components (2.2), the three binaries and what each may re
 | Policy engine | Allowed actions, scope, bounds, whether review is required | Rules owned by the cluster admin |
 | Remediation controller | Reconciles `RemediationRequest`, runs the approved plan, handles failures | CR status, Events about a request in the operator namespace, Git through the GitHub App |
 | GitOps adapter | Reads the repository, prepares the change, branch, commit, PR, auto-merge | One repository, allowed paths |
-| Verifier | Samples the pods of a rollout and writes the `VerificationReport` of a request (<span class="sw-status sw-built">built</span>, #682); the executor reading the report and deciding on it is <span class="sw-status sw-planned">planned</span> (#683) | Own binary, Deployment and ServiceAccount; list pods and get ReplicaSets, Deployments and StatefulSets in the watched namespaces; create reports and update their status in the operator namespace; no model, no Git App, never writes request status |
+| Verifier | Samples the pods of a rollout and writes the `VerificationReport` of a request (<span class="sw-status sw-built">built</span>, #682); the executor reads the report as untrusted evidence and decides `Cleared` (<span class="sw-status sw-built">built</span>, #683) | Own binary, Deployment and ServiceAccount; list pods and get ReplicaSets, Deployments and StatefulSets in the watched namespaces; create reports and update their status in the operator namespace; no model, no Git App, never writes request status |
 
 The base is Go with Kubebuilder, `controller-runtime` and `client-go` ([ADR-0005](../adr/0005-go-kubebuilder-single-module.md)).
 
@@ -148,6 +152,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 - It reads requests, writes their status and patches them to add or remove its finalizer, in the operator namespace only (a Role). Its cache watches requests only there.
 - It records the kill switch's Events about a request (5.4) as core Events in the operator namespace, with the `create` and `patch` on core Events that its leader election Role already holds. The spec of a request is immutable (CEL), so the patch cannot change what was decided.
 - It reads the comments of the pull requests it opened and the commenter's permission in the code host, and writes accepted reviewer hints into request status (<span class="sw-status sw-built">built</span>, code merged, off by default, opt-in with `--reviewer-hints` (#631), #538). <span class="sw-status sw-built">built</span> (#539, off by default too) It moves the branch of a handed-over pull request by one fast-forward commit and rewrites its title and body; on every head of its pull requests it creates the check run `shadewright/review` (`in_progress`) and completes it (`success`) once someone who wrote no hint approves the head, with the Git App's existing permissions and one new one, `checks: write`, which every token request now names. <span class="sw-status sw-built">built</span> (#542, off by default too) It posts one reply per hint or refused command in the same pull request, from a fixed template, only when the redactor would change nothing in it (2.3.3, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)).
+- It reads (`get` only, no list or watch) the verifier's `VerificationReport` of a request in `Verifying`, in the operator namespace and from the API server, as untrusted evidence for `Cleared` (<span class="sw-status sw-built">built</span>, #683, [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 7). It holds no grant on pods and never writes a report.
 - It cannot create requests or write incidents.
 
 ### 2.2.4. Verifier permissions
@@ -162,7 +167,7 @@ The verifier (`shadewright-verifier`, <span class="sw-status sw-built">built</sp
 
 What it does: every 30 seconds, for each `RemediationRequest` in phase `Verifying` that has a merge receipt and `status.rollout.templateRevision` and whose target is a Deployment or StatefulSet in a watched namespace, it gets the target, lists the pods its selector matches (pages of 100, at most 2), proves their owner chain by UID and selector (one ReplicaSet `get`), trims each pod to the fields ADR-0030 section 7 names (the termination message is never read), runs the pure sampling logic of `internal/verification/clearing`, and writes the report `vr-<request UID>`. The report spec holds the request UID, the receipt's merge commit, the target UID, the template revision and the container; its owner reference points to the request with `blockOwnerDeletion` false. Each sample is one status update. A failed read is retried and is not a sample.
 
-Planned: the executor reading the report as untrusted evidence and deciding the outcome (<span class="sw-status sw-planned">planned</span>, #683; the executor's grants are unchanged until then), and skipping requests with `spec.reverts` (<span class="sw-status sw-planned">planned</span>, the field arrives with #96; the verifier has a hook for it).
+The executor reads the report as untrusted evidence and decides the outcome (<span class="sw-status sw-built">built</span>, #683, 2.2.3 and 6). Planned: skipping requests with `spec.reverts` (<span class="sw-status sw-planned">planned</span>, the field arrives with #96; the verifier has a hook for it).
 
 None of the three binaries can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 

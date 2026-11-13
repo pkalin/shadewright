@@ -2,7 +2,7 @@
 
 Group `remediation.shadewright.io`, version `v1alpha1` ([ADR-0009](../adr/0009-api-group-and-docs-domain.md)). Schemas are generated from Go types by Kubebuilder.
 
-This section covers the four objects: the request (5.1), the incident (5.2), the policy (5.3) and the settings (5.4). Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (5.5). A fifth kind, `VerificationReport`, is the verifier's evidence for one request in `Verifying`: one per request in the operator namespace, owned by it, `spec` immutable, `status` forward only by CEL. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 7 defines it, and the [API reference](../reference/api.md#verificationreport) lists its fields. The type and the checks that judge it are built (#679); nothing creates or reads a report until the verifier (#682) and the executor's wiring (#683) are built.
+This section covers the four objects: the request (5.1), the incident (5.2), the policy (5.3) and the settings (5.4). Numbers and edge cases that only matter when you build or debug are in the table "Details" at the end (5.5). A fifth kind, `VerificationReport`, is the verifier's evidence for one request in `Verifying`: one per request in the operator namespace, owned by it, `spec` immutable, `status` forward only by CEL. [ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 7 defines it, and the [API reference](../reference/api.md#verificationreport) lists its fields. The type and the checks that judge it are built (#679); the verifier writes the reports (#682), and the executor reads them with `get` as untrusted evidence for the condition `Cleared` (#683).
 
 ## 5.1. RemediationRequest
 
@@ -83,7 +83,8 @@ Only the user or analyzer writes `metadata` and `spec`. Only the controller writ
 - `GitOps` is the default mode and, in the MVP, the only one.
 - The action type is an enum. Parameters are typed and bounded. Memory values are whole bytes between 1Mi and 1Ti.
 - The whole spec is immutable. A different plan is a new request, so an approval can never carry over to a changed plan.
-- Verification can only be made stricter. The controller always runs the checks the action needs, `stableFor` is at least 1m, and `timeout` is at most 24h and longer than `stableFor`.
+- Verification can only be made stricter. The controller always runs the checks the action needs, `stableFor` is at least 1m, and `timeout` is at most 24h and longer than `stableFor`. The effective `stableFor` is the larger of the request's and the action's minimum: 10 minutes for `SetContainerMemoryLimit`, 3 for `AdjustKedaMaxReplicas` ([ADR-0030](../adr/0030-merge-receipt-and-verification-outcomes.md) section 4). A request naming `QueueBacklogDecreasing` can never end `Succeeded`: no evidence source reads metrics yet, so it ends `Inconclusive` with `CheckNotAvailable`.
+- After the merge the status carries the executor's own stable window, `status.verification` (`windowStart`, `lastReset` with a reason and time, `resets`), written only by the executor; CEL keeps it once set, moves `windowStart` and the time of `lastReset` only forward and never lowers `resets`. The condition `Cleared` says whether the symptom cleared: `True` with `NoRecurrence`, `False` with `OOMKilled` or `Restarted`, `Unknown` while the window runs (`Observing`) or when it ends without evidence.
 - `approvalRequired: false` is a request for automation, not a way to lower central policy.
 
 ### What a request may target

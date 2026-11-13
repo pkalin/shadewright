@@ -27,8 +27,9 @@ import (
 )
 
 // The rollout check reads only the target object, so the executor role generated from the RBAC markers keeps
-// exactly the grants it had before #532: get (no list, no watch) on Deployments and StatefulSets, nothing on
-// pods, no write verb outside the operator's own requests (invariants 2 and 6). A new grant fails this test
+// exactly the grants it had before #532, plus get on the verifier's reports in the operator namespace (#683):
+// get (no list, no watch) on Deployments and StatefulSets, nothing on pods, no write verb outside the operator's
+// own requests (invariants 2 and 6). A new grant fails this test
 // and has to be changed here on purpose.
 func TestExecutorRoleUnchanged(t *testing.T) {
 	raw, err := os.ReadFile("../../../config/rbac/executor/role.yaml")
@@ -74,6 +75,8 @@ func TestExecutorRoleUnchanged(t *testing.T) {
 		"Role remediation.shadewright.io/remediationrequests/status get",
 		"Role remediation.shadewright.io/remediationrequests/status patch",
 		"Role remediation.shadewright.io/remediationrequests/status update",
+		// The verifier's report, the executor's evidence for Cleared (ADR-0030 section 7, #683).
+		"Role remediation.shadewright.io/verificationreports get",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("executor role grants\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

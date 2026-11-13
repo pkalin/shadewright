@@ -44,6 +44,7 @@ import (
 	fluxdelivery "github.com/pkalin/shadewright/internal/providers/delivery/flux"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	verification "github.com/pkalin/shadewright/internal/verification/clearing"
 	"github.com/pkalin/shadewright/internal/verification/rollout"
 )
 
@@ -52,6 +53,8 @@ const (
 	phasesTargetPath = "apps/cache.yaml"
 	// phasesOtherBranch is a target branch that differs from the one in the receipt.
 	phasesOtherBranch = "release-next"
+	// kindStatefulSet is the kind of the target of these specs.
+	kindStatefulSet = "StatefulSet"
 )
 
 // The phases after the merge (#681, ADR-0030 sections 2, 4 and 6) on a real API server, so every status write
@@ -150,7 +153,7 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		ss := &appsv1.StatefulSet{}
 		Expect(k8sClient.Get(ctx, w.ssKey, ss)).To(Succeed())
 		ss.Status = appsv1.StatefulSetStatus{ObservedGeneration: ss.Generation, Replicas: *ss.Spec.Replicas,
-			ReadyReplicas: ready, CurrentReplicas: *ss.Spec.Replicas, UpdatedReplicas: updated,
+			ReadyReplicas: ready, AvailableReplicas: ready, CurrentReplicas: *ss.Spec.Replicas, UpdatedReplicas: updated,
 			CurrentRevision: current, UpdateRevision: update}
 		Expect(k8sClient.Status().Update(ctx, ss)).To(Succeed())
 	}
@@ -214,7 +217,7 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
 
 		rr := fx.MemoryLimitRequest(phasesNamespace, name)
-		rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: linkAPI, Kind: "StatefulSet",
+		rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: linkAPI, Kind: kindStatefulSet,
 			Namespace: phasesNamespace, Name: name, UID: remediationv1alpha1.UID(ss.UID)}
 		mergedRequest(w, rr)
 		return w
@@ -480,9 +483,9 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(c.Message).To(ContainSubstring(w.ssKey.Name + "-1, " + w.ssKey.Name + "-0"))
 	})
 
-	// Until the executor reads the verifier's report (#683), a request that reaches its timeout ends Inconclusive
-	// with ClearingNotChecked instead of staying Verifying. Every reconcile before reads the target again.
-	It("ends Inconclusive with ClearingNotChecked at the timeout", func() {
+	// Without a verifier no report is written: a request that reaches its timeout ends Inconclusive with
+	// StaleReport instead of staying Verifying. Every reconcile before reads the target again.
+	It("ends Inconclusive with StaleReport at the timeout without a report", func() {
 		w := newWorld(nil)
 		w.reader.ks = kustomization(ksStatus{applied: w.merge})
 		applied := w.merged.Add(time.Minute)
@@ -494,7 +497,9 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		// A restart forgets nothing: the new executor decides from the recorded deadline.
 		w.r = w.reconciler()
 		mustReconcileAt(w, deadline)
-		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetStaleReport))
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionUnknown))
+		Expect(rr.Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetStaleReport))
 	})
 
 	// A rollout still stuck at the timeout ends Failed with RolloutStuck.
@@ -621,7 +626,7 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		res := mustReconcileAt(w, w.merged.Add(2*time.Minute))
 		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
 		mustReconcileAt(w, fetch(w).Status.Deadline.Time)
-		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetStaleReport))
 
 		w = newWorld(nil)
 		w.reader.ks = kustomization(ksStatus{applied: w.base})
@@ -762,7 +767,7 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 			name, phasesNamespace, uid, maxReplicas, ready)))).To(Succeed())
 		return u
 	}
-	newKedaWorld := func(maxReplicas int, ready string) *phasesWorld {
+	newKedaWorldWith := func(maxReplicas int, ready string, edit func(*remediationv1alpha1.RemediationRequest)) *phasesWorld {
 		seq++
 		name := fmt.Sprintf("phases-keda-%d", seq)
 		w := &phasesWorld{reader: &rolloutReader{Reader: k8sClient}}
@@ -773,9 +778,15 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		rr.Spec.TargetRef.Namespace = phasesNamespace
 		rr.Spec.TargetRef.Name = name
 		rr.Spec.TargetRef.UID = remediationv1alpha1.UID(uid)
+		if edit != nil {
+			edit(rr)
+		}
 		mergedRequest(w, rr)
 		w.reader.ks = kustomization(ksStatus{applied: w.merge})
 		return w
+	}
+	newKedaWorld := func(maxReplicas int, ready string) *phasesWorld {
+		return newKedaWorldWith(maxReplicas, ready, nil)
 	}
 	// stepAt runs the phases after the merge once at at, as the reconcile does after its earlier steps (which
 	// read the target from the cache, and the test API server has no ScaledObject kind).
@@ -785,7 +796,10 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(err).NotTo(HaveOccurred())
 		return res
 	}
-	It("verifies a ScaledObject and ends Inconclusive at the timeout when it is ready", func() {
+	// A ScaledObject cannot succeed (ADR-0030 section 3): once rolled out (KedaReady) and configured held for
+	// stableFor (3 minutes for AdjustKedaMaxReplicas) it ends Inconclusive with ClearingNotChecked, before its
+	// timeout.
+	It("ends a ready ScaledObject Inconclusive with ClearingNotChecked after stableFor", func() {
 		w := newKedaWorld(15, "True")
 		applied := w.merged.Add(time.Minute)
 		stepAt(w, applied)
@@ -794,8 +808,23 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(rr.Status.Deadline.Time).To(BeTemporally("==", applied.Add(14*time.Minute)))
 		Expect(condition(rr, remediationv1alpha1.ConditionConfigured).Status).To(Equal(metav1.ConditionTrue))
 		Expect(condition(rr, rollout.ConditionRolledOut).Reason).To(Equal(rollout.ReasonKindNotChecked))
-		stepAt(w, rr.Status.Deadline.Time)
-		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonClearingNotChecked))
+		stepAt(w, applied.Add(3*time.Minute-time.Second))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		stepAt(w, applied.Add(3*time.Minute))
+		rr = expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonClearingNotChecked)
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionUnknown))
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonClearingNotChecked))
+	})
+	It("ends a ScaledObject that names QueueBacklogDecreasing Inconclusive with CheckNotAvailable", func() {
+		w := newKedaWorldWith(15, "True", func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Spec.Verification.Checks = []remediationv1alpha1.VerificationCheck{
+				remediationv1alpha1.CheckQueueBacklogDecreasing}
+		})
+		applied := w.merged.Add(time.Minute)
+		stepAt(w, applied)
+		stepAt(w, applied.Add(3*time.Minute))
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonCheckNotAvailable)
 	})
 	It("ends Failed with KedaNotReady when the ScaledObject is not ready at the timeout", func() {
 		w := newKedaWorld(15, "False")
@@ -812,6 +841,344 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		w := newKedaWorld(12, "True")
 		stepAt(w, w.merged.Add(time.Minute))
 		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonValueChanged)
+	})
+
+	// Cleared from the verifier's report (#683, ADR-0030 sections 4 and 7). The report is written here as the
+	// verifier would; a memory fix has stableFor 10 minutes and the node grace 1 minute, so success needs both
+	// spans at least 11 minutes.
+	need := verification.MinStableForMemory + DefaultNodeGrace
+
+	// putReport writes the report of w's request as the verifier would: sample n taken at sampledAt, its window
+	// open since start, every desired replica covered. edit changes the object before it is created and before
+	// its status is written.
+	putReport := func(w *phasesWorld, n int64, sampledAt, start time.Time,
+		edit func(*remediationv1alpha1.VerificationReport)) {
+		rr := fetch(w)
+		ss := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, w.ssKey, ss)).To(Succeed())
+		key := types.NamespacedName{Namespace: phasesNamespace, Name: verification.ReportName(rr.UID)}
+		vr := &remediationv1alpha1.VerificationReport{}
+		err := k8sClient.Get(ctx, key, vr)
+		if apierrors.IsNotFound(err) {
+			vr = &remediationv1alpha1.VerificationReport{
+				ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
+				Spec: remediationv1alpha1.VerificationReportSpec{RequestUID: remediationv1alpha1.UID(rr.UID),
+					MergeCommitSHA: w.merge, TargetUID: remediationv1alpha1.UID(ss.UID),
+					TemplateRevision: rr.Status.Rollout.TemplateRevision, Container: workerContainer},
+			}
+			if edit != nil {
+				edit(vr)
+			}
+			Expect(k8sClient.Create(ctx, vr)).To(Succeed())
+			DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vr))).To(Succeed()) })
+		} else {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		at, from := metav1.NewTime(sampledAt), metav1.NewTime(start)
+		vr.Status.Sample, vr.Status.SampledAt, vr.Status.WindowStart = n, &at, &from
+		vr.Status.DesiredReplicas, vr.Status.PodsCovered = 2, 2
+		if edit != nil {
+			edit(vr)
+		}
+		Expect(k8sClient.Status().Update(ctx, vr)).To(Succeed())
+	}
+	// verifying runs w's request into Verifying at applied, one minute after the merge, with the rollout complete.
+	verifying := func(w *phasesWorld) time.Time {
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		applied := w.merged.Add(time.Minute)
+		mustReconcileAt(w, applied)
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		Expect(meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut)).To(BeTrue())
+		return applied
+	}
+	// drive checks w's request every step from from while t is before until, writing a new sample before each
+	// check with report (nil writes none), and expects it still Verifying after each. It returns the time of the
+	// next check and the next sample number.
+	drive := func(w *phasesWorld, from, until time.Time, step time.Duration, n int64,
+		report func(t time.Time, n int64)) (time.Time, int64) {
+		t := from
+		for ; t.Before(until); t = t.Add(step) {
+			if report != nil {
+				report(t, n)
+			}
+			n++
+			mustReconcileAt(w, t)
+			Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying), "at %s", t.Sub(from))
+		}
+		return t, n
+	}
+	// quiet is a report whose window is open since start and sampled at each check.
+	quiet := func(w *phasesWorld, start time.Time) func(time.Time, int64) {
+		return func(t time.Time, n int64) { putReport(w, n, t, start, nil) }
+	}
+
+	It("ends Succeeded with Cleared True and Verified True on a quiet window with a fresh, matching report", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
+		before := fetch(w)
+		Expect(condition(before, remediationv1alpha1.ConditionCleared).Reason).To(Equal(ReasonObserving))
+		Expect(before.Status.Verification.WindowStart.Time).To(BeTemporally("==", start))
+		putReport(w, n, t, start, nil)
+		mustReconcileAt(w, t)
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseSucceeded))
+		cleared := condition(rr, remediationv1alpha1.ConditionCleared)
+		Expect(cleared.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cleared.Reason).To(Equal(ReasonNoRecurrence))
+		verified := condition(rr, remediationv1alpha1.ConditionVerified)
+		Expect(verified.Status).To(Equal(metav1.ConditionTrue))
+		Expect(verified.Reason).To(Equal(ReasonNoRecurrence))
+		Expect(rr.Status.Deadline).To(BeNil())
+		Expect(*rr.Status.BreakerCounts).To(BeTrue())
+	})
+
+	// The trust contract: a report that is no evidence never ends Succeeded, however long its window, and the
+	// request ends Inconclusive with the executor's reason at the timeout.
+	noEvidence := []struct {
+		name   string
+		reason remediationv1alpha1.ResetReason
+		edit   func(w *phasesWorld) func(*remediationv1alpha1.VerificationReport)
+	}{
+		{"names another request", remediationv1alpha1.ResetReportMismatch, func(*phasesWorld) func(*remediationv1alpha1.VerificationReport) {
+			return func(vr *remediationv1alpha1.VerificationReport) {
+				vr.Spec.RequestUID = "99999999-9999-4999-8999-999999999999"
+			}
+		}},
+		{"names another merge commit", remediationv1alpha1.ResetReportMismatch, func(w *phasesWorld) func(*remediationv1alpha1.VerificationReport) {
+			return func(vr *remediationv1alpha1.VerificationReport) { vr.Spec.MergeCommitSHA = w.base }
+		}},
+		{"names another target", remediationv1alpha1.ResetReportMismatch, func(*phasesWorld) func(*remediationv1alpha1.VerificationReport) {
+			return func(vr *remediationv1alpha1.VerificationReport) {
+				vr.Spec.TargetUID = "88888888-8888-4888-8888-888888888888"
+			}
+		}},
+		{"names another template revision", remediationv1alpha1.ResetReportMismatch, func(*phasesWorld) func(*remediationv1alpha1.VerificationReport) {
+			return func(vr *remediationv1alpha1.VerificationReport) { vr.Spec.TemplateRevision = revisionOld }
+		}},
+		{"covers fewer pods than desired", remediationv1alpha1.ResetPartialRollout, func(*phasesWorld) func(*remediationv1alpha1.VerificationReport) {
+			return func(vr *remediationv1alpha1.VerificationReport) { vr.Status.PodsCovered = 1 }
+		}},
+	}
+	for _, tc := range noEvidence {
+		It(fmt.Sprintf("never ends Succeeded on a report that %s, and ends Inconclusive with %s", tc.name, tc.reason), func() {
+			w := newWorld(nil)
+			applied := verifying(w)
+			deadline := fetch(w).Status.Deadline.Time
+			edit := tc.edit(w)
+			start := applied.Add(30 * time.Second)
+			drive(w, start, deadline, verification.PollInterval, 1, func(t time.Time, n int64) {
+				putReport(w, n, t, start, edit)
+			})
+			mustReconcileAt(w, deadline)
+			rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(tc.reason))
+			Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionUnknown))
+		})
+	}
+
+	It("never ends Succeeded on a stale report, and ends Inconclusive with StaleReport", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		deadline := fetch(w).Status.Deadline.Time
+		start := applied.Add(30 * time.Second)
+		// One sample, then the counter never rises again: stale after three poll intervals.
+		putReport(w, 1, start, start, nil)
+		drive(w, start, deadline, verification.PollInterval, 2, nil)
+		rr := fetch(w)
+		Expect(rr.Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetStaleReport))
+		mustReconcileAt(w, deadline)
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetStaleReport))
+	})
+
+	It("reads a report that was never sampled as stale", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		deadline := fetch(w).Status.Deadline.Time
+		start := applied.Add(30 * time.Second)
+		// Created, and its first sample never written (ADR-0030 amendment of 2026-11-13 on #682).
+		rr := fetch(w)
+		ss := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, w.ssKey, ss)).To(Succeed())
+		vr := &remediationv1alpha1.VerificationReport{
+			ObjectMeta: metav1.ObjectMeta{Namespace: phasesNamespace, Name: verification.ReportName(rr.UID)},
+			Spec: remediationv1alpha1.VerificationReportSpec{RequestUID: remediationv1alpha1.UID(rr.UID),
+				MergeCommitSHA: w.merge, TargetUID: remediationv1alpha1.UID(ss.UID),
+				TemplateRevision: rr.Status.Rollout.TemplateRevision, Container: workerContainer},
+		}
+		Expect(k8sClient.Create(ctx, vr)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vr))).To(Succeed()) })
+		t, _ := drive(w, start, start.Add(time.Second), verification.PollInterval, 1, nil)
+		Expect(fetch(w).Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetStaleReport),
+			"read as missing at once, not as a report covering no pods")
+		drive(w, t, deadline, verification.PollInterval, 1, nil)
+		Expect(fetch(w).Status.Verification.WindowStart).To(BeNil(), "no check was good")
+		mustReconcileAt(w, deadline)
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetStaleReport))
+	})
+
+	// The age of a report is its counter on the executor's clock, never sampledAt: a counter that rose only
+	// since a check more than one poll interval earlier decides nothing, even with a sampledAt an hour ahead.
+	It("lets no report older than one poll interval by the executor's clock decide success", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		ahead := func(t time.Time, n int64) { putReport(w, n, t.Add(time.Hour), start, nil) }
+		t, n := drive(w, start, start.Add(need+5*time.Minute), 45*time.Second, 1, ahead)
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		t = t.Add(-45 * time.Second).Add(verification.FastPollInterval)
+		ahead(t, n)
+		mustReconcileAt(w, t)
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseSucceeded))
+	})
+
+	It("ends Failed with OOMKilled at once when the report records an OOM kill", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(2*time.Minute), verification.PollInterval, 1, quiet(w, start))
+		putReport(w, n, t, start, func(vr *remediationv1alpha1.VerificationReport) {
+			vr.Status.OOMKill = &remediationv1alpha1.OOMKill{PodUID: "77777777-7777-4777-8777-777777777777",
+				Container: workerContainer}
+		})
+		mustReconcileAt(w, t)
+		rr := expectEnd(w, remediationv1alpha1.PhaseFailed, ReasonOOMKilled)
+		cleared := condition(rr, remediationv1alpha1.ConditionCleared)
+		Expect(cleared.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cleared.Reason).To(Equal(ReasonOOMKilled))
+	})
+
+	// The timeout table: trouble the report recorded fails the request whatever its last reset; a pod that is
+	// not Ready without a restart is no evidence and gives PodNotReady.
+	It("ends Failed with Restarted at the timeout when the report recorded trouble", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		deadline := fetch(w).Status.Deadline.Time
+		start := applied.Add(30 * time.Second)
+		drive(w, start, deadline, verification.PollInterval, 1, func(t time.Time, n int64) {
+			putReport(w, n, t, start, func(vr *remediationv1alpha1.VerificationReport) {
+				if n < 4 {
+					return
+				}
+				// A crash loop after the window opened: a recorded Restarted, then PodNotReady in between.
+				trouble := metav1.NewTime(start.Add(time.Minute))
+				vr.Status.TroubleResets = 1
+				vr.Status.LastTroubleReset = &remediationv1alpha1.WindowReset{Reason: remediationv1alpha1.ResetRestarted,
+					Time: trouble}
+				vr.Status.Resets = 2
+				vr.Status.LastReset = &remediationv1alpha1.WindowReset{Reason: remediationv1alpha1.ResetPodNotReady,
+					Time: metav1.NewTime(t)}
+			})
+		})
+		mustReconcileAt(w, deadline)
+		rr := expectEnd(w, remediationv1alpha1.PhaseFailed, ReasonRestarted)
+		Expect(condition(rr, remediationv1alpha1.ConditionCleared).Status).To(Equal(metav1.ConditionFalse))
+	})
+
+	It("ends Inconclusive with PodNotReady at the timeout when a pod is not Ready without a restart", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		deadline := fetch(w).Status.Deadline.Time
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(2*time.Minute), verification.PollInterval, 1, quiet(w, start))
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		drive(w, t, deadline, verification.PollInterval, n, func(t time.Time, n int64) {
+			putReport(w, n, t, start, func(vr *remediationv1alpha1.VerificationReport) {
+				vr.Status.Resets = 1
+				vr.Status.LastReset = &remediationv1alpha1.WindowReset{Reason: remediationv1alpha1.ResetPodNotReady,
+					Time: metav1.NewTime(t)}
+			})
+		})
+		Expect(fetch(w).Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable))
+		mustReconcileAt(w, deadline)
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetPodNotReady))
+	})
+
+	It("ends a Deployment-backed request that names QueueBacklogDecreasing Inconclusive with CheckNotAvailable", func() {
+		seq++
+		name := fmt.Sprintf("phases-%d", seq)
+		w := &phasesWorld{reader: &rolloutReader{Reader: k8sClient}}
+		newGit(w)
+		ss := statefulSet(name, nil)
+		Expect(k8sClient.Create(ctx, ss)).To(Succeed())
+		w.ssKey = client.ObjectKeyFromObject(ss)
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, ss))).To(Succeed()) })
+		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+		rr := fx.MemoryLimitRequest(phasesNamespace, name)
+		rr.Spec.TargetRef = remediationv1alpha1.ObjectRef{APIVersion: linkAPI, Kind: kindStatefulSet,
+			Namespace: phasesNamespace, Name: name, UID: remediationv1alpha1.UID(ss.UID)}
+		rr.Spec.Verification.Checks = []remediationv1alpha1.VerificationCheck{
+			remediationv1alpha1.CheckQueueBacklogDecreasing}
+		mergedRequest(w, rr)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
+		putReport(w, n, t, start, nil)
+		mustReconcileAt(w, t)
+		expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonCheckNotAvailable)
+	})
+
+	// A restart of the executor forgets the report's counter, so success waits one more check, and loses no
+	// window: windowStart is read back from the status.
+	It("delays success by one check after an executor restart and keeps the window", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
+		w.r = w.reconciler()
+		putReport(w, n, t, start, nil)
+		res := mustReconcileAt(w, t)
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying), "the counter was forgotten")
+		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally("==", start))
+		Expect(res.RequeueAfter).To(Equal(verification.FastPollInterval))
+		t = t.Add(verification.FastPollInterval)
+		putReport(w, n+1, t, start, nil)
+		mustReconcileAt(w, t)
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseSucceeded))
+	})
+
+	// The executor's own window only moves forward (validation rules on the object).
+	It("refuses a status.verification that moves back", func() {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		drive(w, start, start.Add(time.Minute), verification.PollInterval, 1, quiet(w, start))
+		rr := fetch(w)
+		Expect(rr.Status.Verification.WindowStart).NotTo(BeNil())
+		Expect(rr.Status.Verification.LastReset).NotTo(BeNil())
+		Expect(rr.Status.Verification.Resets).To(BeNumerically(">", 0))
+		refusals := map[string]func(v *remediationv1alpha1.VerificationWindow) *remediationv1alpha1.VerificationWindow{
+			"windowStart only moves forward": func(v *remediationv1alpha1.VerificationWindow) *remediationv1alpha1.VerificationWindow {
+				back := metav1.NewTime(v.WindowStart.Add(-time.Minute))
+				v.WindowStart = &back
+				return v
+			},
+			"resets never decreases": func(v *remediationv1alpha1.VerificationWindow) *remediationv1alpha1.VerificationWindow {
+				v.Resets--
+				return v
+			},
+			"lastReset is kept once set and its time never moves back": func(v *remediationv1alpha1.VerificationWindow) *remediationv1alpha1.VerificationWindow {
+				v.LastReset.Time = metav1.NewTime(v.LastReset.Time.Add(-time.Minute))
+				return v
+			},
+			"verification is kept once set": func(*remediationv1alpha1.VerificationWindow) *remediationv1alpha1.VerificationWindow {
+				return nil
+			},
+		}
+		for message, edit := range refusals {
+			changed := fetch(w)
+			changed.Status.Verification = edit(changed.Status.Verification.DeepCopy())
+			err := k8sClient.Status().Update(ctx, changed)
+			Expect(err).To(HaveOccurred(), message)
+			Expect(err.Error()).To(ContainSubstring(message))
+		}
+		forward := fetch(w)
+		later := metav1.NewTime(forward.Status.Verification.WindowStart.Add(time.Minute))
+		forward.Status.Verification.WindowStart = &later
+		forward.Status.Verification.Resets++
+		Expect(k8sClient.Status().Update(ctx, forward)).To(Succeed(), "moving forward is allowed")
 	})
 })
 

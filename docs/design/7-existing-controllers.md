@@ -48,5 +48,5 @@ Shadewright never suspends a Kustomization, disables pruning or changes Flux con
 | KEDA module | `internal/modules/keda` is built; its HPA source is consumed (2.5.3), its `ScaledObject` and `ScaledJob` sources too, about the object itself (2.5.1) |
 | Cluster and downstream capacity checks | Planned |
 | Crossplane | Later |
-| Delivery and health check after merge | The rollout report (`RolledOut`, #532) is built on the Flux delivery adapter, and so are the delivery phases and the executor's checks in `Verifying` (#681); the check that the incident cleared, read from the verifier's report, is planned (#683) |
+| Delivery and health check after merge | The rollout report (`RolledOut`, #532) is built on the Flux delivery adapter, and so are the delivery phases and the executor's checks in `Verifying` (#681); and so is the check that the incident cleared, read from the verifier's report (#683) |
 | Readiness rule for `AdjustKedaMaxReplicas` | `KedaReady`, checked at the decision and before every write |

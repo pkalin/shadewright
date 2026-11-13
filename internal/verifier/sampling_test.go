@@ -257,7 +257,7 @@ func TestSlowObservationIsDiscarded(t *testing.T) {
 
 	var counter clearing.Counter
 	executorNow := time.Now()
-	counter.Observe(before.UID, before.Status.Sample, executorNow)
+	counter.Observe(before.UID, before.Status.Sample, executorNow, executorNow)
 
 	slow := newReconciler(admin, slowReader{Reader: admin, clk: clk, step: 45 * time.Second,
 		during: func() { w.setRestarts(t, 1) }}, clk)
@@ -272,7 +272,8 @@ func TestSlowObservationIsDiscarded(t *testing.T) {
 	if after.Status.Sample != before.Status.Sample || after.ResourceVersion != before.ResourceVersion {
 		t.Fatalf("a slow observation was written: sample %d -> %d", before.Status.Sample, after.Status.Sample)
 	}
-	if f := counter.Observe(after.UID, after.Status.Sample, executorNow.Add(clearing.FastPollInterval)); f.Fresh {
+	later := executorNow.Add(clearing.FastPollInterval)
+	if f := counter.Observe(after.UID, after.Status.Sample, later, later); f.Fresh {
 		t.Error("the executor reads the report as fresh after a discarded sample")
 	}
 }

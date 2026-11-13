@@ -133,15 +133,15 @@ var errMergeCommitPending = errors.New("waiting for the Git host to report the m
 // The wait starts when the executor first sees that state: it records the time, on its own clock, in
 // status.mergeCommitAwaitedSince, alone in a patch with the resourceVersion read, so the start is kept over a
 // restart and never moved (a validation rule). It never reads a time of the Git host. A failed write is
-// returned for a retry and decides nothing. A clock that went back never makes the wait longer than
-// mergeCommitWait from now.
+// returned for a retry and decides nothing. A clock that went back never makes the whole wait longer
+// than mergeCommitWait plus mergeCommitClockSlack (mergeCommitWaitRemaining).
 func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) (time.Duration, error) {
 	if cr.State != providers.ChangeRequestMerged || shaPattern.MatchString(cr.MergeCommit) {
 		return 0, nil
 	}
 	if since := rr.Status.MergeCommitAwaitedSince; since != nil {
-		return min(max(since.Add(mergeCommitWait).Sub(r.now()), 0), mergeCommitWait), nil
+		return mergeCommitWaitRemaining(since.Time, r.now()), nil
 	}
 	base := rr.DeepCopy()
 	t := metav1.NewTime(r.now().Truncate(time.Second))
@@ -155,12 +155,29 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 	return mergeCommitWait, nil
 }
 
+// mergeCommitClockSlack is how far the recorded start of the wait may lie after the executor's clock before the
+// clock is taken to have gone back. A start is written truncated to the second from the same clock, so it lies
+// after now only when the clock was set back.
+const mergeCommitClockSlack = time.Minute
+
+// mergeCommitWaitRemaining is what is left of mergeCommitWait since the recorded start, never negative. When the
+// start lies more than mergeCommitClockSlack after now, the clock went back and the wait can no longer be
+// measured: it is over, so the whole wait is bounded by mergeCommitWait plus the slack and never holds the target
+// lock for as long as the clock was set back. Ending it early records the merge without a receipt, which is the
+// inconclusive end and never a success.
+func mergeCommitWaitRemaining(since, now time.Time) time.Duration {
+	if since.After(now.Add(mergeCommitClockSlack)) {
+		return 0
+	}
+	return max(since.Add(mergeCommitWait).Sub(now), 0)
+}
+
 // mergeCommitWaitLeft is what is left of the wait awaitMergeCommit recorded, at least stepDelay so a request
 // whose wait just ended is looked at again soon.
 func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alpha1.RemediationRequest) time.Duration {
 	left := mergeCommitWait
 	if since := rr.Status.MergeCommitAwaitedSince; since != nil {
-		left = min(since.Add(mergeCommitWait).Sub(r.now()), mergeCommitWait)
+		left = mergeCommitWaitRemaining(since.Time, r.now())
 	}
 	return max(left, stepDelay)
 }

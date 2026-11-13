@@ -207,3 +207,24 @@ func TestInconclusiveForTheBreaker(t *testing.T) {
 		t.Errorf("breakerCounts = %v, want true for a probe", rr.Status.BreakerCounts)
 	}
 }
+
+// TestMergeCommitWaitIsBoundedWhenTheClockGoesBack checks that the wait for a merge commit is measured from its
+// recorded start, and that a clock set back by more than the slack ends it instead of stretching it.
+func TestMergeCommitWaitIsBoundedWhenTheClockGoesBack(t *testing.T) {
+	start := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		now  time.Time
+		want time.Duration
+	}{
+		"just started":              {start, mergeCommitWait},
+		"two minutes in":            {start.Add(2 * time.Minute), 3 * time.Minute},
+		"over":                      {start.Add(mergeCommitWait + time.Second), 0},
+		"clock back inside slack":   {start.Add(-30 * time.Second), mergeCommitWait + 30*time.Second},
+		"clock back by an hour":     {start.Add(-time.Hour), 0},
+		"clock back past the slack": {start.Add(-mergeCommitClockSlack - time.Second), 0},
+	} {
+		if got := mergeCommitWaitRemaining(start, tc.now); got != tc.want {
+			t.Errorf("%s: got %s, want %s", name, got, tc.want)
+		}
+	}
+}

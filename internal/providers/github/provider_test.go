@@ -1433,6 +1433,11 @@ func TestGetChangeRequestFailures(t *testing.T) {
 		providers.IsRetryable(err) {
 		t.Errorf("another number: got %v, want ErrUntrustedAnswer", err)
 	}
+	h = newHarness(t, get("/pulls/12", "pull_empty.json")) // a body without a number, then the real answer
+	if _, err := h.p.GetChangeRequest(ctx, 12); err == nil || errors.Is(err, providers.ErrUntrustedAnswer) ||
+		providers.IsNotFound(err) {
+		t.Errorf("no number: got %v, want an unclassified error that is retried", err)
+	}
 	h = newHarness(t, status(http.MethodGet, "/pulls/12", http.StatusForbidden, fxForbidden))
 	if _, err := h.p.GetChangeRequest(ctx, 12); !errors.Is(err, providers.ErrForbidden) {
 		t.Errorf("forbidden: got %v", err)

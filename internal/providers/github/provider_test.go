@@ -1429,8 +1429,9 @@ func TestGetChangeRequestNotOurs(t *testing.T) {
 // a pull request or not found.
 func TestGetChangeRequestFailures(t *testing.T) {
 	h := newHarness(t, get("/pulls/13", "pull_merged.json")) // GitHub answered with #12
-	if _, err := h.p.GetChangeRequest(ctx, 13); err == nil || providers.IsNotFound(err) {
-		t.Errorf("another number: got %v", err)
+	if _, err := h.p.GetChangeRequest(ctx, 13); !errors.Is(err, providers.ErrUntrustedAnswer) || providers.IsNotFound(err) ||
+		providers.IsRetryable(err) {
+		t.Errorf("another number: got %v, want ErrUntrustedAnswer", err)
 	}
 	h = newHarness(t, status(http.MethodGet, "/pulls/12", http.StatusForbidden, fxForbidden))
 	if _, err := h.p.GetChangeRequest(ctx, 12); !errors.Is(err, providers.ErrForbidden) {
@@ -1439,6 +1440,30 @@ func TestGetChangeRequestFailures(t *testing.T) {
 	h = newHarness(t)
 	if _, err := h.p.GetChangeRequest(ctx, 0); err == nil || providers.IsNotFound(err) {
 		t.Errorf("number 0: got %v", err)
+	}
+}
+
+// TestGetChangeRequestMergedWithoutCommit checks that a merged pull request for which GitHub reports no merge
+// commit yet, or one that is not a full commit ID, is returned merged with an empty merge commit, as an answer:
+// the executor waits for the commit a bounded time (#678), instead of retrying without an end.
+func TestGetChangeRequestMergedWithoutCommit(t *testing.T) {
+	merged, err := os.ReadFile("testdata/pull_merged.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = `"merge_commit_sha":"dddddddddddddddddddddddddddddddddddddddd"`
+	for name, value := range map[string]string{
+		"null": `"merge_commit_sha":null`, "missing": `"merge_commit_sha_x":null`, "empty string": `"merge_commit_sha":""`,
+		"abbreviated": `"merge_commit_sha":"ddddddd"`, "upper case": `"merge_commit_sha":"` + strings.Repeat("D", 40) + `"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(string(merged), sha, value, 1)
+			h := newHarness(t, raw("/pulls/12", body))
+			cr, err := h.p.GetChangeRequest(ctx, 12)
+			if err != nil || cr.State != providers.ChangeRequestMerged || cr.MergeCommit != "" || cr.Number != 12 {
+				t.Fatalf("got %+v, %v; want merged without a merge commit", cr, err)
+			}
+		})
 	}
 }
 

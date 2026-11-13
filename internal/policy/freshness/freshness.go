@@ -140,7 +140,8 @@ type ProviderError struct {
 	// Op says what failed, a fixed text.
 	Op string
 	// Class is the sentinel the failure matches (providers.ErrNotFound, ErrConflict, ErrForbidden, ErrRejected,
-	// ErrRetryable, ErrTooLarge, context.Canceled, context.DeadlineExceeded), or nil for an unclassified failure.
+	// ErrRetryable, ErrTooLarge, ErrUntrustedAnswer, context.Canceled, context.DeadlineExceeded), or nil for an
+	// unclassified failure.
 	Class error
 	// RetryAfter is the delay the remote system asked for; zero when it gave none.
 	RetryAfter time.Duration
@@ -165,8 +166,8 @@ func provider(op string, err error) error {
 	}
 	pe := &ProviderError{Op: op}
 	for _, class := range []error{providers.ErrNotFound, providers.ErrConflict, providers.ErrForbidden,
-		providers.ErrRejected, providers.ErrRetryable, providers.ErrTooLarge, context.Canceled,
-		context.DeadlineExceeded} {
+		providers.ErrRejected, providers.ErrRetryable, providers.ErrTooLarge, providers.ErrUntrustedAnswer,
+		context.Canceled, context.DeadlineExceeded} {
 		if errors.Is(err, class) {
 			pe.Class = class
 			break

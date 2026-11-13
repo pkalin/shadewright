@@ -1051,6 +1051,10 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		if outcome, lookErr = r.watchPullRequest(ctx, rr); outcome == prStopped {
 			return ctrl.Result{}, nil
 		}
+		if outcome == prMergeCommitPending {
+			// Merged without a merge commit yet: looked at again until the host reports one or the wait ends.
+			return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, nil
+		}
 		if pe, ok := errors.AsType[*freshness.ProviderError](lookErr); ok && pe.RetryAfter > 0 && lookOnly(rr) {
 			// The Git host asked for a delay (a rate limit): the freshness check would ask it again at once. A
 			// request that carries a stale plan's mark or WritesPaused goes on to the full recheck instead, which

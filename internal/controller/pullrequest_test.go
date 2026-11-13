@@ -1043,9 +1043,26 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		_ = reconcileOnce()
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
-		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
-			To(Equal(ReasonChangeRequestGone))
+		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(approved.Reason).To(Equal(ReasonChangeRequestGone))
+		Expect(approved.Message).To(ContainSubstring("from another branch"), "the cause is kept")
 		Expect(got.Status.MergeReceipt).To(BeNil())
+	})
+
+	It("stops with ChangeRequestGone when the Git host answers the look-up by number with another pull request (#678)", func() {
+		drive(remediationv1alpha1.PhaseAwaitingApproval)
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("another pull request: %w", providers.ErrUntrustedAnswer)
+			}
+			return nil
+		})
+		_ = reconcileOnce()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention), "never retried without an end")
+		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(approved.Reason).To(Equal(ReasonChangeRequestGone))
+		Expect(approved.Message).To(ContainSubstring("answered with another pull request"))
 	})
 
 	It("retries a look-up by number that fails, deciding nothing (#678)", func() {
@@ -1079,6 +1096,47 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		expectReceipt(got, cr.Number, cr.HeadSHA, sha)
 	})
 
+	It("waits for the merge commit on the adopt path, then checks the merge with it (#678)", func() {
+		var sha string
+		var n int64
+		got := mergedAfterLostOpen(func(string) {}, func(num int64) (string, error) {
+			var err error
+			n = num
+			if sha, err = git.Merge(num); err != nil {
+				return "", err
+			}
+			return sha, git.SetMergeCommit(num, "")
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "waits for the commit")
+		Expect(got.Status.PullRequest).To(BeNil(), "nothing recorded while it waits")
+		Expect(got.Status.MergeCommitAwaitedSince).NotTo(BeNil())
+		clock = clock.Add(time.Minute)
+		Expect(git.SetMergeCommit(n, sha)).To(Succeed())
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		expectReceipt(got, n, openRequests()[0].HeadSHA, sha)
+	})
+
+	It("ends a merge found on the adopt path without a merge commit after the wait as unchecked (#678)", func() {
+		got := mergedAfterLostOpen(func(string) {}, func(num int64) (string, error) {
+			sha, err := git.Merge(num)
+			if err != nil {
+				return "", err
+			}
+			return sha, git.SetMergeCommit(num, "")
+		})
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		clock = got.Status.MergeCommitAwaitedSince.Add(mergeCommitWait)
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(approved.Reason).To(Equal(ReasonMergedWithForeignChange))
+		Expect(approved.Message).To(ContainSubstring("no full merge commit ID"))
+		Expect(got.Status.MergeReceipt).To(BeNil())
+	})
+
 	It("writes no merge receipt for a merge with a foreign change (#678)", func() {
 		got := mergedAfterLostOpen(func(branch string) {
 			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))
@@ -1095,6 +1153,21 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			_, err := git.Merge(n)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(git.SetMergeCommit(n, commit)).To(Succeed())
+			// The executor waits for the commit, from the time it first saw the merge without one, on its clock.
+			start := clock
+			_ = reconcileOnce()
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "waits for the commit")
+			Expect(got.Status.MergeCommitAwaitedSince).NotTo(BeNil())
+			Expect(got.Status.MergeCommitAwaitedSince.Time.Equal(start.Truncate(time.Second))).To(BeTrue())
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the lock is kept while it waits")
+			clock = clock.Add(mergeCommitWait - time.Second)
+			_ = reconcileOnce()
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "still within the wait")
+			Expect(got.Status.MergeCommitAwaitedSince.Time.Equal(start.Truncate(time.Second))).To(BeTrue(), "never moved")
+
+			clock = start.Truncate(time.Second).Add(mergeCommitWait)
 			_ = reconcileOnce()
 			got = fetch()
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
@@ -1126,6 +1199,22 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Entry("upper case", strings.Repeat("AB", 20)),
 		Entry("SHA-256", strings.Repeat("ab", 32)),
 	)
+
+	It("records the merge with its receipt when the Git host reports the merge commit during the wait (#678)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		sha, err := git.Merge(n)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.SetMergeCommit(n, "")).To(Succeed())
+		_ = reconcileOnce()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		clock = clock.Add(time.Minute)
+		Expect(git.SetMergeCommit(n, sha)).To(Succeed())
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		expectReceipt(got, n, got.Status.PullRequest.HeadSHA, sha)
+	})
 
 	It("marks a request merged before merge receipts existed once, and leaves its breaker reading as it was (#678)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
@@ -1174,7 +1263,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		got.Status.PullRequest.MergedAt = &merged
 		got.Status.HoldsTarget = new(false)
 		got.Status.BreakerCounts = new(true)
-		setVerified(got, metav1.ConditionUnknown, "SomethingElse", "not written by this executor")
+		setVerifiedUnknown(got, "SomethingElse", "not written by this executor")
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 
 		clock = clock.Add(time.Minute)

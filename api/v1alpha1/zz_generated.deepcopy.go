@@ -1022,6 +1022,10 @@ func (in *RemediationRequestStatus) DeepCopyInto(out *RemediationRequestStatus) 
 		*out = new(MergeReceipt)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.MergeCommitAwaitedSince != nil {
+		in, out := &in.MergeCommitAwaitedSince, &out.MergeCommitAwaitedSince
+		*out = (*in).DeepCopy()
+	}
 	if in.Rollout != nil {
 		in, out := &in.Rollout, &out.Rollout
 		*out = new(RolloutStatus)

@@ -72,7 +72,9 @@ type ChangeRequest struct {
 	State   ChangeRequestState
 	Title   string
 	Body    string
-	// MergeCommit is set when State is Merged.
+	// MergeCommit is the merge commit when State is Merged, a full commit ID. It is empty while the host reports
+	// none (GitHub computes it after the merge) or one that is not a full commit ID; the caller decides how long
+	// to wait for it.
 	MergeCommit string
 }
 
@@ -310,7 +312,8 @@ type GitProvider interface {
 	// request of a request again after a lost status write, also when its branch carries a newer change request
 	// (ADR-0030 section 1). ErrNotFound when there is none with that number, and also when the one with that
 	// number is not from a Shadewright branch of this repository to the target branch: such a change request is
-	// never Shadewright's. Any other error is a failure to find out, never an answer. It only reads.
+	// never Shadewright's. An answer for another number than the one asked for is ErrUntrustedAnswer. Any other
+	// error is a failure to find out, never an answer. It only reads.
 	GetChangeRequest(ctx context.Context, number int64) (ChangeRequest, error)
 
 	// EnableAutoMerge asks the host to merge the change request once its rules pass, only if its head is

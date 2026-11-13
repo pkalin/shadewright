@@ -646,7 +646,9 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 		Message:            fmt.Sprintf("Pull request #%d is open; this request took it over from the request it replaces", cr.Number),
 		ObservedGeneration: rr.Generation,
 	})
-	if cr.State == providers.ChangeRequestMerged {
+	// Merged without a full merge commit ID yet: recorded like an open one, and the look at the recorded pull
+	// request waits for the commit (awaitMergeCommit) and records the merge.
+	if cr.State == providers.ChangeRequestMerged && shaPattern.MatchString(cr.MergeCommit) {
 		recordMerge(ctx, rr, cr)
 		return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
 			"The pull request was merged with this request's change, right after the handoff"))

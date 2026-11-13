@@ -215,6 +215,30 @@ var _ = Describe("RemediationRequest", func() {
 		}
 	})
 
+	// #678: the start of the wait for a merge commit is set once, so a restart or a write cannot move it.
+	It("keeps mergeCommitAwaitedSince once set", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		deleteAfterSpec(rr)
+		since := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+		rr.Status.MergeCommitAwaitedSince = &since
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write is allowed")
+		later := metav1.NewTime(since.Add(time.Minute))
+		for name, change := range map[string]func(*v1alpha1.RemediationRequest){
+			"moved":       func(r *v1alpha1.RemediationRequest) { r.Status.MergeCommitAwaitedSince = &later },
+			"cleared":     func(r *v1alpha1.RemediationRequest) { r.Status.MergeCommitAwaitedSince = nil },
+			statusEmptied: func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} },
+		} {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			change(got)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring("status.mergeCommitAwaitedSince is set once and never changed"), name)
+		}
+	})
+
 	// ADR-0030 section 1 (#678): the merge receipt is written once and never changed, also by dropping it or the
 	// whole status and writing it again, and its merge commit is the one status.pullRequest records.
 	Describe("status.mergeReceipt", func() {
@@ -231,8 +255,9 @@ var _ = Describe("RemediationRequest", func() {
 			rr := fx.RemediationRequest("default", unique("rr"))
 			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
 			deleteAfterSpec(rr)
+			rr.Status.Phase = v1alpha1.PhaseMerged
 			rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
-				MergeCommitSHA: merge}
+				MergeCommitSHA: merge, MergedAt: &mergedAt}
 			rr.Status.MergeReceipt = receipt()
 			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write of the receipt is allowed")
 			return rr
@@ -278,17 +303,74 @@ var _ = Describe("RemediationRequest", func() {
 			deleteAfterSpec(rr)
 			const msg = "status.mergeReceipt.mergeCommitSHA must equal status.pullRequest.mergeCommitSHA"
 			refused(rr, "another merge commit", msg, func(r *v1alpha1.RemediationRequest) {
+				r.Status.Phase = v1alpha1.PhaseMerged
 				r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
-					MergeCommitSHA: strings.Repeat("c", 40)}
+					MergeCommitSHA: strings.Repeat("c", 40), MergedAt: &mergedAt}
 				r.Status.MergeReceipt = receipt()
 			})
 			refused(rr, "no merge commit recorded", msg, func(r *v1alpha1.RemediationRequest) {
-				r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA}
+				r.Status.Phase = v1alpha1.PhaseMerged
+				r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+					MergedAt: &mergedAt}
 				r.Status.MergeReceipt = receipt()
 			})
 			refused(rr, "no pull request recorded", msg, func(r *v1alpha1.RemediationRequest) {
+				r.Status.Phase = v1alpha1.PhaseMerged
 				r.Status.MergeReceipt = receipt()
 			})
+		})
+
+		It("names the pull request, head and merge time status.pullRequest records", func() {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			const msg = "status.mergeReceipt.pullRequest, headSHA and mergedAt must equal status.pullRequest.number, " +
+				"headSHA and mergedAt"
+			later := metav1.NewMicroTime(mergedAt.Add(time.Minute))
+			for name, change := range map[string]func(*v1alpha1.PullRequestStatus){
+				"another number":     func(p *v1alpha1.PullRequestStatus) { p.Number = 2 },
+				"another head":       func(p *v1alpha1.PullRequestStatus) { p.HeadSHA = strings.Repeat("e", 40) },
+				"another merge time": func(p *v1alpha1.PullRequestStatus) { p.MergedAt = &later },
+				"no merge time":      func(p *v1alpha1.PullRequestStatus) { p.MergedAt = nil },
+			} {
+				refused(rr, name, msg, func(r *v1alpha1.RemediationRequest) {
+					r.Status.Phase = v1alpha1.PhaseMerged
+					r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+						MergeCommitSHA: merge, MergedAt: &mergedAt}
+					change(r.Status.PullRequest)
+					r.Status.MergeReceipt = receipt()
+				})
+			}
+		})
+
+		It("keeps the number and head of status.pullRequest once written", func() {
+			rr := merged()
+			for name, change := range map[string]func(*v1alpha1.PullRequestStatus){
+				"number changed": func(p *v1alpha1.PullRequestStatus) { p.Number = 2 },
+				"head changed":   func(p *v1alpha1.PullRequestStatus) { p.HeadSHA = strings.Repeat("e", 40) },
+			} {
+				refused(rr, name, "must equal status.pullRequest.number, headSHA and mergedAt",
+					func(r *v1alpha1.RemediationRequest) { change(r.Status.PullRequest) })
+			}
+		})
+
+		It("is set only in Merged or a phase after it", func() {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			for _, phase := range []v1alpha1.RemediationPhase{"", v1alpha1.PhasePending, v1alpha1.PhasePolicyChecked,
+				v1alpha1.PhasePRCreated, v1alpha1.PhaseAwaitingApproval, v1alpha1.PhaseAutoMergeQueued} {
+				refused(rr, "phase "+string(phase), "status.mergeReceipt is set only in Merged or a phase after it",
+					func(r *v1alpha1.RemediationRequest) {
+						r.Status.Phase = phase
+						r.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL,
+							HeadSHA: testHeadSHA, MergeCommitSHA: merge, MergedAt: &mergedAt}
+						r.Status.MergeReceipt = receipt()
+					})
+			}
+			got := merged()
+			refused(got, "moved back to AwaitingApproval", "status.mergeReceipt is set only in Merged or a phase after it",
+				func(r *v1alpha1.RemediationRequest) { r.Status.Phase = v1alpha1.PhaseAwaitingApproval })
 		})
 
 		It("is written again unchanged", func() {

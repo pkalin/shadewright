@@ -63,6 +63,10 @@ var (
 	// comment marker, so it cannot tell whether its own comment is there already: it posts nothing (fail
 	// closed). It lasts while the conversation does: a retry fails the same way.
 	ErrTooManyComments = errors.New("too many comments to look for a marker")
+	// ErrUntrustedAnswer means the host answered, but with another object than the one asked for (a pull request
+	// with another number), so nothing in the answer can be used. It is not retried: the caller ends what it was
+	// doing instead of asking again without an end.
+	ErrUntrustedAnswer = errors.New("untrusted answer")
 )
 
 // RetryableError is a transient failure with an optional delay requested by the remote system, for example
@@ -117,6 +121,9 @@ func IsInvalidEntry(err error) bool { return errors.Is(err, ErrInvalidEntry) }
 
 // IsMalformedOutput reports whether err means a model's reply broke the contract of the request.
 func IsMalformedOutput(err error) bool { return errors.Is(err, ErrMalformedOutput) }
+
+// IsUntrustedAnswer reports whether err is or wraps ErrUntrustedAnswer.
+func IsUntrustedAnswer(err error) bool { return errors.Is(err, ErrUntrustedAnswer) }
 
 // RetryAfter returns the delay requested by the remote system, if err carries one.
 func RetryAfter(err error) (time.Duration, bool) {

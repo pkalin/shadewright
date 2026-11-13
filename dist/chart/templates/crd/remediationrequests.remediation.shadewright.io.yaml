@@ -929,6 +929,16 @@ spec:
                   outcomes of requests by it.
                 format: date-time
                 type: string
+              mergeCommitAwaitedSince:
+                description: |-
+                  mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
+                  merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
+                  from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a
+                  receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
+                  change it cannot check. Set once and never changed or removed (a validation rule on the object), so a
+                  restart does not start the wait again. Unset when the commit was reported at once.
+                format: date-time
+                type: string
               mergeReceipt:
                 description: |-
                   mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit
@@ -1411,6 +1421,21 @@ spec:
           rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest)
             && has(self.status.pullRequest.mergeCommitSHA) && self.status.mergeReceipt.mergeCommitSHA
             == self.status.pullRequest.mergeCommitSHA)'
+        - message: status.mergeReceipt.pullRequest, headSHA and mergedAt must equal
+            status.pullRequest.number, headSHA and mergedAt
+          rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest)
+            && self.status.mergeReceipt.pullRequest == self.status.pullRequest.number
+            && self.status.mergeReceipt.headSHA == self.status.pullRequest.headSHA
+            && has(self.status.pullRequest.mergedAt) && self.status.mergeReceipt.mergedAt
+            == self.status.pullRequest.mergedAt)'
+        - message: status.mergeCommitAwaitedSince is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince)
+            || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince
+            == oldSelf.status.mergeCommitAwaitedSince)'
+        - message: status.mergeReceipt is set only in Merged or a phase after it
+          rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
+            && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',
+            ''AwaitingApproval'', ''AutoMergeQueued'']))'
         - message: 'status.hints: a stored hint is never removed'
           rule: '!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status)
             && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h,

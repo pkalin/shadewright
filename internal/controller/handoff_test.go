@@ -512,6 +512,38 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(get(pred).Status.MergeReceipt).To(BeNil(), "the request it replaced did not merge")
 	})
 
+	It("records a merged pull request without a merge commit like an open one and waits for the commit (#678)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		var mergeSHA string
+		git.SetAfter(func(op string) error {
+			if op == opAppend {
+				var err error
+				if mergeSHA, err = git.Merge(number); err != nil {
+					return err
+				}
+				return git.SetMergeCommit(number, "")
+			}
+			return nil
+		})
+		pollOf(repl)
+		git.SetAfter(nil)
+		drive(2)
+		r := get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated), "neither Merged nor ended while it waits")
+		Expect(r.Status.MergeCommitAwaitedSince).NotTo(BeNil())
+		Expect(r.Status.MergeReceipt).To(BeNil())
+
+		clock = clock.Add(time.Minute)
+		Expect(git.SetMergeCommit(number, mergeSHA)).To(Succeed())
+		drive(1)
+		r = get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(r.Status.MergeReceipt).NotTo(BeNil())
+		Expect(r.Status.MergeReceipt.MergeCommitSHA).To(Equal(mergeSHA))
+		Expect(r.Status.MergeReceipt.HeadSHA).To(Equal(r.Status.PullRequest.HeadSHA))
+	})
+
 	It("keeps the old pull request when policy denies the replacement, and declines the hint", func() {
 		answer()
 		pollOf(pred)

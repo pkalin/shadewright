@@ -34,5 +34,6 @@
 | [0030](0030-merge-receipt-and-verification-outcomes.md) | The merge receipt and the three outcomes of verification | Accepted, amended |
 | [0031](0031-kustomize-transformations-in-the-source-mapping.md) | Kustomize and Flux transformations the source mapping may understand | Proposed |
 | [0032](0032-azure-devops-as-a-second-git-provider.md) | Azure DevOps as a second `GitProvider` | Proposed |
+| [0034](0034-declarative-pack-format.md) | A declarative pack format, compiled in first | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

@@ -299,8 +299,12 @@ func TestDoctorAllPass(t *testing.T) {
 	}
 }
 
+// reasonUnavailable is the Available reason of a Deployment with too few replicas available.
+const reasonUnavailable = "MinimumReplicasUnavailable"
+
 // TestDoctorChecks makes each check fail, warn or be forbidden on an otherwise healthy install, and checks that
 // only that check changes level.
+
 func TestDoctorChecks(t *testing.T) {
 	notServed := healthyCRD(testCRDName)
 	notServed.Spec.Versions = []apiextensionsv1.CustomResourceDefinitionVersion{
@@ -327,11 +331,9 @@ func TestDoctorChecks(t *testing.T) {
 	unavailable := healthyDeployment("executor")
 	unavailable.Status.AvailableReplicas = 0
 	unavailable.Status.Conditions[0].Status = corev1.ConditionFalse
-	unavailable.Status.Conditions[0].Reason = "MinimumReplicasUnavailable"
+	unavailable.Status.Conditions[0].Reason = reasonUnavailable
 	unavailableVerifier := healthyDeployment("verifier")
-	unavailableVerifier.Status.AvailableReplicas = 0
-	unavailableVerifier.Status.Conditions[0].Status = corev1.ConditionFalse
-	unavailableVerifier.Status.Conditions[0].Reason = "MinimumReplicasUnavailable"
+	unavailableVerifier.Status = *unavailable.Status.DeepCopy()
 	rollout := healthyDeployment("executor")
 	rollout.Status.ObservedGeneration = 1
 	scaledDown := healthyDeployment("executor")
@@ -443,9 +445,9 @@ func TestDoctorChecks(t *testing.T) {
 		}, check: "Deployment verifier", want: levelWarn, detail: "not deployed"},
 		"verifier unavailable": {change: func(o []client.Object) []client.Object {
 			return replace(o, unavailableVerifier)
-		}, check: "Deployment verifier shadewright-verifier", want: levelFail, detail: "MinimumReplicasUnavailable"},
+		}, check: "Deployment verifier shadewright-verifier", want: levelFail, detail: reasonUnavailable},
 		"executor unavailable": {change: func(o []client.Object) []client.Object { return replace(o, unavailable) },
-			check: chkExecutor, want: levelFail, detail: "MinimumReplicasUnavailable"},
+			check: chkExecutor, want: levelFail, detail: reasonUnavailable},
 		"executor rollout": {change: func(o []client.Object) []client.Object { return replace(o, rollout) },
 			check: chkExecutor, want: levelWarn, detail: "rollout"},
 		"executor scaled to 0": {change: func(o []client.Object) []client.Object { return replace(o, scaledDown) },

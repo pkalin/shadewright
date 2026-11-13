@@ -533,16 +533,13 @@ func TestTerminationWithoutFinishTimeIsIncomplete(t *testing.T) {
 // caller can read them all before it takes the sample time; a terminating pod and a pod of another namespace
 // add no name, and a target scaled to zero or of another kind needs none.
 func TestReplicaSetNamesCoverEverySampleRead(t *testing.T) {
-	ps := pods(3)
-	old := pod(3, 0)
-	old.OwnerReferences = controllerRef("ReplicaSet", oldRSName, oldRSUID)
-	terminating := pod(4, 0)
-	terminating.OwnerReferences = controllerRef("ReplicaSet", "terminating-rs", "c0000000-0000-4000-8000-000000000001")
-	terminating.DeletionTimestamp = mt(time.Now())
-	elsewhere := pod(5, 0)
-	elsewhere.Namespace = "other"
-	elsewhere.OwnerReferences = controllerRef("ReplicaSet", "elsewhere-rs", "c0000000-0000-4000-8000-000000000002")
-	ps = append(ps, old, terminating, elsewhere)
+	// Pods 0 to 2 are of the rollout, 3 of the old ReplicaSet, 4 terminating, 5 in another namespace.
+	ps := pods(6)
+	ps[3].OwnerReferences = controllerRef("ReplicaSet", oldRSName, oldRSUID)
+	ps[4].OwnerReferences = controllerRef("ReplicaSet", "terminating-rs", "c0000000-0000-4000-8000-000000000001")
+	ps[4].DeletionTimestamp = mt(time.Now())
+	ps[5].Namespace = "elsewhere"
+	ps[5].OwnerReferences = controllerRef("ReplicaSet", "elsewhere-rs", "c0000000-0000-4000-8000-000000000002")
 
 	in := input(time.Now(), 3, ps)
 	names := ReplicaSetNames(spec(), in)
@@ -566,7 +563,7 @@ func TestReplicaSetNamesCoverEverySampleRead(t *testing.T) {
 		t.Errorf("ReplicaSetNames for a target scaled to zero = %v, want none", got)
 	}
 	sts := input(time.Now(), 3, ps)
-	sts.Target = &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns, UID: deployUID}}
+	sts.Target = &appsv1.StatefulSet{ObjectMeta: deployment(3).ObjectMeta}
 	if got := ReplicaSetNames(spec(), sts); got != nil {
 		t.Errorf("ReplicaSetNames for a StatefulSet = %v, want none", got)
 	}

@@ -70,37 +70,7 @@ func TestVerifierRulesAreExactlySection7(t *testing.T) {
 		{crb, "authentication.k8s.io", "tokenreviews", "create", ""}:                        true,
 		{crb, "authorization.k8s.io", "subjectaccessreviews", "create", ""}:                 true,
 	}
-	// Names in config/watch carry the kustomize name prefix already; the rest get it at build time.
-	bare := func(name string) string { return strings.TrimPrefix(name, "shadewright-") }
-	roles := map[string][]rbacv1.PolicyRule{}
-	var bindings []map[string]any
-	for _, dir := range []string{filepath.Join("..", "..", "config", "rbac"), filepath.Join("..", "..", "config", "watch")} {
-		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || filepath.Ext(path) != ".yaml" || d.Name() == "kustomization.yaml" {
-				return err
-			}
-			for _, u := range decodeAll(t, path) {
-				switch u["kind"] {
-				case kindRoleBinding, crb:
-					bindings = append(bindings, u)
-					continue
-				}
-				rules, aggregated, ok := policyRules(t, path, u)
-				if !ok {
-					continue
-				}
-				name := bare(u["metadata"].(map[string]any)["name"].(string))
-				if aggregated && strings.HasPrefix(name, verifierID) {
-					t.Errorf("%s: an aggregated ClusterRole", path)
-				}
-				roles[u["kind"].(string)+"/"+name] = rules
-			}
-			return nil
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	roles, bindings := readRBAC(t)
 	got := map[key]bool{}
 	for _, b := range bindings {
 		var rb rbacv1.RoleBinding // the fields read here are the same for a ClusterRoleBinding
@@ -108,7 +78,7 @@ func TestVerifierRulesAreExactlySection7(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !slices.ContainsFunc(rb.Subjects, func(s rbacv1.Subject) bool {
-			return s.Kind == "ServiceAccount" && bare(s.Name) == verifierID
+			return s.Kind == rbacv1.ServiceAccountKind && bare(s.Name) == verifierID
 		}) {
 			continue
 		}
@@ -147,6 +117,45 @@ func TestVerifierRulesAreExactlySection7(t *testing.T) {
 			t.Errorf("the verifier lacks %+v of section 7", k)
 		}
 	}
+}
+
+// bare strips the kustomize name prefix: names in config/watch carry it already, the rest get it at build time.
+func bare(name string) string { return strings.TrimPrefix(name, "shadewright-") }
+
+// readRBAC reads every role (by kind and bare name) and every binding in config/rbac and config/watch.
+func readRBAC(t *testing.T) (map[string][]rbacv1.PolicyRule, []map[string]any) {
+	t.Helper()
+	roles := map[string][]rbacv1.PolicyRule{}
+	var bindings []map[string]any
+	config := filepath.Join("..", "..", "config")
+	for _, dir := range []string{filepath.Join(config, "rbac"), filepath.Join(config, "watch")} {
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || filepath.Ext(path) != ".yaml" || d.Name() == "kustomization.yaml" {
+				return err
+			}
+			for _, u := range decodeAll(t, path) {
+				switch u["kind"] {
+				case kindRoleBinding, "ClusterRoleBinding":
+					bindings = append(bindings, u)
+					continue
+				}
+				rules, aggregated, ok := policyRules(t, path, u)
+				if !ok {
+					continue
+				}
+				name := bare(u["metadata"].(map[string]any)["name"].(string))
+				if aggregated && strings.HasPrefix(name, verifierID) {
+					t.Errorf("%s: an aggregated ClusterRole", path)
+				}
+				roles[u["kind"].(string)+"/"+name] = rules
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return roles, bindings
 }
 
 // TestVerifierBoundary asks the API server what the verifier's ServiceAccount may do with the roles bound as

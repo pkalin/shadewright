@@ -341,7 +341,7 @@ func TestVerifierBindingsAreExactlyTheDecidedSet(t *testing.T) {
 // rendered, not even its subject in the metrics-auth binding, its ServiceMonitor or its helm test URL; with one,
 // all of them are, and every one carries the component label verifier.
 func TestVerifierRenderedOnlyWithWatchedNamespaces(t *testing.T) {
-	isVerifier := func(k string, u *unstructured.Unstructured) bool {
+	isVerifier := func(k string) bool {
 		return strings.Contains(k, verifierSA) || strings.Contains(k, "shadewright-verifier-leader-election") ||
 			strings.Contains(k, "allow-verifier-egress")
 	}
@@ -359,7 +359,9 @@ func TestVerifierRenderedOnlyWithWatchedNamespaces(t *testing.T) {
 		"ServiceMonitor/" + operatorNS + "/" + verifierSA + "-metrics",
 		"Lease/" + operatorNS + "/shadewright-verifier-leader-election",
 	}
-	set := []string{"metrics.serviceMonitor.enabled=true", "verifier.replicas=2", "networkPolicy.enabled=true"}
+	// More than one replica, so the PodDisruptionBudget is rendered too.
+	set := make([]string, 0, 4)
+	set = append(set, "metrics.serviceMonitor.enabled=true", "verifier.replicas=3", "networkPolicy.enabled=true")
 
 	on := render(t, false, set...)
 	for _, k := range all {
@@ -373,14 +375,14 @@ func TestVerifierRenderedOnlyWithWatchedNamespaces(t *testing.T) {
 		}
 	}
 	for k, u := range on.chart {
-		if isVerifier(k, u) && !slices.Contains(all, k) && u.GetLabels()["app.kubernetes.io/component"] != verifierComp {
+		if isVerifier(k) && !slices.Contains(all, k) && u.GetLabels()["app.kubernetes.io/component"] != verifierComp {
 			t.Errorf("%s: component label %q, want %q", k, u.GetLabels()["app.kubernetes.io/component"], verifierComp)
 		}
 	}
 
 	off := render(t, false, append(set, "analyzer.watchNamespaces=null")...)
-	for k, u := range off.chart {
-		if isVerifier(k, u) {
+	for k := range off.chart {
+		if isVerifier(k) {
 			t.Errorf("without a watched namespace: %s rendered", k)
 		}
 	}

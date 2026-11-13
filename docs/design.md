@@ -15,7 +15,7 @@ Status: draft for the MVP.
 - The collector of section 3.1 and both levels of deduplication of section 3.2, with the Incident controller that keeps them in `Incident` objects.
 - The Incident lifecycle of section 3.2: the closure rules (`Resolved` after an hour quiet or a request `Succeeded`, `Escalated` on a request that ended without success), recurrence after resolution, and the Warning event `IncidentCapNear` at 80% of the Incident cap.
 - The RBAC of sections 2.2 and 10.
-- The Prometheus metrics of both components ([reference](reference/metrics.md)).
+- The Prometheus metrics of the three components ([reference](reference/metrics.md)).
 - Optional OpenTelemetry traces per analysis, off by default ([reference](reference/traces.md)).
 
 **Built, but not used by the analyzer yet**

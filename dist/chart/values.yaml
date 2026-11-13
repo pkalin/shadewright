@@ -22,7 +22,7 @@ image:
   # @section -- Images
   allowTag: false
 metrics:
-  # -- Serve the metrics endpoint of both components, with its two Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy.
+  # -- Serve the metrics endpoint of the three components, with its three Services. When false there are no Services, no metrics RBAC and no metrics NetworkPolicy.
   # @section -- Metrics
   enabled: true
   # -- Metrics port, 1 to 65535. Passed as `--metrics-bind-address` and opened by the metrics NetworkPolicy.

@@ -115,11 +115,11 @@ Every issue names the ADRs it is tied to:
   comment saying why; never disable a rule for the whole code base.
 - **Containers.** Distroless or scratch base images, non-root user, read-only root filesystem, all
   capabilities dropped, resource requests and limits set.
-  The Dockerfile builds both binaries once (builder pinned by digest, Go release equal to go.mod's toolchain
-  line) and has the targets `executor`, `analyzer` (one binary each) and `local` (both, the default). The
-  Images workflow builds `executor` and `analyzer` for linux/amd64 on pull requests without pushing, and for
-  linux/amd64 and linux/arm64 and pushes `ghcr.io/pkalin/shadewright-{executor,analyzer}` from main and `v*` tags only, in the one job
-  that has `packages: write`. `make docker-build-images` builds both for the host platform.
+  The Dockerfile builds the three binaries once (builder pinned by digest, Go release equal to go.mod's toolchain
+  line) and has the targets `executor`, `analyzer`, `verifier` (one binary each) and `local` (all, the default). The
+  Images workflow builds `executor`, `analyzer` and `verifier` for linux/amd64 on pull requests without pushing, and for
+  linux/amd64 and linux/arm64 and pushes `ghcr.io/pkalin/shadewright-{executor,analyzer,verifier}` from main and `v*` tags only, in the one job
+  that has `packages: write`. `make docker-build-images` builds all three for the host platform.
 - **CI scope.** `.github/workflows/ci.yml` is the one graph of a pull request and of a push to main. Its
   `changes` job runs `hack/ci-changed.sh` once on the files the pull request changes; the jobs that call the
   workflows holding the checks (lint, test, e2e, govulncheck, image build, chart tests, docs check, CodeQL, workflow lint) get
@@ -140,7 +140,7 @@ Every issue names the ADRs it is tied to:
   `go.mod`, `go.sum`, workflows); docs-only pull requests skip it. `ci-ok` needs it, so the `code_scanning`
   ruleset rule stays off (it would block a pull request with no analysis). It needs the repository's code
   scanning default setup switched off (uploads from an advanced setup are refused while it is on).
-  Scans that are not part of the pull request graph: `trivy.yml` scans the published executor and analyzer images (SARIF to code scanning, a category per
+  Scans that are not part of the pull request graph: `trivy.yml` scans the published executor, analyzer and verifier images (SARIF to code scanning, a category per
   image, findings do not fail the run, scanner errors do) on `v*` tags, after the Images workflow pushed them,
   and weekly against the latest release. `scorecard.yml` (OpenSSF Scorecard, results published for the README
   badge) runs on pushes to main, weekly and on branch protection changes, and contains only the steps the action
@@ -158,7 +158,7 @@ Every issue names the ADRs it is tied to:
 ## Design choices
 
 - Providers sit behind interfaces so the project stays generic: `GitProvider` (GitHub first, Azure DevOps later), `DeliveryVerifier` (Flux first, Argo CD later), `ModelProvider` (Microsoft Foundry first). Do not import a provider SDK outside its adapter package.
-- Layout beyond the Kubebuilder scaffold: `cmd/analyzer`, `cmd/kubectl-shadewright` (the read-only kubectl plugin, run by people with their own kubeconfig), `internal/analyzer` (with the collector), `internal/{incidents,incidentcontext,tools,analysis,policy,gitops,redact,providers,modules,groupversion,cmdutil}` (`incidentcontext` is the context builder, not named `context` so that it never shadows the standard library package; `tools` holds the read tools for the model; `analysis` is the analysis loop and its controller), `internal/testutil` (helpers for tests only), `test/eval` (the evaluation harness: recorded scenarios replayed through the analysis loop, docs/evaluation.md); `internal/verification` (`rollout`, the rollout check; `clearing`, the stable window and the `VerificationReport` checks of ADR-0030), `internal/ownership` (owner chain rules shared by the collector, the context builder and `clearing`); planned: `internal/remediation`, `test/scenarios`.
+- Layout beyond the Kubebuilder scaffold: `cmd/analyzer`, `cmd/verifier`, `cmd/kubectl-shadewright` (the read-only kubectl plugin, run by people with their own kubeconfig), `internal/analyzer` (with the collector), `internal/verifier` (the verifier controller, with `watchrbac` holding the markers of its read role in the watched namespaces), `internal/{incidents,incidentcontext,tools,analysis,policy,gitops,redact,providers,modules,groupversion,cmdutil}` (`incidentcontext` is the context builder, not named `context` so that it never shadows the standard library package; `tools` holds the read tools for the model; `analysis` is the analysis loop and its controller), `internal/testutil` (helpers for tests only), `test/eval` (the evaluation harness: recorded scenarios replayed through the analysis loop, docs/evaluation.md); `internal/verification` (`rollout`, the rollout check; `clearing`, the stable window and the `VerificationReport` checks of ADR-0030), `internal/ownership` (owner chain rules shared by the collector, the context builder and `clearing`); planned: `internal/remediation`, `test/scenarios`.
 - `Incident` keeps deduplication state (fingerprint, counters, timestamps) and must survive restarts. Never put raw logs or large payloads in a CR.
 
 ## Commands

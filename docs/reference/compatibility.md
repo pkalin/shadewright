@@ -11,7 +11,7 @@ What Shadewright has been run against, taken from CI, the end-to-end setup, the 
 | Component | Version | Where it runs |
 | --- | --- | --- |
 | Kubernetes API server (envtest) | 1.37 | Unit and envtest suites in CI (`make test`). The version is the one of `k8s.io/api` in `go.mod`, so it moves with it. CRD validation (CEL), RBAC and the controllers run against it |
-| Kubernetes (Kind) | the node image Kind v0.33.0 uses by default | The `e2e` job in CI (`make test-e2e`): installs the CRDs and both Deployments and checks that they run, serve metrics and hold separate Leases. The node image is not pinned in this repository |
+| Kubernetes (Kind) | the node image Kind v0.33.0 uses by default | The `e2e` job in CI (`make test-e2e`): installs the CRDs and all three Deployments and checks that they run, serve metrics and hold separate Leases. The node image is not pinned in this repository |
 | Kubernetes (Kind, fleet) | 1.36.4 | The fleet repository's `Kind` workflow brings up a cluster with Flux and the infrastructure and apps, without Shadewright |
 | Kubernetes (AKS) | 1.36 (1.36.5 on 2026-11-04) | The reference lab. `kubernetes_version` is unset in `shadewright-azure`, so the cluster takes the region's default. The fleet pins its schema checks to 1.36.0 |
 | Flux | 2.10.0 (source-controller 1.10.1, kustomize-controller 1.10.1, helm-controller 1.7.1, notification-controller 1.10.0) | The lab and the fleet's Kind cluster, installed from the release manifest with images pinned by digest. In the lab only these four controllers run |
@@ -36,7 +36,7 @@ No pipeline runs the operator, Flux and KEDA together: that combination is the m
 
 ## Architectures
 
-Both images are built for `linux/amd64` and `linux/arm64` (Images workflow, on pull requests without pushing and on `main` and tags with a push). Everything that **runs** in CI and in the lab is amd64: the GitHub-hosted `ubuntu` runners and the lab's `Standard_D4as_v5` node. The arm64 images are built but no pipeline starts them, so arm64 is untested.
+All three images are built for `linux/amd64` and `linux/arm64` (Images workflow, on pull requests without pushing and on `main` and tags with a push). Everything that **runs** in CI and in the lab is amd64: the GitHub-hosted `ubuntu` runners and the lab's `Standard_D4as_v5` node. The arm64 images are built but no pipeline starts them, so arm64 is untested.
 
 ## Git hosting
 

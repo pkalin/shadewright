@@ -37,12 +37,13 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
+	"github.com/pkalin/shadewright/internal/incidents/aggregation"
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 )
 
 // Defaults for the zero values of [Config].
 const (
-	DefaultWindow       = 5 * time.Minute
+	DefaultWindow       = aggregation.DefaultWindow
 	DefaultMaxIncidents = 500
 	DefaultWriteTimeout = 10 * time.Second
 	// DefaultPassTimeout bounds one pass of the analysis trigger, its reads and writes together. It stays

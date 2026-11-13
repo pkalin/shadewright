@@ -36,7 +36,8 @@ import (
 //
 // The pull request step reads the request's Incident, one object through the API reader, to check that the
 // name it shows unredacted in the body is a real Incident's (pullrequest.go, verifiedIncidentName): get only,
-// in the operator namespace.
+// in the operator namespace. The same get reads its status.count with the merge receipt and with the applied
+// time (incidentcount.go, ADR-0030 section 4).
 //
 // +kubebuilder:rbac:groups=remediation.shadewright.io,namespace=system,resources=incidents,verbs=get
 //

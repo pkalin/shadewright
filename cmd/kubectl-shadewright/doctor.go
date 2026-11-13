@@ -71,9 +71,13 @@ var doctorCRDs = append(slices.Clone(shadewrightCRDs), "remediationpolicies.reme
 
 // The components whose Deployments doctor checks, by their control-plane label (the same in the chart and in
 // config/manager).
-var doctorComponents = []string{"analyzer", "executor"}
+var doctorComponents = []string{"analyzer", "executor", verifierComponent}
 
-// componentLabel is the label both installs put on the analyzer and executor Deployments.
+// verifierComponent is the one component an install may leave out: the chart deploys the verifier only with a
+// namespace to watch (verifier.watchNamespaces, or analyzer.watchNamespaces while it is null).
+const verifierComponent = "verifier"
+
+// componentLabel is the label both installs put on the analyzer, executor and verifier Deployments.
 const componentLabel = "control-plane"
 
 // Flux kinds doctor lists, as plain objects: the plugin does not depend on Flux's Go types.
@@ -302,6 +306,11 @@ func checkDeployments(ctx context.Context, c client.Reader, d *Diagnosis, namesp
 	if err := c.List(ctx, list, client.InNamespace(namespace), client.MatchingLabels{componentLabel: comp}); err != nil {
 		level, detail := readLevel(err, "the Deployments of namespace "+clean(namespace, maxName))
 		d.add(check, level, detail, anchorDeployments)
+		return
+	}
+	if len(list.Items) == 0 && comp == verifierComponent {
+		d.add(check, levelWarn, "not deployed: the chart deploys the verifier only with a namespace to watch "+
+			"(verifier.watchNamespaces); without it a merged request can end only Inconclusive", anchorDeployments)
 		return
 	}
 	if len(list.Items) == 0 {

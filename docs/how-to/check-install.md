@@ -25,12 +25,13 @@ WARN  Kill switch: ON: writes are paused (spec.paused)
       See https://shadewright.io/how-to/check-install/#kill-switch
 PASS  Deployment analyzer shadewright-analyzer: available, 1 of 1 replicas available
 PASS  Deployment executor shadewright-executor: available, 1 of 1 replicas available
+PASS  Deployment verifier shadewright-verifier: available, 1 of 1 replicas available
 PASS  Repository fleet: complete: provider GitHub, target branch main
 PASS  Flux GitRepository flux-system/fleet (repository fleet): Ready
 FAIL  Flux Kustomization flux-system/apps: failing, Ready BuildFailed: <the controller's message>
       See https://shadewright.io/how-to/check-install/#flux
 
-9 passed, 1 warnings, 1 failed
+10 passed, 1 warnings, 1 failed
 ```
 
 The JSON output holds `namespace`, `failed` and `checks`, each with `name`, `level`, `detail`, `link` and, on the settings check, `reported`.
@@ -72,11 +73,12 @@ The line "Reported by the analyzer (shown only)" is the platform and integration
 
 ## Deployments
 
-The analyzer and executor Deployments of the namespace, found by the label `control-plane=analyzer` and `control-plane=executor` that both the chart and the kustomize install set.
+The analyzer, executor and verifier Deployments of the namespace, found by the label `control-plane=analyzer`, `control-plane=executor` and `control-plane=verifier` that both the chart and the kustomize install set. The chart deploys the verifier only with a namespace to watch (`verifier.watchNamespaces`, or `analyzer.watchNamespaces` while it is unset), so its absence is a warn, `not deployed`, never a fail: without it a merged request can end only `Inconclusive`. A missing analyzer or executor is a fail.
 
 | Result | Meaning | What to do |
 | --- | --- | --- |
-| fail: no Deployment labelled ... | None in that namespace | Pass the operator namespace with `-n` |
+| fail: no Deployment labelled ... | No analyzer or executor in that namespace | Pass the operator namespace with `-n` |
+| warn: not deployed (verifier) | No verifier in that namespace: the chart renders it only with a namespace to watch | Set `verifier.watchNamespaces` (or `analyzer.watchNamespaces`), or accept that merged requests end `Inconclusive` |
 | fail: not available | Its `Available` condition is not `True`, or no replica is available | `kubectl -n <ns> describe deploy/<name>` and the pod events: image pull, workload identity, resources |
 | fail: rollout stuck | Its `Progressing` condition is `False` with `ProgressDeadlineExceeded` for the current generation: the old replicas still serve, but the current spec will not roll out by itself | `kubectl -n <ns> describe deploy/<name>` and the events of the new pods; fix the cause, then roll out again |
 | warn: rollout pending | Available, but the Deployment controller has not observed the current spec yet (`status.observedGeneration` is below `metadata.generation`), so its conditions, a passed progress deadline included, are about an earlier spec | Run doctor again in a moment, or wait for `kubectl -n <ns> rollout status deploy/<name>` |

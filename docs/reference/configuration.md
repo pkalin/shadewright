@@ -118,7 +118,7 @@ Flags are passed as container args. A flag given twice takes its last value. The
 
 | Flag | Default | Meaning | `config/` sets |
 | --- | --- | --- | --- |
-| `--watch-namespaces` | empty (no namespace) | Comma-separated namespaces whose pods the verifier may list. A request whose target is in another namespace gets no report. Each needs its own RoleBinding of `verifier-watch-role` (chart: `verifier.watchNamespaces`, `null` by default, which uses `analyzer.watchNamespaces`; a list, `[]` included, is used as it is; unique names, at most 256, `*` refused) | `demo` (the lab) |
+| `--watch-namespaces` | required | Comma-separated namespaces whose pods the verifier may list; the verifier does not start with an empty list. A request whose target is in another namespace gets no report. Each needs its own RoleBinding of `verifier-watch-role` (chart: `verifier.watchNamespaces`, `null` by default, which uses `analyzer.watchNamespaces`; a list, `[]` included, is used as it is; unique names, at most 256, `*` refused; with an empty list the chart deploys no verifier) | `demo` (the lab) |
 
 ### Analyzer only
 
@@ -188,7 +188,7 @@ The permissions, as installed:
 | Executor, operator namespace | `executor-role` Role | `get`, `list`, `patch`, `watch` RemediationRequests; `get`, `patch`, `update` `remediationrequests/status`; its own Lease, and `create`, `patch` on core Events (leader election). After v0.1.0 (#265, on main): `get` on the one Incident a request names, to verify the name shown in the pull request body |
 | Verifier, each watched namespace | RoleBinding `verifier-watch` to `verifier-watch-role` (never a ClusterRoleBinding) | `list` Pods (no `get`, no `watch`); `get` `apps` ReplicaSets, Deployments and StatefulSets |
 | Verifier, operator namespace | `verifier-role` Role | `get`, `list`, `watch` RemediationRequests; `get`, `create` `verificationreports`; `update` `verificationreports/status`; its own Lease (`get`, `update`, `patch` by name) and `create`, `patch` on core Events |
-| Metrics | `metrics-auth-role`, bound to all three ServiceAccounts | `create` TokenReviews and SubjectAccessReviews |
+| Metrics | `metrics-auth-role`, one ClusterRoleBinding to all three ServiceAccounts (the verifier's only while the chart deploys it) | `create` TokenReviews and SubjectAccessReviews: the verifier's only cluster-wide grant |
 
 None of the three identities can read Secrets, and none is `cluster-admin`. `config/rbac` also installs admin, editor and viewer ClusterRoles for each custom resource; Shadewright does not use them, they are for your people.
 

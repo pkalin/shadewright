@@ -8,12 +8,12 @@ How to build and test Shadewright from a clone, without a cluster, a container r
 
 ## Run the tests without a cluster
 
-You need `git`, `make`, Go and a C compiler (`gcc` or `clang`: `make test` uses the race detector, which needs cgo). The Go release is the `toolchain` line of `go.mod` (1.27.3 when this was written); a newer local Go can report different lint and vet results, so pin it with `GOTOOLCHAIN`.
+You need `git`, `make`, Go and a C compiler (`gcc` or `clang`: `make test` uses the race detector, which needs cgo). The Go release is the `toolchain` line of `go.mod` (1.27.4 when this was written); a newer local Go can report different lint and vet results, so pin it with `GOTOOLCHAIN`.
 
 ```bash
 git clone https://github.com/pkalin/shadewright.git
 cd shadewright
-export GOTOOLCHAIN=go1.27.3   # the toolchain line of go.mod
+export GOTOOLCHAIN=go1.27.4   # the toolchain line of go.mod
 make test                      # unit tests and envtest
 ```
 

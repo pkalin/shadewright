@@ -1367,6 +1367,11 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 	}
 	r.setPhase(rr, phase)
+	if phase == remediationv1alpha1.PhaseMerged {
+		// The Incident's count at the merge, in the write that sets Merged with the receipt (ADR-0030 section
+		// 4). A failed read leaves it absent and holds nothing back.
+		r.recordCountAtMerge(ctx, rr)
+	}
 	// A final phase waits for nothing, also not for the kill switch; the request does not go on, so no
 	// WritesResumed Event is recorded.
 	resume(rr)

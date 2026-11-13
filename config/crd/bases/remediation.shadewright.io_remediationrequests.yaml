@@ -1510,10 +1510,82 @@ spec:
                 type: object
               verification:
                 description: |-
-                  verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4). Only
-                  the executor writes it; once set it is kept, windowStart and the time of lastReset only move forward and
-                  resets never decreases (validation rules on the object).
+                  verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4), and
+                  the readings of the Incident's count taken from the merge on (incidentCount). Only the executor writes it;
+                  once set it is kept, windowStart and the time of lastReset only move forward, resets never decreases and
+                  a reading is never changed, only removed (validation rules on the object).
                 properties:
+                  incidentCount:
+                    description: |-
+                      incidentCount holds two readings of the Incident's status.count, taken by the executor with the merge
+                      receipt and with appliedObservedAt (ADR-0030 section 4, "Resolved before the rollout"). They decide only
+                      the reason of Cleared True: ResolvedBeforeRollout instead of NoRecurrence. A reading once set is never
+                      changed, but it may be removed (an older executor drops it), and a removed reading is not taken again.
+                    properties:
+                      atApplied:
+                        description: |-
+                          atApplied is the reading taken in the status write that sets status.pullRequest.appliedObservedAt, only by
+                          the process that took atMerge. Never filled in after that write, never changed once set; it may be removed.
+                        properties:
+                          count:
+                            description: |-
+                              count is the Incident's status.count as read. MaxIncidentCount is the saturation value; a saturated
+                              reading never counts.
+                            format: int64
+                            maximum: 1000000
+                            minimum: 0
+                            type: integer
+                          readAt:
+                            description: |-
+                              readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for
+                              atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is
+                              compared only with the other reading's readAt.
+                            format: date-time
+                            type: string
+                          uid:
+                            description: uid is the UID of the Incident read. The
+                              reading counts only when it equals spec.incidentRef.uid.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - readAt
+                        - uid
+                        type: object
+                      atMerge:
+                        description: |-
+                          atMerge is the reading taken with the merge receipt, only in the status write that sets Merged; when
+                          that read fails it stays absent. Never changed once set; it may be removed.
+                        properties:
+                          count:
+                            description: |-
+                              count is the Incident's status.count as read. MaxIncidentCount is the saturation value; a saturated
+                              reading never counts.
+                            format: int64
+                            maximum: 1000000
+                            minimum: 0
+                            type: integer
+                          readAt:
+                            description: |-
+                              readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for
+                              atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is
+                              compared only with the other reading's readAt.
+                            format: date-time
+                            type: string
+                          uid:
+                            description: uid is the UID of the Incident read. The
+                              reading counts only when it equals spec.incidentRef.uid.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - readAt
+                        - uid
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: atApplied requires atMerge
+                      rule: '!has(self.atApplied) || has(self.atMerge)'
                   lastReset:
                     description: lastReset is the last reset of the window. Kept once
                       set; its time never moves back.
@@ -1693,6 +1765,20 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.resets)
             || (has(self.status) && has(self.status.verification) && has(self.status.verification.resets)
             && self.status.verification.resets >= oldSelf.status.verification.resets)'
+        - message: status.verification.incidentCount.atMerge is never changed once
+            set; it may only be removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount)
+            || !has(oldSelf.status.verification.incidentCount.atMerge) || !has(self.status)
+            || !has(self.status.verification) || !has(self.status.verification.incidentCount)
+            || !has(self.status.verification.incidentCount.atMerge) || self.status.verification.incidentCount.atMerge
+            == oldSelf.status.verification.incidentCount.atMerge'
+        - message: status.verification.incidentCount.atApplied is never changed once
+            set; it may only be removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount)
+            || !has(oldSelf.status.verification.incidentCount.atApplied) || !has(self.status)
+            || !has(self.status.verification) || !has(self.status.verification.incidentCount)
+            || !has(self.status.verification.incidentCount.atApplied) || self.status.verification.incidentCount.atApplied
+            == oldSelf.status.verification.incidentCount.atApplied'
         - message: status.queuedBehind is kept once set
           rule: '!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind)
             == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind)

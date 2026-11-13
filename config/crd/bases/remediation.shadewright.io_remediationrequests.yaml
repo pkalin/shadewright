@@ -484,9 +484,11 @@ spec:
               conditions:
                 description: |-
                   conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
-                  Verified, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's pods run
-                  the applied template; False with reason RolloutStuck or DeliveryNotObserved, Unknown while in progress and
-                  with reason KindNotChecked, RolloutSuperseded or RolloutNotDetermined when the check ends without a verdict).
+                  Verified, Configured, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's
+                  pods run the applied template; True with reason RolloutComplete, or RolloutPartitioned when a partitioned
+                  StatefulSet keeps pods on the old revision on purpose; False with reason RolloutStuck or
+                  DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or
+                  RolloutNotDetermined when the check ends without a verdict).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -546,7 +548,13 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               deadline:
-                description: deadline is when the current step gives up.
+                description: |-
+                  deadline is when the current step gives up, on the executor's clock. In WaitingForDelivery it is the end
+                  of the delivery window: one hour after mergeReceipt.mergedAt, extended by the time writes were paused. In
+                  Verifying it is the timeout, written on entering the phase: status.pullRequest.appliedObservedAt plus the
+                  larger of spec.verification.timeout and the rollout deadline plus the effective stableFor plus the
+                  executor's --node-grace. Past the merge a deadline never ends a request Expired: the evidence decides
+                  between Failed and Inconclusive (ADR-0030 sections 2, 4 and 6).
                 format: date-time
                 type: string
               effectiveApprovalRequired:
@@ -1431,6 +1439,12 @@ spec:
           rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
             && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',
             ''AwaitingApproval'', ''AutoMergeQueued'']))'
+        - message: status.phase WaitingForDelivery and Verifying require status.mergeReceipt
+          rule: '!has(self.status) || !has(self.status.phase) || !(self.status.phase
+            in [''WaitingForDelivery'', ''Verifying'']) || has(self.status.mergeReceipt)'
+        - message: status.phase Verifying requires status.pullRequest.appliedObservedAt
+          rule: '!has(self.status) || !has(self.status.phase) || self.status.phase
+            != ''Verifying'' || (has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt))'
         - message: 'status.hints: a stored hint is never removed'
           rule: '!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status)
             && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h,

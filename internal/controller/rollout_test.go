@@ -56,10 +56,23 @@ const (
 
 // rolloutReader is the executor's API reader in these tests: the Kustomization comes from ks, everything else
 // from the fake client. fail, when set, is asked before every read and may fail it.
+// The GitOps repository of the tests after the merge, and its merged pull request.
+const (
+	testFleetURL         = "https://github.com/example/fleet"
+	testPullRequest56URL = testFleetURL + "/pull/56"
+)
+
 type rolloutReader struct {
 	client.Reader
 	ks   *unstructured.Unstructured
 	fail func(obj client.Object) error
+	// alternate, when set, is served instead of ks on every other read of the Kustomization, so the delivery
+	// moves between two commits while it is checked.
+	alternate *unstructured.Unstructured
+	reads     int
+	// objects are served for unstructured reads of their kind, namespace and name (a ScaledObject, whose CRD
+	// the test API server does not have).
+	objects []*unstructured.Unstructured
 }
 
 func (r *rolloutReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -75,8 +88,21 @@ func (r *rolloutReader) Get(ctx context.Context, key client.ObjectKey, obj clien
 		if r.ks == nil || r.ks.GetNamespace() != key.Namespace || r.ks.GetName() != key.Name {
 			return fmt.Errorf("unexpected Kustomization %s", key)
 		}
-		r.ks.DeepCopyInto(u)
+		ks := r.ks
+		if r.alternate != nil && r.reads%2 == 1 {
+			ks = r.alternate
+		}
+		r.reads++
+		ks.DeepCopyInto(u)
 		return nil
+	}
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		for _, o := range r.objects {
+			if o.GetKind() == u.GetKind() && o.GetNamespace() == key.Namespace && o.GetName() == key.Name {
+				o.DeepCopyInto(u)
+				return nil
+			}
+		}
 	}
 	return r.Reader.Get(ctx, key, obj, opts...)
 }
@@ -172,7 +198,7 @@ func newRolloutWorld(t *testing.T, ss *appsv1.StatefulSet) *rolloutWorld {
 		Path: "apps/cache.yaml", BuildPath: "apps", BaseCommit: strings.Repeat("b", 40)}
 	rr.Status.PlanRepository = freshness.RepositoryOf(settings.Spec.Repositories[0])
 	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 56,
-		URL: "https://github.com/example/fleet/pull/56", HeadSHA: strings.Repeat("c", 40), MergeCommitSHA: merge}
+		URL: testPullRequest56URL, HeadSHA: strings.Repeat("c", 40), MergeCommitSHA: merge}
 	c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithObjects(settings, rr, ss).
 		WithStatusSubresource(&remediationv1alpha1.RemediationRequest{}).Build()
 	w := &rolloutWorld{c: c, reader: &rolloutReader{Reader: c}, git: git, rec: record.NewFakeRecorder(10),

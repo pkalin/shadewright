@@ -60,7 +60,7 @@ func TestStandbyReplicas(t *testing.T) {
 		set  []string
 		want map[string]int32 // component -> replicas
 	}{
-		{"default", nil, map[string]int32{executorComp: 1, analyzerComp: 1, verifierComp: 1}},
+		{defaultCase, nil, map[string]int32{executorComp: 1, analyzerComp: 1, verifierComp: 1}},
 		{"explicit one", []string{"executor.replicas=1", "analyzer.replicas=1", "verifier.replicas=1"},
 			map[string]int32{executorComp: 1, analyzerComp: 1, verifierComp: 1}},
 		{"executor standby", []string{"executor.replicas=2"},

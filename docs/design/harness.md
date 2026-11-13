@@ -23,6 +23,6 @@ Dashed boxes are designed, not built. The teal box is GitHub, outside the cluste
 | Eval harness and injection corpus | <span class="sw-status sw-built">built</span>, the analyzer's own gate <span class="sw-status sw-planned">planned</span> | [11.2, evaluation gate](11-model.md#evaluation-gate), [evaluation](../evaluation.md); `test/eval` |
 | OpenTelemetry traces | <span class="sw-status sw-built">built</span>, off by default | [Traces reference](../reference/traces.md) |
 | Analysis records | <span class="sw-status sw-built">built</span>, with a record store | [ADR-0015](../adr/0015-analysis-records-outlive-the-lab.md); `internal/analysis/record.go` |
-| Proposal, policy check, GitOps PR | <span class="sw-status sw-built">built</span>, up to `Merged` | [6. Reconciliation](6-reconciliation.md), [8. GitOps on GitHub](8-gitops-on-github.md) |
+| Proposal, policy check, GitOps PR | <span class="sw-status sw-built">built</span>, up to `Merged`, then `WaitingForDelivery` and `Verifying` ending `Failed` or `Inconclusive` behind `--verify-outcomes` (off by default) | [6. Reconciliation](6-reconciliation.md), [8. GitOps on GitHub](8-gitops-on-github.md) |
 | Person merges (GitHub), Flux deploys (in the cluster) | not part of Shadewright | [8. GitOps on GitHub](8-gitops-on-github.md) |
 | Verifier | <span class="sw-status sw-built">built</span>, the executor reading its report <span class="sw-status sw-planned">planned</span> (#683) | [10.9, verification](10-security.md#109-verification) |

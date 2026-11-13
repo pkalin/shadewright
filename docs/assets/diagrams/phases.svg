@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 380" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 450" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">RemediationRequest phases</title>
-  <desc id="d">Main path: Pending, PolicyChecked, PRCreated, then AwaitingApproval or AutoMergeQueued, Merged, WaitingForDelivery, Verifying and Succeeded. Any step can instead end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention. A merged request without a merge receipt ends Inconclusive.</desc>
+  <desc id="d">Main path: Pending, PolicyChecked, PRCreated, then AwaitingApproval or AutoMergeQueued (planned), Merged, WaitingForDelivery, Verifying and Succeeded (planned). Built up to Verifying; the steps after Merged run only with the executor flag --verify-outcomes, off by default until the verifier's report is read, and without it a merged request stays Merged and one found in WaitingForDelivery or Verifying ends Inconclusive. A merged request without a merge receipt ends Inconclusive. WaitingForDelivery ends Failed when Flux failed on the merge commit at the end of the delivery window, and Inconclusive when the delivery was not seen, was blocked or suspended, or the target is gone. Verifying ends Inconclusive at once on a changed value, template or target, and at the timeout Failed when the rollout is stuck or a ScaledObject is not ready, otherwise Inconclusive. Before the merge any step can instead end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention; after the merge a deadline never ends a request Expired.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -15,34 +15,50 @@
       .lanet{fill:#7d7999;font-size:12.5px;font-weight:600;letter-spacing:.14em}
       .bad{fill:#2a1720;stroke:#7a3348;stroke-width:1.2}
       .badt{fill:#ff8fa3;font-size:13px;font-weight:600}
+      .plan{stroke-dasharray:6 5}
     </style>
   </defs>
-  <rect width="1120" height="380" rx="18" fill="#0e0e16"/>
+  <rect width="1120" height="450" rx="18" fill="#0e0e16"/>
   <text class="lanet" x="40" y="44">MAIN PATH</text>
   <rect class="box" x="40" y="92" width="130" height="44" rx="22"/><text class="h" x="105" y="119" text-anchor="middle">Pending</text>
   <rect class="box" x="200" y="92" width="160" height="44" rx="22"/><text class="h" x="280" y="119" text-anchor="middle">PolicyChecked</text>
   <rect class="box" x="390" y="92" width="140" height="44" rx="22"/><text class="h" x="460" y="119" text-anchor="middle">PRCreated</text>
   <rect class="box" x="580" y="52" width="190" height="44" rx="22"/><text class="h" x="675" y="79" text-anchor="middle">AwaitingApproval</text>
-  <rect class="box" x="580" y="132" width="190" height="44" rx="22"/><text class="h" x="675" y="159" text-anchor="middle">AutoMergeQueued</text>
+  <rect class="box plan" x="580" y="132" width="190" height="44" rx="22"/><text class="h" x="675" y="159" text-anchor="middle">AutoMergeQueued</text>
   <rect class="box" x="820" y="92" width="130" height="44" rx="22"/><text class="h" x="885" y="119" text-anchor="middle">Merged</text>
   <rect class="bad" x="985" y="92" width="115" height="44" rx="22"/><text class="badt" x="1042" y="119" text-anchor="middle">Inconclusive</text>
   <path class="f" d="M950 114H979" marker-end="url(#a)"/>
   <text class="lbl" x="985" y="84">no merge receipt</text>
   <rect class="box" x="300" y="222" width="210" height="44" rx="22"/><text class="h" x="405" y="249" text-anchor="middle">WaitingForDelivery</text>
   <rect class="box" x="560" y="222" width="150" height="44" rx="22"/><text class="h" x="635" y="249" text-anchor="middle">Verifying</text>
-  <rect class="key" x="760" y="222" width="160" height="44" rx="22"/><text class="h" x="840" y="249" text-anchor="middle">Succeeded</text>
+  <rect class="key plan" x="760" y="222" width="160" height="44" rx="22"/><text class="h" x="840" y="249" text-anchor="middle">Succeeded</text>
   <path class="f" d="M170 114H194" marker-end="url(#a)"/>
   <path class="f" d="M360 114H384" marker-end="url(#a)"/>
   <path class="f" d="M530 114Q555 114 555 94T574 74" marker-end="url(#a)"/>
-  <path class="f" d="M530 114Q555 114 555 134T574 154" marker-end="url(#a)"/>
+  <path class="f plan" d="M530 114Q555 114 555 134T574 154" marker-end="url(#a)"/>
   <text class="lbl" x="600" y="44">human review required</text>
   <text class="lbl" x="600" y="196">policy allows automation</text>
   <path class="f" d="M770 74Q795 74 795 94T814 114" marker-end="url(#a)"/>
-  <path class="f" d="M770 154Q795 154 795 134T814 114" marker-end="url(#a)"/>
+  <path class="f plan" d="M770 154Q795 154 795 134T814 114" marker-end="url(#a)"/>
   <path class="f" d="M885 136V180H405V216" marker-end="url(#a)"/>
+  <text class="lbl" x="395" y="200" text-anchor="end">with --verify-outcomes</text>
+  <text class="lbl" x="395" y="214" text-anchor="end">(off by default)</text>
   <path class="f" d="M510 244H554" marker-end="url(#a)"/>
-  <path class="f" d="M710 244H754" marker-end="url(#a)"/>
-  <text class="lbl" x="930" y="250">right revision, stable</text>
-  <rect class="bad" x="40" y="300" width="1040" height="52" rx="12"/>
-  <text class="badt" x="62" y="331">Any step can end instead in: Denied · Failed · Expired · Cancelled · Superseded · NeedsIntervention</text>
+  <path class="f plan" d="M710 244H754" marker-end="url(#a)"/>
+  <text class="lbl" x="930" y="242">fresh report of a quiet</text>
+  <text class="lbl" x="930" y="258">window (planned)</text>
+  <text class="lbl" x="414" y="288">end of the delivery window</text>
+  <text class="lbl" x="644" y="288">timeout</text>
+  <rect class="bad" x="300" y="306" width="410" height="44" rx="22"/><text class="badt" x="505" y="333" text-anchor="middle">Failed · Inconclusive</text>
+  <path class="f" d="M405 266V300" marker-end="url(#a)"/>
+  <path class="f" d="M635 266V300" marker-end="url(#a)"/>
+  <text class="lbl" x="40" y="292">not delivered, blocked,</text>
+  <text class="lbl" x="40" y="308">suspended, Flux failed on</text>
+  <text class="lbl" x="40" y="324">the merge commit, target gone</text>
+  <text class="lbl" x="730" y="300">value or template changed, target</text>
+  <text class="lbl" x="730" y="316">gone; at the timeout rollout stuck or</text>
+  <text class="lbl" x="730" y="332">ScaledObject not ready (Failed),</text>
+  <text class="lbl" x="730" y="348">or no evidence yet</text>
+  <rect class="bad" x="40" y="372" width="1040" height="52" rx="12"/>
+  <text class="badt" x="62" y="403">Before the merge any step can end in: Denied · Failed · Expired · Cancelled · Superseded · NeedsIntervention</text>
 </svg>

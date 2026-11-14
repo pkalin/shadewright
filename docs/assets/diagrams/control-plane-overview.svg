@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 690" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Control plane mode: hub and reporting clusters</title>
-  <desc id="d">Overview of ADR-0038, proposed and not built. Two spoke clusters, each a standalone Shadewright install with its own analyzer, executor and verifier, plus a new reporter. Each spoke has its own GitOps repository, where its executor opens pull requests as today, and its own model credential and budget. Each reporter sends redacted summaries and a projected ServiceAccount token over HTTPS, to a path naming its cluster, to the intake service of the hub; the connection is outbound from the spoke and the answer is only accepted or refused. The hub is a Kubernetes cluster with intake, a fleet controller, one namespace per spoke holding the reported records, and a read-only status page. In the prototype, spoke A is the hub's own cluster, so hub and spoke are not separate there. The hub reads its Cluster objects from its own GitOps repository through Flux. Evidence, prompts, transcripts, credentials and kubeconfigs never cross, and the hub never calls a spoke.</desc>
+  <desc id="d">Overview of ADR-0038, proposed and not built. Two spoke clusters, each a standalone Shadewright install with its own analyzer, executor and verifier, plus a new reporter. Each spoke has its own GitOps repository, where its executor opens pull requests as today, and its own model credential and budget. Each reporter sends redacted summaries and a projected ServiceAccount token over HTTPS, to a path naming its cluster, to the intake service of the hub; the connection is outbound from the spoke and the answer is only accepted or refused. The hub is a Kubernetes cluster with intake, a fleet controller, one namespace per spoke holding the reported records, and a read-only status page. In the prototype, spoke A is the hub's own cluster, so hub and spoke are not separate there. Removing a Cluster object revokes the spoke: its namespace is kept for a retention and then deleted. The hub reads its Cluster objects from its own GitOps repository through Flux. Evidence, prompts, transcripts, credentials and kubeconfigs never cross, and the hub never calls a spoke.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -63,7 +63,7 @@
   <text class="s" x="856" y="134">Cluster objects, added by a reviewed pull request</text>
   <rect class="box" x="840" y="158" width="396" height="62" rx="12"/>
   <text class="h" x="856" y="182">Fleet controller</text>
-  <text class="s" x="856" y="202">Cluster to namespace, RoleBinding, quota, staleness</text>
+  <text class="s" x="856" y="202">Cluster to namespace, RoleBinding, quota, retention</text>
   <rect class="box" x="840" y="238" width="192" height="84" rx="12"/>
   <text class="h" x="854" y="262">Namespace spoke-a</text>
   <text class="s" x="854" y="282">reported incidents,</text>

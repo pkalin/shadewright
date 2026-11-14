@@ -137,7 +137,7 @@ type OccurrenceRecord struct {
 
 // IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)",message="resolvedTime cannot change while the phase stays Resolved"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || n.state == 'Created'))))",message="revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || n.state == o.state))))",message="revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created or Abandoned"
 type IncidentStatus struct {
 	// phase summarizes the incident.
 	// +optional
@@ -207,8 +207,11 @@ type IncidentStatus struct {
 	// proposer decided to revert (ADR-0030 section 8, #96), oldest first. The proposer writes an entry in state
 	// Pending before it creates the revert and moves it to Created once the revert exists; it never takes a new
 	// decision for a request listed here, so a failed request gets one revert for good, also after that revert
-	// was deleted. Entries are never removed and a state never moves back; a full list stops new reverts for this
-	// incident instead (condition RevertsStopped).
+	// was deleted. When a check before a create says no (the target is gone, the request passed the age bound,
+	// the request was deleted, the revert's name is taken by another request, the create is refused as invalid),
+	// the entry moves to Abandoned instead, which is final: no revert is made for it. Entries are never removed, a
+	// state moves only from Pending to Created or Abandoned, and the status cannot be removed while the list has
+	// entries; a full list stops new reverts for this incident instead (condition RevertsStopped).
 	// +listType=map
 	// +listMapKey=uid
 	// +kubebuilder:validation:MaxItems=20
@@ -236,7 +239,10 @@ type IncidentStatus struct {
 // +kubebuilder:printcolumn:name="Last seen",type=date,JSONPath=`.status.lastSeen`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Incident groups repeated symptoms of one problem on one workload.
+// Incident groups repeated symptoms of one problem on one workload. The rule on the root keeps a write from
+// removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
+// entries.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed) == 0 || has(self.status)",message="status cannot be removed while status.revertsProposed has entries"
 type Incident struct {
 	metav1.TypeMeta `json:",inline"`
 

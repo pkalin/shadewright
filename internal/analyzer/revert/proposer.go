@@ -21,11 +21,16 @@ limitations under the License.
 // name v1alpha1.RevertName of that UID.
 //
 // The decision is recorded in the Incident's status.revertsProposed before the create: an entry in state
-// Pending, then the create, then the entry moves to Created. An entry in either state means no new decision is
-// taken: Pending leads to the (idempotent) create and the move to Created, Created leads to nothing, also after
-// the revert was deleted. So a failed request gets one revert for good. The one window left: the create
-// succeeded, the move to Created was not written (a crash or a failed write), and the revert was deleted before
-// the retry; the retry then creates it once more (ADR-0030, known limit).
+// Pending, then the create, then the entry moves to Created. An entry means no new decision is taken: the
+// failed request gets no second revert, also after the revert was deleted. Pending means a create is still
+// coming; every create, the first or a retried one, runs the same checks first (target, age bound, Incident
+// not being deleted), and when one says no, or the revert's name is taken by another request, or the create is
+// refused as invalid, or the failed request is deleted, the entry moves to Abandoned, which is final, with one
+// Warning event. Right before the create the Incident is read again, and the create is skipped when the entry
+// is no longer Pending. The windows left (ADR-0030, known limits): the create succeeded, the move to Created
+// was not written (a crash or a failed write), and the revert was deleted before the retry, which then creates
+// it once more; and two analyzers running without leader election, where one may create between the other's
+// last read and its own create.
 //
 // It calls no model and imports nothing of the analysis loop or the model providers (a test checks the
 // imports): its only input is the failed request, its Incident and its target as the API server holds them.
@@ -33,13 +38,15 @@ limitations under the License.
 // freshness of the plan and the target lock, and opens a pull request that a person must approve (invariant 3).
 //
 // It never proposes a revert of a revert, nor for any phase but Failed with Verified False (so never for
-// Inconclusive), nor when the failed request's Incident or target is gone (not found, another UID, or being
-// deleted), nor when its action cannot be inverted, nor for a request whose Verified condition moved more than
-// [MaxAge] ago (so a start-up does not revert every old failure), nor when the Incident's list is full. It uses
-// the analyzer's existing grants only: get on requests and create on them in the operator namespace, get on the
-// Incident and update on its status, get on the target with the watch role (Deployments and StatefulSets) or the
-// KEDA module's role (ScaledObjects), and create on core Events in the operator namespace (the leader election
-// Role's grant). It watches the requests through the informer the Incident controller already has.
+// Inconclusive), nor when the failed request's Incident is gone or being deleted, nor when its target is gone
+// (not found, another UID, being deleted, or its kind no longer served), nor when its action cannot be
+// inverted, nor for a request whose Verified condition moved more than [MaxAge] ago or is more than [MaxSkew]
+// ahead (so a start-up does not revert every old failure), nor when the Incident's list is full. It uses the
+// analyzer's existing grants only: get on requests and create on them in the operator namespace, get and list
+// on Incidents and update on their status, get on the target with the watch role (Deployments and
+// StatefulSets) or the KEDA module's role (ScaledObjects), and create on core Events in the operator namespace
+// (the leader election Role's grant). It watches the requests through the informer the Incident controller
+// already has.
 package revert
 
 import (
@@ -77,12 +84,17 @@ const FieldOwner = "shadewright-revert-proposer"
 // is left to a person, so a start-up (or a first install over old requests) does not revert every past failure.
 const MaxAge = 24 * time.Hour
 
+// MaxSkew is how far ahead of the analyzer's clock the Verified condition's transition time may be and still
+// count as now. A time further ahead gets no revert: it is not a time the bound can be checked against.
+const MaxSkew = 5 * time.Minute
+
 // Reasons of the proposer's Warning events.
 const (
 	// EventIncidentGone: the failed request's Incident is gone or has another UID, so no revert is proposed.
 	EventIncidentGone = "RevertNotProposed"
-	// EventNameTaken: a request at the revert's derived name does not revert the failed request.
-	EventNameTaken = "RevertNameTaken"
+	// EventAbandoned: an entry moved from Pending to Abandoned, because a check before the create said no. The
+	// message says which. It is on the failed request, or on the Incident when the request is gone.
+	EventAbandoned = "RevertAbandoned"
 	// EventListFull is about the Incident: its status.revertsProposed is full, no more reverts are proposed.
 	EventListFull = remediationv1alpha1.ReasonRevertListFull
 )
@@ -109,7 +121,8 @@ type Proposer struct {
 }
 
 // SetupWithManager registers the proposer for the requests of the operator namespace that ended Failed with
-// Verified False and are not reverts themselves ([Revertible]).
+// Verified False and are not reverts themselves, also while and after they are deleted, so a Pending entry of a
+// deleted request moves to Abandoned.
 func (p *Proposer) SetupWithManager(mgr manager.Manager) error {
 	if p.Reader == nil {
 		p.Reader = mgr.GetAPIReader()
@@ -119,7 +132,7 @@ func (p *Proposer) SetupWithManager(mgr manager.Manager) error {
 	}
 	failed := predicate.NewPredicateFuncs(func(o client.Object) bool {
 		rr, ok := o.(*remediationv1alpha1.RemediationRequest)
-		return ok && rr.Namespace == p.Namespace && Revertible(rr)
+		return ok && rr.Namespace == p.Namespace && failedUnverified(rr)
 	})
 	return builder.ControllerManagedBy(mgr).
 		Named("revert-proposer").
@@ -131,8 +144,13 @@ func (p *Proposer) SetupWithManager(mgr manager.Manager) error {
 // Verified False, it is not a revert itself (a revert is never reverted) and it is not being deleted. Every
 // other phase, Inconclusive included, gives no revert.
 func Revertible(rr *remediationv1alpha1.RemediationRequest) bool {
-	if rr == nil || remediationv1alpha1.IsRevert(rr) || rr.DeletionTimestamp != nil ||
-		rr.Status.Phase != remediationv1alpha1.PhaseFailed {
+	return failedUnverified(rr) && rr.DeletionTimestamp == nil
+}
+
+// failedUnverified reports whether rr ended Failed with condition Verified False and is not a revert, whether
+// or not it is being deleted.
+func failedUnverified(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr == nil || remediationv1alpha1.IsRevert(rr) || rr.Status.Phase != remediationv1alpha1.PhaseFailed {
 		return false
 	}
 	verified := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionVerified)
@@ -179,18 +197,29 @@ func Entry(inc *remediationv1alpha1.Incident, ref remediationv1alpha1.RequestRef
 	return &inc.Status.RevertsProposed[i]
 }
 
+// pending reports whether inc records ref as Pending.
+func pending(inc *remediationv1alpha1.Incident, ref remediationv1alpha1.RequestRef) bool {
+	e := Entry(inc, ref)
+	return e != nil && e.State == remediationv1alpha1.RevertPending
+}
+
 // Reconcile proposes the revert of one failed request, once. The steps, each read live:
 //
-//  1. The failed request: gone, or no longer [Revertible], ends the pass. Its action must invert, else no
-//     revert.
+//  1. The failed request. Gone, or being deleted, moves a Pending entry of it to Abandoned and ends the pass;
+//     not [Revertible] otherwise ends the pass. Its action must invert, else no revert.
 //  2. Its Incident (by name and UID): gone or another UID gives no revert, with a Warning event on the request.
-//  3. Its entry in status.revertsProposed: Created ends the pass; Pending goes on to step 6.
-//  4. Without an entry, a new decision: the Verified condition moved at most [MaxAge] ago, a full list gives
-//     no revert (condition RevertsStopped on the Incident and one Warning event), the target is of a kind the
-//     action can target and is there (not found, another UID, being deleted or Forbidden gives no revert).
-//  5. The entry, Pending, with the resourceVersion read, retried on conflict.
+//  3. Its entry in status.revertsProposed: Created or Abandoned ends the pass.
+//  4. The checks, the same for a new decision and for a Pending entry: the Verified condition moved at most
+//     [MaxAge] ago and at most [MaxSkew] ahead, the Incident is not being deleted, and the target is of a kind
+//     the action can target and is there (not found, another UID, being deleted, a kind not served or
+//     Forbidden is no). Without an entry, a no records nothing and a full list gives no revert (condition
+//     RevertsStopped on the Incident and one Warning event); otherwise the entry Pending is written. For a
+//     Pending entry a no moves it to Abandoned, with one Warning event.
+//  5. The Incident again, right before the create: an entry no longer Pending (another pass finished it) ends
+//     the pass.
 //  6. The create. AlreadyExists with spec.reverts naming the same request and UID is the revert made by an
-//     earlier pass; with any other link it is a terminal error, with a Warning event, and never overwritten.
+//     earlier pass. With any other link, or a create refused as invalid, the entry moves to Abandoned and the
+//     existing object is left as it is.
 //  7. The entry moves to Created.
 func (p *Proposer) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	if req.Namespace != p.Namespace {
@@ -203,11 +232,15 @@ func (p *Proposer) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 	failed := &remediationv1alpha1.RemediationRequest{}
 	if err := p.Reader.Get(ctx, req.NamespacedName, failed); err != nil {
 		if apierrors.IsNotFound(err) {
-			return reconcile.Result{}, nil
+			return reconcile.Result{}, p.abandonDeleted(ctx, req.Name)
 		}
 		return reconcile.Result{}, fmt.Errorf("reading RemediationRequest %s: %w", req.Name, err)
 	}
 	if !Revertible(failed) {
+		if failed.DeletionTimestamp != nil && failedUnverified(failed) {
+			return reconcile.Result{}, p.abandon(ctx, failed.Spec.IncidentRef, link(failed),
+				"the failed request is being deleted", failed)
+		}
 		return reconcile.Result{}, nil
 	}
 	spec, ok := Spec(failed)
@@ -217,7 +250,7 @@ func (p *Proposer) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 	}
 	ref := link(failed)
 
-	inc, err := p.incident(ctx, failed)
+	inc, err := p.incident(ctx, failed.Spec.IncidentRef)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -225,19 +258,51 @@ func (p *Proposer) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 		p.incidentGone(ctx, failed)
 		return reconcile.Result{}, nil
 	}
-	if e := Entry(inc, ref); e != nil {
-		if e.State == remediationv1alpha1.RevertCreated {
-			return reconcile.Result{}, nil
-		}
-	} else {
-		if decided, err := p.decide(ctx, failed, inc, ref); !decided || err != nil {
+	e := Entry(inc, ref)
+	if e != nil && e.State != remediationv1alpha1.RevertPending {
+		return reconcile.Result{}, nil
+	}
+	why, err := p.unfit(ctx, failed, inc, e == nil)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	switch {
+	case why != "" && e != nil:
+		return reconcile.Result{}, p.abandon(ctx, failed.Spec.IncidentRef, ref, why, failed)
+	case why == whyFull:
+		return reconcile.Result{}, nil
+	case why != "":
+		t := failed.Spec.TargetRef
+		logger.Info("No revert: "+why, "apiVersion", t.APIVersion, "kind", t.Kind, "namespace", t.Namespace,
+			"name", t.Name)
+		return reconcile.Result{}, nil
+	case e == nil:
+		if decided, err := p.writePending(ctx, failed, ref); !decided || err != nil {
 			return reconcile.Result{}, err
 		}
 	}
 
-	name := remediationv1alpha1.RevertName(ref.UID)
-	if err := p.create(ctx, failed, string(name), spec); err != nil {
+	// Another pass (a second analyzer without leader election) may have created the revert and moved the entry
+	// meanwhile, and the revert may be deleted since: create only while the entry is still Pending.
+	inc, err = p.incident(ctx, failed.Spec.IncidentRef)
+	if err != nil {
 		return reconcile.Result{}, err
+	}
+	if inc == nil {
+		p.incidentGone(ctx, failed)
+		return reconcile.Result{}, nil
+	}
+	if !pending(inc, ref) {
+		return reconcile.Result{}, nil
+	}
+
+	name := remediationv1alpha1.RevertName(ref.UID)
+	refused, err := p.create(ctx, string(name), spec)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if refused != "" {
+		return reconcile.Result{}, p.abandon(ctx, failed.Spec.IncidentRef, ref, refused, failed)
 	}
 	if err := p.markCreated(ctx, failed, ref); err != nil {
 		return reconcile.Result{}, err
@@ -246,42 +311,40 @@ func (p *Proposer) Reconcile(ctx context.Context, req reconcile.Request) (reconc
 	return reconcile.Result{}, nil
 }
 
-// decide takes the decision for a failed request its Incident (inc) has no entry for, and writes it as a
-// Pending entry. decided is false when no revert is proposed; an error is for a retry.
-func (p *Proposer) decide(ctx context.Context, failed *remediationv1alpha1.RemediationRequest,
-	inc *remediationv1alpha1.Incident, ref remediationv1alpha1.RequestRef) (decided bool, err error) {
-	logger := log.FromContext(ctx)
-	if p.tooOld(failed) {
-		logger.Info("No revert: the request failed more than the age bound ago; a person decides on it",
-			"maxAge", MaxAge)
-		return false, nil
+// unfit runs the checks every create runs first, the first or a retried one, and returns why no revert is
+// made, or "" when it may be. decision is true for a new decision, which also stops at a full list
+// ([Proposer.stop]). An error is for a retry.
+func (p *Proposer) unfit(ctx context.Context, failed *remediationv1alpha1.RemediationRequest,
+	inc *remediationv1alpha1.Incident, decision bool) (string, error) {
+	if why := p.ageUnfit(failed); why != "" {
+		return why, nil
 	}
-	if len(inc.Status.RevertsProposed) >= remediationv1alpha1.MaxRevertsProposed {
-		return false, p.stop(ctx, failed)
+	if inc.DeletionTimestamp != nil {
+		return "the Incident is being deleted", nil
 	}
-	why, err := p.targetUnfit(ctx, failed.Spec)
-	if err != nil {
-		return false, err
+	if decision && len(inc.Status.RevertsProposed) >= remediationv1alpha1.MaxRevertsProposed {
+		return whyFull, p.stop(ctx, failed)
 	}
-	if why != "" {
-		t := failed.Spec.TargetRef
-		logger.Info("No revert: "+why, "apiVersion", t.APIVersion, "kind", t.Kind, "namespace", t.Namespace,
-			"name", t.Name)
-		return false, nil
-	}
-	return p.writePending(ctx, failed, ref)
+	return p.targetUnfit(ctx, failed.Spec)
 }
 
-// tooOld reports whether failed's Verified condition moved more than [MaxAge] ago. Its lastTransitionTime is
-// written by the executor, another writer with its own clock, compared here with the analyzer's: the bound is
-// coarse on purpose (a day against clock skews of seconds) and only keeps old failures from being reverted at a
-// start-up. A missing time counts as old.
-func (p *Proposer) tooOld(failed *remediationv1alpha1.RemediationRequest) bool {
+// ageUnfit returns why failed is outside the age bound, or "": its Verified condition moved more than [MaxAge]
+// ago, more than [MaxSkew] ahead of the analyzer's clock, or has no time. That time is written by the executor,
+// another writer with its own clock, and compared here with the analyzer's: the bound is coarse on purpose (a
+// day against clock skews of seconds) and only keeps old failures from being reverted at a start-up.
+func (p *Proposer) ageUnfit(failed *remediationv1alpha1.RemediationRequest) string {
 	verified := meta.FindStatusCondition(failed.Status.Conditions, remediationv1alpha1.ConditionVerified)
 	if verified == nil || verified.LastTransitionTime.IsZero() {
-		return true
+		return "the request's Verified condition has no transition time"
 	}
-	return p.now().Sub(verified.LastTransitionTime.Time) > MaxAge
+	age := p.now().Sub(verified.LastTransitionTime.Time)
+	switch {
+	case age > MaxAge:
+		return "the request failed more than 24 hours ago; a person decides on it"
+	case age < -MaxSkew:
+		return "the request's Verified transition time is more than five minutes ahead of the analyzer's clock"
+	}
+	return ""
 }
 
 func (p *Proposer) now() time.Time {
@@ -291,11 +354,10 @@ func (p *Proposer) now() time.Time {
 	return time.Now()
 }
 
-// incident reads the Incident failed names, live. It returns nil, with no error, when it is gone or has
-// another UID: the revert would have nowhere to be recorded, so none is made.
-func (p *Proposer) incident(ctx context.Context, failed *remediationv1alpha1.RemediationRequest) (
+// incident reads the Incident ref names, live. It returns nil, with no error, when it is gone or has another
+// UID: the revert would have nowhere to be recorded, so none is made.
+func (p *Proposer) incident(ctx context.Context, ref remediationv1alpha1.IncidentRef) (
 	*remediationv1alpha1.Incident, error) {
-	ref := failed.Spec.IncidentRef
 	inc := &remediationv1alpha1.Incident{}
 	if err := p.Reader.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: ref.Name}, inc); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -310,12 +372,12 @@ func (p *Proposer) incident(ctx context.Context, failed *remediationv1alpha1.Rem
 }
 
 // incidentGone logs that failed gets no revert because its Incident is gone or has another UID, and writes a
-// Warning event on failed, so a person sees why nothing was proposed. A request past the age bound gets the log
-// only, so a start-up does not repeat the event for every old request.
+// Warning event on failed, so a person sees why nothing was proposed. A request outside the age bound gets the
+// log only, so a start-up does not repeat the event for every old request.
 func (p *Proposer) incidentGone(ctx context.Context, failed *remediationv1alpha1.RemediationRequest) {
 	log.FromContext(ctx).Info("No revert: the failed request's Incident is gone",
 		"incident", failed.Spec.IncidentRef.Name)
-	if !p.tooOld(failed) {
+	if p.ageUnfit(failed) == "" {
 		p.event(failed, EventIncidentGone, "No revert is proposed: Incident %s with the UID this request names is gone",
 			failed.Spec.IncidentRef.Name)
 	}
@@ -339,9 +401,9 @@ var targets = map[remediationv1alpha1.ActionType]func(apiVersion, kind string) b
 }
 
 // targetUnfit reads the target live and returns why no revert is proposed for it, or "" when it is there: its
-// kind is not one the action can target, it is not found, has another UID (deleted and made again) or is being
-// deleted, or the analyzer may not read it (Forbidden: no grant will appear by retrying). Any other failed read
-// is an error for a retry.
+// kind is not one the action can target, the API server does not serve the kind (KEDA uninstalled, for
+// example), it is not found, has another UID (deleted and made again) or is being deleted, or the analyzer may
+// not read it (Forbidden: no grant will appear by retrying). Any other failed read is an error for a retry.
 func (p *Proposer) targetUnfit(ctx context.Context, spec remediationv1alpha1.RemediationRequestSpec) (string, error) {
 	t := spec.TargetRef
 	if fits, ok := targets[spec.Action.Type]; !ok || !fits(t.APIVersion, t.Kind) {
@@ -354,30 +416,38 @@ func (p *Proposer) targetUnfit(ctx context.Context, spec remediationv1alpha1.Rem
 		switch {
 		case apierrors.IsNotFound(err):
 			return "the failed request's target is gone", nil
+		case meta.IsNoMatchError(err):
+			return "the API server does not serve the failed request's target kind", nil
 		case apierrors.IsForbidden(err):
 			return "the analyzer may not read the failed request's target", nil
 		}
 		return "", fmt.Errorf("reading the target %s %s/%s: %w", t.Kind, t.Namespace, t.Name, err)
 	}
-	if remediationv1alpha1.UID(u.GetUID()) != t.UID || u.GetDeletionTimestamp() != nil {
-		return "the failed request's target is gone", nil
+	if remediationv1alpha1.UID(u.GetUID()) != t.UID {
+		return "the failed request's target was replaced by another object of that name", nil
+	}
+	if u.GetDeletionTimestamp() != nil {
+		return "the failed request's target is being deleted", nil
 	}
 	return "", nil
 }
+
+// whyFull is unfit's answer for a full list; [Proposer.stop] has logged it.
+const whyFull = "the Incident's status.revertsProposed is full"
 
 // errFull stops writePending when the Incident's list is full.
 var errFull = errors.New("status.revertsProposed is full")
 
 // writePending adds ref as Pending to the status.revertsProposed of failed's Incident, read live on each
 // attempt, with the resourceVersion read; a conflict is tried again. decided is true when an entry for ref is
-// there afterwards (written now or by an earlier pass) and is not Created yet; false, with no error, when the
-// Incident is gone, the entry is already Created, or the list is full ([Proposer.stop]).
+// there afterwards (written now or by an earlier pass) and is still Pending; false, with no error, when the
+// Incident is gone, the entry is already Created or Abandoned, or the list is full ([Proposer.stop]).
 func (p *Proposer) writePending(ctx context.Context, failed *remediationv1alpha1.RemediationRequest,
 	ref remediationv1alpha1.RequestRef) (decided bool, err error) {
 	gone := false
 	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		gone, decided = false, false
-		inc, err := p.incident(ctx, failed)
+		inc, err := p.incident(ctx, failed.Spec.IncidentRef)
 		if err != nil {
 			return err
 		}
@@ -419,7 +489,7 @@ func (p *Proposer) stop(ctx context.Context, failed *remediationv1alpha1.Remedia
 	var stopped *remediationv1alpha1.Incident
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		stopped = nil
-		inc, err := p.incident(ctx, failed)
+		inc, err := p.incident(ctx, failed.Spec.IncidentRef)
 		if err != nil || inc == nil || meta.IsStatusConditionTrue(inc.Status.Conditions,
 			remediationv1alpha1.ConditionRevertsStopped) {
 			return err
@@ -452,45 +522,103 @@ func (p *Proposer) stop(ctx context.Context, failed *remediationv1alpha1.Remedia
 	return nil
 }
 
-// create creates the revert name with spec. An existing request of that name is success only when its
-// spec.reverts names the same request and UID; otherwise it is a terminal error, with a Warning event on failed,
-// and the object is left as it is: a request at a name derived from failed's UID that reverts something else does
-// not go away by retrying.
-func (p *Proposer) create(ctx context.Context, failed *remediationv1alpha1.RemediationRequest, name string,
-	spec remediationv1alpha1.RemediationRequestSpec) error {
+// create creates the revert name with spec. refused says why the revert can never be made, for the entry to
+// move to Abandoned: an existing request of that name whose spec.reverts does not name the same request and
+// UID (left as it is), or a create the API server refuses as invalid. An existing request with the same link
+// is the revert made by an earlier pass. Any other failure is an error for a retry.
+func (p *Proposer) create(ctx context.Context, name string, spec remediationv1alpha1.RemediationRequestSpec) (
+	refused string, err error) {
 	rr := &remediationv1alpha1.RemediationRequest{
 		ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: name},
 		Spec:       *spec.DeepCopy(),
 	}
-	err := p.Client.Create(ctx, rr, client.FieldOwner(FieldOwner))
-	if !apierrors.IsAlreadyExists(err) {
-		if err != nil {
-			return fmt.Errorf("creating the revert %s: %w", name, err)
-		}
-		return nil
+	err = p.Client.Create(ctx, rr, client.FieldOwner(FieldOwner))
+	switch {
+	case err == nil:
+		return "", nil
+	case apierrors.IsInvalid(err):
+		return fmt.Sprintf("the API server refused the revert %s as invalid: %v", name, err), nil
+	case !apierrors.IsAlreadyExists(err):
+		return "", fmt.Errorf("creating the revert %s: %w", name, err)
 	}
 	existing := &remediationv1alpha1.RemediationRequest{}
 	if err := p.Reader.Get(ctx, client.ObjectKeyFromObject(rr), existing); err != nil {
 		// Gone again since the create, or unreadable: the next pass creates or reads it.
-		return fmt.Errorf("reading the existing revert %s: %w", name, err)
+		return "", fmt.Errorf("reading the existing revert %s: %w", name, err)
 	}
 	if existing.Spec.Reverts == nil || *existing.Spec.Reverts != *spec.Reverts {
-		p.event(failed, EventNameTaken, "No revert is proposed: RemediationRequest %s, the revert's name, exists "+
-			"and does not revert this request", name)
-		return reconcile.TerminalError(fmt.Errorf(
-			"RemediationRequest %s exists and does not revert %s with UID %s; it is left as it is",
-			name, spec.Reverts.Name, spec.Reverts.UID))
+		return fmt.Sprintf("RemediationRequest %s, the revert's name, exists and does not revert this request; "+
+			"it is left as it is", name), nil
+	}
+	return "", nil
+}
+
+// abandon moves the entry of ref in the status.revertsProposed of the Incident incRef names from Pending to
+// Abandoned, read live on each attempt, with the resourceVersion read; a conflict is tried again. When this
+// call made the move it logs why and writes one Warning event on eventOn, or on the Incident when eventOn is
+// nil. An Incident gone or with another UID, or an entry missing or no longer Pending, needs no write.
+func (p *Proposer) abandon(ctx context.Context, incRef remediationv1alpha1.IncidentRef,
+	ref remediationv1alpha1.RequestRef, why string, eventOn runtime.Object) error {
+	var moved *remediationv1alpha1.Incident
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		moved = nil
+		inc, err := p.incident(ctx, incRef)
+		if err != nil || inc == nil || !pending(inc, ref) {
+			return err
+		}
+		Entry(inc, ref).State = remediationv1alpha1.RevertAbandoned
+		if err := p.Client.Status().Update(ctx, inc, client.FieldOwner(FieldOwner)); err != nil {
+			return err
+		}
+		moved = inc
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("recording in Incident %s that %s gets no revert: %w", incRef.Name, ref.Name, err)
+	}
+	if moved == nil {
+		return nil
+	}
+	log.FromContext(ctx).Info("Abandoned the revert of a failed request: "+why, "request", ref.Name,
+		"incident", incRef.Name)
+	if eventOn == nil {
+		eventOn = moved
+	}
+	p.event(eventOn, EventAbandoned, "The revert of %s is abandoned and will not be made: %s", ref.Name, why)
+	return nil
+}
+
+// abandonDeleted moves every Pending entry of the deleted request name to Abandoned, in the Incidents of the
+// operator namespace, listed live: the revert of a request that no longer exists would fail the executor's
+// link check. The Warning event is on the Incident, since the request is gone. A failed list or write is an
+// error for a retry.
+func (p *Proposer) abandonDeleted(ctx context.Context, name string) error {
+	list := &remediationv1alpha1.IncidentList{}
+	if err := p.Reader.List(ctx, list, client.InNamespace(p.Namespace)); err != nil {
+		return fmt.Errorf("listing Incidents for the deleted RemediationRequest %s: %w", name, err)
+	}
+	for i := range list.Items {
+		inc := &list.Items[i]
+		for _, e := range inc.Status.RevertsProposed {
+			if e.Name != name || e.State != remediationv1alpha1.RevertPending {
+				continue
+			}
+			if err := p.abandon(ctx, remediationv1alpha1.IncidentRef{Name: inc.Name,
+				UID: remediationv1alpha1.UID(inc.UID)}, e.RequestRef, "the failed request was deleted", nil); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
 // markCreated moves the entry of ref in the status.revertsProposed of failed's Incident from Pending to Created,
 // read live on each attempt, with the resourceVersion read; a conflict is tried again. An Incident gone or with
-// another UID meanwhile, or an entry already Created, needs no write.
+// another UID meanwhile, or an entry no longer Pending, needs no write.
 func (p *Proposer) markCreated(ctx context.Context, failed *remediationv1alpha1.RemediationRequest,
 	ref remediationv1alpha1.RequestRef) error {
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		inc, err := p.incident(ctx, failed)
+		inc, err := p.incident(ctx, failed.Spec.IncidentRef)
 		if err != nil || inc == nil {
 			return err
 		}
@@ -500,7 +628,7 @@ func (p *Proposer) markCreated(ctx context.Context, failed *remediationv1alpha1.
 			// bring the entry back.
 			return reconcile.TerminalError(fmt.Errorf("incident %s has no entry for %s", inc.Name, ref.Name))
 		}
-		if e.State == remediationv1alpha1.RevertCreated {
+		if e.State != remediationv1alpha1.RevertPending {
 			return nil
 		}
 		e.State = remediationv1alpha1.RevertCreated

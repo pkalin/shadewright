@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -51,6 +52,11 @@ const (
 	incidentUID = "22222222-2222-4222-8222-222222222222"
 	targetUID   = "33333333-3333-4333-8333-333333333333"
 	incName     = "incident-a"
+	// hold is a finalizer that keeps an object in deletion.
+	hold = "example.com/hold"
+	// The kinds the tests name.
+	kindDeployment = "Deployment"
+	kindRequest    = "RemediationRequest"
 )
 
 var errBoom = errors.New("boom")
@@ -167,10 +173,52 @@ func recorded(t *testing.T, k client.Client) []remediationv1alpha1.ProposedRever
 }
 
 var (
-	link0    = remediationv1alpha1.RequestRef{Name: failedName, UID: failedUID}
-	created0 = remediationv1alpha1.ProposedRevert{RequestRef: link0, State: remediationv1alpha1.RevertCreated}
-	pending0 = remediationv1alpha1.ProposedRevert{RequestRef: link0, State: remediationv1alpha1.RevertPending}
+	link0      = remediationv1alpha1.RequestRef{Name: failedName, UID: failedUID}
+	created0   = remediationv1alpha1.ProposedRevert{RequestRef: link0, State: remediationv1alpha1.RevertCreated}
+	pending0   = remediationv1alpha1.ProposedRevert{RequestRef: link0, State: remediationv1alpha1.RevertPending}
+	abandoned0 = remediationv1alpha1.ProposedRevert{RequestRef: link0, State: remediationv1alpha1.RevertAbandoned}
 )
+
+// onlyAbandoned reports whether k's Incident records exactly the failed request, as Abandoned.
+func onlyAbandoned(t *testing.T, k client.Client) bool {
+	t.Helper()
+	got := recorded(t, k)
+	return len(got) == 1 && got[0] == abandoned0
+}
+
+// abandonedOnce reports whether events holds exactly one Warning event EventAbandoned.
+func abandonedOnce(events []string) bool {
+	return len(events) == 1 && strings.Contains(events[0], "Warning "+EventAbandoned+" ")
+}
+
+// noMatch makes the target's kind unknown to the API server, as when KEDA is uninstalled.
+func noMatch(w *world) {
+	w.funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+		opts ...client.GetOption) error {
+		if _, ok := obj.(*unstructured.Unstructured); ok {
+			return &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "apps", Kind: kindDeployment},
+				SearchedVersions: []string{"v1"}}
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}
+}
+
+// forbidden makes the target unreadable for the analyzer.
+func forbidden(w *world) {
+	w.funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+		opts ...client.GetOption) error {
+		if _, ok := obj.(*unstructured.Unstructured); ok {
+			return apierrors.NewForbidden(appsv1.Resource("deployments"), key.Name, errBoom)
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}
+}
+
+// incidentDeleting puts the Incident in deletion, held by a finalizer.
+func incidentDeleting(w *world) {
+	w.inc.DeletionTimestamp = &metav1.Time{Time: now}
+	w.inc.Finalizers = []string{hold}
+}
 
 // onlyCreated reports whether k's Incident records exactly the failed request, as Created.
 func onlyCreated(t *testing.T, k client.Client) bool {
@@ -278,7 +326,7 @@ func TestNeverProposes(t *testing.T) {
 		},
 		"the target being deleted": func(w *world) {
 			w.target.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
-			w.target.Finalizers = []string{"example.com/hold"}
+			w.target.Finalizers = []string{hold}
 		},
 		"values that cannot be inverted": func(w *world) {
 			w.failed.Spec.Action = remediationv1alpha1.Action{Type: remediationv1alpha1.ActionAdjustKedaMaxReplicas}
@@ -297,6 +345,11 @@ func TestNeverProposes(t *testing.T) {
 		"failed more than a day ago": func(w *world) {
 			w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(-MaxAge - time.Second))
 		},
+		"failed more than five minutes ahead": func(w *world) {
+			w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(MaxSkew + time.Second))
+		},
+		"the Incident being deleted":   incidentDeleting,
+		"the target's kind not served": noMatch,
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := newWorld()
@@ -329,6 +382,9 @@ func TestRevertible(t *testing.T) {
 	if Revertible(w.failed) {
 		t.Error("a request being deleted is not revertible")
 	}
+	if !failedUnverified(w.failed) {
+		t.Error("a request being deleted is still watched, so its Pending entry moves to Abandoned")
+	}
 	if Revertible(nil) {
 		t.Error("nil is not revertible")
 	}
@@ -337,7 +393,7 @@ func TestRevertible(t *testing.T) {
 // TestFailedReadIsRetried: a failed read of the request, the Incident or the target returns an error for a
 // retry, creates nothing and records nothing; it is never taken for "gone".
 func TestFailedReadIsRetried(t *testing.T) {
-	for _, kind := range []string{"RemediationRequest", "Incident", "Deployment"} {
+	for _, kind := range []string{kindRequest, "Incident", kindDeployment} {
 		t.Run(kind, func(t *testing.T) {
 			w := newWorld()
 			down := true
@@ -387,8 +443,8 @@ func TestAlreadyExistsWithTheSameLink(t *testing.T) {
 	}
 }
 
-// TestAlreadyExistsWithAnotherLink: a request at the derived name that reverts something else, or nothing, is
-// a terminal error (no retry with backoff: retrying does not move it), with a Warning event on the failed
+// TestAlreadyExistsWithAnotherLink: a request at the derived name that reverts something else, or nothing,
+// moves the entry to Abandoned (retrying does not move that request), with one Warning event on the failed
 // request, and is left as it is.
 func TestAlreadyExistsWithAnotherLink(t *testing.T) {
 	for name, reverts := range map[string]*remediationv1alpha1.RequestRef{
@@ -404,24 +460,20 @@ func TestAlreadyExistsWithAnotherLink(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: revertKey.Name}, Spec: spec}
 			w.extra = append(w.extra, squat)
 			p, k := w.build(t)
-			err := reconcileFailed(p)
-			if err == nil {
-				t.Fatal("an existing request with another link was taken as the revert")
+			for range 2 {
+				if err := reconcileFailed(p); err != nil {
+					t.Fatalf("Reconcile: %v", err)
+				}
 			}
-			if !errors.Is(err, reconcile.TerminalError(nil)) {
-				t.Errorf("error %v is retried with backoff, want a terminal error", err)
-			}
-			if ev := events(p); len(ev) != 1 || !strings.Contains(ev[0], "Warning "+EventNameTaken) {
-				t.Errorf("events = %q, want one Warning %s", ev, EventNameTaken)
+			if ev := events(p); !abandonedOnce(ev) || !strings.Contains(ev[0], "does not revert") {
+				t.Errorf("events = %q, want one Warning %s naming the taken name", ev, EventAbandoned)
 			}
 			got := revertOf(t, k)
 			if got == nil || !equality.Semantic.DeepEqual(got.Spec.Reverts, reverts) {
 				t.Errorf("the existing request was changed: %+v", got)
 			}
-			for _, r := range recorded(t, k) {
-				if r.State == remediationv1alpha1.RevertCreated {
-					t.Error("the failed request was recorded as Created")
-				}
+			if !onlyAbandoned(t, k) {
+				t.Errorf("status.revertsProposed = %+v, want the failed request as Abandoned", recorded(t, k))
 			}
 		})
 	}
@@ -512,12 +564,11 @@ func TestDecisionRecordedBeforeCreate(t *testing.T) {
 	}
 }
 
-// TestPendingKeepsTheDecision: a Pending entry leads to the create and the move to Created, also when the
-// request has since passed the age bound, its target is gone or the list is full: the decision was taken.
+// TestPendingKeepsTheDecision: a Pending entry keeps the decision that no second revert is proposed, not that
+// this one must be made. It leads to the create when the checks pass, also with a full list (the entry is
+// already in it).
 func TestPendingKeepsTheDecision(t *testing.T) {
 	w := newWorld()
-	w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(-2 * MaxAge))
-	w.target = nil
 	fill(w)
 	w.inc.Status.RevertsProposed[len(w.inc.Status.RevertsProposed)-1] = pending0
 	p, k := w.build(t)
@@ -530,6 +581,168 @@ func TestPendingKeepsTheDecision(t *testing.T) {
 	got := recorded(t, k)
 	if got[len(got)-1] != created0 {
 		t.Errorf("the entry is %+v, want Created", got[len(got)-1])
+	}
+}
+
+// TestPendingRunsTheChecks: a retried create runs the checks of the first one. When one says no, no revert is
+// created, the entry moves to Abandoned for good, and one Warning event on the failed request says why; a
+// second pass changes nothing and writes no second event.
+func TestPendingRunsTheChecks(t *testing.T) {
+	for name, edit := range map[string]func(w *world){
+		"the target gone":              func(w *world) { w.target = nil },
+		"the target made again":        func(w *world) { w.target.UID = "24242424-2424-4424-8424-242424242424" },
+		"the target forbidden":         forbidden,
+		"the target's kind not served": noMatch,
+		"the target being deleted": func(w *world) {
+			w.target.DeletionTimestamp = &metav1.Time{Time: now}
+			w.target.Finalizers = []string{hold}
+		},
+		"past the age bound": func(w *world) {
+			w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(-2 * MaxAge))
+		},
+		"ahead of the clock": func(w *world) {
+			w.failed.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(time.Hour))
+		},
+		"the Incident being deleted": incidentDeleting,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld()
+			w.inc.Status.RevertsProposed = []remediationv1alpha1.ProposedRevert{pending0}
+			edit(w)
+			p, k := w.build(t)
+			for range 2 {
+				if err := reconcileFailed(p); err != nil {
+					t.Fatalf("Reconcile: %v", err)
+				}
+			}
+			if revertOf(t, k) != nil {
+				t.Error("a revert was created")
+			}
+			if !onlyAbandoned(t, k) {
+				t.Errorf("status.revertsProposed = %+v, want the failed request as Abandoned", recorded(t, k))
+			}
+			if ev := events(p); !abandonedOnce(ev) {
+				t.Errorf("events = %q, want one Warning %s", ev, EventAbandoned)
+			}
+		})
+	}
+}
+
+// TestCreateAfterAnotherCreatorFinished: a pass that read the entry as Pending, while another pass created the
+// revert, moved the entry to Created and the revert was deleted, reads the Incident again right before the
+// create and creates nothing.
+func TestCreateAfterAnotherCreatorFinished(t *testing.T) {
+	w := newWorld()
+	w.inc.Status.RevertsProposed = []remediationv1alpha1.ProposedRevert{pending0}
+	incidentReads := 0
+	w.funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+		opts ...client.GetOption) error {
+		if err := c.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if _, ok := obj.(*remediationv1alpha1.Incident); ok {
+			if incidentReads++; incidentReads == 1 {
+				// The other pass finishes after this read: Created, and its revert deleted again.
+				done := &remediationv1alpha1.Incident{}
+				if err := c.Get(ctx, key, done); err != nil {
+					return err
+				}
+				done.Status.RevertsProposed = []remediationv1alpha1.ProposedRevert{created0}
+				return c.Status().Update(ctx, done)
+			}
+		}
+		return nil
+	}
+	p, k := w.build(t)
+	if err := reconcileFailed(p); err != nil {
+		t.Fatal(err)
+	}
+	if revertOf(t, k) != nil {
+		t.Error("a second revert was created after another pass had finished")
+	}
+	if !onlyCreated(t, k) {
+		t.Errorf("status.revertsProposed = %+v, want the failed request as Created", recorded(t, k))
+	}
+}
+
+// TestDeletedRequestAbandons: a failed request deleted after its Pending write, or being deleted, moves the
+// entry to Abandoned with one Warning event (on the Incident once the request is gone), and nothing is created.
+func TestDeletedRequestAbandons(t *testing.T) {
+	for name, c := range map[string]struct {
+		edit func(w *world)
+		on   string
+	}{
+		"gone": {func(w *world) { w.failed = nil }, "Incident"},
+		"being deleted": {func(w *world) {
+			w.failed.DeletionTimestamp = &metav1.Time{Time: now}
+			w.failed.Finalizers = []string{hold}
+		}, kindRequest},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld()
+			w.inc.Status.RevertsProposed = []remediationv1alpha1.ProposedRevert{pending0}
+			c.edit(w)
+			p, k := w.build(t)
+			fake := p.Recorder.(*record.FakeRecorder)
+			on := &kindRecorder{EventRecorder: fake}
+			p.Recorder = on
+			for range 2 {
+				if err := reconcileFailed(p); err != nil {
+					t.Fatalf("Reconcile: %v", err)
+				}
+			}
+			p.Recorder = fake
+			if revertOf(t, k) != nil {
+				t.Error("a revert was created")
+			}
+			if !onlyAbandoned(t, k) {
+				t.Errorf("status.revertsProposed = %+v, want the failed request as Abandoned", recorded(t, k))
+			}
+			if ev := events(p); !abandonedOnce(ev) || len(on.kinds) != 1 || on.kinds[0] != c.on {
+				t.Errorf("events = %q on %v, want one Warning %s on the %s", ev, on.kinds, EventAbandoned, c.on)
+			}
+		})
+	}
+}
+
+// kindRecorder notes the kind of the object of each event.
+type kindRecorder struct {
+	record.EventRecorder
+	kinds []string
+}
+
+func (r *kindRecorder) Eventf(obj runtime.Object, eventType, reason, format string, args ...any) {
+	switch obj.(type) {
+	case *remediationv1alpha1.Incident:
+		r.kinds = append(r.kinds, "Incident")
+	case *remediationv1alpha1.RemediationRequest:
+		r.kinds = append(r.kinds, kindRequest)
+	default:
+		r.kinds = append(r.kinds, "other")
+	}
+	r.EventRecorder.Eventf(obj, eventType, reason, format, args...)
+}
+
+// TestInvalidCreateAbandons: a create the API server refuses as invalid never succeeds by retrying: the entry
+// moves to Abandoned with one Warning event, and the pass returns no error.
+func TestInvalidCreateAbandons(t *testing.T) {
+	w := newWorld()
+	w.funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		return apierrors.NewInvalid(schema.GroupKind{Group: remediationv1alpha1.GroupVersion.Group,
+			Kind: kindRequest}, obj.GetName(), nil)
+	}
+	p, k := w.build(t)
+	if err := reconcileFailed(p); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if revertOf(t, k) != nil {
+		t.Error("a revert was created")
+	}
+	if !onlyAbandoned(t, k) {
+		t.Errorf("status.revertsProposed = %+v, want the failed request as Abandoned", recorded(t, k))
+	}
+	if ev := events(p); !abandonedOnce(ev) {
+		t.Errorf("events = %q, want one Warning %s", ev, EventAbandoned)
 	}
 }
 
@@ -676,9 +889,11 @@ func TestAgeBound(t *testing.T) {
 		at   time.Time
 		want bool
 	}{
-		"just within": {now.Add(-MaxAge), true},
-		"older":       {now.Add(-MaxAge - time.Second), false},
-		"no time":     {time.Time{}, false},
+		"just within":           {now.Add(-MaxAge), true},
+		"older":                 {now.Add(-MaxAge - time.Second), false},
+		"no time":               {time.Time{}, false},
+		"ahead within the skew": {now.Add(MaxSkew), true},
+		"ahead beyond the skew": {now.Add(MaxSkew + time.Second), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := newWorld()
@@ -702,7 +917,7 @@ func TestTargetForbidden(t *testing.T) {
 	w := newWorld()
 	w.funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
 		opts ...client.GetOption) error {
-		if objKind(c, obj) == "Deployment" {
+		if objKind(c, obj) == kindDeployment {
 			return apierrors.NewForbidden(appsv1.Resource("deployments"), key.Name, errBoom)
 		}
 		return c.Get(ctx, key, obj, opts...)

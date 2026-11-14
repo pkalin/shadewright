@@ -878,7 +878,7 @@ var _ = Describe("Incident", func() {
 		Expect(k8sClient.Status().Update(ctx, escalated)).To(Succeed())
 	})
 
-	It("keeps every entry of revertsProposed and moves a state only from Pending to Created", func() {
+	It("keeps every entry of revertsProposed and moves a state only from Pending to Created or Abandoned", func() {
 		inc := fx.Incident("default", unique("inc"))
 		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
 		ref := func(name, uid string, state v1alpha1.RevertState) v1alpha1.ProposedRevert {
@@ -897,13 +897,23 @@ var _ = Describe("Incident", func() {
 		inc.Status.RevertsProposed[0].State = v1alpha1.RevertCreated
 		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "Pending may move to Created")
 		created := inc.Status.RevertsProposed[0]
+		third := ref("remediation-e", "31313131-3131-4131-8131-313131313131", v1alpha1.RevertPending)
+		inc.Status.RevertsProposed = append(inc.Status.RevertsProposed, third)
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		inc.Status.RevertsProposed[2].State = v1alpha1.RevertAbandoned
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "Pending may move to Abandoned")
+		abandoned := inc.Status.RevertsProposed[2]
 
 		for _, kept := range [][]v1alpha1.ProposedRevert{
-			{second},
+			{second, abandoned},
+			{created, second},
 			nil,
 			{ref(created.Name, "29292929-2929-4929-8929-292929292929", v1alpha1.RevertCreated), second},
 			{ref("remediation-c", string(created.UID), v1alpha1.RevertCreated), second},
-			{ref(created.Name, string(created.UID), v1alpha1.RevertPending), second},
+			{ref(created.Name, string(created.UID), v1alpha1.RevertPending), second, abandoned},
+			{ref(created.Name, string(created.UID), v1alpha1.RevertAbandoned), second, abandoned},
+			{created, second, ref(abandoned.Name, string(abandoned.UID), v1alpha1.RevertPending)},
+			{created, second, ref(abandoned.Name, string(abandoned.UID), v1alpha1.RevertCreated)},
 		} {
 			changed := inc.DeepCopy()
 			changed.Status.RevertsProposed = kept
@@ -913,14 +923,43 @@ var _ = Describe("Incident", func() {
 		}
 
 		for _, bad := range [][]v1alpha1.ProposedRevert{
-			{created, second, ref("remediation-d", string(second.UID), v1alpha1.RevertPending)},
-			{created, second, ref("remediation-d", "30303030-3030-4030-8030-303030303030", "Done")},
+			{created, second, abandoned, ref("remediation-d", string(second.UID), v1alpha1.RevertPending)},
+			{created, second, abandoned, ref("remediation-d", "30303030-3030-4030-8030-303030303030", "Done")},
 		} {
 			changed := inc.DeepCopy()
 			changed.Status.RevertsProposed = bad
 			err := k8sClient.Status().Update(ctx, changed)
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error for %v: %v", bad, err)
 		}
+	})
+
+	// The rule on revertsProposed sits on the optional status object, so a write that removes the whole status
+	// would skip it; the rule on the root refuses that once the list has entries.
+	It("refuses removing the status while revertsProposed has entries", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Status.Phase = v1alpha1.IncidentEscalated
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		cleared := inc.DeepCopy()
+		cleared.Status = v1alpha1.IncidentStatus{}
+		Expect(k8sClient.Status().Update(ctx, cleared)).To(Succeed(), "a status without entries may be removed")
+		Expect(cleared.Status).To(Equal(v1alpha1.IncidentStatus{}))
+
+		cleared.Status.RevertsProposed = []v1alpha1.ProposedRevert{{RequestRef: v1alpha1.RequestRef{
+			Name: "remediation-a", UID: "27272727-2727-4727-8727-272727272727"}, State: v1alpha1.RevertCreated}}
+		Expect(k8sClient.Status().Update(ctx, cleared)).To(Succeed())
+		removed := cleared.DeepCopy()
+		removed.Status = v1alpha1.IncidentStatus{}
+		err := k8sClient.Status().Update(ctx, removed)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("status cannot be removed"))
+
+		// A write of the main resource keeps the stored status, so it passes.
+		spec := cleared.DeepCopy()
+		spec.Labels = map[string]string{"example.com/touched": "yes"}
+		spec.Status = v1alpha1.IncidentStatus{}
+		Expect(k8sClient.Update(ctx, spec)).To(Succeed())
+		Expect(spec.Status.RevertsProposed).To(HaveLen(1))
 	})
 
 	// The other writers of Incident status in the analyzer (the analysis controller, the Incident controller's

@@ -20,17 +20,23 @@ API group and version: `remediation.shadewright.io/v1alpha1`
 
 ## Incident
 
-Incident groups repeated symptoms of one problem on one workload.
+Incident groups repeated symptoms of one problem on one workload. The rule on the root keeps a write from
+removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
+entries.
 
 - API version: `remediation.shadewright.io/v1alpha1`
 - Kind: `Incident`
 - Scope: Namespaced
 
+Validation rules:
+
+- status cannot be removed while status.revertsProposed has entries: `!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed) == 0 || has(self.status)`
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [IncidentSpec](#incidentspec) | Yes | spec identifies the incident.<br>Rule: spec is immutable; a different symptom is a new Incident<br>Rule: occurrenceNumber and previousIncident are set together<br>Rule: previousIncident must be the occurrence before this one of the same fingerprint |
-| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created |
+| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created or Abandoned |
 
 ## RemediationPolicy
 
@@ -710,7 +716,7 @@ IncidentStatus holds the deduplication state that must survive restarts (ADR-000
 Validation rules:
 
 - resolvedTime cannot change while the phase stays Resolved: `!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)`
-- revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created: `!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || n.state == 'Created'))))`
+- revertsProposed only grows: an entry is never removed, and its state only moves from Pending to Created or Abandoned: `!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || n.state == o.state))))`
 
 Used by: [Incident](#incident).
 
@@ -727,7 +733,7 @@ Used by: [Incident](#incident).
 | `handledHint` | [HintRef](#hintref) | No | handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3): written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint. Absent for an analysis without a hint. The trigger also writes it, with the Analyzed reason CoolingDown or BudgetSpent, for a hint it refuses without an analysis. |
 | `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).<br>Maximum items: 20<br>Maximum length: 200<br>Minimum length: 1<br>Pattern: `^[a-z0-9][a-z0-9-]{0,199}$`<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
-| `revertsProposed` | [ProposedRevert](#proposedrevert) array | No | revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert proposer decided to revert (ADR-0030 section 8, #96), oldest first. The proposer writes an entry in state Pending before it creates the revert and moves it to Created once the revert exists; it never takes a new decision for a request listed here, so a failed request gets one revert for good, also after that revert was deleted. Entries are never removed and a state never moves back; a full list stops new reverts for this incident instead (condition RevertsStopped).<br>Maximum items: 20<br>List type: map<br>List key: `uid` |
+| `revertsProposed` | [ProposedRevert](#proposedrevert) array | No | revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert proposer decided to revert (ADR-0030 section 8, #96), oldest first. The proposer writes an entry in state Pending before it creates the revert and moves it to Created once the revert exists; it never takes a new decision for a request listed here, so a failed request gets one revert for good, also after that revert was deleted. When a check before a create says no (the target is gone, the request passed the age bound, the request was deleted, the revert's name is taken by another request, the create is refused as invalid), the entry moves to Abandoned instead, which is final: no revert is made for it. Entries are never removed, a state moves only from Pending to Created or Abandoned, and the status cannot be removed while the list has entries; a full list stops new reverts for this incident instead (condition RevertsStopped).<br>Maximum items: 20<br>List type: map<br>List key: `uid` |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase.<br>List type: map<br>List key: `type` |
 
 ### IncomingHandoff
@@ -1065,7 +1071,7 @@ Used by: [IncidentStatus](#incidentstatus).
 | --- | --- | --- | --- |
 | `name` | string | Yes | name of the request.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
 | `uid` | [UID](#uid) | Yes | uid of the request, so a request recreated under the same name is never taken for it.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
-| `state` | [RevertState](#revertstate) | Yes | state is Pending from the decision until the revert exists, then Created. It never moves back.<br>One of `Pending`, `Created` |
+| `state` | [RevertState](#revertstate) | Yes | state is Pending from the decision until the revert exists, then Created, or Abandoned when a check before the create said no. Created and Abandoned are final.<br>One of `Pending`, `Created`, `Abandoned` |
 
 ### PullRequestStatus
 
@@ -1366,14 +1372,15 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 RevertState is the state of an entry of an Incident's status.revertsProposed.
 
 - Underlying type: string
-- One of `Pending`, `Created`
+- One of `Pending`, `Created`, `Abandoned`
 
 Used by: [ProposedRevert](#proposedrevert).
 
 | Value | Description |
 | --- | --- |
-| `Pending` | RevertPending: the proposer decided to revert the request and has not seen its create succeed yet. A later pass creates the revert (the create is idempotent) and moves the entry to Created. |
+| `Pending` | RevertPending: the proposer decided that the request gets no second revert, and a create is still coming. Every create, the first or a retried one, runs the same checks first; the entry then moves to Created or, when a check says no, to Abandoned. |
 | `Created` | RevertCreated: the revert exists or existed. Nothing more is done for the request, also after the revert was deleted. |
+| `Abandoned` | RevertAbandoned: a check before the create said no (the target is gone, replaced or not readable, the request passed the age bound or was deleted, the Incident is being deleted, the revert's name is taken by another request, the create was refused as invalid), so no revert is made for the request, for good. A Warning event RevertAbandoned says why. |
 
 ### ReviewCheck
 

@@ -48,16 +48,22 @@ const ConditionRevertsStopped = "RevertsStopped"
 const ReasonRevertListFull = "RevertListFull"
 
 // RevertState is the state of an entry of an Incident's status.revertsProposed.
-// +kubebuilder:validation:Enum=Pending;Created
+// +kubebuilder:validation:Enum=Pending;Created;Abandoned
 type RevertState string
 
 const (
-	// RevertPending: the proposer decided to revert the request and has not seen its create succeed yet. A
-	// later pass creates the revert (the create is idempotent) and moves the entry to Created.
+	// RevertPending: the proposer decided that the request gets no second revert, and a create is still coming.
+	// Every create, the first or a retried one, runs the same checks first; the entry then moves to Created or,
+	// when a check says no, to Abandoned.
 	RevertPending RevertState = "Pending"
 	// RevertCreated: the revert exists or existed. Nothing more is done for the request, also after the revert
 	// was deleted.
 	RevertCreated RevertState = "Created"
+	// RevertAbandoned: a check before the create said no (the target is gone, replaced or not readable, the
+	// request passed the age bound or was deleted, the Incident is being deleted, the revert's name is taken by
+	// another request, the create was refused as invalid), so no revert is made for the request, for good. A
+	// Warning event RevertAbandoned says why.
+	RevertAbandoned RevertState = "Abandoned"
 )
 
 // ProposedRevert is an entry of an Incident's status.revertsProposed: a failed request, by name and UID, and
@@ -65,7 +71,8 @@ const (
 type ProposedRevert struct {
 	RequestRef `json:",inline"`
 
-	// state is Pending from the decision until the revert exists, then Created. It never moves back.
+	// state is Pending from the decision until the revert exists, then Created, or Abandoned when a check
+	// before the create said no. Created and Abandoned are final.
 	// +required
 	State RevertState `json:"state"`
 }

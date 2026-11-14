@@ -34,7 +34,9 @@ import (
 // pull request is recorded.
 const maxRenderEnds = 5
 
-// maxRenderEndEntries bounds the requests renderEnds keeps a count for.
+// maxRenderEndEntries bounds the requests renderEnds keeps a count for. When more than 1,024 requests have a count
+// at once, eviction can drop a live count, so five attempts are guaranteed only while the entry survives. Known
+// and accepted (ADR-0035).
 const maxRenderEndEntries = 1024
 
 // renderEnds counts, per request and plan digest, the ends of the render process in a row that are neither an

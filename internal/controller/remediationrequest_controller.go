@@ -201,6 +201,8 @@ type RemediationRequestReconciler struct {
 	// (renderends.go), so a build that ends it that way on every retry is refused. Memory only, dropped with
 	// checked.
 	renderEnds renderEnds
+	// renderCheck is the render check of checkRender; nil is semdiff.Check. Tests replace it.
+	renderCheck func(context.Context, semdiff.Input) (semdiff.Result, error)
 	// reportCounters holds, per request in Verifying, the executor's memory of its VerificationReport's sample
 	// counter (clearing.go). Memory only: after a restart success waits one more check. Dropped when the request
 	// ends, is being deleted or is gone, not with forget, which runs on every reconcile of a request after the

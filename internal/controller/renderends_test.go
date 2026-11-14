@@ -29,6 +29,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
+	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
 func renderEndsRequest(name, uid, digest string) *remediationv1alpha1.RemediationRequest {
@@ -146,4 +147,75 @@ func TestRenderEndsForgotten(t *testing.T) {
 	if n := len(r.renderEnds.m); n != 0 {
 		t.Fatalf("got %d counts after forget, want none", n)
 	}
+}
+
+// checkRenderEnds runs checkRender for rr with a render check that returns the next of outcomes on each call,
+// against a build directory deploy in a fake repository, and returns what each run returned.
+func checkRenderEnds(t *testing.T, rr *remediationv1alpha1.RemediationRequest, outcomes ...error) []error {
+	t.Helper()
+	ctx := context.Background()
+	git := fakegit.NewGit("main", map[string][]byte{
+		"deploy/kustomization.yaml": []byte("resources:\n- app.yaml\n"),
+		"deploy/app.yaml":           []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n"),
+	})
+	head, err := git.BranchHead(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: "deploy/app.yaml", BuildPath: "deploy"}
+	calls := 0
+	r := &RemediationRequestReconciler{renderCheck: func(context.Context, semdiff.Input) (semdiff.Result, error) {
+		calls++
+		return semdiff.Result{}, outcomes[calls-1]
+	}}
+	got := make([]error, 0, len(outcomes))
+	for range outcomes {
+		got = append(got, r.checkRender(ctx, git, head, []byte("changed"), rr))
+	}
+	if calls != len(outcomes) {
+		t.Fatalf("the render check ran %d times, want %d", calls, len(outcomes))
+	}
+	return got
+}
+
+// TestCheckRenderCountsRenderEnds checks the count where checkRender wires it (#614, ADR-0035): four ends of
+// the render process and then an answer are retried and pass; five ends in a row, with a context error between
+// them that does not count, end as the TooLarge refusal with the fixed message.
+func TestCheckRenderCountsRenderEnds(t *testing.T) {
+	retried := func(t *testing.T, i int, err error) {
+		t.Helper()
+		if _, refused := errors.AsType[*renderRefusal](err); refused || !errors.Is(err, crashed) {
+			t.Fatalf("run %d: got %v, want the end for a retry", i+1, err)
+		}
+	}
+	t.Run("passes after four ends", func(t *testing.T) {
+		got := checkRenderEnds(t, renderEndsRequest("a", "uid-a", "digest-1"), crashed, crashed, crashed, crashed, nil)
+		for i, err := range got[:4] {
+			retried(t, i, err)
+		}
+		if got[4] != nil {
+			t.Fatalf("run 5: got %v, want a pass", got[4])
+		}
+	})
+	t.Run("refused at the fifth end in a row", func(t *testing.T) {
+		got := checkRenderEnds(t, renderEndsRequest("a", "uid-a", "digest-1"),
+			crashed, crashed, context.Canceled, crashed, crashed, crashed)
+		for i, err := range got[:5] {
+			if i == 2 {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("run 3: got %v, want the context error", err)
+				}
+				continue
+			}
+			retried(t, i, err)
+		}
+		rf, ok := errors.AsType[*renderRefusal](got[5])
+		if !ok || rf.reason != string(semdiff.ReasonTooLarge) {
+			t.Fatalf("run 6: got %v, want a TooLarge refusal", got[5])
+		}
+		want := fmt.Sprintf("The render process ended without an answer %d times in a row; the last time it crashed before it answered", maxRenderEnds)
+		if rf.message != want {
+			t.Fatalf("got the message %q, want %q", rf.message, want)
+		}
+	})
 }

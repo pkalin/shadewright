@@ -1007,7 +1007,11 @@ func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git prov
 	}
 	files, err := semdiff.Load(ctx, git, head, string(src.BuildPath))
 	if err == nil {
-		_, err = semdiff.Check(ctx, semdiff.Input{
+		check := semdiff.Check
+		if r.renderCheck != nil {
+			check = r.renderCheck
+		}
+		_, err = check(ctx, semdiff.Input{
 			Files: files, Path: string(src.BuildPath), File: string(src.Path), Patched: changed,
 			Target: rr.Spec.TargetRef, Action: rr.Spec.Action,
 		})

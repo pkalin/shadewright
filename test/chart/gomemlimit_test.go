@@ -209,3 +209,45 @@ func TestChartRefusesAMemoryLimitItCannotReadWithoutAnOverride(t *testing.T) {
 		t.Errorf("verifier GOMEMLIMIT = %s, want 64MiB", got)
 	}
 }
+
+// TestChartReadsLeadingZerosAsDecimal checks that an executor.goMemLimit with leading zeros counts in the budget
+// as Go reads it: 0280MiB is 280 MiB, which with the render process's room does not fit in 512Mi. Read as
+// octal, the number fails on its 8, counts as zero and the budget passes.
+func TestChartReadsLeadingZerosAsDecimal(t *testing.T) {
+	out := helmFails(t, "executor.resources.limits.memory=512Mi", "executor.goMemLimit=0280MiB")
+	if !strings.Contains(out, "render process") {
+		t.Errorf("refused, but not for its size:\n%s", out)
+	}
+}
+
+// TestChartRoundsAFractionalByteCountUp checks that a memory limit given as a fractional number of bytes (a
+// number through --set-json) is rounded up, as Kubernetes rounds a quantity: 545259519.1 bytes is 520 MiB, which
+// holds a 200MiB goMemLimit and the render process's room exactly.
+func TestChartRoundsAFractionalByteCountUp(t *testing.T) {
+	const room = semdiff.MaxRenderResident + semdiff.RenderOutsideData
+	if 200<<20+room != 545259520 {
+		t.Fatalf("the budget of 200MiB is %d bytes, not 545259520: change the test's limit", 200<<20+room)
+	}
+	args := helmArgsWith(t, ciValues(t), "clusterId=chart-test", "executor.goMemLimit=200MiB")
+	r := renderArgs(t, append(args, "--set-json", "executor.resources.limits.memory=545259519.1"))
+	if got := goMemLimit(t, r, executorDeployment); got != "200MiB" {
+		t.Errorf("GOMEMLIMIT = %s, want 200MiB", got)
+	}
+}
+
+// TestChartReadsLargeMemoryLimits checks that a large valid memory limit neither overflows the template's integer
+// arithmetic nor is refused: 300000Ti gives exactly 36 percent, and a limit of 1 Ei or more (8388608Ti is 8 Ei,
+// past an int64; 26 digits of bytes do not fit one) is read as 1 Ei, so GOMEMLIMIT stays positive.
+func TestChartReadsLargeMemoryLimits(t *testing.T) {
+	for limit, want := range map[string]int64{
+		"300000Ti":                   300000 << 40 / 100 * 36,
+		"8388608Ti":                  415051741658464911, // 36 percent of 1 Ei, rounded down
+		"10000000000000000000000000": 415051741658464911,
+	} {
+		r := defaultRender(t, "executor.resources.limits.memory="+limit)
+		got, err := strconv.ParseInt(goMemLimit(t, r, executorDeployment), 10, 64)
+		if err != nil || got <= 0 || got != want {
+			t.Errorf("%s: GOMEMLIMIT = %d (%v), want %d", limit, got, err, want)
+		}
+	}
+}

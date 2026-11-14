@@ -40,5 +40,6 @@
 | [0036](0036-the-model-sees-the-scaledobject-of-a-keda-incident.md) | The model sees the ScaledObject of a KEDA incident | Proposed |
 | [0037](0037-the-anthropic-api-as-a-second-model-provider.md) | The Anthropic API as a second model provider and its API key | Proposed |
 | [0038](0038-control-plane-mode-a-hub-that-many-clusters-report-to.md) | Control plane mode: a hub that many clusters report to | Proposed |
+| [0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) | Code sizes a memory proposal from the metrics, and the pull request shows the evidence | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

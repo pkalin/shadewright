@@ -159,6 +159,9 @@ type modelSource interface {
 	// factory returns the factory for a run of s; each call is a new run. done, when not nil, is called after
 	// the analysis and returns an error when the run did not use the source as recorded (a reply left over).
 	factory(s *scenario) (f analysis.ModelFactory, done func() error, err error)
+	// manifestProvider names the model provider and its settings for the manifest. Fake and foundry return
+	// "" and nil: their manifests leave both out, so they and their digests stay as before the fields existed.
+	manifestProvider() (name string, anthropic *manifestAnthropic)
 	// expectedModels names the model of each configured role (Config.ExpectedModels).
 	expectedModels() map[analysis.Role]string
 	// deployments are the triage and escalation deployments (escalation nil when not configured).

@@ -40,6 +40,9 @@ type Message struct {
 	ToolCalls []ToolCall
 	// ToolCallID ties a tool result to the call it answers (tool messages only).
 	ToolCallID string
+	// ProviderBlocks is the Completion.ProviderBlocks of the reply whose ToolCalls this assistant message
+	// carries, copied unchanged; empty otherwise. Adapters that do not use it ignore it.
+	ProviderBlocks Opaque
 }
 
 // ToolDefinition describes a tool the model may call.
@@ -87,6 +90,19 @@ type Completion struct {
 	// Usage then counts only what was read; a budget should count the call conservatively, for example as
 	// the request's whole output limit.
 	UsageUnknown bool
+	// ProviderBlocks is what the adapter needs back on the assistant message that carries ToolCalls in the
+	// next request of the conversation (Message.ProviderBlocks), for example thinking blocks. The caller never
+	// reads, logs or stores it. Empty without tool calls and for adapters that need nothing back.
+	ProviderBlocks Opaque
+}
+
+// OutputBounder is implemented by a ModelProvider that may bill more output tokens for a request than its
+// MaxOutputTokens, for example because it adds room for thinking to the limit it sends. The caller then
+// bounds a call's cost with OutputSpend instead of MaxOutputTokens: in the budget check before the call, and
+// in the charge of a call that failed or whose usage is unknown.
+type OutputBounder interface {
+	// OutputSpend returns the most output tokens a request with this MaxOutputTokens can be billed.
+	OutputSpend(maxOutputTokens int) int
 }
 
 // ModelProvider calls a language model.

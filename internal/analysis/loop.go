@@ -653,7 +653,9 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 		if len(c.ToolCalls) > MaxToolCallsPerReply {
 			return nil, nil, ReasonInvalidOutput, nil
 		}
-		msgs = append(msgs, providers.Message{Role: providers.RoleAssistant, ToolCalls: c.ToolCalls})
+		// ProviderBlocks goes back unchanged and unread: the adapter's own data, such as thinking blocks.
+		msgs = append(msgs, providers.Message{Role: providers.RoleAssistant, ToolCalls: c.ToolCalls,
+			ProviderBlocks: c.ProviderBlocks})
 		for _, call := range c.ToolCalls {
 			var content string
 			if used >= steps {
@@ -843,7 +845,7 @@ func (r *run) call(model providers.ModelProvider, role Role, d *remediationv1alp
 		Messages: slices.Clone(msgs), Tools: offer, MaxOutputTokens: r.limits.MaxOutputTokens,
 		ResponseSchema: ResponseSchema(),
 	}
-	upper := estimateInput(req) + int64(r.limits.MaxOutputTokens)
+	upper := estimateInput(req) + outputBound(model, r.limits.MaxOutputTokens)
 	key := d.Endpoint + "\x00" + d.Deployment
 	for attempt := 0; ; attempt++ {
 		if err := r.parent.Err(); err != nil {
@@ -970,12 +972,22 @@ func endModelCall(span trace.Span, a attemptResult) {
 	span.End()
 }
 
+// outputBound is the most output tokens a call with this limit can be billed: the limit, or what the model
+// says it may bill when it adds to the limit it sends (the Anthropic adapter adds its thinking allowance).
+func outputBound(model providers.ModelProvider, limit int) int64 {
+	if b, ok := model.(providers.OutputBounder); ok {
+		return int64(max(b.OutputSpend(limit), limit))
+	}
+	return int64(limit)
+}
+
 // estimateInput is a conservative estimate of a request's input tokens: one token per two bytes of
-// everything sent, which overestimates the tokenisers in use for English text and JSON.
+// everything sent, the provider blocks a message carries back included, which overestimates the tokenisers in
+// use for English text and JSON.
 func estimateInput(req providers.CompletionRequest) int64 {
 	n := len(req.ResponseSchema)
 	for _, m := range req.Messages {
-		n += len(m.Content) + len(m.ToolCallID)
+		n += len(m.Content) + len(m.ToolCallID) + m.ProviderBlocks.Len()
 		for _, c := range m.ToolCalls {
 			n += len(c.ID) + len(c.Name) + len(c.Arguments)
 		}

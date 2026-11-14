@@ -916,3 +916,73 @@ func TestPreviousFromTemplateLeavesAnUntargetableSubjectToTheTargetCheck(t *test
 		}
 	}
 }
+
+// boundedModel is a scriptModel whose adapter, like the Anthropic one, may bill up to extra output tokens on
+// top of the request's limit.
+type boundedModel struct {
+	*scriptModel
+	extra int
+}
+
+func (m boundedModel) OutputSpend(limit int) int { return limit + m.extra }
+
+// A call that fails is charged its upper bound: the input estimate, which counts the provider blocks sent
+// back, plus the most output the model may bill, which for an OutputBounder is more than MaxOutputTokens. A
+// model without OutputSpend and without provider blocks is charged what it was before both were counted.
+func TestFailedCallChargeCountsProviderBlocksAndOutputSpend(t *testing.T) {
+	const extra, blockBytes = 4096, 20000
+	for _, bounded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bounded %v", bounded), func(t *testing.T) {
+			f, rec := tracedFixture()
+			f.builder.c.Truncated = true
+			first := toolReply(toolCall("a1", tools.NameListEvents, `{"namespace":"shop"}`))
+			if bounded {
+				first.c.ProviderBlocks = providers.NewOpaque([]byte(strings.Repeat("t", blockBytes)))
+			}
+			f.escalation.steps = []step{first, {err: errors.New("timed out")}}
+			var model providers.ModelProvider = f.escalation
+			if bounded {
+				model = boundedModel{scriptModel: f.escalation, extra: extra}
+			}
+			f.cfg.Models = func(role Role, _ remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
+				if role == RoleTriage {
+					return f.triage, nil
+				}
+				return model, nil
+			}
+			l := testLimits()
+			if out := f.analyze(t, l); out.Reason != ReasonModelError {
+				t.Fatalf("reason %s, want ModelError", out.Reason)
+			}
+			reqs := f.escalation.reqs()
+			if len(reqs) != 2 || reqs[1].Messages[len(reqs[1].Messages)-2].ProviderBlocks.Len() != map[bool]int{true: blockBytes}[bounded] {
+				t.Fatalf("%d requests, or the blocks were not sent back", len(reqs))
+			}
+			// The estimate as it was on main: every field but the provider blocks.
+			n := len(reqs[1].ResponseSchema)
+			for _, m := range reqs[1].Messages {
+				n += len(m.Content) + len(m.ToolCallID)
+				for _, c := range m.ToolCalls {
+					n += len(c.ID) + len(c.Name) + len(c.Arguments)
+				}
+			}
+			for _, d := range reqs[1].Tools {
+				n += len(d.Name) + len(d.Description) + len(d.Parameters)
+			}
+			want := int64(n+1)/2 + int64(l.MaxOutputTokens)
+			if bounded {
+				want += blockBytes/2 + extra
+			}
+			var charged []int64
+			for _, s := range rec.Ended() {
+				if s.Name() == spanModelCall {
+					v, _ := attrOf(s, attrCharged)
+					charged = append(charged, v.AsInt64())
+				}
+			}
+			if got := charged[len(charged)-1]; got != want {
+				t.Errorf("failed call charged %d, want %d", got, want)
+			}
+		})
+	}
+}

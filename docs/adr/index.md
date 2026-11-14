@@ -38,7 +38,7 @@
 | [0034](0034-declarative-pack-format.md) | A declarative pack format, compiled in first | Proposed |
 | [0035](0035-render-check-in-a-limited-child-process.md) | The render check runs in a child process with operating system limits | Proposed |
 | [0036](0036-the-model-sees-the-scaledobject-of-a-keda-incident.md) | The model sees the ScaledObject of a KEDA incident | Proposed |
-| [0037](0037-the-anthropic-api-as-a-second-model-provider.md) | The Anthropic API as a second model provider and its API key | Proposed |
+| [0037](0037-the-anthropic-api-as-a-second-model-provider.md) | The Anthropic API as a second model provider and its API key | Accepted |
 | [0038](0038-control-plane-mode-a-hub-that-many-clusters-report-to.md) | Control plane mode: a hub that many clusters report to | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

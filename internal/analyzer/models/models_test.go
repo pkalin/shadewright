@@ -19,6 +19,8 @@ package models
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -273,5 +275,78 @@ func TestModelFactoryRefusalsNameNoKeyFile(t *testing.T) {
 		if strings.Contains(s, keyFile) || strings.Contains(s, "https://") {
 			t.Errorf("%q names the key file or the endpoint", s)
 		}
+	}
+}
+
+// logSink returns a logger that keeps each line's key-value text.
+func logSink(lines *[]string) logr.Logger {
+	return funcr.New(func(_, args string) { *lines = append(*lines, args) }, funcr.Options{})
+}
+
+// A deployment the adapter refuses to build is logged like the factory's own refusals: a role flag that is a
+// valid model name but not a Claude model ID, and a Foundry API version the adapter does not accept.
+func TestModelFactoryLogsAdapterRefusals(t *testing.T) {
+	var lines []string
+	f, err := NewModelFactory(ModelsConfig{Suffixes: []string{foundrySuffix}, Tokens: failingTokens{t},
+		AnthropicKeyFile: "/var/run/shadewright/anthropic/api-key",
+		Expected:         map[analysis.Role]string{analysis.RoleTriage: "Claude_Haiku"}, Log: logSink(&lines)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []remediationv1alpha1.ModelDeployment{
+		{Provider: remediationv1alpha1.ModelProviderAnthropic, Endpoint: remediationv1alpha1.AnthropicEndpoint,
+			Deployment: "Claude_Haiku", APIVersion: "v1"},
+		{Endpoint: "https://a" + foundrySuffix + "/", Deployment: smallModel, APIVersion: "latest"},
+	} {
+		lines = nil
+		p, err := f(analysis.RoleTriage, d)
+		if !providers.IsInvalidConfig(err) || p != nil || len(lines) != 1 || !strings.Contains(lines[0], "invalid configuration") {
+			t.Errorf("%s: %v, %v, log %q", d.ProviderName(), p, err, lines)
+		}
+	}
+}
+
+// The Anthropic endpoint refusal says what is wrong, not that the host is outside the allow-list, which is
+// not consulted for that provider.
+func TestModelFactoryAnthropicEndpointText(t *testing.T) {
+	f, err := NewModelFactory(ModelsConfig{Suffixes: []string{foundrySuffix}, Tokens: failingTokens{t},
+		AnthropicKeyFile: "/k", Expected: map[analysis.Role]string{analysis.RoleTriage: anthropicModel}, Log: logr.Discard()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f(analysis.RoleTriage, remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderAnthropic,
+		Endpoint: remediationv1alpha1.AnthropicEndpoint + "/", Deployment: anthropicModel, APIVersion: "v1"})
+	if !errors.Is(err, analysis.ErrEndpointNotAllowed) || !strings.Contains(err.Error(), "fixed endpoint") ||
+		strings.Contains(err.Error(), "allow-list") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// Every failed call of an Anthropic provider is logged with the adapter's fixed error text, so a key file that
+// cannot be read is told apart from an outage; the key and the key file's path are never logged.
+func TestModelFactoryLogsAnthropicCallFailures(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(keyFile, []byte("sk-ant-secret\nsk-ant-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	f, err := NewModelFactory(ModelsConfig{Suffixes: []string{foundrySuffix}, Tokens: failingTokens{t},
+		AnthropicKeyFile: keyFile, Expected: map[analysis.Role]string{analysis.RoleTriage: anthropicModel},
+		Log: logSink(&lines)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := f(analysis.RoleTriage, remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderAnthropic,
+		Endpoint: remediationv1alpha1.AnthropicEndpoint, Deployment: anthropicModel, APIVersion: "v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Complete(t.Context(), providers.CompletionRequest{Messages: []providers.Message{
+		{Role: providers.RoleUser, Content: "context"}}})
+	if !providers.IsCredentialUnavailable(err) || len(lines) != 1 || !strings.Contains(lines[0], "API key file is malformed") {
+		t.Fatalf("err %v, log %q", err, lines)
+	}
+	if strings.Contains(lines[0], "sk-ant") || strings.Contains(lines[0], keyFile) {
+		t.Errorf("the log line holds the key or the key file: %q", lines[0])
 	}
 }

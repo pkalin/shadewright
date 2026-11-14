@@ -28,11 +28,11 @@ import (
 )
 
 // EventModelProviderChanged is the reason of the Normal event on the Incident whose analysis is the first to
-// use a role's model provider since the analyzer started or since the settings moved that role to another
-// provider (ADR-0037): it shows where that role's redacted context goes from then on.
+// send a request to a role's model provider since the analyzer started or since the settings moved that role
+// to another provider (ADR-0037): it shows where that role's redacted context goes from then on.
 const EventModelProviderChanged = "ModelProviderChanged"
 
-// providersUsed is the provider each role's last built model used.
+// providersUsed is the provider each role last sent a request to.
 type providersUsed struct {
 	mu   sync.Mutex
 	last map[Role]remediationv1alpha1.ModelProvider
@@ -50,20 +50,22 @@ func (u *providersUsed) swap(role Role, p remediationv1alpha1.ModelProvider) (re
 	return prev, true
 }
 
-// model builds the provider of role's deployment d with the model factory. When the provider of the
-// deployment is not the one role used last, it logs the change and records EventModelProviderChanged on inc.
-// Both name only the role and the provider names, never an endpoint, a deployment or a credential. A refused
-// deployment changes nothing: no context goes anywhere for it.
-func (a *Analyzer) model(ctx context.Context, inc *remediationv1alpha1.Incident, role Role,
-	d *remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
-	m, err := a.cfg.Models(role, *d)
-	if err != nil {
-		return nil, err
-	}
-	p := d.ProviderName()
+// model builds the provider of role's deployment d with the model factory. A refused deployment changes
+// nothing: no context goes anywhere for it.
+func (a *Analyzer) model(role Role, d *remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
+	return a.cfg.Models(role, *d)
+}
+
+// sent notes that a call of inc's analysis may have sent a request to provider p for role: every call whose
+// error is not marked [providers.ErrNotSent]. When p is not the provider role sent to last, it logs the change
+// and records EventModelProviderChanged on inc. So an analysis that reserved no budget unit, was cancelled
+// before its call or whose call sent nothing records nothing, and the next one that sends does. Both name
+// only the role and the provider names, never an endpoint, a deployment or a credential.
+func (a *Analyzer) sent(ctx context.Context, inc *remediationv1alpha1.Incident, role Role,
+	p remediationv1alpha1.ModelProvider) {
 	prev, changed := a.used.swap(role, p)
 	if !changed {
-		return m, nil
+		return
 	}
 	before := string(prev)
 	if before == "" {
@@ -76,5 +78,4 @@ func (a *Analyzer) model(ctx context.Context, inc *remediationv1alpha1.Incident,
 			"The %s model now uses provider %s (before: %s); its redacted context goes to that provider",
 			role, p, before)
 	}
-	return m, nil
 }

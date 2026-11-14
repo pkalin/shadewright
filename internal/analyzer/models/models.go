@@ -154,7 +154,9 @@ type ModelsConfig struct {
 	// Expected names, per role, the model a reply must name (--triage-model, --escalation-model). The
 	// deployment of an Anthropic deployment is the model ID, so it must equal its role's entry.
 	Expected map[analysis.Role]string
-	// Log gets one line per refused deployment, without the endpoint or the key file.
+	// Log gets one line per refused deployment, including one the adapter refuses to build, and one per
+	// failed call of an Anthropic provider with the adapter's fixed error text; never the endpoint, the key
+	// or the key file.
 	Log logr.Logger
 }
 
@@ -168,7 +170,8 @@ type ModelsConfig struct {
 //   - Anthropic: it refuses the deployment when the analyzer has no key file
 //     (analysis.ErrProviderNotConfigured), when the endpoint is not the API's fixed one, and when the
 //     deployment is not the model its role expects (analysis.ErrDeploymentNotExpected); the allow-list is not
-//     consulted. It then builds an Anthropic provider for that model that reads the key file at every attempt.
+//     consulted. It then builds an Anthropic provider for that model that reads the key file at every attempt
+//     and logs every failed call.
 //   - Any other provider is refused (analysis.ErrProviderNotConfigured).
 func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	if len(cfg.Suffixes) == 0 || cfg.Tokens == nil {
@@ -189,22 +192,39 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			if err := CheckEndpoint(d.Endpoint, cfg.Suffixes); err != nil {
 				return nil, refused(role, d, err)
 			}
-			return foundry.New(foundry.Config{Endpoint: d.Endpoint, Deployment: d.Deployment,
+			p, err := foundry.New(foundry.Config{Endpoint: d.Endpoint, Deployment: d.Deployment,
 				APIVersion: d.APIVersion, Tokens: cfg.Tokens})
+			if err != nil {
+				return nil, refused(role, d, err)
+			}
+			return p, nil
 		case remediationv1alpha1.ModelProviderAnthropic:
 			if cfg.AnthropicKeyFile == "" {
 				return nil, refused(role, d, fmt.Errorf("the analyzer runs without --anthropic-api-key-file: %w",
 					analysis.ErrProviderNotConfigured))
 			}
 			if d.Endpoint != anthropic.Endpoint {
-				return nil, refused(role, d, fmt.Errorf("model endpoint is not the Anthropic API's: %w",
-					analysis.ErrEndpointNotAllowed))
+				return nil, refused(role, d, fmt.Errorf("model endpoint is not the Anthropic API's fixed endpoint, "+
+					"the only one this provider calls: %w", analysis.ErrEndpointNotAllowed))
 			}
 			if want := cfg.Expected[role]; want == "" || d.Deployment != want {
 				return nil, refused(role, d, fmt.Errorf("the deployment is not the model of the role's flag: %w",
 					analysis.ErrDeploymentNotExpected))
 			}
-			return anthropic.New(anthropic.Config{Model: d.Deployment, KeyFile: cfg.AnthropicKeyFile})
+			log := cfg.Log.WithValues("role", role, "provider", d.ProviderName(), "deployment", d.Deployment)
+			p, err := anthropic.New(anthropic.Config{Model: d.Deployment, KeyFile: cfg.AnthropicKeyFile,
+				// The adapter's errors are fixed text that never holds the key, the key file's path or the
+				// reply; logging them tells a key file that cannot be used from an outage of the API.
+				OnCall: func(r anthropic.CallReport) {
+					if r.Err != nil {
+						log.Info("A call to the Anthropic API failed", "attempts", r.Attempts,
+							"notSent", providers.IsNotSent(r.Err), "error", r.Err.Error())
+					}
+				}})
+			if err != nil {
+				return nil, refused(role, d, err)
+			}
+			return p, nil
 		default:
 			return nil, refused(role, d, fmt.Errorf("unknown model provider: %w", analysis.ErrProviderNotConfigured))
 		}

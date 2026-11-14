@@ -89,7 +89,8 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&f.anthropicKeyFile, "anthropic-api-key-file", "",
 		"The path of a file that holds the Anthropic API key, mounted read-only from a Secret or a CSI volume "+
 			"the cluster operator provides (ADR-0037). It is read at every call, so a rotated key needs no restart; "+
-			"a missing or unreadable file is a retryable model error. Empty (the default): a deployment with "+
+			"a missing or unreadable file is a retryable model error, then a hand-off (ProviderNotConfigured); a "+
+			"malformed one is not retried. Empty (the default): a deployment with "+
 			"provider Anthropic in RemediationSettings is refused (ProviderNotConfigured). The file is not read "+
 			"at start. Used only with --triage-model.")
 	fs.StringVar(&f.actionPolicies, "action-policies", "",

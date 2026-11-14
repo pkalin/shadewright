@@ -63,9 +63,9 @@ type Record struct {
 	Tokens int64 `json:"usage"`
 	// Deployments are the model deployments of the settings the run read, by role.
 	Deployments RecordDeployments `json:"deployments"`
-	// Providers are the providers of those deployments, by role (ADR-0037), so a result is never read as
-	// belonging to another provider's model.
-	Providers RecordDeployments `json:"providers"`
+	// Providers are the providers of the roles that could run, by role (ADR-0037), so a result is never read
+	// as belonging to another provider's model.
+	Providers RecordProviders `json:"providers"`
 	// Models are the model IDs the replies named.
 	Models        []string `json:"models"`
 	PromptVersion string   `json:"promptVersion"`
@@ -75,9 +75,16 @@ type Record struct {
 	Request string `json:"request,omitempty"`
 }
 
-// RecordDeployments are the deployment names, or the provider names, of the triage and escalation models;
-// empty when not configured.
+// RecordDeployments are the deployment names of the triage and escalation models; empty when not configured.
 type RecordDeployments struct {
+	Triage     string `json:"triage,omitempty"`
+	Escalation string `json:"escalation,omitempty"`
+}
+
+// RecordProviders are the provider names (Foundry, Anthropic) of the triage and escalation models; empty for
+// a role without a deployment in the settings, and for escalation when the analyzer has no escalation model,
+// so the analysis cannot use the settings' escalation deployment.
+type RecordProviders struct {
 	Triage     string `json:"triage,omitempty"`
 	Escalation string `json:"escalation,omitempty"`
 }
@@ -143,7 +150,11 @@ func (c *Controller) buildRecord(claimed *remediationv1alpha1.Incident, id remed
 	}
 	if d := limits.Escalation; d != nil {
 		rec.Deployments.Escalation = r(d.Deployment)
-		rec.Providers.Escalation = string(d.ProviderName())
+		// The analysis drops the escalation deployment when the analyzer has no escalation model (Analyze):
+		// its provider was never in use. The deployment keeps its earlier form.
+		if c.Analyzer.cfg.ExpectedModels[RoleEscalation] != "" {
+			rec.Providers.Escalation = string(d.ProviderName())
+		}
 	}
 	for _, m := range out.Models {
 		rec.Models = append(rec.Models, r(m))

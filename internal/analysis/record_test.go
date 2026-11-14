@@ -579,3 +579,41 @@ func TestFinishLooksAgainAfterAFailedLook(t *testing.T) {
 		t.Fatalf("finish took an applied outcome for a lost claim: %v", err)
 	}
 }
+
+// The escalation's provider is recorded only when the analyzer has an escalation model, so it can run: the
+// analysis drops the settings' escalation deployment otherwise. Deployments keep their earlier form.
+func TestRecordProvidersOnlyForRolesThatCanRun(t *testing.T) {
+	for name, expected := range map[string]map[Role]string{
+		"triage only":     {RoleTriage: fakeModel},
+		"with escalation": {RoleTriage: fakeModel, RoleEscalation: fakeModel},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture()
+			f.cfg.ExpectedModels = expected
+			a, err := New(f.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inc := incident()
+			inc.Name, inc.UID = "inc-1", "0b0e3c1c-7f4a-4c55-9c39-6a3e2d2f0a02"
+			inc.Status.LastAnalysisTime = &metav1.Time{Time: time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)}
+			c := &Controller{Analyzer: a, Now: func() time.Time { return inc.Status.LastAnalysisTime.Time }}
+			rec, err := c.buildRecord(inc, recordID(inc), Outcome{Reason: ReasonNoProposal}, testLimits(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var r Record
+			if err := json.Unmarshal(rec.Data, &r); err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			if expected[RoleEscalation] != "" {
+				want = string(remediationv1alpha1.ModelProviderFoundry)
+			}
+			if r.Providers.Triage != string(remediationv1alpha1.ModelProviderFoundry) || r.Providers.Escalation != want ||
+				r.Deployments.Escalation != testLimits().Escalation.Deployment {
+				t.Errorf("providers %+v, deployments %+v", r.Providers, r.Deployments)
+			}
+		})
+	}
+}

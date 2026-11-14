@@ -17,6 +17,7 @@ limitations under the License.
 package analysis
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/client-go/tools/record"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -177,5 +179,111 @@ func TestRoleWithoutExpectedModelIsNotConfigured(t *testing.T) {
 	f.escalation.steps = []step{reply(validResult)}
 	if out := f.analyze(t, testLimits()); out.Reason != ReasonEscalationNotConfigured || f.escalation.calls() != 0 {
 		t.Errorf("no escalation model: reason %s, calls %d", out.Reason, f.escalation.calls())
+	}
+}
+
+// credentialErr is what the Anthropic adapter returns when its key file could not be used and no attempt sent
+// a request: retryable for a file that could not be read, not for a malformed one.
+func credentialErr(retryable bool) error {
+	err := fmt.Errorf("anthropic: the API key file could not be used: %w", providers.ErrCredentialUnavailable)
+	if retryable {
+		err = &providers.RetryableError{Err: err}
+	}
+	return providers.NotSent(err)
+}
+
+// A key file that could not be read, or is malformed, ends the analysis with ProviderNotConfigured, whose
+// message names the key file, not with ModelUnavailable or ModelForbidden. A call that sent nothing is charged
+// nothing; one that may have sent something is charged its upper bound.
+func TestKeyFileFailureHandsOffAsNotConfigured(t *testing.T) {
+	for name, err := range map[string]error{"unreadable": credentialErr(true), "malformed": credentialErr(false)} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture()
+			f.triage.steps = []step{{err: err}}
+			out := f.analyze(t, testLimits())
+			if out.Reason != ReasonProviderNotConfigured || out.Tokens != 0 || out.Calls != 1 {
+				t.Errorf("reason %s, tokens %d, calls %d", out.Reason, out.Tokens, out.Calls)
+			}
+		})
+	}
+	if m := outcomeMessages[ReasonProviderNotConfigured]; !strings.Contains(m, "key file") {
+		t.Errorf("the message %q does not name the key file", m)
+	}
+	t.Run("sent before", func(t *testing.T) {
+		f := newFixture()
+		f.triage.steps = []step{{err: &providers.RetryableError{Err: providers.ErrCredentialUnavailable}}}
+		out := f.analyze(t, testLimits())
+		if out.Reason != ReasonModelUnavailable || out.Tokens == 0 {
+			t.Errorf("reason %s, tokens %d: an earlier attempt may have been billed", out.Reason, out.Tokens)
+		}
+	})
+}
+
+// The messages of the reasons that refuse a provider or an endpoint say only that nothing went to it: an
+// escalation refused after triage calls has sent context to the triage provider.
+func TestRefusalMessagesAfterTriage(t *testing.T) {
+	f := newFixture()
+	f.triage.steps = []step{reply("not json"), reply("not json")}
+	f.cfg.Models = func(role Role, _ remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
+		if role == RoleTriage {
+			return f.triage, nil
+		}
+		return nil, ErrProviderNotConfigured
+	}
+	if out := f.analyze(t, testLimits()); out.Reason != ReasonProviderNotConfigured || out.Calls == 0 {
+		t.Fatalf("reason %s, calls %d", out.Reason, out.Calls)
+	}
+	for _, r := range []Reason{ReasonProviderNotConfigured, ReasonEndpointNotAllowed} {
+		if m := outcomeMessages[r]; strings.Contains(m, "; nothing was sent;") {
+			t.Errorf("%s: %q says nothing was sent at all", r, m)
+		}
+	}
+	// The endpoint refusal also covers the Anthropic API's fixed endpoint, where no allow-list applies.
+	if m := outcomeMessages[ReasonEndpointNotAllowed]; !strings.Contains(m, "Anthropic") {
+		t.Errorf("%q blames the allow-list only", m)
+	}
+}
+
+// The provider change is recorded on the analysis that first sends a request to the new provider: not on
+// one whose budget was spent or unavailable, whose call sent nothing, or that was cancelled before its call.
+func TestProviderChangeIsRecordedOnFirstSend(t *testing.T) {
+	f := newFixture()
+	events := record.NewFakeRecorder(8)
+	f.cfg.Recorder = events
+	a, err := New(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := func() string {
+		select {
+		case e := <-events.Events:
+			return e
+		default:
+			return ""
+		}
+	}
+	run := func(ctx context.Context) {
+		t.Helper()
+		if _, err := a.Analyze(ctx, incident(), testLimits()); err != nil && ctx.Err() == nil {
+			t.Fatal(err)
+		}
+	}
+	f.reserveErr = incidents.ErrBudgetSpent
+	run(t.Context())
+	f.reserveErr = errors.New("conflict")
+	run(t.Context())
+	f.reserveErr = nil
+	f.triage.steps = []step{{err: credentialErr(true)}}
+	run(t.Context())
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	run(cancelled)
+	if e := next(); e != "" {
+		t.Fatalf("event %q before any request was sent", e)
+	}
+	f.triage.steps = []step{reply(noProposal)}
+	run(t.Context())
+	if e := next(); !strings.Contains(e, EventModelProviderChanged+" The triage model now uses provider Foundry") {
+		t.Errorf("first send: event %q", e)
 	}
 }

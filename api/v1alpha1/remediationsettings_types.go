@@ -296,6 +296,11 @@ const (
 // AnthropicEndpoint is the only endpoint of a deployment with provider Anthropic (ADR-0037 decision 2).
 const AnthropicEndpoint = "https://api.anthropic.com"
 
+// The second rule on ModelDeployment refuses the host api.anthropic.com for every provider other than
+// Anthropic, not for Foundry only: a provider added later inherits the ban on purpose, so no credential of
+// another provider can be sent to that host. TestAnthropicEndpointInRules checks that the rules name
+// AnthropicEndpoint and its host.
+
 // ModelDeployment is one model deployment behind an inference endpoint, for example in Microsoft Foundry
 // (ADR-0016), or a model of the Anthropic API (ADR-0037). It holds no key, token or other credential.
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'Anthropic' || self.endpoint == 'https://api.anthropic.com'",message="a deployment with provider Anthropic must have the endpoint https://api.anthropic.com"

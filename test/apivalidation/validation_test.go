@@ -1694,7 +1694,20 @@ var _ = Describe("RemediationSettings", func() {
 				Entry("another host under the vendor's domain", "https://console.anthropic.com"),
 				Entry("the host with a path", "https://api.anthropic.com/v1"),
 				Entry("the host with port 443", "https://api.anthropic.com:443"),
+				Entry("the host with a trailing slash", "https://api.anthropic.com/"),
 			)
+
+			It("accepts an update of another field of a deployment written without provider", func() {
+				s := withModel(func(*v1alpha1.ModelDeployment) {})
+				expectAccepted(s)
+				got := &v1alpha1.RemediationSettings{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(s), got)).To(Succeed())
+				// The client leaves provider out, as a writer from before the field did.
+				got.Spec.Analysis.Models.Triage.Provider = ""
+				got.Spec.Analysis.Models.Triage.MaxTokensPerDay = ptr.To[int64](400000)
+				Expect(k8sClient.Update(ctx, got)).To(Succeed())
+				Expect(got.Spec.Analysis.Models.Triage.Provider).To(Equal(v1alpha1.ModelProviderFoundry))
+			})
 
 			DescribeTable("refuses the API's host on a Foundry deployment",
 				func(provider v1alpha1.ModelProvider, endpoint string) {

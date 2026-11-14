@@ -590,11 +590,15 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 			"The branch holds neither the previous nor the planned value of the file")
 	}
 
+	title, body, err := r.pullRequestText(ctx, rr)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
 	cr, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
 		HeadBranch: branch,
 		BaseBranch: string(src.TargetBranch),
-		Title:      commitTitle(rr),
-		Body:       pullRequestBody(rr, r.verifiedIncidentName(ctx, rr)),
+		Title:      title,
+		Body:       body,
 	})
 	if err != nil {
 		return reconcile.Result{}, freshness.WrapProvider("open the pull request", err)
@@ -1946,28 +1950,78 @@ func stepSize(rr *remediationv1alpha1.RemediationRequest) string {
 }
 
 // commitTitle is the commit message and pull request title. It follows Conventional Commits, as the GitOps
-// repository's title check requires: lower case, no full stop. Every part is a validated name or value.
+// repository's title check requires: lower case, no full stop. Every part is a validated name or value. A
+// revert (ADR-0030 section 8) says so with the type "revert" and "back to", which both the operator's and the
+// fleet's title checks accept. Neither the branch nor the marker derives from the title, so a pull request
+// opened with an older title is still found (invariant 5).
 func commitTitle(rr *remediationv1alpha1.RemediationRequest) string {
 	what, _, desired := change(rr)
 	t := rr.Spec.TargetRef
+	if remediationv1alpha1.IsRevert(rr) {
+		return redact.String(fmt.Sprintf("revert: set %s of %s/%s back to %s", what, t.Namespace, t.Name, desired))
+	}
 	return redact.String(fmt.Sprintf("fix: set %s of %s/%s to %s", what, t.Namespace, t.Name, desired))
+}
+
+// pullRequestText returns the title and the body of rr's pull request. For a revert it first reads the request rr
+// reverts from the API server (revertedRequest); a failed read is returned for a retry, and no pull request is
+// opened or rewritten with a body that leaves out what it reverts.
+func (r *RemediationRequestReconciler) pullRequestText(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (title, body string, err error) {
+	failed, err := r.revertedRequest(ctx, rr)
+	if err != nil {
+		return "", "", err
+	}
+	return commitTitle(rr), pullRequestBody(rr, r.verifiedIncidentName(ctx, rr), failed), nil
+}
+
+// revertedRequest returns the request a revert names in spec.reverts, read from the API server, or nil when rr is
+// no revert, the request is gone or its name now belongs to another UID: the body then names it from spec.reverts
+// alone. Any other failed read is an error, never taken for a missing request.
+func (r *RemediationRequestReconciler) revertedRequest(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (*remediationv1alpha1.RemediationRequest, error) {
+	ref := rr.Spec.Reverts
+	if ref == nil {
+		return nil, nil
+	}
+	failed := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: ref.Name}, failed); {
+	case apierrors.IsNotFound(err):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("get the RemediationRequest %s reverts for its pull request: %w", rr.Name, err)
+	case failed.UID != types.UID(ref.UID):
+		return nil, nil
+	}
+	return failed, nil
 }
 
 // pullRequestBody is the evidence, scope, expected effect, risk and rollback plan, and the marker. Every value
 // comes from validated fields of the request and its status; the whole body is redacted once more, so nothing
 // that looks like a secret reaches the Git host. The exceptions are incident, the Incident name as
-// verifiedIncidentName returned it, and the request's own "namespace/name" as keptRequestName returns it: when
-// not empty, their whole occurrences are kept (redact.StringKeeping), because the names the collector and the
-// analyzer derive are long hex runs the redactor takes for a token.
-func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string) string {
+// verifiedIncidentName returned it, and the "namespace/name" of the request and of the request it reverts as
+// keptRequestName returns them: when not empty, their whole occurrences are kept (redact.StringKeeping), because
+// the names the collector and the analyzer derive are long hex runs the redactor takes for a token.
+//
+// For a revert, failed is the request spec.reverts names as revertedRequest read it (nil when it is gone or has
+// another UID). The body then says what it reverts: that request, its pull request and the reason it failed, all
+// from that request's status as the executor wrote it, and no model text.
+func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string,
+	failed *remediationv1alpha1.RemediationRequest) string {
 	what, previous, desired := change(rr)
 	t, src := rr.Spec.TargetRef, rr.Status.Source
+	revert := remediationv1alpha1.IsRevert(rr)
 	approval := "yes"
 	if rr.Status.EffectiveApprovalRequired != nil && !*rr.Status.EffectiveApprovalRequired {
 		approval = "no (policy allows automation; auto-merge is not available yet, so a person merges)"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Shadewright proposes one typed change for incident `%s`.\n\n", rr.Spec.IncidentRef.Name)
+	if revert {
+		fmt.Fprintf(&b, "Shadewright proposes to revert a failed change for incident `%s`.\n\n", rr.Spec.IncidentRef.Name)
+		writeReverts(&b, rr, failed)
+	} else {
+		fmt.Fprintf(&b, "Shadewright proposes one typed change for incident `%s`.\n\n", rr.Spec.IncidentRef.Name)
+	}
 	fmt.Fprintf(&b, "**Change:** %s (`%s`) of %s `%s/%s`, from `%s` to `%s`.\n\n", what, rr.Spec.Action.Type,
 		t.Kind, t.Namespace, t.Name, previous, desired)
 	fmt.Fprintf(&b, "**Scope:** one value in `%s` on `%s`. Nothing else in this pull request is part of the plan.\n\n",
@@ -1975,7 +2029,10 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 	fmt.Fprintf(&b, "**Evidence:** RemediationRequest `%s/%s` (UID `%s`), incident `%s`, policy `%s` "+
 		"(decision `WithinApprovedBounds`), plan digest `%s`.\n\n",
 		rr.Namespace, rr.Name, rr.UID, rr.Spec.IncidentRef.Name, rr.Status.PolicyRevision, rr.Status.PlanDigest)
-	if size := stepSize(rr); size != "" {
+	if size := stepSize(rr); size != "" && revert {
+		fmt.Fprintf(&b, "**Size:** %s, within policy `%s`: the step of the failed request, undone. No model chose "+
+			"it.\n\n", size, rr.Spec.PolicyRef)
+	} else if size != "" {
 		fmt.Fprintf(&b, "**Size:** %s, within policy `%s`. The policy bounds the step; it does not say the step is "+
 			"the right size. The diagnosis, with the model's unverified reason for the size, is in the analysis record "+
 			"and the analyzer's log for this request's name, not in this pull request (ADR-0026): check it before "+
@@ -1984,22 +2041,70 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 	fmt.Fprintf(&b, "**Expected effect:** once merged and delivered, %s is `%s`.\n\n", what, desired)
 	b.WriteString("**Risk:** the change is bounded by the policy's limits and touches one field. " +
 		"Any other push to this branch stops the automation.\n\n")
-	b.WriteString("**Rollback:** revert this pull request; the GitOps controller applies the previous value.\n\n")
+	if revert {
+		fmt.Fprintf(&b, "**Rollback:** do not revert this pull request: that applies `%s` again, the value of the "+
+			"failed request. To keep the current value, close this pull request without merging it.\n\n", previous)
+	} else {
+		b.WriteString("**Rollback:** revert this pull request; the GitOps controller applies the previous value.\n\n")
+	}
 	fmt.Fprintf(&b, "**Approval required:** %s.\n\n", approval)
-	out := redact.StringKeeping(b.String(), incident, keptRequestName(rr))
+	keep := []string{incident, keptRequestName(rr)}
+	if failed != nil {
+		keep = append(keep, keptRequestName(failed))
+	}
+	out := redact.StringKeeping(b.String(), keep...)
 	// The marker is added after redaction: it holds only the UID and the digest, and must stay exact.
 	return out + marker(rr) + "\n"
 }
 
+// writeReverts writes the paragraph of a revert's body that names the request it reverts: from failed, the
+// request as read back with the UID in spec.reverts, its pull request and the reason of its Verified condition;
+// without it, only the name and UID in spec.reverts and that the rest is not shown.
+func writeReverts(b *strings.Builder, rr, failed *remediationv1alpha1.RemediationRequest) {
+	ref := rr.Spec.Reverts
+	fmt.Fprintf(b, "**Reverts:** RemediationRequest `%s/%s` (UID `%s`)", rr.Namespace, ref.Name, ref.UID)
+	if failed == nil {
+		b.WriteString(". It is no longer there with that UID, so its pull request and the reason it failed are not " +
+			"shown.\n\n")
+		return
+	}
+	if pr := failed.Status.PullRequest; pr != nil && pr.Number > 0 {
+		fmt.Fprintf(b, ", pull request #%d", pr.Number)
+		if pr.URL != "" {
+			fmt.Fprintf(b, " (%s)", pr.URL)
+		}
+	} else {
+		b.WriteString(", no pull request recorded")
+	}
+	verified := meta.FindStatusCondition(failed.Status.Conditions, remediationv1alpha1.ConditionVerified)
+	if failed.Status.Phase == remediationv1alpha1.PhaseFailed && verified != nil &&
+		verified.Status == metav1.ConditionFalse && verified.Reason != "" {
+		fmt.Fprintf(b, ". It ended `Failed` with the reason `%s`", verified.Reason)
+	} else {
+		b.WriteString(". Its status no longer shows why it failed")
+	}
+	b.WriteString(". This pull request sets the value it changed back.\n\n")
+}
+
 // keptRequestName returns the request's "namespace/name", as the body shows it, when the body may show it
 // unredacted, and "" otherwise. metadata.name is chosen by whoever created the request, so its shape proves
-// nothing: a hex secret could be written as "remediation-<secret>". The name is kept only when it equals
-// remediationv1alpha1.RequestName of the request's own spec as the API server stored it (spec.incidentRef.uid
-// and the plan; the spec is immutable), the name the analyzer derives: a hash nobody can steer to a chosen
-// value. The namespace is kept only when the redactor leaves it alone, so keeping the pair never lets a
+// nothing: a hex secret could be written as "remediation-<secret>" or "revert-<secret>". The name is kept only
+// when it is the name the analyzer derives from the request's own spec as the API server stored it (the spec is
+// immutable): remediationv1alpha1.RevertName of spec.reverts.uid for a revert, else
+// remediationv1alpha1.RequestName of spec.incidentRef.uid and the plan. Either is a hash nobody can steer to a
+// chosen value. The namespace is kept only when the redactor leaves it alone, so keeping the pair never lets a
 // token-like namespace through. Anything else gives "" and so a redacted name.
 func keptRequestName(rr *remediationv1alpha1.RemediationRequest) string {
-	if rr.Spec.IncidentRef.UID == "" || redact.String(rr.Namespace) != rr.Namespace {
+	if redact.String(rr.Namespace) != rr.Namespace {
+		return ""
+	}
+	if ref := rr.Spec.Reverts; ref != nil {
+		if ref.UID == "" || string(remediationv1alpha1.RevertName(ref.UID)) != rr.Name {
+			return ""
+		}
+		return rr.Namespace + "/" + rr.Name
+	}
+	if rr.Spec.IncidentRef.UID == "" {
 		return ""
 	}
 	if name, err := remediationv1alpha1.RequestName(rr.Spec); err != nil || string(name) != rr.Name {

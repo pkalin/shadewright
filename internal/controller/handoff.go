@@ -733,7 +733,11 @@ func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *re
 			return err
 		}
 		log := logf.FromContext(ctx).WithValues("remediationRequest", key)
-		err = git.UpdateChangeRequest(stepCtx, pr.Number, commitTitle(rr), pullRequestBody(rr, r.verifiedIncidentName(stepCtx, rr)))
+		title, body, err := r.pullRequestText(stepCtx, rr)
+		if err != nil {
+			return err
+		}
+		err = git.UpdateChangeRequest(stepCtx, pr.Number, title, body)
 		step, err := stepOutcome(log, err, "rewrite the pull request")
 		switch {
 		case err != nil:

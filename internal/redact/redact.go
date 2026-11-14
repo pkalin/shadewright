@@ -29,20 +29,20 @@ limitations under the License.
 // runs that mix letters and digits, such as Git commit hashes and container IDs, 32 characters or more of
 // mixed-case base64 that slashes cut short, or that has no slash and no digit (also a base64 blob that is not
 // a secret, and at most one short part of up to five characters on each side of it in a path), and every
-// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"), the whole array
-// or object under a secret-named JSON field, the value after a secret-named command-line flag ("--client-secret
-// x", "-password x", also across line ends, in argument lists and after a flag that took the flag as its
-// value), however it reads or starts with ("--use-token --verbose" loses "--verbose", "--secret db-creds"
-// loses "db-creds"), taken as the whole argument (argumentSpan: to the closing quote of a quoted argument,
-// the next "," or "]" of a flow sequence, the line end of a YAML list item, or one shell word of glued
-// pieces, and to the line end where its end is unclear), and the word after a key name of two or more
-// words joined by "_", "-" or in camelCase and a blank ("client_secret is missing" loses "is"). Values that look
-// like references rather than secrets, such as "secretName: db-creds", are kept, because the name of a
-// missing Secret is what a diagnosis needs, and so is the hex of an image digest.
+// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"), the value after a
+// secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
+// argument lists and after a flag that took the flag as its value), however it reads or starts with
+// ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
+// name of two or more words that ends in a secret word, joined by "_", "-" or in camelCase, and a blank
+// ("client_secret is missing" loses "is"; a name that starts upper-case, such as "ClientSecret", only before a
+// value that does not read as a word). After a flag or such a name the value is one token, or the text
+// between its quotes on one line (keyNameValue). Values that look like references rather than secrets, such
+// as "secretName: db-creds", are kept, because the name of a missing Secret is what a diagnosis needs, and so
+// is the hex of an image digest.
 //
 // Where a rule would also match prose, it asks the value to look like a credential: the word after "Basic"
-// or "Bearer", and the value of the short keys "pass", "auth" and "sig" before a colon, on their own ("pass:
-// 12 fail: 0") or after one of a few prose words and a hyphen ("pre-auth: ok", "two-pass: true"), inline or
+// or "Bearer", and the value of the short keys "pass", "auth", "sig" and "sas" before a colon, on their own
+// ("pass: 12 fail: 0") or after one of a few prose words and a hyphen ("pre-auth: ok", "two-pass: true"), inline or
 // in a block on the following lines, count only with a value of at least 8 bytes that mixes ASCII letters
 // with digits or symbols (blanks too when the value is quoted, as in a passphrase; 16 bytes of anything after
 // Basic or Bearer, or base64 of "user:password" after Basic). So "Bearer abc12" and "auth: hunter2" pass
@@ -56,8 +56,11 @@ limitations under the License.
 // before it whose parts read as words or acronyms (whole or in part, see base64Windows), a secret after a
 // one-word key name and a blank without a dash ("set secret x", which only the long-token rule judges,
 // because "kubectl get secret foo" has the same shape), after a single-letter flag ("-p x"), after a key or
-// flag name written with Unicode escapes, or in a here-document or here-string, and a secret in a format no
-// rule knows (TestKeyNameKnownLeaks).
+// flag name written with Unicode escapes, or in a here-document or here-string, the part of a value after a
+// key name past its first token or its quotes on one line (blanks inside an argument that holds the flag,
+// YAML flow, block, multi-line, anchored and tagged scalars, shell words of glued pieces and command
+// substitution, arrays and objects under a secret field, JSON comments), and a secret in a format no rule
+// knows (TestKeyNameKnownLeaks).
 package redact
 
 import (
@@ -472,19 +475,27 @@ func referenceKey(key string, flag bool) bool {
 // secretWordPattern finds a secret word (secretWordExpr) anywhere in a key.
 var secretWordPattern = regexp.MustCompile(`(?i)` + secretWordExpr)
 
+// shortKeyNames are the short key names that hold secrets but are also parts of other words (shortKeyExpr):
+// the one list that the key patterns, isBareShortKey, isSasKey and secretNameEnd read.
+var shortKeyNames = strings.Split(shortKeyNamesExpr, "|")
+
+// sasKeyName is the short key name of an Azure shared access signature.
+const sasKeyName = "sas"
+
 // isSasKey reports whether key, quoted or not, counts as a secret only through its last part "sas" (an Azure
 // shared access signature): it ends in "sas" and holds no other secret word.
 func isSasKey(key string) bool {
 	k := strings.Trim(key, `"'\`)
-	return len(k) >= 3 && strings.EqualFold(k[len(k)-3:], "sas") && !secretWordPattern.MatchString(k)
+	return len(k) >= len(sasKeyName) && strings.EqualFold(k[len(k)-len(sasKeyName):], sasKeyName) &&
+		!secretWordPattern.MatchString(k)
 }
 
 // sasRefused reports whether the key in group 1 of m is a "sas" key (isSasKey) in a place where it does not
-// count. "sas" is also a path segment and an image name ("ghcr.io/acme/sas:v1.2.3"), so it counts only when
-// the byte before it is not "/", "." or an ASCII letter or digit ("AZURE_STORAGE_SAS" and "?sas=" count,
-// "storageSas", "acme.sas" and "/sas" do not), and, with sep, only before "=" or before ":" and a blank or a
-// line end ("sas=...", "sas: ..."), unless the key is quoted (`"sas":`), whose closing quote ends it. The
-// flag and compound key rules never take a "sas" key (#585).
+// count. "sas" is also a path segment and an image name ("ghcr.io/acme/sas:v1.2.3"), so it never counts
+// right after "/" ("/sas: x"); "AZURE_STORAGE_SAS", "storageSas", "azure.storage.sas", "--source-sas" and
+// "?sas=" count. With sep it counts only before "=" or before ":" and a blank or a line end ("sas=...",
+// "sas: ...", not the tag in "sas:v1"), unless the key is quoted (`"sas":`), whose closing quote ends it
+// (#585).
 func sasRefused(s string, m []int, sep bool) bool {
 	if !isSasKey(s[m[2]:m[3]]) {
 		return false
@@ -493,8 +504,8 @@ func sasRefused(s string, m []int, sep bool) bool {
 	for end > m[2] && strings.IndexByte(`"'\`, s[end-1]) >= 0 {
 		end--
 	}
-	if at := end - 3; at > 0 {
-		if c := s[at-1]; c == '/' || c == '.' || isAlnum(c) {
+	if at := end - len(sasKeyName); at > 0 {
+		if s[at-1] == '/' {
 			return true
 		}
 	}
@@ -535,23 +546,15 @@ func bareShortColon(s string, m []int) bool {
 // ("db-pass", "admin-pass", "proxy-auth") names what the credential is for, so such a key always counts.
 var proseShortKeyPrefixes = []string{"pre", "post", "re", "two", "multi", "single"}
 
-// isBareShortKey reports whether key is one of the short names "pass", "auth" or "sig" on its own, in any
-// case, or in lower case after exactly one word of proseShortKeyPrefixes and a hyphen ("pre-auth", but not
+// isBareShortKey reports whether key is one of shortKeyNames ("pass", "auth", "sig", "sas") on its own, in
+// any case, or in lower case after exactly one word of proseShortKeyPrefixes and a hyphen ("pre-auth", but not
 // "Pre-Auth", "pre-x-auth" or "db-pass").
 func isBareShortKey(key string) bool {
-	switch strings.ToLower(key) {
-	case "pass", "auth", "sig":
+	if slices.Contains(shortKeyNames, strings.ToLower(key)) {
 		return true
 	}
 	prefix, short, ok := strings.Cut(key, "-")
-	if !ok {
-		return false
-	}
-	switch short {
-	case "pass", "auth", "sig":
-		return slices.Contains(proseShortKeyPrefixes, prefix)
-	}
-	return false
+	return ok && slices.Contains(shortKeyNames, short) && slices.Contains(proseShortKeyPrefixes, prefix)
 }
 
 // looksLikeSecret reports whether v has the shape of a credential rather than of prose: at least 8 bytes,
@@ -1564,9 +1567,6 @@ func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
 			end++
 		}
 	case boundaryFlow:
-		if s[pos] == '[' || s[pos] == '{' {
-			return pos, bracketEnd(s, pos)
-		}
 		end = len(s)
 		if i := strings.IndexAny(s[pos:], ",}]\r\n"); i >= 0 {
 			end = pos + i
@@ -1646,12 +1646,7 @@ func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd in
 		if bare && b == boundaryFlow {
 			b = boundaryFlowWord
 		}
-		var start, end int
-		if b == boundaryWhitespace && !bare {
-			start, end = argumentSpan(s, m[1], m[2], false, false)
-		} else {
-			start, end = valueSpan(s, m[1], b, m[2]-m[0])
-		}
+		start, end := valueSpan(s, m[1], b, m[2]-m[0])
 		if bare {
 			if v := s[start:end]; start > m[1] && !looksLikeQuotedSecret(v) || start == m[1] && !looksLikeSecret(v) {
 				return 0, 0, false
@@ -1662,21 +1657,20 @@ func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd in
 }
 
 // flagValueSpan is the span function of the command-line flag rule: a secret-named flag ("--client-secret",
-// "--aws-secret-access-key", "--password", "--secret-id", or with one dash and two or more letters, as Go
-// programs take them: "-password", "-token"), the separator after it (flagSeparatorExpr) and then its value.
-// The key name is the signal: the whole argument is redacted (argumentSpan), whatever it reads as or starts
+// "--aws-secret-access-key", "--password", "--secret-id", "--sas", or with one dash and two or more letters,
+// as Go programs take them: "-password", "-token"), the separator after it (flagSeparatorExpr) and then its
+// value (keyNameValue). The key name is the signal: the value is redacted whatever it reads as or starts
 // with, so a key that the long-token rule would keep in part (TestSlashSplitBase64KnownLeaks) goes whole, and
 // so does "--Hunter2pw" or the next flag ("--use-token --verbose" loses "--verbose", accepted
 // over-redaction). Each flag is judged on its own: one taken as the value of an earlier flag still has its
 // own value redacted ("--enable-auth --client-secret x"). The flag counts wherever its dash does not follow a
 // letter, a digit or another "-" ("EXTRA_ARGS=--client-secret x" counts, "a--token x" and "my-token x" do
 // not). A reference flag ("--secret-name", "--token-ttl", "--password-file", "--password-stdin") keeps its
-// value, and a "sas" flag never counts (sasRefused). A value that starts inside the previous value is
-// skipped, as it is redacted already, so each value is read once and the cost stays linear.
+// value. A value that starts inside the previous value is skipped, as it is redacted already, so each value
+// is read once and the cost stays linear.
 func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	switch {
-	case m[0] > 0 && (isAlnum(s[m[0]-1]) || s[m[0]-1] == '-'), m[1] < prevEnd, referenceKey(s[m[2]:m[3]], true),
-		isSasKey(s[m[2]:m[3]]):
+	case m[0] > 0 && (isAlnum(s[m[0]-1]) || s[m[0]-1] == '-'), m[1] < prevEnd, referenceKey(s[m[2]:m[3]], true):
 		return 0, 0, false
 	case m[2] == m[0]+1 && !isLetter(s[m[2]]):
 		// One dash: the flag needs a letter after it ("-password"), as "-_x" or "-1" is no flag.
@@ -1684,37 +1678,63 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	}
 	sep := s[m[3]:m[1]]
 	closed := sep != "" && (sep[0] == '"' || sep[0] == '\'' || sep[0] == '\\')
-	start, end := argumentSpan(s, m[1], m[0], strings.IndexByte(sep, ',') >= 0, closed)
+	start, end := keyNameValue(s, m[1], m[0], closed)
 	return start, end, true
 }
 
 // compoundValueSpan is the span function of the rule for a key name of two or more words, a blank and the
-// argument after it (argumentSpan), as in "aws configure set aws_secret_access_key x" (#585). The words are
-// joined by "_" ("client_secret", "api_key"), by "-" ("client-secret") or in camelCase ("clientSecret"). The
-// key must start a word, and a one-word name ("secret", "token", "password") never counts in this form, so
-// "kubectl get secret foo" and "kubectl create token sa" stay readable. A name joined by "-" or in camelCase
-// is also how Kubernetes names a Secret ("kubectl describe secret db-password -n prod"), so after such a name
-// a value that reads as a flag ("-n", "--namespace", flagWord) is kept. It also takes a flag ("-client_secret
+// value after it (keyNameValue), as in "aws configure set aws_secret_access_key x" (#585). The words are
+// joined by "_" ("client_secret", "STORAGE_SAS"), by "-" ("client-secret") or in camelCase ("clientSecret",
+// and starting upper-case "ClientSecret"). The key must start a word, and a one-word name ("secret", "token",
+// "password") never counts in this form, so "kubectl get secret foo" and "kubectl create token sa" stay
+// readable. A name joined by "-" or in camelCase is also how Kubernetes names a Secret ("kubectl describe
+// secret db-password -n prod"), so after such a name a value that reads as a flag ("-n", "--namespace",
+// flagWord) is kept. A name that starts upper-case is as often a type or a word of a sentence
+// ("ClientSecretCredential authentication failed", "Password expired"), so it counts only when it ends in a
+// secret word (secretNameEnd) and the value reads as one (valueShaped). It also takes a flag ("-client_secret
 // x", "--client_secret x", which the flag rule takes too), and leaves "=" or ":" after the blanks to the
 // key-value rules. A reference key ("client_id", "access_key_id", and as a flag "--password-stdin") keeps its
-// value, a bare short key with a prose prefix ("re-auth") does not count, and a "sas" key never counts here
-// (sasRefused).
+// value, and a bare short key with a prose prefix ("re-auth") does not count.
 func compoundValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	key := strings.TrimLeft(s[m[2]:m[3]], "-")
 	joined := strings.Contains(key, "_")
+	upper := key != "" && key[0] >= 'A' && key[0] <= 'Z'
 	spelled := !joined && !isBareShortKey(key) &&
 		(strings.Contains(key, "-") && !strings.Contains(key, "--") || isCamelCase(key))
 	switch {
 	case m[2] > 0 && isTokenByte(s[m[2]-1]), m[1] < prevEnd, !joined && !spelled,
 		m[1] < len(s) && (s[m[1]] == '=' || s[m[1]] == ':'), referenceKey(s[m[2]:m[3]], key != s[m[2]:m[3]]),
-		isSasKey(key):
+		!secretNameEnd.MatchString(key):
 		return 0, 0, false
 	}
-	start, end := argumentSpan(s, m[1], m[2], false, false)
-	if spelled && flagWord(s[start:end]) {
+	start, end := keyNameValue(s, m[1], m[2], false)
+	switch v := s[start:end]; {
+	case spelled && flagWord(v), upper && !valueShaped(v):
 		return 0, 0, false
 	}
 	return start, end, true
+}
+
+// secretNameEnd matches a key that ends in a secret word or a short key name ("client_secret", "db-password",
+// "ClientSecret", "ApiKey", "STORAGE_SAS"), not one that goes on into another word ("secret-volume",
+// "ClientSecretCredential"). "credential" does not count here: it ends SDK type names and the names of
+// credential files ("GOOGLE_APPLICATION_CREDENTIALS /etc/gcp.json").
+var secretNameEnd = regexp.MustCompile(`(?i)(?:` + strings.Replace(secretWordExpr, "|credentials?", "", 1) + `|` +
+	shortKeyNamesExpr + `)$`)
+
+// valueShaped reports whether v reads as a value rather than a word of a sentence: it holds a digit or one
+// of "/+=_-.:", mixes case after its first byte, or is 16 bytes or longer ("refresh token expired" and
+// "ClientSecret is missing" keep their words).
+func valueShaped(v string) bool {
+	if len(v) >= 16 || strings.ContainsAny(v, "0123456789/+=_-.:") {
+		return true
+	}
+	var lower, upper bool
+	for i := range len(v) {
+		lower = lower || v[i] >= 'a' && v[i] <= 'z'
+		upper = upper || i > 0 && v[i] >= 'A' && v[i] <= 'Z'
+	}
+	return lower && upper
 }
 
 // isLetter reports whether c is an ASCII letter.
@@ -1722,11 +1742,10 @@ func isLetter(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
-// isCamelCase reports whether key joins words in camelCase: it starts with a lower-case ASCII letter and has
-// a lower-case letter or a digit right before an upper-case one ("clientSecret", "dbPassword"). PascalCase is
-// how SDKs name types ("ClientSecretCredential authentication failed"), so it does not count.
+// isCamelCase reports whether key joins words in camelCase: it starts with an ASCII letter and has a
+// lower-case letter or a digit right before an upper-case one ("clientSecret", "dbPassword", "ClientSecret").
 func isCamelCase(key string) bool {
-	if key == "" || key[0] < 'a' || key[0] > 'z' {
+	if key == "" || !isLetter(key[0]) {
 		return false
 	}
 	for i := 1; i < len(key); i++ {
@@ -1738,8 +1757,10 @@ func isCamelCase(key string) bool {
 }
 
 // flagWord reports whether v reads as a command-line flag: one or two dashes, then a lower-case letter, then
-// only lower-case letters, digits and dashes ("-n", "--namespace", "--dry-run").
+// only lower-case letters, digits and dashes, and optionally "=" and its value ("-n", "--namespace",
+// "--dry-run", "--from-literal=x=y").
 func flagWord(v string) bool {
+	v, _, _ = strings.Cut(v, "=")
 	w := strings.TrimPrefix(v, "-")
 	if w == v {
 		return false
@@ -1756,85 +1777,48 @@ func flagWord(v string) bool {
 	return true
 }
 
-// argumentSpan returns the value after a secret key name or flag that starts at keyStart, from pos, as a
-// whole argument rather than its first token (#585):
+// keyNameValue returns the value after a secret flag or a compound key name and a blank (#585), from pos;
+// the name starts at keyStart. A value that opens with a quote, plain or escaped as JSON inside a JSON string
+// (escapeLevel), runs to its closing quote on the same line, with escapes handled (quotedEnd,
+// escapedQuotedSpan); when that quote does not close, the value is the quote and the token after it. Any other value is one
+// token (tokenEnd). A value never starts in the middle of a quoted string it did not open: when a quote opens
+// right before the name and the separator did not close it (closed is false), the same quote at pos closes
+// that string, and the value is empty. Each call reads forward from pos to the end of its line at most, and
+// back from keyStart over at most eight backslashes.
 //
-//   - in escaped quotes (JSON inside a JSON string), to its own closing quote (escapedQuotedSpan);
-//   - when the key itself follows an opening quote ("\"--client-secret=a b c\"", also escaped) and closed is
-//     false (the flag's own closing quote was not part of the separator), to that quote's closing quote, with
-//     escapes handled, or to the line end;
-//   - after a YAML block scalar indicator ("- |-"), the lines below it indented deeper than the line's text;
-//   - as a YAML sequence entry ("- --client-secret x y", or the value on its own "- x y" line), quoted to its
-//     closing quote, otherwise to the line end;
-//   - in a flow sequence (flow, or the key after "[" or ","): quoted to its closing quote, otherwise to the
-//     next "," or "]" or the line end;
-//   - otherwise as one shell word (shellWordEnd): quoted and unquoted pieces glued together up to unquoted
-//     whitespace, escaped blanks and line ends inside quotes included. A value that is one quoted piece is the
-//     text between its quotes.
-//
-// Where the end is unclear (a quote that does not close), the value runs to the line end. Except after a
-// block scalar indicator, the value also covers what valueSpan gives up to the next whitespace, so it is never
-// shorter than before #585. Each case reads forward from pos once; the scans back from keyStart and pos read
-// only blanks and dashes, and the line before a block scalar indicator, of which a line holds one.
-func argumentSpan(s string, pos, keyStart int, flow, closed bool) (int, int) {
+// Values with blanks that are not quoted, YAML block and flow scalars, shell words of glued pieces and arrays
+// or objects lose only their first token (TestKeyNameKnownLeaks): taking more needs a tokenizer per format.
+func keyNameValue(s string, pos, keyStart int, closed bool) (int, int) {
 	if pos >= len(s) {
 		return pos, pos
 	}
-	if isBlockHeader(s, pos) {
-		if start, end := indentedLines(s, lineEnd(s, pos), lineIndent(s, pos)); start >= 0 {
-			return start, end
+	level := escapeLevel(s, pos)
+	if !closed {
+		if enclosing, ok := enclosingQuote(s, keyStart); ok && enclosing == level && s[pos+1<<level-1] == s[keyStart-1] {
+			return pos, pos
 		}
-		return pos, lineEnd(s, pos)
 	}
-	start, end := argumentExtent(s, pos, keyStart, flow, closed)
-	ws, we := valueSpan(s, pos, boundaryWhitespace, 0)
-	return min(start, ws), max(end, we)
-}
-
-// argumentExtent is argumentSpan for a value that does not open a block scalar.
-func argumentExtent(s string, pos, keyStart int, flow, closed bool) (int, int) {
-	if level := escapeLevel(s, pos); level > 0 {
+	if level > 0 {
 		return escapedQuotedSpan(s, pos, level)
 	}
-	if !closed {
-		if level, ok := enclosingQuote(s, keyStart); ok {
-			return pos, enclosedEnd(s, pos, s[keyStart-1], level)
-		}
-	}
-	item := sequenceEntry(s, pos) || sequenceEntry(s, keyStart)
-	if c := s[pos]; (item || flow) && (c == '"' || c == '\'') {
+	if c := s[pos]; c == '"' || c == '\'' {
 		if end := quotedEnd(s, pos); end > 0 {
 			return pos + 1, end - 1
 		}
-		return pos, lineEnd(s, pos)
+		return pos, tokenEnd(s, pos+1)
 	}
-	if item {
-		return pos, trimBlanks(s, pos, lineEnd(s, pos))
-	}
-	if flow || flowItem(s, keyStart) {
-		end := lineEnd(s, pos)
-		if i := strings.IndexAny(s[pos:end], ",]"); i >= 0 {
-			end = pos + i
-		}
-		return pos, trimBlanks(s, pos, end)
-	}
-	if c := s[pos]; c == '"' || c == '\'' {
-		if end := shellWordEnd(s, pos); end > 0 && end == shellQuoteEnd(s, pos) {
-			return pos + 1, end - 1
-		}
-	}
-	if end := shellWordEnd(s, pos); end >= 0 {
-		return pos, end
-	}
-	return pos, lineEnd(s, pos)
+	return pos, tokenEnd(s, pos)
 }
 
-// trimBlanks returns end moved back over the blanks before it, but not before pos.
-func trimBlanks(s string, pos, end int) int {
-	for end > pos && isSpace(s[end-1]) {
-		end--
+// tokenEnd returns the end of the token that starts at pos: the next whitespace (a line end included), quote,
+// ",", "]" or "}".
+func tokenEnd(s string, pos int) int {
+	for i := pos; i < len(s); i++ {
+		if isSpace(s[i]) || strings.IndexByte(`"',]}`, s[i]) >= 0 {
+			return i
+		}
 	}
-	return end
+	return len(s)
 }
 
 // enclosingQuote reports whether a quote opens right before the key at keyStart, and the level of its
@@ -1864,128 +1848,6 @@ func enclosingQuote(s string, keyStart int) (int, bool) {
 		return 3, true
 	}
 	return 0, false
-}
-
-// enclosedEnd returns the end of a value inside a quoted string of the given escape level that opened before
-// its key: the closing quote q, a backslash escaping the next byte in double quotes, or the line end.
-func enclosedEnd(s string, pos int, q byte, level int) int {
-	if level > 0 {
-		_, end := escapedQuotedSpan(s, pos-1<<level, level)
-		return end
-	}
-	for i := pos; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == '\n' || c == '\r':
-			return i
-		case c == '\\' && q == '"':
-			if i+1 < len(s) && s[i+1] != '\n' && s[i+1] != '\r' {
-				i++
-			}
-		case c == q:
-			return i
-		}
-	}
-	return len(s)
-}
-
-// lineIndent returns the indentation of the line holding pos: the column of its first byte that is not a
-// blank. The content of a block scalar is indented deeper than it, also when the indicator follows a sequence
-// entry ("- |-").
-func lineIndent(s string, pos int) int {
-	ls := strings.LastIndexByte(s[:pos], '\n') + 1
-	return pos - ls - len(strings.TrimLeft(s[ls:pos], " \t"))
-}
-
-// sequenceEntry reports whether only a YAML sequence entry indicator ("- ", after any indentation) stands
-// between the start of its line and pos. It reads back over blanks and dashes only.
-func sequenceEntry(s string, pos int) bool {
-	i, dash := pos, false
-	for i > 0 && (s[i-1] == ' ' || s[i-1] == '\t' || s[i-1] == '-') {
-		if s[i-1] == '-' {
-			if i == pos || s[i] != ' ' && s[i] != '\t' {
-				return false
-			}
-			dash = true
-		}
-		i--
-	}
-	return dash && (i == 0 || s[i-1] == '\n')
-}
-
-// flowItem reports whether the key at keyStart is an item of a flow sequence: "[" or "," before it, after
-// any blanks.
-func flowItem(s string, keyStart int) bool {
-	i := keyStart
-	for i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
-		i--
-	}
-	return i > 0 && (s[i-1] == '[' || s[i-1] == ',')
-}
-
-// shellQuoteEnd returns the index just past the closing quote of the shell quote that opens at pos: a single
-// quote ends at the next one, a double quote at the next one not escaped by a backslash. Line ends inside the
-// quotes belong to the value. It returns -1 when the quote does not close.
-func shellQuoteEnd(s string, pos int) int {
-	q := s[pos]
-	for i := pos + 1; i < len(s); i++ {
-		switch s[i] {
-		case '\\':
-			if q == '"' {
-				i++
-			}
-		case q:
-			return i + 1
-		}
-	}
-	return -1
-}
-
-// shellWordEnd returns the end of the shell word that starts at pos: quoted and unquoted pieces glued
-// together up to whitespace outside quotes. A backslash outside quotes escapes the next byte (a blank, or a
-// line end, "\r\n" too). It returns -1 when a quote does not close.
-func shellWordEnd(s string, pos int) int {
-	i := pos
-	for i < len(s) {
-		switch c := s[i]; {
-		case isSpace(c):
-			return i
-		case c == '\\':
-			i += 2
-			if i < len(s) && s[i-1] == '\r' && s[i] == '\n' {
-				i++
-			}
-		case c == '"' || c == '\'':
-			if i = shellQuoteEnd(s, i); i < 0 {
-				return -1
-			}
-		default:
-			i++
-		}
-	}
-	return len(s)
-}
-
-// bracketEnd returns the index just past the bracket that closes the JSON or YAML flow array or object
-// opening at pos, skipping brackets inside double-quoted strings, or the end of s when it does not close: a
-// truncated value is redacted to the end (#585).
-func bracketEnd(s string, pos int) int {
-	depth, str := 0, false
-	for i := pos; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == '\\':
-			i++
-		case c == '"':
-			str = !str
-		case str:
-		case c == '[' || c == '{':
-			depth++
-		case c == ']' || c == '}':
-			if depth--; depth == 0 {
-				return i + 1
-			}
-		}
-	}
-	return len(s)
 }
 
 // commentOverBlock reports whether the value of the key in group 1 of m, at the end of m, is a YAML comment
@@ -2022,11 +1884,14 @@ func commentOverBlock(s string, m []int) bool {
 const (
 	secretWordExpr = `(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?|connection[_-]?string|conn[_-]?str)`
 	bareKeyExpr    = `(?:[A-Za-z0-9_.-]*` + secretWordExpr + `[A-Za-z0-9_.-]*|` + shortKeyExpr + `)`
+	// shortKeyNamesExpr lists the short key names (shortKeyNames), joined by "|".
+	shortKeyNamesExpr = `pass|auth|sig|sas`
 	// shortKeyExpr names short keys that hold secrets but are also parts of other words ("bypass",
 	// "author", "signal", "kansas", "sasl"), so they count only as a whole key or as the last part of a
-	// longer one after "_", "." or "-" ("DB_PASS", "basic_auth", "AZURE_STORAGE_SAS"); "sas" (an Azure shared
-	// access signature) also only where sasRefused lets it count.
-	shortKeyExpr  = `(?:[A-Za-z0-9_.-]*[_.-]|\b)(?:pass|auth|sig|sas)`
+	// longer one after "_", "." or "-" ("DB_PASS", "basic_auth", "AZURE_STORAGE_SAS"). "sas" (an Azure shared
+	// access signature) also counts as the last word of a camelCase key, spelled "Sas" ("storageSas",
+	// "StorageSas"; not "kansas" or "KANSAS"), and only where sasRefused lets it count.
+	shortKeyExpr  = `(?:(?:[A-Za-z0-9_.-]*[_.-]|\b)(?:` + shortKeyNamesExpr + `)|[A-Za-z0-9_.-]*(?-i:[a-z0-9]Sas))`
 	secretKeyExpr = `["']?` + bareKeyExpr + `["']?`
 	flowKeyExpr   = `\\*["']` + bareKeyExpr + `\\*["']|` + bareKeyExpr
 	// nextLineHeaderExpr is a YAML key that names a secret with nothing after its colon but blanks or a

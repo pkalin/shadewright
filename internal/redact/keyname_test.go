@@ -135,15 +135,17 @@ func TestFlagOnlyReferenceSuffixes(t *testing.T) {
 	}
 }
 
-// "sas" counts only in "sas=value" and "sas: value", never after "/", "." or a letter or a digit, so an image
-// named sas keeps its tag (#585).
+// "sas" counts as "--sas", "--source-sas", "storageSas", "StorageSas", "STORAGE_SAS", "sas=" and "sas: ", and as a
+// quoted key, never right after "/" or "." and never as the tag of an image named sas (#585).
 func TestSasKeyOnlyBeforeItsSeparator(t *testing.T) {
 	for _, in := range []string{
 		`Failed to pull image "ghcr.io/acme/sas:v1.2.3beta"`,
 		"image: ghcr.io/acme/sas:v1.2.3beta",
 		"pulled acme.sas:v2beta1 and storageSas:x",
 		"opts sas:v1 /mnt/sas=v2",
-		"az storage blob list --sas x",
+		"GET /sas: Ab3xyz789q",
+		"checks sas: none found",
+		"kansas=Ab3xyz789q KANSAS=Ab3xyz789q Arkansas: Ab3xyz789q",
 	} {
 		if out := String(in); out != in {
 			t.Errorf("changed useful text:\n in: %q\nout: %q", in, out)
@@ -157,48 +159,64 @@ func TestSasKeyOnlyBeforeItsSeparator(t *testing.T) {
 		"GET /c/b?sas=" + k + "&x=1",
 		`{"sas":"` + k + `"}`,
 		"env:\n- name: STORAGE_SAS\n  value: " + k,
+		"az storage blob list --sas " + k + " --account-name a",
+		"azcopy copy --source-sas " + k + " x",
+		"storageSas=" + k,
+		"StorageSas: " + k,
+		"azure.storage.sas: " + k,
+		"set STORAGE_SAS " + k,
 	} {
 		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:]}, nil)
 	}
 }
 
-// After a secret key name or flag the value is the whole argument, not its first token (#585): to the closing
-// quote of a quoted argument, to the next "," or "]" in a flow sequence, the whole indented block of a block
-// scalar, one shell word of glued pieces, and the line end where the end is unclear.
-func TestWholeArgumentAfterAKeyName(t *testing.T) {
+// After a secret flag or a compound key name, a value that opens with a quote, plain or escaped, runs to its
+// closing quote on the same line, with escapes handled; any other value is one token, ending at whitespace, a
+// quote, ",", "]" or "}" (#585). What follows the value stays.
+func TestQuotedValueAfterAKeyName(t *testing.T) {
 	words := []string{"horse", "battery", "staple"}
 	for name, c := range map[string]struct{ in, kept string }{
-		"quoted argument":         {`args: ["--client-secret=horse battery staple", "--region", "x"]`, `"--region", "x"]`},
-		"quoted single":           {`args: ['--client-secret=horse battery staple', '--region']`, `'--region']`},
-		"quoted flag and value":   {`command: ["app", "--password horse battery staple"]`, `"app"`},
-		"quoted env entry":        {`env: ["PASSWORD=horse battery staple", "REGION=x"]`, `env: [`},
-		"escaped json":            {`"args":"[\"--client-secret=horse battery staple\",\"--region\"]"`, `\"--region\"]"`},
-		"escaped json twice":      {`"a":"{\"args\":\"[\\\"--client-secret=horse battery staple\\\"]\"}"`, `"a":"{\"args\"`},
-		"flow sequence":           {"args: [--client-secret, horse battery staple, --region, west]", "--region, west]"},
-		"flow sequence last":      {"args: [--client-secret, horse battery staple]", "args: [--client-secret, "},
-		"flow item with =":        {"args: [--client-secret=horse battery staple, --region, west]", "--region, west]"},
-		"block scalar item":       {"args:\n- --client-secret\n- |-\n  horse battery\n  staple\n- --region\n- west", "- --region\n- west"},
-		"folded block scalar":     {"args:\n  - --password\n  - >\n    horse battery\n    staple\n  - --region", "  - --region"},
-		"yaml item plain":         {"args:\n- --client-secret\n- horse battery staple\n- --region", "- --region"},
-		"yaml item one line":      {"args:\n- --client-secret horse battery staple\n- --region", "- --region"},
-		"shell pieces":            {`--client-secret="horse"'battery'"staple" --region x`, flagAfter},
-		"shell pieces unquoted":   {`--client-secret=horse'battery'staple --region x`, flagAfter},
-		"escaped blank":           {`--client-secret horse\ battery\ staple --region x`, flagAfter},
-		"line end inside quotes":  {"--client-secret \"horse battery\nstaple\" --region x", flagAfter},
-		"single quotes on lines":  {"--password 'horse\nbattery staple' --region x", flagAfter},
-		"unclosed quote":          {`--client-secret "horse battery staple --region x`, ""},
-		"unclosed enclosing":      {`args: ["--client-secret=horse battery staple`, "args: ["},
-		"key-value shell pieces":  {`PASSWORD="horse"'battery staple' REGION=x`, " REGION=x"},
-		"compound shell pieces":   {`aws configure set aws_secret_access_key "horse"' battery staple' x`, " x"},
-		"single-dash flag pieces": {`-password 'horse battery staple' -region x`, " -region x"},
+		"double quotes":        {`run --password "horse battery staple" --region x`, `" --region x`},
+		"single quotes":        {`run --password 'horse battery staple' --region x`, `' --region x`},
+		"escaped quote inside": {`run --password "horse \"battery\" staple" --region z`, `" --region z`},
+		"argument list":        {`args: ["--client-secret", "horse battery staple", "--region", "x"]`, `", "--region", "x"]`},
+		"escaped json":         {`"args":"[\"--client-secret\",\"horse battery staple\",\"--region\"]"`, `\",\"--region\"]"`},
+		"escaped json twice":   {`"a":"{\"args\":\"[\\\"--client-secret\\\",\\\"horse battery staple\\\"]\"}"`, `\\\"]\"}"`},
+		"yaml list quoted":     {"args:\n- --client-secret\n- \"horse battery staple\"\n- --region", "\"\n- --region"},
+		"flow sequence quoted": {`args: [--client-secret, "horse battery staple", --region]`, `", --region]`},
+		"single-dash flag":     {`-password 'horse battery staple' -region x`, `' -region x`},
+		"compound name":        {`aws configure set aws_secret_access_key "horse battery staple" then`, `" then`},
+		"upper-case compound":  {`login ClientSecret "horse battery staple" after`, `" after`},
+		"crlf continuation":    {"app --client-secret \\\r\n  \"horse battery staple\" \\\r\n  --region x", "--region x"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			var kept []string
-			if c.kept != "" {
-				kept = []string{c.kept}
-			}
-			checkRedacted(t, c.in, words, kept)
+			checkRedacted(t, c.in, words, []string{c.kept})
 		})
+	}
+	k := leakKey()
+	for in, kept := range map[string]string{
+		"args: [--client-secret, " + k + ", --region, west]": ", --region, west]",
+		`{"cmd": "run --token ` + k + `", "u": "x"}`:         `", "u": "x"}`,
+		"{run --token " + k + "}":                            "}",
+		"run --token '" + k + " --region x":                  " --region x",
+		"[--token " + k + "]next":                            "]next",
+		"run --token " + k + "'x' --region y":                "'x' --region y",
+	} {
+		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:]}, []string{kept})
+	}
+	// A quote that does not close goes with the value.
+	if in, want := "run --token 'hunter2abc --region x", "run --token [REDACTED] --region x"; String(in) != want {
+		t.Errorf("String(%q) = %q, want %q", in, String(in), want)
+	}
+	// A value never starts in the middle of a quoted string it did not open: the quote after the blank closes
+	// the argument that holds the flag.
+	for _, in := range []string{
+		`args: ["--password ", "--region", "x"]`,
+		`"args":"[\"--password \",\"--region\"]"`,
+	} {
+		if out := String(in); out != in {
+			t.Errorf("value taken from the next argument:\n in: %q\nout: %q", in, out)
+		}
 	}
 }
 
@@ -245,7 +263,8 @@ func TestSingleDashLongFlags(t *testing.T) {
 
 // A key name of two or more words before a blank counts joined by "-" and in camelCase too, not only by "_"
 // (#585). After such a name a value that reads as a flag is kept, as "kubectl describe secret db-password -n
-// prod" names a Secret.
+// prod" names a Secret. A name that starts upper-case counts only when it ends in a secret word and the value
+// has a digit, one of "/+=_-.:", mixed case inside or 16 or more bytes.
 func TestSpelledCompoundKeyNames(t *testing.T) {
 	k := leakKey()
 	for _, in := range []string{
@@ -253,8 +272,21 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 		"login clientSecret " + k + " next",
 		"set db-password\t" + k,
 		"set apiKey " + k,
+		// Names that start upper-case, before a value that does not read as a word.
+		"login ClientSecret " + k + " next",
+		"set ApiKey " + k,
+		"set AccessKey " + k,
+		"set STORAGE_SAS " + k,
 	} {
 		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:]}, nil)
+	}
+	for in, v := range map[string]string{
+		"set ClientSecret hunter3 now":          "hunter3",
+		"set ClientSecret hunter/two now":       "hunter/two",
+		"set ClientSecret hunTer now":           "hunTer",
+		"set ClientSecret correcthorsebatt now": "correcthorsebatt",
+	} {
+		checkRedacted(t, in, []string{v}, []string{" now"})
 	}
 	for _, in := range []string{
 		"kubectl describe secret db-password -n prod",
@@ -263,6 +295,13 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 		"deleted Secret/client-secret-7d9f8b6c5",
 		"ClientSecretCredential authentication failed",
 		"ClientAssertionCredential authentication failed.",
+		"ClientSecretCredential Abc123xyz9 failed",
+		"refresh token expired",
+		"ClientSecret is missing for tenant",
+		"AWS_SECRET_ACCESS_KEY is empty",
+		"MyPassword Expired",
+		"ClientSecret correcthorsebat",
+		"ClientSecret --namespace prod",
 	} {
 		if out := String(in); out != in {
 			t.Errorf("changed useful text:\n in: %q\nout: %q", in, out)
@@ -270,37 +309,148 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 	}
 }
 
-// A JSON or flow secret field whose value is an array or an object loses the whole value (#585).
-func TestSecretFieldArraysAndObjects(t *testing.T) {
-	words := []string{"horse", "battery", "staple"}
-	for in, kept := range map[string]string{
-		`{"password": ["horse","battery", "staple"], "user": "x"}`:                                 `, "user": "x"}`,
-		`{"token": {"a": "horse battery", "b": ["staple]"]}, "u": "x"}`:                            `, "u": "x"}`,
-		"{\n  \"password\": [\n    \"horse\",\n    \"battery staple\"\n  ],\n  \"user\": \"x\"\n}": `"user": "x"`,
-		`{\"apiKey\":[\"horse\",\"battery\",\"staple\"],\"u\":1}`:                                  `,\"u\":1}`,
-		`{"password": ["horse", "battery staple"`:                                                  `{"password": `,
-	} {
-		checkRedacted(t, in, words, []string{kept})
-	}
-}
-
-// Known leaks after a key name, kept by decision and documented in design 10.3 and threat model G4.4 (#585).
-// The test fails when one no longer leaks, so the list and the docs are updated with the change that closes it.
+// Known leaks after a key name, kept by decision and documented in design 10.3 and threat model G4.4 (#585):
+// after a key name only the first token of a value goes, or the text between its quotes on one line. Taking
+// more needs a tokenizer per format (follow-up issue to be linked). The test fails when one no longer leaks,
+// so the list and the docs are updated with the change that closes it.
 func TestKeyNameKnownLeaks(t *testing.T) {
 	k := leakKey()
 	for name, in := range map[string]string{
-		"unicode-escaped key":       `{"\u0070assword": "` + k + `"}`,
-		"unicode-escaped flag":      `["--\u0070assword", "` + k + `"]`,
-		"here-doc":                  "app login <<EOF\n" + k + "\nEOF",
-		"here-doc after stdin flag": "docker login -u bob --password-stdin <<EOF\n" + k + "\nEOF",
-		"here-string":               `docker login -u bob --password-stdin <<< "` + k + `"`,
-		"short flag":                "mysql -u root -p " + k,
-		"one-word name and a blank": "vault write auth/x secret " + k,
-		"one-word token name":       "app set token " + k,
+		"unicode-escaped key":        `{"\u0070assword": "` + k + `"}`,
+		"unicode-escaped flag":       `["--\u0070assword", "` + k + `"]`,
+		"here-doc":                   "app login <<EOF\n" + k + "\nEOF",
+		"here-doc after stdin flag":  "docker login -u bob --password-stdin <<EOF\n" + k + "\nEOF",
+		"here-string":                `docker login -u bob --password-stdin <<< "` + k + `"`,
+		"short flag":                 "mysql -u root -p " + k,
+		"one-word name and a blank":  "vault write auth/x secret " + k,
+		"one-word token name":        "app set token " + k,
+		"blanks inside the argument": `args: ["--client-secret=horse battery ` + k + `"]`,
+		"flow sequence scalar":       "args: [--client-secret, horse battery " + k + ", --region]",
+		"block scalar":               "args:\n- --client-secret\n- |-\n  " + k + "\n- --region",
+		"anchor":                     "args:\n- --client-secret\n- &pw " + k,
+		"tag":                        "args:\n- --client-secret\n- !!str " + k,
+		"multi-line quoted scalar":   "--password \"horse\n" + k + "\" --region x",
+		"shell concatenated quotes":  `--client-secret="horse"'` + k + `' --region x`,
+		"command substitution":       "--password $(echo " + k + ") --region x",
+		"array value":                `{"password": ["horse", "` + k + `"], "u": "x"}`,
+		"object value":               `{"token": {"a": "horse", "b": "` + k + `"}, "u": "x"}`,
+		"escaped array value":        `{\"apiKey\":[\"horse\",\"` + k + `\"],\"u\":1}`,
+		"json comment":               "{\"password\": // rotated\n  \"" + k + "\"}",
 	} {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",
 				name, in, out)
+		}
+	}
+}
+
+// flagValueLine is a secret flag, its value and the next flag.
+const flagValueLine = "run --password hunter2abc --region y"
+
+// evidenceRow is one input of TestKeepsWhatMainKept: main is the output of main before #585 (commit f09d6392)
+// and mainSpans the byte ranges it redacted, generated once by a throwaway test run in a checkout of that
+// commit. want, when set, is the output of this change, written by hand for a value it is meant to redact
+// (why says which).
+type evidenceRow struct {
+	in, main  string
+	mainSpans [][2]int
+	want, why string
+}
+
+// evidenceRows are realistic inputs that mention a secret word: logfmt and JSON log lines, kubectl describe
+// and event lines, curl with a credential in a quoted URL and options after it, volume and Secret names.
+var evidenceRows = []evidenceRow{
+	{in: "level=warn msg=\"refresh token: expired\" user=bob pod=web-7f9 node=n1",
+		main:      "level=warn msg=\"refresh token: *** user=bob pod=web-7f9 node=n1",
+		mainSpans: [][2]int{{31, 39}}},
+	{in: "level=info msg=\"rotated client secret for app\" app=web ns=prod",
+		main: "level=info msg=\"rotated client secret for app\" app=web ns=prod"},
+	{in: "ts=2026-11-14T10:00:00Z level=error msg=\"password authentication failed for user \\\"app\\\"\" db=orders",
+		main: "ts=2026-11-14T10:00:00Z level=error msg=\"password authentication failed for user \\\"app\\\"\" db=orders"},
+	{in: "level=error msg=\"secret \\\"db-creds\\\" not found\" controller=app",
+		main: "level=error msg=\"secret \\\"db-creds\\\" not found\" controller=app"},
+	{in: "level=warn msg=\"ClientSecretCredential authentication failed\" tenant=t1",
+		main: "level=warn msg=\"ClientSecretCredential authentication failed\" tenant=t1"},
+	{in: "{\"level\":\"error\",\"msg\":\"failed to read secret db-password: not found\",\"namespace\":\"prod\"}",
+		main:      "{\"level\":\"error\",\"msg\":\"failed to read secret db-password: *** found\",\"namespace\":\"prod\"}",
+		mainSpans: [][2]int{{59, 62}}},
+	{in: "{\"msg\":\"token expired\",\"user\":\"bob\",\"retry\":3}",
+		main: "{\"msg\":\"token expired\",\"user\":\"bob\",\"retry\":3}"},
+	{in: "{\"msg\":\"api key missing\",\"service\":\"billing\"}",
+		main: "{\"msg\":\"api key missing\",\"service\":\"billing\"}"},
+	{in: "{\"msg\":\"--password flag is deprecated, use --password-file\",\"component\":\"cli\"}",
+		main: "{\"msg\":\"--password flag is deprecated, use --password-file\",\"component\":\"cli\"}",
+		want: "{\"msg\":\"--password *** is deprecated, use --password-file\",\"component\":\"cli\"}",
+		why:  "the token after a secret flag goes whatever it reads as, also in prose (accepted over-redaction)"},
+	{in: "  Warning  FailedMount  2m  kubelet  MountVolume.SetUp failed for volume \"secret-volume\" : secret \"db-password\" not found",
+		main: "  Warning  FailedMount  2m  kubelet  MountVolume.SetUp failed for volume \"secret-volume\" : secret \"db-password\" not found"},
+	{in: "    Mounts:\n      /etc/secret from secret-volume (ro)\n      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-x (ro)",
+		main: "    Mounts:\n      /etc/secret from secret-volume (ro)\n      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-x (ro)"},
+	{in: "  Warning  FailedMount  1m  kubelet  Unable to attach or mount volumes: unmounted volumes=[secret-volume], unattached volumes=[secret-volume kube-api-access-x]",
+		main: "  Warning  FailedMount  1m  kubelet  Unable to attach or mount volumes: unmounted volumes=[secret-volume], unattached volumes=[secret-volume kube-api-access-x]"},
+	{in: "Error from server (NotFound): secrets \"client-secret\" not found",
+		main: "Error from server (NotFound): secrets \"client-secret\" not found"},
+	{in: "env:\n- name: DB_PASSWORD\n  valueFrom:\n    secretKeyRef:\n      name: db-creds\n      key: password",
+		main: "env:\n- name: DB_PASSWORD\n  valueFrom:\n    secretKeyRef:\n      name: db-creds\n      key: password"},
+	{in: "kubectl create secret generic db-password --from-literal=x=y -n prod",
+		main: "kubectl create secret generic db-password --from-literal=x=y -n prod"},
+	{in: "kubectl get secret db-token --namespace prod -o yaml",
+		main: "kubectl get secret db-token --namespace prod -o yaml"},
+	{in: "docker login --password-stdin -u bob registry.test",
+		main: "docker login --password-stdin -u bob registry.test"},
+	{in: "curl \"https://svc.test/?token=x\" --retry 3",
+		main:      "curl \"https://svc.test/?token=** --retry 3",
+		mainSpans: [][2]int{{30, 32}}},
+	{in: "curl -sS \"https://svc.test/api?token=abc123\" --retry 3 -H \"Accept: application/json\"",
+		main:      "curl -sS \"https://svc.test/api?token=*** --retry 3 -H \"Accept: application/json\"",
+		mainSpans: [][2]int{{37, 44}}},
+	{in: "args: [\"--token-ttl\", \"5m\", \"--secret-name\", \"db-creds\"]",
+		main: "args: [\"--token-ttl\", \"5m\", \"--secret-name\", \"db-creds\"]"},
+	{in: flagValueLine,
+		main: flagValueLine,
+		want: "run --password [REDACTED] --region y",
+		why:  "the value after a secret flag"},
+	{in: "args: [\"--client-secret\", \"s3cr3t-value\", \"--region\", \"west\"]",
+		main: "args: [\"--client-secret\", \"s3cr3t-value\", \"--region\", \"west\"]",
+		want: "args: [\"--client-secret\", \"[credential]\", \"--region\", \"west\"]",
+		why:  "the value after a secret flag in an argument list"},
+	{in: "login ClientSecret Abc123xyz9 next",
+		main: "login ClientSecret Abc123xyz9 next",
+		want: "login ClientSecret [REDACTED] next",
+		why:  "the value after an upper-case compound key name and a blank"},
+	{in: "az storage blob list --sas sv=2024 --account-name acct",
+		main: "az storage blob list --sas sv=2024 --account-name acct",
+		want: "az storage blob list --sas *** --account-name acct",
+		why:  "the value after the flag --sas"},
+	{in: "{\"msg\":\"login failed\",\"password\":\"hunter2\",\"user\":\"bob\"}",
+		main:      "{\"msg\":\"login failed\",\"password\":\"***\",\"user\":\"bob\"}",
+		mainSpans: [][2]int{{34, 41}}},
+}
+
+// Evidence main kept stays (#585): on each input of evidenceRows, the redactor removes no byte that main kept,
+// except in rows marked by hand with the output this change is meant to give.
+func TestKeepsWhatMainKept(t *testing.T) {
+	for _, r := range evidenceRows {
+		if r.want != "" {
+			if got := String(r.in); got != r.want {
+				t.Errorf("%s:\n  in: %q\n got: %q\nwant: %q", r.why, r.in, got, r.want)
+			}
+			continue
+		}
+		mainRedacted := make([]bool, len(r.in))
+		for _, sp := range r.mainSpans {
+			for i := sp[0]; i < sp[1]; i++ {
+				mainRedacted[i] = true
+			}
+		}
+		for _, sp := range defaultRedactor.spans(r.in) {
+			for i := sp.start; i < sp.end; i++ {
+				if !mainRedacted[i] {
+					t.Errorf("removed %q, which main kept:\n  in: %q\nmain: %q\n now: %q",
+						r.in[sp.start:sp.end], r.in, r.main, String(r.in))
+					break
+				}
+			}
 		}
 	}
 }

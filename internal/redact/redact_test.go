@@ -554,6 +554,8 @@ func skipLarge(t *testing.T) {
 func TestRepeatedPatternsStayLinear(t *testing.T) {
 	skipLarge(t)
 	const size = 1 << 20
+	// tails close the units that open a quote, once, at the end of the text.
+	tails := map[string]string{"quote closed at the end": "'", "flag quote closed at end": `"`}
 	for name, unit := range map[string]string{
 		"yaml empty headers":       "password:\n",
 		"yaml headers over values": "password:\n  password:\n",
@@ -604,7 +606,7 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"compound keys":        "a_token ",
 		"compound chains":      "a_token a_token\t",
 		"secret ids":           "--secret-id x ",
-		// Second fix round of #585: whole arguments after a key name.
+		// Second fix round of #585: values after a key name in quotes, flow sequences and block forms.
 		"quoted runs":            `--password "a b `,
 		"multi-line quotes":      "--password \"a\n",
 		"single quotes on lines": "--password 'a\n",
@@ -627,9 +629,17 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"sas image tags":         "ghcr.io/a/sas:v1 ",
 		"sas keys":               "sas: x sas=y ",
 		"enclosing short keys":   `"auth: ok `,
+		// Third fix round of #585: quoted values that close only at the end of the text (tails), and values
+		// that close the quote the flag stands in.
+		"quote closed at the end":   "password='a'\\\n",
+		"flag quote closed at end":  "--password \"a\\\n",
+		"enclosing flag quotes":     `"--password ", `,
+		"upper compound keys":       "ClientSecret Ab1 ",
+		"upper compound word chain": "ClientSecret ClientSecret ",
 	} {
-		small := timeString(t, name, rep(unit, size/8/len(unit)))
-		large := timeString(t, name, rep(unit, size/len(unit)))
+		tail := tails[name]
+		small := timeString(t, name, rep(unit, size/8/len(unit))+tail)
+		large := timeString(t, name, rep(unit, size/len(unit))+tail)
 		if large > 10*time.Second || large > 16*max(small, 20*time.Millisecond) {
 			t.Errorf("%s: %d bytes took %s, an eighth of them %s", name, size, large, small)
 		}
@@ -1441,7 +1451,7 @@ func TestFlagAndKeyNameReferencesStay(t *testing.T) {
 	// The value goes, the flag and the text after it stay; a flag after a boolean secret-named flag is
 	// taken as its value (accepted over-redaction).
 	for in, want := range map[string]string{
-		"run --password hunter2abc --region y":  "run --password [REDACTED] --region y",
+		flagValueLine:                           "run --password [REDACTED] --region y",
 		"run --use-token --verbose":             "run --use-token ***",
 		"run --client-secret hunter2abc\n--dbg": "run --client-secret [REDACTED]\n--dbg",
 	} {

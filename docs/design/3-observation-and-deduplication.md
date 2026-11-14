@@ -159,6 +159,10 @@ Both are pure functions in `internal/incidents/fingerprint`:
 - First sightings older than 15 minutes are dropped on the writer's tick. The gauge `shadewright_incident_first_sightings_held` reports how many are held.
 - The cap on Incidents applies when a sighting opens one, not when it is held.
 
+### Consequence symptoms
+
+<span class="sw-status sw-planned">planned</span> `BackOff` and probe `Unhealthy` of a container with an open cause Incident (`OOMKilled`, an image that cannot be pulled, a configuration error) are meant to count as evidence on that Incident and open none of their own, and a consequence with no cause is held and opens an Incident only if it persists. Proposed in [ADR-0039](../adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) ([#432](https://github.com/pkalin/shadewright/issues/432)); nothing of it is built.
+
 ### Timing values
 
 Starting values, to be tuned on real traffic:

@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<title id="t">Shadewright cause rule</title>
+<desc id="d">Overview of ADR-0039. The symptoms of one container, for example web in the Deployment demo/web, arrive as observations: an OOMKilled termination read from pod status, then a BackOff event and an Unhealthy probe event. The collector names the container and the class of each observation: cause (a container termination, or a kubelet Failed event on the container) or consequence (BackOff, probe Unhealthy). The Incident controller looks for an open cause Incident of the same subject and container. A cause opens its Incident as today. A consequence with an open cause is counted as evidence on the cause's Incident (status.absorbed: reason, count, last seen) and opens nothing. A consequence with no cause is held for the grace period, 2 minutes, and opens its own Incident only if the container still shows the symptom; otherwise it is dropped. When a cause opens up to 10 minutes after a consequence Incident of the same container, that Incident is closed as Resolved with the Lifecycle reason FoldedIntoCause, status.foldedInto naming the cause Incident, its counts kept; a request of it with no pull request yet ends Cancelled with reason IncidentFolded. The fingerprint does not change, and an unrelated problem of the same workload, such as a missing Secret on another container, keeps its own Incident.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+<style>
+.bt{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4}
+.ext{fill:#1d1b2b;stroke:#4fd1c5;stroke-width:1.4}
+.hold{fill:#1d1b2b;stroke:#f0b429;stroke-width:1.4;stroke-dasharray:6 4}
+.lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.12em}
+.h{fill:#f1edff;font-size:15px;font-weight:650}
+.s{fill:#a9a4c4;font-size:12.5px}
+.no{fill:#ff8fa3;font-size:12.5px;font-weight:600}
+.fb{stroke:#a879ff;stroke-width:1.8;fill:none}
+.dash{stroke:#f0b429;stroke-width:1.8;fill:none;stroke-dasharray:6 4}
+</style></defs>
+<rect width="1200" height="560" rx="18" fill="#0e0e16"/>
+<text class="lanet" x="20" y="44">1  SYMPTOMS OF ONE CONTAINER</text>
+<text class="lanet" x="420" y="44">2  THE RULE</text>
+<text class="lanet" x="800" y="44">3  WHAT IS WRITTEN</text>
+
+<rect class="ext" x="20" y="62" width="340" height="86" rx="10"/>
+<text class="h" x="34" y="88">OOMKilled (cause)</text>
+<text class="s" x="34" y="110">termination in pod status, container web</text>
+<text class="s" x="34" y="129">immediate, as today</text>
+<rect class="ext" x="20" y="166" width="340" height="86" rx="10"/>
+<text class="h" x="34" y="192">BackOff (consequence)</text>
+<text class="s" x="34" y="214">kubelet event, fieldPath spec.containers{web}</text>
+<text class="s" x="34" y="233">container checked against the pod's spec</text>
+<rect class="ext" x="20" y="270" width="340" height="86" rx="10"/>
+<text class="h" x="34" y="296">Unhealthy (consequence)</text>
+<text class="s" x="34" y="318">kubelet probe event on the same container</text>
+<text class="s" x="34" y="337">same subject, same container name</text>
+<rect class="ext" x="20" y="396" width="340" height="104" rx="10"/>
+<text class="h" x="34" y="422">Missing Secret on container sidecar</text>
+<text class="s" x="34" y="444">a cause of another container</text>
+<text class="s" x="34" y="463">its own Incident, nothing is folded</text>
+<text class="s" x="34" y="482">the rule never joins two causes</text>
+
+<rect class="bt" x="420" y="62" width="320" height="132" rx="10"/>
+<text class="h" x="434" y="88">Incident controller, consume</text>
+<text class="s" x="434" y="110">before the first-sighting gate and the</text>
+<text class="s" x="434" y="129">fingerprint store; code only, no model</text>
+<text class="s" x="434" y="148">open cause Incident for this subject UID</text>
+<text class="s" x="434" y="167">and container? (phase not Resolved)</text>
+<rect class="bt" x="420" y="214" width="320" height="104" rx="10"/>
+<text class="h" x="434" y="240">Cause open: absorb</text>
+<text class="s" x="434" y="262">evidence on the cause, no Incident,</text>
+<text class="s" x="434" y="281">no wait, for as long as it is open</text>
+<text class="s" x="434" y="300">the fingerprint is unchanged</text>
+<rect class="hold" x="420" y="338" width="320" height="104" rx="10"/>
+<text class="h" x="434" y="364">No cause: hold 2 min (orphan)</text>
+<text class="s" x="434" y="386">the collector requeues, a restart starts</text>
+<text class="s" x="434" y="405">the wait again from the informer relist</text>
+<text class="s" x="434" y="424">opens only if the container still fails</text>
+<path class="fb" d="M360 105 L420 105" marker-end="url(#a)"/>
+<path class="fb" d="M360 209 L400 209 L400 140 L420 140" marker-end="url(#a)"/>
+<path class="fb" d="M360 313 L410 313 L410 160 L420 160" marker-end="url(#a)"/>
+<path class="fb" d="M580 194 L580 214" marker-end="url(#a)"/>
+<path class="dash" d="M440 194 L440 250 L430 250 L430 338" marker-end="url(#a)"/>
+
+<rect class="bt" x="800" y="62" width="380" height="132" rx="10"/>
+<text class="h" x="814" y="88">Incident of the cause (as today)</text>
+<text class="s" x="814" y="110">phase, count, lastSeen, occurrences</text>
+<text class="s" x="814" y="129">status.containers: web</text>
+<text class="s" x="814" y="148">status.absorbed: BackOff 14, Unhealthy 6,</text>
+<text class="s" x="814" y="167">last seen of each; no change of count</text>
+<rect class="bt" x="800" y="214" width="380" height="104" rx="10"/>
+<text class="h" x="814" y="240">Late cause: consequence Incident</text>
+<text class="s" x="814" y="262">opened up to 10 min before the cause:</text>
+<text class="s" x="814" y="281">Resolved, Lifecycle FoldedIntoCause,</text>
+<text class="s" x="814" y="300">status.foldedInto, counts kept</text>
+<rect class="bt" x="800" y="338" width="380" height="104" rx="10"/>
+<text class="h" x="814" y="364">Its request, no pull request yet</text>
+<text class="s" x="814" y="386">the executor ends it Cancelled, reason</text>
+<text class="s" x="814" y="405">IncidentFolded; one with a pull request</text>
+<text class="s" x="814" y="424">runs its course</text>
+<path class="fb" d="M740 266 L800 266" marker-end="url(#a)"/>
+<path class="fb" d="M740 150 L760 150 L760 120 L800 120" marker-end="url(#a)"/>
+<path class="fb" d="M990 318 L990 338" marker-end="url(#a)"/>
+<path class="dash" d="M740 390 L770 390 L770 262 L800 262" marker-end="url(#a)"/>
+<text class="no" x="420" y="480">One OOM: one Incident, one analysis, at most one request.</text>
+<text class="s" x="420" y="502">The orphan opens its own Incident only if the symptom is still there after the wait.</text>
+</svg>

@@ -14,7 +14,7 @@ A proposal reaches you as a pull request in your GitOps repository, made by the 
     kubectl -n shadewright-system get remediationrequest
     ```
 
-2. Open the pull request. The branch is `shadewright/<request UID>`, the title is `fix: set <what> of <namespace>/<name> to <value>`, and the body states the change (from and to), the scope (one value in one file), the evidence (request, incident, policy, plan digest), the expected effect, the risk and the rollback (revert the pull request).
+2. Open the pull request. The branch is `shadewright/<request UID>`, the title is `fix: set <what> of <namespace>/<name> to <value>`, and the body states the change (from and to), the scope (one value in one file), the evidence (request, incident, policy, plan digest), the expected effect, the risk and the rollback (revert the pull request). A revert of a failed request has the title `revert: set <what> of <namespace>/<name> back to <value>`; its body names the failed request, its pull request and the reason it failed, and its rollback says not to revert it, since that applies the failed value again.
 3. Check what a reviewer should check:
     - The diff is one scalar in one file, and that file is the one you expect for the workload.
     - The new value is what you want, and sensible for the workload, not only inside the policy's bounds. The policy is a ceiling, not a recommendation.

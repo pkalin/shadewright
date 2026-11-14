@@ -161,7 +161,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		_, err = git.CommitFile(ctx, branch, head, providers.FileChange{Path: sourcePath, Content: manifest("384Mi")})
 		Expect(err).NotTo(HaveOccurred())
 		cr, err = git.OpenChangeRequest(ctx, providers.NewChangeRequest{
-			HeadBranch: branch, BaseBranch: mainBranch, Title: "t", Body: pullRequestBody(got, ""),
+			HeadBranch: branch, BaseBranch: mainBranch, Title: "t", Body: pullRequestBody(got, "", nil),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		got.Status.Phase = remediationv1alpha1.PhaseAwaitingApproval
@@ -480,7 +480,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		const elsewhere = "shadewright/someone-else"
 		Expect(git.CreateBranch(ctx, elsewhere, head)).To(Succeed())
 		foreign, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
-			HeadBranch: elsewhere, BaseBranch: mainBranch, Title: "f", Body: pullRequestBody(fetch(), ""),
+			HeadBranch: elsewhere, BaseBranch: mainBranch, Title: "f", Body: pullRequestBody(fetch(), "", nil),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		markCleanup(func(got *remediationv1alpha1.RemediationRequest) {

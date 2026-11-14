@@ -60,6 +60,8 @@ const testAppsPath = "apps"
 const (
 	opCommit = "CommitFile"
 	opOpen   = "OpenChangeRequest"
+	// readmePath is a file of the fake repository besides the target file.
+	readmePath = "README.yaml"
 )
 
 var _ = Describe("RemediationRequest pull request step", func() {
@@ -418,6 +420,128 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.PullRequest).NotTo(BeNil())
 		Expect(got.Status.PullRequest.Number).To(Equal(openRequests()[0].Number))
 		Expect(openRequests()).To(HaveLen(1))
+	})
+
+	// revertingRequest turns the spec's request into one that ended Failed with Verified False (OOMKilled) after
+	// its pull request #71, and makes its revert the request the spec drives (#720). The live limit and the file
+	// on the target branch hold the failed request's value, and the policy allows the revert's decrease.
+	revertingRequest := func() *remediationv1alpha1.RemediationRequest {
+		failed := fetch()
+		failed.Status.Phase = remediationv1alpha1.PhaseFailed
+		failed.Status.HoldsTarget = new(false) // its pull request merged, so the revert may take the target
+		failed.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 71,
+			URL: "https://github.com/example/fleet/pull/71", HeadSHA: strings.Repeat("c", 40)}
+		meta.SetStatusCondition(&failed.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionVerified,
+			Status: metav1.ConditionFalse, Reason: ReasonOOMKilled, Message: "OOM killed under the limit of the failed request"})
+		Expect(k8sClient.Status().Update(ctx, failed)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, failed))).To(Succeed()) })
+
+		live := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(deployment), live)).To(Succeed())
+		live.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("384Mi")
+		Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		pol := &remediationv1alpha1.RemediationPolicy{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), pol)).To(Succeed())
+		pol.Spec.Actions[0].SetContainerMemoryLimit.MaxDecreasePercent = new(int32(90))
+		Expect(k8sClient.Update(ctx, pol)).To(Succeed())
+		git = fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: manifest("384Mi"), buildKustomize: buildFile,
+			readmePath: []byte("a: 1\n")})
+
+		revert := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace,
+			Name: string(remediationv1alpha1.RevertName(remediationv1alpha1.UID(failed.UID)))}}
+		revert.Spec = *failed.Spec.DeepCopy()
+		m := revert.Spec.Action.SetContainerMemoryLimit
+		m.Previous, m.Desired = m.Desired, m.Previous
+		revert.Spec.Reverts = &remediationv1alpha1.RequestRef{Name: failed.Name, UID: remediationv1alpha1.UID(failed.UID)}
+		revert.Spec.ApprovalRequired = new(true)
+		Expect(k8sClient.Create(ctx, revert)).To(Succeed())
+		request = revert
+		return failed
+	}
+	revertTitle := func() string {
+		return "revert: set the memory limit of container worker of " + fx.TargetNamespace + "/" + deployment.Name +
+			" back to 256Mi"
+	}
+
+	It("opens a revert's pull request that names what it reverts and shows the revert's name (#720)", func() {
+		failed := revertingRequest()
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "conditions %+v", got.Status.Conditions)
+		crs := openRequests()
+		Expect(crs).To(HaveLen(1))
+		Expect(crs[0].Title).To(Equal(revertTitle()))
+		Expect(crs[0].Body).To(ContainSubstring("**Reverts:** RemediationRequest `" + requestNamespace + "/" +
+			failed.Name + "` (UID `" + string(failed.UID) + "`), pull request #71. " +
+			"It ended `Failed` with the reason `OOMKilled`."))
+		Expect(crs[0].Body).To(ContainSubstring("**Evidence:** RemediationRequest `" + requestNamespace + "/" +
+			got.Name + "` (UID"))
+		Expect(crs[0].Body).NotTo(ContainSubstring("[REDACTED"))
+		Expect(crs[0].Body).NotTo(ContainSubstring("revert this pull request;"))
+		file, err := git.ReadFile(ctx, crs[0].HeadSHA, sourcePath, providers.MaxFileBytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(file.Data).To(Equal(manifest("256Mi")))
+	})
+
+	It("finds a revert's pull request opened under the older title after a restart, and opens no second one (#720)", func() {
+		revertingRequest()
+		// The executor crashes right after the open, before it records the pull request; an older version had
+		// opened it under the title of a first fix.
+		crashed := false
+		git.SetAfter(func(op string) error {
+			if op == opOpen && !crashed {
+				crashed = true
+				return errors.New("crash after the open")
+			}
+			return nil
+		})
+		for range 10 {
+			_ = reconcileOnce()
+			if crashed {
+				break
+			}
+		}
+		crs := openRequests()
+		Expect(crs).To(HaveLen(1))
+		Expect(fetch().Status.PullRequest).To(BeNil())
+		oldTitle := "fix: set the memory limit of container worker of " + fx.TargetNamespace + "/" + deployment.Name +
+			" to 256Mi"
+		Expect(git.UpdateChangeRequest(ctx, crs[0].Number, oldTitle, crs[0].Body)).To(Succeed())
+
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(openRequests()).To(HaveLen(1))
+		Expect(got.Status.PullRequest.Number).To(Equal(crs[0].Number))
+		Expect(crs[0].HeadBranch).To(Equal("shadewright/" + string(got.UID)))
+		Expect(hasMarker(openRequests()[0].Body, got)).To(BeTrue())
+	})
+
+	It("retries the open of a revert's pull request while the request it reverts cannot be read (#720)", func() {
+		failed := revertingRequest()
+		// The read fails from the commit on, after the link check has passed: no pull request is opened with a
+		// body that leaves out what it reverts, and the request is not ended.
+		fail := &atomic.Bool{}
+		apiReader = switchedRequestReader{Reader: k8sClient, name: failed.Name, fail: fail}
+		git.SetAfter(func(op string) error {
+			if op == opCommit {
+				fail.Store(true)
+			}
+			return nil
+		})
+		var lastErr error
+		for range 10 {
+			if err := reconcileOnce(); err != nil {
+				lastErr = err
+			}
+		}
+		Expect(lastErr).To(MatchError(ContainSubstring("pull request text of a revert")))
+		Expect(git.ChangeRequests()).To(BeEmpty())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+
+		fail.Store(false)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(openRequests()).To(HaveLen(1))
+		Expect(openRequests()[0].Body).To(ContainSubstring("pull request #71"))
 	})
 
 	It("opens one pull request when reconciled concurrently", func() {
@@ -1100,7 +1224,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		_, err = git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 2\n"))
 		Expect(err).NotTo(HaveOccurred())
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: "next", Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: "next", Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(next.Number).NotTo(Equal(n))
 		_ = reconcileOnce()
@@ -1778,7 +1902,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 		// A newer pull request on the same branch, with this request's own marker: it may carry its commit.
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: "opened after the close", Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: "opened after the close", Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(next.Number).NotTo(Equal(n))
 		res, err := reconcileResult()
@@ -2296,7 +2420,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		seenGone(n)
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(next.Number).NotTo(Equal(n))
 		lost := reconciler()
@@ -2315,7 +2439,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		n := got.Status.PullRequest.Number
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		recorder = record.NewFakeRecorder(20)
 		lost := reconciler()
@@ -2353,7 +2477,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		n := got.Status.PullRequest.Number
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		seenGone(n)
 		// The listing in all states misses the newer one; the open listing has it.
@@ -2435,7 +2559,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		n := got.Status.PullRequest.Number
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(next.Number).NotTo(Equal(n))
 		Expect(reconciler().closeChangeRequest(ctx, fetch())).To(Succeed(),
@@ -2488,7 +2612,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	It("closes the open pull request with its marker behind a closed newer one when none is recorded (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
-		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
+		reopened := reopenBehindNewer(got, pullRequestBody(got, "", nil))
 		forgetRecorded()
 		Expect(reconciler().closeChangeRequest(ctx, fetch())).To(Succeed())
 		Expect(git.ChangeRequests()[reopened.Number-1].State).To(Equal(providers.ChangeRequestClosed),
@@ -2497,7 +2621,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	It("closes on deletion the open pull request with its marker behind a closed newer one when none is recorded (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
-		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
+		reopened := reopenBehindNewer(got, pullRequestBody(got, "", nil))
 		forgetRecorded()
 		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 		Expect(reconcileOnce()).To(Succeed())
@@ -2526,7 +2650,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	It("keeps the target of a stopped holder with none recorded while its open pull request hides behind a closed newer one (#688)", func() {
 		got := stopHeadMoved()
-		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
+		reopened := reopenBehindNewer(got, pullRequestBody(got, "", nil))
 		forgetRecorded()
 		_, err := reconcileResult()
 		Expect(err).NotTo(HaveOccurred())
@@ -3065,7 +3189,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	It("closes on deletion the open pull request of its branch behind a closed newer one that carries its marker (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
-		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
+		reopened := reopenBehindNewer(got, pullRequestBody(got, "", nil))
 		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 		Expect(reconcileOnce()).To(Succeed())
 		Eventually(gone).Should(BeTrue())
@@ -3078,7 +3202,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		n := got.Status.PullRequest.Number
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: "opened again", Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: "opened again", Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 		r := reconciler()
@@ -3097,7 +3221,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		n := got.Status.PullRequest.Number
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: "opened again", Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: "opened again", Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		r := reconciler()
 		// The read shows #next with this request's marker (errOwnListed), then the write of condition
@@ -3115,7 +3239,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		n := got.Status.PullRequest.Number
 		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
-			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "", nil)})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 		r := reconciler()
@@ -5535,13 +5659,13 @@ var _ = Describe("Pull request body", func() {
 		rr := bodyRequest()
 		m := rr.Spec.Action.SetContainerMemoryLimit
 		m.Previous, m.Desired = resource.MustParse("48Mi"), resource.MustParse("64Mi")
-		body := pullRequestBody(rr, "")
+		body := pullRequestBody(rr, "", nil)
 		Expect(body).To(ContainSubstring("**Size:** an increase of 34% of the previous value, within policy `" +
 			string(rr.Spec.PolicyRef) + "`."))
 		Expect(body).To(ContainSubstring("The diagnosis, with the model's unverified reason for the size, is in the " +
 			"analysis record and the analyzer's log for this request's name, not in this pull request"))
 		m.Previous, m.Desired = resource.MustParse("100Mi"), resource.MustParse("80Mi")
-		Expect(pullRequestBody(rr, "")).To(ContainSubstring("**Size:** a decrease of 20% of the previous value"))
+		Expect(pullRequestBody(rr, "", nil)).To(ContainSubstring("**Size:** a decrease of 20% of the previous value"))
 		k := remediationv1alpha1.AdjustKedaMaxReplicas{PreviousValue: 2, DesiredValue: 3}
 		rr.Spec.Action = remediationv1alpha1.Action{Type: remediationv1alpha1.ActionAdjustKedaMaxReplicas,
 			AdjustKedaMaxReplicas: &k}
@@ -5555,7 +5679,7 @@ var _ = Describe("Pull request body", func() {
 		// Names are validated by the schema; the body is redacted anyway, so a token that slipped through a
 		// future field never reaches the Git host.
 		rr.Spec.IncidentRef.Name = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
-		body := pullRequestBody(rr, "")
+		body := pullRequestBody(rr, "", nil)
 		Expect(body).NotTo(ContainSubstring("eyJhbGciOiJIUzI1NiJ9"))
 		Expect(body).To(ContainSubstring("[REDACTED"))
 		Expect(hasMarker(body, rr)).To(BeTrue())
@@ -5574,7 +5698,7 @@ var _ = Describe("Pull request body", func() {
 		rr.Spec.IncidentRef.Name = name
 		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3" // #nosec G101 -- made-up hex run, not a credential
 		rr.Status.Source.Path = remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml")
-		body := pullRequestBody(rr, name)
+		body := pullRequestBody(rr, name, nil)
 		Expect(body).To(ContainSubstring("for incident `" + name + "`."))
 		Expect(body).To(ContainSubstring("incident `" + name + "`, policy `p/1`"))
 		Expect(body).NotTo(ContainSubstring(hexToken), "a hex token in other text is still redacted")
@@ -5592,7 +5716,7 @@ var _ = Describe("Pull request body", func() {
 		rr.Name = string(name)
 		hexToken := "3f1c9a7be2d84f06a5b1c3e9d7f2a4b6c8e0d1f3" // #nosec G101 -- made-up hex run, not a credential
 		rr.Status.Source.Path = remediationv1alpha1.GitFilePath("apps/" + hexToken + "/deployment.yaml")
-		body := pullRequestBody(rr, "")
+		body := pullRequestBody(rr, "", nil)
 		Expect(body).To(ContainSubstring("RemediationRequest `" + requestNamespace + "/" + rr.Name + "` (UID"))
 		Expect(body).NotTo(ContainSubstring(hexToken), "a hex token in other text is still redacted")
 		Expect(body).To(ContainSubstring("[REDACTED:token]"))
@@ -5623,7 +5747,7 @@ var _ = Describe("Pull request body", func() {
 				rr = tc.spec
 			}
 			rr.Namespace, rr.Name = tc.namespace, tc.name
-			body := pullRequestBody(rr, "")
+			body := pullRequestBody(rr, "", nil)
 			Expect(body).NotTo(ContainSubstring(tc.secret), tc.namespace+"/"+tc.name)
 			Expect(body).To(ContainSubstring("RemediationRequest `[REDACTED:token]` (UID"), tc.namespace+"/"+tc.name)
 			Expect(hasMarker(body, rr)).To(BeTrue())
@@ -5640,7 +5764,7 @@ var _ = Describe("Pull request body", func() {
 		} {
 			rr := bodyRequest()
 			rr.Spec.IncidentRef.Name = token
-			body := pullRequestBody(rr, "")
+			body := pullRequestBody(rr, "", nil)
 			Expect(body).NotTo(ContainSubstring(token), token)
 			Expect(body).To(ContainSubstring("for incident `[REDACTED:token]`."), token)
 			Expect(hasMarker(body, rr)).To(BeTrue())
@@ -5673,6 +5797,22 @@ func (h hangingIncidentReader) Get(ctx context.Context, key client.ObjectKey, ob
 		return ctx.Err()
 	}
 	return h.Reader.Get(ctx, key, obj, opts...)
+}
+
+// switchedRequestReader is a reader whose get of the RemediationRequest called name fails with a server error
+// while fail is set; every other read goes to Reader.
+type switchedRequestReader struct {
+	client.Reader
+	name string
+	fail *atomic.Bool
+}
+
+func (f switchedRequestReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.RemediationRequest); ok && key.Name == f.name && f.fail.Load() {
+		return apierrors.NewInternalError(errors.New("etcd is not answering"))
+	}
+	return f.Reader.Get(ctx, key, obj, opts...)
 }
 
 // openListedOnly is a Git host that answers 404 for pull request n and leaves it out of the listing of its branch

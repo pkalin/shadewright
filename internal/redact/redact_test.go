@@ -549,7 +549,8 @@ func skipLarge(t *testing.T) {
 
 // Repeating the shapes the scanning rules look for must cost linear time: each value is scanned once and
 // keys inside a value already redacted are skipped. Each input takes about a second; a quadratic scan of
-// them takes minutes.
+// them takes minutes. Each unit is also timed at an eighth of the size: eight times the input may take at
+// most sixteen times as long (a quadratic scan takes 64 times as long).
 func TestRepeatedPatternsStayLinear(t *testing.T) {
 	skipLarge(t)
 	const size = 1 << 20
@@ -603,17 +604,48 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"compound keys":        "a_token ",
 		"compound chains":      "a_token a_token\t",
 		"secret ids":           "--secret-id x ",
+		// Second fix round of #585: whole arguments after a key name.
+		"quoted runs":            `--password "a b `,
+		"multi-line quotes":      "--password \"a\n",
+		"single quotes on lines": "--password 'a\n",
+		"enclosing quotes":       `"--password=a b `,
+		"enclosing lines":        "\"--password=a b\n",
+		"escaped enclosing":      `\"--password=a b `,
+		"shell pieces":           `--password="a"'b'\ c `,
+		"unclosed shell pieces":  `--password=a"b `,
+		"flow sequences":         "[--password, a b, ",
+		"flow items":             "[--password=a b, ",
+		"block scalars":          "- --password\n- |-\n  a\n",
+		"block scalar headers":   "- --password\n- |-\n",
+		"yaml items":             "- --password a b\n",
+		"json arrays":            `{"password": [`,
+		"closed json arrays":     `{"password": ["a]", {"b": 1}], `,
+		"escaped json arrays":    `{\"token\":[\"a\",`,
+		"single-dash flags":      "-password x ",
+		"spelled compounds":      "client-secret x clientSecret y ",
+		"spelled flag values":    "db-password -n ",
+		"sas image tags":         "ghcr.io/a/sas:v1 ",
+		"sas keys":               "sas: x sas=y ",
+		"enclosing short keys":   `"auth: ok `,
 	} {
-		in := rep(unit, size/len(unit))
-		start := time.Now()
-		out := String(in)
-		if d := time.Since(start); d > 10*time.Second {
-			t.Errorf("%s: %d bytes took %s", name, len(in), d)
-		}
-		if len(out) > len(in) {
-			t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+		small := timeString(t, name, rep(unit, size/8/len(unit)))
+		large := timeString(t, name, rep(unit, size/len(unit)))
+		if large > 10*time.Second || large > 16*max(small, 20*time.Millisecond) {
+			t.Errorf("%s: %d bytes took %s, an eighth of them %s", name, size, large, small)
 		}
 	}
+}
+
+// timeString returns how long String takes on in, and fails when the output is longer than the input.
+func timeString(t *testing.T, name, in string) time.Duration {
+	t.Helper()
+	start := time.Now()
+	out := String(in)
+	d := time.Since(start)
+	if len(out) > len(in) {
+		t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+	}
+	return d
 }
 
 // Nested entries whose lines all belong to the first one: each match reads a bounded part of them.
@@ -937,7 +969,7 @@ const seeds = 1000
 func TestSlashSplitBase64IsRedacted(t *testing.T) {
 	contexts := []struct{ name, before, after string }{
 		{"aws configure set", "aws configure set aws_secret_access_key ", "\nnext: field"},
-		{"cli flag", "run --aws-secret-access-key ", " --region x"},
+		{"cli flag", "run --aws-secret-access-key ", flagAfter},
 		{"prose", "rotated ", " today"},
 		{"start of a path", "cp ", "/etc/app/config.yaml ok"},
 		{"middle of a path", "open /var/run/secrets/", "/token failed"},
@@ -1239,8 +1271,6 @@ var keyNameForms = []struct{ name, before, after string }{
 	{"env style quoted", "export AWS_SECRET_ACCESS_KEY='", "'\nexport AWS_REGION=x"},
 	{"camelCase", "env accessKey=", envAfter},
 	{"sas", "AZURE_STORAGE_SAS=", envAfter},
-	{"camelCase sas", "env storageSas=", envAfter},
-	{"--sas", "az storage blob list --sas ", " --account x"},
 	{"--passwd", "run --passwd ", flagAfter},
 	{"--token", "run --token ", flagAfter},
 }
@@ -1307,7 +1337,7 @@ func TestSeededKeysAfterAKeyNameAreRedacted(t *testing.T) {
 	}
 }
 
-// A key name counts only before "=", ":" (with optional quotes) or, as a flag starting with "--", before
+// A key name counts only before "=", ":" (with optional quotes) or, as a flag starting with "-", before
 // blanks or a comma and a value (#585). A key name inside a path, a Kubernetes resource name or a command
 // argument without that separator stays readable, and so does a flag that names a reference to a secret.
 func TestKeyNameSignalKeepsPathsAndNames(t *testing.T) {

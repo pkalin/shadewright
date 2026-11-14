@@ -261,8 +261,9 @@ type Config struct {
 	// model call and tool call. The spans carry IDs, counts, fixed result labels and the configured model and
 	// deployment names only, never text from the cluster, a tool or the model. Nil means no tracing.
 	TracerProvider trace.TracerProvider
-	// Recorder writes the Normal event EventModelProviderChanged on the Incident whose analysis first sent a
-	// request to a role's provider after it changed (ADR-0037). Nil writes none; the change is logged either way.
+	// Recorder writes the Normal event EventModelProviderChanged on the Incident whose call to a role's provider
+	// is the first to return having sent a request after it changed (ADR-0037). Nil writes none; the change is
+	// logged either way.
 	Recorder record.EventRecorder
 }
 

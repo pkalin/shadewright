@@ -27,12 +27,14 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
-// EventModelProviderChanged is the reason of the Normal event on the Incident whose analysis is the first to
-// send a request to a role's model provider since the analyzer started or since the settings moved that role
-// to another provider (ADR-0037): it shows where that role's redacted context goes from then on.
+// EventModelProviderChanged is the reason of the Normal event on the Incident whose analysis has the first call
+// to a role's model provider that returns having sent a request, since the analyzer started or since the
+// settings moved that role to another provider (ADR-0037): it shows where that role's redacted context goes
+// from then on. Calls of concurrent analyses are noted in the order they return, so a call that sent earlier
+// but returned later does not get it.
 const EventModelProviderChanged = "ModelProviderChanged"
 
-// providersUsed is the provider each role last sent a request to.
+// providersUsed is the provider of each role's last call that returned having sent a request.
 type providersUsed struct {
 	mu   sync.Mutex
 	last map[Role]remediationv1alpha1.ModelProvider
@@ -56,11 +58,12 @@ func (a *Analyzer) model(role Role, d *remediationv1alpha1.ModelDeployment) (pro
 	return a.cfg.Models(role, *d)
 }
 
-// sent notes that a call of inc's analysis may have sent a request to provider p for role: every call whose
-// error is not marked [providers.ErrNotSent]. When p is not the provider role sent to last, it logs the change
-// and records EventModelProviderChanged on inc. So an analysis that reserved no budget unit, was cancelled
-// before its call or whose call sent nothing records nothing, and the next one that sends does. Both name
-// only the role and the provider names, never an endpoint, a deployment or a credential.
+// sent notes, once a call of inc's analysis has returned, that it may have sent a request to provider p for
+// role: every call whose error is not marked [providers.ErrNotSent]. When p is not the provider of the last
+// call noted for role, it logs the change and records EventModelProviderChanged on inc. So an analysis that
+// reserved no budget unit, was cancelled before its call or whose call sent nothing records nothing, and the
+// next call that returns having sent does, which need not be the first to send. Both name only the role and
+// the provider names, never an endpoint, a deployment or a credential.
 func (a *Analyzer) sent(ctx context.Context, inc *remediationv1alpha1.Incident, role Role,
 	p remediationv1alpha1.ModelProvider) {
 	prev, changed := a.used.swap(role, p)

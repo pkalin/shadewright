@@ -90,9 +90,9 @@ limitations under the License.
 // (Config.ExpectedModels, ADR-0023 decision 8), and a role without one is not configured. The analyzer binary
 // starts the controller only with its --triage-model flag, with the adapter each deployment's provider names:
 // Foundry behind a host allow-list ([ErrEndpointNotAllowed]), or the Anthropic API at its fixed host with the
-// analyzer's key file ([ErrProviderNotConfigured], [ErrDeploymentNotExpected]; ADR-0037). The first analysis
-// that sends a request to a role's provider since the start or a change logs it and records
-// EventModelProviderChanged on its Incident (Config.Recorder).
+// analyzer's key file ([ErrProviderNotConfigured], [ErrDeploymentNotExpected]; ADR-0037). The analysis whose
+// call to a role's provider is the first to return having sent a request, since the start or a change, logs
+// it and records EventModelProviderChanged on its Incident (Config.Recorder).
 //
 // With a tracer provider (Config.TracerProvider, #90) each analysis is one OpenTelemetry trace: a root span
 // with the outcome, and spans for the context, the budget reservation, the triage and escalation phases, each

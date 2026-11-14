@@ -865,3 +865,61 @@ func TestCompleteReplyTooLarge(t *testing.T) {
 		})
 	}
 }
+
+// roundTripFunc is an http.RoundTripper made of a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A call whose request reached the transport may have been billed, whatever happened next: it is never marked
+// as not sent.
+func TestCompleteReachedTheTransportIsSent(t *testing.T) {
+	newProviderWith := func(t *testing.T, tr http.RoundTripper, attemptTimeout time.Duration) *Provider {
+		t.Helper()
+		keyFile := filepath.Join(t.TempDir(), "api-key")
+		writeKey(t, keyFile, keyMark)
+		p, err := newProvider(Config{Model: testModel, KeyFile: keyFile, MaxAttempts: 1, AttemptTimeout: attemptTimeout},
+			testHooks{transport: tr})
+		if err != nil {
+			t.Fatalf("newProvider: %v", err)
+		}
+		return p
+	}
+	t.Run("the transport returns an error", func(t *testing.T) {
+		var calls atomic.Int32
+		p := newProviderWith(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			return nil, errors.New("connection reset")
+		}), 0)
+		_, err := p.Complete(context.Background(), structuredRequest())
+		if err == nil || providers.IsNotSent(err) || calls.Load() != 1 {
+			t.Errorf("err = %v (not sent %v), %d round trips", err, providers.IsNotSent(err), calls.Load())
+		}
+	})
+	t.Run("a response races the attempt deadline", func(t *testing.T) {
+		// The transport answers only after the attempt's context ended, as a reply can arrive just after it.
+		p := newProviderWith(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{},
+				Body: io.NopCloser(strings.NewReader(messageJSON(testModel, "end_turn", "{}"))), Request: r}, nil
+		}), 20*time.Millisecond)
+		_, err := p.Complete(context.Background(), structuredRequest())
+		if !providers.IsRetryable(err) || !strings.Contains(err.Error(), "timed out") || providers.IsNotSent(err) {
+			t.Errorf("err = %v (not sent %v), want the timeout, sent", err, providers.IsNotSent(err))
+		}
+	})
+	t.Run("the server hangs past the attempt deadline", func(t *testing.T) {
+		h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+		})
+		h.p.attemptTimeout = 20 * time.Millisecond
+		h.p.attempts = 1
+		_, err := h.p.Complete(context.Background(), structuredRequest())
+		if err == nil || providers.IsNotSent(err) || h.requests.Load() != 1 {
+			t.Errorf("err = %v (not sent %v), %d requests", err, providers.IsNotSent(err), h.requests.Load())
+		}
+	})
+}

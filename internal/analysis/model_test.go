@@ -219,6 +219,31 @@ func TestKeyFileFailureHandsOffAsNotConfigured(t *testing.T) {
 	})
 }
 
+// A call whose request reached the transport and then failed (a network error, or a reply that came after the
+// attempt's deadline) is not marked as not sent by the adapter: it may have been billed and is charged its
+// upper bound. The same error marked as not sent is charged nothing.
+func TestSentThenFailedCallIsChargedItsUpperBound(t *testing.T) {
+	for name, err := range map[string]error{
+		"network": &providers.RetryableError{Err: errors.New("anthropic: the model request failed (network)")},
+		"timeout": &providers.RetryableError{Err: errors.New("anthropic: the model request timed out")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := testLimits()
+			f := newFixture()
+			f.triage.steps = []step{{err: err}}
+			if out := f.analyze(t, l); out.Calls != 1 || out.Tokens <= int64(l.MaxOutputTokens) {
+				t.Errorf("sent: calls %d, tokens %d, want the upper bound (more than %d)", out.Calls, out.Tokens,
+					l.MaxOutputTokens)
+			}
+			f = newFixture()
+			f.triage.steps = []step{{err: providers.NotSent(err)}}
+			if out := f.analyze(t, l); out.Calls != 1 || out.Tokens != 0 {
+				t.Errorf("not sent: calls %d, tokens %d, want 0", out.Calls, out.Tokens)
+			}
+		})
+	}
+}
+
 // The messages of the reasons that refuse a provider or an endpoint say only that nothing went to it: an
 // escalation refused after triage calls has sent context to the triage provider.
 func TestRefusalMessagesAfterTriage(t *testing.T) {
@@ -244,8 +269,9 @@ func TestRefusalMessagesAfterTriage(t *testing.T) {
 	}
 }
 
-// The provider change is recorded on the analysis that first sends a request to the new provider: not on
-// one whose budget was spent or unavailable, whose call sent nothing, or that was cancelled before its call.
+// The provider change is recorded on the analysis whose call is the first to return having sent a request to
+// the new provider: not on one whose budget was spent or unavailable, whose call sent nothing, or that was
+// cancelled before its call.
 func TestProviderChangeIsRecordedOnFirstSend(t *testing.T) {
 	f := newFixture()
 	events := record.NewFakeRecorder(8)

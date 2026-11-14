@@ -113,3 +113,31 @@ func TestReadLimit(t *testing.T) {
 		}
 	}
 }
+
+// NotSent adds ErrNotSent and keeps the text and the chain of the error it marks: the kinds and the delay the
+// remote system asked for still match.
+func TestNotSentKeepsTheChain(t *testing.T) {
+	if providers.NotSent(nil) != nil {
+		t.Error("NotSent(nil) is not nil")
+	}
+	inner := &providers.RetryableError{RetryAfter: 7 * time.Second,
+		Err: fmt.Errorf("the key file: %w", providers.ErrCredentialUnavailable)}
+	err := providers.NotSent(inner)
+	if !providers.IsNotSent(err) || providers.IsNotSent(inner) {
+		t.Errorf("IsNotSent: marked %v, unmarked %v", providers.IsNotSent(err), providers.IsNotSent(inner))
+	}
+	if !providers.IsCredentialUnavailable(err) || !providers.IsRetryable(err) {
+		t.Errorf("the chain is lost: credential %v, retryable %v", providers.IsCredentialUnavailable(err),
+			providers.IsRetryable(err))
+	}
+	if d, ok := providers.RetryAfter(err); !ok || d != 7*time.Second {
+		t.Errorf("RetryAfter = %v, %v, want 7s", d, ok)
+	}
+	if err.Error() != inner.Error() {
+		t.Errorf("text %q, want %q", err.Error(), inner.Error())
+	}
+	var re *providers.RetryableError
+	if !errors.As(err, &re) || re != inner {
+		t.Error("errors.As does not find the wrapped RetryableError")
+	}
+}

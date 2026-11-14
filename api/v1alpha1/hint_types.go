@@ -74,9 +74,10 @@ const ReasonAnotherRequestMerged = "AnotherRequestMerged"
 const ReasonAnotherRequestClosed = "AnotherRequestClosed"
 
 // ReasonAnotherRequestSucceeded is the PlanFresh reason of a request that ended Superseded because it waited
-// behind the target lock of another request for the same target and field (of any Incident, recorded in
-// status.queuedBehind), planned from the same previous value, whose change was merged and then ended Succeeded
-// (#719). That change took this one's baseline away and fixed what this one was proposed for. The closure rules
+// behind the target lock of another request for the same target and field (of any Incident, including its own,
+// recorded in status.queuedBehind) whose change of that field, from the same previous value and in the same
+// direction (both desired values above it, or both below), was merged and then ended Succeeded (#719). That
+// change took this one's baseline away and went the way this one would have gone. The closure rules
 // of its Incident follow the holder's success instead of escalating.
 const ReasonAnotherRequestSucceeded = "AnotherRequestSucceeded"
 

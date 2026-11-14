@@ -294,7 +294,11 @@ const (
 	// container status does not show).
 	ConditionCleared = "Cleared"
 	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed, the ScaledObject
-	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed). It is also False, with the
+	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed).
+	// It is also False when an undecided request ended Superseded because of another request for the same
+	// target: AnotherRequestMerged (a request of the same Incident was merged), AnotherRequestClosed (the request
+	// it waited behind had its pull request closed without a merge) or AnotherRequestSucceeded (the request it
+	// waited behind changed the same field the same way and ended Succeeded). It is also False, with the
 	// stale reason and the phase unchanged, once the cleanup of a stale plan has started: it is written before
 	// the change request is closed, so a close whose answer was lost is known on the next reconcile to be
 	// Shadewright's own, and the request ends Superseded rather than NeedsIntervention. When the Git host refuses

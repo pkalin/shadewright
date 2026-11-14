@@ -19,10 +19,13 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
@@ -58,6 +62,10 @@ func holdWorld(t *testing.T, verify bool) (*RemediationRequestReconciler, client
 	expectQueuedAfter(t, r, rr, res, err, got, stub, ReasonTargetLocked, admissionRecheckDelay)
 	if len(got.Status.QueuedBehind) != 1 || got.Status.QueuedBehind[0].Name != closedHolder {
 		t.Fatalf("queuedBehind = %+v, want %s", got.Status.QueuedBehind, closedHolder)
+	}
+	if q := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionQueued); q.Message !=
+		queuedMessages[ReasonTargetLocked] {
+		t.Fatalf("Queued message behind an open pull request = %q", q.Message)
 	}
 	return r, c, rr, stub
 }
@@ -122,7 +130,8 @@ func deliver(t *testing.T, c client.Client) {
 	}
 }
 
-// expectStillQueued checks that the waiter stays Queued with TargetLocked, without reading Git.
+// expectStillQueued checks that the waiter stays Queued with TargetLocked, without reading Git, and that its message
+// says it waits for the verification of the holder's merged change, not for an open pull request.
 func expectStillQueued(t *testing.T, r *RemediationRequestReconciler, rr *remediationv1alpha1.RemediationRequest,
 	stub *stubResolver, when string) {
 	t.Helper()
@@ -136,6 +145,9 @@ func expectStillQueued(t *testing.T, r *RemediationRequestReconciler, rr *remedi
 		pa := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed)
 		t.Fatalf("%s: phase %q, Queued %+v, PolicyAllowed %+v; want still Queued with TargetLocked",
 			when, got.Status.Phase, c, pa)
+	}
+	if c.Message != verifyingLockMessage {
+		t.Fatalf("%s: Queued message = %q, want %q", when, c.Message, verifyingLockMessage)
 	}
 	if res.RequeueAfter != heldRecheckInterval {
 		t.Fatalf("%s: RequeueAfter = %v, want %v", when, res.RequeueAfter, heldRecheckInterval)
@@ -289,38 +301,131 @@ func TestHeldForVerification(t *testing.T) {
 }
 
 // TestSucceededInstead checks which holder that ended Succeeded ends a request queued behind it (#719): the same
-// field, changed from the same previous value to another one. A holder planned from another previous value, or
-// one whose change set the waiter's previous value, does not explain the waiter's lost baseline.
+// field, changed from the same previous value to another one in the same direction. A holder planned from another
+// previous value, one whose change set the waiter's previous value, one that went the other way, and any value
+// that cannot be compared leave the waiter to be decided as usual.
 func TestSucceededInstead(t *testing.T) {
-	waiter := otherRequest("waiter", limitsTarget, "", 0)
-	succeeded := func() *remediationv1alpha1.RemediationRequest {
-		return ofIncident(withPullRequest(otherRequest(closedHolder, limitsTarget,
-			remediationv1alpha1.PhaseSucceeded, time.Minute), ReasonPullRequestOpened))
+	type change = func(*remediationv1alpha1.SetContainerMemoryLimit)
+	to := func(previous, desired string) change {
+		return func(a *remediationv1alpha1.SetContainerMemoryLimit) {
+			a.Previous, a.Desired = resource.MustParse(previous), resource.MustParse(desired)
+		}
 	}
-	ctx := context.Background()
-	if !succeededInstead(ctx, succeeded(), waiter) {
-		t.Fatal("a holder of another Incident that changed the same field from the same value does not end the waiter")
-	}
-	for name, mutate := range map[string]func(*remediationv1alpha1.RemediationRequest){
-		"not Succeeded": func(o *remediationv1alpha1.RemediationRequest) { o.Status.Phase = remediationv1alpha1.PhaseFailed },
-		"Inconclusive": func(o *remediationv1alpha1.RemediationRequest) {
-			o.Status.Phase = remediationv1alpha1.PhaseInconclusive
-		},
-		"another container": func(o *remediationv1alpha1.RemediationRequest) {
-			o.Spec.Action.SetContainerMemoryLimit.Container = sidecarContainer
-		},
-		"from another previous value": func(o *remediationv1alpha1.RemediationRequest) {
-			o.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("128Mi")
-		},
-		"to the waiter's previous value": func(o *remediationv1alpha1.RemediationRequest) {
-			o.Spec.Action.SetContainerMemoryLimit.Previous = resource.MustParse("128Mi")
-			o.Spec.Action.SetContainerMemoryLimit.Desired = waiter.Spec.Action.SetContainerMemoryLimit.Previous
-		},
+	const unbounded = "1e300" // outside the bounded form of quantity.Parse: not Comparable
+	for name, c := range map[string]struct {
+		phase          remediationv1alpha1.RemediationPhase
+		waiter, holder change
+		want           bool
+	}{
+		"up, holder up":             {remediationv1alpha1.PhaseSucceeded, to("256Mi", "384Mi"), to("256Mi", "512Mi"), true},
+		"down, holder down":         {remediationv1alpha1.PhaseSucceeded, to("256Mi", "128Mi"), to("256Mi", "192Mi"), true},
+		"up, holder down":           {remediationv1alpha1.PhaseSucceeded, to("256Mi", "512Mi"), to("256Mi", "128Mi"), false},
+		"down, holder up":           {remediationv1alpha1.PhaseSucceeded, to("256Mi", "128Mi"), to("256Mi", "384Mi"), false},
+		"not Succeeded":             {remediationv1alpha1.PhaseFailed, to("256Mi", "384Mi"), to("256Mi", "512Mi"), false},
+		"Inconclusive":              {remediationv1alpha1.PhaseInconclusive, to("256Mi", "384Mi"), to("256Mi", "512Mi"), false},
+		"from another previous":     {remediationv1alpha1.PhaseSucceeded, to("256Mi", "384Mi"), to("128Mi", "512Mi"), false},
+		"to the waiter's previous":  {remediationv1alpha1.PhaseSucceeded, to("256Mi", "384Mi"), to("128Mi", "256Mi"), false},
+		"holder desired unbounded":  {remediationv1alpha1.PhaseSucceeded, to("256Mi", "384Mi"), to("256Mi", unbounded), false},
+		"holder previous unbounded": {remediationv1alpha1.PhaseSucceeded, to("256Mi", "384Mi"), to(unbounded, "512Mi"), false},
+		"waiter previous unbounded": {remediationv1alpha1.PhaseSucceeded, to(unbounded, "384Mi"), to(unbounded, "512Mi"), false},
+		"waiter desired unbounded":  {remediationv1alpha1.PhaseSucceeded, to("256Mi", unbounded), to("256Mi", "512Mi"), false},
+		"another container (holder)": {remediationv1alpha1.PhaseSucceeded, to("256Mi", "384Mi"), func(a *remediationv1alpha1.SetContainerMemoryLimit) {
+			to("256Mi", "512Mi")(a)
+			a.Container = sidecarContainer
+		}, false},
 	} {
-		o := succeeded()
-		mutate(o)
-		if succeededInstead(ctx, o, waiter) {
-			t.Errorf("%s: ends the waiter, want not", name)
+		t.Run(name, func(t *testing.T) {
+			waiter := otherRequest("waiter", limitsTarget, "", 0)
+			c.waiter(waiter.Spec.Action.SetContainerMemoryLimit)
+			holder := ofIncident(withPullRequest(otherRequest(closedHolder, limitsTarget, c.phase, time.Minute),
+				ReasonPullRequestOpened))
+			c.holder(holder.Spec.Action.SetContainerMemoryLimit)
+			if got := succeededInstead(context.Background(), holder, waiter); got != c.want {
+				t.Fatalf("succeededInstead = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestHolderDeletedWhileVerifyingReleasesWaiter checks #719 for a holder deleted by hand while its outcome is
+// verified: its finalizer released the lock, so the request queued behind it goes on at once and is decided as
+// usual (here the source mapping still finds the merged value in Git and the old one live: NeedsIntervention with
+// ValueMismatch), and the look-up of the recorded holder logs that it is gone.
+func TestHolderDeletedWhileVerifyingReleasesWaiter(t *testing.T) {
+	r, c, rr, stub := holdWorld(t, true)
+	mergeHolder(t, r, c, stub)
+	moveHolder(t, r, c, remediationv1alpha1.PhaseWaitingForDelivery)
+	moveHolder(t, r, c, remediationv1alpha1.PhaseVerifying)
+	expectStillQueued(t, r, rr, stub, "Verifying")
+	if err := c.Delete(context.Background(), getHolder(t, c)); err != nil {
+		t.Fatal(err)
+	}
+	waiter := &remediationv1alpha1.RemediationRequest{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(rr), waiter); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var lines []string
+	ctx := logf.IntoContext(context.Background(), funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, args)
+	}, funcr.Options{}))
+	if w, reason, err := r.recordedHolderOf(ctx, waiter); err != nil || w != nil {
+		t.Fatalf("recordedHolderOf = %v, %q, %v; want nothing", w, reason, err)
+	}
+	mu.Lock()
+	logged := slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, closedHolder) })
+	mu.Unlock()
+	if !logged {
+		t.Fatalf("the deleted holder was not logged: %q", lines)
+	}
+	_, got, err := reconcileLimits(t, r, rr)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	pa := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPolicyAllowed)
+	if got.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention || pa == nil ||
+		pa.Reason != string(sourcemap.ReasonValueMismatch) {
+		t.Fatalf("phase %q, PolicyAllowed %+v; want NeedsIntervention with ValueMismatch", got.Status.Phase, pa)
+	}
+}
+
+// TestTwoWaitersBehindOneSucceededHolder checks #719 with two requests, of two Incidents, queued behind one holder
+// for the same field: when the holder ends Succeeded, both end Superseded with AnotherRequestSucceeded.
+func TestTwoWaitersBehindOneSucceededHolder(t *testing.T) {
+	r, c, rr, stub := holdWorld(t, true)
+	second := rr.DeepCopy()
+	second.ObjectMeta = metav1.ObjectMeta{Namespace: rr.Namespace, Name: "rr-second"}
+	second.Status = remediationv1alpha1.RemediationRequestStatus{}
+	second.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: "third-incident",
+		UID: "77777777-7777-4777-8777-777777777777"}
+	if err := c.Create(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	res, got, err := reconcileLimits(t, r, second)
+	expectQueuedAfter(t, r, second, res, err, got, stub, ReasonTargetLocked, admissionRecheckDelay)
+	mergeHolder(t, r, c, stub)
+	moveHolder(t, r, c, remediationv1alpha1.PhaseWaitingForDelivery)
+	moveHolder(t, r, c, remediationv1alpha1.PhaseVerifying)
+	for _, w := range []*remediationv1alpha1.RemediationRequest{rr, second} {
+		expectStillQueued(t, r, w, stub, "Verifying, "+w.Name)
+	}
+	deliver(t, c)
+	stub.result = resolved()
+	if err := r.succeed(context.Background(), getHolder(t, c), time.Minute, "No recurrence in the window"); err != nil {
+		t.Fatalf("succeed: %v", err)
+	}
+	for _, w := range []*remediationv1alpha1.RemediationRequest{rr, second} {
+		_, got, err := reconcileLimits(t, r, w)
+		if err != nil {
+			t.Fatalf("%s: Reconcile: %v", w.Name, err)
+		}
+		pf := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+		if got.Status.Phase != remediationv1alpha1.PhaseSuperseded || pf == nil ||
+			pf.Reason != remediationv1alpha1.ReasonAnotherRequestSucceeded {
+			t.Fatalf("%s: phase %q, PlanFresh %+v; want Superseded with AnotherRequestSucceeded", w.Name,
+				got.Status.Phase, pf)
 		}
 	}
 }

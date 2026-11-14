@@ -133,6 +133,20 @@ var queuedMessages = map[string]string{
 		"probe; this one waits until the probe ends",
 }
 
+// verifyingLockMessage is the message of Queued with reason TargetLocked when every request that holds the lock on
+// the target is merged and held while its outcome is verified (heldForVerification, #719): no pull request is
+// open, and the wait is for the verification of the merged change.
+const verifyingLockMessage = "Another request for the same target was merged and keeps the lock while its outcome " +
+	"is verified; this one waits until that verification ends (Succeeded, Failed or Inconclusive)"
+
+// queuedMessage returns the message of the Queued condition s holds a request back with.
+func (s limitsState) queuedMessage() string {
+	if s.reason == ReasonTargetLocked && s.lockVerifying {
+		return verifyingLockMessage
+	}
+	return queuedMessages[s.reason]
+}
+
 // Defaults of the circuit breaker.
 const (
 	// DefaultBreakerThreshold is how many consecutive failures open the breaker.
@@ -171,6 +185,9 @@ type limitsState struct {
 	// or deleted): the lock then lasts until a person or a look-up of checkHeld frees it, so the request
 	// waits longer between checks and is woken by lockWaiters when the holder changes.
 	stoppedLock bool
+	// lockVerifying is whether every request that holds the lock on the target is merged and held only while
+	// its outcome is verified (heldForVerification, #719).
+	lockVerifying bool
 	// holders are the requests that hold the lock on the target, those for rr's field first, then by name, at
 	// most MaxQueuedBehind, whatever
 	// reason holds the request back: what waitForLimits records in status.queuedBehind (duplicates.go, #643).
@@ -306,7 +323,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 	if err != nil {
 		return limitsState{}, err
 	}
-	locked, lockMoving := false, false
+	locked, lockMoving, lockVerifying := false, false, true
 	var holders []lockHolder
 	var lastSuccess, lastFailure time.Time
 	var failures []time.Time
@@ -331,6 +348,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		if e.target == rr.Spec.TargetRef.UID && e.lock && uid != predecessor {
 			locked = true
 			lockMoving = lockMoving || e.active
+			lockVerifying = lockVerifying && e.verifying
 			holders = append(holders, lockHolder{ref: remediationv1alpha1.RequestRef{Name: e.name, UID: remediationv1alpha1.UID(uid)},
 				same: e.sameField(ctx, rr)})
 		}
@@ -366,6 +384,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 	case locked:
 		s.reason = ReasonTargetLocked
 		s.stoppedLock = !lockMoving
+		s.lockVerifying = lockVerifying
 	case s.active >= s.limit:
 		s.reason = ReasonConcurrencyLimit
 	}
@@ -407,6 +426,8 @@ type limitsEntry struct {
 	ended    bool
 	// pending is a request whose outcome the breaker does not know yet (verificationPending).
 	pending bool
+	// verifying is a merged request that keeps its lock while its outcome is verified (heldForVerification).
+	verifying bool
 	// replaces is the UID of the request a replacement takes over (spec.replaces), set only once the executor
 	// admitted the replacement with its checked chain link (admittedPredecessor); empty for any other, so a
 	// spec.replaces nobody checked never frees a slot.
@@ -539,7 +560,8 @@ func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace
 			e := limitsEntry{active: active(o), lock: holdsLock(o), target: o.Spec.TargetRef.UID,
 				outcome: breakerOutcome(o), counts: ptr.Deref(o.Status.BreakerCounts, false), name: o.Name,
 				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero(),
-				ended: ended(o.Status.Phase), pending: r.verificationPending(o)}
+				ended: ended(o.Status.Phase), pending: r.verificationPending(o),
+				verifying: heldForVerification(o, r.VerifyOutcomes)}
 			if e.pending {
 				e.outcome = outcomeNone
 			}
@@ -694,7 +716,7 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 		Type:               remediationv1alpha1.ConditionQueued,
 		Status:             metav1.ConditionTrue,
 		Reason:             reason,
-		Message:            queuedMessages[reason],
+		Message:            s.queuedMessage(),
 		ObservedGeneration: rr.Generation,
 	})
 	recorded := false

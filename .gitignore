@@ -36,7 +36,7 @@ CLAUDE.local.md
 # Docs build
 /site/
 .cache/
-.venv/
+.venv
 
 # Credentials and local env
 *.pem

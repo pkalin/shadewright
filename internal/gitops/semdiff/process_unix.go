@@ -19,10 +19,22 @@ limitations under the License.
 package semdiff
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 )
+
+// killedBySIGKILL reports whether err, from the wait for a render process, says the process ended by a SIGKILL.
+func killedBySIGKILL(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL
+}
 
 // catchCPU makes the render process exit with exitCPU on SIGXCPU, which the Go runtime otherwise ignores.
 func catchCPU() {

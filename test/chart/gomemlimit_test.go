@@ -17,6 +17,7 @@ limitations under the License.
 package chart
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,10 +52,10 @@ func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
 		wantAnalyzer string
 	}{
 		"default 512Mi and 128Mi": {nil, "241591910", "120795955"},
-		"128Mi executor only":     {[]string{"executor.resources.limits.memory=128Mi"}, "60397977", "120795955"},
+		"2Gi executor only":       {[]string{"executor.resources.limits.memory=2Gi"}, "966367641", "120795955"},
 		"1Gi analyzer":            {[]string{"analyzer.resources.limits.memory=1Gi"}, "241591910", "966367641"},
 		"decimal 1000M":           {[]string{"executor.resources.limits.memory=1000M"}, "450000000", "120795955"},
-		"plain bytes":             {[]string{"executor.resources.limits.memory=134217728"}, "60397977", "120795955"},
+		"plain bytes":             {[]string{"executor.resources.limits.memory=536870912"}, "241591910", "120795955"},
 		"override":                {[]string{"executor.goMemLimit=100MiB", "analyzer.goMemLimit=64MiB"}, "100MiB", "64MiB"},
 	}
 	for name, tc := range tests {
@@ -96,16 +97,54 @@ func TestExecutorMemoryLimitHoldsARenderProcess(t *testing.T) {
 	}
 }
 
+// TestChartRefusesAnExecutorMemoryLimitBelowItsBudget checks that the chart refuses to render an executor whose
+// memory limit cannot hold its Go soft limit, the render process's resident limit and the margin (ADR-0035),
+// with the default goMemLimit (45 percent of the limit) and with an explicit one, and renders one that can:
+// exactly the budget passes, a byte less fails. The template's numbers are checked against
+// semdiff.MaxRenderResident and semdiff.RenderOutsideData.
+func TestChartRefusesAnExecutorMemoryLimitBelowItsBudget(t *testing.T) {
+	const room = semdiff.MaxRenderResident + semdiff.RenderOutsideData
+	for _, set := range [][]string{
+		{"executor.resources.limits.memory=256Mi"},
+		{"executor.resources.limits.memory=465Mi"}, // 45 percent of it plus room is just over
+		{"executor.resources.limits.memory=1Gi", "executor.goMemLimit=900MiB"},
+		{fmt.Sprintf("executor.resources.limits.memory=%d", 200<<20+room-1), "executor.goMemLimit=200MiB"},
+		{"executor.resources.limits.memory=1.5Gi", "executor.goMemLimit=1GiB"}, // a limit the chart cannot read
+	} {
+		out := helmFails(t, set...)
+		if !strings.Contains(out, "executor.resources.limits.memory") || !strings.Contains(out, "render process") {
+			t.Errorf("%v: the error does not say the limit cannot hold the render process:\n%s", set, out)
+		}
+	}
+	for _, c := range []struct {
+		set  []string
+		want string
+	}{
+		{[]string{"executor.resources.limits.memory=466Mi"}, "219886387"},
+		{[]string{"executor.resources.limits.memory=1Gi"}, "483183820"},
+		{[]string{fmt.Sprintf("executor.resources.limits.memory=%d", 200<<20+room), "executor.goMemLimit=200MiB"}, "200MiB"},
+		{[]string{"executor.resources.limits.memory=2Gi", "executor.goMemLimit=1GiB"}, "1GiB"},
+	} {
+		r := defaultRender(t, c.set...)
+		if got := goMemLimit(t, r, executorDeployment); got != c.want {
+			t.Errorf("%v: GOMEMLIMIT = %s, want %s", c.set, got, c.want)
+		}
+	}
+}
+
 func TestChartRefusesAMemoryLimitItCannotReadWithoutAnOverride(t *testing.T) {
 	out := helmFails(t, "executor.resources.limits.memory=1.5Gi")
-	if !strings.Contains(out, "executor.goMemLimit") {
-		t.Errorf("error does not ask for executor.goMemLimit:\n%s", out)
+	if !strings.Contains(out, "executor.resources.limits.memory") {
+		t.Errorf("error does not name executor.resources.limits.memory:\n%s", out)
+	}
+	if out := helmFails(t, "analyzer.resources.limits.memory=1.5Gi"); !strings.Contains(out, "analyzer.goMemLimit") {
+		t.Errorf("error does not ask for analyzer.goMemLimit:\n%s", out)
 	}
 	if out := helmFails(t, "analyzer.goMemLimit=lots"); !strings.Contains(out, "goMemLimit") {
 		t.Errorf("a malformed override is not refused:\n%s", out)
 	}
-	r := defaultRender(t, "executor.resources.limits.memory=1.5Gi", "executor.goMemLimit=1GiB")
-	if got := goMemLimit(t, r, executorDeployment); got != "1GiB" {
+	r := defaultRender(t, "analyzer.resources.limits.memory=1.5Gi", "analyzer.goMemLimit=1GiB")
+	if got := goMemLimit(t, r, analyzerDeployment); got != "1GiB" {
 		t.Errorf("GOMEMLIMIT = %s, want 1GiB", got)
 	}
 	if out := helmFails(t, "verifier.resources.limits.memory=1.5Gi"); !strings.Contains(out, "verifier.goMemLimit") {

@@ -61,8 +61,9 @@ const (
 	// It is a partial guard, not a bound: the kernel checks it on a fresh writable mapping, but the Go runtime
 	// maps its heap over address space it reserved earlier (mmap with MAP_FIXED over a PROT_NONE reservation),
 	// which the kernel does not check, so the heap can grow past it. The process then ends at its next fresh
-	// mapping, and the Go runtime writes "out of memory" or "cannot allocate memory", which is a refusal, or
-	// crashes with a SIGSEGV in its collector, which is an error for a retry (ADR-0035). The executor's render
+	// mapping, where the Go runtime writes "out of memory" or "cannot allocate memory" or crashes with a SIGSEGV
+	// in its collector. Neither end proves this limit (Linux refuses a mapping with the same error when the node
+	// is short of memory to commit), so both are a [RenderEnded] for a retry (ADR-0035). The executor's render
 	// process started with 83 MiB of it and reached 245 MiB when its own sampling stopped it; this is 1.5
 	// times that.
 	MaxRenderData = 384 << 20
@@ -136,6 +137,27 @@ type renderAnswer struct {
 
 // errNotStarted is returned when the render process could not be started or ended before it set its limits.
 var errNotStarted = errors.New("semdiff: the render process did not start")
+
+// RenderEnded is an end of a render process that had set its limits and was neither an answer nor one of
+// its limit refusals: a kill the parent did not make (such as an OOM killer), a crash, the Go runtime's out of
+// memory exit, a failure to read its input, or an answer that cannot be read. [Check] returns it for a retry.
+// The same build may end this way on every retry, so the caller counts these ends in a row and refuses the
+// change after a few (controller.maxRenderEnds, ADR-0035); a context that ended is never one.
+type RenderEnded struct {
+	// Cause says how the process ended, in fixed text, for example "crashed before it answered".
+	Cause string
+	// Err is the error behind it, if any: the wait status of the process.
+	Err error
+}
+
+func (e *RenderEnded) Error() string {
+	if e.Err == nil {
+		return "semdiff: the render process " + e.Cause
+	}
+	return "semdiff: the render process " + e.Cause + ": " + e.Err.Error()
+}
+
+func (e *RenderEnded) Unwrap() error { return e.Err }
 
 // RunRenderProcess turns this process into the render process when it was started as one by [Check], and
 // returns otherwise. Every binary that calls [Check], test binaries included (from TestMain), calls it first
@@ -276,7 +298,7 @@ func (f *fatalLine) Write(p []byte) (int, error) {
 // runtimeOutOfMemory reports whether line, the first fatal error line of a render process, is the Go
 // runtime's own end at a refused mapping: "fatal error: out of memory", "fatal error: runtime: out of memory"
 // (a heap mapping) or "fatal error: runtime: cannot allocate memory" (its own metadata), the texts Go 1.27
-// writes at the data limit.
+// writes at the data limit, and also when the node is short of memory to commit.
 func runtimeOutOfMemory(line string) bool {
 	msg, ok := strings.CutPrefix(line, "fatal error: ")
 	return ok && (strings.Contains(msg, "out of memory") || strings.Contains(msg, "cannot allocate memory"))
@@ -328,7 +350,7 @@ func runRenderProcess(ctx context.Context, in Input) (Result, error) {
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("%w: %w", errNotStarted, err)
 	}
-	stop, killed := watchResident(cmd.Process, residentLimit())
+	stop, hit := watchResident(cmd.Process, residentLimit())
 	runErr := cmd.Wait()
 	stop()
 	if err := ctx.Err(); err != nil {
@@ -341,7 +363,9 @@ func runRenderProcess(ctx context.Context, in Input) (Result, error) {
 		}
 		return Result{}, fmt.Errorf("%w: %w", errNotStarted, runErr)
 	}
-	if runErr != nil && killed() {
+	// The parent's kill is the end only when the process ended by a SIGKILL after it: a process that crashed
+	// just before the kill reached it is read by its own end.
+	if hit() && killedBySIGKILL(runErr) {
 		return Result{}, refuse(ReasonTooLarge,
 			fmt.Sprintf("the render needs more than %d MiB of resident memory", residentLimit()>>20))
 	}
@@ -359,23 +383,33 @@ func residentLimit() uint64 {
 	return MaxRenderResident
 }
 
+// residentKill kills the render process p, which the parent read at n bytes resident, prev at the reading
+// before. Tests replace it to see the readings or to stand in for a process that ended by itself first.
+var residentKill = func(p *os.Process, _, _ uint64) error { return p.Kill() }
+
 // watchResident reads the resident memory of the render process p every residentEvery and kills it past limit
-// (Linux only; elsewhere [residentBytes] reads nothing). stop ends the watch and waits for it; killed reports
-// whether the watch killed the process, which it reports only for a kill that reached a running process. A
-// failed read is neither a refusal nor an error: the process may have ended, and its end is read as usual.
-func watchResident(p *os.Process, limit uint64) (stop func(), killed func() bool) {
-	var hit atomic.Bool
+// (Linux only; elsewhere [residentBytes] reads nothing). stop ends the watch and waits for it; hit reports
+// whether the watch sent the kill to a process not reaped yet. That alone does not say the kill ended it: the
+// caller also needs its wait status. A failed read is neither a refusal nor an error: the process may have
+// ended, and its end is read as usual.
+func watchResident(p *os.Process, limit uint64) (stop func(), hit func() bool) {
+	var sent atomic.Bool
 	done, ended := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(ended)
 		t := time.NewTicker(residentEvery)
 		defer t.Stop()
+		var prev uint64
 		for {
-			if n, ok := residentBytes(p.Pid); ok && n > limit {
-				if p.Kill() == nil {
-					hit.Store(true)
+			n, ok := residentBytes(p.Pid)
+			if ok && n > limit {
+				if residentKill(p, prev, n) == nil {
+					sent.Store(true)
 				}
 				return
+			}
+			if ok {
+				prev = n
 			}
 			select {
 			case <-done:
@@ -384,16 +418,16 @@ func watchResident(p *os.Process, limit uint64) (stop func(), killed func() bool
 			}
 		}
 	}()
-	return func() { close(done); <-ended }, hit.Load
+	return func() { close(done); <-ended }, sent.Load
 }
 
 // stopped reads the end of a render process that had set its limits, wrote no answer and was not killed by
 // the parent at its resident limit (a refusal, read in [runRenderProcess]). Only the ends the process chose
-// itself are refusals: its own exits at the memory sampling and at the CPU time limit, and the Go runtime's exit
-// when the data limit refused a mapping (fatal, the first fatal error line of its stderr). The same build ends
-// the same way on every retry. Any other end is an error for a retry: a signal, such as a SIGKILL from an OOM
-// killer, or another crash, such as the Go runtime's SIGSEGV when its collector cannot map its work queue at the
-// data limit.
+// itself at a limit are refusals: its own exits at the memory sampling and at the CPU time limit. The same build
+// ends the same way on every retry. Every other end is a [RenderEnded] for a retry: a signal, such as a SIGKILL
+// from an OOM killer, the Go runtime's out of memory exit (fatal, the first fatal error line of its stderr),
+// which the data limit or a node short of memory can cause alike, or another crash, such as the Go runtime's
+// SIGSEGV when its collector cannot map its work queue at the data limit.
 func stopped(err error, fatal string) error {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
@@ -405,31 +439,31 @@ func stopped(err error, fatal string) error {
 	case code == exitCPU:
 		return refuse(ReasonTooLarge, fmt.Sprintf("the render needs more than %d s of CPU time", MaxRenderCPUSeconds))
 	case code == exitRuntimeFatal && runtimeOutOfMemory(fatal):
-		return refuse(ReasonTooLarge, fmt.Sprintf("the render needs more than %d MiB of data mappings", MaxRenderData>>20))
+		return &RenderEnded{Cause: "ran out of memory (the Go runtime's out of memory exit)", Err: err}
 	case code == exitFailed:
-		return fmt.Errorf("semdiff: the render process could not read its input or write its answer: %w", err)
+		return &RenderEnded{Cause: "could not read its input or write its answer", Err: err}
 	case code < 0:
-		return fmt.Errorf("semdiff: the render process was killed before it answered: %w", err)
+		return &RenderEnded{Cause: "was killed before it answered", Err: err}
 	}
-	return fmt.Errorf("semdiff: the render process crashed before it answered: %w", err)
+	return &RenderEnded{Cause: "crashed before it answered", Err: err}
 }
 
 // decodeAnswer reads the answer of a render process that exited normally.
 func decodeAnswer(data []byte, over bool) (Result, error) {
 	var a renderAnswer
 	if over || json.Unmarshal(data, &a) != nil {
-		return Result{}, errors.New("semdiff: the render process wrote no readable answer")
+		return Result{}, &RenderEnded{Cause: "wrote no readable answer"}
 	}
 	switch {
 	case a.Result != nil:
 		return *a.Result, nil
 	case a.Reason != "":
 		if !a.Reason.known() {
-			return Result{}, errors.New("semdiff: the render process answered a reason the check does not give")
+			return Result{}, &RenderEnded{Cause: "answered a reason the check does not give"}
 		}
 		return Result{}, refuse(a.Reason, capDetail(a.Detail))
 	default:
-		return Result{}, errors.New("semdiff: the render process failed")
+		return Result{}, &RenderEnded{Cause: "failed without a refusal"}
 	}
 }
 

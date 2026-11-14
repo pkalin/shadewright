@@ -76,7 +76,9 @@ type Result struct {
 // that grows past the limits checked before the render is refused with ReasonTooLarge instead of ending the
 // executor (#614, ADR-0035). One render process runs at a time. ctx bounds the wait for that turn and the
 // render process: when it ends, the process is killed and Check returns ctx.Err(). A process that cannot be
-// started, or that ends before it has set its limits, is a plain error for a retry, never a refusal.
+// started, or that ends before it has set its limits, is a plain error for a retry, never a refusal. One that
+// ends after that without an answer and not at one of its limits is a [*RenderEnded], also for a retry; the
+// caller counts those in a row and refuses the change after a few (ADR-0035).
 func Check(ctx context.Context, in Input) (Result, error) {
 	if _, _, _, err := plan(in); err != nil {
 		return Result{}, err

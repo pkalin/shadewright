@@ -42,7 +42,9 @@ limitations under the License.
 // memory ([MaxRenderResident]) and operating system limits ([MaxRenderData], a partial guard, and
 // [MaxRenderCPUSeconds]). The walk's budgets are estimates of what a render grows to; the process limits bound
 // it whatever the estimate misses, and a render that reaches them is refused with ReasonTooLarge instead of
-// ending the executor (#614, ADR-0035). The wait for a turn and the render process honour the context.
+// ending the executor (#614, ADR-0035). Any other end of the render process after it set its limits (a crash,
+// a kill the parent did not make, an unreadable answer) is a [RenderEnded] for a retry, which the caller counts.
+// The wait for a turn and the render process honour the context.
 //
 // Rendering is locked down. Every kustomization file is checked against an allow-list before kustomize
 // sees it: plain resources, components, patches (inline or from a local file) and the built-in name,

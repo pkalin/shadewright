@@ -197,6 +197,10 @@ type RemediationRequestReconciler struct {
 	// restart a reply gets that many tries again, and its marker keeps a post that went through from being
 	// repeated.
 	replyAttempts sync.Map
+	// renderEnds counts, per request and plan digest, the ends of the render process in a row without an answer
+	// (renderends.go), so a build that ends it that way on every retry is refused. Memory only, dropped with
+	// checked.
+	renderEnds renderEnds
 	// reportCounters holds, per request in Verifying, the executor's memory of its VerificationReport's sample
 	// counter (clearing.go). Memory only: after a restart success waits one more check. Dropped when the request
 	// ends, is being deleted or is gone, not with forget, which runs on every reconcile of a request after the
@@ -224,14 +228,15 @@ type RemediationRequestReconciler struct {
 }
 
 // forget drops what this process keeps in memory about a request: its last full recheck, its last
-// permission warning, the comments of the merge gate it posted, a rewrite not recorded yet and the failed
-// posts of its replies to hints.
+// permission warning, the comments of the merge gate it posted, a rewrite not recorded yet, the failed
+// posts of its replies to hints and the ends of its render process in a row.
 func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 	r.checked.Delete(key)
 	r.permissionWarned.Delete(key)
 	r.steeredCommented.Delete(key)
 	r.rewritten.Delete(key)
 	r.replyAttempts.Delete(key)
+	r.renderEnds.forget(key)
 }
 
 // DefaultTargetStateTimeout is how long the policy check waits by default for KEDA to report on a

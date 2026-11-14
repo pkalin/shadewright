@@ -145,7 +145,7 @@ executor:
     # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `executor.identity.azure.clientId`.
     # @section -- Executor
     annotations: {}
-  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 45 percent of `resources.limits.memory` (241591910 bytes, about 230 MiB, with the default 512Mi), so it follows that limit: the Go runtime then collects before the heap reaches its share, and a large but bounded parse is not OOM-killed. The rest is for the render process of the render check, a child of the executor in the same container that the executor stops at 192 MiB resident, and a 64 MiB margin (ADR-0035). Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1.5Gi`: the chart then refuses to render) or for another margin.
+  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 45 percent of `resources.limits.memory` (241591910 bytes, about 230 MiB, with the default 512Mi), so it follows that limit: the Go runtime then collects before the heap reaches its share, and a large but bounded parse is not OOM-killed. The rest is for the render process of the render check, a child of the executor in the same container that the executor stops at 192 MiB resident, and a 64 MiB margin (ADR-0035). The chart refuses to render when `resources.limits.memory` is less than this plus 192 MiB plus 64 MiB, and it must be an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix (not `1.5Gi`), also when this is set. Set it for another split of the limit.
   # @default -- 45 percent of `resources.limits.memory`
   # @section -- Executor
   goMemLimit: ""
@@ -158,8 +158,8 @@ executor:
       # unbounded. It covers the executor and one render process of the render check (ADR-0035): the executor's Go
       # soft limit (45 percent, 230 MiB) plus the render process's resident limit (192 MiB, where the executor
       # kills it) plus a 64 MiB margin is 486 MiB. On cgroup v2 a container OOM ends the executor with the render
-      # process, so a lower limit, or a larger `goMemLimit`, lets a build that reaches the render process's limit
-      # restart the executor on every retry. The render process's own limits bound what crafted input can make a
+      # process, so a lower limit, or a larger `goMemLimit`, would let a build that reaches the render process's
+      # limit restart the executor on every retry: the chart refuses to render it. The render process's own limits bound what crafted input can make a
       # render grow (#614); the Git input budgets (#495, #595, #482) refuse most large builds before it runs.
       # @section -- Executor
       memory: 512Mi

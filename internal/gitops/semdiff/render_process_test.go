@@ -18,6 +18,8 @@ package semdiff_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
 	goruntime "runtime"
 	"strings"
 	"sync/atomic"
@@ -73,6 +75,11 @@ func heapPeak(f func()) uint64 {
 	return peak.Load()
 }
 
+// memoryRefusal matches the two memory refusals of the render process: its own sampling of its Go memory and
+// the parent's reading of its resident memory.
+var memoryRefusal = regexp.MustCompile(fmt.Sprintf(
+	`^semdiff: TooLarge: the render needs more than (%d MiB of memory|[0-9]+ MiB of resident memory)$`, semdiff.MaxRenderMemory>>20))
+
 // TestCheckBoundsAChainedNameReference reproduces #614: a 64 KiB annotation moved into a ConfigMap name that
 // 1,000 references copy, about 100 KB of input within every budget the walk checks, rendered 66 MB and peaked
 // at 374 MiB of Go heap in the executor's process (5.6 s), and the check passed. The render process stops at
@@ -87,8 +94,10 @@ func TestCheckBoundsAChainedNameReference(t *testing.T) {
 		peak := heapPeak(func() {
 			_, err = semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
 		})
-		if !errors.Is(err, semdiff.ErrTooLarge) || !strings.Contains(err.Error(), "MiB of memory") {
-			t.Fatalf("got %v, want TooLarge at the render process's memory limit", err)
+		// Either memory bound may stop it first: the process's own sampling or the parent's resident reading
+		// (whose limit is larger in a race build).
+		if !errors.Is(err, semdiff.ErrTooLarge) || !memoryRefusal.MatchString(err.Error()) {
+			t.Fatalf("got %v, want TooLarge at one of the render process's memory limits", err)
 		}
 		if peak > 64<<20 {
 			t.Errorf("this process peaked at %d MiB of Go heap, want the render outside it", peak>>20)

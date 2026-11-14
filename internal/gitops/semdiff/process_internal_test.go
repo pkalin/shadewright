@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -118,6 +119,21 @@ func runHelper(mode string) int {
 			sink = append(sink, bytes.Repeat([]byte{1}, 4<<20))
 		}
 		return 0
+	case "residentcrash": // the real limits without its own sampling, past the resident limit, then a crash of its own
+		sampleMemory = false
+		if limitRenderProcess() != nil {
+			return exitFailed
+		}
+		debug.SetMemoryLimit(math.MaxInt64)
+		ready()
+		for range 1024 {
+			if n, ok := residentBytes(os.Getpid()); ok && n > residentLimit()+16<<20 {
+				break
+			}
+			sink = append(sink, bytes.Repeat([]byte{1}, 4<<20))
+		}
+		time.Sleep(200 * time.Millisecond) // the parent reads it over the limit meanwhile
+		return exitRuntimeFatal
 	case "data": // the real data limit, 64 MiB above what the process holds at the start (Linux only)
 		if err := setLimits(vmData()+64<<20, MaxRenderCPUSeconds); err != nil {
 			return exitFailed
@@ -162,25 +178,26 @@ func withHelper(t *testing.T, mode string) {
 
 // TestRenderProcessEnds checks how each end of the render process is read (#614): one that never set its
 // limits is an error for a retry, never a refusal; one that set them and stopped at a limit it chose (the
-// memory sampling, the CPU time, the Go runtime's end at a refused mapping) is a TooLarge refusal that says
-// why; one killed by a signal, one that crashed otherwise, one that cannot read its input and one that
-// answers nothing readable or a reason the check does not give are errors for a retry.
+// memory sampling, the CPU time) is a TooLarge refusal that says why; one killed by a signal, the Go runtime's
+// out of memory exit (the data limit or a node short of memory alike), one that crashed otherwise, one that
+// cannot read its input and one that answers nothing readable or a reason the check does not give are a
+// RenderEnded for a retry, which the executor counts.
 func TestRenderProcessEnds(t *testing.T) {
 	for mode, c := range map[string]struct {
-		refusal string // a TooLarge refusal naming this, or "" for a plain error
-		retry   error  // the error it wraps, when it is not a refusal
+		refusal string // a TooLarge refusal naming this, or "" for an error for a retry
+		retry   error  // the error it wraps, when it is not a RenderEnded
 		says    string // what the error for a retry says
 	}{
 		"silent":  {retry: errNotStarted},
 		"memory":  {refusal: "more than 128 MiB of memory"},
-		"oom":     {refusal: fmt.Sprintf("more than %d MiB of data mappings", MaxRenderData>>20)},
+		"oom":     {says: "ran out of memory"},
 		"cpu":     {refusal: "more than 20 s of CPU time"},
-		"oommeta": {refusal: fmt.Sprintf("more than %d MiB of data mappings", MaxRenderData>>20)},
+		"oommeta": {says: "ran out of memory"},
 		"crash":   {says: "crashed"},
 		"segv":    {says: "crashed"},
 		"killed":  {says: "was killed"},
-		"failed":  {},
-		"garbage": {},
+		"failed":  {says: "could not read its input"},
+		"garbage": {says: "no readable answer"},
 		"reason":  {says: "a reason the check does not give"},
 	} {
 		t.Run(mode, func(t *testing.T) {
@@ -196,6 +213,9 @@ func TestRenderProcessEnds(t *testing.T) {
 				}
 				if c.retry != nil && !errors.Is(err, c.retry) {
 					t.Fatalf("got %v, want %v", err, c.retry)
+				}
+				if _, ended := errors.AsType[*RenderEnded](err); ended != (c.retry == nil) {
+					t.Fatalf("got %v (a RenderEnded: %t), want one: %t", err, ended, c.retry == nil)
 				}
 				if !strings.Contains(err.Error(), c.says) {
 					t.Fatalf("got %v, want an error that says %q", err, c.says)
@@ -322,11 +342,13 @@ func TestRenderProcessDataLimit(t *testing.T) {
 	if strings.Contains(stderr.String(), "pthread_create failed") {
 		return // a cgo build; the executor is built without cgo
 	}
-	// The parent reads this end as the data limit's refusal.
+	// The parent reads this end as the Go runtime's out of memory exit, for a retry: the same end comes from a
+	// node short of memory to commit, so it does not prove the data limit.
 	var fatal fatalLine
 	_, _ = fatal.Write(stderr.Bytes())
-	if err := stopped(err, fatal.found); !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "data mappings") {
-		t.Fatalf("got %v from the first fatal line %q, want TooLarge at the data limit", err, fatal.found)
+	err = stopped(err, fatal.found)
+	if _, ended := errors.AsType[*RenderEnded](err); !ended || !strings.Contains(err.Error(), "ran out of memory") {
+		t.Fatalf("got %v from the first fatal line %q, want the out of memory end for a retry", err, fatal.found)
 	}
 }
 
@@ -338,13 +360,47 @@ func TestRenderProcessResident(t *testing.T) {
 		t.Skip("no resident memory to read here (Linux only)")
 	}
 	withHelper(t, "resident")
+	var prev, at uint64
+	orig := residentKill
+	t.Cleanup(func() { residentKill = orig })
+	residentKill = func(p *os.Process, before, n uint64) error {
+		prev, at = before, n
+		return orig(p, before, n)
+	}
 	start := time.Now()
 	_, err := runRenderProcess(context.Background(), Input{})
 	want := fmt.Sprintf("more than %d MiB of resident memory", residentLimit()>>20)
 	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), want) {
 		t.Fatalf("got %v, want TooLarge naming %q", err, want)
 	}
-	t.Logf("killed after %s", time.Since(start))
+	// The overshoot the margin of the executor's memory limit holds (RenderOutsideData, ADR-0035): how far over
+	// the limit the reading that killed the process was, and how much it grew since the reading before.
+	t.Logf("killed after %s at %d MiB resident: %d MiB over the limit, %d MiB more than the reading before",
+		time.Since(start), at>>20, (at-residentLimit())>>20, (at-prev)>>20)
+}
+
+// TestRenderProcessCrashAfterResidentHit checks that the parent's kill at the resident limit is a refusal only
+// when the process ended by that kill: a process the parent read over the limit that crashed by itself before
+// the kill reached it (here the kill is not sent) is read by its own end, a crash for a retry.
+func TestRenderProcessCrashAfterResidentHit(t *testing.T) {
+	if _, ok := residentBytes(os.Getpid()); !ok {
+		t.Skip("no resident memory to read here (Linux only)")
+	}
+	withHelper(t, "residentcrash")
+	orig := residentKill
+	t.Cleanup(func() { residentKill = orig })
+	var hit atomic.Bool
+	residentKill = func(*os.Process, uint64, uint64) error {
+		hit.Store(true)
+		return nil // as if the kill reached a process that had crashed already
+	}
+	_, err := runRenderProcess(context.Background(), Input{})
+	if !hit.Load() {
+		t.Fatal("the parent never read the process over its resident limit")
+	}
+	if _, ended := errors.AsType[*RenderEnded](err); !ended || !strings.Contains(err.Error(), "crashed") {
+		t.Fatalf("got %v, want the crash for a retry, not the resident refusal", err)
+	}
 }
 
 func firstLine(s string) string {

@@ -228,6 +228,81 @@ func TestGatedGitPassesTheGateAsCheckpoint(t *testing.T) {
 	}
 }
 
+// staleWrites lists every write method of GitProvider and whether a provider opened for a stale plan (closeOnly
+// true) still lets it through: only the close. A write method added to the interface fails
+// TestGatedGitStalePlanWritesOnlyTheClose until it is listed here.
+var staleWrites = map[string]bool{
+	"CreateBranch":         false,
+	"CommitFile":           false,
+	"AppendCommit":         false,
+	"OpenChangeRequest":    false,
+	"EnableAutoMerge":      false,
+	"CommentChangeRequest": false,
+	"UpdateChangeRequest":  false,
+	"CreateCheckRun":       false,
+	"CloseChangeRequest":   true,
+}
+
+// TestGatedGitStalePlanWritesOnlyTheClose calls every write of a gated provider with closeOnly true, false and
+// nil. With closeOnly true every write but the close returns errStalePlanWrite without asking the gate or
+// reaching the wrapped provider, and the close asks the gate and reaches it; otherwise every write does.
+func TestGatedGitStalePlanWritesOnlyTheClose(t *testing.T) {
+	typ := reflect.TypeFor[providers.GitProvider]()
+	for m := range typ.Methods() {
+		if _, listed := staleWrites[m.Name]; !listed && !gitReads[m.Name] {
+			t.Errorf("the write %s is not listed in staleWrites", m.Name)
+		}
+	}
+	for name := range staleWrites {
+		if _, ok := typ.MethodByName(name); !ok {
+			t.Errorf("staleWrites lists %s, which is no GitProvider method", name)
+		}
+	}
+	modes := map[string]func() bool{
+		"closeOnly":    func() bool { return true },
+		"notCloseOnly": func() bool { return false },
+		"nil":          nil,
+	}
+	for name, passesStale := range staleWrites {
+		m, ok := typ.MethodByName(name)
+		if !ok {
+			continue
+		}
+		for mode, closeOnly := range modes {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				inner := &checkpointProbe{asked: map[string]error{}}
+				asked := 0
+				gated := &gatedGit{git: inner, closeOnly: closeOnly, allow: func(context.Context) error {
+					asked++
+					return nil
+				}}
+				args := []reflect.Value{}
+				for in := range m.Type.Ins() {
+					if in == reflect.TypeFor[context.Context]() {
+						args = append(args, reflect.ValueOf(context.Background()))
+						continue
+					}
+					args = append(args, reflect.Zero(in))
+				}
+				out := reflect.ValueOf(gated).MethodByName(name).Call(args)
+				err, _ := reflect.TypeAssert[error](out[len(out)-1])
+				_, reached := inner.asked[name]
+				if closeOnly != nil && closeOnly() && !passesStale {
+					if !errors.Is(err, errStalePlanWrite) || asked != 0 || reached {
+						t.Fatalf("%s on a stale plan: %v, asked the gate %d times, reached the host %v; "+
+							"want errStalePlanWrite, no ask, not reached", name, err, asked, reached)
+					}
+					return
+				}
+				if err != nil || asked == 0 || !reached {
+					t.Fatalf("%s (%s): %v, asked the gate %d times, reached the host %v; want it asked and reached",
+						name, mode, err, asked, reached)
+				}
+			})
+		}
+	}
+}
+
 // TestGatedGitWritesWhenAllowed checks that an allowed write reaches the host.
 func TestGatedGitWritesWhenAllowed(t *testing.T) {
 	inner := fakegit.NewGit("main", map[string][]byte{"a.yaml": []byte("a: 1\n")})

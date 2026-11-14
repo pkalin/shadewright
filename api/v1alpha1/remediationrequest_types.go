@@ -295,7 +295,11 @@ const (
 	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed). It is also False, with the
 	// stale reason and the phase unchanged, once the cleanup of a stale plan has started: it is written before
 	// the change request is closed, so a close whose answer was lost is known on the next reconcile to be
-	// Shadewright's own, and the request ends Superseded rather than NeedsIntervention. It is Unknown, with reason
+	// Shadewright's own, and the request ends Superseded rather than NeedsIntervention. When the Git host refuses
+	// that close for good (403 or 422), the request keeps its phase and this condition, and condition
+	// PullRequestNotClosed says why. Once written, nothing removes it but the request's end as a closed stale plan:
+	// a merge keeps it on the Merged request, so the outcome after the merge is never Succeeded (StalePlanMerged),
+	// and a close by a person keeps it on the request that ends with ChangeRequestClosed. It is Unknown, with reason
 	// GitForbidden or GitRejected, while the Git host refuses the freshness check of a request whose pull
 	// request waits for review; the pull request is still watched and nothing is written to Git.
 	ConditionPlanFresh = "PlanFresh"
@@ -329,6 +333,43 @@ const (
 	// PullRequestUnreadable, is recorded when it is set or its reason changes, and one Normal Event,
 	// PullRequestReadable, when it is removed.
 	ConditionPullRequestUnreadable = "PullRequestUnreadable"
+	// ConditionPullRequestNotClosed is True, with reason GitForbidden or GitRejected, while the Git host refuses
+	// for good (403 or 422) to close the pull request of a stale plan: PlanFresh False keeps the stale reason, the
+	// request keeps its phase, its pull request is still watched and the close is tried again on every look. The
+	// message names the pull request; lastTransitionTime is the first refusal. A failed call never removes it,
+	// also not a close whose answer was lost: only a close that went through, or a read that finds the pull request
+	// closed or merged, does, and so does the request's end. A pull request found closed (not merged) while it is
+	// True ends the request as a stale plan Shadewright closed does (Superseded, the stale reason kept on PlanFresh),
+	// with PROpened saying that it is not known whether Shadewright's retried close or a person closed it; it is no
+	// failure for the circuit breaker. A failed read is never a refusal of the close
+	// (PullRequestUnreadable says so). One Warning Event, PullRequestNotClosed, is recorded when it is set or its
+	// reason changes. A deleted request's cleanup uses CleanupRefused instead.
+	ConditionPullRequestNotClosed = "PullRequestNotClosed"
+	// ConditionCleanupRefused is True, with reason GitForbidden or GitRejected, once the Git host refused for good
+	// (403 or 422) a step of the cleanup of a deleted request: the access token for the plan's repository, the
+	// read of the recorded pull request, the listing of the request's branch or the close. The message says which
+	// step and names the recorded pull request, if any. It is set only while the request is being deleted, so its
+	// lastTransitionTime is the first refusal after the deletion began, on the executor's clock; it is kept while
+	// refusals and failures worth a retry go on, and removed, with CleanupFailing, when the cleanup completes. The
+	// finalizer tries the cleanup again every minute; it is released by the first attempt that is refused 15
+	// minutes or more after lastTransitionTime, with a Warning Event PullRequestLeftOpen that names the pull request
+	// (left open when the close was refused; of unknown state, maybe open, when an earlier step was). An attempt
+	// that fails another way after the 15 minutes releases nothing: the next refused attempt or the 24 hour bound
+	// of CleanupFailing does. A failure worth a retry, or a failed read that is not a refusal, never sets it. One
+	// Warning Event, CleanupRefused, is recorded when it is set or its reason changes. CleanupFailing is set with
+	// it, and its longer bound applies too.
+	ConditionCleanupRefused = "CleanupRefused"
+	// ConditionCleanupFailing is True once a step of the cleanup of a deleted request failed, whatever the class of
+	// the failure (a refusal, a failure worth a retry, a token the Git App cannot get, a signer that cannot sign, a
+	// 404). The reason is GitForbidden or GitRejected for a refusal, RecordedMissingOtherListed for that read and
+	// CleanupFailed for anything else; the message names the step and the recorded pull request, if any, never the
+	// Git host's answer. It is set only while the request is being deleted, so its lastTransitionTime is the first
+	// failure after the deletion began, on the executor's clock, and it is kept while failures go on. It is removed
+	// only when the cleanup finishes. 24 hours after lastTransitionTime the finalizer lets the request go with a
+	// Warning Event PullRequestLeftOpen saying that the cleanup could not be finished, that the state of the pull
+	// request is not known and that it may be open. Paused writes (RemediationSettings spec.paused) hold the
+	// deletion and never set it. One Warning Event, CleanupFailing, is recorded when it is set.
+	ConditionCleanupFailing = "CleanupFailing"
 )
 
 // PullRequestStatus records the pull request that carries the plan.

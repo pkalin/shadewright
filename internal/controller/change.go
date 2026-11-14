@@ -273,7 +273,7 @@ func (r *RemediationRequestReconciler) checkOpenListing(ctx context.Context, git
 	if err != nil {
 		// A failed read shows nothing: no first look at a missing number is recorded on it.
 		*absent = false
-		return unknownChange(freshness.WrapProvider("list the open change requests of the branch", err))
+		return unknownChange(listFailed("list the open change requests of the branch", err))
 	}
 	listed := slices.ContainsFunc(open, func(cr providers.ChangeRequest) bool { return cr.Number == n })
 	readOpen := v.pr.Number == n && v.pr.State == providers.ChangeRequestOpen
@@ -318,7 +318,7 @@ func (r *RemediationRequestReconciler) changeByNumber(ctx context.Context, git p
 		if lerr != nil {
 			// The 404 is left out of the chain: a caller must never read it as an answer.
 			return unknownChange(fmt.Errorf("the Git host answered 404 for pull request #%d, and %w", n,
-				freshness.WrapProvider("list the change requests of the branch", lerr))), false
+				listFailed("list the change requests of the branch", lerr))), false
 		}
 		var own []providers.ChangeRequest
 		for _, o := range all {
@@ -620,7 +620,7 @@ func (r *RemediationRequestReconciler) changeOnBranch(ctx context.Context, git p
 	rr *remediationv1alpha1.RemediationRequest) changeVerdict {
 	all, err := git.ListChangeRequests(ctx, freshness.BranchName(rr), false)
 	if err != nil {
-		return unknownChange(freshness.WrapProvider("list the change requests of the branch", err))
+		return unknownChange(listFailed("list the change requests of the branch", err))
 	}
 	v := changeVerdict{state: changeGone, gone: "the branch has no pull request with this request's marker"}
 	for _, cr := range all {

@@ -297,11 +297,14 @@ func (r *RemediationRequestReconciler) reserve(ctx context.Context, rr, pred *re
 	reconcile.Result, error) {
 	from := rr.Status.Handoff.From
 	h := hintByRef(pred, from.Hint)
+	// A predecessor whose plan is stale (its cleanup started, or its close is refused, #199) gets nothing but the
+	// close written to its pull request: no handoff pushes to it.
 	if pred.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval || pred.Status.PullRequest == nil ||
-		!pred.DeletionTimestamp.IsZero() || h == nil || h.State != remediationv1alpha1.HintPending {
+		!pred.DeletionTimestamp.IsZero() || h == nil || h.State != remediationv1alpha1.HintPending ||
+		staleMark(pred) != nil {
 		return reconcile.Result{}, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHandoffRefused,
-			"The request it replaces no longer waits for review, or its hint is no longer Pending; nothing was "+
-				"taken over")
+			"The request it replaces no longer waits for review, its plan is stale, or its hint is no longer "+
+				"Pending; nothing was taken over")
 	}
 	if err := r.writeAllowed(ctx); err != nil {
 		return reconcile.Result{}, err

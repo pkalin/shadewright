@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.5.0](https://github.com/pkalin/shadewright/compare/v0.4.0...v0.5.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* a v0.4.x executor image cannot write request status against the v0.5.0 CRDs, so an image-only rollback fails. Roll back the whole chart, CRDs included, which prunes the fields v0.4.x does not know.
+
+### Features
+
+* add the verifier component that writes VerificationReports ([#690](https://github.com/pkalin/shadewright/issues/690)) ([d219022](https://github.com/pkalin/shadewright/commit/d21902249dfa98023913f1e723fa715ed4d59475))
+* **analyzer:** propose a revert for a request that failed verification ([#704](https://github.com/pkalin/shadewright/issues/704)) ([82538c3](https://github.com/pkalin/shadewright/commit/82538c357ab192a2ff38a36fb2bdb9e343029ddb))
+* **api:** add spec.reverts and settle a revert request after the merge ([#701](https://github.com/pkalin/shadewright/issues/701)) ([10e08ab](https://github.com/pkalin/shadewright/commit/10e08ab2481e9efc48a8d1a78a63dc69f23057c7))
+* **api:** add the VerificationReport type and the stable window checks ([#686](https://github.com/pkalin/shadewright/issues/686)) ([2fcae2d](https://github.com/pkalin/shadewright/commit/2fcae2d29e9c806c0553c0f2cb5285a788bdd435))
+* **api:** record a merge receipt and end a merge without one Inconclusive ([#687](https://github.com/pkalin/shadewright/issues/687)) ([477a35e](https://github.com/pkalin/shadewright/commit/477a35e9555056001f825455cb30beaf48d4d7f0))
+* **gitops:** find the candidate manifest of a workload at the applied revision ([#675](https://github.com/pkalin/shadewright/issues/675)) ([62d253b](https://github.com/pkalin/shadewright/commit/62d253b3cc4ae73cab806100d9e19dca390ede5c))
+* **gitops:** judge Cleared from the verifier report and end verification ([#694](https://github.com/pkalin/shadewright/issues/694)) ([a8fe47d](https://github.com/pkalin/shadewright/commit/a8fe47d696179317906502494aff31a3d78cdbc5))
+* **gitops:** move merged requests through WaitingForDelivery and Verifying ([#691](https://github.com/pkalin/shadewright/issues/691)) ([1b39234](https://github.com/pkalin/shadewright/commit/1b39234be3de8154d194065e30cce3878b397298))
+* record ResolvedBeforeRollout from two readings of the Incident count ([#702](https://github.com/pkalin/shadewright/issues/702)) ([ea42557](https://github.com/pkalin/shadewright/commit/ea4255783711635fdfb44559ad8b9115d6072c84))
+* report the delivery sources of the watched namespaces in kubectl shadewright doctor ([#689](https://github.com/pkalin/shadewright/issues/689)) ([4bc7141](https://github.com/pkalin/shadewright/commit/4bc7141b995d1675b13a3be9c82fa7f3992655c6))
+
+
+### Bug fixes
+
+* **analyzer:** redact the value after a secret key name whatever its score ([#707](https://github.com/pkalin/shadewright/issues/707)) ([d6246ba](https://github.com/pkalin/shadewright/commit/d6246ba4a98ae9610d753f9a39a7156affb50168))
+* **analyzer:** show the model the ScaledObject and decide its baseline in code ([#716](https://github.com/pkalin/shadewright/issues/716)) ([55d4378](https://github.com/pkalin/shadewright/commit/55d4378fd51c11257b98a884f9cd00fa9570d5eb))
+* **gitops:** bound the render check by a child process with OS limits ([#711](https://github.com/pkalin/shadewright/issues/711)) ([7f5c009](https://github.com/pkalin/shadewright/commit/7f5c0098c84a35f7664e8abf76220c59fdfa9130))
+* **gitops:** bring the test job back within its time margin ([#718](https://github.com/pkalin/shadewright/issues/718)) ([957d8e0](https://github.com/pkalin/shadewright/commit/957d8e08f4e316eb6e85c1a5677113ad045d64db))
+* **gitops:** end a merge conflict in NeedsIntervention with ChangeRequestConflict ([#693](https://github.com/pkalin/shadewright/issues/693)) ([8880304](https://github.com/pkalin/shadewright/commit/8880304076a851811632e7e10a740b1f0c35060e))
+* **gitops:** end a queued request when the pull request it waited behind is closed unmerged ([#674](https://github.com/pkalin/shadewright/issues/674)) ([4acd170](https://github.com/pkalin/shadewright/commit/4acd170604c9d69be8b49aa428686574cb12b08f))
+* **gitops:** give a refused close an end and keep watching a stale plan ([#712](https://github.com/pkalin/shadewright/issues/712)) ([2bac59a](https://github.com/pkalin/shadewright/commit/2bac59a114f6b078b516e09c8343872f2b24e821))
+* **gitops:** look a recorded pull request up by its number on every path ([#697](https://github.com/pkalin/shadewright/issues/697)) ([0e57ce6](https://github.com/pkalin/shadewright/commit/0e57ce681034d29f8ecfa87c3586cc52af674565))
+* **gitops:** say in a revert's pull request what it reverts and keep its name readable ([#721](https://github.com/pkalin/shadewright/issues/721)) ([d0ab324](https://github.com/pkalin/shadewright/commit/d0ab32473d33a1f1169d6463bd620755711c0adb))
+
+
+### Documentation
+
+* mark the image-only rollback from v0.5.0 as a breaking change ([#706](https://github.com/pkalin/shadewright/issues/706)) ([f09d639](https://github.com/pkalin/shadewright/commit/f09d63928bf4d74dabdef0800615c1d4b153f90f)), closes [#705](https://github.com/pkalin/shadewright/issues/705)
+
 ## [0.4.0](https://github.com/pkalin/shadewright/compare/v0.3.1...v0.4.0) (2026-11-10)
 
 

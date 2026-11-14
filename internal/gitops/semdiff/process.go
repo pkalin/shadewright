@@ -185,7 +185,7 @@ func serveRender(in io.Reader, out io.Writer) int {
 	if err := json.NewDecoder(in).Decode(&input); err != nil {
 		return exitFailed
 	}
-	answer := answerFor(input)
+	answer := answerFor(context.Background(), input)
 	if err := json.NewEncoder(w).Encode(answer); err != nil || w.Flush() != nil {
 		return exitFailed
 	}
@@ -212,13 +212,14 @@ func limitRenderProcess() error {
 }
 
 // answerFor runs the check and turns its outcome into an answer; a panic is a render failure, as in [render].
-func answerFor(in Input) (a renderAnswer) {
+// The render process passes context.Background(): its parent's context ends it by a kill.
+func answerFor(ctx context.Context, in Input) (a renderAnswer) {
 	defer func() {
 		if recover() != nil {
 			a = renderAnswer{Reason: ReasonRenderFailed, Detail: "kustomize could not build the path"}
 		}
 	}()
-	res, err := check(context.Background(), in)
+	res, err := check(ctx, in)
 	if se, ok := errors.AsType[*Error](err); ok {
 		return renderAnswer{Reason: se.Reason, Detail: se.Detail}
 	}

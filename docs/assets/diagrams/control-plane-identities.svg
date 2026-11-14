@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 640" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Control plane identities and their writes</title>
-  <desc id="d">Identities of ADR-0038, proposed and not built. In each spoke, the analyzer, executor and verifier keep the writes that invariant 6 gives them today. The new reporter, a fourth identity, reads Incidents, RemediationRequests and VerificationReports in the operator namespace, plus get on remediationsettings, get on the kube-system Namespace by resource name and get on the non-resource URL /openid/v1/jwks. Its only write, proposed, is get and update on one ConfigMap, shadewright-cluster-registration, by resource name, which holds the ready Cluster manifest and the last result from the hub and which the chart creates empty. The reporter has no Secrets, no Git identity and no model credential, and may reach only the hub's host. It sends reports to the hub's intake service. At the hub, intake may write the reported record kinds, using one static ClusterRole from the chart bound in each spoke namespace. RBAC does not keep it to one namespace: that guard is intake's code, which takes the namespace from the verified Cluster object, and it needs tests. Intake has no Git write and no model credential, and it fetches issuer discovery documents only from allow-listed hosts. The fleet controller creates Namespaces, ResourceQuotas and RoleBindings only, with bind limited to that one ClusterRole and no escalate, never Roles, and holds no spoke credential or kubeconfig. The status page can only read. People who may merge in the hub GitOps repository approve each new spoke. No hub identity is cluster-admin, and none has a model credential or a Git write identity in phase 1.</desc>
+  <desc id="d">Identities of ADR-0038, proposed and not built. In each spoke, the analyzer, executor and verifier keep the writes that invariant 6 gives them today. The new reporter, a fourth identity, reads Incidents, RemediationRequests and VerificationReports in the operator namespace, plus get on remediationsettings, get on the kube-system Namespace by resource name and get on the non-resource URL /openid/v1/jwks. It also reads, by resource name, the one ConfigMap shadewright-cluster-registration. Its only write, proposed, is update on that ConfigMap, which holds the ready Cluster manifest and the last result from the hub and which the chart creates only when absent and never overwrites. The reporter has no Secrets, no Git identity and no model credential, and may reach only the hub's host. It sends reports to the hub's intake service. At the hub, intake may write the reported record kinds and its key observations, which record keys a spoke reported that the hub does not trust yet, using one static ClusterRole from the chart bound in each spoke namespace. RBAC does not keep it to one namespace: that guard is intake's code, which takes the namespace from the verified Cluster object, and it needs tests. Intake has no write on Cluster objects, no Git write and no model credential, and it fetches issuer discovery documents only from allow-listed hosts. The fleet controller alone writes Cluster status, including the trusted and pending keys, promoting and dropping them from intake's observations. Otherwise it creates Namespaces, ResourceQuotas and RoleBindings only, with bind limited to that one ClusterRole and no escalate, never Roles, and holds no spoke credential or kubeconfig. The status page can only read. People who may merge in the hub GitOps repository approve each new spoke. No hub identity is cluster-admin, and none has a model credential or a Git write identity in phase 1.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -42,8 +42,8 @@
   <text class="h" x="822" y="100">Reporter (new, proposed)</text>
   <text class="s" x="822" y="122">reads: Incidents, requests,</text>
   <text class="s" x="822" y="138">reports, settings, kube-system,</text>
-  <text class="s" x="822" y="154">/openid/v1/jwks</text>
-  <text class="s" x="822" y="170">writes: its registration ConfigMap</text>
+  <text class="s" x="822" y="154">its ConfigMap, /openid/v1/jwks</text>
+  <text class="s" x="822" y="170">writes: update on that ConfigMap</text>
   <text class="no" x="822" y="190">never: Secrets, Git, model key</text>
   <text class="s" x="822" y="210">egress: the hub's host only</text>
   <text class="s" x="822" y="228">token audience names this hub</text>
@@ -52,17 +52,18 @@
   <text class="lanet" x="44" y="358">HUB</text>
   <rect class="key" x="44" y="378" width="330" height="150" rx="12"/>
   <text class="h" x="60" y="406">Intake</text>
-  <text class="s" x="60" y="432">writes: ReportedIncident, ReportedRequest,</text>
-  <text class="s" x="60" y="450">heartbeat; the namespace comes from the</text>
-  <text class="s" x="60" y="468">verified Cluster object: code guard, not RBAC</text>
-  <text class="no" x="60" y="496">never: Git write, model credential</text>
-  <text class="s" x="60" y="516">egress: issuer hosts on the allow-list</text>
+  <text class="s" x="60" y="430">writes: ReportedIncident, ReportedRequest,</text>
+  <text class="s" x="60" y="446">heartbeat, key observations (pending keys);</text>
+  <text class="s" x="60" y="462">namespace from the verified Cluster: code guard</text>
+  <text class="no" x="60" y="482">never: Cluster objects, Git, model credential</text>
+  <text class="s" x="60" y="506">egress: issuer hosts on the allow-list</text>
   <rect class="box" x="396" y="378" width="330" height="150" rx="12"/>
   <text class="h" x="412" y="406">Fleet controller</text>
-  <text class="s" x="412" y="432">writes: namespaces, quota, RoleBindings</text>
-  <text class="s" x="412" y="450">(bind: one ClusterRole), conditions</text>
-  <text class="no" x="412" y="496">never: Roles, escalate, kubeconfig</text>
-  <text class="s" x="412" y="516">reads: Cluster objects</text>
+  <text class="s" x="412" y="430">writes: namespaces, quota, RoleBindings</text>
+  <text class="s" x="412" y="446">(bind: one ClusterRole); alone writes Cluster</text>
+  <text class="s" x="412" y="462">status: trusted and pending keys</text>
+  <text class="no" x="412" y="482">never: Roles, escalate, kubeconfig</text>
+  <text class="s" x="412" y="506">reads: Cluster objects, key observations</text>
   <rect class="box" x="748" y="378" width="328" height="70" rx="12"/>
   <text class="h" x="764" y="406">Status page</text>
   <text class="s" x="764" y="428">read-only; escapes everything</text>

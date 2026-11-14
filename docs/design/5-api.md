@@ -145,7 +145,7 @@ The cleanup runs in three steps:
 
 A crash, restart or deadline anywhere in between leaves the mark. The next reconcile finishes the cleanup without checking the plan again: it closes again (a no-op if the first close went through) and supersedes.
 
-A recorded pull request found closed while the mark is set was closed by that cleanup. It ends `Superseded`, not `NeedsIntervention` (`ChangeRequestClosed`), even if the plan looks fresh again by then. The exception is a pull request whose close the Git host refused for good (condition `PullRequestNotClosed`, #199): the request keeps the mark and its phase and watches the pull request, and one found closed then was closed by a person, so it ends `NeedsIntervention` (`ChangeRequestClosed`) with the stale reason kept (6.5).
+A recorded pull request found closed while the mark is set was closed by that cleanup. It ends `Superseded`, not `NeedsIntervention` (`ChangeRequestClosed`), even if the plan looks fresh again by then. A pull request whose close the Git host refused for good (condition `PullRequestNotClosed`, #199) keeps the mark and the phase and is watched; one found closed then ends `Superseded` too, with `PullRequestOpened` saying that it is not known whether the executor's retried close or a person closed it (6.5).
 
 ### Raising `maxReplicaCount`
 

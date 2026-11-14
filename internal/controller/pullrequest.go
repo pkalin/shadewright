@@ -1630,10 +1630,11 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // the recorded number that the branch does not confirm, an answer about another pull request or any failed read
 // keeps the finalizer for a retry; a recorded number that is not this request's while the branch lists one with
 // its marker does not (closeAllOwn). While writes are paused (RemediationSettings spec.paused) the deletion waits,
-// because closing is a write. A step of the cleanup the Git host refuses for good (refusedCleanup: the token, the
-// read, the listing or the close) sets CleanupRefused and is tried again until closeRefusedGrace after the first
-// refusal; then the finalizer goes, with a Warning Event and a log line that name the pull request (#288). A
-// failure worth a retry, and a failed read that is not a refusal, never lets it go.
+// because closing is a write, and the pause starts no bound. Every other failure of the cleanup sets CleanupFailing
+// and is tried again until cleanupFailingBound after the first failure; a step the Git host refuses for good
+// (refusedCleanup: the token, the read, the listing or the close) also sets CleanupRefused and is tried again until
+// closeRefusedGrace after the first refusal. At the end of either bound the finalizer goes, with a Warning Event and
+// a log line that name the pull request (#288, cleanupFailedOnDelete).
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
@@ -1670,36 +1671,41 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		}
 		defer freeSlot()
 	}
-	var left *refusedStep
+	var left *cleanupRelease
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeOnDeleteOf(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 		cancel()
-		refused, isRefused := refusedCleanup(err)
+		_, isRefused := refusedCleanup(err)
 		switch {
-		case isRefused:
-			// The Git host refuses a step of the cleanup for good (#288): the token, the read of the pull request,
-			// the listing of the branch or the close. Held and tried again for closeRefusedGrace after the first
-			// refusal, then let go.
-			res, release, err := r.cleanupRefusedOnDelete(ctx, rr, refused)
-			if !release {
+		case isRefused, isUnknownChange(err):
+			// A step the Git host refuses for good (#288), or a read that failed, which is never an answer, whatever
+			// its class (ErrConflict included): retried within the bounds of the deletion (cleanupFailedOnDelete).
+			res, release, err := r.cleanupFailedOnDelete(ctx, rr, err)
+			if release == nil {
 				return res, err
 			}
-			left = &refused
-		case isUnknownChange(err):
-			// A read that failed is never an answer, whatever its class (ErrConflict included): retried.
-			return r.waitOrFail(ctx, rr, err)
+			left = release
 		case err == nil, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
 			errors.Is(err, freshness.ErrRepositoryUnusable), isMergedUnrecorded(err),
 			errors.Is(err, errChangeRequestNotOurs):
 			// Closed, nothing reachable to close, the open ones closed and a merged one read as merged, or not
 			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
+			if err := r.clearCleanupFailing(ctx, rr); err != nil {
+				return reconcile.Result{}, err
+			}
 		case errors.Is(err, freshness.ErrPaused):
+			// A pause is no failure: it holds the deletion and starts neither bound.
 			return r.waitWhilePaused(ctx, rr)
 		default:
-			// A failure worth a retry never starts or ends the grace.
-			return r.waitOrFail(ctx, rr, err)
+			// Any other failure, whatever its class (a 5xx, a token the host does not give, a signer that cannot
+			// sign): retried within the bounds of the deletion.
+			res, release, err := r.cleanupFailedOnDelete(ctx, rr, err)
+			if release == nil {
+				return res, err
+			}
+			left = release
 		}
 	}
 	// The outcomes this request's success cleared are read again before the finalizer goes; until they all are,
@@ -1713,7 +1719,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if left != nil {
 		// Before the patch, so a patch that finds the request gone, or a restart right after it, loses neither the
 		// Event nor the log line. A failed patch is retried and reports it again: at least once, maybe twice.
-		r.leftOpen(ctx, rr, *left)
+		r.reportRelease(ctx, rr, *left)
 	}
 	base := rr.DeepCopy()
 	controllerutil.RemoveFinalizer(rr, FinalizerName)

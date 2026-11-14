@@ -92,6 +92,7 @@ var troubleshootingSections = map[string][]string{
 	"CircuitHalfOpen":                   {secLimits},
 	"CircuitOpen":                       {secLimits},
 	"ClearingNotChecked":                {secAfterMerge},
+	"CleanupFailed":                     {secPullRequest},
 	"ConcurrencyLimitReached":           {secLimits},
 	"DeclarationNotFound":               {secFiles},
 	"DecreaseNotAllowed":                {secPolicy},

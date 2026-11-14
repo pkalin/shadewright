@@ -1214,18 +1214,19 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	}
 }
 
-// endStaleClosed ends a request whose stale plan's cleanup started (the mark) and whose pull request is closed. While
-// the Git host refused the close (PullRequestNotClosed, #199), the pull request is taken as closed by a person: the
-// normal end of a closed pull request, with the stale reason kept on PlanFresh. That holds also after a retried close
-// whose answer was lost (a timeout, a 5xx), which may have been the one that closed it: a failed call never clears
-// the condition, and the end that asks a person to look is the safe one. Otherwise the close that was cut short was
-// ours, not a person's rejection, whatever the plan looks like now: Superseded.
+// endStaleClosed ends a request whose stale plan's cleanup started (the mark) and whose pull request is closed:
+// Superseded with the stale reason, the end of a stale plan Shadewright closed. While the Git host refused the close
+// (PullRequestNotClosed, #199) the executor kept trying it, and a retried close whose answer was lost (a timeout, a
+// 5xx, a failed status write) may be the one that closed it, so PROpened says that it is not known whether that
+// close or a person closed it. Either way it is no failure for the circuit breaker.
 func (r *RemediationRequestReconciler) endStaleClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	mark *metav1.Condition) (ctrl.Result, error) {
 	if notClosed(rr) != nil {
-		return r.rejected(ctx, rr)
+		markClosed(rr, ReasonPullRequestClosed, "is closed ("+staleClosed(mark.Reason)+"); Shadewright kept trying "+
+			"to close it, and it is not known whether its retried close or a person closed it")
+	} else {
+		closedByUs(rr, staleClosed(mark.Reason))
 	}
-	closedByUs(rr, staleClosed(mark.Reason))
 	return ctrl.Result{}, r.ignoreSuperseded(r.endFreshness(ctx, rr, remediationv1alpha1.PhaseSuperseded,
 		mark.Reason, mark.Message))
 }

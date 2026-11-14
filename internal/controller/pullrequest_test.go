@@ -2678,6 +2678,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 		Expect(reconcileOnce()).To(Succeed(), "a pause is a wait, not an error")
 		Consistently(gone, "300ms").Should(BeFalse())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)).
+			To(BeNil(), "a pause is no failure and starts no bound")
 		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
 		live.Spec.Paused = new(false)
@@ -2723,6 +2725,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		refusedOf := func() *metav1.Condition {
 			return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionCleanupRefused)
 		}
+		// failingOf returns condition CleanupFailing of the request.
+		failingOf := func() *metav1.Condition {
+			return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
+		}
+
 		// leftOpenOf returns the messages of the PullRequestLeftOpen Events recorded since the last call.
 		leftOpenOf := func() []string {
 			reasons, messages := warnings()
@@ -2846,7 +2853,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(refusedOf().LastTransitionTime.Time).To(BeTemporally("==", clock))
 		})
 
-		It("never lets the request go on failures worth a retry, however long they last", func() {
+		It("never lets the request go on failures worth a retry within 24 hours", func() {
 			drive(remediationv1alpha1.PhaseAwaitingApproval)
 			failClose(&providers.RetryableError{Err: errors.New("bad gateway")})
 			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
@@ -2856,6 +2863,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(gone()).To(BeFalse())
 			}
 			Expect(refusedOf()).To(BeNil(), "a failure worth a retry is no refusal")
+			Expect(failingOf()).NotTo(BeNil(), "but a failure")
 			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
 		})
 
@@ -2896,6 +2904,113 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Eventually(gone).Should(BeTrue())
 			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
 			Expect(leftOpenOf()).To(BeEmpty(), "nothing was left open")
+		})
+
+		// Failures no refusal class names (#288): the token mint answered 422 or 404 (a repository removed from the
+		// App's installation, the App uninstalled), a signer that cannot sign, 404s on the reads of a cached token
+		// for a repository outside the installation. The second bound ends them: 24 hours after the first failure.
+		DescribeTable("holds a deleted request on any failure of the cleanup and lets it go only after 24 hours",
+			func(fault func()) {
+				pr := drive(remediationv1alpha1.PhaseAwaitingApproval).Status.PullRequest
+				name := fmt.Sprintf("#%d (%s)", pr.Number, pr.URL)
+				fault()
+				Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+				deleted := clock
+
+				_ = reconcileOnce()
+				Expect(gone()).To(BeFalse(), "the finalizer holds the request")
+				c := failingOf()
+				Expect(c).NotTo(BeNil(), "set at the first failed attempt")
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Reason).To(Equal(ReasonCleanupFailed))
+				Expect(c.Message).To(ContainSubstring(name), "the recorded pull request")
+				Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
+				Expect(c.Message).NotTo(ContainSubstring("422"))
+				Expect(c.LastTransitionTime.Time).To(BeTemporally("==", deleted), "on the executor's clock")
+				Expect(refusedOf()).To(BeNil(), "no refusal class")
+				reasons, _ := warnings()
+				Expect(reasons).To(ContainElement(EventCleanupFailing))
+				Expect(reasons).NotTo(ContainElement(EventPullRequestLeftOpen))
+
+				// Before the bound: held, the first failure kept, no new Event.
+				clock = deleted.Add(cleanupFailingBound - time.Second)
+				res, err := reconcileResult()
+				if err == nil {
+					Expect(res.RequeueAfter).To(BeNumerically("<=", time.Second), "never later than the bound")
+				}
+				Expect(gone()).To(BeFalse())
+				Expect(failingOf().LastTransitionTime.Time).To(BeTemporally("==", deleted))
+				reasons, _ = warnings()
+				Expect(reasons).To(BeEmpty())
+
+				// At the bound: let go, and an Event says the state of the pull request is not known.
+				clock = deleted.Add(cleanupFailingBound)
+				Expect(reconcileOnce()).To(Succeed())
+				Eventually(gone).Should(BeTrue())
+				Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+				left := leftOpenOf()
+				Expect(left).To(HaveLen(1))
+				Expect(left[0]).To(ContainSubstring("could not be finished for 24 hours"))
+				Expect(left[0]).To(ContainSubstring(name))
+				Expect(left[0]).To(ContainSubstring("not known and it may be open"))
+				Expect(left[0]).NotTo(ContainSubstring("ghs_leaked"))
+			},
+			Entry("token mint answered 422 (repository removed from the installation)", func() {
+				openErr = errors.New("mint the installation token: status 422 from https://api.github.com with ghs_leaked")
+			}),
+			Entry("token mint answered 404 (App uninstalled)", func() {
+				openErr = fmt.Errorf("mint the installation token with ghs_leaked: %w", providers.ErrNotFound)
+			}),
+			Entry("signer error (Key Vault cannot sign, key deleted)", func() {
+				openErr = errors.New("sign the App JWT: the key ghs_leaked is disabled")
+			}),
+			Entry("reads answer 404 with a cached token", func() {
+				git.SetFail(func(op string) error {
+					if op == opGet || op == opList {
+						return fmt.Errorf("status 404 with ghs_leaked: %w", providers.ErrNotFound)
+					}
+					return nil
+				})
+			}),
+		)
+
+		It("clears CleanupFailing once the cleanup finishes within 24 hours, and lets the request go without a warning", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			failClose(&providers.RetryableError{Err: errors.New("bad gateway")})
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			Expect(reconcileOnce()).NotTo(Succeed(), "retried with backoff")
+			Expect(failingOf()).NotTo(BeNil())
+			_, _ = warnings()
+
+			// The failure stops before the bound; the patch is held back so the status can be read.
+			clock = clock.Add(cleanupFailingBound - time.Minute)
+			failClose(nil)
+			r := reconciler()
+			r.Client = &patchGone{Client: k8sClient}
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(failingOf()).To(BeNil(), "cleared when the cleanup finishes")
+			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+
+			Expect(reconcileOnce()).To(Succeed())
+			Eventually(gone).Should(BeTrue())
+			reasons, _ := warnings()
+			Expect(reasons).To(BeEmpty(), "no Warning Event")
+		})
+
+		It("lets a refused cleanup go after 24 hours of failures even when the refusal is younger than the grace", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			failClose(&providers.RetryableError{Err: errors.New("bad gateway")})
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			first := clock
+			Expect(reconcileOnce()).NotTo(Succeed())
+			clock = first.Add(cleanupFailingBound)
+			failClose(refused403)
+			Expect(reconcileOnce()).To(Succeed())
+			Eventually(gone).Should(BeTrue())
+			left := leftOpenOf()
+			Expect(left).To(HaveLen(1))
+			Expect(left[0]).To(ContainSubstring("could not be finished for 24 hours"))
 		})
 
 		It("records the Event before the finalizer patch, so a patch that finds the request gone loses nothing", func() {

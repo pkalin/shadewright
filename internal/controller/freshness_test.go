@@ -841,21 +841,31 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			expectStale(got)
 		})
 
-		It("records a close by a person as the normal end of a closed pull request and keeps the stale reason", func() {
+		// expectClosedUnknown checks the end of a stale plan whose pull request was found closed while the executor
+		// kept trying to close it: Superseded with the stale reason, as a close by the executor, PROpened saying it is
+		// not known who closed it, and no failure for the circuit breaker.
+		expectClosedUnknown := func(got *remediationv1alpha1.RemediationRequest) {
+			GinkgoHelper()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			expectStale(got)
+			opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+			Expect(opened).NotTo(BeNil())
+			Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+			Expect(opened.Message).To(ContainSubstring(fmt.Sprintf("#%d is closed", cr.Number)))
+			Expect(opened.Message).To(ContainSubstring("not known whether its retried close or a person closed it"))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				To(BeNil())
+			Expect(breakerOutcome(got)).To(Equal(outcomeNone), "no failure for the circuit breaker")
+		}
+
+		It("records a close by a person as the end of a stale plan whose pull request is closed, and keeps the stale reason", func() {
 			refused(providers.ErrForbidden)
 			refuse = nil // a person's close goes through
 			Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
 			refuse = fmt.Errorf("refused: %w", providers.ErrForbidden)
 			_, err := watcher()
 			Expect(err).NotTo(HaveOccurred())
-			got := fetch()
-			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
-			approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
-			Expect(approved).NotTo(BeNil())
-			Expect(approved.Reason).To(Equal(ReasonChangeRequestClosed))
-			expectStale(got)
-			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
-				To(BeNil())
+			expectClosedUnknown(fetch())
 		})
 
 		It("ends Superseded once a retried close goes through", func() {
@@ -893,7 +903,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				To(Equal(ReasonStalePlanMerged))
 		})
 
-		It("takes a pull request found closed after a close whose answer was lost as a person's close", func() {
+		It("never takes a pull request found closed after a close whose answer was lost as a person's rejection", func() {
 			refused(providers.ErrForbidden)
 			// The close takes effect, but its answer is a server error.
 			refuse = nil
@@ -913,10 +923,10 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			_, err = watcher()
 			Expect(err).NotTo(HaveOccurred())
 			got := fetch()
-			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention), "the safe end")
-			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
-				To(Equal(ReasonChangeRequestClosed))
-			expectStale(got)
+			if approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved); approved != nil {
+				Expect(approved.Reason).NotTo(Equal(ReasonChangeRequestClosed), "the executor's own close may have closed it")
+			}
+			expectClosedUnknown(got)
 		})
 	})
 

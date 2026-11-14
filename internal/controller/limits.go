@@ -241,7 +241,8 @@ const (
 // nothing about whether the changes work, and a request without a plan digest never got through the policy
 // check, so neither counts. Nor does a request without lastPhaseTransitionTime (one that ended before the
 // field existed): it cannot be ordered. A request in Merged that carries the NoMergeReceipt mark (merge.go) is
-// read like the Inconclusive it ends in, never as a success. A revert (spec.reverts) is never a success, in any
+// read like the Inconclusive it ends in, never as a success, and so is a request in Merged that carries the mark of
+// a stale plan (stalePlanMerged, #199). A revert (spec.reverts) is never a success, in any
 // phase and whatever VerifyOutcomes says; its failures count. The limits read a request that is still undecided
 // (verificationPending, which depends on VerifyOutcomes) as no outcome over this.
 func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
@@ -251,6 +252,10 @@ func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 	switch {
 	case noReceiptMerge(rr):
 		// Merged without a receipt: it ends Inconclusive at the next reconcile, and is read as that already.
+		return outcomeNone
+	case rr.Status.Phase == remediationv1alpha1.PhaseMerged && stalePlanMerged(rr):
+		// A stale plan a person merged (#199) is never a success: capStaleSuccess ends it Inconclusive once its
+		// rollout check is over, and it is read as that already.
 		return outcomeNone
 	case remediationv1alpha1.IsRevert(rr) && slices.Contains(successPhases, rr.Status.Phase):
 		// A revert is never a success (ADR-0030 section 8): it clears nothing, so the failure it reverts stays

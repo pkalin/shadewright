@@ -61,5 +61,9 @@ func residentBytes(pid int) (uint64, bool) {
 	if _, err := fmt.Sscan(string(b), &size, &resident); err != nil {
 		return 0, false
 	}
-	return resident * uint64(os.Getpagesize()), true
+	page := os.Getpagesize()
+	if page <= 0 {
+		return 0, false
+	}
+	return resident * uint64(page), true // #nosec G115 -- positive, checked above
 }

@@ -174,7 +174,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
 {{- end }}
 
 {{/*
@@ -225,6 +225,22 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- end -}}
 {{- if and $blob.account (not $blob.container) -}}
 {{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.analysis.recordStore.azureBlob.container" -}}
+{{- end -}}
+{{- $key := (($a.anthropic | default dict).apiKey | default dict) -}}
+{{- if and $key.secretName $key.volume -}}
+{{- fail "analyzer.analysis.anthropic.apiKey sets both secretName and volume: set one" -}}
+{{- end -}}
+{{- if and $key.volume (hasKey $key.volume "name") -}}
+{{- fail "analyzer.analysis.anthropic.apiKey.volume may not set name: the chart names the volume itself" -}}
+{{- end -}}
+{{- if and $.context.Values.settings.spec (not $key.secretName) (not $key.volume) -}}
+{{- /* A convenience at install only: the analyzer refuses an Anthropic deployment with no key file whatever the chart says (ADR-0037 decision 3). */ -}}
+{{- $models := (($.context.Values.settings.spec.analysis | default dict).models | default dict) -}}
+{{- range $role := list "triage" "escalation" -}}
+{{- if eq ((get $models $role | default dict).provider | default "") "Anthropic" -}}
+{{- fail (printf "settings.spec.analysis.models.%s has provider Anthropic: set analyzer.analysis.anthropic.apiKey.secretName (an existing Secret) or apiKey.volume, the analyzer has no model API key otherwise" $role) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $reserved := splitList " " (include "shadewright.reservedFlags" .context) -}}
@@ -388,4 +404,28 @@ or milli form) skips the check; without goMemLimit, shadewright.goMemLimit then 
 {{- fail (printf "executor.resources.limits.memory %q (%d bytes) cannot hold the executor and its render process: it needs the executor's Go memory limit (%d bytes, executor.goMemLimit or 36 percent of the memory limit) plus 192 MiB for the render process plus a 128 MiB margin, %d bytes (ADR-0035). Raise the memory limit or lower executor.goMemLimit" (include "shadewright.memoryLimitString" (dict "component" "executor" "context" .)) $limit $softBytes $need) }}
 {{- end }}
 {{- end }}
+{{- end }}
+
+{{/*
+The model API key file of the analyzer (ADR-0037 decision 3): the volume source, as YAML, of the one key source that
+is set, or nothing. Used by the analyzer Deployment only. The Secret is never created here.
+*/}}
+{{- define "shadewright.anthropicKeyVolume" -}}
+{{- $key := ((.Values.analyzer.analysis.anthropic | default dict).apiKey | default dict) -}}
+{{- if $key.secretName -}}
+secret:
+  secretName: {{ $key.secretName | quote }}
+  defaultMode: 0444
+  items:
+  - key: {{ $key.secretKey | default "api-key" | quote }}
+    path: {{ $key.secretKey | default "api-key" | quote }}
+{{- else if $key.volume -}}
+{{- toYaml $key.volume -}}
+{{- end -}}
+{{- end }}
+
+{{/* The file name inside the key volume: the Secret key, or fileName of a volume source. */}}
+{{- define "shadewright.anthropicKeyFile" -}}
+{{- $key := ((.Values.analyzer.analysis.anthropic | default dict).apiKey | default dict) -}}
+{{- if $key.secretName -}}{{ $key.secretKey | default "api-key" }}{{- else -}}{{ $key.fileName | default "api-key" }}{{- end -}}
 {{- end }}

@@ -284,6 +284,20 @@ analyzer:
     # -- The RemediationPolicy a proposed RemediationRequest of each action type refers to (`--action-policies`), a map from `AdjustKedaMaxReplicas` or `SetContainerMemoryLimit` to a policy name, such as `{SetContainerMemoryLimit: memory-limits}`. An action type without one is never proposed. Used only with `triageModel`. With at least one name, the chart grants the analyzer `get` on exactly these RemediationPolicies (ClusterRole and ClusterRoleBinding `analyzer-policy-reader`, `resourceNames` set to the names, no `list` or `watch`), so the context shows the model the bounds of the policy that will decide its proposal; the policy still decides. Without a name there is no such rule.
     # @section -- Analyzer
     actionPolicies: {}
+    anthropic:
+      apiKey:
+        # -- Name of an existing Secret in the release namespace that holds the model API key for a deployment with `provider: Anthropic` (ADR-0037). The chart mounts it read-only and whole (no `subPath`, so a rotated Secret reaches the file without a restart) at `/var/run/secrets/shadewright/anthropic` in the analyzer container only, and passes `--anthropic-api-key-file`. The chart never creates the Secret and the analyzer gets no RBAC on Secrets: the kubelet mounts it. Set at most one of `secretName` and `volume`. With neither, nothing is mounted and no flag is passed. The render fails when `settings.spec` names an `Anthropic` deployment and neither is set; that is a convenience at install only, because `RemediationSettings` is edited live and the analyzer is the gate: it refuses such a deployment with no key file.
+        # @section -- Analyzer
+        secretName: ""
+        # -- Key in the Secret `secretName` that holds the API key. Also the file name under the mount path.
+        # @section -- Analyzer
+        secretKey: api-key
+        # -- A volume source object (the part of a Pod volume without its `name`) that puts the key file in a volume, as an alternative to `secretName`, such as a `csi` block for the Secrets Store CSI driver: `{csi: {driver: secrets-store.csi.k8s.io, readOnly: true, volumeAttributes: {secretProviderClass: anthropic-key}}}`. Mounted whole and read-only at the same path. Empty (the default): none. Not with `secretName`.
+        # @section -- Analyzer
+        volume: {}
+        # -- The file inside `volume` that holds the key, so the flag is `--anthropic-api-key-file=/var/run/secrets/shadewright/anthropic/<fileName>`. Used only with `volume`.
+        # @section -- Analyzer
+        fileName: api-key
     recordStore:
       azureBlob:
         # -- Storage account name (3 to 24 lower-case letters and digits) of the Blob Storage container that keeps one redacted record of each analysis (`--analysis-store-account`, ADR-0015). Records are written create-only (`If-None-Match: *`) to `https://<account>.blob.core.windows.net` with the analyzer's workload identity (a token for the Storage audience, no key or SAS); the identity needs a role that may write blobs in that container, such as the analysis writer role of `shadewright-azure/foundation`. Empty (the default) writes no record. Used only with `triageModel` (the chart refuses to render it without one).

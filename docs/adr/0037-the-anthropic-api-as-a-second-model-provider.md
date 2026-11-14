@@ -1,6 +1,6 @@
 # ADR-0037: The Anthropic API as a second model provider and its API key
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-14
 
 ## Context
@@ -54,7 +54,7 @@ The decisions below were taken on 2026-11-14. This ADR writes them down and stat
 
 **NetworkPolicy does not help.** The analyzer's egress rule already allows TCP 443 to any address, and a standard NetworkPolicy cannot tell hosts apart ([design 10](../design/10-security.md), accepted in [#391](https://github.com/pkalin/shadewright/issues/391)). Adding the Anthropic API changes no rule. What keeps the key to one host and the Entra token away from it is the host fixed in code, the refusal on the Foundry path and the CEL rules. A compromised analyzer could send what it holds, now including this key, to any HTTPS host. A policy that names hosts needs a CNI with that feature and is not part of this ADR.
 
-**Invariant 6 wording.** `AGENTS.md` lists what each identity may do and has no rule for a static credential. Not every external service offers federated or keyless authentication, and this will not be the last one: a second vendor API, a signed webhook of the Notifier ([#97](https://github.com/pkalin/shadewright/issues/97)). So the rule is written once, as a rule, and each use of it is named. The build PR has to add this to invariant 6, after the three identities:
+**Invariant 6 wording.** `AGENTS.md` lists what each identity may do and has no rule for a static credential. Not every external service offers federated or keyless authentication, and this will not be the last one: a second vendor API, a signed webhook of the Notifier ([#97](https://github.com/pkalin/shadewright/issues/97)). So the rule is written once, as a rule, and each use of it is named. [#734](https://github.com/pkalin/shadewright/pull/734) added this to invariant 6, after the three identities:
 
 > **Static credentials.** Federated or keyless authentication is used wherever the external service offers it. Where it does not, a component may hold a static credential under these conditions, all of them: an ADR names the adapter and the credential; only the one component whose identity makes that call gets it; it reaches the component as a read-only mounted file that the cluster operator provides (a Secret or a CSI volume), never through RBAC on Secrets, an environment variable or a field of a custom resource; it is read at each use, so rotation needs no restart; and it never appears in logs, events, status, records, traces or errors. In use today: the analyzer's Anthropic API key (ADR-0037).
 

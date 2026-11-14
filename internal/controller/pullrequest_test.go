@@ -2135,6 +2135,24 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(process.keys).NotTo(HaveKey(key), "the last unlock drops an entry that keeps no first look")
 	})
 
+	It("reads nothing when the context has ended and the lock is free (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		key := client.ObjectKeyFromObject(got)
+		ended, cancel := context.WithCancel(ctx)
+		cancel()
+		var reads atomic.Int32
+		// With the lock free both cases of the wait are ready, so the outcome of one try proves nothing.
+		for range 64 {
+			v := reconciler().changeOf(ended, &countedReads{GitProvider: git, reads: &reads}, fetch(), changeQuery{})
+			Expect(v.state).To(Equal(changeUnknown))
+			Expect(v.err).To(MatchError(context.Canceled))
+		}
+		Expect(reads.Load()).To(BeZero())
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		Expect(process.keys).NotTo(HaveKey(key), "a call that gave the lock back holds nothing")
+	})
+
 	It("does not confirm on a first look of an earlier request with the same name and number (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number

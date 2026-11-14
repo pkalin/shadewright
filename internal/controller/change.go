@@ -491,6 +491,13 @@ func (g *goneLooks) lock(ctx context.Context, key types.NamespacedName) error {
 	g.mu.Unlock()
 	select {
 	case s.call <- struct{}{}:
+		// When the lock is free and ctx has ended, both cases are ready and select picks either: a call
+		// whose context ended reads nothing, so it gives the lock back.
+		if err := ctx.Err(); err != nil {
+			<-s.call
+			g.release(key, s)
+			return err
+		}
 		return nil
 	case <-ctx.Done():
 		g.release(key, s)

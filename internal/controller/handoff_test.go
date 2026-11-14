@@ -931,6 +931,31 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(prState()).To(Equal(providers.ChangeRequestOpen))
 	})
 
+	It("never takes over the pull request of a stale plan whose close the Git host refuses (#199)", func() {
+		git.SetFail(func(op string) error {
+			if op == "CloseChangeRequest" {
+				return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		pol := &remediationv1alpha1.RemediationPolicy{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), pol)).To(Succeed())
+		pol.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 150
+		Expect(k8sClient.Update(ctx, pol)).To(Succeed())
+		pollOf(pred)
+		p := get(pred)
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(meta.IsStatusConditionTrue(p.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+			To(BeTrue())
+		replace("512Mi", ref(hint))
+		drive(5)
+		Expect(get(repl).Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(head()).To(Equal(oldHead), "nothing is pushed to the stale plan's pull request")
+		p = get(pred)
+		Expect(p.Status.Handoff == nil || p.Status.Handoff.To == nil).To(BeTrue(), "no intent recorded")
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+	})
+
 	It("takes a person's one-commit push to the target file for a foreign push", func() {
 		replace("512Mi", ref(hint))
 		untilIntent()

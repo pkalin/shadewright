@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -205,6 +206,25 @@ func TestInconclusiveForTheBreaker(t *testing.T) {
 	classifyBreaker(rr)
 	if rr.Status.BreakerCounts == nil || !*rr.Status.BreakerCounts {
 		t.Errorf("breakerCounts = %v, want true for a probe", rr.Status.BreakerCounts)
+	}
+}
+
+// TestStaleMergedPlanForTheBreaker checks that a stale plan a person merged (#199) is never read as a success while
+// it is still Merged, before capStaleSuccess ends it Inconclusive once its rollout check is over: with
+// --verify-outcomes off that check can take minutes, and the breaker must not count the merge meanwhile. A plan
+// that is not stale is still a success in Merged.
+func TestStaleMergedPlanForTheBreaker(t *testing.T) {
+	rr := otherRequest("stale-merged", limitsTarget, remediationv1alpha1.PhaseMerged, time.Minute)
+	if got := breakerOutcome(rr); got != outcomeSuccess {
+		t.Fatalf("breakerOutcome of a fresh merged plan = %v, want success", got)
+	}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionPlanFresh,
+		Status: metav1.ConditionFalse, Reason: freshness.ReasonPolicyChanged, Message: "stale"})
+	if got := breakerOutcome(rr); got != outcomeNone {
+		t.Errorf("breakerOutcome of a merged stale plan = %v, want none", got)
+	}
+	if countsForBreaker(rr) {
+		t.Error("countsForBreaker of a merged stale plan = true, want false")
 	}
 }
 

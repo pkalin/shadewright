@@ -116,6 +116,7 @@ func handoffAppendedWorld(t *testing.T, root func(*api.RemediationRequest)) (*Re
 	}
 	r := &RemediationRequestReconciler{Client: c, APIReader: c, ReviewerHints: true,
 		OpenRepository: func(context.Context, api.GitRepository) (providers.GitProvider, error) { return g, nil }}
+	fixClocks(r, g)
 	return r, g, p, rr, cr, head
 }
 

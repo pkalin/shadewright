@@ -501,9 +501,12 @@ func (r *RemediationRequestReconciler) endAtTimeout(ctx context.Context, rr *rem
 // NoRecurrence, the executor's window as it is, the phase and its breaker classification, no deadline and the
 // target lock settled. Cleared carries ResolvedBeforeRollout instead when the readings of the Incident's count
 // show it did not move from the merge to the rollout (clearedReason); that changes nothing else. One Normal
-// Event follows.
+// Event follows. A merged stale plan ends Inconclusive with StalePlanMerged instead (capStaleSuccess).
 func (r *RemediationRequestReconciler) succeed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	stableFor time.Duration, message string) error {
+	if done, err := r.capStaleSuccess(ctx, rr); done {
+		return err
+	}
 	clearedBy, clearedMessage := clearedReason(rr, stableFor, message)
 	setCondition(rr, remediationv1alpha1.ConditionCleared, metav1.ConditionTrue, clearedBy, clearedMessage)
 	setCondition(rr, remediationv1alpha1.ConditionVerified, metav1.ConditionTrue, ReasonNoRecurrence, message)

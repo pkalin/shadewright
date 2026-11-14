@@ -19,6 +19,7 @@ package redact
 import (
 	"encoding/base64"
 	"math/rand/v2"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -548,10 +549,13 @@ func skipLarge(t *testing.T) {
 
 // Repeating the shapes the scanning rules look for must cost linear time: each value is scanned once and
 // keys inside a value already redacted are skipped. Each input takes about a second; a quadratic scan of
-// them takes minutes.
+// them takes minutes. Each unit is also timed at an eighth of the size: eight times the input may take at
+// most sixteen times as long (a quadratic scan takes 64 times as long).
 func TestRepeatedPatternsStayLinear(t *testing.T) {
 	skipLarge(t)
 	const size = 1 << 20
+	// tails close the units that open a quote, once, at the end of the text.
+	tails := map[string]string{"quote closed at the end": "'", "flag quote closed at end": `"`}
 	for name, unit := range map[string]string{
 		"yaml empty headers":       "password:\n",
 		"yaml headers over values": "password:\n  password:\n",
@@ -581,17 +585,62 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		// Issue #581: Entra client secret markers without the length after them, and runs of its alphabet.
 		"entra markers":  "ab.8Q~x.",
 		"entra alphabet": "a.b~c_d-",
+		// Issue #585: secret-named flags and their values, flags that a flag follows, argument lists and
+		// camelCase "sas" keys.
+		"flag values":    "--password x ",
+		"flag chains":    "--token --token ",
+		"flag list":      `"--secret", `,
+		"glued flags":    "a--token ",
+		"camel sas keys": "aSas=",
+		// Issue #585: flags glued to other text, multi-line, escaped and continued separators, values that
+		// open a quote, compound key names before a blank, quoted values on one line, and values that close
+		// the quote the flag stands in.
+		"glued flag chains":         "=--token ",
+		"flag yaml list":            "- --token\n",
+		"flag pretty json":          "\"--token\",\n  ",
+		"flag escaped json":         `\"--token\",`,
+		"flag escaped lines":        `\"--token\",\n`,
+		"flag continuation":         "--token \\\n",
+		"flag quote values":         "--token \"",
+		"flag escaped values":       `--token \"`,
+		"flag separators only":      ", \n- \\\n",
+		"compound keys":             "a_token ",
+		"compound chains":           "a_token a_token\t",
+		"secret ids":                "--secret-id x ",
+		"quoted runs":               `--password "a b `,
+		"multi-line quotes":         "--password \"a\n",
+		"single quotes on lines":    "--password 'a\n",
+		"single-dash flags":         "-password x ",
+		"spelled compounds":         "client-secret x1 clientSecret y1 ",
+		"spelled flag values":       "db-password -n ",
+		"sas image tags":            "ghcr.io/a/sas:v1 ",
+		"sas keys":                  "sas: x sas=y ",
+		"quote closed at the end":   "password='a'\\\n",
+		"flag quote closed at end":  "--password \"a\\\n",
+		"enclosing flag quotes":     `"--password ", `,
+		"upper compound keys":       "ClientSecret Ab1 ",
+		"upper compound word chain": "ClientSecret ClientSecret ",
+		"compound values to blanks": "a_token a1]b,c}d\"e ",
 	} {
-		in := rep(unit, size/len(unit))
-		start := time.Now()
-		out := String(in)
-		if d := time.Since(start); d > 10*time.Second {
-			t.Errorf("%s: %d bytes took %s", name, len(in), d)
-		}
-		if len(out) > len(in) {
-			t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+		tail := tails[name]
+		small := timeString(t, name, rep(unit, size/8/len(unit))+tail)
+		large := timeString(t, name, rep(unit, size/len(unit))+tail)
+		if large > 10*time.Second || large > 16*max(small, 20*time.Millisecond) {
+			t.Errorf("%s: %d bytes took %s, an eighth of them %s", name, size, large, small)
 		}
 	}
+}
+
+// timeString returns how long String takes on in, and fails when the output is longer than the input.
+func timeString(t *testing.T, name, in string) time.Duration {
+	t.Helper()
+	start := time.Now()
+	out := String(in)
+	d := time.Since(start)
+	if len(out) > len(in) {
+		t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+	}
+	return d
 }
 
 // Nested entries whose lines all belong to the first one: each match reads a bounded part of them.
@@ -915,7 +964,7 @@ const seeds = 1000
 func TestSlashSplitBase64IsRedacted(t *testing.T) {
 	contexts := []struct{ name, before, after string }{
 		{"aws configure set", "aws configure set aws_secret_access_key ", "\nnext: field"},
-		{"cli flag", "run --aws-secret-access-key ", " --region x"},
+		{"cli flag", "run --aws-secret-access-key ", flagAfter},
 		{"prose", "rotated ", " today"},
 		{"start of a path", "cp ", "/etc/app/config.yaml ok"},
 		{"middle of a path", "open /var/run/secrets/", "/token failed"},
@@ -956,7 +1005,8 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 			keyParts(entraSecret), []string{"-p ", " --tenant t"}},
 	})
 	// A key whose shortest windows score as words but whose whole window scores as base64.
-	if in, out := "aws configure set aws_secret_access_key "+seededKey(68276), String("aws configure set aws_secret_access_key "+seededKey(68276)); out != "aws configure set aws_secret_access_key [REDACTED:token]" {
+	// No key name before it: after "aws_secret_access_key" the compound key rule takes it whole (#585).
+	if in, out := "rotated "+seededKey(68276)+" today", String("rotated "+seededKey(68276)+" today"); out != "rotated [REDACTED:token] today" {
 		t.Errorf("String(%q) = %q, want the whole key redacted", in, out)
 	}
 	// Two keys with a path between them are redacted each on its own; the path stays.
@@ -1154,11 +1204,10 @@ func TestSlashSplitKeyEndingInAWordIsRedacted(t *testing.T) {
 	}
 }
 
-// Known gaps of the slash-split base64 rule, kept by decision for safety and simplicity over perfect paths
-// (#525, follow-up to be filed): the test logs what still leaks and is skipped, so that a change that
-// closes a gap shows here and the case moves to TestSlashSplitBase64IsRedacted.
-func TestSlashSplitBase64KnownLeaks(t *testing.T) {
-	cases := []struct{ name, key string }{
+// knownLeakKeys are the keys the slash-split base64 rule keeps in whole or in part when no key name stands
+// before them (TestSlashSplitBase64KnownLeaks).
+func knownLeakKeys() []struct{ name, key string } {
+	return []struct{ name, key string }{
 		// Every window of this key scores as words (long runs of lower-case letters by chance).
 		{"key whose windows score as words", seededKey(39781)},
 		// The short lower-case end "/wed7" reads as a path word and is not taken in.
@@ -1168,6 +1217,14 @@ func TestSlashSplitBase64KnownLeaks(t *testing.T) {
 		// A lower-case path word at the start of the key ("cijt") stays with the path around it.
 		{"lower-case word at the end of a key", seededKey(47360)},
 	}
+}
+
+// Known gaps of the slash-split base64 rule with no key name before the key, kept by decision for safety and
+// simplicity over perfect paths (#525): the test logs what still leaks and is skipped, so that a change that
+// closes a gap shows here and the case moves to TestSlashSplitBase64IsRedacted. After a secret key name the
+// same keys go whole (#585, TestKnownLeaksAfterAKeyNameAreRedacted).
+func TestSlashSplitBase64KnownLeaks(t *testing.T) {
+	cases := knownLeakKeys()
 	leaking := 0
 	for _, c := range cases {
 		out := String("rotated " + c.key + " today")
@@ -1184,7 +1241,239 @@ func TestSlashSplitBase64KnownLeaks(t *testing.T) {
 			t.Logf("%s: no longer leaks, move it to TestSlashSplitBase64IsRedacted", c.name)
 		}
 	}
-	t.Skipf("known gaps of #525, follow-up to be filed: %d of %d cases leak", leaking, len(cases))
+	t.Skipf("known gaps of #525 with no key name before the key: %d of %d cases leak", leaking, len(cases))
+}
+
+// Text after a value in keyNameForms: the next flag, the next key.
+const (
+	flagAfter = " --region x"
+	envAfter  = " region=x"
+)
+
+// keyNameForm is one form in which a secret key name stands before its value (#585): the value goes between
+// before and after. The forms of a key, a separator and a value were redacted whole on main before #585 as
+// well: with before alone they guard against regressions and are expected to pass on main. probe is the
+// same form with a name main read as a reference (a Vault secret ID, "secret_id", which main kept), so that
+// every form also has a probe that leaks on main; it is empty where before itself leaks on main (flags and
+// the blank form). opaqueOnly marks the blank form, which redacts only an opaque token (opaqueToken).
+type keyNameForm struct {
+	name, before, after, probe string
+	opaqueOnly                 bool
+}
+
+var keyNameForms = []keyNameForm{
+	{"name=value", "set client_secret=", envAfter, "set secret_id=", false},
+	{"name: value", "client_secret: ", "\nregion: x", "secret_id: ", false},
+	{"name: value inline", "config password: ", " region: x", "config secret_id: ", false},
+	{"quoted json", `{"clientSecret": "`, `", "region": "x"}`, `{"secretId": "`, false},
+	{"single-quoted yaml", "'api_key': '", "'\nregion: x", "'secret_id': '", false},
+	{"--name value", "run --client-secret ", flagAfter, "", false},
+	{"--name value quoted", `run --password "`, `" --region x`, "", false},
+	{"--name=value", "run --client-secret=", flagAfter, "run --secret-id=", false},
+	{"--name value in an argument list", `args: ["--aws-secret-access-key", "`, `", "--region", "x"]`, "", false},
+	{"env style", "AWS_SECRET_ACCESS_KEY=", "\nAWS_REGION=x", "VAULT_SECRET_ID=", false},
+	{"env style quoted", "export AWS_SECRET_ACCESS_KEY='", "'\nexport AWS_REGION=x", "export VAULT_SECRET_ID='", false},
+	{"camelCase", "env accessKey=", envAfter, "env secretId=", false},
+	{"sas", "AZURE_STORAGE_SAS=", envAfter, "", false},
+	{"--passwd", "run --passwd ", flagAfter, "", false},
+	{"--token", "run --token ", flagAfter, "", false},
+	{"compound name and a blank", "aws configure set aws_secret_access_key ", envAfter, "", true},
+}
+
+// valueMarker matches one redaction marker and nothing else (markerPattern), in the place of a whole value.
+var valueMarker = regexp.MustCompile(`^(?:` + markerPattern.String() + `)$`)
+
+// redactedAfterKeyName reports whether String redacts value whole in form: the text before and after it
+// stays, and only one marker stands in its place.
+func redactedAfterKeyName(before, value, after string) (string, bool) {
+	out := String(before + value + after)
+	if !strings.HasPrefix(out, before) || !strings.HasSuffix(out, after) || len(out) < len(before)+len(after) {
+		return out, false
+	}
+	return out, valueMarker.MatchString(out[len(before) : len(out)-len(after)])
+}
+
+// The key name in front of a value is the signal that closes the known leaks of the slash-split base64 rule
+// (#585): after a secret key name in any of its forms, the whole value is redacted, whatever its parts read
+// as (in the blank form, every value that is an opaque token), and the key name and the text after the value
+// stay. Each form is checked with its probe as well, which leaks on main (keyNameForm).
+func TestKnownLeaksAfterAKeyNameAreRedacted(t *testing.T) {
+	values := knownLeakKeys()
+	values = append(values,
+		struct{ name, key string }{"all-capital parts", "ABCDEFGH/IJKLMNOP/QRSTUVWX/YZABCDEF/GHIJKLMN"},
+		struct{ name, key string }{"word-like parts", "correct/horse/battery/staple/orange/window"},
+		struct{ name, key string }{"one word", "hunter"},
+	)
+	for _, f := range keyNameForms {
+		for _, v := range values {
+			if f.opaqueOnly && !opaqueToken(v.key) {
+				continue // the blank form takes only an opaque key (TestKeyNameKnownLeaks)
+			}
+			for _, before := range []string{f.before, f.probe} {
+				if before == "" {
+					continue
+				}
+				if out, ok := redactedAfterKeyName(before, v.key, f.after); !ok {
+					t.Errorf("%s, %s: value not redacted whole:\n in: %s\nout: %s", f.name, v.name, before+v.key+f.after, out)
+				}
+			}
+		}
+	}
+}
+
+// Over 100,000 seeded slash-split keys after a key name, rotating through the forms, no key stays whole and
+// no fragment of four or more characters stays: the value is one marker (#585).
+// It takes seconds, and minutes under -race, so it runs without it (make test runs it a second time).
+func TestSeededKeysAfterAKeyNameAreRedacted(t *testing.T) {
+	if raceDetector {
+		t.Skip("100,000 keys: runs without -race")
+	}
+	const n = 100_000
+	whole, fragments, notOpaque := 0, 0, 0
+	for seed := range uint64(n) {
+		f := keyNameForms[seed%uint64(len(keyNameForms))]
+		k := seededKey(seed)
+		if f.opaqueOnly && !opaqueToken(k) {
+			notOpaque++ // counted, never skipped: such a key fails below as well
+		}
+		out, ok := redactedAfterKeyName(f.before, k, f.after)
+		if ok {
+			continue
+		}
+		if strings.Contains(out, k) {
+			whole++
+		} else {
+			fragments++
+		}
+		if whole+fragments <= 3 {
+			t.Errorf("seed %d, %s: value not redacted whole:\n in: %s\nout: %s", seed, f.name, f.before+k+f.after, out)
+		}
+	}
+	if whole+fragments > 0 || notOpaque > 0 {
+		t.Errorf("of %d keys after a key name, %d stayed whole and %d left a fragment; %d keys in the blank form are no opaque token",
+			n, whole, fragments, notOpaque)
+	}
+}
+
+// A key name counts only before "=", ":" (with optional quotes) or, as a flag starting with "-", before its
+// separator and a value (#585). A key name inside a path, a Kubernetes resource name or a command argument
+// without that separator stays readable, and so does a flag that names a reference to a secret. This test
+// guards against regressions and is expected to pass on main, which kept all of these too.
+func TestKeyNameSignalKeepsPathsAndNames(t *testing.T) {
+	for _, in := range []string{
+		"/etc/secret/app/config",
+		"open /var/run/secrets/kubernetes.io/serviceaccount/token failed",
+		"/mnt/password/token/api_key/client_secret/sas/data",
+		"secret/my-app",
+		"kubectl get secret foo",
+		"kubectl describe secret db-password -n prod",
+		"deleted Secret/client-secret-7d9f8b6c5",
+		"--secret-name foo",
+		"--token-ttl 5m",
+		"--password-file /etc/app/pw",
+		"a--token x",
+		"sasl_mechanism PLAIN",
+		"kansas=1 KANSAS=2 Arkansas: 3",
+		"sasl.mechanism=PLAIN",
+		`args: ["--secret-name", "db-creds"]`,
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed useful text:\n in: %s\nout: %s", in, out)
+		}
+	}
+}
+
+// Forms of a secret-named flag or key name and its value that leaked before (#585 review): {k} stands for
+// the value. The value is a key the long-token rule keeps whole (knownLeakKeys), so only the key name signal
+// can catch it.
+func TestFlagAndKeyNameFormsAreRedacted(t *testing.T) {
+	k := seededKey(39781)
+	for name, in := range map[string]string{
+		// A secret-named flag is judged on its own, also when an earlier flag took it as its value.
+		"chain in an argument list": `args: ["--enable-auth", "--client-secret", "{k}"]`,
+		"chain of flags":            "run --use-token --password {k}",
+		"chain in yaml":             "args:\n- --enable-auth\n- --client-secret\n- {k}",
+		// The value after a secret-named flag goes whatever it starts with.
+		"value with two dashes": "run --password --{k}",
+		"value with one dash":   "run --client-secret -{k}",
+		// Line ends, a YAML list dash, a JSON comma, quotes and a shell continuation between flag and value.
+		"yaml list":         "args:\n- --client-secret\n- {k}\n- --region\n- x",
+		"yaml list quoted":  "args:\n  - \"--client-secret\"\n  - \"{k}\"",
+		"pretty json":       "\"args\": [\n  \"--client-secret\",\n  \"{k}\"\n]",
+		"crlf yaml list":    "args:\r\n- --client-secret\r\n- {k}\r\n",
+		"next line":         "--client-secret\n{k}",
+		"continuation":      "app --client-secret \\\n  {k} \\\n  --region x",
+		"continuation crlf": "app --client-secret \\\r\n  {k}",
+		// A flag glued to "=", ".", "/" or "_".
+		"after =": "EXTRA_ARGS=--client-secret {k}",
+		"after .": "x.--password {k}",
+		"after /": "opts/--client-secret {k}",
+		"after _": "ARGS_--password {k}",
+		// Escaped JSON (an annotation in -o json), once and twice.
+		"escaped json":       `"args":"[\"--client-secret\",\"{k}\"]"`,
+		"escaped json space": `"args":"[\"--client-secret\", \"{k}\"]"`,
+		"escaped twice":      `"a":"{\"args\":\"[\\\"--client-secret\\\",\\\"{k}\\\"]\"}"`,
+		// A Vault AppRole secret ID is a secret, in every form.
+		"--secret-id":         "vault write auth/approle/login role_id=r --secret-id {k}",
+		"secret_id=":          "role_id=r secret_id={k}",
+		"secretId:":           "secretId: {k}",
+		"SECRET_ID=":          "VAULT_SECRET_ID={k}",
+		"secret-id in a list": `["--secret-id", "{k}"]`,
+		// A key name of two or more words joined by "_", a blank and the value.
+		"aws configure":        "aws configure set aws_secret_access_key {k}",
+		"secret_access_key":    "set secret_access_key {k}",
+		"client_secret":        "login client_secret {k}",
+		"api_key":              "set api_key {k}",
+		"access_key":           "set access_key {k}",
+		"private_key":          "set private_key {k}",
+		"connection_string":    "set connection_string {k}",
+		"upper-case compound":  "set AWS_SECRET_ACCESS_KEY\t{k}",
+		"quoted compound":      `set client_secret "{k}"`,
+		"single-dash compound": "app -client_secret {k}",
+	} {
+		in = strings.ReplaceAll(in, "{k}", k)
+		if out := String(in); strings.Contains(out, k) || strings.Contains(out, k[:12]) || strings.Contains(out, k[len(k)-12:]) {
+			t.Errorf("%s: value leaks:\n in: %q\nout: %q", name, in, out)
+		}
+	}
+}
+
+// What the flag and compound key rules keep: references to a secret, one-word key names before a blank
+// (Kubernetes commands name a Secret that way), and the text after a redacted value (#585).
+func TestFlagAndKeyNameReferencesStay(t *testing.T) {
+	for _, in := range []string{
+		"kubectl get secret foo",
+		"kubectl create token sa",
+		"docker login --password-stdin -u bob",
+		"kubectl create token sa --token-audience api",
+		"--client-id app --key-id k1",
+		"client_id app",
+		"access_key_id AKID",
+		"role_id=r",
+		"secret_names a,b",
+	} {
+		if out := String(in); out != in {
+			t.Errorf("changed useful text:\n in: %q\nout: %q", in, out)
+		}
+	}
+	// The value goes, the flag and the text after it stay; a flag after a boolean secret-named flag is
+	// taken as its value (accepted over-redaction).
+	for in, want := range map[string]string{
+		flagValueLine:                           "run --password [REDACTED] --region y",
+		"run --use-token --verbose":             "run --use-token ***",
+		"run --client-secret hunter2abc\n--dbg": "run --client-secret [REDACTED]\n--dbg",
+		// Literal backslash pairs after a flag are the start of its value, so the value goes whole.
+		`run --password \n\r\tHunter2 --region west`: "run --password [credential] --region west",
+		// A value inside a JSON string ends at its closing quote, so the next field stays.
+		`{"cmd":"run --password ` + leakKey() + `","reason":"FailedMount"}`: `{"cmd":"run --password [REDACTED:credential]","reason":"FailedMount"}`,
+		// A secret-named flag taken as the value of a compound name is judged on its own; the compound
+		// name's value "--password" is no opaque token and stays.
+		"set client_secret --password " + leakKey(): "set client_secret --password [REDACTED:credential]",
+	} {
+		if out := String(in); out != want {
+			t.Errorf("%q: got %q, want %q", in, out, want)
+		}
+	}
 }
 
 // entraAlphabet holds the characters of a current-format Microsoft Entra client secret.

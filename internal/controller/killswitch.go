@@ -97,6 +97,13 @@ func (r *RemediationRequestReconciler) writeAllowed(ctx context.Context) error {
 // passes writeAllowed first. Every provider the reconciler writes through comes from here.
 func (r *RemediationRequestReconciler) openRepository(ctx context.Context, repo remediationv1alpha1.GitRepository) (
 	providers.GitProvider, error) {
+	return r.openGated(ctx, repo, nil)
+}
+
+// openGated is openRepository whose provider also refuses every write but CloseChangeRequest, with
+// errStalePlanWrite, while closeOnly reports true at the time of the write (nil: never).
+func (r *RemediationRequestReconciler) openGated(ctx context.Context, repo remediationv1alpha1.GitRepository,
+	closeOnly func() bool) (providers.GitProvider, error) {
 	if r.OpenRepository == nil {
 		return nil, errors.New("no Git provider")
 	}
@@ -104,8 +111,13 @@ func (r *RemediationRequestReconciler) openRepository(ctx context.Context, repo 
 	if err != nil {
 		return nil, err
 	}
-	return &gatedGit{git: git, allow: r.writeAllowed}, nil
+	return &gatedGit{git: git, allow: r.writeAllowed, closeOnly: closeOnly}, nil
 }
+
+// errStalePlanWrite is what a provider opened for a stale plan (openPlanRepositoryOf) returns for any write but the
+// close of a change request, instead of calling the host: nothing but the close is written to a stale plan's pull
+// request (#199). It is final for that write, never retried.
+var errStalePlanWrite = errors.New("the plan is stale: nothing but the close is written to its pull request")
 
 // GatedRepository is openRepository for providers the reconciler does not open itself: cmd/main.go gives it
 // to the source mapping, which only reads, so that every provider the executor opens passes the kill switch
@@ -118,12 +130,14 @@ func (r *RemediationRequestReconciler) GatedRepository(ctx context.Context, repo
 // gatedGit is a GitProvider whose writes (CreateBranch, CommitFile, OpenChangeRequest, EnableAutoMerge,
 // CommentChangeRequest, CloseChangeRequest) call allow immediately before the wrapped provider, and return its
 // error instead of writing when it refuses; the wrapped provider gets allow as its write checkpoint too (gate).
-// Reads pass straight through, without a checkpoint. It implements every method itself rather than embedding the
-// interface, so a write method added to GitProvider cannot pass ungated: the build fails until it
-// is added here.
+// Reads pass straight through, without a checkpoint. When closeOnly is set and reports true, every write but
+// CloseChangeRequest returns errStalePlanWrite before allow is asked (gateWrite). It implements every method
+// itself rather than embedding the interface, so a write method added to GitProvider cannot pass ungated: the
+// build fails until it is added here.
 type gatedGit struct {
-	git   providers.GitProvider
-	allow func(context.Context) error
+	git       providers.GitProvider
+	allow     func(context.Context) error
+	closeOnly func() bool
 }
 
 var _ providers.GitProvider = (*gatedGit)(nil)
@@ -197,8 +211,17 @@ func (g *gatedGit) gate(ctx context.Context) (context.Context, error) {
 	return providers.WithWriteCheckpoint(ctx, g.allow, freshness.ErrPaused, freshness.ErrWriteBlocked), nil
 }
 
+// gateWrite is gate for every write but CloseChangeRequest: while closeOnly reports true it refuses with
+// errStalePlanWrite, so a stale plan's pull request gets no write but its close, whichever step reaches it.
+func (g *gatedGit) gateWrite(ctx context.Context) (context.Context, error) {
+	if g.closeOnly != nil && g.closeOnly() {
+		return ctx, errStalePlanWrite
+	}
+	return g.gate(ctx)
+}
+
 func (g *gatedGit) CreateBranch(ctx context.Context, branch, fromCommit string) error {
-	ctx, err := g.gate(ctx)
+	ctx, err := g.gateWrite(ctx)
 	if err != nil {
 		return err
 	}
@@ -206,7 +229,7 @@ func (g *gatedGit) CreateBranch(ctx context.Context, branch, fromCommit string) 
 }
 
 func (g *gatedGit) CommitFile(ctx context.Context, branch, expectedHead string, change providers.FileChange) (string, error) {
-	ctx, err := g.gate(ctx)
+	ctx, err := g.gateWrite(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -214,7 +237,7 @@ func (g *gatedGit) CommitFile(ctx context.Context, branch, expectedHead string, 
 }
 
 func (g *gatedGit) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
-	ctx, err := g.gate(ctx)
+	ctx, err := g.gateWrite(ctx)
 	if err != nil {
 		return providers.ChangeRequest{}, err
 	}
@@ -222,7 +245,7 @@ func (g *gatedGit) OpenChangeRequest(ctx context.Context, req providers.NewChang
 }
 
 func (g *gatedGit) EnableAutoMerge(ctx context.Context, number int64, expectedHeadSHA string) error {
-	ctx, err := g.gate(ctx)
+	ctx, err := g.gateWrite(ctx)
 	if err != nil {
 		return err
 	}
@@ -230,7 +253,7 @@ func (g *gatedGit) EnableAutoMerge(ctx context.Context, number int64, expectedHe
 }
 
 func (g *gatedGit) CommentChangeRequest(ctx context.Context, number int64, marker, body string) error {
-	ctx, err := g.gate(ctx)
+	ctx, err := g.gateWrite(ctx)
 	if err != nil {
 		return err
 	}
@@ -254,7 +277,7 @@ func (g *gatedGit) Parents(ctx context.Context, commit string) ([]string, error)
 }
 
 func (g *gatedGit) AppendCommit(ctx context.Context, branch, expectedHead string, change providers.FileChange) (string, error) {
-	ctx, err := g.gate(ctx)
+	ctx, err := g.gateWrite(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -262,7 +285,7 @@ func (g *gatedGit) AppendCommit(ctx context.Context, branch, expectedHead string
 }
 
 func (g *gatedGit) UpdateChangeRequest(ctx context.Context, number int64, title, body string) error {
-	ctx, err := g.gate(ctx)
+	ctx, err := g.gateWrite(ctx)
 	if err != nil {
 		return err
 	}
@@ -270,7 +293,7 @@ func (g *gatedGit) UpdateChangeRequest(ctx context.Context, number int64, title,
 }
 
 func (g *gatedGit) CreateCheckRun(ctx context.Context, head string, run providers.CheckRun) error {
-	ctx, err := g.gate(ctx)
+	ctx, err := g.gateWrite(ctx)
 	if err != nil {
 		return err
 	}

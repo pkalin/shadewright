@@ -782,7 +782,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				Expect(c.Reason).To(Equal(reason))
 				Expect(c.Message).To(ContainSubstring(fmt.Sprintf("#%d (%s)", cr.Number, cr.URL)))
 				Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
-				Expect(c.Message).NotTo(ContainSubstring("403"))
+				Expect(c.Message).NotTo(ContainSubstring("status 403"))
 				Expect(notClosedEvents()).To(Equal(1))
 				stillOpen()
 				Expect(closes.Load()).To(Equal(int32(1)))

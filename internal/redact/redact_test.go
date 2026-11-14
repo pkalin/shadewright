@@ -1244,30 +1244,40 @@ func TestSlashSplitBase64KnownLeaks(t *testing.T) {
 	t.Skipf("known gaps of #525 with no key name before the key: %d of %d cases leak", leaking, len(cases))
 }
 
-// keyNameForms are the forms in which a secret key name stands before its value (#585): the value goes
-// between before and after.
 // Text after a value in keyNameForms: the next flag, the next key.
 const (
 	flagAfter = " --region x"
 	envAfter  = " region=x"
 )
 
-var keyNameForms = []struct{ name, before, after string }{
-	{"name=value", "set client_secret=", envAfter},
-	{"name: value", "client_secret: ", "\nregion: x"},
-	{"name: value inline", "config password: ", " region: x"},
-	{"quoted json", `{"clientSecret": "`, `", "region": "x"}`},
-	{"single-quoted yaml", "'api_key': '", "'\nregion: x"},
-	{"--name value", "run --client-secret ", flagAfter},
-	{"--name value quoted", `run --password "`, `" --region x`},
-	{"--name=value", "run --client-secret=", flagAfter},
-	{"--name value in an argument list", `args: ["--aws-secret-access-key", "`, `", "--region", "x"]`},
-	{"env style", "AWS_SECRET_ACCESS_KEY=", "\nAWS_REGION=x"},
-	{"env style quoted", "export AWS_SECRET_ACCESS_KEY='", "'\nexport AWS_REGION=x"},
-	{"camelCase", "env accessKey=", envAfter},
-	{"sas", "AZURE_STORAGE_SAS=", envAfter},
-	{"--passwd", "run --passwd ", flagAfter},
-	{"--token", "run --token ", flagAfter},
+// keyNameForm is one form in which a secret key name stands before its value (#585): the value goes between
+// before and after. The forms of a key, a separator and a value were redacted whole on main before #585 as
+// well: with before alone they guard against regressions and are expected to pass on main. probe is the
+// same form with a name main read as a reference (a Vault secret ID, "secret_id", which main kept), so that
+// every form also has a probe that leaks on main; it is empty where before itself leaks on main (flags and
+// the blank form). opaqueOnly marks the blank form, which redacts only an opaque token (opaqueToken).
+type keyNameForm struct {
+	name, before, after, probe string
+	opaqueOnly                 bool
+}
+
+var keyNameForms = []keyNameForm{
+	{"name=value", "set client_secret=", envAfter, "set secret_id=", false},
+	{"name: value", "client_secret: ", "\nregion: x", "secret_id: ", false},
+	{"name: value inline", "config password: ", " region: x", "config secret_id: ", false},
+	{"quoted json", `{"clientSecret": "`, `", "region": "x"}`, `{"secretId": "`, false},
+	{"single-quoted yaml", "'api_key': '", "'\nregion: x", "'secret_id': '", false},
+	{"--name value", "run --client-secret ", flagAfter, "", false},
+	{"--name value quoted", `run --password "`, `" --region x`, "", false},
+	{"--name=value", "run --client-secret=", flagAfter, "run --secret-id=", false},
+	{"--name value in an argument list", `args: ["--aws-secret-access-key", "`, `", "--region", "x"]`, "", false},
+	{"env style", "AWS_SECRET_ACCESS_KEY=", "\nAWS_REGION=x", "VAULT_SECRET_ID=", false},
+	{"env style quoted", "export AWS_SECRET_ACCESS_KEY='", "'\nexport AWS_REGION=x", "export VAULT_SECRET_ID='", false},
+	{"camelCase", "env accessKey=", envAfter, "env secretId=", false},
+	{"sas", "AZURE_STORAGE_SAS=", envAfter, "", false},
+	{"--passwd", "run --passwd ", flagAfter, "", false},
+	{"--token", "run --token ", flagAfter, "", false},
+	{"compound name and a blank", "aws configure set aws_secret_access_key ", envAfter, "", true},
 }
 
 // valueMarker matches one redaction marker and nothing else (markerPattern), in the place of a whole value.
@@ -1285,7 +1295,8 @@ func redactedAfterKeyName(before, value, after string) (string, bool) {
 
 // The key name in front of a value is the signal that closes the known leaks of the slash-split base64 rule
 // (#585): after a secret key name in any of its forms, the whole value is redacted, whatever its parts read
-// as, and the key name and the text after the value stay.
+// as (in the blank form, every value that is an opaque token), and the key name and the text after the value
+// stay. Each form is checked with its probe as well, which leaks on main (keyNameForm).
 func TestKnownLeaksAfterAKeyNameAreRedacted(t *testing.T) {
 	values := knownLeakKeys()
 	values = append(values,
@@ -1295,8 +1306,16 @@ func TestKnownLeaksAfterAKeyNameAreRedacted(t *testing.T) {
 	)
 	for _, f := range keyNameForms {
 		for _, v := range values {
-			if out, ok := redactedAfterKeyName(f.before, v.key, f.after); !ok {
-				t.Errorf("%s, %s: value not redacted whole:\n in: %s\nout: %s", f.name, v.name, f.before+v.key+f.after, out)
+			if f.opaqueOnly && !opaqueToken(v.key) {
+				continue // the blank form takes only an opaque key (TestKeyNameKnownLeaks)
+			}
+			for _, before := range []string{f.before, f.probe} {
+				if before == "" {
+					continue
+				}
+				if out, ok := redactedAfterKeyName(before, v.key, f.after); !ok {
+					t.Errorf("%s, %s: value not redacted whole:\n in: %s\nout: %s", f.name, v.name, before+v.key+f.after, out)
+				}
 			}
 		}
 	}
@@ -1310,10 +1329,13 @@ func TestSeededKeysAfterAKeyNameAreRedacted(t *testing.T) {
 		t.Skip("100,000 keys: runs without -race")
 	}
 	const n = 100_000
-	whole, fragments := 0, 0
+	whole, fragments, notOpaque := 0, 0, 0
 	for seed := range uint64(n) {
 		f := keyNameForms[seed%uint64(len(keyNameForms))]
 		k := seededKey(seed)
+		if f.opaqueOnly && !opaqueToken(k) {
+			notOpaque++ // counted, never skipped: such a key fails below as well
+		}
 		out, ok := redactedAfterKeyName(f.before, k, f.after)
 		if ok {
 			continue
@@ -1327,14 +1349,16 @@ func TestSeededKeysAfterAKeyNameAreRedacted(t *testing.T) {
 			t.Errorf("seed %d, %s: value not redacted whole:\n in: %s\nout: %s", seed, f.name, f.before+k+f.after, out)
 		}
 	}
-	if whole+fragments > 0 {
-		t.Errorf("of %d keys after a key name, %d stayed whole and %d left a fragment", n, whole, fragments)
+	if whole+fragments > 0 || notOpaque > 0 {
+		t.Errorf("of %d keys after a key name, %d stayed whole and %d left a fragment; %d keys in the blank form are no opaque token",
+			n, whole, fragments, notOpaque)
 	}
 }
 
-// A key name counts only before "=", ":" (with optional quotes) or, as a flag starting with "-", before
-// blanks or a comma and a value (#585). A key name inside a path, a Kubernetes resource name or a command
-// argument without that separator stays readable, and so does a flag that names a reference to a secret.
+// A key name counts only before "=", ":" (with optional quotes) or, as a flag starting with "-", before its
+// separator and a value (#585). A key name inside a path, a Kubernetes resource name or a command argument
+// without that separator stays readable, and so does a flag that names a reference to a secret. This test
+// guards against regressions and is expected to pass on main, which kept all of these too.
 func TestKeyNameSignalKeepsPathsAndNames(t *testing.T) {
 	for _, in := range []string{
 		"/etc/secret/app/config",
@@ -1388,7 +1412,6 @@ func TestFlagAndKeyNameFormsAreRedacted(t *testing.T) {
 		// Escaped JSON (an annotation in -o json), once and twice.
 		"escaped json":       `"args":"[\"--client-secret\",\"{k}\"]"`,
 		"escaped json space": `"args":"[\"--client-secret\", \"{k}\"]"`,
-		"escaped json lines": `"args":"[\n  \"--client-secret\",\n  \"{k}\"\n]"`,
 		"escaped twice":      `"a":"{\"args\":\"[\\\"--client-secret\\\",\\\"{k}\\\"]\"}"`,
 		// A Vault AppRole secret ID is a secret, in every form.
 		"--secret-id":         "vault write auth/approle/login role_id=r --secret-id {k}",
@@ -1439,6 +1462,13 @@ func TestFlagAndKeyNameReferencesStay(t *testing.T) {
 		flagValueLine:                           "run --password [REDACTED] --region y",
 		"run --use-token --verbose":             "run --use-token ***",
 		"run --client-secret hunter2abc\n--dbg": "run --client-secret [REDACTED]\n--dbg",
+		// Literal backslash pairs after a flag are the start of its value, so the value goes whole.
+		`run --password \n\r\tHunter2 --region west`: "run --password [credential] --region west",
+		// A value inside a JSON string ends at its closing quote, so the next field stays.
+		`{"cmd":"run --password ` + leakKey() + `","reason":"FailedMount"}`: `{"cmd":"run --password [REDACTED:credential]","reason":"FailedMount"}`,
+		// A secret-named flag taken as the value of a compound name is judged on its own; the compound
+		// name's value "--password" is no opaque token and stays.
+		"set client_secret --password " + leakKey(): "set client_secret --password [REDACTED:credential]",
 	} {
 		if out := String(in); out != want {
 			t.Errorf("%q: got %q, want %q", in, out, want)

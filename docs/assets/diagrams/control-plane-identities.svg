@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 640" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Control plane identities and their writes</title>
+  <desc id="d">Identities of ADR-0038, proposed and not built. In each spoke, the analyzer, executor and verifier keep the writes that invariant 6 gives them today. The new reporter, a fourth identity, reads Incidents, RemediationRequests, VerificationReports and the settings status in the operator namespace, has no Secrets, no Git identity and no model credential, and may reach only the hub's host. It sends reports to the hub's intake service. At the hub, intake may write the reported record kinds only in the namespace of the cluster whose token it verified, through a Role and RoleBinding that the fleet controller creates per namespace; it has no Git write and no model credential, and it fetches issuer discovery documents only from allow-listed hosts. The fleet controller reconciles Cluster objects into namespaces, Roles, RoleBindings, quotas and conditions, and holds no spoke credential or kubeconfig. The status page can only read. People who may merge in the hub GitOps repository approve each new spoke. No hub component has a model credential or a Git write identity in phase 1.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .bad{fill:#2a1720;stroke:#7a3348;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:12px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="1120" height="640" rx="18" fill="#0e0e16"/>
+  <rect class="lane" x="24" y="24" width="1072" height="250" rx="12"/>
+  <text class="lanet" x="44" y="52">EACH SPOKE</text>
+  <rect class="box" x="44" y="72" width="236" height="176" rx="12"/>
+  <text class="h" x="60" y="100">Analyzer</text>
+  <text class="s" x="60" y="128">writes: Incidents, its budget</text>
+  <text class="s" x="60" y="146">ConfigMap, requests it proposes</text>
+  <text class="no" x="60" y="178">never: Git, hub</text>
+  <rect class="box" x="298" y="72" width="236" height="176" rx="12"/>
+  <text class="h" x="314" y="100">Executor</text>
+  <text class="s" x="314" y="128">writes: request status, pull</text>
+  <text class="s" x="314" y="146">requests in the spoke's repo</text>
+  <text class="no" x="314" y="178">never: model, hub</text>
+  <rect class="box" x="552" y="72" width="236" height="176" rx="12"/>
+  <text class="h" x="568" y="100">Verifier</text>
+  <text class="s" x="568" y="128">writes: verification reports</text>
+  <text class="s" x="568" y="146">and their status</text>
+  <text class="no" x="568" y="178">never: Git, model, Secrets</text>
+  <rect class="key" x="806" y="72" width="236" height="176" rx="12"/>
+  <text class="h" x="822" y="100">Reporter (new, proposed)</text>
+  <text class="s" x="822" y="128">reads: Incidents, requests,</text>
+  <text class="s" x="822" y="146">reports, settings status</text>
+  <text class="no" x="822" y="178">never: Secrets, Git, model key</text>
+  <text class="s" x="822" y="204">egress: the hub's host only</text>
+  <text class="s" x="822" y="222">token audience names this hub</text>
+  <text class="lbl" x="44" y="266">as invariant 6 lists today, unchanged</text>
+  <rect class="lane" x="24" y="330" width="1072" height="284" rx="12"/>
+  <text class="lanet" x="44" y="358">HUB</text>
+  <rect class="key" x="44" y="378" width="330" height="150" rx="12"/>
+  <text class="h" x="60" y="406">Intake</text>
+  <text class="s" x="60" y="432">writes: ReportedIncident, ReportedRequest,</text>
+  <text class="s" x="60" y="450">heartbeat, only in the namespace of the</text>
+  <text class="s" x="60" y="468">cluster whose token it verified</text>
+  <text class="no" x="60" y="496">never: Git write, model credential</text>
+  <text class="s" x="60" y="516">egress: issuer hosts on the allow-list</text>
+  <rect class="box" x="396" y="378" width="330" height="150" rx="12"/>
+  <text class="h" x="412" y="406">Fleet controller</text>
+  <text class="s" x="412" y="432">writes: namespaces, Role and RoleBinding</text>
+  <text class="s" x="412" y="450">for intake, quota, Cluster conditions</text>
+  <text class="no" x="412" y="496">never: spoke credential, kubeconfig</text>
+  <text class="s" x="412" y="516">reads: Cluster objects</text>
+  <rect class="box" x="748" y="378" width="328" height="70" rx="12"/>
+  <text class="h" x="764" y="406">Status page</text>
+  <text class="s" x="764" y="428">read-only; escapes everything</text>
+  <rect class="ext" x="748" y="458" width="328" height="70" rx="12"/>
+  <text class="h" x="764" y="486">People who merge in the hub repo</text>
+  <text class="s" x="764" y="508">approve each new spoke</text>
+  <path class="f" d="M924 248V300H209V378" marker-end="url(#a)"/>
+  <text class="lbl" x="300" y="292">report over HTTPS: the only line from spoke to hub</text>
+  <path class="f" d="M396 453H378" marker-end="url(#a)"/>
+  <text class="s" x="44" y="578">No hub component has a model credential or a Git write identity in phase 1.</text>
+  <text class="s" x="44" y="598">Each spoke has its own model credential and budget (ADR-0037, ADR-0023).</text>
+</svg>

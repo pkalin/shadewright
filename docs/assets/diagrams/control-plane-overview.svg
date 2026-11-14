@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 690" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Control plane mode: hub and reporting clusters</title>
+  <desc id="d">Overview of ADR-0038, proposed and not built. Two spoke clusters, each a standalone Shadewright install with its own analyzer, executor and verifier, plus a new reporter. Each spoke has its own GitOps repository, where its executor opens pull requests as today, and its own model credential and budget. Each reporter sends redacted summaries and a projected ServiceAccount token over HTTPS to the intake service of the hub; the connection is outbound from the spoke and the answer is only accepted or refused. The hub is a Kubernetes cluster with intake, a fleet controller, one namespace per spoke holding the reported records, and a read-only status page. The hub reads its Cluster objects from its own GitOps repository through Flux. Evidence, prompts, transcripts, credentials and kubeconfigs never cross, and the hub never calls a spoke.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .bad{fill:#2a1720;stroke:#7a3348;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:12px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="1280" height="690" rx="18" fill="#0e0e16"/>
+  <rect class="lane" x="250" y="64" width="420" height="212" rx="12"/>
+  <text class="lanet" x="270" y="90">SPOKE A: AKS LAB CLUSTER</text>
+  <rect class="lane" x="250" y="296" width="420" height="212" rx="12"/>
+  <text class="lanet" x="270" y="322">SPOKE B: LOCAL KIND CLUSTER</text>
+  <rect class="lane" x="820" y="64" width="436" height="444" rx="12"/>
+  <text class="lanet" x="840" y="84">HUB: KUBERNETES CLUSTER</text>
+  <rect class="box" x="266" y="104" width="388" height="92" rx="12"/>
+  <text class="h" x="284" y="130">Analyzer, executor, verifier</text>
+  <text class="s" x="284" y="152">standalone install, unchanged; keeps working</text>
+  <text class="s" x="284" y="172">when the hub is down; own model credential</text>
+  <rect class="key" x="266" y="208" width="388" height="60" rx="12"/>
+  <text class="h" x="284" y="234">Reporter (fourth identity, proposed)</text>
+  <text class="s" x="284" y="254">reads Incidents, requests, reports</text>
+  <rect class="box" x="266" y="334" width="388" height="92" rx="12"/>
+  <text class="h" x="284" y="360">Analyzer, executor, verifier</text>
+  <text class="s" x="284" y="382">standalone install, unchanged; keeps working</text>
+  <text class="s" x="284" y="402">when the hub is down; own model credential</text>
+  <rect class="key" x="266" y="438" width="388" height="60" rx="12"/>
+  <text class="h" x="284" y="464">Reporter (fourth identity, proposed)</text>
+  <text class="s" x="284" y="484">reads Incidents, requests, reports</text>
+  <text class="lanet" x="24" y="84">OUTSIDE</text>
+  <rect class="ext" x="24" y="94" width="196" height="50" rx="12"/>
+  <text class="h" x="38" y="115">Spoke A GitOps repo</text>
+  <text class="s" x="38" y="133">PRs from its executor</text>
+  <rect class="ext" x="24" y="150" width="196" height="50" rx="12"/>
+  <text class="h" x="38" y="171">Model provider A</text>
+  <text class="s" x="38" y="189">own credential and budget</text>
+  <rect class="ext" x="24" y="326" width="196" height="50" rx="12"/>
+  <text class="h" x="38" y="347">Spoke B GitOps repo</text>
+  <text class="s" x="38" y="365">PRs from its executor</text>
+  <rect class="ext" x="24" y="382" width="196" height="50" rx="12"/>
+  <text class="h" x="38" y="403">Model provider B</text>
+  <text class="s" x="38" y="421">own credential and budget</text>
+  <path class="f" d="M266 119H224" marker-end="url(#a)"/>
+  <path class="f" d="M266 175H224" marker-end="url(#a)"/>
+  <path class="f" d="M266 351H224" marker-end="url(#a)"/>
+  <path class="f" d="M266 407H224" marker-end="url(#a)"/>
+  <rect class="ext" x="840" y="98" width="396" height="44" rx="12"/>
+  <text class="h" x="856" y="117">Hub GitOps repo</text>
+  <text class="s" x="856" y="134">Cluster objects, added by a reviewed pull request</text>
+  <rect class="box" x="840" y="158" width="396" height="62" rx="12"/>
+  <text class="h" x="856" y="182">Fleet controller</text>
+  <text class="s" x="856" y="202">Cluster object to namespace, Role, quota, staleness</text>
+  <rect class="box" x="840" y="238" width="192" height="84" rx="12"/>
+  <text class="h" x="854" y="262">Namespace spoke-a</text>
+  <text class="s" x="854" y="282">reported incidents,</text>
+  <text class="s" x="854" y="298">requests, heartbeat</text>
+  <rect class="box" x="1044" y="238" width="192" height="84" rx="12"/>
+  <text class="h" x="1058" y="262">Namespace spoke-b</text>
+  <text class="s" x="1058" y="282">reported incidents,</text>
+  <text class="s" x="1058" y="298">requests, heartbeat</text>
+  <rect class="key" x="840" y="342" width="396" height="70" rx="12"/>
+  <text class="h" x="856" y="366">Intake (stateless, N replicas)</text>
+  <text class="s" x="856" y="386">verify token, validate, rate limit, store</text>
+  <text class="s" x="856" y="402">writes only in the verified cluster's namespace</text>
+  <rect class="box" x="840" y="430" width="396" height="56" rx="12"/>
+  <text class="h" x="856" y="454">Status page (read-only)</text>
+  <text class="s" x="856" y="473">escapes everything it shows; notifier later (#97)</text>
+  <path class="f" d="M1038 142V158" marker-end="url(#a)"/>
+  <text class="lbl" x="1048" y="153">Flux</text>
+  <path class="f" d="M910 220V238" marker-end="url(#a)"/>  <path class="f" d="M1140 220V238" marker-end="url(#a)"/>
+  <path class="f" d="M980 342V322" marker-end="url(#a)"/>  <path class="f" d="M1190 342V322" marker-end="url(#a)"/>
+  <path class="r" d="M1038 412V430" marker-end="url(#m)"/>
+  <path class="f" d="M654 236H790V366H836" marker-start="url(#a)" marker-end="url(#a)"/>
+  <path class="f" d="M654 468H806V392H836" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="lbl" x="660" y="228">report + token</text>
+  <text class="lbl" x="660" y="256">ok or refused</text>
+  <text class="lbl" x="660" y="460">report + token</text>
+  <text class="lbl" x="660" y="488">ok or refused</text>
+  <rect class="lane" x="24" y="520" width="1232" height="150" rx="12"/>
+  <text class="h" x="44" y="548">Crosses to the hub</text>
+  <text class="s" x="44" y="570">heartbeat and versions, doctor's delivery source report;</text>
+  <text class="s" x="44" y="588">summaries of Incidents, requests and outcomes: bounded,</text>
+  <text class="s" x="44" y="606">redacted fields only; names optionally hashed.</text>
+  <text class="s" x="44" y="628">Direction: spoke to hub, always outbound, over HTTPS.</text>
+  <text class="h" x="470" y="548">Comes back from the hub</text>
+  <text class="s" x="470" y="570">Phase 1: accepted or refused, with a status. Nothing else.</text>
+  <text class="s" x="470" y="588">Later phases: restrictive directives only (pause, slow down),</text>
+  <text class="s" x="470" y="606">never permissive ones. Configuration for a spoke travels as</text>
+  <text class="s" x="470" y="624">a pull request to that spoke's GitOps repo, not on this line.</text>
+  <text class="no" x="880" y="548">Never crosses</text>
+  <text class="s" x="880" y="570">evidence, prompts, transcripts, model credentials,</text>
+  <text class="s" x="880" y="588">kubeconfigs, Secrets. The hub never calls a spoke and</text>
+  <text class="s" x="880" y="606">holds no spoke credential. Nothing a spoke sends</text>
+  <text class="s" x="880" y="624">reaches a model or a Git write in phase 1.</text>
+  <text class="lbl" x="44" y="654">Hub and spokes are clusters; the word fleet here is unrelated to the shadewright-fleet repository.</text>
+</svg>

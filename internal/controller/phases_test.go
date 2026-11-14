@@ -1170,14 +1170,13 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 			"the rollout is still reported")
 	})
 
-	It("never caps a failed rollout of a merged stale plan with --verify-outcomes off: it keeps Merged with RolledOut False (#199)", func() {
+	It("ends a merged stale plan Inconclusive with StalePlanMerged when its rollout fails with --verify-outcomes off (#199)", func() {
 		w := newWorld(nil)
 		markStalePlan(w)
 		w.r.VerifyOutcomes = false
 		w.reader.ks = kustomization(ksStatus{})
 		mustReconcileAt(w, w.merged.Add(deliveryWindow+time.Second))
-		rr := fetch(w)
-		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged), "a bad end is not turned into Inconclusive")
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonStalePlanMerged)
 		c := condition(rr, rollout.ConditionRolledOut)
 		Expect(c.Status).To(Equal(metav1.ConditionFalse))
 		Expect(c.Reason).To(Equal(rollout.ReasonDeliveryNotObserved))

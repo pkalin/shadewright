@@ -103,9 +103,10 @@ const (
 	// ReasonVerificationDisabled: the executor runs without --verify-outcomes and found the request in
 	// WaitingForDelivery or Verifying, which nothing moves on with the flag off (Inconclusive at once).
 	ReasonVerificationDisabled = "VerificationDisabled"
-	// ReasonStalePlanMerged: a person merged the pull request of a plan Shadewright knew was stale and could not
-	// close (the Git host refused the close, #199), and the request would otherwise have ended Succeeded, or, with
-	// --verify-outcomes off, kept Merged with its rollout reported (Inconclusive). A failure still ends Failed.
+	// ReasonStalePlanMerged: a person merged the pull request of a plan Shadewright knew was stale (#199), and the
+	// request would otherwise have ended in a state the circuit breaker counts as a success: Succeeded, or, with
+	// --verify-outcomes off, Merged once its rollout check is over, whether the rollout report is good or bad
+	// (Inconclusive; RolledOut keeps the report). With verification on a failure still ends Failed.
 	ReasonStalePlanMerged = "StalePlanMerged"
 	// ReasonKedaNotReady: a ScaledObject target is not ready by the KedaReady rule at the timeout (Failed).
 	ReasonKedaNotReady = verification.ReasonKedaNotReady
@@ -726,20 +727,16 @@ func stalePlanMerged(rr *remediationv1alpha1.RemediationRequest) bool {
 // capStaleSuccess is the one place that caps the good end of a merged stale plan (stalePlanMerged): where the
 // request would end Succeeded (succeed), or keep Merged with its rollout report as the final word with
 // --verify-outcomes off (afterMerge), it ends Inconclusive with ReasonStalePlanMerged instead, through
-// endVerification like any other Inconclusive end. done is false, and nothing is written, for any other request,
-// and for one whose rollout failed (RolledOut False): a bad end is never capped.
+// endVerification like any other Inconclusive end. The rule: where a plan that is not stale would end in a state
+// the circuit breaker counts as a success, a stale one ends Inconclusive with StalePlanMerged; every other end is
+// the same. With --verify-outcomes off Merged is such a state whatever the rollout report says, so a failed rollout
+// is capped too (RolledOut keeps saying what the rollout did); with it on only succeed calls this, and Failed stays
+// Failed. done is false, and nothing is written, for any other request.
 func (r *RemediationRequestReconciler) capStaleSuccess(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	done bool, err error) {
 	if p := rr.Status.Phase; !stalePlanMerged(rr) ||
 		(p != remediationv1alpha1.PhaseMerged && p != remediationv1alpha1.PhaseVerifying) {
 		// Only a good end is capped: an end already written (Failed, Inconclusive) is never overwritten.
-		return false, nil
-	}
-	if c := meta.FindStatusCondition(rr.Status.Conditions, rollout.ConditionRolledOut); rr.Status.Phase ==
-		remediationv1alpha1.PhaseMerged && c != nil && c.Status == metav1.ConditionFalse {
-		// A rollout reported failed on a Merged request (the check after the merge with --verify-outcomes off) is a
-		// bad end, not a would-be success: it keeps Merged with RolledOut False as any merged request does. The
-		// verification (Verifying) caps only from succeed, which a failed rollout never reaches.
 		return false, nil
 	}
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)

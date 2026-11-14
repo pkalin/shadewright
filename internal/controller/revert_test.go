@@ -169,7 +169,7 @@ func TestRevertPullRequestText(t *testing.T) {
 	for _, want := range []string{
 		"Shadewright proposes to revert a failed change for incident `",
 		"**Reverts:** RemediationRequest `shadewright-system/" + failed.Name + "` (UID `" + failedUID + "`), " +
-			"pull request #71 (https://github.com/example/fleet/pull/71). It ended `Failed` with the reason " +
+			"pull request #71. It ended `Failed` with the reason " +
 			"`OOMKilled`. This pull request sets the value it changed back.",
 		"**Evidence:** RemediationRequest `shadewright-system/" + revert.Name + "` (UID `" + string(revert.UID) + "`)",
 		"**Rollback:** do not revert this pull request: that applies `384Mi` again",

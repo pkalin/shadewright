@@ -2074,10 +2074,9 @@ func writeReverts(b *strings.Builder, rr, failed *remediationv1alpha1.Remediatio
 		return
 	}
 	if pr := failed.Status.PullRequest; pr != nil && pr.Number > 0 {
+		// The number only: the code host links it. status.pullRequest.url is status text that is checked against
+		// nothing here, so it does not go into a body a reviewer reads.
 		fmt.Fprintf(b, ", pull request #%d", pr.Number)
-		if pr.URL != "" {
-			fmt.Fprintf(b, " (%s)", pr.URL)
-		}
 	} else {
 		b.WriteString(", no pull request recorded")
 	}

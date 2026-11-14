@@ -472,3 +472,81 @@ func TestDeletingVerifyingHolderClosesNothing(t *testing.T) {
 		t.Fatalf("the request is still there with finalizers %v", o.Finalizers)
 	}
 }
+
+// openBreaker adds three requests for other targets that ended Failed at limitsNow, so the circuit breaker is
+// open: a success at the same time does not close it.
+func openBreaker(t *testing.T, c client.Client) {
+	t.Helper()
+	ctx := context.Background()
+	for _, name := range []string{"f1", "f2", "f3"} {
+		o := otherRequest(name, "uid-target-"+name, remediationv1alpha1.PhaseFailed, 0)
+		status := o.Status
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+		o.Status = status
+		if err := c.Status().Update(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestRecordedHolderEndsWaiterWhileAnotherLimitHolds checks #719 when the holder ended and released the lock while
+// another limit (the open circuit breaker) still holds the waiter back: the target is no longer locked, so no
+// holder is found, but the recorded one is still checked and ends the waiter at once, Superseded with
+// AnotherRequestSucceeded for a holder that Succeeded and AnotherRequestClosed for one closed without a merge,
+// instead of leaving it Queued with CircuitOpen.
+func TestRecordedHolderEndsWaiterWhileAnotherLimitHolds(t *testing.T) {
+	for name, c := range map[string]struct {
+		end    func(t *testing.T, r *RemediationRequestReconciler, c client.Client, stub *stubResolver)
+		reason string
+	}{
+		"Succeeded": {func(t *testing.T, r *RemediationRequestReconciler, c client.Client, stub *stubResolver) {
+			mergeHolder(t, r, c, stub)
+			moveHolder(t, r, c, remediationv1alpha1.PhaseWaitingForDelivery)
+			moveHolder(t, r, c, remediationv1alpha1.PhaseVerifying)
+			deliver(t, c)
+			stub.result = resolved()
+			if err := r.succeed(context.Background(), getHolder(t, c), time.Minute,
+				"No recurrence in the window"); err != nil {
+				t.Fatalf("succeed: %v", err)
+			}
+		}, remediationv1alpha1.ReasonAnotherRequestSucceeded},
+		"closed without a merge": {func(t *testing.T, _ *RemediationRequestReconciler, c client.Client, _ *stubResolver) {
+			holder := closeUnmerged(getHolder(t, c), limitsNow)
+			if err := c.Status().Update(context.Background(), holder); err != nil {
+				t.Fatal(err)
+			}
+		}, remediationv1alpha1.ReasonAnotherRequestClosed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, cl, rr, stub := holdWorld(t, true)
+			c.end(t, r, cl, stub)
+			if h := getHolder(t, cl); ptr.Deref(h.Status.HoldsTarget, true) {
+				t.Fatal("the holder kept the lock after it ended")
+			}
+			openBreaker(t, cl)
+			if reason := limitsReason(t, r); reason != ReasonCircuitOpen {
+				t.Fatalf("limits = %q, want %s", reason, ReasonCircuitOpen)
+			}
+			calls := stub.calls.Load()
+			_, got, err := reconcileLimits(t, r, rr)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			pf := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+			if got.Status.Phase != remediationv1alpha1.PhaseSuperseded || pf == nil || pf.Status != metav1.ConditionFalse ||
+				pf.Reason != c.reason || !strings.Contains(pf.Message, closedHolder) {
+				q := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionQueued)
+				t.Fatalf("phase %q, PlanFresh %+v, Queued %+v; want Superseded with %s naming %s",
+					got.Status.Phase, pf, q, c.reason, closedHolder)
+			}
+			if meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionQueued) != nil {
+				t.Fatal("the superseded request stays Queued")
+			}
+			if n := stub.calls.Load(); n != calls {
+				t.Fatal("the superseded request read Git")
+			}
+		})
+	}
+}

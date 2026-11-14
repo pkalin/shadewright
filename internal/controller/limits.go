@@ -705,7 +705,7 @@ var (
 
 // waitForLimits holds back a request that a limit does not let through: it sets Queued True with the limit as
 // the reason and, when the target is locked, records its holders in status.queuedBehind (#643; holdBack checked
-// the recorded ones first), writes the status when that changed, and checks again after s.recheckDelay. A
+// the recorded ones first whenever they differ from these, also when there are none), writes the status when that changed, and checks again after s.recheckDelay. A
 // record is kept while the target is not locked. A wait for the target's state that the request was in before
 // ends here (endWait): the policy check let it through, so a later wait is a new one with its own clock, not
 // one that already lasted the whole time the request was Queued (#556).
@@ -849,11 +849,12 @@ func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remedia
 			return reconcile.Result{}, false, true, clearing{}, err
 		}
 		if s.reason != "" {
-			// Other holders than the recorded ones: the recorded ones are checked before the record is replaced,
-			// so a holder whose pull request was closed while another request took the lock still ends this one
-			// (duplicates.go, #643).
-			if len(s.holders) > 0 && len(rr.Status.QueuedBehind) > 0 &&
-				!slices.Equal(rr.Status.QueuedBehind, s.holders) {
+			// Other holders than the recorded ones, or none: the recorded ones are checked first, so a holder whose
+			// pull request was closed while another request took the lock still ends this one (duplicates.go,
+			// #643), and so does one that ended (closed, or Succeeded) and released the lock while another limit,
+			// such as the open breaker, holds this one back (#719). waitForLimits keeps the record while the
+			// target is not locked, so without this check the request would wait out that limit and only then end.
+			if len(rr.Status.QueuedBehind) > 0 && !slices.Equal(rr.Status.QueuedBehind, s.holders) {
 				if ended, err := r.endIfDuplicate(ctx, rr); ended || err != nil {
 					if ended {
 						r.forget(client.ObjectKeyFromObject(rr))

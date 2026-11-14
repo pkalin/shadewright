@@ -41,9 +41,10 @@ import (
 const QuietBeforeResolved = time.Hour
 
 // ConditionLifecycle is the Incident condition that says why the closure rules last moved the Incident's
-// phase: to Resolved (quiet, or a request that Succeeded) or to Escalated (a request that ended without
-// success). It is always True; its lastTransitionTime is when that move was written. A move by another rule
-// (an analysis outcome, a recurrence) leaves it as it was.
+// phase: to Resolved (quiet, a request that Succeeded, or HolderSucceeded: a request that waited behind another
+// request for the same field which Succeeded) or to Escalated (a request that ended without success). It is
+// always True; its lastTransitionTime is when that move was written. A move by another rule (an analysis
+// outcome, a recurrence) leaves it as it was.
 const ConditionLifecycle = "Lifecycle"
 
 // Reasons of the Lifecycle condition.
@@ -66,6 +67,11 @@ const (
 	ReasonRequestNeedsIntervention = "RequestNeedsIntervention"
 	ReasonRequestSuperseded        = "RequestSuperseded"
 	ReasonRequestInconclusive      = "RequestInconclusive"
+	// ReasonHolderSucceeded: the newest request naming the Incident ended Superseded with reason
+	// AnotherRequestSucceeded (#719): it waited behind another request for the same field, of any Incident, whose
+	// change took its baseline away and ended Succeeded. The Incident follows that success and moves to Resolved at
+	// once, as for ReasonRequestSucceeded.
+	ReasonHolderSucceeded = "HolderSucceeded"
 	// ReasonReopened: the Incident was Resolved by quiet time before any analysis, and its symptom came back
 	// within RecurrenceWindow of resolvedTime, so it is Open again, with no resolvedTime, and is analyzed as
 	// usual ([reopens]). It is the one Lifecycle reason the observation writer sets.
@@ -100,6 +106,7 @@ var endedWithoutSuccess = map[remediationv1alpha1.RemediationPhase]string{
 var lifecycleMessages = map[string]string{
 	ReasonSymptomQuiet:             "Nothing was observed for an hour and no request naming the Incident is active",
 	ReasonRequestSucceeded:         "The newest request naming the Incident succeeded",
+	ReasonHolderSucceeded:          "The newest request naming the Incident waited behind another request for the same field, which succeeded",
 	ReasonRequestDenied:            "The newest request naming the Incident was denied; a person decides",
 	ReasonRequestExpired:           "The newest request naming the Incident expired; a person decides",
 	ReasonRequestFailed:            "The newest request naming the Incident failed; a person decides",
@@ -112,8 +119,9 @@ var lifecycleMessages = map[string]string{
 }
 
 // finalRequest reports whether a request phase is final for the closure rules (design 3.2): Succeeded, one
-// that ended without success, or Merged. Merged counts as final until the verifier (#92) writes Succeeded: it
-// no longer keeps the Incident out of the quiet rule, but it moves nothing by itself. Every other phase, no
+// that ended without success, or Merged. Merged is the end of a request when the executor verifies no outcomes
+// (--verify-outcomes off); with verification on it is a short step before WaitingForDelivery. Either way it no
+// longer keeps the Incident out of the quiet rule, but it moves nothing by itself. Every other phase, no
 // phase yet and a phase this version does not know included, is active, so an unknown phase never resolves
 // an Incident.
 func finalRequest(p remediationv1alpha1.RemediationPhase) bool {
@@ -154,15 +162,19 @@ func lifecycleReason(inc *remediationv1alpha1.Incident) string {
 //     listing is no lock), so the next pass undoes that resolution from what the API server holds, also after
 //     a restart: an active request naming it moves it back to Proposed (ReasonRequestActive); otherwise, when
 //     the newest request naming it was created at or after resolvedTime, it applies the request rules of
-//     phase Proposed (ended without success escalates; Succeeded leaves it Resolved; Merged moves nothing). A
-//     final request created before resolvedTime never moves it.
+//     phase Proposed (ended without success escalates; Succeeded, also through the request it waited behind,
+//     leaves it Resolved; Merged moves nothing). A final request created before resolvedTime never moves it.
 //   - Any active request naming it keeps it where it is ([finalRequest]).
 //   - In phase Proposed (or Escalated by a Superseded request, [decidedByRequest]), the newest request naming
 //     the Incident (by creation time; at the same time a Superseded one is the older, then by name) decides:
 //     Succeeded moves it to Resolved, any other final phase but Merged to Escalated. Superseded thus follows
 //     the newer request when there is one, and escalates when there is none. A request Superseded because
 //     another one was merged ([mergedElsewhere], reason AnotherRequestMerged) is never the newest: the merged
-//     request decides. Merged moves nothing until the verifier is built (#92); the quiet rule then applies.
+//     request decides. A request Superseded because the request it waited behind for the same field succeeded
+//     ([succeededElsewhere], reason AnotherRequestSucceeded, #719) follows that success: Resolved with
+//     ReasonHolderSucceeded, not Escalated, when every holder it records that still exists is Succeeded. A lone
+//     Merged request (the end of a request with --verify-outcomes off, or the step before WaitingForDelivery
+//     with it on) moves nothing: it is not active, so the quiet rule applies. WaitingForDelivery and Verifying are active and keep the Incident where it is.
 //   - Otherwise an Incident quiet for QuietBeforeResolved moves to Resolved. It is quiet since the latest of lastSeen, held, lastAnalysisTime and the Lifecycle
 //     condition's lastTransitionTime, so an escalation stands for at least that long before the Incident can
 //     go on to Resolved. An Incident whose newest occurrence is a lasting symptom state ([lastingState]) is
@@ -204,26 +216,25 @@ func Closure(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.R
 		if newest == nil || !createdSinceResolved(newest, st.ResolvedTime) {
 			return "", "", false
 		}
-		if reason, ended := endedWithoutSuccess[newest.Status.Phase]; ended {
-			return remediationv1alpha1.IncidentEscalated, reason, true
+		if phase, reason, ok := requestOutcome(newest, requests); ok &&
+			phase == remediationv1alpha1.IncidentEscalated {
+			return phase, reason, true
 		}
-		// Succeeded leaves it Resolved; Merged moves nothing until the verifier (#92).
+		// Succeeded, also through the request it waited behind (succeededElsewhere), leaves it Resolved; Merged
+		// moves nothing.
 		return "", "", false
 	}
 	if active {
 		return "", "", false
 	}
 	if newest != nil && decidedByRequest(inc) {
-		p := newest.Status.Phase
-		if p == remediationv1alpha1.PhaseSucceeded {
-			return remediationv1alpha1.IncidentResolved, ReasonRequestSucceeded, true
-		}
-		if reason, ended := endedWithoutSuccess[p]; ended {
-			if st.Phase == remediationv1alpha1.IncidentEscalated && lifecycleReason(inc) == reason {
+		if phase, reason, ok := requestOutcome(newest, requests); ok {
+			if phase == remediationv1alpha1.IncidentEscalated && st.Phase == remediationv1alpha1.IncidentEscalated &&
+				lifecycleReason(inc) == reason {
 				// Already escalated for this outcome; only the quiet rule moves it on.
 				return closeQuiet(inc, held, now)
 			}
-			return remediationv1alpha1.IncidentEscalated, reason, true
+			return phase, reason, true
 		}
 	}
 	return closeQuiet(inc, held, now)
@@ -238,6 +249,51 @@ func mergedElsewhere(rr *remediationv1alpha1.RemediationRequest) bool {
 	}
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == remediationv1alpha1.ReasonAnotherRequestMerged
+}
+
+// requestOutcome returns where the request newest moves its Incident and the Lifecycle reason: Resolved with
+// ReasonRequestSucceeded for Succeeded, Resolved with ReasonHolderSucceeded when it ended because the request it
+// waited behind succeeded (succeededElsewhere), Escalated with the phase's reason for any other end without
+// success, and ok false for Merged or a phase that has not ended. The one helper keeps the order of these checks
+// the same for every phase of the Incident.
+func requestOutcome(newest *remediationv1alpha1.RemediationRequest, requests []remediationv1alpha1.RemediationRequest) (
+	remediationv1alpha1.IncidentPhase, string, bool) {
+	switch {
+	case newest.Status.Phase == remediationv1alpha1.PhaseSucceeded:
+		return remediationv1alpha1.IncidentResolved, ReasonRequestSucceeded, true
+	case succeededElsewhere(newest, requests):
+		// Superseded by the success of the request it waited behind: the Incident follows that outcome.
+		return remediationv1alpha1.IncidentResolved, ReasonHolderSucceeded, true
+	}
+	if reason, ended := endedWithoutSuccess[newest.Status.Phase]; ended {
+		return remediationv1alpha1.IncidentEscalated, reason, true
+	}
+	return "", "", false
+}
+
+// succeededElsewhere reports whether rr ended Superseded because the request it waited behind for the same field
+// ended Succeeded with a change that took its baseline away (PlanFresh False with reason AnotherRequestSucceeded,
+// #719). The executor writes that reason only after it read the holder Succeeded, a final phase. The record is
+// checked too: rr must name the requests it waited behind (status.queuedBehind), and each of them that requests
+// (the listing) still holds, by name and UID, must be Succeeded. A named request gone from the listing (deleted
+// since) is accepted, since the reason was written from its Succeeded phase.
+func succeededElsewhere(rr *remediationv1alpha1.RemediationRequest, requests []remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.Phase != remediationv1alpha1.PhaseSuperseded || len(rr.Status.QueuedBehind) == 0 {
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != remediationv1alpha1.ReasonAnotherRequestSucceeded {
+		return false
+	}
+	for _, ref := range rr.Status.QueuedBehind {
+		for i := range requests {
+			h := &requests[i]
+			if h.Name == ref.Name && h.UID == types.UID(ref.UID) && h.Status.Phase != remediationv1alpha1.PhaseSucceeded {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // closeQuiet is the quiet rule of [Closure], for an Incident no active request names.

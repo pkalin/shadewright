@@ -15,8 +15,9 @@ limitations under the License.
 */
 
 // Command render runs the executor's pre-commit render check (internal/gitops/semdiff) on the largest
-// repository its limits allow, and prints the time and the memory it took. hack/load/measure.sh runs it in a
-// container with the executor's memory limit, so the process peak is the cgroup's. Test tooling only.
+// repository its limits allow, and prints the time and the memory it took, with the CPU time and the peak
+// resident memory of the render process it started (ADR-0035). hack/load/measure.sh runs it in a container with
+// the executor's memory and CPU limits. Test tooling only.
 //
 // Shapes (n MiB of ConfigMaps; with n = 4, the default, both sit just under the 4 MiB build budget, counted with
 // repetition, and at most at the 1,024 object cap; a larger n is refused):
@@ -55,6 +56,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -175,9 +177,24 @@ func main() {
 		outcome = "error:" + err.Error()
 	}
 	fmt.Printf("shape=%s input_mib=%.1f files=%d time_s=%.2f go_heap_inuse_peak_mib=%.0f "+
-		"go_sys_peak_mib=%.0f rss_peak_mib=%s %s\n",
+		"go_sys_peak_mib=%.0f rss_peak_mib=%s %s %s\n",
 		shape, float64(in)/(1<<20), len(files), took.Seconds(), float64(peakHeap.Load())/(1<<20),
-		float64(peakSys.Load())/(1<<20), rssPeak(), outcome)
+		float64(peakSys.Load())/(1<<20), rssPeak(), renderProcess(), outcome)
+}
+
+// renderProcess is the CPU time (user and system) and the peak resident set of the render process that Check
+// started (ADR-0035), from the rusage of this process's waited-for children.
+func renderProcess() string {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_CHILDREN, &ru); err != nil {
+		return "child_cpu_s=n/a child_rss_peak_mib=n/a"
+	}
+	cpu := time.Duration(syscall.TimevalToNsec(ru.Utime) + syscall.TimevalToNsec(ru.Stime))
+	rss := float64(ru.Maxrss) / 1024 // KiB on Linux
+	if runtime.GOOS == "darwin" {
+		rss /= 1024 // bytes on macOS
+	}
+	return fmt.Sprintf("child_cpu_s=%.2f child_rss_peak_mib=%.0f", cpu.Seconds(), rss)
 }
 
 // rssPeak is the process's peak resident set (VmHWM in /proc/self/status, Linux only), in MiB.

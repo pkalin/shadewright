@@ -20,7 +20,6 @@ package semdiff
 
 import (
 	"errors"
-	"os/exec"
 )
 
 // setLimits fails where the render process's limits are not implemented, so no render runs without them.
@@ -30,7 +29,7 @@ func setLimits(uint64, uint64) error {
 
 func catchCPU() {}
 
-func outOfCPU(*exec.ExitError) bool { return false }
+func preferOOMKill() {}
 
 // noDataLimit is unused here: setLimits fails.
 const noDataLimit = 0

@@ -31,3 +31,6 @@ func setLimits(_, cpuSeconds uint64) error {
 
 // noDataLimit is unused here: no data limit is set on macOS.
 const noDataLimit = 0
+
+// preferOOMKill does nothing on macOS, which has no OOM score; see process_linux.go.
+func preferOOMKill() {}

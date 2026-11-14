@@ -23,10 +23,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"runtime/debug"
 	"runtime/metrics"
+	"strings"
 	"time"
 )
 
@@ -39,8 +41,9 @@ const (
 	// returned to the system). The process samples it every millisecond and exits with a refusal past it, and
 	// sets Go's soft memory limit to three quarters of it so that the collector works harder first. The render
 	// check of the test suite peaks at 46 MiB (design 8.2.2 measured 45 to 78 MiB of Go heap at the input
-	// budgets), so this leaves room for honest builds; with the executor's own memory it fits in the 256 Mi
-	// limit of its container.
+	// budgets), so this leaves room for honest builds. The executor's container holds the executor and one
+	// render process: its memory limit (384 Mi in the chart) covers the executor's Go soft limit (230 MiB) plus
+	// this and the render process's memory outside its Go runtime (ADR-0035).
 	MaxRenderMemory = 128 << 20
 	// MaxRenderData is the hard memory limit the operating system enforces on the render process: its private
 	// writable mappings (RLIMIT_DATA, Linux). It counts address space, not resident memory, and the process
@@ -48,9 +51,12 @@ const (
 	// check's 46 MiB of Go memory it held 216 MiB. It is set above what [MaxRenderMemory] allows, so it stops
 	// only a burst the sampling misses, and then the Go runtime ends the process ("out of memory").
 	MaxRenderData = 512 << 20
-	// MaxRenderCPUSeconds is the CPU time the render process may use (RLIMIT_CPU, every platform). A check at
-	// the input budgets takes 1 to 15 s, depending on the host.
-	MaxRenderCPUSeconds = 60
+	// MaxRenderCPUSeconds is the CPU time the render process may use (RLIMIT_CPU, every platform). The largest
+	// check the input budgets allow used 3.9 s of CPU time (hack/load/render, Linux arm64, ADR-0035), so this
+	// leaves five times that. At the executor's CPU limit in the chart (500m) it takes 40 s of wall time to
+	// reach, well inside the two minutes of the pull request step (controller.DefaultWriteTimeout), so the
+	// refusal arrives before the step's own deadline.
+	MaxRenderCPUSeconds = 20
 )
 
 // cpuGrace is how long past MaxRenderCPUSeconds the kernel waits before it kills a render process that did not
@@ -68,12 +74,28 @@ const renderReady = "shadewright-render-process ready\n"
 // maxRenderAnswer bounds what the parent reads from the render process: one [Result] or one refusal.
 const maxRenderAnswer = 64 << 10
 
+// maxRenderDetail bounds the detail of a refusal the render process answers: room for two repository paths of
+// repopath.MaxLen bytes and the text around them. A longer detail is cut there.
+const maxRenderDetail = 2 << 10
+
+// maxFatalLine bounds the line of the render process's stderr that [fatalLine] keeps.
+const maxFatalLine = 256
+
+// exitRuntimeFatal is the Go runtime's exit code for a fatal error, such as a heap mapping the data limit
+// refused ("fatal error: out of memory").
+const exitRuntimeFatal = 2
+
 // Exit codes of the render process, besides 0 (an answer was written).
 const (
 	exitMemory = 3 // the memory watchdog stopped the render
 	exitFailed = 4 // the process could not set its limits or read its input
 	exitCPU    = 5 // the process reached its CPU time limit (SIGXCPU)
 )
+
+// oomScoreAdj is the OOM score adjustment the render process sets on Linux ([preferOOMKill]): the most, so
+// that when the executor's container runs out of memory the kernel's OOM killer ends the render process, not
+// the executor.
+const oomScoreAdj = "1000"
 
 // sampleEvery is how often the render process samples the memory its Go runtime holds ([watchMemory]).
 const sampleEvery = time.Millisecond
@@ -111,6 +133,8 @@ func serveRender(in io.Reader, out io.Writer) int {
 	if err := setLimits(data, cpu); err != nil {
 		return exitFailed
 	}
+	preferOOMKill()
+	quietStderr()
 	debug.SetMemoryLimit(MaxRenderMemory * 3 / 4)
 	go watchMemory(MaxRenderMemory)
 	w := bufio.NewWriter(out)
@@ -145,6 +169,16 @@ func answerFor(in Input) (a renderAnswer) {
 	return renderAnswer{Result: &res}
 }
 
+// quietStderr points the standard error of Go code in the render process (os.Stderr and the log package) at
+// nothing, so that what the parent reads from the process's stderr ([fatalLine]) is written by the Go runtime
+// alone, which writes to the file descriptor itself. A failure leaves stderr as it was.
+func quietStderr() {
+	log.SetOutput(io.Discard)
+	if f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
+		os.Stderr = f
+	}
+}
+
 // watchMemory ends the process with exitMemory when the memory its Go runtime holds (mapped, less what it has
 // returned to the system) passes limit. It samples every millisecond, so it can overshoot; the operating
 // system's limit ([MaxRenderData]) is the hard bound.
@@ -174,6 +208,42 @@ func (c *capped) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	return c.buf.Write(p)
+}
+
+// fatalLine keeps the first line of the render process's stderr that starts with "fatal error: ", which is
+// the line the Go runtime writes first when it ends the process, up to maxFatalLine bytes, and drops the rest.
+type fatalLine struct {
+	line  []byte
+	found string
+}
+
+func (f *fatalLine) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 && f.found == "" {
+		i := bytes.IndexByte(p, '\n')
+		part := p
+		if i >= 0 {
+			part = p[:i]
+		}
+		f.line = append(f.line, part[:min(len(part), maxFatalLine-len(f.line))]...)
+		if i < 0 {
+			break
+		}
+		if bytes.HasPrefix(f.line, []byte("fatal error: ")) {
+			f.found = string(f.line)
+		}
+		f.line = f.line[:0]
+		p = p[i+1:]
+	}
+	return n, nil
+}
+
+// runtimeOutOfMemory reports whether line, the first fatal error line of a render process, is the Go
+// runtime's own end at a refused heap mapping ("fatal error: out of memory", "fatal error: runtime: out of
+// memory" and the like).
+func runtimeOutOfMemory(line string) bool {
+	msg, ok := strings.CutPrefix(line, "fatal error: ")
+	return ok && strings.Contains(msg, "out of memory")
 }
 
 // renderCommand returns the command of the render process: this binary with [renderProcessArg]. Tests replace
@@ -216,7 +286,8 @@ func runRenderProcess(ctx context.Context, in Input) (Result, error) {
 	cmd.Stdin = bytes.NewReader(payload)
 	out := &capped{max: maxRenderAnswer}
 	cmd.Stdout = out
-	cmd.Stderr = io.Discard
+	fatal := &fatalLine{}
+	cmd.Stderr = fatal
 	cmd.WaitDelay = time.Second
 	runErr := cmd.Run()
 	if err := ctx.Err(); err != nil {
@@ -230,30 +301,34 @@ func runRenderProcess(ctx context.Context, in Input) (Result, error) {
 		return Result{}, fmt.Errorf("%w: %w", errNotStarted, runErr)
 	}
 	if runErr != nil {
-		return Result{}, stopped(runErr)
+		return Result{}, stopped(runErr, fatal.found)
 	}
 	return decodeAnswer(answer, out.over)
 }
 
-// stopped turns the end of a render process that had set its limits and wrote no answer into a refusal: it
-// ran out of memory or CPU time, or kustomize crashed it (a Go stack overflow is not recoverable), and the
-// same build would end the same way on every retry.
-func stopped(err error) error {
+// stopped reads the end of a render process that had set its limits and wrote no answer. Only the ends the
+// process chose itself are refusals: its own exits at the memory sampling and at the CPU time limit, and the Go
+// runtime's exit when the data limit refused a heap mapping (fatal, the first fatal error line of its stderr).
+// The same build ends the same way on every retry. Any other end is an error for a retry: a signal, such as a
+// SIGKILL from the container's OOM killer while the executor held its memory, or another crash.
+func stopped(err error, fatal string) error {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
 		return fmt.Errorf("semdiff: wait for the render process: %w", err)
 	}
-	switch {
-	case exitErr.ExitCode() == exitFailed:
-		return fmt.Errorf("semdiff: the render process could not read its input or write its answer: %w", err)
-	case exitErr.ExitCode() == exitMemory:
+	switch code := exitErr.ExitCode(); {
+	case code == exitMemory:
 		return refuse(ReasonTooLarge, fmt.Sprintf("the render needs more than %d MiB of memory", MaxRenderMemory>>20))
-	case exitErr.ExitCode() == exitCPU, outOfCPU(exitErr):
+	case code == exitCPU:
 		return refuse(ReasonTooLarge, fmt.Sprintf("the render needs more than %d s of CPU time", MaxRenderCPUSeconds))
+	case code == exitRuntimeFatal && runtimeOutOfMemory(fatal):
+		return refuse(ReasonTooLarge, fmt.Sprintf("the render needs more than %d MiB of data mappings", MaxRenderData>>20))
+	case code == exitFailed:
+		return fmt.Errorf("semdiff: the render process could not read its input or write its answer: %w", err)
+	case code < 0:
+		return fmt.Errorf("semdiff: the render process was killed before it answered: %w", err)
 	}
-	return refuse(ReasonTooLarge, fmt.Sprintf(
-		"the render process stopped before it answered: at its limits of %d MiB of memory, %d MiB of data or %d s of CPU time, or by a crash",
-		MaxRenderMemory>>20, MaxRenderData>>20, MaxRenderCPUSeconds))
+	return fmt.Errorf("semdiff: the render process crashed before it answered: %w", err)
 }
 
 // decodeAnswer reads the answer of a render process that exited normally.
@@ -266,8 +341,19 @@ func decodeAnswer(data []byte, over bool) (Result, error) {
 	case a.Result != nil:
 		return *a.Result, nil
 	case a.Reason != "":
-		return Result{}, refuse(a.Reason, a.Detail)
+		if !a.Reason.known() {
+			return Result{}, errors.New("semdiff: the render process answered a reason the check does not give")
+		}
+		return Result{}, refuse(a.Reason, capDetail(a.Detail))
 	default:
 		return Result{}, errors.New("semdiff: the render process failed")
 	}
+}
+
+// capDetail cuts the detail of a refusal from the render process to maxRenderDetail bytes of valid UTF-8.
+func capDetail(d string) string {
+	if len(d) <= maxRenderDetail {
+		return d
+	}
+	return strings.ToValidUTF8(d[:maxRenderDetail], "")
 }

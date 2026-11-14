@@ -143,4 +143,4 @@ One task per step, filed when the ADR is accepted. Each refusal test must fail w
 
 ## Amendments
 
-None.
+- 2026-11-14: the render is no longer made in the executor's process. Since [ADR-0035](0035-render-check-in-a-limited-child-process.md) (#614) the render check runs in a child process of the executor's own binary, with operating system limits on its memory and CPU time, from the same files read through the Git provider. What the consequences above say about invariant 3 still holds: nothing is applied to the cluster, and the child has no token and reads only its input. The decision is unchanged.

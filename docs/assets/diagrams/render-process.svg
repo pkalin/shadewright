@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 600" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Render check in a limited child process</title>
+  <desc id="d">The executor's container, 384 Mi of memory and 500m of CPU, holds the executor and at most one render process. The executor validates the input of semdiff.Check, waits for the one render slot and starts its own binary again with one fixed argument and an empty environment. The render process sets its limits before it reads any input: 20 s of CPU time, 512 MiB of data mappings on Linux, 128 MiB of Go memory sampled every millisecond, and an OOM score adjustment of 1000. It writes a ready line, reads the input as JSON on stdin, renders before and after the change and writes one answer on stdout. The executor reads three kinds of end. An answer: a result, or a refusal with a known reason and a detail cut at 2 KiB. A TooLarge refusal: the render process's own exit at the memory sampling or the CPU limit, or the Go runtime's out of memory exit at the data limit. An error for a retry: no ready line, a kill by a signal such as the container's OOM killer, any other crash, an unreadable answer, or the step's context ending, which kills the process.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
+      .ok{fill:#7fd6c2;font-size:11.5px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="600" rx="18" fill="#0e0e16"/>
+
+  <!-- lanes -->
+  <rect class="lane" x="24" y="24" width="660" height="552" rx="14"/>
+  <text class="lanet" x="44" y="54">EXECUTOR CONTAINER (384Mi, 500m CPU)</text>
+  <rect class="lane" x="702" y="24" width="394" height="552" rx="14"/>
+  <text class="lanet" x="722" y="54">HOW THE CHECK ENDS</text>
+
+  <!-- executor -->
+  <rect class="box" x="48" y="80" width="290" height="200" rx="12"/>
+  <text class="h" x="68" y="110">Executor</text>
+  <text class="s" x="68" y="136">semdiff.Check</text>
+  <text class="s" x="68" y="162">1. validate the input</text>
+  <text class="s" x="68" y="184">2. wait for the one render slot</text>
+  <text class="s" x="68" y="206">3. start its own binary again,</text>
+  <text class="s" x="84" y="226">one fixed argument, empty env</text>
+  <text class="s" x="68" y="252">Go soft limit 230 MiB</text>
+  <text class="s" x="68" y="270">(60 percent of the container)</text>
+
+  <!-- render process -->
+  <rect class="key" x="374" y="80" width="290" height="200" rx="12"/>
+  <text class="h" x="394" y="110">Render process</text>
+  <text class="s" x="394" y="136">limits set before any input:</text>
+  <text class="s" x="394" y="162">CPU time 20 s (RLIMIT_CPU)</text>
+  <text class="s" x="394" y="184">data mappings 512 MiB (Linux)</text>
+  <text class="s" x="394" y="206">Go memory 128 MiB, sampled</text>
+  <text class="s" x="394" y="228">oom_score_adj 1000</text>
+  <text class="s" x="394" y="254">walk, render before and after,</text>
+  <text class="s" x="394" y="272">compare</text>
+
+  <!-- arrows between them -->
+  <path class="f" d="M338 140 H372" marker-end="url(#a)"/>
+  <path class="f" d="M374 230 H340" marker-end="url(#a)"/>
+  <text class="lbl" x="48" y="310">stdin: the input as JSON</text>
+  <text class="lbl" x="48" y="330">stdout: a ready line once the limits are set, then one answer (at most 64 KiB)</text>
+  <text class="lbl" x="48" y="350">stderr: only the first "fatal error:" line of the Go runtime is kept</text>
+
+  <!-- what the limits do not bound -->
+  <rect class="box" x="48" y="382" width="616" height="170" rx="12"/>
+  <text class="h" x="68" y="412">Same container, same user</text>
+  <text class="s" x="68" y="438">The limits bound memory and CPU time. The render process shares the</text>
+  <text class="s" x="68" y="460">executor's user, file system and network, so they do not bound what an</text>
+  <text class="s" x="68" y="482">exploited render could read. It holds no token and reads only its stdin.</text>
+  <text class="s" x="68" y="512">Memory: 230 MiB (executor) + 128 MiB (render process) = 358 MiB,</text>
+  <text class="s" x="68" y="534">26 MiB left for the executor's memory outside its Go runtime.</text>
+
+  <!-- ends -->
+  <rect class="box" x="722" y="80" width="354" height="128" rx="12"/>
+  <text class="ok" x="742" y="106">ANSWER</text>
+  <text class="s" x="742" y="132">a result, or a refusal with a reason the</text>
+  <text class="s" x="742" y="152">package gives and a detail cut at 2 KiB</text>
+  <text class="s" x="742" y="180">the check passes or refuses</text>
+  <text class="s" x="742" y="198">as it did in process</text>
+
+  <rect class="box" x="722" y="224" width="354" height="148" rx="12"/>
+  <text class="no" x="742" y="250">REFUSAL · TOOLARGE</text>
+  <text class="s" x="742" y="276">only ends the process chose:</text>
+  <text class="s" x="742" y="298">its exit at the memory sampling,</text>
+  <text class="s" x="742" y="318">its exit at the CPU time limit,</text>
+  <text class="s" x="742" y="338">the Go runtime's "out of memory"</text>
+  <text class="s" x="742" y="358">at the data limit</text>
+
+  <rect class="box" x="722" y="388" width="354" height="164" rx="12"/>
+  <text class="lbl" x="742" y="414">ERROR FOR A RETRY</text>
+  <text class="s" x="742" y="440">no ready line (did not start)</text>
+  <text class="s" x="742" y="462">killed by a signal (the container's</text>
+  <text class="s" x="742" y="482">OOM killer), any other crash</text>
+  <text class="s" x="742" y="504">no readable answer or unknown reason</text>
+  <text class="s" x="742" y="526">the step's context ended: the</text>
+  <text class="s" x="742" y="546">process is killed</text>
+
+  <path class="r" d="M664 150 H718" marker-end="url(#m)"/>
+  <path class="r" d="M664 250 C690 250 694 298 718 298" marker-end="url(#m)"/>
+  <path class="r" d="M664 270 C682 300 690 460 718 460" marker-end="url(#m)"/>
+</svg>

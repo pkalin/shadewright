@@ -20,7 +20,6 @@ package semdiff
 
 import (
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 )
@@ -33,10 +32,4 @@ func catchCPU() {
 		<-ch
 		os.Exit(exitCPU)
 	}()
-}
-
-// outOfCPU reports whether the render process was ended by SIGXCPU itself, before catchCPU was set.
-func outOfCPU(err *exec.ExitError) bool {
-	ws, ok := err.Sys().(syscall.WaitStatus)
-	return ok && ws.Signaled() && ws.Signal() == syscall.SIGXCPU
 }

@@ -37,7 +37,7 @@ const (
 	// (gityaml.MaxMappingKeys), what patches and transformers can add to the render ([MaxTransformBytes]), the
 	// keys and items patches can merge into one mapping or sequence of an object ([MaxMergedKeys]), the
 	// rendered objects ([MaxObjects]), or the memory or CPU time of the render process ([MaxRenderMemory],
-	// [MaxRenderData], [MaxRenderCPUSeconds]), which also ends a render that crashes.
+	// [MaxRenderData], [MaxRenderCPUSeconds]).
 	ReasonTooLarge Reason = "TooLarge"
 	// ReasonInvalidYAML means a kustomization file does not parse or has a duplicate key, or a file of the
 	// build is not UTF-8, does not parse, repeats a key in one mapping (#608), or uses YAML anchors, aliases or merge keys (a "<<" key, not a "<<" value), which kustomize would
@@ -117,5 +117,19 @@ var (
 	ErrSourceIgnored            = &Error{Reason: ReasonSourceIgnored}
 	ErrSchemaInvalid            = &Error{Reason: ReasonSchemaInvalid}
 )
+
+// known reports whether r is one of the reasons above: a refusal the render process answers with any other
+// reason is not read as a refusal ([decodeAnswer]).
+func (r Reason) known() bool {
+	switch r {
+	case ReasonInvalidInput, ReasonUnsupportedKustomization, ReasonInvalidReference, ReasonFileMissing,
+		ReasonTooLarge, ReasonInvalidYAML, ReasonRenderFailed, ReasonFileNotInBuild, ReasonTargetNotFound,
+		ReasonAmbiguousTarget, ReasonObjectsAddedOrRemoved, ReasonOtherObjectChanged, ReasonOtherFieldChanged,
+		ReasonPreviousValueDiffers, ReasonDesiredValueMissing, ReasonFieldNotFound, ReasonSourceIgnored,
+		ReasonSchemaInvalid:
+		return true
+	}
+	return false
+}
 
 func refuse(r Reason, detail string) error { return &Error{Reason: r, Detail: detail} }

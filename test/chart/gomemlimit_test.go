@@ -35,19 +35,21 @@ func goMemLimit(t *testing.T, r rendered, k string) string {
 	return found[0]
 }
 
-// TestGoMemLimitFollowsTheMemoryLimit: both containers get 90 percent of their memory limit in bytes, by
-// default and after a change to the limit, and the override wins (#601).
+// TestGoMemLimitFollowsTheMemoryLimit: the analyzer and the verifier get 90 percent of their memory limit in
+// bytes, the executor 60 percent (the rest is for its render process, ADR-0035), by default and after a change
+// to the limit, and the override wins (#601). The executor's default stays 241591910 bytes, as it was with 90
+// percent of the former 256Mi.
 func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
 	tests := map[string]struct {
 		set          []string
 		wantExecutor string
 		wantAnalyzer string
 	}{
-		"default 256Mi and 128Mi": {nil, "241591910", "120795955"},
-		"128Mi executor only":     {[]string{"executor.resources.limits.memory=128Mi"}, "120795955", "120795955"},
+		"default 384Mi and 128Mi": {nil, "241591910", "120795955"},
+		"128Mi executor only":     {[]string{"executor.resources.limits.memory=128Mi"}, "80530636", "120795955"},
 		"1Gi analyzer":            {[]string{"analyzer.resources.limits.memory=1Gi"}, "241591910", "966367641"},
-		"decimal 500M":            {[]string{"executor.resources.limits.memory=500M"}, "450000000", "120795955"},
-		"plain bytes":             {[]string{"executor.resources.limits.memory=134217728"}, "120795955", "120795955"},
+		"decimal 500M":            {[]string{"executor.resources.limits.memory=500M"}, "300000000", "120795955"},
+		"plain bytes":             {[]string{"executor.resources.limits.memory=134217728"}, "80530636", "120795955"},
 		"override":                {[]string{"executor.goMemLimit=100MiB", "analyzer.goMemLimit=64MiB"}, "100MiB", "64MiB"},
 	}
 	for name, tc := range tests {

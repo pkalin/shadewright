@@ -298,7 +298,9 @@ Takes a dict with .component and .context. Renders nothing when the result is em
 {{/*
 GOMEMLIMIT of one component's container, in bytes: the goMemLimit value when set (a Go memory limit such as
 "100MiB"), else 90 percent of resources.limits.memory, so the Go runtime collects before the heap reaches the
-limit and a bounded parse is not OOM-killed (#601). Takes a dict with .component and .context. Reads the limit
+limit and a bounded parse is not OOM-killed (#601). The executor's default is 60 percent instead: its container
+also holds the render process of the render check, which has its own limits outside the executor's Go runtime
+(ADR-0035). Takes a dict with .component and .context. Reads the limit
 as an integer or a Kubernetes quantity with a binary (Ki, Mi, Gi, Ti) or decimal (k, K, M, G, T) suffix; any
 other form (for example "1.5Gi" or "1e9") fails the render and asks for goMemLimit.
 */}}
@@ -315,6 +317,7 @@ other form (for example "1.5Gi" or "1e9") fails the render and asks for goMemLim
 {{- end }}
 {{- $mult := dict "" 1 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 "k" 1000 "K" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 }}
 {{- $bytes := mul (int64 (regexReplaceAll $re $q "${1}")) (int64 (index $mult (regexReplaceAll $re $q "${2}"))) }}
-{{- div (mul $bytes 90) 100 }}
+{{- $percent := ternary 60 90 (eq .component "executor") }}
+{{- div (mul $bytes $percent) 100 }}
 {{- end }}
 {{- end }}

@@ -17,6 +17,7 @@ limitations under the License.
 package semdiff
 
 import (
+	"os"
 	"syscall"
 )
 
@@ -34,3 +35,15 @@ func setLimits(memory, cpuSeconds uint64) error {
 
 // noDataLimit lifts the data limit, for a race build (raceBuild).
 const noDataLimit = ^uint64(0) // RLIM_INFINITY
+
+// preferOOMKill raises the render process's own OOM score adjustment to oomScoreAdj before it reads any input.
+// Raising it needs no privilege. A failed write is not fatal: the process has no one to tell (its stderr is
+// read only for the Go runtime's fatal error line), and the render runs with its other limits as before.
+func preferOOMKill() {
+	f, err := os.OpenFile("/proc/self/oom_score_adj", os.O_WRONLY, 0)
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(oomScoreAdj)
+	_ = f.Close()
+}

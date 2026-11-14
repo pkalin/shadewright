@@ -106,10 +106,11 @@ spec:
         resources:
           limits:
             cpu: 500m
-            # 256Mi: headroom for large real GitOps trees (#615). The Git input budgets (#495, #595, #482) stay the
-            # bound and were measured against 128Mi; growth from crafted input multiplies, so the limit is not the
-            # defence (#614).
-            memory: 256Mi
+            # 384Mi: the executor and one render process of the render check (ADR-0035). The executor's Go memory
+            # (about 230 MiB before its collector works harder) plus the render process at its memory limit (128 MiB
+            # of Go memory) is 358 MiB. The render process's own limits bound what crafted input can make a render
+            # grow (#614). These manifests set no GOMEMLIMIT; the chart does (60 percent of this limit).
+            memory: 384Mi
           requests:
             cpu: 10m
             memory: 64Mi

@@ -56,7 +56,7 @@ make kind >/dev/null
 KIND="${ROOT}/bin/kind"
 k() { kubectl --context "${CTX}" "$@"; }
 
-# alpine 3.22, pinned by digest: the render runs in it with a 128 MiB limit.
+# alpine 3.22, pinned by digest: the render runs in it with the executor's limits.
 ALPINE="alpine:3.22@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e7709c66b034"
 
 # Refuse to start when a cluster of that name exists: the cleanup below would delete it, and kind would not
@@ -200,7 +200,7 @@ done
 
 if [ "${RENDER}" = 1 ]; then
   echo
-  echo "== worst-case render in a container limited to 128 MiB (the executor's limit)"
+  echo "== worst-case render in a container limited to 384 MiB and 500m CPU (the executor's limits)"
   mkdir -p "${WORK}/render"
   CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" go build -o "${WORK}/render/render" ./hack/load/render
   # At the build budget (4), just over it (5, refused before the render), the old 16 MiB budget (15, refused),
@@ -213,7 +213,7 @@ if [ "${RENDER}" = 1 ]; then
   for args in "flat 4" "diamond 4" "flat 5" "diamond 5" "flat 15" "diamond 15" "tiny 1" "tiny 4" \
     "docs 4095" "heavy 4095" "patches 1708" "patches 3072" "docs 4096" "annotations 100" "annotations 101" "images 100" \
     "images 101" "dense 100" "dense 101" "denseseq 100" "denseannotations 100"; do
-    out="$(docker run --rm --memory=128m --memory-swap=128m -v "${WORK}/render:/r:ro" "${ALPINE}" \
+    out="$(docker run --rm --memory=384m --memory-swap=384m --cpus=0.5 -v "${WORK}/render:/r:ro" "${ALPINE}" \
       sh -c "/r/render ${args}; echo exit=\$?" 2>&1 | tail -2 | tr '\n' ' ')"
     echo "${args}: ${out}"
   done

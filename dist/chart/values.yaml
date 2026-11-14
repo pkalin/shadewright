@@ -145,8 +145,8 @@ executor:
     # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `executor.identity.azure.clientId`.
     # @section -- Executor
     annotations: {}
-  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit: the Go runtime then collects before the heap reaches the container's limit, and a large but bounded parse is not OOM-killed. Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1.5Gi`: the chart then refuses to render) or for another margin.
-  # @default -- 90 percent of `resources.limits.memory`
+  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 60 percent of `resources.limits.memory` (241591910 bytes, about 230 MiB, with the default 384Mi), so it follows that limit: the Go runtime then collects before the heap reaches its share, and a large but bounded parse is not OOM-killed. The other 40 percent is for the render process of the render check, a child of the executor in the same container with its own limits (ADR-0035). Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1.5Gi`: the chart then refuses to render) or for another margin.
+  # @default -- 60 percent of `resources.limits.memory`
   # @section -- Executor
   goMemLimit: ""
   resources:
@@ -155,11 +155,13 @@ executor:
       # @section -- Executor
       cpu: 500m
       # -- Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never
-      # unbounded. 256Mi gives headroom for large real GitOps trees (#615); the Git input budgets (#495, #595, #482)
-      # stay the bound and were measured against 128Mi, and growth from crafted input multiplies, so the limit is not
-      # the defence (#614).
+      # unbounded. It covers the executor and one render process of the render check (ADR-0035): the executor's Go
+      # soft limit (60 percent, 230 MiB) plus the render process at its memory limit (128 MiB of Go memory, 125 MiB
+      # resident when measured) is 358 MiB, which leaves 26 MiB for the executor's memory outside its Go runtime. The
+      # render process's own limits bound what crafted input can make a render grow (#614); the Git input budgets
+      # (#495, #595, #482) refuse most large builds before it runs.
       # @section -- Executor
-      memory: 256Mi
+      memory: 384Mi
     requests:
       # -- CPU request.
       # @section -- Executor

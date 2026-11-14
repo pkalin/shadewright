@@ -124,6 +124,7 @@ nav = [
       { "0034 Declarative packs" = "adr/0034-declarative-pack-format.md" },
       { "0035 Render process limits" = "adr/0035-render-check-in-a-limited-child-process.md" },
       { "0036 ScaledObject for the model" = "adr/0036-the-model-sees-the-scaledobject-of-a-keda-incident.md" },
+      { "0037 Anthropic API provider" = "adr/0037-the-anthropic-api-as-a-second-model-provider.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

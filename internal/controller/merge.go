@@ -24,10 +24,12 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -75,6 +77,46 @@ func recordMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest
 		return
 	}
 	markNoMergeReceipt(rr)
+}
+
+// errMergeCheck marks a failed check of the plan at the merge (checkAtMerge): the merge is not recorded, and the
+// look at the pull request is retried; the caller never goes on to a check that reads Git, since a merged change
+// makes the plan look stale there.
+var errMergeCheck = errors.New("the plan could not be checked at the merge")
+
+// checkAtMerge runs the reduced freshness check of ADR-0041 section 2 (freshness.Checker.CheckAtMerge, #737) on a
+// request whose pull request was seen merged, right before the caller records the merge, in every path that does
+// (watchStep, endMerged, recordHandoff). The periodic check marks a stale plan only every freshRecheckInterval, so a
+// person who merges after a change of the policy, the settings or the target and before that check would
+// otherwise end a stale plan as a fresh one. It reads the API server only, compares the recorded plan with what
+// it holds now, and compares no timestamp.
+//
+// A stale plan gets the stale mark (PlanFresh False with the stale reason) in rr, not written: the caller's write
+// that sets Merged carries it, and capStaleSuccess caps the good end as for a stale plan Shadewright could not
+// close (#199). A request that already carries the mark keeps it, unchecked. A read that fails, or a context that
+// ended, is returned wrapped in errMergeCheck with nothing set, for a retry: it is never taken as fresh.
+func (r *RemediationRequestReconciler) checkAtMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	if staleMark(rr) != nil {
+		return nil
+	}
+	err := freshness.Checker{Reader: r.reader()}.CheckAtMerge(ctx, rr)
+	if err == nil {
+		return nil
+	}
+	staleErr, ok := errors.AsType[*freshness.StaleError](err)
+	if !ok {
+		return fmt.Errorf("%w: %w", errMergeCheck, err)
+	}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPlanFresh,
+		Status:             metav1.ConditionFalse,
+		Reason:             staleErr.Reason,
+		Message:            "The plan was stale when the merge was seen: " + staleErr.Message,
+		ObservedGeneration: rr.Generation,
+	})
+	logf.FromContext(ctx).Info("Found the plan of RemediationRequest stale at the merge",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "reason", staleErr.Reason)
+	return nil
 }
 
 // markNoMergeReceipt sets condition Verified Unknown with reason NoMergeReceipt in the status about to be written.
@@ -179,6 +221,22 @@ func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alph
 		left = mergeCommitWaitRemaining(since.Time, r.now())
 	}
 	return max(left, stepDelay)
+}
+
+// mergeNotRecorded is recheck's answer to a look that found the pull request merged without recording the merge:
+// merged is true, and nothing else runs, for prMergeCommitPending (looked at again until the host reports the
+// merge commit or the wait ends) and prMergeUnchecked (the plan could not be checked at the merge: lookErr is
+// returned for the error backoff). The full freshness check never runs on a merged change, which makes the plan
+// look stale.
+func (r *RemediationRequestReconciler) mergeNotRecorded(rr *remediationv1alpha1.RemediationRequest, outcome prOutcome,
+	lookErr error) (res ctrl.Result, merged bool, err error) {
+	switch outcome {
+	case prMergeCommitPending:
+		return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, true, nil
+	case prMergeUnchecked:
+		return ctrl.Result{}, true, lookErr
+	}
+	return ctrl.Result{}, false, nil
 }
 
 // setVerifiedUnknown sets condition Verified Unknown in the status about to be written.

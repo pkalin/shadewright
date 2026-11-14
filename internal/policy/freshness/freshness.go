@@ -504,12 +504,19 @@ func (c Checker) recheckInputs(ctx context.Context, rr *v1alpha1.RemediationRequ
 // repository entry of the plan.
 func (c Checker) loadPlan(ctx context.Context, rr *v1alpha1.RemediationRequest) (*v1alpha1.RemediationPolicy,
 	*v1alpha1.RemediationSettings, v1alpha1.GitRepository, error) {
+	return c.loadPlanOf(ctx, rr, true)
+}
+
+// loadPlanOf is loadPlan; with pausable false a pause is not tested, for the check at the merge, which writes
+// nothing to Git and must not let a pause hide a stale plan.
+func (c Checker) loadPlanOf(ctx context.Context, rr *v1alpha1.RemediationRequest, pausable bool) (
+	*v1alpha1.RemediationPolicy, *v1alpha1.RemediationSettings, v1alpha1.GitRepository, error) {
 	src := rr.Status.Source
 	// Settings first: while writes are paused nothing else is decided, because a stale plan leads to a
 	// write (closing its change request).
 	settings := &v1alpha1.RemediationSettings{}
 	settingsErr := c.Reader.Get(ctx, client.ObjectKey{Name: v1alpha1.SettingsName}, settings)
-	if settingsErr == nil && Paused(settings) {
+	if pausable && settingsErr == nil && Paused(settings) {
 		return nil, nil, v1alpha1.GitRepository{}, ErrPaused
 	}
 	pol := &v1alpha1.RemediationPolicy{}
@@ -546,6 +553,43 @@ func (c Checker) loadPlan(ctx context.Context, rr *v1alpha1.RemediationRequest) 
 		return nil, nil, v1alpha1.GitRepository{}, stale(ReasonPlanChanged, "The plan, its source or the repository settings changed")
 	}
 	return pol, settings, repo, nil
+}
+
+// CheckAtMerge is the reduced check for a pull request seen merged (ADR-0041 section 2, #737), run before the
+// merge is recorded. It reads only the API server (Reader, never a cache) and nothing in Git or Flux: after the
+// merge the target file and the live field hold the new value, so the comparisons of [Checker.Check] with the
+// previous value would call every merged plan stale. It compares what the plan recorded with what the API server
+// holds now: the policy UID and revision, the module of the action still enabled, the repository entry and its
+// target branch, the plan digest, and the target's UID and the policy's object selector. A pause is not tested:
+// the check writes nothing, and a pause must not hide a stale plan. It compares no timestamp.
+//
+// It returns nil when all of them match, a [*StaleError] when one definitely changed (a policy, settings object or
+// target that is not found included), and another error when a read failed or the context ended: neither fresh
+// nor stale, and the caller retries.
+func (c Checker) CheckAtMerge(ctx context.Context, rr *v1alpha1.RemediationRequest) error {
+	if rr.Status.PlanDigest == "" || rr.Status.Source == nil {
+		return errors.New("the request has no plan digest")
+	}
+	pol, _, _, err := c.loadPlanOf(ctx, rr, false)
+	if err != nil {
+		return err
+	}
+	ref := rr.Spec.TargetRef
+	live, err := c.readTarget(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if string(live.GetUID()) != string(ref.UID) {
+		return stale(ReasonTargetChanged, "%s %s/%s has another UID than the plan names", ref.Kind, ref.Namespace, ref.Name)
+	}
+	if reason, msg := policy.CheckObjectSelector(pol, live.GetLabels()); reason != "" {
+		return stale(ReasonTargetChanged, "%s", msg)
+	}
+	// A read that answered as the context ended may have been cut short: no verdict then.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("the plan was checked at the merge, but the check ran out of time: %w", err)
+	}
+	return nil
 }
 
 // readTarget reads the live target straight from the API server.

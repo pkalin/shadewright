@@ -847,6 +847,11 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 	if ref != nil {
 		return r.mergedForeign(ctx, rr, ref)
 	}
+	// The reduced freshness check at the merge (ADR-0041): a stale plan is marked in the write below, a failed
+	// read is returned for a retry with nothing written.
+	if err := r.checkAtMerge(ctx, rr); err != nil {
+		return err
+	}
 	markClosed(rr, ReasonChangeRequestMerged, "was merged")
 	recordMerge(ctx, rr, cr)
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "The pull request was merged")
@@ -1057,6 +1062,10 @@ const (
 	// prMergeCommitPending: merged, and the executor waits for the Git host to report the merge commit
 	// (awaitMergeCommit). Nothing else is done meanwhile: a merged change makes the plan look stale.
 	prMergeCommitPending
+	// prMergeUnchecked: merged, and the check of the plan at the merge (checkAtMerge) could not read what it
+	// needs. Nothing is recorded and nothing else is done: the error is retried, and the full freshness check is
+	// not run on a merged change, which makes the plan look stale.
+	prMergeUnchecked
 )
 
 // watchPullRequest looks at the recorded pull request: a merge ends the request (Merged), a pull request
@@ -1084,6 +1093,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prConflicted, nil
 	case errors.Is(err, errMergeCommitPending):
 		return prMergeCommitPending, nil
+	case errors.Is(err, errMergeCheck):
+		return prMergeUnchecked, err
 	}
 	caughtUp := false
 	if ctx.Err() == nil {
@@ -1246,6 +1257,11 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 			return hintLook{}, err
 		case left > 0:
 			return hintLook{}, errMergeCommitPending
+		}
+		// A plan that became stale since the last full recheck is marked in the write that records the merge;
+		// a failed read records nothing (errMergeCheck).
+		if err := r.checkAtMerge(ctx, rr); err != nil {
+			return hintLook{}, err
 		}
 		recordMerge(ctx, rr, cr)
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,

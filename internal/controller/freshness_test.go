@@ -538,6 +538,102 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
 	})
 
+	// The lab case of #737: the policy is edited after the plan, and a person merges before any full recheck saw
+	// it. The look at the pull request checks the plan at the merge, so the request carries the stale mark and
+	// never ends as a success.
+	It("marks a plan stale when the policy changed before a merge that no full recheck saw (#737)", func() {
+		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 90
+		Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+		sha, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha), "the merge is recorded in the same write")
+		Expect(got.Status.MergeReceipt).NotTo(BeNil())
+		c := planFresh()
+		Expect(c).NotTo(BeNil())
+		Expect(c.Status).To(Equal(metav1.ConditionFalse))
+		Expect(c.Reason).To(Equal(freshness.ReasonPolicyChanged))
+		Expect(stalePlanMerged(got)).To(BeTrue())
+		Expect(breakerOutcome(got)).To(Equal(outcomeNone), "a stale plan merged is never a success")
+		Expect(closes.Load()).To(BeZero(), "a merged pull request is not closed")
+
+		// The cap ends it Inconclusive where it would have ended Succeeded (or kept Merged with verification off).
+		done, err := reconciler().capStaleSuccess(ctx, got)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(done).To(BeTrue())
+		ended := fetch()
+		Expect(ended.Status.Phase).To(Equal(remediationv1alpha1.PhaseInconclusive))
+		verified := meta.FindStatusCondition(ended.Status.Conditions, remediationv1alpha1.ConditionVerified)
+		Expect(verified).NotTo(BeNil())
+		Expect(verified.Reason).To(Equal(ReasonStalePlanMerged))
+		Expect(verified.Message).To(Equal(fmt.Sprintf("Pull request #%d was merged with a plan that was stale "+
+			"when the merge was recorded (%s, see PlanFresh); the change is not reported as a success", cr.Number,
+			freshness.ReasonPolicyChanged)))
+		Expect(breakerOutcome(ended)).To(Equal(outcomeNone))
+	})
+
+	It("records a merge as fresh when nothing changed, although Git and the live target hold the new value", func() {
+		// After the merge the target file holds the new value, which the full check would call stale.
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(planFresh()).To(BeNil())
+		Expect(stalePlanMerged(got)).To(BeFalse())
+	})
+
+	It("records nothing while the plan cannot be checked at the merge, then checks it again (#737)", func() {
+		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 90
+		Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		var fail atomic.Bool
+		fail.Store(true)
+		r := reconciler()
+		r.APIReader = failingPolicyReader{Reader: k8sClient, fail: fail.Load}
+		before := fetch()
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(MatchError(errMergeCheck))
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(got.Status.MergeReceipt).To(BeNil())
+		Expect(got.ResourceVersion).To(Equal(before.ResourceVersion), "nothing is written")
+		Expect(closes.Load()).To(BeZero())
+
+		fail.Store(false)
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonPolicyChanged))
+	})
+
+	It("marks a stale plan when a merge of a pull request never recorded is found (#737)", func() {
+		// Its open lost its status write (#524): no pull request recorded.
+		got := fetch()
+		got.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+		got.Status.PullRequest = nil
+		meta.RemoveStatusCondition(&got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 90
+		Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		merged := changeRequest()
+		Expect(merged.State).To(Equal(providers.ChangeRequestMerged))
+		err = reconciler().endMerged(ctx, git, fetch(), merged)
+		Expect(err).To(MatchError(errStopped))
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonPolicyChanged))
+		Expect(stalePlanMerged(got)).To(BeTrue())
+	})
+
 	// forgetPullRequest stands for a request whose pull request open lost its status write (#524): no pull
 	// request is recorded, though the branch's pull request carries the request's marker.
 	forgetPullRequest := func(rr *remediationv1alpha1.RemediationRequest) {

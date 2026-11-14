@@ -103,7 +103,8 @@ const (
 	// ReasonVerificationDisabled: the executor runs without --verify-outcomes and found the request in
 	// WaitingForDelivery or Verifying, which nothing moves on with the flag off (Inconclusive at once).
 	ReasonVerificationDisabled = "VerificationDisabled"
-	// ReasonStalePlanMerged: a person merged the pull request of a plan Shadewright knew was stale (#199), and the
+	// ReasonStalePlanMerged: a person merged the pull request of a plan that was stale when the merge was recorded
+	// (marked before the merge and not closed, #199, or found stale by the check at the merge, #737), and the
 	// request would otherwise have ended in a state the circuit breaker counts as a success: Succeeded, or, with
 	// --verify-outcomes off, Merged once its rollout check is over, whether the rollout report is good or bad
 	// (Inconclusive; RolledOut keeps the report). With verification on a failure still ends Failed.
@@ -716,9 +717,10 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 	return nil
 }
 
-// stalePlanMerged reports whether rr, merged, carries the plan Shadewright knew was stale when a person merged it:
-// PlanFresh False with a stale reason, which stop keeps on Merged only after the Git host refused to close the pull
-// request (#199).
+// stalePlanMerged reports whether rr, merged, carries the plan Shadewright knew was stale when its merge was
+// recorded: PlanFresh False with a stale reason, which stop keeps on Merged. It is there when the periodic check
+// marked the plan before the merge and the close did not happen or the Git host refused it (#199), or when the
+// check at the merge found the plan stale (checkAtMerge, #737).
 func stalePlanMerged(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 	return c != nil && c.Status == metav1.ConditionFalse && staleReasons[c.Reason] && !beforeMerge(rr.Status.Phase)
@@ -745,6 +747,6 @@ func (r *RemediationRequestReconciler) capStaleSuccess(ctx context.Context, rr *
 		number = rr.Status.PullRequest.Number
 	}
 	return true, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive, ReasonStalePlanMerged,
-		fmt.Sprintf("A person merged pull request #%d of a plan Shadewright knew was stale (%s) and could not close; "+
-			"the change is not reported as a success", number, c.Reason))
+		fmt.Sprintf("Pull request #%d was merged with a plan that was stale when the merge was recorded (%s, see "+
+			"PlanFresh); the change is not reported as a success", number, c.Reason))
 }

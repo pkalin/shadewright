@@ -33,3 +33,6 @@ func preferOOMKill() {}
 
 // noDataLimit is unused here: setLimits fails.
 const noDataLimit = 0
+
+// residentBytes reads nothing: no render process runs here (setLimits fails), so the parent does not watch the render process's resident memory.
+func residentBytes(int) (uint64, bool) { return 0, false }

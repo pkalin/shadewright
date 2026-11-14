@@ -200,7 +200,7 @@ done
 
 if [ "${RENDER}" = 1 ]; then
   echo
-  echo "== worst-case render in a container limited to 384 MiB and 500m CPU (the executor's limits)"
+  echo "== worst-case render in a container limited to 512 MiB and 500m CPU (the executor's limits)"
   mkdir -p "${WORK}/render"
   CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" go build -o "${WORK}/render/render" ./hack/load/render
   # At the build budget (4), just over it (5, refused before the render), the old 16 MiB budget (15, refused),
@@ -209,11 +209,12 @@ if [ "${RENDER}" = 1 ]; then
   # refused before the render) (design 8.2.2, #488). Untargeted patches at the transform budget (patches 1708),
   # and at the document bound (patches 3072, refused before the render since #626). The build budget with an
   # annotation, an image override or a value of many small nodes at the transform budget (100 percent), and just
-  # over it (101, refused before the render) (#495).
+  # over it (101, refused before the render) (#495). A value moved into a name copied into 1,000 references,
+  # past the estimates: 16 KiB renders, 64 KiB is stopped by the render process's limits (#614, ADR-0035).
   for args in "flat 4" "diamond 4" "flat 5" "diamond 5" "flat 15" "diamond 15" "tiny 1" "tiny 4" \
     "docs 4095" "heavy 4095" "patches 1708" "patches 3072" "docs 4096" "annotations 100" "annotations 101" "images 100" \
-    "images 101" "dense 100" "dense 101" "denseseq 100" "denseannotations 100"; do
-    out="$(docker run --rm --memory=384m --memory-swap=384m --cpus=0.5 -v "${WORK}/render:/r:ro" "${ALPINE}" \
+    "images 101" "dense 100" "dense 101" "denseseq 100" "denseannotations 100" "chained 16" "chained 64"; do
+    out="$(docker run --rm --memory=512m --memory-swap=512m --cpus=0.5 -v "${WORK}/render:/r:ro" "${ALPINE}" \
       sh -c "/r/render ${args}; echo exit=\$?" 2>&1 | tail -2 | tr '\n' ' ')"
     echo "${args}: ${out}"
   done

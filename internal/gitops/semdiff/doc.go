@@ -37,8 +37,9 @@ limitations under the License.
 // since Flux would filter the files by it. Path rules are shared with the source mapping
 // (internal/gitops/repopath).
 //
-// The walk, both renders and the comparison of [Check] run in that render process, one at a time, with
-// operating system limits on its memory and CPU time ([MaxRenderMemory], [MaxRenderData],
+// The walk, both renders and the comparison of [Check] run in that render process, one at a time, with limits
+// on its memory and CPU time: its own memory sampling ([MaxRenderMemory]), the parent's reading of its resident
+// memory ([MaxRenderResident]) and operating system limits ([MaxRenderData], a partial guard, and
 // [MaxRenderCPUSeconds]). The walk's budgets are estimates of what a render grows to; the process limits bound
 // it whatever the estimate misses, and a render that reaches them is refused with ReasonTooLarge instead of
 // ending the executor (#614, ADR-0035). The wait for a turn and the render process honour the context.

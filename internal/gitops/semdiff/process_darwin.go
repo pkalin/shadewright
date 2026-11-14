@@ -34,3 +34,6 @@ const noDataLimit = 0
 
 // preferOOMKill does nothing on macOS, which has no OOM score; see process_linux.go.
 func preferOOMKill() {}
+
+// residentBytes reads nothing: macOS, used for development only, has no /proc, so the parent does not watch the render process's resident memory.
+func residentBytes(int) (uint64, bool) { return 0, false }

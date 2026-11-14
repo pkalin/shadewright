@@ -17,8 +17,13 @@ limitations under the License.
 package chart
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 )
 
 func goMemLimit(t *testing.T, r rendered, k string) string {
@@ -36,7 +41,7 @@ func goMemLimit(t *testing.T, r rendered, k string) string {
 }
 
 // TestGoMemLimitFollowsTheMemoryLimit: the analyzer and the verifier get 90 percent of their memory limit in
-// bytes, the executor 60 percent (the rest is for its render process, ADR-0035), by default and after a change
+// bytes, the executor 45 percent (the rest is for its render process, ADR-0035), by default and after a change
 // to the limit, and the override wins (#601). The executor's default stays 241591910 bytes, as it was with 90
 // percent of the former 256Mi.
 func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
@@ -45,11 +50,11 @@ func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
 		wantExecutor string
 		wantAnalyzer string
 	}{
-		"default 384Mi and 128Mi": {nil, "241591910", "120795955"},
-		"128Mi executor only":     {[]string{"executor.resources.limits.memory=128Mi"}, "80530636", "120795955"},
+		"default 512Mi and 128Mi": {nil, "241591910", "120795955"},
+		"128Mi executor only":     {[]string{"executor.resources.limits.memory=128Mi"}, "60397977", "120795955"},
 		"1Gi analyzer":            {[]string{"analyzer.resources.limits.memory=1Gi"}, "241591910", "966367641"},
-		"decimal 500M":            {[]string{"executor.resources.limits.memory=500M"}, "300000000", "120795955"},
-		"plain bytes":             {[]string{"executor.resources.limits.memory=134217728"}, "80530636", "120795955"},
+		"decimal 1000M":           {[]string{"executor.resources.limits.memory=1000M"}, "450000000", "120795955"},
+		"plain bytes":             {[]string{"executor.resources.limits.memory=134217728"}, "60397977", "120795955"},
 		"override":                {[]string{"executor.goMemLimit=100MiB", "analyzer.goMemLimit=64MiB"}, "100MiB", "64MiB"},
 	}
 	for name, tc := range tests {
@@ -66,6 +71,28 @@ func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
 				t.Errorf("verifier GOMEMLIMIT = %s, want 120795955", got)
 			}
 		})
+	}
+}
+
+// TestExecutorMemoryLimitHoldsARenderProcess checks the executor's memory budget with the default values
+// (ADR-0035): its Go soft limit, plus the render process's resident limit (semdiff.MaxRenderResident, where
+// the executor kills it), plus the margin (semdiff.RenderOutsideData), fits in the container's memory limit.
+// On cgroup v2 a container OOM ends the executor with the render process, so a render the samplers stop must
+// not cause one; the test fails when either side changes.
+func TestExecutorMemoryLimitHoldsARenderProcess(t *testing.T) {
+	r := defaultRender(t)
+	limit, ok := container(t, r, executorDeployment).Resources.Limits[corev1.ResourceMemory]
+	if !ok {
+		t.Fatal("the executor has no memory limit")
+	}
+	soft, err := strconv.ParseInt(goMemLimit(t, r, executorDeployment), 10, 64)
+	if err != nil {
+		t.Fatalf("the executor's GOMEMLIMIT is not in bytes: %v", err)
+	}
+	need := soft + semdiff.MaxRenderResident + semdiff.RenderOutsideData
+	if need > limit.Value() {
+		t.Fatalf("GOMEMLIMIT %d + MaxRenderResident %d + RenderOutsideData %d = %d bytes, over the memory limit %s (%d)",
+			soft, semdiff.MaxRenderResident, semdiff.RenderOutsideData, need, limit.String(), limit.Value())
 	}
 }
 

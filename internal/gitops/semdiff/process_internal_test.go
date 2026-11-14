@@ -21,8 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +58,14 @@ func runHelper(mode string) int {
 	case "crash": // a fatal error of the Go runtime other than a refused mapping
 		ready()
 		_, _ = os.Stderr.WriteString("fatal error: stack overflow\n\nruntime stack:\n")
+		return exitRuntimeFatal
+	case "oommeta": // the Go runtime's end when a mapping of its own metadata is refused
+		ready()
+		_, _ = os.Stderr.WriteString("fatal error: runtime: cannot allocate memory\n\nruntime stack:\n")
+		return exitRuntimeFatal
+	case "segv": // the Go runtime's crash when its collector cannot map its work queue at the data limit
+		ready()
+		_, _ = os.Stderr.WriteString("SIGSEGV: segmentation violation\nPC=0x41b48 m=2 sigcode=1 addr=0x0\n")
 		return exitRuntimeFatal
 	case "oom": // the Go runtime's end at a heap mapping the data limit refused, after some other output
 		ready()
@@ -97,6 +107,17 @@ func runHelper(mode string) int {
 		for x := 0; ; x++ {
 			_ = x
 		}
+	case "resident": // the real limits without the process's own memory sampling, then memory touched until killed
+		sampleMemory = false
+		if limitRenderProcess() != nil {
+			return exitFailed
+		}
+		debug.SetMemoryLimit(math.MaxInt64) // no collector working harder near the soft limit
+		ready()
+		for range 1024 { // 4 GiB, held, at most
+			sink = append(sink, bytes.Repeat([]byte{1}, 4<<20))
+		}
+		return 0
 	case "data": // the real data limit, 64 MiB above what the process holds at the start (Linux only)
 		if err := setLimits(vmData()+64<<20, MaxRenderCPUSeconds); err != nil {
 			return exitFailed
@@ -152,9 +173,11 @@ func TestRenderProcessEnds(t *testing.T) {
 	}{
 		"silent":  {retry: errNotStarted},
 		"memory":  {refusal: "more than 128 MiB of memory"},
-		"oom":     {refusal: "more than 512 MiB of data mappings"},
+		"oom":     {refusal: fmt.Sprintf("more than %d MiB of data mappings", MaxRenderData>>20)},
 		"cpu":     {refusal: "more than 20 s of CPU time"},
+		"oommeta": {refusal: fmt.Sprintf("more than %d MiB of data mappings", MaxRenderData>>20)},
 		"crash":   {says: "crashed"},
+		"segv":    {says: "crashed"},
 		"killed":  {says: "was killed"},
 		"failed":  {},
 		"garbage": {},
@@ -216,7 +239,8 @@ func TestReasonsKnown(t *testing.T) {
 }
 
 // TestRenderProcessOOMScore checks that the render process raises its own OOM score adjustment to the most
-// before it reads its input, so that the container's OOM killer ends it and not the executor (Linux only).
+// before it reads its input, so that an OOM killer that ends one process picks it and not the executor (Linux
+// only; on cgroup v2 the kubelet's default ends the whole container, see oomScoreAdj).
 func TestRenderProcessOOMScore(t *testing.T) {
 	if _, err := os.Stat("/proc/self/oom_score_adj"); err != nil {
 		t.Skip("no OOM score here (Linux only)")
@@ -304,6 +328,23 @@ func TestRenderProcessDataLimit(t *testing.T) {
 	if err := stopped(err, fatal.found); !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "data mappings") {
 		t.Fatalf("got %v from the first fatal line %q, want TooLarge at the data limit", err, fatal.found)
 	}
+}
+
+// TestRenderProcessResident checks the parent's second memory bound (Linux only): a render process whose
+// memory outruns its own sampling (here turned off, standing in for a burst between two samples) is killed by
+// the parent past its resident limit, and the check is refused with TooLarge, not retried.
+func TestRenderProcessResident(t *testing.T) {
+	if _, ok := residentBytes(os.Getpid()); !ok {
+		t.Skip("no resident memory to read here (Linux only)")
+	}
+	withHelper(t, "resident")
+	start := time.Now()
+	_, err := runRenderProcess(context.Background(), Input{})
+	want := fmt.Sprintf("more than %d MiB of resident memory", residentLimit()>>20)
+	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("got %v, want TooLarge naming %q", err, want)
+	}
+	t.Logf("killed after %s", time.Since(start))
 }
 
 func firstLine(s string) string {

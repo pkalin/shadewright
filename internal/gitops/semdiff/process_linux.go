@@ -17,6 +17,7 @@ limitations under the License.
 package semdiff
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 )
@@ -36,9 +37,10 @@ func setLimits(memory, cpuSeconds uint64) error {
 // noDataLimit lifts the data limit, for a race build (raceBuild).
 const noDataLimit = ^uint64(0) // RLIM_INFINITY
 
-// preferOOMKill raises the render process's own OOM score adjustment to oomScoreAdj before it reads any input.
-// Raising it needs no privilege. A failed write is not fatal: the process has no one to tell (its stderr is
-// read only for the Go runtime's fatal error line), and the render runs with its other limits as before.
+// preferOOMKill raises the render process's own OOM score adjustment to oomScoreAdj before it reads any input,
+// which helps only where the OOM killer ends one process (see oomScoreAdj). Raising it needs no privilege. A
+// failed write is not fatal: the process has no one to tell (its stderr is read only for the Go runtime's fatal
+// error line), and the render runs with its other limits as before.
 func preferOOMKill() {
 	f, err := os.OpenFile("/proc/self/oom_score_adj", os.O_WRONLY, 0)
 	if err != nil {
@@ -46,4 +48,18 @@ func preferOOMKill() {
 	}
 	_, _ = f.WriteString(oomScoreAdj)
 	_ = f.Close()
+}
+
+// residentBytes reads the resident memory of the process pid from /proc/<pid>/statm (its second field, in
+// pages). It reports false when the file cannot be read or parsed, for example once the process has ended.
+func residentBytes(pid int) (uint64, bool) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/statm", pid))
+	if err != nil {
+		return 0, false
+	}
+	var size, resident uint64
+	if _, err := fmt.Sscan(string(b), &size, &resident); err != nil {
+		return 0, false
+	}
+	return resident * uint64(os.Getpagesize()), true
 }

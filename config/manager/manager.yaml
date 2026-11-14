@@ -106,11 +106,12 @@ spec:
         resources:
           limits:
             cpu: 500m
-            # 384Mi: the executor and one render process of the render check (ADR-0035). The executor's Go memory
-            # (about 230 MiB before its collector works harder) plus the render process at its memory limit (128 MiB
-            # of Go memory) is 358 MiB. The render process's own limits bound what crafted input can make a render
-            # grow (#614). These manifests set no GOMEMLIMIT; the chart does (60 percent of this limit).
-            memory: 384Mi
+            # 512Mi: the executor and one render process of the render check (ADR-0035). The executor's Go soft
+            # limit (about 230 MiB) plus the render process's resident limit (192 MiB, where the executor kills it)
+            # plus a 64 MiB margin is 486 MiB, so a render the samplers stop does not set off a container OOM,
+            # which on cgroup v2 ends the executor too. These manifests set no GOMEMLIMIT; the chart does (45
+            # percent of this limit, 230 MiB).
+            memory: 512Mi
           requests:
             cpu: 10m
             memory: 64Mi

@@ -29,6 +29,7 @@ import (
 	"runtime/debug"
 	"runtime/metrics"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,16 +42,30 @@ const (
 	// returned to the system). The process samples it every millisecond and exits with a refusal past it, and
 	// sets Go's soft memory limit to three quarters of it so that the collector works harder first. The render
 	// check of the test suite peaks at 46 MiB (design 8.2.2 measured 45 to 78 MiB of Go heap at the input
-	// budgets), so this leaves room for honest builds. The executor's container holds the executor and one
-	// render process: its memory limit (384 Mi in the chart) covers the executor's Go soft limit (230 MiB) plus
-	// this and the render process's memory outside its Go runtime (ADR-0035).
+	// budgets), so this leaves room for honest builds.
 	MaxRenderMemory = 128 << 20
-	// MaxRenderData is the hard memory limit the operating system enforces on the render process: its private
-	// writable mappings (RLIMIT_DATA, Linux). It counts address space, not resident memory, and the process
-	// starts with about 135 MiB of it (the binary's data and the Go runtime's own reservations); at the render
-	// check's 46 MiB of Go memory it held 216 MiB. It is set above what [MaxRenderMemory] allows, so it stops
-	// only a burst the sampling misses, and then the Go runtime ends the process ("out of memory").
-	MaxRenderData = 512 << 20
+	// MaxRenderResident is the resident memory the render process may hold (Linux, /proc/<pid>/statm). The
+	// parent reads it every millisecond while it waits and kills the process past it, which is a refusal:
+	// a second sampler, in another process, for a render whose Go memory outruns the process's own sampling. The
+	// executor's render process held at most 145 MiB on builds that pass and 179 MiB when its own sampling
+	// stopped it at [MaxRenderMemory] (ADR-0035, Linux arm64; the binary's text is about 44 MiB of it). The
+	// executor's memory limit holds its Go soft limit, this and [RenderOutsideData] (a chart test checks the
+	// sum), so on cgroup v2, where a container OOM ends the executor too, a render the samplers stop does not
+	// reach it. Both are samplers, not a kernel guarantee: a burst between two samples can pass it.
+	MaxRenderResident = 192 << 20
+	// RenderOutsideData is the room the executor's memory limit keeps besides the executor's Go soft limit and
+	// [MaxRenderResident]: memory the Go soft limit does not count (the executor's binary text, stacks, pipe
+	// buffers, page tables) and what a render can add between two samples.
+	RenderOutsideData = 64 << 20
+	// MaxRenderData is the data limit of the render process (RLIMIT_DATA, Linux, what /proc shows as VmData).
+	// It is a partial guard, not a bound: the kernel checks it on a fresh writable mapping, but the Go runtime
+	// maps its heap over address space it reserved earlier (mmap with MAP_FIXED over a PROT_NONE reservation),
+	// which the kernel does not check, so the heap can grow past it. The process then ends at its next fresh
+	// mapping, and the Go runtime writes "out of memory" or "cannot allocate memory", which is a refusal, or
+	// crashes with a SIGSEGV in its collector, which is an error for a retry (ADR-0035). The executor's render
+	// process started with 83 MiB of it and reached 245 MiB when its own sampling stopped it; this is 1.5
+	// times that.
+	MaxRenderData = 384 << 20
 	// MaxRenderCPUSeconds is the CPU time the render process may use (RLIMIT_CPU, every platform). The largest
 	// check the input budgets allow used 3.9 s of CPU time (hack/load/render, Linux arm64, ADR-0035), so this
 	// leaves five times that. At the executor's CPU limit in the chart (500m) it takes 40 s of wall time to
@@ -93,12 +108,22 @@ const (
 )
 
 // oomScoreAdj is the OOM score adjustment the render process sets on Linux ([preferOOMKill]): the most, so
-// that when the executor's container runs out of memory the kernel's OOM killer ends the render process, not
-// the executor.
+// that the kernel's OOM killer picks the render process before the executor where it kills one process: on
+// cgroup v1 and on cgroup v2 nodes whose kubelet sets singleProcessOOMKill. On other cgroup v2 nodes (the
+// kubelet's default since Kubernetes 1.28) a container OOM kills every process in the container, and the
+// render process's limits and the executor's memory limit ([MaxRenderResident]) are what keep the render process
+// from causing one.
 const oomScoreAdj = "1000"
 
 // sampleEvery is how often the render process samples the memory its Go runtime holds ([watchMemory]).
 const sampleEvery = time.Millisecond
+
+// residentEvery is how often the parent reads the resident memory of the render process ([watchResident]).
+const residentEvery = time.Millisecond
+
+// sampleMemory turns the render process's own memory sampling ([watchMemory]) on; tests turn it off to stand
+// in for a render that outruns it.
+var sampleMemory = true
 
 // renderAnswer is what the render process writes after renderReady: a result, a refusal or neither (Failed),
 // for an error that is not a refusal.
@@ -125,18 +150,9 @@ func RunRenderProcess() {
 
 // serveRender is the render process: limits first, then the untrusted input.
 func serveRender(in io.Reader, out io.Writer) int {
-	data, cpu := uint64(MaxRenderData), uint64(MaxRenderCPUSeconds)
-	if raceBuild {
-		data, cpu = noDataLimit, 8*cpu
-	}
-	catchCPU()
-	if err := setLimits(data, cpu); err != nil {
+	if err := limitRenderProcess(); err != nil {
 		return exitFailed
 	}
-	preferOOMKill()
-	quietStderr()
-	debug.SetMemoryLimit(MaxRenderMemory * 3 / 4)
-	go watchMemory(MaxRenderMemory)
 	w := bufio.NewWriter(out)
 	if _, err := w.WriteString(renderReady); err != nil || w.Flush() != nil {
 		return exitFailed
@@ -150,6 +166,25 @@ func serveRender(in io.Reader, out io.Writer) int {
 		return exitFailed
 	}
 	return 0
+}
+
+// limitRenderProcess sets the limits of the render process and starts its memory sampling.
+func limitRenderProcess() error {
+	data, cpu := uint64(MaxRenderData), uint64(MaxRenderCPUSeconds)
+	if raceBuild {
+		data, cpu = noDataLimit, 8*cpu
+	}
+	catchCPU()
+	if err := setLimits(data, cpu); err != nil {
+		return err
+	}
+	preferOOMKill()
+	quietStderr()
+	debug.SetMemoryLimit(MaxRenderMemory * 3 / 4)
+	if sampleMemory {
+		go watchMemory(MaxRenderMemory)
+	}
+	return nil
 }
 
 // answerFor runs the check and turns its outcome into an answer; a panic is a render failure, as in [render].
@@ -180,8 +215,8 @@ func quietStderr() {
 }
 
 // watchMemory ends the process with exitMemory when the memory its Go runtime holds (mapped, less what it has
-// returned to the system) passes limit. It samples every millisecond, so it can overshoot; the operating
-// system's limit ([MaxRenderData]) is the hard bound.
+// returned to the system) passes limit. It samples every millisecond, so it can overshoot; the parent's reading
+// of the process's resident memory ([MaxRenderResident]) is the second bound.
 func watchMemory(limit uint64) {
 	s := []metrics.Sample{{Name: "/memory/classes/total:bytes"}, {Name: "/memory/classes/heap/released:bytes"}}
 	for {
@@ -239,11 +274,12 @@ func (f *fatalLine) Write(p []byte) (int, error) {
 }
 
 // runtimeOutOfMemory reports whether line, the first fatal error line of a render process, is the Go
-// runtime's own end at a refused heap mapping ("fatal error: out of memory", "fatal error: runtime: out of
-// memory" and the like).
+// runtime's own end at a refused mapping: "fatal error: out of memory", "fatal error: runtime: out of memory"
+// (a heap mapping) or "fatal error: runtime: cannot allocate memory" (its own metadata), the texts Go 1.27
+// writes at the data limit.
 func runtimeOutOfMemory(line string) bool {
 	msg, ok := strings.CutPrefix(line, "fatal error: ")
-	return ok && strings.Contains(msg, "out of memory")
+	return ok && (strings.Contains(msg, "out of memory") || strings.Contains(msg, "cannot allocate memory"))
 }
 
 // renderCommand returns the command of the render process: this binary with [renderProcessArg]. Tests replace
@@ -289,7 +325,12 @@ func runRenderProcess(ctx context.Context, in Input) (Result, error) {
 	fatal := &fatalLine{}
 	cmd.Stderr = fatal
 	cmd.WaitDelay = time.Second
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return Result{}, fmt.Errorf("%w: %w", errNotStarted, err)
+	}
+	stop, killed := watchResident(cmd.Process, residentLimit())
+	runErr := cmd.Wait()
+	stop()
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
@@ -300,17 +341,59 @@ func runRenderProcess(ctx context.Context, in Input) (Result, error) {
 		}
 		return Result{}, fmt.Errorf("%w: %w", errNotStarted, runErr)
 	}
+	if runErr != nil && killed() {
+		return Result{}, refuse(ReasonTooLarge,
+			fmt.Sprintf("the render needs more than %d MiB of resident memory", residentLimit()>>20))
+	}
 	if runErr != nil {
 		return Result{}, stopped(runErr, fatal.found)
 	}
 	return decodeAnswer(answer, out.over)
 }
 
-// stopped reads the end of a render process that had set its limits and wrote no answer. Only the ends the
-// process chose itself are refusals: its own exits at the memory sampling and at the CPU time limit, and the Go
-// runtime's exit when the data limit refused a heap mapping (fatal, the first fatal error line of its stderr).
-// The same build ends the same way on every retry. Any other end is an error for a retry: a signal, such as a
-// SIGKILL from the container's OOM killer while the executor held its memory, or another crash.
+// residentLimit is [MaxRenderResident], or four times it in a race build, whose shadow memory is resident too.
+func residentLimit() uint64 {
+	if raceBuild {
+		return 4 * MaxRenderResident
+	}
+	return MaxRenderResident
+}
+
+// watchResident reads the resident memory of the render process p every residentEvery and kills it past limit
+// (Linux only; elsewhere [residentBytes] reads nothing). stop ends the watch and waits for it; killed reports
+// whether the watch killed the process, which it reports only for a kill that reached a running process. A
+// failed read is neither a refusal nor an error: the process may have ended, and its end is read as usual.
+func watchResident(p *os.Process, limit uint64) (stop func(), killed func() bool) {
+	var hit atomic.Bool
+	done, ended := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(ended)
+		t := time.NewTicker(residentEvery)
+		defer t.Stop()
+		for {
+			if n, ok := residentBytes(p.Pid); ok && n > limit {
+				if p.Kill() == nil {
+					hit.Store(true)
+				}
+				return
+			}
+			select {
+			case <-done:
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return func() { close(done); <-ended }, hit.Load
+}
+
+// stopped reads the end of a render process that had set its limits, wrote no answer and was not killed by
+// the parent at its resident limit (a refusal, read in [runRenderProcess]). Only the ends the process chose
+// itself are refusals: its own exits at the memory sampling and at the CPU time limit, and the Go runtime's exit
+// when the data limit refused a mapping (fatal, the first fatal error line of its stderr). The same build ends
+// the same way on every retry. Any other end is an error for a retry: a signal, such as a SIGKILL from an OOM
+// killer, or another crash, such as the Go runtime's SIGSEGV when its collector cannot map its work queue at the
+// data limit.
 func stopped(err error, fatal string) error {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {

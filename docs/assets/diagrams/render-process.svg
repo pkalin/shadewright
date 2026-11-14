@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 600" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Render check in a limited child process</title>
-  <desc id="d">The executor's container, 384 Mi of memory and 500m of CPU, holds the executor and at most one render process. The executor validates the input of semdiff.Check, waits for the one render slot and starts its own binary again with one fixed argument and an empty environment. The render process sets its limits before it reads any input: 20 s of CPU time, 512 MiB of data mappings on Linux, 128 MiB of Go memory sampled every millisecond, and an OOM score adjustment of 1000. It writes a ready line, reads the input as JSON on stdin, renders before and after the change and writes one answer on stdout. The executor reads three kinds of end. An answer: a result, or a refusal with a known reason and a detail cut at 2 KiB. A TooLarge refusal: the render process's own exit at the memory sampling or the CPU limit, or the Go runtime's out of memory exit at the data limit. An error for a retry: no ready line, a kill by a signal such as the container's OOM killer, any other crash, an unreadable answer, or the step's context ending, which kills the process.</desc>
+  <desc id="d">The executor's container, 512 Mi of memory and 500m of CPU, holds the executor and at most one render process. The executor validates the input of semdiff.Check, waits for the one render slot and starts its own binary again with one fixed argument and an empty environment, then reads the render process's resident size every millisecond on Linux and kills it past 192 MiB. The render process sets its limits before it reads any input: 20 s of CPU time, 384 MiB of data mappings on Linux (a partial guard: the Go runtime's heap mappings pass it unchecked), 128 MiB of Go memory sampled every millisecond, and an OOM score adjustment of 1000. It writes a ready line, reads the input as JSON on stdin, renders before and after the change and writes one answer on stdout. The executor reads three kinds of end. An answer: a result, or a refusal with a known reason and a detail cut at 2 KiB. A TooLarge refusal: the render process's own exit at the memory sampling or the CPU limit, the executor's kill at the resident limit, or the Go runtime's out of memory exit at the data limit. An error for a retry: no ready line, a kill by a signal the executor did not send such as an OOM killer's, any other crash, an unreadable answer, or the step's context ending, which kills the process. Memory: 230 MiB for the executor, 192 MiB for the render process and a 64 MiB margin make 486 MiB of the 512 Mi; on cgroup v2 a container OOM ends both processes.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -24,7 +24,7 @@
 
   <!-- lanes -->
   <rect class="lane" x="24" y="24" width="660" height="552" rx="14"/>
-  <text class="lanet" x="44" y="54">EXECUTOR CONTAINER (384Mi, 500m CPU)</text>
+  <text class="lanet" x="44" y="54">EXECUTOR CONTAINER (512Mi, 500m CPU)</text>
   <rect class="lane" x="702" y="24" width="394" height="552" rx="14"/>
   <text class="lanet" x="722" y="54">HOW THE CHECK ENDS</text>
 
@@ -36,15 +36,15 @@
   <text class="s" x="68" y="184">2. wait for the one render slot</text>
   <text class="s" x="68" y="206">3. start its own binary again,</text>
   <text class="s" x="84" y="226">one fixed argument, empty env</text>
-  <text class="s" x="68" y="252">Go soft limit 230 MiB</text>
-  <text class="s" x="68" y="270">(60 percent of the container)</text>
+  <text class="s" x="68" y="248">4. kill it past 192 MiB resident</text>
+  <text class="s" x="68" y="270">Go soft limit 230 MiB (45 percent)</text>
 
   <!-- render process -->
   <rect class="key" x="374" y="80" width="290" height="200" rx="12"/>
   <text class="h" x="394" y="110">Render process</text>
   <text class="s" x="394" y="136">limits set before any input:</text>
   <text class="s" x="394" y="162">CPU time 20 s (RLIMIT_CPU)</text>
-  <text class="s" x="394" y="184">data mappings 512 MiB (Linux)</text>
+  <text class="s" x="394" y="184">data mappings 384 MiB (partial)</text>
   <text class="s" x="394" y="206">Go memory 128 MiB, sampled</text>
   <text class="s" x="394" y="228">oom_score_adj 1000</text>
   <text class="s" x="394" y="254">walk, render before and after,</text>
@@ -63,8 +63,8 @@
   <text class="s" x="68" y="438">The limits bound memory and CPU time. The render process shares the</text>
   <text class="s" x="68" y="460">executor's user, file system and network, so they do not bound what an</text>
   <text class="s" x="68" y="482">exploited render could read. It holds no token and reads only its stdin.</text>
-  <text class="s" x="68" y="512">Memory: 230 MiB (executor) + 128 MiB (render process) = 358 MiB,</text>
-  <text class="s" x="68" y="534">26 MiB left for the executor's memory outside its Go runtime.</text>
+  <text class="s" x="68" y="512">Memory: 230 MiB (executor) + 192 MiB (render process) + 64 MiB</text>
+  <text class="s" x="68" y="534">margin = 486 MiB of 512 Mi. Measured, not a kernel guarantee.</text>
 
   <!-- ends -->
   <rect class="box" x="722" y="80" width="354" height="128" rx="12"/>
@@ -76,17 +76,17 @@
 
   <rect class="box" x="722" y="224" width="354" height="148" rx="12"/>
   <text class="no" x="742" y="250">REFUSAL · TOOLARGE</text>
-  <text class="s" x="742" y="276">only ends the process chose:</text>
-  <text class="s" x="742" y="298">its exit at the memory sampling,</text>
-  <text class="s" x="742" y="318">its exit at the CPU time limit,</text>
-  <text class="s" x="742" y="338">the Go runtime's "out of memory"</text>
-  <text class="s" x="742" y="358">at the data limit</text>
+  <text class="s" x="742" y="276">only ends a limit chose: its exits</text>
+  <text class="s" x="742" y="298">at the memory sampling and the CPU</text>
+  <text class="s" x="742" y="318">time limit, the executor's kill at</text>
+  <text class="s" x="742" y="338">192 MiB resident, the Go runtime's</text>
+  <text class="s" x="742" y="358">out of memory exit at the data limit</text>
 
   <rect class="box" x="722" y="388" width="354" height="164" rx="12"/>
   <text class="lbl" x="742" y="414">ERROR FOR A RETRY</text>
   <text class="s" x="742" y="440">no ready line (did not start)</text>
-  <text class="s" x="742" y="462">killed by a signal (the container's</text>
-  <text class="s" x="742" y="482">OOM killer), any other crash</text>
+  <text class="s" x="742" y="462">a signal the executor did not send</text>
+  <text class="s" x="742" y="482">(an OOM killer), any other crash</text>
   <text class="s" x="742" y="504">no readable answer or unknown reason</text>
   <text class="s" x="742" y="526">the step's context ended: the</text>
   <text class="s" x="742" y="546">process is killed</text>

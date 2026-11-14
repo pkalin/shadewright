@@ -288,6 +288,23 @@ type Explanation struct {
 	Incident *IncidentReport `json:"incident,omitempty"`
 	// Requests is the request named, or the Incident's requests, newest first.
 	Requests []RequestExplanation `json:"requests"`
+	// RevertsProposed is the Incident's status.revertsProposed, oldest first, when an Incident is explained:
+	// also the entries of requests that no longer exist.
+	RevertsProposed []ProposedRevertReport `json:"revertsProposed,omitempty"`
+}
+
+// ProposedRevertReport is an entry of an Incident's status.revertsProposed (ADR-0030 section 8, #96).
+type ProposedRevertReport struct {
+	// Request is the failed request's name.
+	Request string `json:"request"`
+	// State is Pending (a create may still come), Created (the revert exists or existed) or Abandoned (no
+	// revert will be made).
+	State string `json:"state"`
+	// Reason is why the entry is Abandoned; absent in the other states.
+	Reason string `json:"reason,omitempty"`
+	// Revert is the revert's name, derived from the failed request's UID. It need not exist: a Pending revert
+	// is not created yet, an Abandoned one never will be, a Created one may have been deleted since.
+	Revert string `json:"revert"`
 }
 
 // RequestExplanation is one RemediationRequest, explained.
@@ -325,6 +342,9 @@ type RequestExplanation struct {
 	// Reverts is the name in spec.reverts: the failed request whose change this revert undoes (ADR-0030
 	// section 8).
 	Reverts string `json:"reverts,omitempty"`
+	// RevertProposed is this request's entry in its Incident's status.revertsProposed (by name and UID): what
+	// the analyzer's revert proposer did about its revert (#96). Absent when the Incident records none.
+	RevertProposed *ProposedRevertReport `json:"revertProposed,omitempty"`
 	// HandoffFrom is status.handoff.from: the request this one took the pull request over from.
 	HandoffFrom *HandoffReport `json:"handoffFrom,omitempty"`
 	// HandoffTo is status.handoff.to: the request that took the pull request over from this one.
@@ -459,6 +479,7 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 		e.IncidentState = stateOK
 		r := incidentReport(inc)
 		e.Incident = &r
+		e.Requests[0].RevertProposed = revertProposed(inc, rr)
 		return e, nil
 	case !apierrors.IsNotFound(err):
 		return nil, fmt.Errorf("reading RemediationRequest %s: %w", e.Name, err)
@@ -475,6 +496,9 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 	e.IncidentState = stateOK
 	r := incidentReport(inc)
 	e.Incident = &r
+	for _, p := range inc.Status.RevertsProposed {
+		e.RevertsProposed = append(e.RevertsProposed, proposedRevertReport(p))
+	}
 	var rrs remediationv1alpha1.RemediationRequestList
 	if err := c.List(ctx, &rrs, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("listing RemediationRequests: %w", err)
@@ -491,9 +515,44 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 		return cmp.Or(b.CreationTimestamp.Compare(a.CreationTimestamp.Time), cmp.Compare(a.Name, b.Name))
 	})
 	for _, rr := range own {
-		e.Requests = append(e.Requests, explainRequest(rr, settings))
+		r := explainRequest(rr, settings)
+		r.RevertProposed = revertProposed(inc, rr)
+		e.Requests = append(e.Requests, r)
 	}
 	return e, nil
+}
+
+// revertProposed returns the entry of inc's status.revertsProposed that names rr by name and UID, or nil.
+func revertProposed(inc *remediationv1alpha1.Incident,
+	rr *remediationv1alpha1.RemediationRequest) *ProposedRevertReport {
+	ref := remediationv1alpha1.RequestRef{Name: rr.Name, UID: remediationv1alpha1.UID(rr.UID)}
+	i := slices.IndexFunc(inc.Status.RevertsProposed, func(p remediationv1alpha1.ProposedRevert) bool {
+		return p.RequestRef == ref
+	})
+	if i < 0 {
+		return nil
+	}
+	r := proposedRevertReport(inc.Status.RevertsProposed[i])
+	return &r
+}
+
+// proposedRevertReport takes one entry of status.revertsProposed, each string cleaned.
+func proposedRevertReport(p remediationv1alpha1.ProposedRevert) ProposedRevertReport {
+	return ProposedRevertReport{
+		Request: clean(p.Name, maxName),
+		State:   clean(string(p.State), maxName),
+		Reason:  clean(string(p.Reason), maxName),
+		Revert:  string(remediationv1alpha1.RevertName(p.UID)),
+	}
+}
+
+// proposedRevertLine is the text of one entry: its state, its reason when Abandoned, and the revert's name.
+func proposedRevertLine(p *ProposedRevertReport) string {
+	line := p.State
+	if p.Reason != "" {
+		line += ", reason " + p.Reason
+	}
+	return line + ", revert " + p.Revert
 }
 
 // explainRequest takes the fields of one request explain shows, each string cleaned.
@@ -666,6 +725,12 @@ func renderExplainText(w io.Writer, e *Explanation, now time.Time) error {
 		if e.Incident != nil {
 			incidentLines(p, e.Incident, now)
 		}
+		if len(e.RevertsProposed) > 0 {
+			p.line("  Reverts proposed, oldest first: %d", len(e.RevertsProposed))
+			for i := range e.RevertsProposed {
+				p.line("    %s: %s", e.RevertsProposed[i].Request, proposedRevertLine(&e.RevertsProposed[i]))
+			}
+		}
 		if len(e.Requests) == 0 {
 			p.line("  No RemediationRequests name this Incident.")
 		} else {
@@ -742,6 +807,9 @@ func requestLines(p *printer, e *Explanation, r *RequestExplanation, now time.Ti
 	}
 	if r.Reverts != "" {
 		p.line("  Reverts:      %s", r.Reverts)
+	}
+	if r.RevertProposed != nil {
+		p.line("  Revert:       %s", proposedRevertLine(r.RevertProposed))
 	}
 	if r.ChainRoot != "" {
 		p.line("  Chain root:   %s", r.ChainRoot)

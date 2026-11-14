@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,40 +89,11 @@ func revertLinkProblem(rr, failed *remediationv1alpha1.RemediationRequest) strin
 		return "The request it reverts names another Incident"
 	case failed.Spec.TargetRef != rr.Spec.TargetRef:
 		return "The request it reverts names another target"
-	case !inverseAction(failed.Spec.Action, rr.Spec.Action):
+	case !remediationv1alpha1.IsInverseAction(failed.Spec.Action, rr.Spec.Action):
 		return "The action is not exactly the inverse of the reverted request's: the same type and container, " +
 			"with previous and desired swapped"
 	}
 	return ""
-}
-
-// inverseAction reports whether b undoes a exactly: the same action type, the same container where the action
-// names one, b's previous equal to a's desired and b's desired equal to a's previous, and no other field set.
-// An action type it does not know is never an inverse.
-func inverseAction(a, b remediationv1alpha1.Action) bool {
-	want := remediationv1alpha1.Action{Type: a.Type}
-	switch a.Type {
-	case remediationv1alpha1.ActionSetContainerMemoryLimit:
-		m := a.SetContainerMemoryLimit
-		if m == nil {
-			return false
-		}
-		want.SetContainerMemoryLimit = &remediationv1alpha1.SetContainerMemoryLimit{
-			Container: m.Container, Previous: m.Desired.DeepCopy(), Desired: m.Previous.DeepCopy(),
-		}
-	case remediationv1alpha1.ActionAdjustKedaMaxReplicas:
-		k := a.AdjustKedaMaxReplicas
-		if k == nil {
-			return false
-		}
-		want.AdjustKedaMaxReplicas = &remediationv1alpha1.AdjustKedaMaxReplicas{
-			PreviousValue: k.DesiredValue, DesiredValue: k.PreviousValue,
-		}
-	default:
-		return false
-	}
-	// Semantic equality compares quantities by value, so 1Gi and 1024Mi are the same limit.
-	return equality.Semantic.DeepEqual(want, b)
 }
 
 // revertApproval keeps approval required on an allowed revert, whatever the policy decided. Through the API it

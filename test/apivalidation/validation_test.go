@@ -878,6 +878,203 @@ var _ = Describe("Incident", func() {
 		Expect(k8sClient.Status().Update(ctx, escalated)).To(Succeed())
 	})
 
+	It("keeps every entry of revertsProposed and moves a state only from Pending to Created or Abandoned", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		ref := func(name, uid string, state v1alpha1.RevertState) v1alpha1.ProposedRevert {
+			return v1alpha1.ProposedRevert{RequestRef: v1alpha1.RequestRef{Name: name, UID: v1alpha1.UID(uid)},
+				State: state}
+		}
+		first := ref("remediation-a", "27272727-2727-4727-8727-272727272727", v1alpha1.RevertPending)
+		second := ref("remediation-b", "28282828-2828-4828-8828-282828282828", v1alpha1.RevertPending)
+		// The rule is a transition rule of the status object, so it runs while the status has another field, as
+		// every Incident status the analyzer writes has (its phase).
+		inc.Status.Phase = v1alpha1.IncidentEscalated
+		inc.Status.RevertsProposed = []v1alpha1.ProposedRevert{first}
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		inc.Status.RevertsProposed = append(inc.Status.RevertsProposed, second)
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "an entry may be added")
+		inc.Status.RevertsProposed[0].State = v1alpha1.RevertCreated
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "Pending may move to Created")
+		created := inc.Status.RevertsProposed[0]
+		third := ref("remediation-e", "31313131-3131-4131-8131-313131313131", v1alpha1.RevertPending)
+		inc.Status.RevertsProposed = append(inc.Status.RevertsProposed, third)
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		inc.Status.RevertsProposed[2].State = v1alpha1.RevertAbandoned
+		inc.Status.RevertsProposed[2].Reason = v1alpha1.RevertReasonTargetGone
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "Pending may move to Abandoned")
+		abandoned := inc.Status.RevertsProposed[2]
+		with := func(e v1alpha1.ProposedRevert, reason v1alpha1.RevertReason) v1alpha1.ProposedRevert {
+			e.Reason = reason
+			return e
+		}
+
+		// Each row changes one thing of the stored list.
+		for _, kept := range [][]v1alpha1.ProposedRevert{
+			{second, abandoned},
+			{created, second},
+			nil,
+			{ref(created.Name, "29292929-2929-4929-8929-292929292929", v1alpha1.RevertCreated), second, abandoned},
+			{ref("remediation-c", string(created.UID), v1alpha1.RevertCreated), second, abandoned},
+			{ref(created.Name, string(created.UID), v1alpha1.RevertPending), second, abandoned},
+			{with(ref(created.Name, string(created.UID), v1alpha1.RevertAbandoned), v1alpha1.RevertReasonTargetGone),
+				second, abandoned},
+			{created, second, ref(abandoned.Name, string(abandoned.UID), v1alpha1.RevertPending)},
+			{created, second, ref(abandoned.Name, string(abandoned.UID), v1alpha1.RevertCreated)},
+			{created, second, with(abandoned, v1alpha1.RevertReasonNameTaken)},
+		} {
+			changed := inc.DeepCopy()
+			changed.Status.RevertsProposed = kept
+			err := k8sClient.Status().Update(ctx, changed)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error for %v: %v", kept, err)
+			Expect(err.Error()).To(ContainSubstring("revertsProposed only grows"))
+		}
+
+		for _, bad := range [][]v1alpha1.ProposedRevert{
+			{created, second, abandoned, ref("remediation-d", string(second.UID), v1alpha1.RevertPending)},
+			{created, second, abandoned, ref("remediation-d", "30303030-3030-4030-8030-303030303030", "Done")},
+		} {
+			changed := inc.DeepCopy()
+			changed.Status.RevertsProposed = bad
+			err := k8sClient.Status().Update(ctx, changed)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error for %v: %v", bad, err)
+		}
+
+		// A Pending entry moving to Abandoned, which the state rules allow, with a reason outside the enum.
+		changed := inc.DeepCopy()
+		changed.Status.RevertsProposed = []v1alpha1.ProposedRevert{created,
+			with(ref(second.Name, string(second.UID), v1alpha1.RevertAbandoned), "NoSuchReason"), abandoned}
+		err := k8sClient.Status().Update(ctx, changed)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error for an unknown reason: %v", err)
+		Expect(err.Error()).To(ContainSubstring("Unsupported value: \"NoSuchReason\""))
+	})
+
+	const (
+		nameA = "remediation-a"
+		uidA  = "27272727-2727-4727-8727-272727272727"
+	)
+
+	It("sets the reason of a revertsProposed entry exactly with Abandoned", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Status.Phase = v1alpha1.IncidentEscalated
+		inc.Status.RevertsProposed = []v1alpha1.ProposedRevert{
+			{RequestRef: v1alpha1.RequestRef{Name: nameA, UID: uidA},
+				State: v1alpha1.RevertPending},
+			{RequestRef: v1alpha1.RequestRef{Name: "remediation-b", UID: "28282828-2828-4828-8828-282828282828"},
+				State: v1alpha1.RevertPending},
+		}
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		for name, edit := range map[string]func(e []v1alpha1.ProposedRevert){
+			"Abandoned without a reason": func(e []v1alpha1.ProposedRevert) { e[0].State = v1alpha1.RevertAbandoned },
+			"Pending with a reason":      func(e []v1alpha1.ProposedRevert) { e[0].Reason = v1alpha1.RevertReasonTargetGone },
+			"Created with a reason": func(e []v1alpha1.ProposedRevert) {
+				e[0].State, e[0].Reason = v1alpha1.RevertCreated, v1alpha1.RevertReasonTargetGone
+			},
+		} {
+			changed := inc.DeepCopy()
+			edit(changed.Status.RevertsProposed)
+			err := k8sClient.Status().Update(ctx, changed)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring("reason is set exactly when state is Abandoned"), name)
+		}
+		inc.Status.RevertsProposed[0].State = v1alpha1.RevertAbandoned
+		inc.Status.RevertsProposed[0].Reason = v1alpha1.RevertReasonRequestGone
+		inc.Status.RevertsProposed[1].State = v1alpha1.RevertCreated
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+	})
+
+	// A new entry is a decision not acted on yet. The rule sits on the root, so it also holds in the first status
+	// write, which the transition rule of the status object does not see.
+	It("refuses a new revertsProposed entry in any state but Pending", func() {
+		for _, first := range []bool{true, false} {
+			inc := fx.Incident("default", unique("inc"))
+			Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+			if !first {
+				inc.Status.Phase = v1alpha1.IncidentEscalated
+				Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+			}
+			for _, e := range []v1alpha1.ProposedRevert{
+				{RequestRef: v1alpha1.RequestRef{Name: nameA, UID: uidA},
+					State: v1alpha1.RevertCreated},
+				{RequestRef: v1alpha1.RequestRef{Name: nameA, UID: uidA},
+					State: v1alpha1.RevertAbandoned, Reason: v1alpha1.RevertReasonTargetGone},
+			} {
+				changed := inc.DeepCopy()
+				changed.Status.RevertsProposed = []v1alpha1.ProposedRevert{e}
+				err := k8sClient.Status().Update(ctx, changed)
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "first write %v, %s: unexpected error: %v", first, e.State, err)
+				Expect(err.Error()).To(ContainSubstring("a new entry of status.revertsProposed must be Pending"))
+			}
+			inc.Status.RevertsProposed = []v1alpha1.ProposedRevert{{RequestRef: v1alpha1.RequestRef{
+				Name: nameA, UID: uidA}, State: v1alpha1.RevertPending}}
+			Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		}
+	})
+
+	// The rule on revertsProposed sits on the optional status object, so a write that removes the whole status
+	// would skip it; the rule on the root refuses that once the list has entries.
+	It("refuses removing the status while revertsProposed has entries", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Status.Phase = v1alpha1.IncidentEscalated
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		cleared := inc.DeepCopy()
+		cleared.Status = v1alpha1.IncidentStatus{}
+		Expect(k8sClient.Status().Update(ctx, cleared)).To(Succeed(), "a status without entries may be removed")
+		Expect(cleared.Status).To(Equal(v1alpha1.IncidentStatus{}))
+
+		cleared.Status.RevertsProposed = []v1alpha1.ProposedRevert{{RequestRef: v1alpha1.RequestRef{
+			Name: "remediation-a", UID: "27272727-2727-4727-8727-272727272727"}, State: v1alpha1.RevertPending}}
+		Expect(k8sClient.Status().Update(ctx, cleared)).To(Succeed())
+		removed := cleared.DeepCopy()
+		removed.Status = v1alpha1.IncidentStatus{}
+		err := k8sClient.Status().Update(ctx, removed)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("status cannot be removed"))
+
+		// A write of the main resource keeps the stored status, so it passes.
+		spec := cleared.DeepCopy()
+		spec.Labels = map[string]string{"example.com/touched": "yes"}
+		spec.Status = v1alpha1.IncidentStatus{}
+		Expect(k8sClient.Update(ctx, spec)).To(Succeed())
+		Expect(spec.Status.RevertsProposed).To(HaveLen(1))
+	})
+
+	// The other writers of Incident status in the analyzer (the analysis controller, the Incident controller's
+	// trigger, closure and occurrence writes) write the whole status with Update. One that read the Incident
+	// before the revert proposer added an entry gets a conflict, and retries from a fresh read; one that dropped
+	// the entries on the current resourceVersion is refused by the CEL rule. Neither drops an entry silently.
+	It("refuses a stale whole-status write that would drop revertsProposed", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Status.Phase = v1alpha1.IncidentEscalated
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		stale := inc.DeepCopy()
+
+		inc.Status.RevertsProposed = []v1alpha1.ProposedRevert{{RequestRef: v1alpha1.RequestRef{
+			Name: "remediation-a", UID: "27272727-2727-4727-8727-272727272727"}, State: v1alpha1.RevertPending}}
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+
+		stale.Status.Phase = v1alpha1.IncidentProposed
+		err := k8sClient.Status().Update(ctx, stale.DeepCopy())
+		Expect(apierrors.IsConflict(err)).To(BeTrue(), "unexpected error: %v", err)
+
+		// The status subresource refuses an update without a resourceVersion, so a writer cannot skip the
+		// check; one that rebuilt the status without the entries on the current resourceVersion hits CEL.
+		rebuilt := stale.DeepCopy()
+		rebuilt.ResourceVersion = inc.ResourceVersion
+		err = k8sClient.Status().Update(ctx, rebuilt)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("revertsProposed only grows"))
+
+		fresh := &v1alpha1.Incident{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(inc), fresh)).To(Succeed())
+		fresh.Status.Phase = v1alpha1.IncidentProposed
+		Expect(k8sClient.Status().Update(ctx, fresh)).To(Succeed(), "the retry from a fresh read")
+		Expect(fresh.Status.RevertsProposed).To(Equal(inc.Status.RevertsProposed))
+	})
+
 	It("refuses adding an occurrence number later", func() {
 		inc := fx.Incident("default", unique("inc"))
 		Expect(k8sClient.Create(ctx, inc)).To(Succeed())

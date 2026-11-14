@@ -137,6 +137,7 @@ type OccurrenceRecord struct {
 
 // IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)",message="resolvedTime cannot change while the phase stays Resolved"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || (n.state == o.state && (!has(o.reason) || (has(n.reason) && n.reason == o.reason)))))))",message="revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes"
 type IncidentStatus struct {
 	// phase summarizes the incident.
 	// +optional
@@ -202,6 +203,22 @@ type IncidentStatus struct {
 	// +optional
 	RemediationRequests []Name `json:"remediationRequests,omitempty"`
 
+	// revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert
+	// proposer decided to revert (ADR-0030 section 8, #96), oldest first. The proposer writes an entry in state
+	// Pending before it creates the revert and moves it to Created once the revert exists; it never takes a new
+	// decision for a request listed here, so a failed request gets one revert for good, also after that revert
+	// was deleted. When a check before a create says no (the target is gone, the request passed the age bound,
+	// the request was deleted, the revert's name is taken by another request, the create is refused as invalid),
+	// the entry moves to Abandoned instead, with a reason, which is final: no revert is made for it. A new entry
+	// is always Pending, entries are never removed, a state moves only from Pending to Created or Abandoned, a
+	// reason never changes, and the status cannot be removed while the list has entries; a full list stops new
+	// reverts for this incident instead (condition RevertsStopped).
+	// +listType=map
+	// +listMapKey=uid
+	// +kubebuilder:validation:MaxItems=20
+	// +optional
+	RevertsProposed []ProposedRevert `json:"revertsProposed,omitempty"`
+
 	// conditions explain the phase.
 	// +listType=map
 	// +listMapKey=type
@@ -223,7 +240,11 @@ type IncidentStatus struct {
 // +kubebuilder:printcolumn:name="Last seen",type=date,JSONPath=`.status.lastSeen`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Incident groups repeated symptoms of one problem on one workload.
+// Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
+// removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
+// entries, and refuse a new entry of that list in any state but Pending, also in the first status write.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed) == 0 || has(self.status)",message="status cannot be removed while status.revertsProposed has entries"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n, n.state == 'Pending' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed) && oldSelf.status.revertsProposed.exists(o, o.uid == n.uid)))",message="a new entry of status.revertsProposed must be Pending"
 type Incident struct {
 	metav1.TypeMeta `json:",inline"`
 

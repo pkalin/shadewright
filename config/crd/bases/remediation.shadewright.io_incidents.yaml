@@ -57,7 +57,10 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Incident groups repeated symptoms of one problem on one workload.
+        description: |-
+          Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
+          removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
+          entries, and refuse a new entry of that list in any state but Pending, also in the first status write.
         properties:
           apiVersion:
             description: |-
@@ -384,15 +387,94 @@ spec:
                   without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident.
                 format: date-time
                 type: string
+              revertsProposed:
+                description: |-
+                  revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert
+                  proposer decided to revert (ADR-0030 section 8, #96), oldest first. The proposer writes an entry in state
+                  Pending before it creates the revert and moves it to Created once the revert exists; it never takes a new
+                  decision for a request listed here, so a failed request gets one revert for good, also after that revert
+                  was deleted. When a check before a create says no (the target is gone, the request passed the age bound,
+                  the request was deleted, the revert's name is taken by another request, the create is refused as invalid),
+                  the entry moves to Abandoned instead, with a reason, which is final: no revert is made for it. A new entry
+                  is always Pending, entries are never removed, a state moves only from Pending to Created or Abandoned, a
+                  reason never changes, and the status cannot be removed while the list has entries; a full list stops new
+                  reverts for this incident instead (condition RevertsStopped).
+                items:
+                  description: |-
+                    ProposedRevert is an entry of an Incident's status.revertsProposed: a failed request, by name and UID, and
+                    how far the proposer got with its revert.
+                  properties:
+                    name:
+                      description: name of the request.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    reason:
+                      description: reason is why the entry is Abandoned. It is set
+                        with that state, only with it, and never changes.
+                      enum:
+                      - TargetGone
+                      - TargetKindUnsupported
+                      - OutsideAgeBound
+                      - IncidentDeleting
+                      - RequestGone
+                      - NotRevertible
+                      - NameTaken
+                      - CreateInvalid
+                      type: string
+                    state:
+                      description: |-
+                        state is Pending from the decision until the revert exists, then Created, or Abandoned when no revert
+                        will be made. Created and Abandoned are final. A new entry is always Pending.
+                      enum:
+                      - Pending
+                      - Created
+                      - Abandoned
+                      type: string
+                    uid:
+                      description: uid of the request, so a request recreated under
+                        the same name is never taken for it.
+                      maxLength: 36
+                      pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                      type: string
+                  required:
+                  - name
+                  - state
+                  - uid
+                  type: object
+                  x-kubernetes-validations:
+                  - message: reason is set exactly when state is Abandoned
+                    rule: has(self.reason) == (self.state == 'Abandoned')
+                maxItems: 20
+                type: array
+                x-kubernetes-list-map-keys:
+                - uid
+                x-kubernetes-list-type: map
             type: object
             x-kubernetes-validations:
             - message: resolvedTime cannot change while the phase stays Resolved
               rule: '!(has(oldSelf.phase) && oldSelf.phase == ''Resolved'' && has(oldSelf.resolvedTime)
                 && has(self.phase) && self.phase == ''Resolved'') || (has(self.resolvedTime)
                 && self.resolvedTime == oldSelf.resolvedTime)'
+            - message: 'revertsProposed only grows: an entry is never removed, its
+                state only moves from Pending to Created or Abandoned, and its reason
+                never changes'
+              rule: '!has(oldSelf.revertsProposed) || (has(self.revertsProposed) &&
+                oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid
+                == o.uid && n.name == o.name && (o.state == ''Pending'' || (n.state
+                == o.state && (!has(o.reason) || (has(n.reason) && n.reason == o.reason)))))))'
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: status cannot be removed while status.revertsProposed has entries
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed)
+            == 0 || has(self.status)'
+        - message: a new entry of status.revertsProposed must be Pending
+          rule: '!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n,
+            n.state == ''Pending'' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed)
+            && oldSelf.status.revertsProposed.exists(o, o.uid == n.uid)))'
     served: true
     storage: true
     subresources:

@@ -35,6 +35,7 @@ import (
 	"github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
 	"github.com/pkalin/shadewright/internal/analyzer/models"
+	"github.com/pkalin/shadewright/internal/analyzer/revert"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -274,11 +275,22 @@ func readTools(f analysisFlags, d analysisDeps) (*tools.Set, error) {
 	return set, nil
 }
 
-// setupAnalysis builds the analysis controller and registers it with the manager, or logs that the analysis
-// is off. The trigger (inc) then counts the reviewer hints of the requests the analysis answers them on
-// (ADR-0028), selected by the analysis's own predicate; with the analysis off it counts none.
+// setupAnalysis registers the revert proposer, then builds the analysis controller and registers it with the
+// manager, or logs that the analysis is off. The revert proposer (ADR-0030 section 8, #96) is deterministic and
+// calls no model, so it runs whether the analysis is on or off: it creates the revert of a request that ended
+// Failed with Verified False (at most revert.MaxAge ago, also at start-up) and records it in the Incident's
+// status.revertsProposed, with the grants the analyzer already holds. The trigger (inc) then counts the reviewer
+// hints of the requests the analysis answers them on (ADR-0028), selected by the analysis's own predicate; with
+// the analysis off it counts none.
 func setupAnalysis(mgr ctrl.Manager, inc *incidents.Controller, f analysisFlags, builder analysis.ContextBuilder,
 	sources analyzer.Sources, redactor *redact.Redactor, tp trace.TracerProvider) error {
+	// Its Warning events are about the failed request or its Incident, in the operator namespace, with the grant
+	// on core Events there that the leader election Role holds (see the Incident controller's recorder in main.go).
+	proposer := &revert.Proposer{Client: mgr.GetClient(), Namespace: f.namespace,
+		Recorder: mgr.GetEventRecorderFor("shadewright-analyzer")} //nolint:staticcheck // as in main.go
+	if err := proposer.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("the revert proposer: %w", err)
+	}
 	c, err := buildAnalysis(f, analysisDeps{
 		cache: mgr.GetCache(), apiReader: mgr.GetAPIReader(), client: mgr.GetClient(), builder: builder,
 		sources: sources, redactor: redactor, log: ctrl.Log.WithName("analysis"), tracerProvider: tp,

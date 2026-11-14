@@ -261,14 +261,13 @@ spec:
               reverts:
                 description: |-
                   reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a
-                  revert. A deterministic revert proposer in the analyzer is planned (#96, second part) to create one for a
-                  request that ended Failed with Verified False; none is built, so no component creates a revert yet. A
-                  model proposal has no such field. A revert requires approvalRequired: true, never replaces another
+                  revert, which the analyzer's deterministic revert proposer creates, with no model call, for a request that
+                  ended Failed with Verified False. A model proposal has no such field. A revert requires approvalRequired: true, never replaces another
                   request, and is never changed after create (the spec is immutable). The executor checks
                   the link before the policy check: the named request exists with this UID, ended Failed with Verified
                   False, is not a revert itself, has the same Incident, target and action type (and container), and this
                   request's previous and desired values are its desired and previous values; this request's name is
-                  RevertName of that UID, so a failed request has at most one revert at a time (a revert that was deleted can be created again; the proposer must cover that). Otherwise the request ends Denied
+                  RevertName of that UID, so a failed request has at most one revert at a time (the proposer also records it in the Incident's status.revertsProposed and never makes a second one). Otherwise the request ends Denied
                   with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier
                   writes no report for it, and once rolled out, configured and available for stableFor it ends
                   Inconclusive with reason RevertApplied, never Succeeded.

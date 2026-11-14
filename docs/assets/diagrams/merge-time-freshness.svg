@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 520" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Shadewright merge-time freshness check</title>
+  <desc id="d">Overview of ADR-0041, proposed and not built. When the executor sees that a person merged a pull request, it first checks freshness once more, from recorded state and three reads of the API server: the policy, the settings and the target, compared with the recorded policy UID and revision, plan repository, plan digest and target UID. It reads nothing from Git or Flux, because after the merge the file and the live value already hold the new value, and it compares no timestamps. A failed read is not fresh and not stale: the request keeps its phase and the next look retries. If nothing changed, the merge is recorded as today. If something changed and the current policy, asked through the same Preflight code, would still allow the change, the merge is recorded with PlanFresh False and the request ends Inconclusive with StalePlanMerged, which the circuit breaker does not count as a success. If the current policy would refuse the change, the request ends NeedsIntervention with the reason MergedAgainstPolicy, with the merge receipt kept. In both stale cases Shadewright opens no revert proposal and makes no Git write; a person decides. With verification on, a failure still ends Failed.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="520" rx="18" fill="#0e0e16"/>
+
+  <rect class="lane" x="24" y="24" width="300" height="472" rx="14"/>
+  <text class="lanet" x="44" y="54">GIT HOST</text>
+  <rect class="lane" x="350" y="24" width="746" height="472" rx="14"/>
+  <text class="lanet" x="370" y="54">EXECUTOR, RECORDED STATE ONLY</text>
+
+  <rect class="ext" x="48" y="90" width="252" height="110" rx="12"/>
+  <text class="h" x="66" y="118">Pull request merged</text>
+  <text class="s" x="66" y="142">by a person, at any time after a</text>
+  <text class="s" x="66" y="162">policy, settings or target change</text>
+  <text class="s" x="66" y="182">seen at the next look (30 s to 5 min)</text>
+
+  <rect class="box" x="48" y="250" width="252" height="216" rx="12"/>
+  <text class="h" x="66" y="278">Not read at the merge</text>
+  <text class="s" x="66" y="304">no Git read, no source mapping,</text>
+  <text class="s" x="66" y="324">no Flux read, no previous-value test:</text>
+  <text class="s" x="66" y="344">after the merge the file and the live</text>
+  <text class="s" x="66" y="364">value hold the new value (a false</text>
+  <text class="s" x="66" y="384">positive on every plan)</text>
+  <text class="no" x="66" y="414">No timestamps compared</text>
+  <text class="no" x="66" y="438">No Git write, no revert</text>
+
+  <path class="f" d="M300 145H372" marker-end="url(#a)"/>
+
+  <rect class="key" x="372" y="90" width="340" height="206" rx="12"/>
+  <text class="h" x="390" y="118">Merge-time check</text>
+  <text class="s" x="390" y="142">reads from the API server:</text>
+  <text class="s" x="390" y="162">policy, settings, target</text>
+  <text class="s" x="390" y="186">against what the plan recorded:</text>
+  <text class="s" x="390" y="206">policy UID and revision, repository,</text>
+  <text class="s" x="390" y="226">plan digest, target UID and labels</text>
+  <text class="no" x="390" y="258">Failed read: not fresh, not stale</text>
+  <text class="s" x="390" y="278">phase kept, the next look retries</text>
+
+  <rect class="box" x="372" y="330" width="340" height="136" rx="12"/>
+  <text class="h" x="390" y="358">Would the current policy allow it?</text>
+  <text class="s" x="390" y="382">policy.Preflight: the same field checks</text>
+  <text class="s" x="390" y="402">as the decision, with the policy read now</text>
+  <text class="s" x="390" y="422">(the model is not asked)</text>
+  <path class="f" d="M542 296V330" marker-end="url(#a)"/>
+  <text class="lbl" x="554" y="318">changed</text>
+
+  <rect class="box" x="748" y="84" width="324" height="98" rx="12"/>
+  <text class="h" x="766" y="112">Nothing changed</text>
+  <text class="s" x="766" y="136">Merged with receipt, as today;</text>
+  <text class="s" x="766" y="156">verification and the cap go on</text>
+  <path class="f" d="M712 134H748" marker-end="url(#a)"/>
+  <text class="lbl" x="716" y="124">same</text>
+
+  <rect class="box" x="748" y="212" width="324" height="124" rx="12"/>
+  <text class="h" x="766" y="240">Allowed: Inconclusive</text>
+  <text class="s" x="766" y="264">Merged with PlanFresh False; the cap</text>
+  <text class="s" x="766" y="284">ends it StalePlanMerged. The breaker</text>
+  <text class="s" x="766" y="304">counts no success (verification on:</text>
+  <text class="s" x="766" y="324">a failure still ends Failed)</text>
+  <path class="f" d="M712 380H730V274H748" marker-end="url(#a)"/>
+  <text class="lbl" x="716" y="370">allowed</text>
+
+  <rect class="key" x="748" y="360" width="324" height="106" rx="12"/>
+  <text class="h" x="766" y="388">Refused: NeedsIntervention</text>
+  <text class="s" x="766" y="412">reason MergedAgainstPolicy, receipt kept</text>
+  <text class="s" x="766" y="432">no revert proposal: a person merged it,</text>
+  <text class="s" x="766" y="452">a person decides</text>
+  <path class="f" d="M712 430H748" marker-end="url(#a)"/>
+  <text class="lbl" x="716" y="420">refused</text>
+</svg>

@@ -49,7 +49,8 @@ func options() *krusty.Options {
 // refused every reference that kustomize could read as a URL or Git address, and the file system holds
 // only the given files. The kustomize error text is dropped, since it may quote file contents.
 //
-// The wait for the render slot honours ctx; the render itself cannot be cancelled once it has started.
+// The wait for the render slot honours ctx; the render itself cannot be cancelled once it has started, which is
+// why [Check] runs it in the render process ([runRenderProcess]), killed when its context ends.
 func render(ctx context.Context, files map[string][]byte, dir string) (objs []map[string]any, err error) {
 	failed := refuse(ReasonRenderFailed, "kustomize could not build "+dir)
 	defer func() {

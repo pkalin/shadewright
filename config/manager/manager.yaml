@@ -78,6 +78,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        # The Go soft limit the memory limit below is sized for: 241591910 bytes (about 230 MiB), the same bytes as
+        # the chart's default (36 percent of 640Mi). Change both together (ADR-0035).
+        - name: GOMEMLIMIT
+          value: "241591910"
         name: executor
         ports:
         - containerPort: 8081
@@ -106,10 +110,12 @@ spec:
         resources:
           limits:
             cpu: 500m
-            # 256Mi: headroom for large real GitOps trees (#615). The Git input budgets (#495, #595, #482) stay the
-            # bound and were measured against 128Mi; growth from crafted input multiplies, so the limit is not the
-            # defence (#614).
-            memory: 256Mi
+            # 640Mi: the executor and one render process of the render check (ADR-0035). The executor's Go soft
+            # limit (about 230 MiB) plus the render process's resident limit (192 MiB, where the executor kills it)
+            # plus a 128 MiB margin is 550.4 MiB, so a render the samplers stop does not set off a container OOM,
+            # which on cgroup v2 ends the executor too. GOMEMLIMIT above sets that soft limit, as the chart does
+            # (36 percent of this limit).
+            memory: 640Mi
           requests:
             cpu: 10m
             memory: 64Mi

@@ -15,8 +15,9 @@ limitations under the License.
 */
 
 // Command render runs the executor's pre-commit render check (internal/gitops/semdiff) on the largest
-// repository its limits allow, and prints the time and the memory it took. hack/load/measure.sh runs it in a
-// container with the executor's memory limit, so the process peak is the cgroup's. Test tooling only.
+// repository its limits allow, and prints the time and the memory it took, with the CPU time and the peak
+// resident memory of the render process it started (ADR-0035). hack/load/measure.sh runs it in a container with
+// the executor's memory and CPU limits. Test tooling only.
 //
 // Shapes (n MiB of ConfigMaps; with n = 4, the default, both sit just under the 4 MiB build budget, counted with
 // repetition, and at most at the 1,024 object cap; a larger n is refused):
@@ -44,10 +45,18 @@ limitations under the License.
 //   - heavy:   as docs, each ConfigMap padded so that the build is just under the 4 MiB byte budget: both
 //     input bounds at once. Files hold as many as fit in 1 MiB, and a ConfigMap is at most about 1 MiB, so
 //     with n below 4 the build stays under the byte budget.
+//   - chained: past the estimates (#614): a base adds a common annotation of n KiB to one ConfigMap, the
+//     overlay moves it into the ConfigMap's name with a JSON patch, and the Deployment's 1,000 envFrom
+//     references take the new name. With n = 16 it renders; with n = 64 the render process's limits stop it.
+//
+// RENDER_INPUT=<file> writes the input of the render process (semdiff.Input as JSON) to the file instead of
+// running the check, so that another binary's render process, such as the executor's, can be run on it
+// (ADR-0035 measured the executor's binary that way).
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -55,6 +64,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -78,6 +88,8 @@ const (
 	shapeDense      = "dense"
 	shapeDenseSeq   = "denseseq"
 	shapeDenseAnnot = "denseannotations"
+	// chained: past the estimates (#614).
+	shapeChained = "chained"
 )
 
 const deployment = `apiVersion: apps/v1
@@ -106,6 +118,7 @@ spec:
 `
 
 func main() {
+	semdiff.RunRenderProcess() // Check renders in a child process of this binary (ADR-0035)
 	shape, n := "flat", 4
 	if len(os.Args) > 1 {
 		shape = os.Args[1]
@@ -142,6 +155,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	in0 := semdiff.Input{Files: files, Path: path, File: file, Patched: patched, Target: target, Action: act}
+	if out := os.Getenv("RENDER_INPUT"); out != "" {
+		// The input of the render process, for a run of another binary's render process on it.
+		b, err := json.Marshal(in0)
+		if err == nil {
+			// #nosec G703 -- load test tooling: the path is the one the person running it chose.
+			err = os.WriteFile(out, b, 0o600)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "input:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	var peakHeap, peakSys atomic.Uint64
 	done := make(chan struct{})
 	go func() {
@@ -161,8 +188,7 @@ func main() {
 	}()
 
 	start := time.Now()
-	res, err := semdiff.Check(context.Background(), semdiff.Input{
-		Files: files, Path: path, File: file, Patched: patched, Target: target, Action: act})
+	res, err := semdiff.Check(context.Background(), in0)
 	took := time.Since(start)
 	close(done)
 
@@ -174,9 +200,24 @@ func main() {
 		outcome = "error:" + err.Error()
 	}
 	fmt.Printf("shape=%s input_mib=%.1f files=%d time_s=%.2f go_heap_inuse_peak_mib=%.0f "+
-		"go_sys_peak_mib=%.0f rss_peak_mib=%s %s\n",
+		"go_sys_peak_mib=%.0f rss_peak_mib=%s %s %s\n",
 		shape, float64(in)/(1<<20), len(files), took.Seconds(), float64(peakHeap.Load())/(1<<20),
-		float64(peakSys.Load())/(1<<20), rssPeak(), outcome)
+		float64(peakSys.Load())/(1<<20), rssPeak(), renderProcess(), outcome)
+}
+
+// renderProcess is the CPU time (user and system) and the peak resident set of the render process that Check
+// started (ADR-0035), from the rusage of this process's waited-for children.
+func renderProcess() string {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_CHILDREN, &ru); err != nil {
+		return "child_cpu_s=n/a child_rss_peak_mib=n/a"
+	}
+	cpu := time.Duration(syscall.TimevalToNsec(ru.Utime) + syscall.TimevalToNsec(ru.Stime))
+	rss := float64(ru.Maxrss) / 1024 // KiB on Linux
+	if runtime.GOOS == "darwin" {
+		rss /= 1024 // bytes on macOS
+	}
+	return fmt.Sprintf("child_cpu_s=%.2f child_rss_peak_mib=%.0f", cpu.Seconds(), rss)
 }
 
 // rssPeak is the process's peak resident set (VmHWM in /proc/self/status, Linux only), in MiB.
@@ -386,6 +427,19 @@ func build(shape string, n int) (map[string][]byte, string) {
 		}
 		k := fit(files, func(size int) []byte { return kust(extra(size), res...) }, n)
 		files["apps/kustomization.yaml"] = k
+	case shapeChained:
+		files["apps/base/kustomization.yaml"] = kust("commonAnnotations:\n  x: "+strings.Repeat("n", n<<10)+"\n", "cm.yaml")
+		files["apps/base/cm.yaml"] = []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm0\n  namespace: web\n")
+		var d strings.Builder
+		d.WriteString("          envFrom:\n")
+		for range 1000 {
+			d.WriteString("            - configMapRef:\n                name: cm0\n")
+		}
+		image := "          image: registry.example.com/web:1.0.0\n"
+		files["apps/deployment.yaml"] = []byte(strings.Replace(deployment, image, image+d.String(), 1))
+		files["apps/kustomization.yaml"] = kust("patches:\n  - target:\n      kind: ConfigMap\n      name: cm0\n"+
+			"    patch: |\n      - op: move\n        from: /metadata/annotations/x\n        path: /metadata/name\n",
+			"base", "deployment.yaml")
 	case shapeTiny:
 		res := append(make([]string, 0, n+1), "deployment.yaml")
 		files["apps/deployment.yaml"] = []byte(deployment)

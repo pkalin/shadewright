@@ -298,23 +298,94 @@ Takes a dict with .component and .context. Renders nothing when the result is em
 {{/*
 GOMEMLIMIT of one component's container, in bytes: the goMemLimit value when set (a Go memory limit such as
 "100MiB"), else 90 percent of resources.limits.memory, so the Go runtime collects before the heap reaches the
-limit and a bounded parse is not OOM-killed (#601). Takes a dict with .component and .context. Reads the limit
-as an integer or a Kubernetes quantity with a binary (Ki, Mi, Gi, Ti) or decimal (k, K, M, G, T) suffix; any
-other form (for example "1.5Gi" or "1e9") fails the render and asks for goMemLimit.
+limit and a bounded parse is not OOM-killed (#601). The executor's default is 36 percent instead: its container
+also holds the render process of the render check, which the executor stops at 192 MiB resident, and the rest
+covers that and a 128 MiB margin (ADR-0035, checked by shadewright.executorMemoryBudget).
+Takes a dict with .component and .context. Reads the limit with shadewright.memoryLimitBytes and fails the
+render, asking for goMemLimit, on a form it cannot read.
 */}}
 {{- define "shadewright.goMemLimit" -}}
 {{- $c := index .context.Values .component }}
 {{- if $c.goMemLimit }}
 {{- $c.goMemLimit }}
 {{- else }}
-{{- $raw := $c.resources.limits.memory }}
-{{- $q := ternary (printf "%.0f" $raw) (toString $raw) (kindIs "float64" $raw) }}
-{{- $re := "^([0-9]+)(Ki|Mi|Gi|Ti|k|K|M|G|T)?$" }}
-{{- if not (regexMatch $re $q) }}
-{{- fail (printf "%s.resources.limits.memory %q is not an integer or a whole number with a Ki, Mi, Gi, Ti, k, K, M, G or T suffix: set %s.goMemLimit" .component $q .component) }}
+{{- $read := include "shadewright.memoryLimitBytes" . }}
+{{- if not $read }}
+{{- fail (printf "%s.resources.limits.memory %q is not a plain number of bytes or a number with an optional fraction and a Ki, Mi, Gi, Ti, k, K, M, G or T suffix, so the chart cannot take a share of it: set %s.goMemLimit" .component (include "shadewright.memoryLimitString" .) .component) }}
 {{- end }}
+{{- $percent := ternary 36 90 (eq .component "executor") }}
+{{- /* The hundredths first and the rest apart, so a large limit cannot overflow the integer arithmetic of the
+template, and the result is still exactly the percentage rounded down. */}}
+{{- $l := $read | int64 }}
+{{- add (mul (div $l 100) $percent) (div (mul (mod $l 100) $percent) 100) }}
+{{- end }}
+{{- end }}
+
+{{/*
+resources.limits.memory of one component as written, a number rendered without an exponent.
+Takes a dict with .component and .context.
+*/}}
+{{- define "shadewright.memoryLimitString" -}}
+{{- $raw := (index .context.Values .component).resources.limits.memory }}
+{{- /* A fractional number of bytes (through --set-json) is rounded up, as Kubernetes rounds a quantity. */}}
+{{- ternary (printf "%.0f" (ceil $raw)) (toString $raw) (kindIs "float64" $raw) }}
+{{- end }}
+
+{{/*
+resources.limits.memory of one component in bytes, rounded up as Kubernetes rounds a quantity, or nothing for a
+form it does not read. Reads the forms a memory limit is written in: a number of bytes, or a number with a
+binary (Ki, Mi, Gi, Ti) or decimal (k, K, M, G, T) suffix, each with an optional fraction of up to six digits
+("1.5Gi", "0.5Gi", "600M", "536870912"). Other valid quantities, such as exponents ("1e9") or milli ("m"), give
+nothing. A limit of 1 Ei or more is read as 1 Ei, larger than any budget, so the template's integer arithmetic
+cannot overflow. Takes a dict with .component and .context.
+*/}}
+{{- define "shadewright.memoryLimitBytes" -}}
+{{- $q := include "shadewright.memoryLimitString" . }}
+{{- $re := "^([0-9]+)(?:\\.([0-9]{1,6}))?(Ki|Mi|Gi|Ti|k|K|M|G|T)?$" }}
+{{- if regexMatch $re $q }}
 {{- $mult := dict "" 1 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 "k" 1000 "K" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 }}
-{{- $bytes := mul (int64 (regexReplaceAll $re $q "${1}")) (int64 (index $mult (regexReplaceAll $re $q "${2}"))) }}
-{{- div (mul $bytes 90) 100 }}
+{{- $m := int64 (index $mult (regexReplaceAll $re $q "${3}")) }}
+{{- /* Leading zeros go first: the conversion to an integer would read "010" as octal. */}}
+{{- $whole := regexReplaceAll "^0+([0-9])" (regexReplaceAll $re $q "${1}") "${1}" }}
+{{- $frac := regexReplaceAll $re $q "${2}" }}
+{{- $cap := int64 1152921504606846976 }}
+{{- /* More than 18 digits do not fit an int64; fewer that pass the cap once multiplied are capped first. */}}
+{{- if or (gt (len $whole) 18) (gt (int64 $whole) (div $cap $m)) }}
+{{- $cap }}
+{{- else }}
+{{- $bytes := mul (int64 $whole) $m }}
+{{- if $frac }}
+{{- $scale := int64 (printf "1%s" (repeat (len $frac) "0")) }}
+{{- $digits := regexReplaceAll "^0+([0-9])" $frac "${1}" }}
+{{- $bytes = add $bytes (div (sub (add (mul (int64 $digits) $m) $scale) 1) $scale) }}
+{{- end }}
+{{- min $bytes $cap }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Fails the render when the executor's memory limit cannot hold the executor and one render process of the render
+check (ADR-0035): its Go soft limit (GOMEMLIMIT, shadewright.goMemLimit), plus the render process's resident
+limit (192 MiB, semdiff.MaxRenderResident, where the executor kills it), plus a 128 MiB margin
+(semdiff.RenderOutsideData). On cgroup v2 a container OOM ends the executor with the render process, so with less
+a build that reaches the render process's limit restarts the executor on every retry. The chart tests check these
+numbers against the package's constants. A memory limit shadewright.memoryLimitBytes does not read (an exponent
+or milli form) skips the check; without goMemLimit, shadewright.goMemLimit then asks for one.
+*/}}
+{{- define "shadewright.executorMemoryBudget" -}}
+{{- $read := include "shadewright.memoryLimitBytes" (dict "component" "executor" "context" .) }}
+{{- if $read }}
+{{- $limit := $read | int64 }}
+{{- $soft := include "shadewright.goMemLimit" (dict "component" "executor" "context" .) }}
+{{- $re := "^([0-9]+)(B|KiB|MiB|GiB|TiB)?$" }}
+{{- $mult := dict "" 1 "B" 1 "KiB" 1024 "MiB" 1048576 "GiB" 1073741824 "TiB" 1099511627776 }}
+{{- /* Leading zeros go first, as for the memory limit: Go reads "0280MiB" as 280 MiB, the conversion as octal. */}}
+{{- $softDigits := regexReplaceAll "^0+([0-9])" (regexReplaceAll $re $soft "${1}") "${1}" }}
+{{- $softBytes := mul (int64 $softDigits) (int64 (index $mult (regexReplaceAll $re $soft "${2}"))) }}
+{{- $need := add $softBytes 201326592 134217728 }}
+{{- if lt $limit $need }}
+{{- fail (printf "executor.resources.limits.memory %q (%d bytes) cannot hold the executor and its render process: it needs the executor's Go memory limit (%d bytes, executor.goMemLimit or 36 percent of the memory limit) plus 192 MiB for the render process plus a 128 MiB margin, %d bytes (ADR-0035). Raise the memory limit or lower executor.goMemLimit" (include "shadewright.memoryLimitString" (dict "component" "executor" "context" .)) $limit $softBytes $need) }}
+{{- end }}
 {{- end }}
 {{- end }}

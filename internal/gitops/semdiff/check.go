@@ -71,11 +71,23 @@ type Result struct {
 // targetNamespace, postBuild, components). The source mapping already refuses a Kustomization that sets any
 // of them, and the pull request step relies on that.
 //
-// Renders are serialised in the process (kustomize keeps global state). ctx bounds the wait for that turn:
-// when it ends first, Check returns ctx.Err() without rendering. A render that has started runs to its end,
-// since kustomize cannot be cancelled; the limits on the build ([MaxVisits], [MaxBuildBytes], [MaxBuildDocuments],
-// [MaxTransformBytes]) bound how long it can take.
+// After the input is validated, the walk, both renders and the comparison run in a child process with
+// operating system limits on its memory and CPU time ([MaxRenderMemory], [MaxRenderCPUSeconds]), so a build
+// that grows past the limits checked before the render is refused with ReasonTooLarge instead of ending the
+// executor (#614, ADR-0035). One render process runs at a time. ctx bounds the wait for that turn and the
+// render process: when it ends, the process is killed and Check returns ctx.Err(). A process that cannot be
+// started, or that ends before it has set its limits, is a plain error for a retry, never a refusal. One that
+// ends after that without an answer and not at one of its limits is a [*RenderEnded], also for a retry; the
+// caller counts those in a row and refuses the change after a few (ADR-0035).
 func Check(ctx context.Context, in Input) (Result, error) {
+	if _, _, _, err := plan(in); err != nil {
+		return Result{}, err
+	}
+	return runRenderProcess(ctx, in)
+}
+
+// check is the body of [Check], run in the render process ([RunRenderProcess]).
+func check(ctx context.Context, in Input) (Result, error) {
 	field, previous, desired, err := plan(in)
 	if err != nil {
 		return Result{}, err

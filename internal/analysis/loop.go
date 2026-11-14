@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -126,9 +127,17 @@ const (
 	// ReasonUnexpectedModel: a reply named another model than the one configured for its deployment's role
 	// (ADR-0023 decision 8), or none; it is not used.
 	ReasonUnexpectedModel Reason = "UnexpectedModel"
-	// ReasonEndpointNotAllowed: the deployment's endpoint is outside the operator's allow-list of host
-	// suffixes (ErrEndpointNotAllowed), so nothing was sent to it and no token requested for it.
+	// ReasonEndpointNotAllowed: the deployment's endpoint is one the analyzer may not call
+	// (ErrEndpointNotAllowed): for Foundry, outside the operator's allow-list of host suffixes or the Anthropic
+	// API's host; for Anthropic, not the API's fixed endpoint. Nothing was sent to it and no token requested for
+	// it; an earlier triage call may have gone to another endpoint.
 	ReasonEndpointNotAllowed Reason = "EndpointNotAllowed"
+	// ReasonProviderNotConfigured: the deployment's provider needs something the analyzer was not started
+	// with, such as the API key file of an Anthropic deployment (ErrProviderNotConfigured), or the provider's
+	// key file could not be read after the adapter's retries or is malformed, and the call sent no request
+	// (providers.ErrCredentialUnavailable with providers.ErrNotSent). Nothing went to that provider for the
+	// call it ended; an earlier triage call may have gone to another provider (ADR-0037).
+	ReasonProviderNotConfigured Reason = "ProviderNotConfigured"
 	// ReasonPlanUnchanged: an analysis with a reviewer hint proposed the plan of the request it would replace,
 	// so no replacement was created (ADR-0028 section 4).
 	ReasonPlanUnchanged Reason = "PlanUnchanged"
@@ -144,14 +153,30 @@ const (
 	ReasonHintNotPending Reason = "HintNotPending"
 )
 
-// ErrEndpointNotAllowed is what a [ModelFactory] returns, wrapped, for an endpoint outside the operator's
-// allow-list; the analysis hands off with ReasonEndpointNotAllowed.
+// ErrEndpointNotAllowed is what a [ModelFactory] returns, wrapped, for an endpoint the analyzer may not call:
+// a Foundry endpoint outside the operator's allow-list or on the Anthropic API's host, or an Anthropic endpoint
+// other than the API's fixed one; the analysis hands off with ReasonEndpointNotAllowed.
 var ErrEndpointNotAllowed = errors.New("the model endpoint is not allowed")
+
+// ErrProviderNotConfigured is what a [ModelFactory] returns, wrapped, for a deployment whose provider the
+// analyzer cannot call as started, such as an Anthropic deployment without the analyzer's key file flag; the
+// analysis hands off with ReasonProviderNotConfigured.
+var ErrProviderNotConfigured = errors.New("the model provider is not configured in the analyzer")
+
+// ErrDeploymentNotExpected is what a [ModelFactory] returns, wrapped, for a deployment that names another
+// model than the one configured for its role, where the deployment is the model ID (an Anthropic
+// deployment, ADR-0037 decision 2); the analysis hands off with ReasonUnexpectedModel before any call.
+var ErrDeploymentNotExpected = errors.New("the deployment names another model than the role's")
 
 // factoryFailure is the hand-off reason of a ModelFactory error.
 func factoryFailure(err error) Reason {
-	if errors.Is(err, ErrEndpointNotAllowed) {
+	switch {
+	case errors.Is(err, ErrEndpointNotAllowed):
 		return ReasonEndpointNotAllowed
+	case errors.Is(err, ErrProviderNotConfigured):
+		return ReasonProviderNotConfigured
+	case errors.Is(err, ErrDeploymentNotExpected):
+		return ReasonUnexpectedModel
 	}
 	return ReasonModelError
 }
@@ -236,6 +261,10 @@ type Config struct {
 	// model call and tool call. The spans carry IDs, counts, fixed result labels and the configured model and
 	// deployment names only, never text from the cluster, a tool or the model. Nil means no tracing.
 	TracerProvider trace.TracerProvider
+	// Recorder writes the Normal event EventModelProviderChanged on the Incident whose call to a role's provider
+	// is the first to return having sent a request after it changed (ADR-0037). Nil writes none; the change is
+	// logged either way.
+	Recorder record.EventRecorder
 }
 
 // Analyzer runs the bounded analysis of one Incident at a time per call. It is safe for concurrent use when
@@ -243,6 +272,8 @@ type Config struct {
 type Analyzer struct {
 	cfg    Config
 	tracer trace.Tracer
+	// used is the provider each role last sent a request to, to notice a change (Analyzer.sent).
+	used providersUsed
 }
 
 // New checks the configuration.
@@ -269,7 +300,7 @@ func New(cfg Config) (*Analyzer, error) {
 	if tp == nil {
 		tp = noop.NewTracerProvider()
 	}
-	return &Analyzer{cfg: cfg, tracer: tp.Tracer(TracerName)}, nil
+	return &Analyzer{cfg: cfg, tracer: tp.Tracer(TracerName), used: providersUsed{last: map[Role]remediationv1alpha1.ModelProvider{}}}, nil
 }
 
 // Timeout returns the deadline of one analysis.
@@ -408,7 +439,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		}
 		role, deployment = RoleEscalation, limits.Escalation
 	}
-	model, err := a.cfg.Models(role, *deployment)
+	model, err := a.model(role, deployment)
 	if err != nil {
 		return r.handOff(factoryFailure(err))
 	}
@@ -441,7 +472,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		if limits.Escalation == nil {
 			return r.handOff(ReasonEscalationNotConfigured)
 		}
-		if model, err = a.cfg.Models(RoleEscalation, *limits.Escalation); err != nil {
+		if model, err = a.model(RoleEscalation, limits.Escalation); err != nil {
 			return r.handOff(factoryFailure(err))
 		}
 	}
@@ -898,13 +929,21 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		attrAttempt.Int(attempt+1), attrMaxOutputTokens.Int(req.MaxOutputTokens)))
 	defer func() { endModelCall(span, res) }()
 	c, err := model.Complete(ctx, req)
+	notSent := providers.IsNotSent(err)
+	if !notSent {
+		r.a.sent(r.parent, r.inc, role, d.ProviderName())
+	}
 	// Fail closed: a call that failed, or whose usage is unknown, is charged its upper bound. Whether and
 	// how much the service billed it cannot be told (a timeout may come after the reply was generated), so
 	// the analysis and deployment bounds count the most it could have cost. A malformed reply was billed
-	// and reports its usage, which is charged as reported.
+	// and reports its usage, which is charged as reported. A call the adapter marks as having sent no request
+	// on any attempt (providers.ErrNotSent) cannot have been billed and is charged nothing.
 	charge := upper
 	billed := (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown
-	if billed {
+	switch {
+	case notSent:
+		charge = 0
+	case billed:
 		charge = c.Usage.InputTokens + c.Usage.OutputTokens
 		span.SetAttributes(attrInputTokens.Int64(c.Usage.InputTokens), attrOutputTokens.Int64(c.Usage.OutputTokens))
 	}
@@ -933,6 +972,12 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		return attemptResult{err: fmt.Errorf("analysis: %w", r.parent.Err())}
 	case r.ctx.Err() != nil:
 		return attemptResult{reason: ReasonDeadlineExceeded}
+	case notSent && providers.IsCredentialUnavailable(err):
+		// The provider's key file could not be read (after the adapter's retries) or is malformed, and no
+		// attempt sent anything: the provider cannot be called as configured.
+		log.FromContext(r.parent).Info("Handed off an analysis: the model provider's key file could not be used",
+			"role", role, "provider", d.ProviderName(), "error", err.Error())
+		return attemptResult{reason: ReasonProviderNotConfigured}
 	case providers.IsMalformedOutput(err):
 		return attemptResult{reason: ReasonInvalidOutput}
 	case providers.IsNotFound(err):

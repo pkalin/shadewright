@@ -16,8 +16,9 @@ limitations under the License.
 
 // Package models wires the analysis to its model provider (design 11.1, #76): the operator's allow-list of
 // model endpoint host suffixes, the model names the replies must give, the policy per action type, and the
-// factory that builds a Microsoft Foundry provider for a deployment of RemediationSettings only after its
-// endpoint passed the allow-list. It is apart from package analyzer so that the collector's tests, which import
+// factory that builds the provider of a deployment of RemediationSettings by its provider field: Microsoft
+// Foundry only after its endpoint passed the allow-list, the Anthropic API only at its fixed host and with the
+// analyzer's key file (ADR-0037). It is apart from package analyzer so that the collector's tests, which import
 // that package, do not import the analysis.
 package models
 
@@ -35,6 +36,7 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/model/anthropic"
 	"github.com/pkalin/shadewright/internal/providers/model/foundry"
 )
 
@@ -135,32 +137,96 @@ func ParseActionPolicies(flag string) (map[remediationv1alpha1.ActionType]remedi
 	return out, nil
 }
 
+// anthropicHost is the host of the Anthropic API. The Foundry path refuses it whatever the allow-list says, so
+// the workload identity token never goes there (ADR-0037 decision 2).
+const anthropicHost = "api.anthropic.com"
+
 // ModelsConfig configures [NewModelFactory].
 type ModelsConfig struct {
-	// Suffixes is the allow-list of endpoint host suffixes ([ParseEndpointSuffixes]). Required.
+	// Suffixes is the allow-list of endpoint host suffixes ([ParseEndpointSuffixes]) of Foundry deployments.
+	// Required.
 	Suffixes []string
-	// Tokens is the workload identity token source. Required.
+	// Tokens is the workload identity token source of Foundry deployments. Required.
 	Tokens foundry.TokenSource
-	// Log gets one line per refused endpoint, without the endpoint.
+	// AnthropicKeyFile is the path of the file that holds the Anthropic API key (--anthropic-api-key-file).
+	// Empty refuses every Anthropic deployment (analysis.ErrProviderNotConfigured).
+	AnthropicKeyFile string
+	// Expected names, per role, the model a reply must name (--triage-model, --escalation-model). The
+	// deployment of an Anthropic deployment is the model ID, so it must equal its role's entry.
+	Expected map[analysis.Role]string
+	// Log gets one line per refused deployment, including one the adapter refuses to build, and one per
+	// failed call of an Anthropic provider with the adapter's fixed error text; never the endpoint, the key
+	// or the key file.
 	Log logr.Logger
 }
 
-// NewModelFactory returns the analysis's [analysis.ModelFactory]: it checks a deployment's endpoint against
-// the allow-list ([CheckEndpoint]) before anything else, so a refused endpoint gets no request and no token,
-// then builds a Foundry provider bound to that endpoint, deployment and API version, with the workload
-// identity token source (Cognitive Services audience only; the adapter refuses private addresses at dial
-// time). It makes no network call.
+// NewModelFactory returns the analysis's [analysis.ModelFactory]. It builds the provider a deployment's
+// provider field names and makes no network call:
+//   - Foundry (the default): it refuses the Anthropic API's host whatever the allow-list says, then checks the
+//     endpoint against the allow-list ([CheckEndpoint]), so a refused endpoint gets no request and no token,
+//     then builds a Foundry provider bound to that endpoint, deployment and API version, with the workload
+//     identity token source (Cognitive Services audience only; the adapter refuses private addresses at dial
+//     time).
+//   - Anthropic: it refuses the deployment when the analyzer has no key file
+//     (analysis.ErrProviderNotConfigured), when the endpoint is not the API's fixed one, and when the
+//     deployment is not the model its role expects (analysis.ErrDeploymentNotExpected); the allow-list is not
+//     consulted. It then builds an Anthropic provider for that model that reads the key file at every attempt
+//     and logs every failed call.
+//   - Any other provider is refused (analysis.ErrProviderNotConfigured).
 func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	if len(cfg.Suffixes) == 0 || cfg.Tokens == nil {
 		return nil, errors.New("the model factory needs an endpoint allow-list and a token source")
 	}
+	refused := func(role analysis.Role, d remediationv1alpha1.ModelDeployment, err error) error {
+		cfg.Log.Info("Refused a model deployment from RemediationSettings", "role", role,
+			"provider", d.ProviderName(), "deployment", d.Deployment, "reason", err.Error())
+		return err
+	}
 	return func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
-		if err := CheckEndpoint(d.Endpoint, cfg.Suffixes); err != nil {
-			cfg.Log.Info("Refused a model endpoint from RemediationSettings", "role", role,
-				"deployment", d.Deployment, "reason", err.Error())
-			return nil, err
+		switch d.ProviderName() {
+		case remediationv1alpha1.ModelProviderFoundry:
+			if u, err := url.Parse(d.Endpoint); err == nil && strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") == anthropicHost {
+				return nil, refused(role, d, fmt.Errorf("model endpoint host is the Anthropic API's, not a Foundry "+
+					"resource: %w", analysis.ErrEndpointNotAllowed))
+			}
+			if err := CheckEndpoint(d.Endpoint, cfg.Suffixes); err != nil {
+				return nil, refused(role, d, err)
+			}
+			p, err := foundry.New(foundry.Config{Endpoint: d.Endpoint, Deployment: d.Deployment,
+				APIVersion: d.APIVersion, Tokens: cfg.Tokens})
+			if err != nil {
+				return nil, refused(role, d, err)
+			}
+			return p, nil
+		case remediationv1alpha1.ModelProviderAnthropic:
+			if cfg.AnthropicKeyFile == "" {
+				return nil, refused(role, d, fmt.Errorf("the analyzer runs without --anthropic-api-key-file: %w",
+					analysis.ErrProviderNotConfigured))
+			}
+			if d.Endpoint != anthropic.Endpoint {
+				return nil, refused(role, d, fmt.Errorf("model endpoint is not the Anthropic API's fixed endpoint, "+
+					"the only one this provider calls: %w", analysis.ErrEndpointNotAllowed))
+			}
+			if want := cfg.Expected[role]; want == "" || d.Deployment != want {
+				return nil, refused(role, d, fmt.Errorf("the deployment is not the model of the role's flag: %w",
+					analysis.ErrDeploymentNotExpected))
+			}
+			log := cfg.Log.WithValues("role", role, "provider", d.ProviderName(), "deployment", d.Deployment)
+			p, err := anthropic.New(anthropic.Config{Model: d.Deployment, KeyFile: cfg.AnthropicKeyFile,
+				// The adapter's errors are fixed text that never holds the key, the key file's path or the
+				// reply; logging them tells a key file that cannot be used from an outage of the API.
+				OnCall: func(r anthropic.CallReport) {
+					if r.Err != nil {
+						log.Info("A call to the Anthropic API failed", "attempts", r.Attempts,
+							"notSent", providers.IsNotSent(r.Err), "error", r.Err.Error())
+					}
+				}})
+			if err != nil {
+				return nil, refused(role, d, err)
+			}
+			return p, nil
+		default:
+			return nil, refused(role, d, fmt.Errorf("unknown model provider: %w", analysis.ErrProviderNotConfigured))
 		}
-		return foundry.New(foundry.Config{Endpoint: d.Endpoint, Deployment: d.Deployment, APIVersion: d.APIVersion,
-			Tokens: cfg.Tokens})
 	}, nil
 }

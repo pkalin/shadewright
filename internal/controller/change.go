@@ -188,20 +188,30 @@ func unknownChange(err error) changeVerdict {
 // Every call settles this process's record of a first look at a missing number once, from what its reads showed
 // (settleGone), and keeps condition PullRequestUnreadable in line with the read (noteRead): set while the host
 // refuses it, removed by the next read that works.
+//
+// Calls for one request never overlap, whatever the number of workers: each holds the lock of the request whose
+// pull request it reads (goneLooks.lock, keyed by rr's namespaced name) from before its first read until it
+// returns, so its reads and its settle are one unit. The handoff reads a predecessor's pull request inside the
+// successor's reconcile and takes the predecessor's lock. Lock order: a call holds at most one request's lock,
+// since changeOf is a leaf (nothing it calls calls changeOf), and it takes the goneLooks mutex only inside that
+// lock, never the other way round. A call whose context ends while it waits for the lock reads nothing and
+// answers unknown, for a retry.
 func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, q changeQuery) changeVerdict {
-	// The ticket is taken before the first read, so settleGone knows whether a read that showed a pull request of
-	// this request finished in another call while this one read.
 	looks := r.looks()
-	t := looks.begin(client.ObjectKeyFromObject(rr))
-	defer looks.end(t)
-	v, n := r.readChange(ctx, git, rr, q, t)
+	key := client.ObjectKeyFromObject(rr)
+	if err := looks.lock(ctx, key); err != nil {
+		return unknownChange(fmt.Errorf("wait for another read of the pull requests of RemediationRequest %s: %w",
+			key, err))
+	}
+	defer looks.unlock(key)
+	v, n := r.readChange(ctx, git, rr, q)
 	return r.noteRead(ctx, rr, n, v)
 }
 
 // readChange is changeOf without the condition; it also returns the number it read (0 for the listing).
 func (r *RemediationRequestReconciler) readChange(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, q changeQuery, t goneTicket) (changeVerdict, int64) {
+	rr *remediationv1alpha1.RemediationRequest, q changeQuery) (changeVerdict, int64) {
 	src := rr.Status.Source
 	if src == nil {
 		return unknownChange(errors.New("no source recorded")), 0
@@ -211,14 +221,14 @@ func (r *RemediationRequestReconciler) readChange(ctx context.Context, git provi
 		n = rr.Status.PullRequest.Number
 	}
 	if n == 0 {
-		return r.settleGone(ctx, rr, t, 0, false, r.changeOnBranch(ctx, git, rr)), 0
+		return r.settleGone(ctx, rr, 0, false, r.changeOnBranch(ctx, git, rr)), 0
 	}
-	return r.readByNumber(ctx, git, rr, q, n, t), n
+	return r.readByNumber(ctx, git, rr, q, n), n
 }
 
 // readByNumber is readChange for a number.
 func (r *RemediationRequestReconciler) readByNumber(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, q changeQuery, n int64, t goneTicket) changeVerdict {
+	rr *remediationv1alpha1.RemediationRequest, q changeQuery, n int64) changeVerdict {
 	v, absent := r.changeByNumber(ctx, git, rr, n, string(rr.Status.Source.TargetBranch))
 	switch {
 	case v.state == changeUnknown && errors.Is(v.err, errOwnListed) && q.openOnBranch:
@@ -240,7 +250,7 @@ func (r *RemediationRequestReconciler) readByNumber(ctx context.Context, git pro
 			v = r.checkOpenListing(ctx, git, rr, q, n, v, &absent)
 		}
 	}
-	return r.settleGone(ctx, rr, t, n, absent, v)
+	return r.settleGone(ctx, rr, n, absent, v)
 }
 
 // checkOpenListing checks v, an answer about pull request n, against the listing of the open pull requests of the
@@ -352,8 +362,8 @@ func (r *RemediationRequestReconciler) changeByNumber(ctx context.Context, git p
 }
 
 // settleGone is the one place that decides the confirmation wait of a pull request missing by its number (#688),
-// on the same terms as a merge conflict (conflicted). It runs once per changeOf call, after its reads, with t, the
-// ticket the call took before its first read, n, the number read (0 for the listing of the branch), and absent,
+// on the same terms as a merge conflict (conflicted). It runs once per changeOf call, after its reads and under
+// the request's lock, with n, the number read (0 for the listing of the branch), and absent,
 // true only when this call's reads found n missing: a 404 that neither the listing of every pull request of the
 // branch nor the open listing contradicts, with no pull request of this request listed. The first look is
 // evidence about the Git host as this process saw it, so it lives in this process's memory (goneLooks), never in
@@ -363,33 +373,28 @@ func (r *RemediationRequestReconciler) changeByNumber(ctx context.Context, git p
 //     time on this process's clock and answers unknown (errGoneUnconfirmed, with the time left as the delay to
 //     ask for); one that finds it missing at least confirmWait after the first look answers gone;
 //   - any other outcome (a read that showed n or a pull request of this request, conflicting reads, a failed read,
-//     any verdict but gone) drops the first look, so the next 404 waits again;
-//   - a look during which another call dropped the first look (its ticket is stale) neither keeps nor confirms
-//     one and answers unknown (errConflictingReads): a read that showed a pull request of this request finished
-//     after this call's reads began, so its 404 may be older than that read.
+//     any verdict but gone) drops the first look, so the next 404 waits again.
 //
-// So gone is never answered by a call in which a read showed a pull request of this request, nor by one that
-// overlapped such a read, and never on a time from another clock or from stored state. After a restart or a
+// Since calls for one request never overlap (changeOf), no read of another call falls between this call's
+// reads and its settle. So gone is never answered by a call in which a read showed a pull request of this
+// request, nor across one, and never on a time from another clock or from stored state. After a restart or a
 // change of leader the wait starts again.
 //
 // A confirmed gone drops the first look before the caller writes what it decided. When that write fails, the
 // next look keeps a first look anew and the decision waits confirmWait once more. That is kept on purpose: the
 // record never outlives the answer it gave, and a failed write is rare.
 func (r *RemediationRequestReconciler) settleGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	t goneTicket, n int64, absent bool, v changeVerdict) changeVerdict {
+	n int64, absent bool, v changeVerdict) changeVerdict {
 	looks := r.looks()
 	if !absent || v.state != changeGone {
 		looks.forget(client.ObjectKeyFromObject(rr))
 		return v
 	}
-	switch outcome, left := looks.settle(t, rr, n, r.now()); outcome {
+	switch outcome, left := looks.settle(rr, n, r.now()); outcome {
 	case lookConfirmed:
 		return v
 	case lookWaiting:
 		return unknownChange(goneWait(n, left))
-	case lookStale:
-		return unknownChange(fmt.Errorf("%w: #%d was read as missing while another read showed a pull request "+
-			"of this request", errConflictingReads, n))
 	}
 	logf.FromContext(ctx).Info("The Git host has no pull request with the number of RemediationRequest; waiting to "+
 		"see it missing again", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", n,
@@ -407,10 +412,10 @@ const goneLookMaxAge = 30 * time.Minute
 // other outcome of a read of the request's pull requests, when the request ends (setPhase), when it is gone, and
 // when it expires (swept each time a first look is kept, for every request).
 //
-// One mutex guards it all, and an order rule holds whatever the number of workers: each changeOf call takes a
-// ticket (begin) before its reads, holding the request's drop count; every drop raises that count; a call whose
-// count moved before it settles neither keeps nor confirms a first look. A request's entry stays while a call
-// holds a ticket for it, so its count never restarts under a ticket. The zero value is empty and ready.
+// It also holds the lock of each request that changeOf takes around its reads (lock, unlock), so calls for one
+// request never overlap. One mutex guards the map. A request's entry stays while a call holds or waits for its
+// lock or a first look is kept, and goes with the last of them, so the map does not grow with ended requests.
+// The zero value is empty and ready.
 type goneLooks struct {
 	mu   sync.Mutex
 	keys map[types.NamespacedName]*goneKey
@@ -418,9 +423,12 @@ type goneLooks struct {
 
 // goneKey is the state of goneLooks for one request.
 type goneKey struct {
-	look    *goneLook
-	drops   uint64
-	readers int
+	look *goneLook
+	// call is the request's lock: a buffered channel of one, full while a changeOf call holds it, so a call
+	// that waits can give up when its context ends.
+	call chan struct{}
+	// holders counts the calls that hold or wait for call; the entry is kept while it is above zero.
+	holders int
 }
 
 // goneLook is one first look of goneLooks.
@@ -428,12 +436,6 @@ type goneLook struct {
 	uid    types.UID
 	number int64
 	at     time.Time
-}
-
-// goneTicket is what a changeOf call took from goneLooks before its reads (begin).
-type goneTicket struct {
-	key   types.NamespacedName
-	drops uint64
 }
 
 // lookOutcome is what goneLooks.settle did with a look that found a number missing.
@@ -446,8 +448,6 @@ const (
 	lookWaiting
 	// lookConfirmed found a first look at least confirmWait old and dropped it: the number is gone.
 	lookConfirmed
-	// lookStale found the ticket's drop count moved and changed nothing.
-	lookStale
 )
 
 // looks returns the reconciler's goneLooks, made on first use when the reconciler was built without one.
@@ -467,56 +467,70 @@ func (g *goneLooks) entry(key types.NamespacedName) *goneKey {
 	}
 	s, ok := g.keys[key]
 	if !ok {
-		s = &goneKey{}
+		s = &goneKey{call: make(chan struct{}, 1)}
 		g.keys[key] = s
 	}
 	return s
 }
 
-// tidy removes the state of key when it holds no first look and no call holds a ticket for it. The caller holds
-// g.mu.
+// tidy removes the state of key when it holds no first look and no call holds or waits for its lock. The caller
+// holds g.mu.
 func (g *goneLooks) tidy(key types.NamespacedName) {
-	if s, ok := g.keys[key]; ok && s.look == nil && s.readers == 0 {
+	if s, ok := g.keys[key]; ok && s.look == nil && s.holders == 0 {
 		delete(g.keys, key)
 	}
 }
 
-// begin takes the ticket of a changeOf call for the request with key, before its reads; end gives it back.
-func (g *goneLooks) begin(key types.NamespacedName) goneTicket {
+// lock takes the lock of the request with key for one changeOf call, waiting while another call holds it. It
+// takes g.mu only to find the entry, never while it waits. When ctx ends first it returns ctx's error and holds
+// nothing; otherwise the caller gives the lock back with unlock.
+func (g *goneLooks) lock(ctx context.Context, key types.NamespacedName) error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	s := g.entry(key)
-	s.readers++
-	return goneTicket{key: key, drops: s.drops}
+	s.holders++
+	g.mu.Unlock()
+	select {
+	case s.call <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		g.release(key, s)
+		return ctx.Err()
+	}
 }
 
-// end gives back a ticket taken by begin.
-func (g *goneLooks) end(t goneTicket) {
+// unlock gives back the lock taken by lock.
+func (g *goneLooks) unlock(key types.NamespacedName) {
+	g.mu.Lock()
+	s := g.keys[key]
+	g.mu.Unlock()
+	<-s.call
+	g.release(key, s)
+}
+
+// release ends one holder of the lock of key and drops the entry when nothing else keeps it.
+func (g *goneLooks) release(key types.NamespacedName, s *goneKey) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if s, ok := g.keys[t.key]; ok && s.readers > 0 {
-		s.readers--
-	}
-	g.tidy(t.key)
+	s.holders--
+	g.tidy(key)
 }
 
-// settle decides a look of the call with ticket t that found n missing for rr at now, in one step under the mutex
-// (settleGone). With lookWaiting it also returns the time left.
-func (g *goneLooks) settle(t goneTicket, rr *remediationv1alpha1.RemediationRequest, n int64,
+// settle decides a look that found n missing for rr at now, in one step under the mutex (settleGone). With
+// lookWaiting it also returns the time left.
+func (g *goneLooks) settle(rr *remediationv1alpha1.RemediationRequest, n int64,
 	now time.Time) (lookOutcome, time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	s := g.entry(t.key)
-	if s.drops != t.drops {
-		return lookStale, 0
-	}
-	if k := s.look; k != nil && k.uid == rr.UID && k.number == n {
-		switch age := now.Sub(k.at); {
-		case age >= confirmWait && age < goneLookMaxAge:
-			g.dropLocked(t.key)
-			return lookConfirmed, 0
-		case age >= 0 && age < confirmWait:
-			return lookWaiting, confirmWait - age
+	key := client.ObjectKeyFromObject(rr)
+	if s, ok := g.keys[key]; ok {
+		if k := s.look; k != nil && k.uid == rr.UID && k.number == n {
+			switch age := now.Sub(k.at); {
+			case age >= confirmWait && age < goneLookMaxAge:
+				g.dropLocked(key)
+				return lookConfirmed, 0
+			case age >= 0 && age < confirmWait:
+				return lookWaiting, confirmWait - age
+			}
 		}
 	}
 	g.noteLocked(rr, n, now)
@@ -558,8 +572,8 @@ func (g *goneLooks) first(rr *remediationv1alpha1.RemediationRequest, n int64) (
 	return s.look.at, true
 }
 
-// forget drops the first look kept for the request with key and raises its drop count, so no call whose reads
-// began before keeps or confirms one.
+// forget drops the first look kept for the request with key, and its entry with it unless a call holds or waits
+// for its lock (then the last unlock drops it).
 func (g *goneLooks) forget(key types.NamespacedName) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -568,14 +582,10 @@ func (g *goneLooks) forget(key types.NamespacedName) {
 
 // dropLocked is forget with g.mu held.
 func (g *goneLooks) dropLocked(key types.NamespacedName) {
-	s, ok := g.keys[key]
-	if !ok {
-		// No first look and no call holding a ticket: there is nothing to drop or to invalidate.
-		return
+	if s, ok := g.keys[key]; ok {
+		s.look = nil
+		g.tidy(key)
 	}
-	s.look = nil
-	s.drops++
-	g.tidy(key)
 }
 
 // goneWait is the error of a pull request missing on a look that does not confirm it yet: errGoneUnconfirmed,

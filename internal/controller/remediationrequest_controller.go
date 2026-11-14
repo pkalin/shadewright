@@ -213,7 +213,8 @@ type RemediationRequestReconciler struct {
 	// goneLooks holds, per request, the first look of this process that found a pull request number of the
 	// request missing from the Git host (change.go, #688). Memory only: after a restart or a change of leader
 	// the confirmation wait starts again. Dropped by any other outcome of a read, when the request ends
-	// (setPhase) and when it is gone. Tests that model one process over several reconcilers set the same one;
+	// (setPhase) and when it is gone. It also holds the lock per request that keeps calls of changeOf for one
+	// request from overlapping, dropped with the request's entry. Tests that model one process over several reconcilers set the same one;
 	// otherwise looks makes it on first use (goneLooksOnce).
 	goneLooks     *goneLooks
 	goneLooksOnce sync.Once

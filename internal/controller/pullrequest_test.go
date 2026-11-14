@@ -184,6 +184,15 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		n, _ := firstLook()
 		return n
 	}
+	// lockHolders is the number of changeOf calls that hold or wait for the lock of the request (goneLooks.lock).
+	lockHolders := func() int {
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		if s, ok := process.keys[client.ObjectKeyFromObject(request)]; ok {
+			return s.holders
+		}
+		return 0
+	}
 
 	BeforeEach(func() {
 		seq++
@@ -2001,19 +2010,25 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(at).To(BeTemporally("==", clock))
 	})
 
-	It("never keeps a look at a missing pull request that a read showing it overtook (#688)", func() {
+	It("never keeps a look at a missing pull request that a later read showing it follows (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number
-		// Call A reads 404 and, before it settles, call B (another worker) reads the pull request open.
-		var b changeVerdict
+		// Call A reads 404 and, before it settles, call B (another worker) asks to read the pull request: B waits
+		// for A, then reads it open.
+		var reads atomic.Int32
+		var b <-chan changeVerdict
 		a := reconciler().changeOf(ctx, &pausedLost{lostChangeRequest: lostChangeRequest{Git: git, n: n},
 			pause: func() {
-				b = inOtherWorker(func() changeVerdict { return reconciler().changeOf(ctx, git, fetch(), changeQuery{}) })
+				b = startOtherWorker(func() changeVerdict {
+					return reconciler().changeOf(ctx, &countedReads{GitProvider: git, reads: &reads}, fetch(), changeQuery{})
+				})
+				Eventually(lockHolders).Should(Equal(2), "B waits for the lock A holds")
+				Expect(reads.Load()).To(BeZero(), "B reads nothing while A has not settled")
 			}}, fetch(), changeQuery{})
-		Expect(b.state).To(Equal(changeOpen))
 		Expect(a.state).To(Equal(changeUnknown))
-		Expect(a.err).To(MatchError(errConflictingReads), "the look began before the read that showed the pull request")
-		Expect(lookedAt()).To(BeZero(), "the overtaken look is not kept")
+		Expect(a.err).To(MatchError(errGoneUnconfirmed), "A settles on its own reads")
+		Expect((<-b).state).To(Equal(changeOpen))
+		Expect(lookedAt()).To(BeZero(), "B's read, after A's, drops the first look A kept")
 		// So one 404 two minutes later only starts the wait, never answers gone.
 		clock = clock.Add(confirmWait)
 		v := reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
@@ -2021,29 +2036,103 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(v.err).To(MatchError(errGoneUnconfirmed))
 	})
 
-	It("never confirms a missing pull request from a look that a read showing it overtook (#688)", func() {
+	It("never confirms a missing pull request from a 404 that waited behind a read showing it (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number
 		seenGone(n)
-		// Call A reads 404 with a first look confirmWait old kept. Before it settles, call B reads the pull
-		// request open and drops that look, call C reads 404 and keeps a new one, and confirmWait passes.
-		a := reconciler().changeOf(ctx, &pausedLost{lostChangeRequest: lostChangeRequest{Git: git, n: n},
-			pause: func() {
-				Expect(inOtherWorker(func() changeVerdict {
-					return reconciler().changeOf(ctx, git, fetch(), changeQuery{})
-				}).state).To(Equal(changeOpen))
-				Expect(inOtherWorker(func() changeVerdict {
-					return reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
-				}).err).To(MatchError(errGoneUnconfirmed))
-				clock = clock.Add(confirmWait)
-			}}, fetch(), changeQuery{})
-		Expect(a.state).To(Equal(changeUnknown), "a read that showed the pull request came after A's 404")
-		Expect(a.err).To(MatchError(errConflictingReads))
+		// Call B reads the pull request open and, before it settles, call A (a 404) and then call C (another 404)
+		// ask to read it. Both wait for B, then for each other.
+		var reads atomic.Int32
+		var a, c <-chan changeVerdict
+		b := reconciler().changeOf(ctx, &pausedOpen{Git: git, pause: func() {
+			a = startOtherWorker(func() changeVerdict {
+				return reconciler().changeOf(ctx, &countedReads{GitProvider: &lostChangeRequest{Git: git, n: n},
+					reads: &reads}, fetch(), changeQuery{})
+			})
+			Eventually(lockHolders).Should(Equal(2), "A waits for the lock B holds")
+			Expect(reads.Load()).To(BeZero(), "A reads nothing while B has not settled")
+		}}, fetch(), changeQuery{openOnBranch: true})
+		Expect(b.state).To(Equal(changeOpen))
+		va := <-a
+		Expect(va.state).To(Equal(changeUnknown), "B's read dropped the first look before A read")
+		Expect(va.err).To(MatchError(errGoneUnconfirmed))
+		c = startOtherWorker(func() changeVerdict {
+			return reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
+		})
+		Expect((<-c).err).To(MatchError(errGoneUnconfirmed), "C finds A's first look younger than confirmWait")
 		_, at := firstLook()
-		Expect(at).To(BeTemporally("==", clock.Add(-confirmWait)), "C's first look is kept")
-		// A look that began after B confirms on C's first look.
+		Expect(at).To(BeTemporally("==", clock), "A's first look is kept")
+		clock = clock.Add(confirmWait)
 		Expect(reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{}).state).
-			To(Equal(changeGone))
+			To(Equal(changeGone), "a look confirmWait after A's confirms")
+	})
+
+	It("never answers gone while another read of the pull request is between a 404 and its listing (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		seenGone(n)
+		// Call B reads the number open and pauses in its open listing. Call A, asked to read meanwhile, would read
+		// 404 and an empty listing: it waits for B, which drops the first look, so A only starts the wait.
+		var reads atomic.Int32
+		var a <-chan changeVerdict
+		b := reconciler().changeOf(ctx, &pausedOpen{Git: git, pause: func() {
+			a = startOtherWorker(func() changeVerdict {
+				return reconciler().changeOf(ctx, &countedReads{GitProvider: &lostChangeRequest{Git: git, n: n},
+					reads: &reads}, fetch(), changeQuery{})
+			})
+			Eventually(lockHolders).Should(Equal(2))
+			Expect(reads.Load()).To(BeZero(), "A neither reads by number nor lists while B has not settled")
+		}}, fetch(), changeQuery{openOnBranch: true})
+		Expect(b.state).To(Equal(changeOpen))
+		va := <-a
+		Expect(va.state).NotTo(Equal(changeGone), "a 404 never outlives a read that showed the pull request")
+		Expect(va.err).To(MatchError(errGoneUnconfirmed))
+		Expect(lockHolders()).To(BeZero())
+	})
+
+	It("drops the lock of a request with the request, also when a read held it as the request ended (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		// A read that finds the pull request missing holds the lock while the request ends.
+		v := reconciler().changeOf(ctx, &pausedLost{lostChangeRequest: lostChangeRequest{Git: git, n: n},
+			pause: func() {
+				Expect(reconciler().stop(ctx, fetch(), remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
+					"The head moved")).To(MatchError(errStopped))
+				Expect(lockHolders()).To(Equal(1), "the entry stays while the read holds the lock")
+			}}, fetch(), changeQuery{})
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+		Expect(lookedAt()).To(Equal(n), "the read settled after the request ended")
+		// The request goes: its entry, the lock with it, is dropped.
+		Expect(k8sClient.Delete(ctx, fetch())).To(Succeed())
+		base := fetch()
+		patched := base.DeepCopy()
+		controllerutil.RemoveFinalizer(patched, FinalizerName)
+		Expect(k8sClient.Patch(ctx, patched, client.MergeFrom(base))).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(request), &remediationv1alpha1.RemediationRequest{}))
+		}).Should(BeTrue())
+		Expect(reconcileOnce()).To(Succeed())
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		Expect(process.keys).NotTo(HaveKey(client.ObjectKeyFromObject(request)), "nothing is left of the request")
+	})
+
+	It("gives up the wait for the lock when the context ends, and reads nothing (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		key := client.ObjectKeyFromObject(got)
+		Expect(process.lock(ctx, key)).To(Succeed())
+		waiting, cancel := context.WithCancel(ctx)
+		cancel()
+		var reads atomic.Int32
+		v := reconciler().changeOf(waiting, &countedReads{GitProvider: git, reads: &reads}, fetch(), changeQuery{})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(context.Canceled))
+		Expect(reads.Load()).To(BeZero())
+		Expect(lockHolders()).To(Equal(1), "the call that gave up holds nothing")
+		process.unlock(key)
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		Expect(process.keys).NotTo(HaveKey(key), "the last unlock drops an entry that keeps no first look")
 	})
 
 	It("does not confirm on a first look of an earlier request with the same name and number (#688)", func() {
@@ -2071,9 +2160,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		other := got.DeepCopy()
 		other.Name, other.UID = other.Name+"-other", "uid-of-another-request"
 		r := reconciler()
-		t := process.begin(client.ObjectKeyFromObject(other))
-		v := r.settleGone(ctx, other, t, 7, true, changeVerdict{state: changeGone, gone: "missing"})
-		process.end(t)
+		v := r.settleGone(ctx, other, 7, true, changeVerdict{state: changeGone, gone: "missing"})
 		Expect(v.err).To(MatchError(errGoneUnconfirmed))
 		Expect(lookedAt()).To(BeZero(), "the expired first look of the first request is swept")
 		process.mu.Lock()
@@ -4656,14 +4743,49 @@ func (p *pausedLost) ListChangeRequests(ctx context.Context, branch string, open
 	return p.lostChangeRequest.ListChangeRequests(ctx, branch, openOnly)
 }
 
-// inOtherWorker runs read in another goroutine, as another worker of the controller, and waits for it.
-func inOtherWorker(read func() changeVerdict) changeVerdict {
-	done := make(chan changeVerdict)
+// startOtherWorker runs read in another goroutine, as another worker of the controller, and returns its verdict
+// once it is done, without waiting for it.
+func startOtherWorker(read func() changeVerdict) <-chan changeVerdict {
+	done := make(chan changeVerdict, 1)
 	go func() {
 		defer GinkgoRecover()
 		done <- read()
 	}()
-	return <-done
+	return done
+}
+
+// pausedOpen is a Git host that runs pause once, on the first listing of the open pull requests of the branch:
+// after the read by number and before the call settles.
+type pausedOpen struct {
+	*fakegit.Git
+	pause  func()
+	paused bool
+}
+
+func (p *pausedOpen) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	if openOnly && !p.paused {
+		p.paused = true
+		p.pause()
+	}
+	return p.Git.ListChangeRequests(ctx, branch, openOnly)
+}
+
+// countedReads counts the reads of pull requests that go through it.
+type countedReads struct {
+	providers.GitProvider
+	reads *atomic.Int32
+}
+
+func (c *countedReads) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	c.reads.Add(1)
+	return c.GitProvider.GetChangeRequest(ctx, n)
+}
+
+func (c *countedReads) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	c.reads.Add(1)
+	return c.GitProvider.ListChangeRequests(ctx, branch, openOnly)
 }
 
 // openedLater is the title of a newer pull request a test opens on the branch.

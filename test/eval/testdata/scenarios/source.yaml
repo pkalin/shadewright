@@ -2,4 +2,4 @@
 # (scenarios/<name>/expected.yaml). Update the files and the commit together; the evaluation manifest names it
 # as the rubric (ADR-0025 decision 3).
 fleetRepository: pkalin/shadewright-fleet
-fleetCommit: 525500a811b3c8117120a217bea38fda2b09540e
+fleetCommit: 20af7ef1badba364e1a135854837cb64a516760e

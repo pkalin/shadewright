@@ -21,12 +21,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -52,7 +54,10 @@ type analysisFlags struct {
 	watched                      []string
 	triageModel, escalationModel string
 	endpointSuffixes             string
-	actionPolicies               string
+	// anthropicKeyFile is the path of the Anthropic API key file (ADR-0037); empty refuses every Anthropic
+	// deployment.
+	anthropicKeyFile string
+	actionPolicies   string
 	// storeAccount and storeContainer name the Blob Storage container of the analysis records (ADR-0015).
 	storeAccount, storeContainer string
 	// claimTimeout is the Incident trigger's AnalysisTimeout: how long a claim lasts (ADR-0025 decision 1).
@@ -81,6 +86,12 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 			"for one resource. Required with --triage-model: there is no default, so no Azure AI host is allowed "+
 			"unless named. An endpoint outside them, or on a port other than 443, is refused before any token is "+
 			"requested (EndpointNotAllowed).")
+	fs.StringVar(&f.anthropicKeyFile, "anthropic-api-key-file", "",
+		"The path of a file that holds the Anthropic API key, mounted read-only from a Secret or a CSI volume "+
+			"the cluster operator provides (ADR-0037). It is read at every call, so a rotated key needs no restart; "+
+			"a missing or unreadable file is a retryable model error. Empty (the default): a deployment with "+
+			"provider Anthropic in RemediationSettings is refused (ProviderNotConfigured). The file is not read "+
+			"at start. Used only with --triage-model.")
 	fs.StringVar(&f.actionPolicies, "action-policies", "",
 		"Comma-separated ActionType=policy pairs: the RemediationPolicy a proposed RemediationRequest of each "+
 			"action type refers to, such as SetContainerMemoryLimit=memory-limits. An action type without one is "+
@@ -105,6 +116,8 @@ type analysisDeps struct {
 	log              logr.Logger
 	// tracerProvider makes the analysis spans; nil means no tracing.
 	tracerProvider trace.TracerProvider
+	// recorder writes the analysis's Events about Incidents in the operator namespace; nil writes none.
+	recorder record.EventRecorder
 	// newStore builds the analysis record store; nil means the Blob Storage adapter with the workload identity.
 	newStore func(cfg azureblob.Config) (providers.AnalysisStore, error)
 }
@@ -174,6 +187,9 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 		if f.storeAccount != "" || f.storeContainer != "" {
 			return nil, errors.New("--analysis-store-account and --analysis-store-container need --triage-model")
 		}
+		if f.anthropicKeyFile != "" {
+			return nil, errors.New("--anthropic-api-key-file needs --triage-model")
+		}
 		return nil, nil
 	}
 	if (f.storeAccount == "") != (f.storeContainer == "") {
@@ -190,6 +206,9 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if f.endpointSuffixes == "" {
 		return nil, errors.New("--triage-model needs --model-endpoint-suffixes: no model endpoint host is allowed by default")
 	}
+	if k := f.anthropicKeyFile; k != "" && (!filepath.IsAbs(k) || filepath.Clean(k) != k) {
+		return nil, errors.New("--anthropic-api-key-file must be an absolute, clean path")
+	}
 	if f.claimTimeout <= 0 {
 		return nil, errors.New("the analysis needs the Incident trigger's analysis timeout")
 	}
@@ -205,8 +224,12 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if err != nil {
 		return nil, fmt.Errorf("the analyzer's Azure workload identity: %w", err)
 	}
+	expected := map[analysis.Role]string{analysis.RoleTriage: triage}
+	if escalation != "" {
+		expected[analysis.RoleEscalation] = escalation
+	}
 	factory, err := models.NewModelFactory(models.ModelsConfig{Suffixes: suffixes, Tokens: tokens,
-		Log: d.log.WithName("models")})
+		AnthropicKeyFile: f.anthropicKeyFile, Expected: expected, Log: d.log.WithName("models")})
 	if err != nil {
 		return nil, err
 	}
@@ -214,13 +237,9 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if err != nil {
 		return nil, err
 	}
-	expected := map[analysis.Role]string{analysis.RoleTriage: triage}
-	if escalation != "" {
-		expected[analysis.RoleEscalation] = escalation
-	}
 	a, err := analysis.New(analysis.Config{
 		Builder: d.builder, Tools: set, Models: factory, Policies: policies, ExpectedModels: expected,
-		Redactor: d.redactor, TracerProvider: d.tracerProvider,
+		Redactor: d.redactor, TracerProvider: d.tracerProvider, Recorder: d.recorder,
 		Reserve: func(ctx context.Context, now time.Time) error {
 			return incidents.ReserveAnalysis(ctx, d.apiReader, d.client, f.namespace, now)
 		},
@@ -291,9 +310,13 @@ func setupAnalysis(mgr ctrl.Manager, inc *incidents.Controller, f analysisFlags,
 	if err := proposer.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("the revert proposer: %w", err)
 	}
+	// The analysis's Normal event of a role's provider change is about the Incident it analyzed, in the
+	// operator namespace, with the grant on core Events there that the leader election Role holds.
+	recorder := mgr.GetEventRecorderFor("shadewright-analyzer") //nolint:staticcheck // as in main.go
 	c, err := buildAnalysis(f, analysisDeps{
 		cache: mgr.GetCache(), apiReader: mgr.GetAPIReader(), client: mgr.GetClient(), builder: builder,
 		sources: sources, redactor: redactor, log: ctrl.Log.WithName("analysis"), tracerProvider: tp,
+		recorder: recorder,
 	}, func() (foundry.TokenSource, error) { return foundry.NewWorkloadIdentity() })
 	if err != nil {
 		return err
@@ -307,10 +330,11 @@ func setupAnalysis(mgr ctrl.Manager, inc *incidents.Controller, f analysisFlags,
 		// The Warning event of a record not written is about the Incident, in the operator namespace, with the
 		// grant on core Events there that the leader election Role holds (see the Incident controller's
 		// recorder in main.go).
-		c.Recorder = mgr.GetEventRecorderFor("shadewright-analyzer") //nolint:staticcheck // as in main.go
+		c.Recorder = recorder
 	}
 	setupLog.Info("The analysis is on", "triageModel", f.triageModel, "escalationModel", f.escalationModel,
-		"endpointSuffixes", f.endpointSuffixes, "actionPolicies", f.actionPolicies,
+		"endpointSuffixes", f.endpointSuffixes, "anthropicKeyFileSet", f.anthropicKeyFile != "",
+		"actionPolicies", f.actionPolicies,
 		"analysisStoreAccount", f.storeAccount, "analysisStoreContainer", f.storeContainer)
 	return c.SetupWithManager(mgr)
 }

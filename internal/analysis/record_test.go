@@ -86,7 +86,8 @@ func TestControllerWritesTheRecord(t *testing.T) {
 		r.Request != string(got.Status.RemediationRequests[0]) || r.PromptVersion != PromptVersion() ||
 		r.Calls != 1 || len(r.Models) != 1 || r.Incident.UID != string(got.UID) || r.Incident.Name != got.Name ||
 		!r.StartedAt.Equal(got.Status.LastAnalysisTime.Time) || r.Summary == "" ||
-		r.Deployments.Triage != testLimits().Triage.Deployment || r.Deployments.Escalation != "" {
+		r.Deployments.Triage != testLimits().Triage.Deployment || r.Deployments.Escalation != "" ||
+		r.Providers.Triage != string(remediationv1alpha1.ModelProviderFoundry) || r.Providers.Escalation != "" {
 		t.Errorf("record %+v", r)
 	}
 	keep := make([]string, 0, 2+len(rec.Verified))

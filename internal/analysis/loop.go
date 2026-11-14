@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -129,6 +130,10 @@ const (
 	// ReasonEndpointNotAllowed: the deployment's endpoint is outside the operator's allow-list of host
 	// suffixes (ErrEndpointNotAllowed), so nothing was sent to it and no token requested for it.
 	ReasonEndpointNotAllowed Reason = "EndpointNotAllowed"
+	// ReasonProviderNotConfigured: the deployment's provider needs something the analyzer was not started
+	// with, such as the API key file of an Anthropic deployment (ErrProviderNotConfigured), so nothing was
+	// sent (ADR-0037).
+	ReasonProviderNotConfigured Reason = "ProviderNotConfigured"
 	// ReasonPlanUnchanged: an analysis with a reviewer hint proposed the plan of the request it would replace,
 	// so no replacement was created (ADR-0028 section 4).
 	ReasonPlanUnchanged Reason = "PlanUnchanged"
@@ -148,10 +153,25 @@ const (
 // allow-list; the analysis hands off with ReasonEndpointNotAllowed.
 var ErrEndpointNotAllowed = errors.New("the model endpoint is not allowed")
 
+// ErrProviderNotConfigured is what a [ModelFactory] returns, wrapped, for a deployment whose provider the
+// analyzer cannot call as started, such as an Anthropic deployment without the analyzer's key file flag; the
+// analysis hands off with ReasonProviderNotConfigured.
+var ErrProviderNotConfigured = errors.New("the model provider is not configured in the analyzer")
+
+// ErrDeploymentNotExpected is what a [ModelFactory] returns, wrapped, for a deployment that names another
+// model than the one configured for its role, where the deployment is the model ID (an Anthropic
+// deployment, ADR-0037 decision 2); the analysis hands off with ReasonUnexpectedModel before any call.
+var ErrDeploymentNotExpected = errors.New("the deployment names another model than the role's")
+
 // factoryFailure is the hand-off reason of a ModelFactory error.
 func factoryFailure(err error) Reason {
-	if errors.Is(err, ErrEndpointNotAllowed) {
+	switch {
+	case errors.Is(err, ErrEndpointNotAllowed):
 		return ReasonEndpointNotAllowed
+	case errors.Is(err, ErrProviderNotConfigured):
+		return ReasonProviderNotConfigured
+	case errors.Is(err, ErrDeploymentNotExpected):
+		return ReasonUnexpectedModel
 	}
 	return ReasonModelError
 }
@@ -236,6 +256,9 @@ type Config struct {
 	// model call and tool call. The spans carry IDs, counts, fixed result labels and the configured model and
 	// deployment names only, never text from the cluster, a tool or the model. Nil means no tracing.
 	TracerProvider trace.TracerProvider
+	// Recorder writes the Normal event EventModelProviderChanged on the Incident whose analysis first used a
+	// role's provider after it changed (ADR-0037). Nil writes none; the change is logged either way.
+	Recorder record.EventRecorder
 }
 
 // Analyzer runs the bounded analysis of one Incident at a time per call. It is safe for concurrent use when
@@ -243,6 +266,8 @@ type Config struct {
 type Analyzer struct {
 	cfg    Config
 	tracer trace.Tracer
+	// used is the provider each role's last built model used, to notice a change (providerUsed).
+	used providersUsed
 }
 
 // New checks the configuration.
@@ -269,7 +294,7 @@ func New(cfg Config) (*Analyzer, error) {
 	if tp == nil {
 		tp = noop.NewTracerProvider()
 	}
-	return &Analyzer{cfg: cfg, tracer: tp.Tracer(TracerName)}, nil
+	return &Analyzer{cfg: cfg, tracer: tp.Tracer(TracerName), used: providersUsed{last: map[Role]remediationv1alpha1.ModelProvider{}}}, nil
 }
 
 // Timeout returns the deadline of one analysis.
@@ -408,7 +433,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		}
 		role, deployment = RoleEscalation, limits.Escalation
 	}
-	model, err := a.cfg.Models(role, *deployment)
+	model, err := a.model(ctx, inc, role, deployment)
 	if err != nil {
 		return r.handOff(factoryFailure(err))
 	}
@@ -441,7 +466,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		if limits.Escalation == nil {
 			return r.handOff(ReasonEscalationNotConfigured)
 		}
-		if model, err = a.cfg.Models(RoleEscalation, *limits.Escalation); err != nil {
+		if model, err = a.model(ctx, inc, RoleEscalation, limits.Escalation); err != nil {
 			return r.handOff(factoryFailure(err))
 		}
 	}

@@ -975,6 +975,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonRequestNotCreated:       "The RemediationRequest of the proposal could not be created; handed off to a person",
 	ReasonUnexpectedModel:         "A reply came from another model than the one configured for the deployment; handed off to a person",
 	ReasonEndpointNotAllowed:      "The model endpoint is outside the analyzer's allow-list of host suffixes; nothing was sent; handed off to a person",
+	ReasonProviderNotConfigured:   "The model deployment's provider is not configured in the analyzer; nothing was sent; handed off to a person",
 	ReasonPlanUnchanged:           "The analysis with a reviewer hint proposed the plan of the request it would replace; no replacement was created",
 	ReasonHintNotPending:          "The reviewer hint was no longer pending; no replacement was created for it",
 	ReasonScalerNotReady:          "The subject's ScaledObject is not ready, so a change of maxReplicaCount was not offered; handed off to a person",

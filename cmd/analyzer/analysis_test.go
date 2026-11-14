@@ -26,12 +26,14 @@ import (
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/analyzer"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
@@ -273,5 +275,57 @@ func TestCheckPolicyReadsRefusesARoleWithoutTheName(t *testing.T) {
 	}
 	if err := checkPolicyReads(incidentcontext.Config{}); err != nil {
 		t.Errorf("no policy reader: %v", err)
+	}
+}
+
+// emptyBuilder builds an empty context, so an analysis goes on to its model.
+type emptyBuilder struct{}
+
+func (emptyBuilder) Build(context.Context, *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+	return &incidentcontext.Context{}, nil
+}
+
+// --anthropic-api-key-file is checked at start, and the factory the analysis gets refuses an Anthropic
+// deployment without it, or for another model than the role's flag, before any call or token (ADR-0037).
+func TestAnalysisAnthropicKeyFile(t *testing.T) {
+	ok := func() (foundry.TokenSource, error) { return noTokens{}, nil }
+	f := validFlags()
+	f.triageModel = ""
+	f.anthropicKeyFile = "/var/run/shadewright/anthropic/api-key"
+	if _, err := buildAnalysis(f, testDeps(t), ok); err == nil {
+		t.Error("--anthropic-api-key-file without --triage-model was accepted")
+	}
+	for _, bad := range []string{"api-key", "/var/run/../key", "/var/run/key/"} {
+		f := validFlags()
+		f.anthropicKeyFile = bad
+		if _, err := buildAnalysis(f, testDeps(t), ok); err == nil {
+			t.Errorf("key file %q was accepted", bad)
+		}
+	}
+
+	limits := analysis.Limits{MaxOutputTokens: 1024, Triage: &remediationv1alpha1.ModelDeployment{
+		Provider: remediationv1alpha1.ModelProviderAnthropic, Endpoint: remediationv1alpha1.AnthropicEndpoint,
+		Deployment: "claude-haiku-5-5", APIVersion: "v1", MaxTokensPerDay: new(int64(1000))}}
+	inc := &remediationv1alpha1.Incident{ObjectMeta: metav1.ObjectMeta{Name: "web-oom", Namespace: operatorNamespace}}
+	for name, tc := range map[string]struct {
+		keyFile, model string
+		want           analysis.Reason
+	}{
+		"no key file":         {"", "claude-haiku-5-5", analysis.ReasonProviderNotConfigured},
+		"another model":       {"/var/run/shadewright/anthropic/api-key", "claude-opus-5-5", analysis.ReasonUnexpectedModel},
+		"no key, other model": {"", "claude-opus-5-5", analysis.ReasonProviderNotConfigured},
+	} {
+		f := validFlags()
+		f.triageModel, f.anthropicKeyFile = tc.model, tc.keyFile
+		d := testDeps(t)
+		d.builder = emptyBuilder{}
+		c, err := buildAnalysis(f, d, ok)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		out, err := c.Analyzer.Analyze(t.Context(), inc, limits)
+		if err != nil || out.Reason != tc.want || out.Calls != 0 {
+			t.Errorf("%s: reason %s, calls %d, error %v; want %s", name, out.Reason, out.Calls, err, tc.want)
+		}
 	}
 }

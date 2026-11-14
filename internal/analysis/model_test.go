@@ -19,7 +19,10 @@ package analysis
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+
+	"k8s.io/client-go/tools/record"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -74,6 +77,88 @@ func TestEndpointNotAllowedHandsOff(t *testing.T) {
 	}
 	if out := f.analyze(t, testLimits()); out.Reason != ReasonModelError {
 		t.Errorf("another factory error: reason %s", out.Reason)
+	}
+}
+
+// A provider the analyzer was not started for (an Anthropic deployment without the key file flag) and a
+// deployment that names another model than its role's are handed off with their own reasons, before any call
+// and any unit of the budget (ADR-0037).
+func TestProviderRefusalsHandOff(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want Reason
+	}{
+		{ErrProviderNotConfigured, ReasonProviderNotConfigured},
+		{ErrDeploymentNotExpected, ReasonUnexpectedModel},
+	} {
+		f := newFixture()
+		f.cfg.Models = func(Role, remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
+			return nil, fmt.Errorf("anthropic deployment: %w", tc.err)
+		}
+		if out := f.analyze(t, testLimits()); out.Reason != tc.want || f.reserved != 0 || out.Calls != 0 {
+			t.Errorf("%v: reason %s, reserved %d, calls %d", tc.err, out.Reason, f.reserved, out.Calls)
+		}
+	}
+}
+
+// The first analysis that uses a role's provider, and the first after the settings moved the role to another
+// provider, records one Normal event on its Incident naming the role and the providers only; an analysis on
+// the same provider records none, and a refused deployment changes nothing (ADR-0037).
+func TestProviderChangeIsRecorded(t *testing.T) {
+	f := newFixture()
+	f.triage.steps = append(f.triage.steps, reply(noProposal), reply(noProposal), reply(noProposal))
+	events := record.NewFakeRecorder(8)
+	f.cfg.Recorder = events
+	a, err := New(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(p remediationv1alpha1.ModelProvider) {
+		t.Helper()
+		l := testLimits()
+		l.Triage.Provider = p
+		if p == remediationv1alpha1.ModelProviderAnthropic {
+			l.Triage.Endpoint, l.Triage.Deployment = remediationv1alpha1.AnthropicEndpoint, "claude-haiku-5-5"
+		}
+		if _, err := a.Analyze(t.Context(), incident(), l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := func() string {
+		select {
+		case e := <-events.Events:
+			return e
+		default:
+			return ""
+		}
+	}
+	run("")
+	if e := next(); e != "Normal "+EventModelProviderChanged+" The triage model now uses provider Foundry "+
+		"(before: none since the analyzer started); its redacted context goes to that provider" {
+		t.Errorf("first use: event %q", e)
+	}
+	run(remediationv1alpha1.ModelProviderFoundry)
+	if e := next(); e != "" {
+		t.Errorf("same provider: event %q, want none", e)
+	}
+	run(remediationv1alpha1.ModelProviderAnthropic)
+	e := next()
+	if e != "Normal "+EventModelProviderChanged+" The triage model now uses provider Anthropic (before: Foundry); "+
+		"its redacted context goes to that provider" {
+		t.Errorf("switch: event %q", e)
+	}
+	for _, leak := range []string{"https://", "claude-haiku", "small", "services.ai.azure.com"} {
+		if strings.Contains(e, leak) {
+			t.Errorf("the event names %q", leak)
+		}
+	}
+	f.cfg.Models = func(Role, remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
+		return nil, ErrProviderNotConfigured
+	}
+	a.cfg.Models = f.cfg.Models
+	run(remediationv1alpha1.ModelProviderFoundry)
+	if e := next(); e != "" {
+		t.Errorf("refused deployment: event %q, want none", e)
 	}
 }
 

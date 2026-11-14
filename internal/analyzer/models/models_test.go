@@ -24,9 +24,12 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/model/anthropic"
 )
 
 // foundrySuffix is the Microsoft Foundry host suffix of these tests.
@@ -145,5 +148,130 @@ func TestModelFactoryChecksTheEndpointFirst(t *testing.T) {
 	}
 	if spy.n != 0 {
 		t.Errorf("building providers asked for %d tokens", spy.n)
+	}
+}
+
+// anthropicModel and smallModel are model IDs of these tests.
+const (
+	anthropicModel = "claude-haiku-5-5"
+	smallModel     = "small"
+)
+
+// failingTokens fails the test when a token is asked for.
+type failingTokens struct{ t *testing.T }
+
+func (f failingTokens) Token(context.Context) (string, error) {
+	f.t.Error("a workload identity token was requested")
+	return "", errors.New("no token in tests")
+}
+
+// The Foundry path refuses the Anthropic API's host even when the allow-list names it, before a provider is
+// built, so no workload identity token can be requested for it (ADR-0037 decision 2).
+func TestModelFactoryRefusesTheAnthropicHostOnFoundry(t *testing.T) {
+	for _, suffixes := range [][]string{{".api.anthropic.com"}, {".anthropic.com"}, {foundrySuffix, ".anthropic.com"}} {
+		f, err := NewModelFactory(ModelsConfig{Suffixes: suffixes, Tokens: failingTokens{t}, Log: logr.Discard(),
+			AnthropicKeyFile: "/var/run/anthropic/key", Expected: map[analysis.Role]string{analysis.RoleTriage: smallModel}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, provider := range []remediationv1alpha1.ModelProvider{"", remediationv1alpha1.ModelProviderFoundry} {
+			for _, endpoint := range []string{remediationv1alpha1.AnthropicEndpoint, "https://api.anthropic.com/openai/v1",
+				"https://api.anthropic.com:443/"} {
+				d := remediationv1alpha1.ModelDeployment{Provider: provider, Endpoint: endpoint, Deployment: smallModel,
+					APIVersion: "v1"}
+				p, err := f(analysis.RoleTriage, d)
+				if p != nil {
+					// Calling it shows what the refusal prevents: the token source fails the test.
+					_, _ = p.Complete(t.Context(), providers.CompletionRequest{})
+				}
+				if !errors.Is(err, analysis.ErrEndpointNotAllowed) || p != nil {
+					t.Errorf("%v, provider %q, %s: %v, %v", suffixes, provider, endpoint, p, err)
+				}
+			}
+		}
+	}
+}
+
+// An Anthropic deployment is built only with the analyzer's key file, at the API's fixed endpoint, for the
+// model its role expects; the allow-list is not consulted, and no token is requested (ADR-0037).
+func TestModelFactoryAnthropic(t *testing.T) {
+	if remediationv1alpha1.AnthropicEndpoint != anthropic.Endpoint {
+		t.Fatalf("the API's endpoint %q and the adapter's %q differ", remediationv1alpha1.AnthropicEndpoint,
+			anthropic.Endpoint)
+	}
+	const keyFile = "/var/run/shadewright/anthropic/api-key"
+	expected := map[analysis.Role]string{analysis.RoleTriage: anthropicModel}
+	build := func(keyFile string, d remediationv1alpha1.ModelDeployment, role analysis.Role) (providers.ModelProvider, error) {
+		t.Helper()
+		f, err := NewModelFactory(ModelsConfig{Suffixes: []string{foundrySuffix}, Tokens: failingTokens{t},
+			AnthropicKeyFile: keyFile, Expected: expected, Log: logr.Discard()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f(role, d)
+	}
+	good := remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderAnthropic,
+		Endpoint: remediationv1alpha1.AnthropicEndpoint, Deployment: anthropicModel, APIVersion: "v1"}
+
+	p, err := build(keyFile, good, analysis.RoleTriage)
+	if _, ok := p.(*anthropic.Provider); err != nil || !ok {
+		t.Fatalf("a valid deployment: %T, %v", p, err)
+	}
+
+	p, err = build("", good, analysis.RoleTriage)
+	if !errors.Is(err, analysis.ErrProviderNotConfigured) || p != nil {
+		t.Errorf("no key file: %v, %v", p, err)
+	}
+
+	for name, change := range map[string]func(*remediationv1alpha1.ModelDeployment){
+		"a Foundry endpoint":  func(d *remediationv1alpha1.ModelDeployment) { d.Endpoint = "https://other.services.ai.azure.com/" },
+		"a trailing slash":    func(d *remediationv1alpha1.ModelDeployment) { d.Endpoint += "/" },
+		"another vendor host": func(d *remediationv1alpha1.ModelDeployment) { d.Endpoint = "https://console.anthropic.com" },
+		"a path on that host": func(d *remediationv1alpha1.ModelDeployment) { d.Endpoint += "/v1" },
+		"a port on that host": func(d *remediationv1alpha1.ModelDeployment) { d.Endpoint += ":443" },
+	} {
+		d := good
+		change(&d)
+		if p, err := build(keyFile, d, analysis.RoleTriage); !errors.Is(err, analysis.ErrEndpointNotAllowed) || p != nil {
+			t.Errorf("%s: %v, %v", name, p, err)
+		}
+	}
+
+	other := good
+	other.Deployment = "claude-opus-5-5"
+	if p, err := build(keyFile, other, analysis.RoleTriage); !errors.Is(err, analysis.ErrDeploymentNotExpected) || p != nil {
+		t.Errorf("another model than the role's flag: %v, %v", p, err)
+	}
+	if p, err := build(keyFile, good, analysis.RoleEscalation); !errors.Is(err, analysis.ErrDeploymentNotExpected) || p != nil {
+		t.Errorf("a role without a flag: %v, %v", p, err)
+	}
+
+	unknown := good
+	unknown.Provider = "OpenAI"
+	if p, err := build(keyFile, unknown, analysis.RoleTriage); !errors.Is(err, analysis.ErrProviderNotConfigured) || p != nil {
+		t.Errorf("an unknown provider: %v, %v", p, err)
+	}
+}
+
+// A refusal's error and log line name neither the key file nor the endpoint.
+func TestModelFactoryRefusalsNameNoKeyFile(t *testing.T) {
+	const keyFile = "/var/run/shadewright/anthropic/api-key"
+	var lines []string
+	sink := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
+	f, err := NewModelFactory(ModelsConfig{Suffixes: []string{foundrySuffix}, Tokens: failingTokens{t},
+		AnthropicKeyFile: keyFile, Expected: map[analysis.Role]string{}, Log: sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderAnthropic,
+		Endpoint: remediationv1alpha1.AnthropicEndpoint, Deployment: anthropicModel, APIVersion: "v1"}
+	_, err = f(analysis.RoleTriage, d)
+	if err == nil || len(lines) != 1 {
+		t.Fatalf("%v, %d log lines", err, len(lines))
+	}
+	for _, s := range []string{err.Error(), lines[0]} {
+		if strings.Contains(s, keyFile) || strings.Contains(s, "https://") {
+			t.Errorf("%q names the key file or the endpoint", s)
+		}
 	}
 }

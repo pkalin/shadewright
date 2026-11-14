@@ -40,4 +40,4 @@ Risk: the model aims at the maximum. In the evaluation a reply was first written
 
 ## Amendments
 
-<span class="sw-status sw-planned">planned</span> [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) (Proposed) would amend this ADR: code computes the size of a memory limit from the metrics, so the bounds block is no longer needed for the size and the pull request body shows the evidence instead of pointing at the model's reason. Nothing here changes until that ADR is accepted.
+- 2026-11-14: <span class="sw-status sw-planned">planned</span> [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) (Proposed) would amend this ADR: code computes the size of a memory limit from the metrics, so the bounds block is no longer needed for the size and the pull request body shows the evidence instead of pointing at the model's reason. Nothing here changes until that ADR is accepted.

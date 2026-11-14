@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1380 600" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
 <title id="t">Shadewright sizing from metrics</title>
-<desc id="d">Overview of ADR-0040, proposed. The context builder reads the memory working set of the target's containers from the metrics source with approved query templates and keeps the numbers as typed values. After the model replies, the analysis loop takes only the action and the container from the reply and ignores any size. Code computes the size: observed peak plus headroom, a multiplicative step when the peak is at the limit, rounded up, clamped to the policy range and step. Without a measurement the Incident is handed off as MissingData. The request is created with the new limit and typed sizing evidence. The executor's policy engine decides the request as before, and the executor prints the evidence in the pull request body. The model sits beside this path and chooses only the action and the container.</desc>
+<desc id="d">Overview of ADR-0040, proposed. The context builder reads the memory working set and the limit of the target's containers from the metrics source with approved query templates and keeps the numbers as typed values. After the model replies, the analysis loop takes only the action and the container from the reply, accepts them only where code saw memory pressure for that container (the Incident's OOMKilled symptom or a peak near the limit) and ignores any size. Code computes the size: observed peak plus headroom, a multiplicative step when at the limit, rounded up, clamped to the policy range and step, rounded down to the unit. Without a measurement the Incident is handed off as MissingData, without pressure as NoMemoryPressure. The request is created with the new limit and optional typed sizing evidence. The executor's policy engine decides the request as before, and the executor prints the evidence in the pull request body. The model sits beside this path and chooses only the action and the container.</desc>
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
 <style>
 .bt{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4}
@@ -23,15 +23,15 @@
 <text class="h" x="34" y="96">Metrics source (Prometheus)</text>
 <text class="s" x="34" y="118">approved template, range query</text>
 <text class="s" x="34" y="137">container_memory_working_set_bytes</text>
-<text class="s" x="34" y="156">container_last_terminated_oomkilled</text>
+<text class="s" x="34" y="156">container_memory_limit_bytes</text>
 <text class="s" x="34" y="175">the analysis window, no free text</text>
 <path class="fb" d="M170 194 L170 230" marker-end="url(#a)"/>
 <rect class="bt" x="20" y="234" width="300" height="144" rx="10"/>
 <text class="h" x="34" y="260">Typed measurement (context builder)</text>
 <text class="s" x="34" y="282">per container: peak over pods and</text>
-<text class="s" x="34" y="301">samples, sample count, window,</text>
-<text class="s" x="34" y="320">OOM flag; the template limit from</text>
-<text class="s" x="34" y="339">the API server, never the model's</text>
+<text class="s" x="34" y="301">samples (recent ones needed), window,</text>
+<text class="s" x="34" y="320">limit of the same pod; the Incident's</text>
+<text class="s" x="34" y="339">OOMKilled symptom is the other signal</text>
 <text class="s" x="34" y="358">partial or capped answer: none</text>
 <rect class="bt" x="20" y="414" width="300" height="104" rx="10"/>
 <text class="h" x="34" y="440">No measurement</text>
@@ -43,16 +43,16 @@
 <rect class="bt" x="360" y="70" width="300" height="166" rx="10"/>
 <text class="h" x="374" y="96">Size</text>
 <text class="s" x="374" y="118">need = peak + headroom (25%)</text>
-<text class="s" x="374" y="137">peak at the limit or OOM kill:</text>
+<text class="s" x="374" y="137">OOMKilled symptom or peak &gt;= 90%:</text>
 <text class="s" x="374" y="156">at least limit x 1.5 (it understates)</text>
-<text class="s" x="374" y="175">round up to 8Mi</text>
-<text class="s" x="374" y="194">clamp: policy min, max, step</text>
+<text class="s" x="374" y="175">round up to 8Mi; clamp, round down</text>
+<text class="s" x="374" y="194">policy min, max, step (previous: #494)</text>
 <text class="s" x="374" y="213">the model's size is not read</text>
 <rect class="bt" x="360" y="270" width="300" height="148" rx="10"/>
 <text class="h" x="374" y="296">No proposal, with a reason</text>
 <text class="s" x="374" y="318">need above the policy max:</text>
-<text class="s" x="374" y="337">PolicyMaxBelowNeed</text>
-<text class="s" x="374" y="356">not above the current limit:</text>
+<text class="s" x="374" y="337">PolicyMaxBelowNeed; no pressure seen:</text>
+<text class="s" x="374" y="356">NoMemoryPressure; not above limit:</text>
 <text class="s" x="374" y="375">SizeNotAnIncrease (decreases</text>
 <text class="s" x="374" y="394">and #497 are out of scope)</text>
 <path class="fb" d="M320 290 L356 150" marker-end="url(#a)"/>
@@ -60,11 +60,11 @@
 
 <rect class="bt" x="700" y="70" width="300" height="146" rx="10"/>
 <text class="h" x="714" y="96">RemediationRequest (created)</text>
-<text class="s" x="714" y="118">action, container: from the model</text>
-<text class="s" x="714" y="137">previous: the template (#494)</text>
+<text class="s" x="714" y="118">action, container: from the model,</text>
+<text class="s" x="714" y="137">only where pressure was seen</text>
 <text class="s" x="714" y="156">desired: the size from code</text>
-<text class="s" x="714" y="175">sizing: metric, peak, window,</text>
-<text class="s" x="714" y="194">headroom, rule; spec immutable</text>
+<text class="s" x="714" y="175">sizing (optional): metric, peak,</text>
+<text class="s" x="714" y="194">window, headroom, limitedBy</text>
 <rect class="ext" x="700" y="250" width="300" height="146" rx="10"/>
 <text class="h" x="714" y="276">Policy engine (unchanged)</text>
 <text class="s" x="714" y="298">decides every request in the executor</text>
@@ -78,9 +78,9 @@
 <text class="h" x="1054" y="96">Pull request body (executor)</text>
 <text class="s" x="1054" y="118">Size: from 48Mi to 72Mi, 50%</text>
 <text class="s" x="1054" y="137">Evidence: working set peak 47.9Mi</text>
-<text class="s" x="1054" y="156">over 6 h, 58 samples, headroom 25%,</text>
-<text class="s" x="1054" y="175">at the limit, so 1.5 x limit; limited</text>
-<text class="s" x="1054" y="194">by the policy step. Typed fields</text>
+<text class="s" x="1054" y="156">over 1 h, 58 samples, headroom 25%,</text>
+<text class="s" x="1054" y="175">at the limit: 1.5 x limit, equal to</text>
+<text class="s" x="1054" y="194">the step limit. Typed fields</text>
 <text class="s" x="1054" y="213">only, never model prose</text>
 <rect class="bt" x="1040" y="270" width="320" height="126" rx="10"/>
 <text class="h" x="1054" y="296">Later use (pointer)</text>

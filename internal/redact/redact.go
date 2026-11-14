@@ -1734,7 +1734,7 @@ func compoundValueSpans(s string, m []int, prevEnd int, add func(start, end int)
 		return prevEnd
 	}
 	start, end := keyNameValue(s, m[1], m[2], false)
-	if v := s[start:end]; named && opaqueToken(v) && !(spelled && flagWord(v)) {
+	if v := s[start:end]; named && opaqueToken(v) && (!spelled || !flagWord(v)) {
 		add(start, end)
 	}
 	return max(prevEnd, end)

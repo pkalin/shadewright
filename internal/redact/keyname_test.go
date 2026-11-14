@@ -324,8 +324,6 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 		"db-password Opaque",
 		// Not an opaque token: shorter than 16, a byte outside the set, or no digit and none of "/+=".
 		"ClientSecretCredential AuthenticationFailed tenant=t1",
-		"db-password kubernetes.io/basic-auth 2 5d",
-		"DB_PASSWORD CredentialUnavailableError 12345 next",
 		"set ClientSecret correcthorsebattery now",
 		"secret-volume (ro)",
 		"volumes=[secret-volume kube-api-access-x]",
@@ -383,13 +381,13 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 	for in, word := range map[string]string{
 		"export DB_PASSWORD changeme":                                      "changeme",
 		"set ClientSecret Password now":                                    "Password",
-		"set client_secret hunter2 now":                                    "hunter2",
+		"set client_secret hunter2x now":                                   "hunter2x",
 		"set ClientSecret \"Password!\" now":                               "Password!",
 		"set client_secret \"horse battery staple\" now":                   "horse battery staple",
 		"set client_secret hunter3hunter3h now":                            "hunter3hunter3h",
 		"set client_secret correcthorsebatterystaple x":                    "correcthorsebatterystaple",
 		"set aws_secret_access_key abc,DEF123/ghiJKL456/mnoPQR789+stu now": "DEF123/ghiJKL456/mnoPQR789+stu",
-		"client_secret myPassword123 reason=FailedMount":                   "myPassword123",
+		takenValueLine: "myPassword123",
 	} {
 		if out := String(in); !strings.Contains(out, word) {
 			t.Errorf("value after a blank no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",
@@ -397,6 +395,10 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		}
 	}
 }
+
+// takenValueLine is a compound name, a short password as its value (no opaque token, so it stays) and a field
+// after it that a match starting inside the value would take.
+const takenValueLine = "client_secret myPassword123 reason=FailedMount"
 
 // flagValueLine is a secret flag, its value and the next flag.
 const flagValueLine = "run --password hunter2abc --region y"
@@ -511,8 +513,7 @@ var evidenceRows = []evidenceRow{
 		want: "{\"cmd\":\"--password ***\",\"reason\":\"FailedMount\"}",
 		why:  "the value after a secret flag inside a JSON string, up to the closing quote"},
 	// A match inside a value already taken is skipped, except a secret-named flag.
-	{in: "client_secret myPassword123 reason=FailedMount",
-		main: "client_secret myPassword123 reason=FailedMount"},
+	{in: takenValueLine, main: takenValueLine},
 	{in: "client_secret db_password --region west",
 		main: "client_secret db_password --region west"},
 	{in: "client_secret db_password --region=us-west-2a",

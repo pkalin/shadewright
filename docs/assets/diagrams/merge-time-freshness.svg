@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 520" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright merge-time freshness check</title>
-  <desc id="d">Overview of ADR-0041, proposed and not built. When the executor sees that a person merged a pull request, it first checks freshness once more, from recorded state and three reads of the API server: the policy, the settings and the target, compared with the recorded policy UID and revision, plan repository, plan digest and target UID. It reads nothing from Git or Flux, because after the merge the file and the live value already hold the new value, and it compares no timestamps. A failed read is not fresh and not stale: the request keeps its phase and the next look retries. If nothing changed, the merge is recorded as today. If something changed and the current policy, asked through the same Preflight code, would still allow the change, the merge is recorded with PlanFresh False and the request ends Inconclusive with StalePlanMerged, which the circuit breaker does not count as a success. If the current policy would refuse the change, the request ends NeedsIntervention with the reason MergedAgainstPolicy, with the merge receipt kept. In both stale cases Shadewright opens no revert proposal and makes no Git write; a person decides. With verification on, a failure still ends Failed.</desc>
+  <desc id="d">Overview of ADR-0041, proposed and not built. When the executor sees that a person merged a pull request, it first checks freshness once more, from recorded state and three reads of the API server: the policy, the settings and the target, compared with the recorded policy UID and revision, plan repository, plan digest and target UID. It reads nothing from Git or Flux, because after the merge the file and the live value already hold the new value, and it compares no timestamps. A failed read is not fresh and not stale: the request keeps its phase and the next look retries. If nothing changed, the merge is recorded as today. If something changed, the same policy code is asked whether it refuses the change: Preflight (the field checks) and the source checks, run on the recorded source with no Git read. If they do not refuse it, the merge is recorded with PlanFresh False and the request ends Inconclusive with StalePlanMerged, which the circuit breaker does not count as a success. If they refuse it, or the policy was deleted, the request ends NeedsIntervention with the reason MergedAgainstPolicy, with the merge receipt kept and no outcome counted by the circuit breaker. A gone target or settings object ends Inconclusive without that question. The same reads also run at every poll before the merge, compare only, and close a stale pull request within one poll. In both stale cases Shadewright opens no revert proposal and makes no Git write; a person decides. With verification on, a failure still ends Failed.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -56,10 +56,10 @@
   <text class="s" x="390" y="278">phase kept, the next look retries</text>
 
   <rect class="box" x="372" y="330" width="340" height="136" rx="12"/>
-  <text class="h" x="390" y="358">Would the current policy allow it?</text>
-  <text class="s" x="390" y="382">policy.Preflight: the same field checks</text>
-  <text class="s" x="390" y="402">as the decision, with the policy read now</text>
-  <text class="s" x="390" y="422">(the model is not asked)</text>
+  <text class="h" x="390" y="358">Do the checks refuse it?</text>
+  <text class="s" x="390" y="382">Preflight field checks, then the source</text>
+  <text class="s" x="390" y="402">checks on the recorded source, with the</text>
+  <text class="s" x="390" y="422">policy read now (the model is not asked)</text>
   <path class="f" d="M542 296V330" marker-end="url(#a)"/>
   <text class="lbl" x="554" y="318">changed</text>
 
@@ -71,19 +71,19 @@
   <text class="lbl" x="716" y="124">same</text>
 
   <rect class="box" x="748" y="212" width="324" height="124" rx="12"/>
-  <text class="h" x="766" y="240">Allowed: Inconclusive</text>
+  <text class="h" x="766" y="240">Not refused: Inconclusive</text>
   <text class="s" x="766" y="264">Merged with PlanFresh False; the cap</text>
   <text class="s" x="766" y="284">ends it StalePlanMerged. The breaker</text>
-  <text class="s" x="766" y="304">counts no success (verification on:</text>
+  <text class="s" x="766" y="304">counts no outcome (verification on:</text>
   <text class="s" x="766" y="324">a failure still ends Failed)</text>
   <path class="f" d="M712 380H730V274H748" marker-end="url(#a)"/>
-  <text class="lbl" x="716" y="370">allowed</text>
+  <text class="lbl" x="716" y="370">not refused</text>
 
   <rect class="key" x="748" y="360" width="324" height="106" rx="12"/>
   <text class="h" x="766" y="388">Refused: NeedsIntervention</text>
   <text class="s" x="766" y="412">reason MergedAgainstPolicy, receipt kept</text>
   <text class="s" x="766" y="432">no revert proposal: a person merged it,</text>
-  <text class="s" x="766" y="452">a person decides</text>
+  <text class="s" x="766" y="452">a person decides; no breaker outcome</text>
   <path class="f" d="M712 430H748" marker-end="url(#a)"/>
   <text class="lbl" x="716" y="420">refused</text>
 </svg>

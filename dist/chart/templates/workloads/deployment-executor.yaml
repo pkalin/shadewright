@@ -1,4 +1,5 @@
 {{- $_ := include "shadewright.validate" (dict "component" "executor" "context" $) }}
+{{- $_ := include "shadewright.executorMemoryBudget" $ }}
 {{- $c := .Values.executor }}
 apiVersion: apps/v1
 kind: Deployment

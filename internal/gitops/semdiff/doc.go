@@ -16,8 +16,8 @@ limitations under the License.
 // Package semdiff proves, before a commit, that a patched manifest changes only what the plan says
 // (design 8.2, steps 4 and 5).
 //
-// [Check] renders the Kustomization path twice with the kustomize API, in process, from an in-memory file
-// system: once from the files at the commit the change builds on and once with the patched file in place. It
+// [Check] renders the Kustomization path twice with the kustomize API, in a child process of the binary
+// ([RunRenderProcess]), from an in-memory file system: once from the files at the commit the change builds on and once with the patched file in place. It
 // compares the rendered objects by identity (apiVersion, kind, namespace, name) and passes only when they are the same
 // set, every object other than the target is unchanged, and the target differs in exactly the action's
 // field, from the previous to the desired value. Then it runs basic schema checks on the changed target.
@@ -37,8 +37,14 @@ limitations under the License.
 // since Flux would filter the files by it. Path rules are shared with the source mapping
 // (internal/gitops/repopath).
 //
-// Renders are serialised in the process; the wait for a turn honours the context, the render itself cannot
-// be cancelled.
+// The walk, both renders and the comparison of [Check] run in that render process, one at a time, with limits
+// on its memory and CPU time: its own memory sampling ([MaxRenderMemory]), the parent's reading of its resident
+// memory ([MaxRenderResident]) and operating system limits ([MaxRenderData], a partial guard, and
+// [MaxRenderCPUSeconds]). The walk's budgets are estimates of what a render grows to; the process limits bound
+// it whatever the estimate misses, and a render that reaches them is refused with ReasonTooLarge instead of
+// ending the executor (#614, ADR-0035). Any other end of the render process after it set its limits (a crash,
+// a kill the parent did not make, an unreadable answer) is a [RenderEnded] for a retry, which the caller counts.
+// The wait for a turn and the render process honour the context.
 //
 // Rendering is locked down. Every kustomization file is checked against an allow-list before kustomize
 // sees it: plain resources, components, patches (inline or from a local file) and the built-in name,

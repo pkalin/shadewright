@@ -997,7 +997,8 @@ func (e *renderRefusal) Error() string { return e.reason + ": " + e.message }
 // cutting the branch and the commit, and while the pull request waits for review. The caller has checked that
 // the merge result is the tree at head with changed in place of the target file; checkRender renders that tree
 // with and without the change, and the one difference must be the planned field of the target. A refusal is
-// returned as a [*renderRefusal]; Git that cannot be read is returned for a retry.
+// returned as a [*renderRefusal]; Git that cannot be read, and a render process that ended without an answer
+// fewer than maxRenderEnds times in a row (renderEnds), are returned for a retry.
 func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git providers.GitProvider, head string,
 	changed []byte, rr *remediationv1alpha1.RemediationRequest) error {
 	src := rr.Status.Source
@@ -1009,10 +1010,19 @@ func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git prov
 	}
 	files, err := semdiff.Load(ctx, git, head, string(src.BuildPath))
 	if err == nil {
-		_, err = semdiff.Check(ctx, semdiff.Input{
+		check := semdiff.Check
+		if r.renderCheck != nil {
+			check = r.renderCheck
+		}
+		_, err = check(ctx, semdiff.Input{
 			Files: files, Path: string(src.BuildPath), File: string(src.Path), Patched: changed,
 			Target: rr.Spec.TargetRef, Action: rr.Spec.Action,
 		})
+		// A render process that keeps ending without an answer is refused after a few ends in a row (ADR-0035).
+		err = r.renderEnds.note(rr, err)
+	}
+	if rf, ok := errors.AsType[*renderRefusal](err); ok {
+		return rf
 	}
 	if se, ok := errors.AsType[*semdiff.Error](err); ok {
 		return &renderRefusal{reason: string(se.Reason),

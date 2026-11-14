@@ -145,8 +145,8 @@ executor:
     # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `executor.identity.azure.clientId`.
     # @section -- Executor
     annotations: {}
-  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit: the Go runtime then collects before the heap reaches the container's limit, and a large but bounded parse is not OOM-killed. Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1.5Gi`: the chart then refuses to render) or for another margin.
-  # @default -- 90 percent of `resources.limits.memory`
+  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 36 percent of `resources.limits.memory` (241591910 bytes, about 230 MiB, with the default 640Mi), so it follows that limit: the Go runtime then collects before the heap reaches its share, and a large but bounded parse is not OOM-killed. The rest is for the render process of the render check, a child of the executor in the same container that the executor stops at 192 MiB resident, and a 128 MiB margin (ADR-0035). The chart refuses to render when `resources.limits.memory` is less than this plus 192 MiB plus 128 MiB. It reads a number of bytes or a number with an optional fraction and a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix (such as `1.5Gi` or `600M`); for another form (an exponent such as `1e9`, or milli) it skips that check and needs this value set. Set it for another split of the limit.
+  # @default -- 36 percent of `resources.limits.memory`
   # @section -- Executor
   goMemLimit: ""
   resources:
@@ -155,11 +155,15 @@ executor:
       # @section -- Executor
       cpu: 500m
       # -- Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never
-      # unbounded. 256Mi gives headroom for large real GitOps trees (#615); the Git input budgets (#495, #595, #482)
-      # stay the bound and were measured against 128Mi, and growth from crafted input multiplies, so the limit is not
-      # the defence (#614).
+      # unbounded. It covers the executor and one render process of the render check (ADR-0035): the executor's Go
+      # soft limit (36 percent, 230.4 MiB) plus the render process's resident limit (192 MiB, where the executor
+      # kills it) plus a 128 MiB margin is 550.4 MiB. On cgroup v2 a container OOM ends the executor with the
+      # render process, so a lower limit, or a larger `goMemLimit`, would let a build that reaches the render
+      # process's limit restart the executor on every retry: the chart refuses to render it. The render process's
+      # own limits bound what crafted input can make a render grow (#614); the Git input budgets (#495, #595,
+      # #482) refuse most large builds before it runs.
       # @section -- Executor
-      memory: 256Mi
+      memory: 640Mi
     requests:
       # -- CPU request.
       # @section -- Executor
@@ -298,7 +302,7 @@ analyzer:
     # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `analyzer.identity.azure.clientId`.
     # @section -- Analyzer
     annotations: {}
-  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit: the Go runtime then collects before the heap reaches the container's limit, and a large but bounded parse is not OOM-killed. Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1.5Gi`: the chart then refuses to render) or for another margin.
+  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit: the Go runtime then collects before the heap reaches the container's limit, and a large but bounded parse is not OOM-killed. Set it for a limit the chart cannot read (not a number of bytes or a number with an optional fraction and a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1e9`: the chart then refuses to render) or for another margin.
   # @default -- 90 percent of `resources.limits.memory`
   # @section -- Analyzer
   goMemLimit: ""
@@ -372,7 +376,7 @@ verifier:
   # @default -- `null`, so `analyzer.watchNamespaces`
   # @section -- Verifier
   watchNamespaces: null
-  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit. Set it for a limit the chart cannot read (not an integer or a whole number with a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix: the chart then refuses to render) or for another margin.
+  # -- Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit. Set it for a limit the chart cannot read (not a number of bytes or a number with an optional fraction and a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1e9`: the chart then refuses to render) or for another margin.
   # @default -- 90 percent of `resources.limits.memory`
   # @section -- Verifier
   goMemLimit: ""

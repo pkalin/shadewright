@@ -40,6 +40,7 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/cmdutil"
 	"github.com/pkalin/shadewright/internal/controller"
+	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -114,6 +115,9 @@ func (f *executorFlags) newReconciler(c client.Client, s *runtime.Scheme, namesp
 }
 
 func main() {
+	// The render check runs kustomize in a child process of this binary with operating system limits (ADR-0035):
+	// when this process is that child, it renders and exits here, before any flag or client is set up.
+	semdiff.RunRenderProcess()
 	var opts cmdutil.Options
 	var namespace string
 	var webhookCertPath, webhookCertName, webhookCertKey string

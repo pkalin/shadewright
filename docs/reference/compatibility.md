@@ -18,7 +18,7 @@ What Shadewright has been run against, taken from CI, the end-to-end setup, the 
 | Helm chart | 0.2.0-rc.1 | `ct install` and `helm test` on Kind in CI (pull requests that change the chart, and every release tag). In the lab on 2026-11-04, Flux helm-controller 1.7.1 installed the chart from `oci://ghcr.io/pkalin/charts/shadewright` by digest, after source-controller verified its keyless signature (`OCIRepository` with `verify.provider: cosign`) |
 | KEDA | 2.21.0 (chart and app) | The lab and the fleet's Kind cluster, from the upstream chart, not the AKS add-on |
 | Go | the `toolchain` line of `go.mod` (1.27.4) | CI and the image build |
-| Kustomize (render check) | `sigs.k8s.io/kustomize/api` 0.21.2, linked into the executor | The executor renders in process; there is no kustomize binary to match. The fleet's own checks use kustomize 5.8.1 |
+| Kustomize (render check) | `sigs.k8s.io/kustomize/api` 0.21.2, linked into the executor | The executor renders with the linked library, in a child process of its own binary with operating system limits (ADR-0035); there is no kustomize binary to match. The fleet's own checks use kustomize 5.8.1 |
 
 No pipeline runs the operator, Flux and KEDA together: that combination is the manual [OOM acceptance run](../lab-oom-acceptance.md) in the lab.
 

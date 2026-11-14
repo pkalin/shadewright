@@ -66,7 +66,7 @@ const MaxTransformBytes = 4 << 20
 // The bound is an estimate with known gaps, not a bound of the render: it does not count keys merged under
 // sibling paths of one mapping together, keys that labels, commonLabels or commonAnnotations add, patches
 // wrapped in a List, JSON 6902 moves, or a list a JSON patch creates that a strategic merge patch then merges
-// into. #614 tracks bounding the render itself.
+// into. What those gaps let through is bounded by the render process instead ([MaxRenderMemory], #614).
 const MaxMergedKeys = 4096
 
 // NodeBytes is what one YAML node a patch or transformer adds counts for against [MaxTransformBytes]: the heap a

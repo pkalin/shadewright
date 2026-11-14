@@ -36,5 +36,6 @@
 | [0032](0032-azure-devops-as-a-second-git-provider.md) | Azure DevOps as a second `GitProvider` | Proposed |
 | [0033](0033-argo-cd-delivery-and-source-mapping.md) | Argo CD delivery verification and source mapping | Proposed |
 | [0034](0034-declarative-pack-format.md) | A declarative pack format, compiled in first | Proposed |
+| [0035](0035-render-check-in-a-limited-child-process.md) | The render check runs in a child process with operating system limits | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

@@ -106,6 +106,7 @@ spec:
 `
 
 func main() {
+	semdiff.RunRenderProcess() // Check renders in a child process of this binary (ADR-0035)
 	shape, n := "flat", 4
 	if len(os.Args) > 1 {
 		shape = os.Args[1]

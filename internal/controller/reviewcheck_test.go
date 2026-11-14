@@ -45,6 +45,23 @@ const (
 	newName = "new"
 )
 
+// The clocks of the worlds the hint, reply and handoff tests build (gateWorld, replyWorld,
+// handoffAppendedWorld): reconcilerClock is the reconciler's (Now) and hostClock the fake code host's (the
+// feedback clock and the times of its comments and reviews). Every fixture time is built from one of them, never
+// from time.Now, so no test depends on the date it runs on. They differ on purpose: the reconciler never decides
+// from a code host's time, and moving either one to another date, far in the past or the future, leaves every
+// result the same.
+var (
+	reconcilerClock = time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	hostClock       = reconcilerClock.Add(-37 * time.Minute)
+)
+
+// fixClocks sets the clocks of a world: r's to reconcilerClock and g's to hostClock.
+func fixClocks(r *RemediationRequestReconciler, g *fakegit.Git) {
+	r.Now = func() time.Time { return reconcilerClock }
+	g.SetFeedbackClock(func() time.Time { return hostClock })
+}
+
 // gateWorld is a predecessor waiting for review with hint 7 Reserved for its replacement, the replacement's
 // commit pushed on top of the predecessor's (handoff step 3 done), nothing recorded yet. It returns the
 // reconciler, the fake Git, both requests as stored, the pull request and the new head.
@@ -110,6 +127,7 @@ func gateWorld(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.
 	}
 	r := &RemediationRequestReconciler{Client: c, APIReader: c, ReviewerHints: true,
 		OpenRepository: func(context.Context, api.GitRepository) (providers.GitProvider, error) { return g, nil }}
+	fixClocks(r, g)
 	return r, g, p, rr, cr, head
 }
 
@@ -127,7 +145,7 @@ func plainWaiting(t *testing.T, r *RemediationRequestReconciler, p *api.Remediat
 func approve(g *fakegit.Git, number, id, author int64, head string) {
 	g.AddReview(number, providers.Feedback{ID: id, Author: providers.FeedbackAuthor{ID: author,
 		Login: fmt.Sprintf("reviewer-%d", author), Kind: providers.AuthorPerson}, ReviewState: reviewApproved,
-		CommitID: head, CreatedAt: time.Now()})
+		CommitID: head, CreatedAt: hostClock})
 }
 
 func TestReviewCheckOnAHeadNoHandoffPushed(t *testing.T) {
@@ -254,7 +272,7 @@ func TestReviewGateCollectsHintsBeforeItDecides(t *testing.T) {
 	if err := r.Status().Update(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now()
+	now := hostClock
 	author := providers.FeedbackAuthor{ID: 2002, Login: "second", Kind: providers.AuthorPerson}
 	g.SetWriter(author.ID, true)
 	g.AddComment(cr.Number, providers.Feedback{ID: 8, Author: author, Body: hintCommand + " inspect the sidecar", CreatedAt: now})

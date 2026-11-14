@@ -115,6 +115,8 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		writeTimeout time.Duration
 		// recorder is the reconciler's Event recorder; nil records none.
 		recorder *record.FakeRecorder
+		// provider, when set, is what the reconciler's OpenRepository returns instead of git.
+		provider providers.GitProvider
 	)
 
 	reconciler := func() *RemediationRequestReconciler {
@@ -133,6 +135,9 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 			OpenRepository: func(_ context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
 				if repo.URL != settings.Spec.Repositories[0].URL {
 					return nil, errors.New("unknown repository")
+				}
+				if provider != nil {
+					return provider, nil
 				}
 				return git, nil
 			},
@@ -183,7 +188,7 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 	BeforeEach(func() {
 		seq++
 		clock = time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
-		hook, hintsOff, writeTimeout, recorder = nil, false, 0, nil
+		hook, hintsOff, writeTimeout, recorder, provider = nil, false, 0, nil, nil
 		nextID.Store(5000)
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
 		Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
@@ -596,17 +601,12 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 	It("gives the look at the comments its own deadline, apart from the check of the pull request", func() {
 		byWriter("/shadewright reanalyze: the sidecar")
 		writeTimeout = 2 * time.Second
-		git.SetFail(func(op string) error {
-			switch op {
-			case opGet:
-				time.Sleep(1400 * time.Millisecond)
-			case "ListComments":
-				time.Sleep(900 * time.Millisecond)
-			}
-			return nil
-		})
+		contexts := &contextsGit{Git: git}
+		provider = contexts
 		poll()
-		git.SetFail(nil)
+		Expect(contexts.checked).To(BeTrue(), "the pull request was checked")
+		Expect(contexts.looked).To(BeTrue(), "the comments were looked at")
+		Expect(contexts.lookErr).NotTo(HaveOccurred())
 		Expect(fetch().Status.Hints).To(HaveLen(1), "the look did not run out of the check's time")
 	})
 
@@ -940,6 +940,39 @@ func TestCommentCursorRoundTrip(t *testing.T) {
 	if !got.Since.Equal(at) {
 		t.Errorf("since %v, want %v", got.Since, at)
 	}
+}
+
+// contextsGit records the context of the last check of a pull request (GetChangeRequest), and at the look at
+// its comments (ListComments) whether that look has a context of its own: the check's context has ended and
+// the look's is live with a deadline. Nothing waits on the wall clock.
+type contextsGit struct {
+	*fakegit.Git
+	checkCtx context.Context
+	checked  bool
+	looked   bool
+	lookErr  error
+}
+
+func (g *contextsGit) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	g.checkCtx, g.checked = ctx, true
+	return g.Git.GetChangeRequest(ctx, n)
+}
+
+func (g *contextsGit) ListComments(ctx context.Context, n int64, cur providers.FeedbackCursor) (
+	providers.FeedbackPage, error) {
+	g.looked = true
+	_, bounded := ctx.Deadline()
+	switch {
+	case g.checkCtx == nil:
+		g.lookErr = errors.New("the comments were looked at before the pull request was checked")
+	case g.checkCtx.Err() == nil:
+		g.lookErr = errors.New("the look shares the context of the check of the pull request")
+	case ctx.Err() != nil:
+		g.lookErr = fmt.Errorf("the look's context has ended: %w", ctx.Err())
+	case !bounded:
+		g.lookErr = errors.New("the look's context has no deadline")
+	}
+	return g.Git.ListComments(ctx, n, cur)
 }
 
 // slowCommentsGit is a provider whose comment list answers only when its context ends.

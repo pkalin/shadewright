@@ -471,8 +471,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(crs).To(HaveLen(1))
 		Expect(crs[0].Title).To(Equal(revertTitle()))
 		Expect(crs[0].Body).To(ContainSubstring("**Reverts:** RemediationRequest `" + requestNamespace + "/" +
-			failed.Name + "` (UID `" + string(failed.UID) + "`), pull request #71 " +
-			"(https://github.com/example/fleet/pull/71). It ended `Failed` with the reason `OOMKilled`."))
+			failed.Name + "` (UID `" + string(failed.UID) + "`), pull request #71. " +
+			"It ended `Failed` with the reason `OOMKilled`."))
 		Expect(crs[0].Body).To(ContainSubstring("**Evidence:** RemediationRequest `" + requestNamespace + "/" +
 			got.Name + "` (UID"))
 		Expect(crs[0].Body).NotTo(ContainSubstring("[REDACTED"))

@@ -34,6 +34,7 @@ import (
 	"github.com/pkalin/shadewright/internal/analyzer/models"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/pkalin/shadewright/internal/providers/model/anthropic"
 	"github.com/pkalin/shadewright/internal/providers/model/foundry"
 	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
@@ -42,7 +43,8 @@ import (
 // Environment of a run. EVAL_REPORT_DIR applies to both modes; the others to the real model only.
 const (
 	envReportDir = "EVAL_REPORT_DIR"
-	envModel     = "EVAL_MODEL" // "foundry" runs TestEvalFoundry
+	envModel     = "EVAL_MODEL" // "foundry" runs TestEvalFoundry, "anthropic" TestEvalAnthropic
+	envKeyFile   = "EVAL_ANTHROPIC_KEY_FILE"
 	envEndpoint  = "EVAL_ENDPOINT"
 	envSuffixes  = "EVAL_ENDPOINT_SUFFIXES"
 	envAPI       = "EVAL_API_VERSION"
@@ -57,6 +59,13 @@ const (
 	envPriceOut  = "EVAL_PRICE_OUTPUT_PER_MTOK"
 	envEscPrices = "EVAL_ESCALATION_PRICE_"
 	envForceEsc  = "EVAL_FORCE_ESCALATION" // "1" sends every run to the escalation model
+)
+
+// The model providers of a run, as the report's mode and the manifest's provider name them.
+const (
+	providerFake      = "fake"
+	providerFoundry   = "foundry"
+	providerAnthropic = "anthropic"
 )
 
 // Bounds of a real-model run.
@@ -96,6 +105,8 @@ func (replaySource) factory(s *scenario) (analysis.ModelFactory, func() error, e
 		return m, nil
 	}, done, nil
 }
+
+func (replaySource) provider() string { return providerFake }
 
 func (replaySource) expectedModels() map[analysis.Role]string {
 	return map[analysis.Role]string{analysis.RoleTriage: fakeModelName, analysis.RoleEscalation: fakeModelName}
@@ -180,6 +191,8 @@ func (f *foundrySource) factory(*scenario) (analysis.ModelFactory, func() error,
 	return f.factoryFn, nil, nil
 }
 
+func (*foundrySource) provider() string { return providerFoundry }
+
 func (f *foundrySource) expectedModels() map[analysis.Role]string {
 	m := map[analysis.Role]string{analysis.RoleTriage: f.triageModel}
 	if f.escalation != nil {
@@ -190,6 +203,81 @@ func (f *foundrySource) expectedModels() map[analysis.Role]string {
 
 func (f *foundrySource) deployments() (*remediationv1alpha1.ModelDeployment, *remediationv1alpha1.ModelDeployment) {
 	return f.triage, f.escalation
+}
+
+// anthropicSource calls Claude models through the Anthropic API adapter. The analyzer has no such wiring yet
+// (#387): only the evaluation builds this provider. The deployments carry the API's endpoint and version and
+// the model ID as the deployment name, so the manifest and report read as for Foundry.
+type anthropicSource struct {
+	providers             map[analysis.Role]*anthropic.Provider
+	triage, escalation    *remediationv1alpha1.ModelDeployment
+	triageModel, escModel string
+	force                 bool
+}
+
+// foundryOnly are the settings that mean nothing with EVAL_MODEL=anthropic; one that is set is refused, so a
+// run never looks like it used them.
+var foundryOnly = []string{envEndpoint, envSuffixes, envAPI, envTriageDep, envEscDep}
+
+func newAnthropicSource() (*anthropicSource, error) {
+	for _, n := range foundryOnly {
+		if os.Getenv(n) != "" {
+			return nil, fmt.Errorf("%s applies to EVAL_MODEL=foundry only", n)
+		}
+	}
+	src := &anthropicSource{providers: map[analysis.Role]*anthropic.Provider{},
+		triageModel: os.Getenv(envTriageMod), escModel: os.Getenv(envEscMod)}
+	keyFile := os.Getenv(envKeyFile)
+	if src.triageModel == "" || keyFile == "" {
+		return nil, fmt.Errorf("%s and %s are required", envTriageMod, envKeyFile)
+	}
+	force, err := envForceEscalation(src.escModel != "")
+	if err != nil {
+		return nil, err
+	}
+	src.force = force
+	for role, model := range map[analysis.Role]string{analysis.RoleTriage: src.triageModel,
+		analysis.RoleEscalation: src.escModel} {
+		if model == "" {
+			continue
+		}
+		p, err := anthropic.New(anthropic.Config{Model: model, KeyFile: keyFile})
+		if err != nil {
+			return nil, fmt.Errorf("the %s model: %w", role, err)
+		}
+		src.providers[role] = p
+	}
+	src.triage = deployment(anthropic.Endpoint, src.triageModel, anthropic.APIVersion)
+	if src.escModel != "" {
+		src.escalation = deployment(anthropic.Endpoint, src.escModel, anthropic.APIVersion)
+	}
+	return src, nil
+}
+
+func (a *anthropicSource) forcesEscalation() bool { return a.force }
+
+func (*anthropicSource) provider() string { return providerAnthropic }
+
+func (a *anthropicSource) factory(*scenario) (analysis.ModelFactory, func() error, error) {
+	return func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
+		p := a.providers[role]
+		if p == nil || d.Deployment != a.expectedModels()[role] {
+			return nil, fmt.Errorf("no Anthropic model is configured for the %s role", role)
+		}
+		return p, nil
+	}, nil, nil
+}
+
+func (a *anthropicSource) expectedModels() map[analysis.Role]string {
+	m := map[analysis.Role]string{analysis.RoleTriage: a.triageModel}
+	if a.escalation != nil {
+		m[analysis.RoleEscalation] = a.escModel
+	}
+	return m
+}
+
+func (a *anthropicSource) deployments() (*remediationv1alpha1.ModelDeployment, *remediationv1alpha1.ModelDeployment) {
+	return a.triage, a.escalation
 }
 
 // toolDefinitions are the definitions the loop offers on escalation in an evaluation run, for the manifest:
@@ -281,7 +369,7 @@ func TestEvalReplay(t *testing.T) {
 	if err := replayEnvError(); err != nil {
 		t.Fatal(err)
 	}
-	r := evaluate(t, "fake", replaySource{}, 1, 1, nil)
+	r := evaluate(t, providerFake, replaySource{}, 1, 1, nil)
 	for _, s := range r.Scenarios {
 		if !s.Pass {
 			t.Errorf("scenario %s failed: outcome %+v, diagnosis %+v, error %q", s.Name, s.Outcome, s.Diagnosis, s.Error)
@@ -295,7 +383,7 @@ func TestEvalReplay(t *testing.T) {
 // TestEvalFoundry runs the scenarios against the real model. It runs only with EVAL_MODEL=foundry, from the
 // Evaluation workflow or by hand with a workload identity; it costs money.
 func TestEvalFoundry(t *testing.T) {
-	if os.Getenv(envModel) != "foundry" {
+	if os.Getenv(envModel) != providerFoundry {
 		t.Skip("set EVAL_MODEL=foundry to evaluate the real model")
 	}
 	repeats, err := envInt(envRepeats, 1, 1, maxRepeats)
@@ -314,7 +402,36 @@ func TestEvalFoundry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := evaluate(t, "foundry", src, repeats, rate, p)
+	r := evaluate(t, providerFoundry, src, repeats, rate, p)
+	if !r.Totals.Pass {
+		t.Errorf("the run did not reach the pass threshold: %d of %d passed", r.Totals.Passed, r.Totals.Runs)
+	}
+}
+
+// TestEvalAnthropic runs the scenarios against a Claude model through the Anthropic API. It runs only with
+// EVAL_MODEL=anthropic, by hand with an API key in a private file (EVAL_ANTHROPIC_KEY_FILE); it costs money.
+// There is no fallback to Foundry or to another model.
+func TestEvalAnthropic(t *testing.T) {
+	if os.Getenv(envModel) != providerAnthropic {
+		t.Skip("set EVAL_MODEL=anthropic to evaluate a Claude model")
+	}
+	repeats, err := envInt(envRepeats, 1, 1, maxRepeats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rate, err := envFloat(envPassRate, 1, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := newAnthropicSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := envPrices(src.escalation != nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := evaluate(t, providerAnthropic, src, repeats, rate, p)
 	if !r.Totals.Pass {
 		t.Errorf("the run did not reach the pass threshold: %d of %d passed", r.Totals.Passed, r.Totals.Runs)
 	}

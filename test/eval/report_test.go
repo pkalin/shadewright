@@ -44,7 +44,7 @@ const reportSchemaVersion = 3
 // report is the result of one evaluation run.
 type report struct {
 	SchemaVersion int `json:"schemaVersion"`
-	// Mode is fake (recorded replies) or foundry (the real model).
+	// Mode is fake (recorded replies), foundry or anthropic (a real model through that provider).
 	Mode      string           `json:"mode"`
 	Manifest  manifest         `json:"manifest"`
 	Scenarios []scenarioResult `json:"scenarios"`
@@ -278,6 +278,8 @@ func (p *prices) forRole(role string) *prices {
 // manifest is the evaluation manifest of ADR-0025 decision 3: the inputs that affect behaviour, and its
 // digest.
 type manifest struct {
+	// Provider is the model provider of the run: fake, foundry or anthropic.
+	Provider string `json:"provider"`
 	// Models are the deployments by role: deployment name and the model ID and version the replies must name.
 	Models map[string]manifestModel `json:"models"`
 	// PromptVersion is analysis.PromptVersion: the prompt templates and their generated parts.
@@ -359,6 +361,7 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 	minPassRate float64, repeats int) (manifest, error) {
 	l := incidentcontext.DefaultLimits()
 	m := manifest{
+		Provider:      models.provider(),
 		Models:        map[string]manifestModel{},
 		PromptVersion: analysis.PromptVersion(),
 		MinPassRate:   minPassRate, Repeats: repeats, ForcedEscalation: models.forcesEscalation(),

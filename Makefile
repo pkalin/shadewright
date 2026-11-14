@@ -132,13 +132,18 @@ EVAL_REPORT_DIR ?= $(LOCALBIN)/eval
 eval: ## Replay every lab scenario's recorded context and replies through the analysis loop; report in EVAL_REPORT_DIR.
 	EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run '^TestEvalReplay$$' -count=1 -v
 
+# The provider of make eval-model: foundry (Azure workload identity) or anthropic (an API key file).
+EVAL_MODEL ?= foundry
+
 .PHONY: eval-model
-eval-model: ## Evaluate the real model (the EVAL_* and AZURE_* variables, see docs/evaluation.md). Costs money. Times out at 50m, so a report is written first.
-	EVAL_MODEL=foundry EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run '^TestEvalFoundry$$' -count=1 -v -timeout 50m
+eval-model: ## Evaluate a real model through EVAL_MODEL (foundry or anthropic; the EVAL_* variables, see docs/evaluation.md). Costs money. Times out at 50m, so a report is written first.
+	@case "$(EVAL_MODEL)" in foundry) t=TestEvalFoundry ;; anthropic) t=TestEvalAnthropic ;; \
+		*) echo "EVAL_MODEL must be foundry or anthropic" >&2; exit 1 ;; esac; \
+	EVAL_MODEL="$(EVAL_MODEL)" EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run "^$$t\$$" -count=1 -v -timeout 50m
 
 # Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
 # new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.
-FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/foundry:FuzzParseResponse internal/tools:FuzzArguments
+FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/tools:FuzzArguments
 FUZZ ?= $(FUZZ_TARGETS)
 FUZZTIME ?= 30s
 

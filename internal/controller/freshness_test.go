@@ -515,14 +515,16 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		stillOpen()
 	})
 
-	It("drops the mark when the pull request merges before the cleanup closes it", func() {
+	It("keeps the mark when the pull request merges before the cleanup closes it, so the outcome is capped (#199)", func() {
 		markCleanup(func(*remediationv1alpha1.RemediationRequest) {})
 		_, err := git.Merge(cr.Number)
 		Expect(err).NotTo(HaveOccurred())
 		_, err = reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
-		Expect(planFresh()).To(BeNil(), "no stale condition is left on a merged request")
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(planFresh()).NotTo(BeNil(), "the plan was known stale when it merged")
+		Expect(stalePlanMerged(got)).To(BeTrue())
 	})
 
 	It("records the merge commit in the same write that ends the request in Merged", func() {
@@ -864,7 +866,34 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				To(BeNil())
 		})
 
-		It("takes a pull request found closed after a close that may have gone through as its own close", func() {
+		It("keeps the refusal across a failure worth a retry, so a person's merge then never ends Succeeded", func() {
+			refused(providers.ErrForbidden)
+			// One retried close fails with a server error and closes nothing.
+			refuse = &providers.RetryableError{Err: errors.New("bad gateway")}
+			_, err := watcher()
+			Expect(err).To(HaveOccurred(), "retried")
+			got := fetch()
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				NotTo(BeNil(), "a failed call never clears the refusal")
+			expectStale(got)
+			// A person merges; the request is Merged with the mark, and its outcome is capped.
+			_, err = git.Merge(cr.Number)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = watcher()
+			Expect(err).NotTo(HaveOccurred())
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+			expectStale(got)
+			// Without a delivery check the rollout is not followed, so Merged is the final word: capped.
+			_, err = watcher()
+			Expect(err).NotTo(HaveOccurred())
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseInconclusive))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified).Reason).
+				To(Equal(ReasonStalePlanMerged))
+		})
+
+		It("takes a pull request found closed after a close whose answer was lost as a person's close", func() {
 			refused(providers.ErrForbidden)
 			// The close takes effect, but its answer is a server error.
 			refuse = nil
@@ -879,13 +908,15 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			Expect(err).To(HaveOccurred(), "retried")
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
-				To(BeNil(), "the close may have gone through")
+				NotTo(BeNil(), "a failed call never clears the refusal")
 			git.SetAfter(nil)
 			_, err = watcher()
 			Expect(err).NotTo(HaveOccurred())
 			got := fetch()
-			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded), "not a person's close")
-			closedForStalePlan(got, freshness.ReasonPolicyChanged)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention), "the safe end")
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+				To(Equal(ReasonChangeRequestClosed))
+			expectStale(got)
 		})
 	})
 

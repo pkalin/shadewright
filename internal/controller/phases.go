@@ -726,12 +726,20 @@ func stalePlanMerged(rr *remediationv1alpha1.RemediationRequest) bool {
 // capStaleSuccess is the one place that caps the good end of a merged stale plan (stalePlanMerged): where the
 // request would end Succeeded (succeed), or keep Merged with its rollout report as the final word with
 // --verify-outcomes off (afterMerge), it ends Inconclusive with ReasonStalePlanMerged instead, through
-// endVerification like any other Inconclusive end. done is false, and nothing is written, for any other request.
+// endVerification like any other Inconclusive end. done is false, and nothing is written, for any other request,
+// and for one whose rollout failed (RolledOut False): a bad end is never capped.
 func (r *RemediationRequestReconciler) capStaleSuccess(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	done bool, err error) {
 	if p := rr.Status.Phase; !stalePlanMerged(rr) ||
 		(p != remediationv1alpha1.PhaseMerged && p != remediationv1alpha1.PhaseVerifying) {
 		// Only a good end is capped: an end already written (Failed, Inconclusive) is never overwritten.
+		return false, nil
+	}
+	if c := meta.FindStatusCondition(rr.Status.Conditions, rollout.ConditionRolledOut); rr.Status.Phase ==
+		remediationv1alpha1.PhaseMerged && c != nil && c.Status == metav1.ConditionFalse {
+		// A rollout reported failed on a Merged request (the check after the merge with --verify-outcomes off) is a
+		// bad end, not a would-be success: it keeps Merged with RolledOut False as any merged request does. The
+		// verification (Verifying) caps only from succeed, which a failed rollout never reaches.
 		return false, nil
 	}
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)

@@ -1369,14 +1369,11 @@ func (r *RemediationRequestReconciler) foreignHead(ctx context.Context, git prov
 // request is recorded), and returns errStopped.
 func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string) error {
-	if phase == remediationv1alpha1.PhaseMerged && staleMark(rr) != nil && notClosed(rr) == nil {
-		// The cleanup of a stale plan started, but its pull request merged before the close: the change
-		// landed, so the plan's freshness no longer says anything and the mark is not left behind. A merge after
-		// the Git host refused the close (PullRequestNotClosed, #199) keeps it: a person merged a plan Shadewright
-		// knew was stale, and the outcome after the merge is capped (capStaleSuccess).
-		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
-	}
-	// The pull request is merged or closed now, or no longer this request's to close.
+	// The stale mark (PlanFresh False with a stale reason) stays on a Merged request: a pull request merged after
+	// Shadewright knew its plan was stale, before its close or after the Git host refused it (#199), is still a
+	// stale plan merged, and the outcome after the merge is capped (capStaleSuccess). Only the request ending as a
+	// closed stale plan (endFreshness) replaces it. The pull request is merged or closed now, or no longer this
+	// request's to close, so PullRequestNotClosed goes.
 	clearNotClosed(rr)
 	r.setPhase(rr, phase)
 	if phase == remediationv1alpha1.PhaseMerged {
@@ -1633,9 +1630,10 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // the recorded number that the branch does not confirm, an answer about another pull request or any failed read
 // keeps the finalizer for a retry; a recorded number that is not this request's while the branch lists one with
 // its marker does not (closeAllOwn). While writes are paused (RemediationSettings spec.paused) the deletion waits,
-// because closing is a write. A close the Git host refuses for good (refusedClose) sets PullRequestNotClosed and
-// is tried again until closeRefusedGrace after the first refusal; then the finalizer goes and the pull request is
-// left open, with a Warning Event and a log line that name it (#288). A failure worth a retry never lets it go.
+// because closing is a write. A step of the cleanup the Git host refuses for good (refusedCleanup: the token, the
+// read, the listing or the close) sets CleanupRefused and is tried again until closeRefusedGrace after the first
+// refusal; then the finalizer goes, with a Warning Event and a log line that name the pull request (#288). A
+// failure worth a retry, and a failed read that is not a refusal, never lets it go.
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
@@ -1672,17 +1670,23 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		}
 		defer freeSlot()
 	}
-	var (
-		left       *closeFailure
-		leftReason string
-	)
+	var left *refusedStep
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeOnDeleteOf(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 		cancel()
-		cf, refused, isRefused := refusedClose(err)
+		refused, isRefused := refusedCleanup(err)
 		switch {
+		case isRefused:
+			// The Git host refuses a step of the cleanup for good (#288): the token, the read of the pull request,
+			// the listing of the branch or the close. Held and tried again for closeRefusedGrace after the first
+			// refusal, then let go.
+			res, release, err := r.cleanupRefusedOnDelete(ctx, rr, refused)
+			if !release {
+				return res, err
+			}
+			left = &refused
 		case isUnknownChange(err):
 			// A read that failed is never an answer, whatever its class (ErrConflict included): retried.
 			return r.waitOrFail(ctx, rr, err)
@@ -1693,14 +1697,6 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
 		case errors.Is(err, freshness.ErrPaused):
 			return r.waitWhilePaused(ctx, rr)
-		case isRefused:
-			// The Git host refuses the close for good (#288): held and tried again for closeRefusedGrace after
-			// the first refusal, then let go with the pull request left open.
-			res, release, err := r.closeRefusedOnDelete(ctx, rr, cf, refused)
-			if !release {
-				return res, err
-			}
-			left, leftReason = cf, refused
 		default:
 			// A failure worth a retry never starts or ends the grace.
 			return r.waitOrFail(ctx, rr, err)
@@ -1714,14 +1710,16 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		}
 		return reconcile.Result{}, err
 	}
+	if left != nil {
+		// Before the patch, so a patch that finds the request gone, or a restart right after it, loses neither the
+		// Event nor the log line. A failed patch is retried and reports it again: at least once, maybe twice.
+		r.leftOpen(ctx, rr, *left)
+	}
 	base := rr.DeepCopy()
 	controllerutil.RemoveFinalizer(rr, FinalizerName)
 	if err := r.Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		// NotFound: the request is gone already, nothing more to say.
 		return reconcile.Result{}, client.IgnoreNotFound(err)
-	}
-	if left != nil {
-		// After the finalizer is gone, so a retry of a failed patch or restore does not report it twice.
-		r.leftOpen(ctx, rr, left, leftReason)
 	}
 	return reconcile.Result{}, nil
 }

@@ -34,19 +34,54 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
-// This file holds what happens when the Git host refuses for good (403 or 422) to close a pull request that
-// Shadewright must close (#199, #288): the close of a stale plan's pull request, and the close of a deleted
-// request's pull request by the finalizer. refusedClose is the one place that decides whether a failed close is
-// such a refusal; condition PullRequestNotClosed records it.
+// This file holds what happens when the Git host refuses for good (403 or 422) a step of closing a pull request
+// that Shadewright must close (#199, #288): the close of a stale plan's pull request, and the cleanup of a deleted
+// request by the finalizer (the token for the repository, the read of the pull request, the listing of the branch,
+// the close). refusedCleanup is the one place that decides whether a failed step is such a refusal, and which
+// step it was. Condition PullRequestNotClosed records a refused close of a stale plan, condition CleanupRefused a
+// refused step of a deletion.
 
 const (
 	// EventPullRequestNotClosed is the Warning Event recorded when condition PullRequestNotClosed is set, or its
 	// reason changes.
 	EventPullRequestNotClosed = "PullRequestNotClosed"
+	// EventCleanupRefused is the Warning Event recorded when condition CleanupRefused is set, or its reason
+	// changes.
+	EventCleanupRefused = "CleanupRefused"
 	// EventPullRequestLeftOpen is the Warning Event recorded when the finalizer lets a deleted request go although
-	// the Git host kept refusing to close its pull request until closeRefusedGrace had passed.
+	// the Git host kept refusing a step of its cleanup until closeRefusedGrace had passed.
 	EventPullRequestLeftOpen = "PullRequestLeftOpen"
 )
+
+// cleanupStep names a step of closing a request's pull request that the Git host may refuse.
+type cleanupStep int
+
+const (
+	// stepToken is opening the repository: the token of the Git App for it.
+	stepToken cleanupStep = iota
+	// stepRead is the read of the recorded pull request by its number.
+	stepRead
+	// stepListing is the listing of the pull requests of the request's branch.
+	stepListing
+	// stepClose is the close call itself.
+	stepClose
+)
+
+// stepFailure is the error of a step before the close that is not the read by number: opening the repository
+// (stepToken) or listing the branch (stepListing). It wraps the provider error and adds no text.
+type stepFailure struct {
+	step cleanupStep
+	err  error
+}
+
+func (e *stepFailure) Error() string { return e.err.Error() }
+
+func (e *stepFailure) Unwrap() error { return e.err }
+
+// listFailed wraps err, a failed listing of the branch's pull requests (op says which), as a *stepFailure.
+func listFailed(op string, err error) error {
+	return &stepFailure{step: stepListing, err: freshness.WrapProvider(op, err)}
+}
 
 // closeFailure is the error of a call that closes pull request number (url as the Git host reported it), so the
 // caller can name the pull request it could not close. It wraps the provider error.
@@ -68,78 +103,111 @@ func closeFailed(cr providers.ChangeRequest, err error) error {
 	return &closeFailure{number: cr.Number, url: cr.URL, err: freshness.WrapProvider("close the change request", err)}
 }
 
-// refusedClose returns the failed close in err, and the reason (GitForbidden or GitRejected), when the Git host
-// refused the close call itself for good (refusal). A failed read of a pull request (isUnknownChange) is never a
-// refused close, whatever its class, and neither is a failure worth a retry (a 5xx, a timeout, a rate limit),
-// the caller's cancellation or the step's deadline, which boundErr has replaced by then.
-func refusedClose(err error) (*closeFailure, string, bool) {
-	if err == nil || isUnknownChange(err) {
-		return nil, "", false
-	}
-	cf, ok := errors.AsType[*closeFailure](err)
-	if !ok {
-		return nil, "", false
-	}
+// refusedStep is a step that the Git host refused for good: which step, the reason (GitForbidden or GitRejected),
+// and, for stepClose, the pull request whose close was refused.
+type refusedStep struct {
+	step   cleanupStep
+	reason string
+	closed *closeFailure
+}
+
+// refusedCleanup is the one place that decides whether err, the failure of closing a request's pull request, is a
+// refusal for good of one of its steps (refusal: providers.ErrForbidden or ErrRejected, by class, never by text),
+// and of which: the close call (a *closeFailure), opening the repository or listing the branch (a *stepFailure),
+// or the read of the pull request (any other failed read, isUnknownChange). A failure worth a retry (a 5xx, a
+// timeout, a rate limit), the caller's cancellation and the step's deadline (which boundErr has replaced by then)
+// are never refusals, and neither is a failed read without such a class (an answer about another pull request,
+// two reads that disagree).
+func refusedCleanup(err error) (refusedStep, bool) {
 	reason, _, ok := refusal(err)
 	if !ok {
+		return refusedStep{}, false
+	}
+	if cf, ok := errors.AsType[*closeFailure](err); ok && !isUnknownChange(err) {
+		return refusedStep{step: stepClose, reason: reason, closed: cf}, true
+	}
+	if sf, ok := errors.AsType[*stepFailure](err); ok {
+		return refusedStep{step: sf.step, reason: reason}, true
+	}
+	if isUnknownChange(err) {
+		return refusedStep{step: stepRead, reason: reason}, true
+	}
+	return refusedStep{}, false
+}
+
+// refusedClose returns the failed close in err, and the reason, when the Git host refused the close call itself
+// for good (refusedCleanup with stepClose). A refused read, listing or token is not a refused close.
+func refusedClose(err error) (*closeFailure, string, bool) {
+	s, ok := refusedCleanup(err)
+	if !ok || s.step != stepClose {
 		return nil, "", false
 	}
-	return cf, reason, true
+	return s.closed, s.reason, true
 }
 
-// mayHaveClosed reports whether err, a failed close of a stale plan's pull request that was not refused, may have
-// closed it anyway: the close call failed in a way worth a retry (its answer may be lost), or the step reached its
-// deadline or was cancelled while it may have been running. A close refused as a conflict closed nothing.
-func mayHaveClosed(err error) bool {
-	if err == nil || errors.Is(err, freshness.ErrPaused) || providers.IsConflict(err) {
-		// The kill switch stopped the call before it reached the Git host, or the host refused the close as a
-		// conflict (a merged pull request): nothing was closed.
-		return false
-	}
-	if _, ok := errors.AsType[*closeFailure](err); ok {
-		return true
-	}
-	return errors.Is(err, ErrTimeout) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-}
-
-// closeRefusedGrace is how long after the first refusal (the lastTransitionTime of PullRequestNotClosed, on the
-// executor's clock) the finalizer of a deleted request keeps trying to close a pull request the Git host refuses
-// to close, before it lets the request go and leaves the pull request open (#288).
+// closeRefusedGrace is how long after the first refusal of a step of a deleted request's cleanup (the
+// lastTransitionTime of CleanupRefused, on the executor's clock) the finalizer keeps trying, before it lets the
+// request go and leaves the pull request as it is (#288).
 const closeRefusedGrace = handoffRecoveryGrace
 
-// closeRefusedRetry is how often the finalizer tries the close again while the Git host refuses it, within
-// closeRefusedGrace.
+// closeRefusedRetry is how often the finalizer tries the cleanup again while the Git host refuses a step of it,
+// within closeRefusedGrace.
 const closeRefusedRetry = time.Minute
 
-// notClosedCondition is condition PullRequestNotClosed for the close of cf refused with reason. deleting says
-// whether it is the finalizer's close.
-func notClosedCondition(rr *remediationv1alpha1.RemediationRequest, cf *closeFailure, reason string,
-	deleting bool) metav1.Condition {
-	var message string
-	if deleting {
-		message = fmt.Sprintf("The Git host refused (%s) to close pull request %s of the deleted request; Shadewright "+
-			"tries again and, %s after the first refusal, lets the request go and leaves the pull request open",
-			reason, pullRequestName(cf), ShortDuration(closeRefusedGrace))
-	} else {
-		message = fmt.Sprintf("The plan is stale and the Git host refused (%s) to close pull request %s; Shadewright "+
-			"writes nothing else to it, tries the close again on every look and records a merge or a close by a person",
-			reason, pullRequestName(cf))
-	}
+// notClosedCondition is condition PullRequestNotClosed for the close of a stale plan's pull request cf, refused
+// with reason.
+func notClosedCondition(rr *remediationv1alpha1.RemediationRequest, cf *closeFailure, reason string) metav1.Condition {
 	return metav1.Condition{
-		Type:               remediationv1alpha1.ConditionPullRequestNotClosed,
-		Status:             metav1.ConditionTrue,
-		Reason:             reason,
-		Message:            message,
+		Type:   remediationv1alpha1.ConditionPullRequestNotClosed,
+		Status: metav1.ConditionTrue,
+		Reason: reason,
+		Message: fmt.Sprintf("The plan is stale and the Git host refused (%s) to close pull request %s; Shadewright "+
+			"writes nothing else to it, tries the close again on every look and records a merge or a close by a person",
+			reason, pullRequestName(cf.number, cf.url)),
+		ObservedGeneration: rr.Generation,
+	}
+}
+
+// stepText says which step s was, for a message.
+func stepText(rr *remediationv1alpha1.RemediationRequest, s refusedStep) string {
+	switch s.step {
+	case stepToken:
+		return "the access token for the plan's repository"
+	case stepListing:
+		return "the listing of the pull requests of branch " + freshness.BranchName(rr)
+	case stepClose:
+		return "the close of pull request " + pullRequestName(s.closed.number, s.closed.url)
+	}
+	return "the read of the recorded pull request"
+}
+
+// recordedText names the recorded pull request of rr, for a message, or says there is none.
+func recordedText(rr *remediationv1alpha1.RemediationRequest) string {
+	if pr := rr.Status.PullRequest; pr != nil {
+		return "the recorded pull request is " + pullRequestName(pr.Number, pr.URL)
+	}
+	return "no pull request is recorded"
+}
+
+// cleanupRefusedCondition is condition CleanupRefused for the refused step s of a deleted request's cleanup.
+func cleanupRefusedCondition(rr *remediationv1alpha1.RemediationRequest, s refusedStep) metav1.Condition {
+	return metav1.Condition{
+		Type:   remediationv1alpha1.ConditionCleanupRefused,
+		Status: metav1.ConditionTrue,
+		Reason: s.reason,
+		Message: fmt.Sprintf("The Git host refused (%s) %s while Shadewright cleans up the deleted request (%s); "+
+			"Shadewright tries again and, %s after the first refusal, lets the request go", s.reason, stepText(rr, s),
+			recordedText(rr), ShortDuration(closeRefusedGrace)),
 		ObservedGeneration: rr.Generation,
 	}
 }
 
 // pullRequestName is "#<number>", with the URL the Git host reported for it when there is one.
-func pullRequestName(cf *closeFailure) string {
-	if cf.url == "" {
-		return fmt.Sprintf("#%d", cf.number)
+func pullRequestName(number int64, url string) string {
+	if url == "" {
+		return fmt.Sprintf("#%d", number)
 	}
-	return fmt.Sprintf("#%d (%s)", cf.number, cf.url)
+	return fmt.Sprintf("#%d (%s)", number, url)
 }
 
 // notClosed returns condition PullRequestNotClosed of rr, nil when it is not True.
@@ -151,64 +219,61 @@ func notClosed(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
 	return c
 }
 
-// setNotClosed sets condition PullRequestNotClosed to want in the status about to be written and reports whether
-// that changed it, with the Event that goes with a change after the write (notClosedEvent). The transition time
-// is the executor's clock: set when the condition is new, kept while it stays True, and set again when the
-// recorded one lies after now (the clock went back), so the grace is never measured from a time ahead of the
-// clock.
-func (r *RemediationRequestReconciler) setNotClosed(rr *remediationv1alpha1.RemediationRequest,
+// setRefused sets want, a True condition of a refusal (PullRequestNotClosed or CleanupRefused), in the status
+// about to be written and reports whether that changed it, and whether the Event that goes with it is due after
+// the write (it is new, or its reason changed). The transition time is the executor's clock when the condition is
+// new; while it stays True it is kept, whatever the reason and message become (a lastTransitionTime is never
+// rewritten without a change of status).
+func (r *RemediationRequestReconciler) setRefused(rr *remediationv1alpha1.RemediationRequest,
 	want metav1.Condition) (changed, event bool) {
-	now := r.now()
-	was := notClosed(rr)
-	if was != nil && was.LastTransitionTime.After(now) {
-		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
-		was = nil
+	was := meta.FindStatusCondition(rr.Status.Conditions, want.Type)
+	if was == nil || was.Status != metav1.ConditionTrue {
+		want.LastTransitionTime = metav1.NewTime(r.now())
 	}
-	event = was == nil || was.Reason != want.Reason
-	if was == nil {
-		want.LastTransitionTime = metav1.NewTime(now)
-	}
+	event = was == nil || was.Status != metav1.ConditionTrue || was.Reason != want.Reason
 	if !meta.SetStatusCondition(&rr.Status.Conditions, want) {
 		return false, false
 	}
 	return true, event
 }
 
-// clearNotClosed removes condition PullRequestNotClosed from the status about to be written and reports whether
-// it was there.
-func clearNotClosed(rr *remediationv1alpha1.RemediationRequest) bool {
-	return meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+// clearNotClosed removes condition PullRequestNotClosed from the status about to be written.
+func clearNotClosed(rr *remediationv1alpha1.RemediationRequest) {
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 }
 
-// notClosedEvent records the Warning Event PullRequestNotClosed with the condition's message. Without a Recorder
-// it records none.
-func (r *RemediationRequestReconciler) notClosedEvent(rr *remediationv1alpha1.RemediationRequest, c metav1.Condition) {
+// refusedEvent records a Warning Event with reason and the condition's message. Without a Recorder it records
+// none.
+func (r *RemediationRequestReconciler) refusedEvent(rr *remediationv1alpha1.RemediationRequest, reason string,
+	c metav1.Condition) {
 	if r.Recorder != nil {
-		r.Recorder.Event(rr, corev1.EventTypeWarning, EventPullRequestNotClosed, c.Message)
+		r.Recorder.Event(rr, corev1.EventTypeWarning, reason, c.Message)
 	}
 }
 
-// closeRefusedOnDelete handles the finalizer's close that the Git host refused for good (refusedClose): it records
-// condition PullRequestNotClosed on the first refusal (with one Warning Event) and keeps the finalizer, trying the
-// close again every closeRefusedRetry, until closeRefusedGrace has passed since that first refusal on the
-// executor's clock. Then release is true: the caller lets the request go and reports the pull request left open
-// (leftOpen). A failed status write is returned for a retry and starts nothing.
-func (r *RemediationRequestReconciler) closeRefusedOnDelete(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, cf *closeFailure, reason string) (reconcile.Result, bool, error) {
-	want := notClosedCondition(rr, cf, reason, true)
-	changed, event := r.setNotClosed(rr, want)
+// cleanupRefusedOnDelete handles a step of the finalizer's cleanup that the Git host refused for good
+// (refusedCleanup): it records condition CleanupRefused (with one Warning Event when it is set or its reason
+// changes) and keeps the finalizer, trying the cleanup again every closeRefusedRetry, until closeRefusedGrace has
+// passed since the first refusal after the deletion began (the condition's lastTransitionTime, on the executor's
+// clock; the condition is only ever set on a deleted request). Then release is true: the caller lets the request
+// go and reports it (leftOpen). A failed status write is returned for a retry and starts nothing.
+func (r *RemediationRequestReconciler) cleanupRefusedOnDelete(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, s refusedStep) (reconcile.Result, bool, error) {
+	want := cleanupRefusedCondition(rr, s)
+	changed, event := r.setRefused(rr, want)
 	if changed {
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return reconcile.Result{}, false, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
 				rr.Namespace, rr.Name, err)
 		}
 		if event {
-			r.notClosedEvent(rr, want)
+			r.refusedEvent(rr, EventCleanupRefused, want)
 		}
-		logf.FromContext(ctx).Info("The Git host refused to close the pull request of a deleted RemediationRequest",
-			"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cf.number, "reason", reason)
+		logf.FromContext(ctx).Info("The Git host refused a step of the cleanup of a deleted RemediationRequest",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "step", stepText(rr, s), "reason", s.reason)
 	}
-	since := notClosed(rr).LastTransitionTime.Time
+	since := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupRefused).
+		LastTransitionTime.Time
 	left := since.Add(closeRefusedGrace).Sub(r.now())
 	if left > 0 {
 		return reconcile.Result{RequeueAfter: min(left, closeRefusedRetry)}, false, nil
@@ -216,19 +281,32 @@ func (r *RemediationRequestReconciler) closeRefusedOnDelete(ctx context.Context,
 	return reconcile.Result{}, true, nil
 }
 
-// leftOpen reports a deleted request that the finalizer let go with its pull request open (closeRefusedOnDelete):
-// a Warning Event PullRequestLeftOpen on the request and a log line, both naming the pull request by its number
-// and URL, never the Git host's answer. The Event is a core/v1 Event in the request's namespace with no owner, so
-// it stays there for the API server's Event time to live after the request is gone.
+// leftOpen reports a deleted request that the finalizer lets go after the Git host kept refusing step s of its
+// cleanup (cleanupRefusedOnDelete): a Warning Event PullRequestLeftOpen on the request and a log line, naming the
+// pull request by its number and URL, never the Git host's answer. When the close itself was refused the pull
+// request is left open; when an earlier step was, its state is unknown and it may be open. The Event is a
+// core/v1 Event in the request's namespace with no owner, so it stays there for the API server's Event time to
+// live after the request is gone.
 func (r *RemediationRequestReconciler) leftOpen(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	cf *closeFailure, reason string) {
-	message := fmt.Sprintf("The Git host kept refusing (%s) to close pull request %s for %s; the deleted request "+
-		"was let go and the pull request is left open: close it by hand", reason, pullRequestName(cf),
-		ShortDuration(closeRefusedGrace))
+	s refusedStep) {
+	var message string
+	if s.step == stepClose {
+		message = fmt.Sprintf("The Git host kept refusing (%s) to close pull request %s for %s; the deleted request "+
+			"was let go and the pull request is left open: close it by hand", s.reason,
+			pullRequestName(s.closed.number, s.closed.url), ShortDuration(closeRefusedGrace))
+	} else {
+		which := "any pull request of branch " + freshness.BranchName(rr)
+		if pr := rr.Status.PullRequest; pr != nil {
+			which = "pull request " + pullRequestName(pr.Number, pr.URL)
+		}
+		message = fmt.Sprintf("The Git host kept refusing (%s) %s for %s; the deleted request was let go and "+
+			"nothing was closed: the state of %s is unknown and it may be open, check it and close it by hand",
+			s.reason, stepText(rr, s), ShortDuration(closeRefusedGrace), which)
+	}
 	if r.Recorder != nil {
 		r.Recorder.Event(rr, corev1.EventTypeWarning, EventPullRequestLeftOpen, message)
 	}
-	logf.FromContext(ctx).Info("Released the finalizer of RemediationRequest with its pull request left open",
-		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cf.number, "url", cf.url,
-		"reason", reason)
+	logf.FromContext(ctx).Info("Gave up the cleanup of a deleted RemediationRequest after the Git host kept "+
+		"refusing it", "remediationRequest", client.ObjectKeyFromObject(rr), "step", stepText(rr, s),
+		"reason", s.reason)
 }

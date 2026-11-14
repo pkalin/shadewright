@@ -1215,10 +1215,11 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 }
 
 // endStaleClosed ends a request whose stale plan's cleanup started (the mark) and whose pull request is closed. While
-// the Git host refused every close so far (PullRequestNotClosed, #199) and no close since may have gone through
-// (that removes the condition), a person closed it: the normal end of a closed pull request, with the stale reason
-// kept on PlanFresh. Otherwise the close that was cut short was ours, not a person's rejection, whatever the plan
-// looks like now: Superseded.
+// the Git host refused the close (PullRequestNotClosed, #199), the pull request is taken as closed by a person: the
+// normal end of a closed pull request, with the stale reason kept on PlanFresh. That holds also after a retried close
+// whose answer was lost (a timeout, a 5xx), which may have been the one that closed it: a failed call never clears
+// the condition, and the end that asks a person to look is the safe one. Otherwise the close that was cut short was
+// ours, not a person's rejection, whatever the plan looks like now: Superseded.
 func (r *RemediationRequestReconciler) endStaleClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	mark *metav1.Condition) (ctrl.Result, error) {
 	if notClosed(rr) != nil {
@@ -1438,16 +1439,8 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		}
 		refused, _, ok := refusal(err)
 		if !ok {
-			if mayHaveClosed(err) && notClosed(rr) != nil {
-				// The close may have gone through: a pull request found closed next is taken as this close
-				// (Superseded), not as a person's.
-				if clearNotClosed(rr) {
-					if uerr := r.Status().Update(ctx, rr); uerr != nil {
-						return errors.Join(err, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
-							rr.Namespace, rr.Name, uerr))
-					}
-				}
-			}
+			// A failed call never clears PullRequestNotClosed, also one that may have closed the pull request (a
+			// timeout, a 5xx): only a close that went through or a read that finds it closed or merged does.
 			return err
 		}
 		// The Git host refuses the close of a pull request found by the branch (none is recorded, so none is
@@ -1472,8 +1465,8 @@ var errStaleNotClosed = errors.New("the Git host refused to close the stale plan
 // checked again and nothing but the close is written for it.
 func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cf *closeFailure, refused string) error {
-	want := notClosedCondition(rr, cf, refused, false)
-	changed, event := r.setNotClosed(rr, want)
+	want := notClosedCondition(rr, cf, refused)
+	changed, event := r.setRefused(rr, want)
 	if !changed {
 		return errStaleNotClosed
 	}
@@ -1481,7 +1474,7 @@ func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	if event {
-		r.notClosedEvent(rr, want)
+		r.refusedEvent(rr, EventPullRequestNotClosed, want)
 	}
 	logf.FromContext(ctx).Info("The Git host refused to close the pull request of a stale RemediationRequest; "+
 		"watching it", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cf.number,
@@ -1640,7 +1633,7 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		return freshness.ErrRepositoryUnusable
 	}
 	if err != nil {
-		return freshness.WrapProvider("open the repository", err)
+		return &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}
 	}
 	// Without a recorded pull request it is found by the request's branch: it may exist although the status
 	// write that records it failed (design section 6). A recorded one is read by its number, so a newer pull

@@ -61,7 +61,7 @@ func tookOverWorld(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *
 func TestRecoveryRetriesWhenTheRepositoryCannotBeOpened(t *testing.T) {
 	r, g, _, rr, _, head := gateWorld(t)
 	ctx := context.Background()
-	rr.Status.Deadline = &metav1.Time{Time: time.Now().Add(-time.Minute)}
+	rr.Status.Deadline = &metav1.Time{Time: r.now().Add(-time.Minute)}
 	if err := r.Status().Update(ctx, rr); err != nil {
 		t.Fatal(err)
 	}

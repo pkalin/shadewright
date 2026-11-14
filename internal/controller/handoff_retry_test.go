@@ -39,10 +39,10 @@ import (
 
 // The retries of the handoff and the merge gate (#590, the review round of #604).
 
-// pastDeadline sets rr's deadline to ago before now.
+// pastDeadline sets rr's deadline to ago before r's clock.
 func pastDeadline(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest, ago time.Duration) {
 	t.Helper()
-	rr.Status.Deadline = &metav1.Time{Time: time.Now().Add(-ago)}
+	rr.Status.Deadline = &metav1.Time{Time: r.now().Add(-ago)}
 	if err := r.Status().Update(context.Background(), rr); err != nil {
 		t.Fatal(err)
 	}

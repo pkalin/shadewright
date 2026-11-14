@@ -253,7 +253,9 @@ const (
 	// while this one waited, before it took the target lock or opened a pull request. With reason
 	// AnotherRequestClosed (on PlanFresh) this one waited behind the target lock of another request for the same
 	// target and field (status.queuedBehind) whose pull request was closed without a merge, before it took the
-	// lock or opened a pull request.
+	// lock or opened a pull request. With reason AnotherRequestSucceeded (on PlanFresh) this one waited behind the
+	// target lock of another request that changed the same field from the same previous value, was merged and
+	// ended Succeeded (#719).
 	// Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
@@ -699,7 +701,10 @@ type RemediationRequestStatus struct {
 	// holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
 	// write of the allowed decision and cleared only once the request's pull request is known merged or closed and
 	// no other pull request that may deliver its change is open on its branch (condition TargetHeld says when one
-	// is), or a look-up by its branch and marker found none of its own open. While it is true no other request on the
+	// is), or a look-up by its branch and marker found none of its own open. With the executor's --verify-outcomes
+	// on, a merged request keeps it until it ends (Succeeded, Failed, Inconclusive), not only until its merge, so a
+	// request queued for the same target does not meet the merged change on its way to the cluster (#719).
+	// While it is true no other request on the
 	// same target goes through the policy check. Unset on a request not yet decided, and on one written before the
 	// field existed; the executor then derives it once from the request's phase and pull request, keeping the
 	// lock when in doubt.
@@ -733,7 +738,9 @@ type RemediationRequestStatus struct {
 	// holders, the executor first reads the recorded ones from the API server and only then replaces them. Until
 	// the request is decided, it ends Superseded (PlanFresh False, reason AnotherRequestClosed) when a recorded
 	// request ended NeedsIntervention because its pull request for the same target and field was closed without a
-	// merge. A request that never waited behind that one has no record of it and is decided as usual. Only the
+	// merge, or (reason AnotherRequestSucceeded, #719) a recorded request ended Succeeded with a change of the same
+	// field from the same previous value to another one. A request that never waited behind that one has no
+	// record of it and is decided as usual. Only the
 	// executor writes it; once set it is never removed or emptied (a validation rule refuses that). At most four
 	// holders are recorded, those for the same field first: a request behind more holders than that may have no
 	// record of one, and is then decided as usual when that one's pull request is closed.

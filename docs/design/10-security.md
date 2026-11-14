@@ -155,7 +155,7 @@ The lock is per target object, not per file in Git. Two targets declared in one 
 
 The executor records the lock in `status.holdsTarget` (#294, #376). It is set in the status write of the allowed decision and cleared only when the release is proven. The release is proven by one of these:
 
-- the pull request merged (`Merged` or a later phase, or seen merged after a stop);
+- the pull request merged (`Merged` or a later phase, `Failed` with a merge receipt included, or seen merged after a stop). With the executor flag `--verify-outcomes` on, a merged request keeps the lock while its outcome is verified (`Merged` with a merge receipt, `WaitingForDelivery`, `Verifying`) and releases it in the status write that ends it (`Succeeded`, `Failed`, `Inconclusive`), see [requests behind a change being verified](6-reconciliation.md#665-requests-behind-a-change-being-verified) (#719);
 - the pull request seen merged (`PullRequestOpened` with reason `ChangeRequestMerged`);
 - the pull request closed by Shadewright or seen closed (`Superseded`, written only after the close, or `PullRequestOpened` with reason `PullRequestClosed` or `ChangeRequestClosed`), and a read of the branch that finds no other open pull request that may deliver the change (see [stopped holders](#stopped-holders));
 - a look-up of the branch that found none of the request's own open and no other open pull request that may deliver the change (`openHolding`). A cleanup (the stale plan's, the deadline's) closes only the pull requests with the request's marker, so it never releases the lock itself: a person may have opened one without the marker from the branch (#688).
@@ -167,7 +167,7 @@ Everything else keeps the lock (fail closed):
 - An expiry whose cleanup the Git host refused ends with its own reason, `PullRequestDeadlineCleanupRefused`, and keeps the lock.
 - Any other state keeps the lock: a pull request the executor could not find (`ChangeRequestGone`), `Failed` and an unknown phase included.
 
-A request that waits behind a holder of the same Incident whose pull request is then merged does not take the lock while the merged change is in effect: it ends `Superseded` with reason `AnotherRequestMerged` ([6.6.3](6-reconciliation.md#663-duplicates-of-a-merged-request), #556). A request that waits behind a holder for the same field, of any Incident, whose pull request is then closed without a merge does not take the lock either: it ends `Superseded` with reason `AnotherRequestClosed` ([6.6.4](6-reconciliation.md#664-requests-after-a-pull-request-closed-without-a-merge), #643).
+A request that waits behind a holder of the same Incident whose pull request is then merged does not take the lock while the merged change is in effect: it ends `Superseded` with reason `AnotherRequestMerged` ([6.6.3](6-reconciliation.md#663-duplicates-of-a-merged-request), #556). A request that waits behind a holder for the same field, of any Incident, whose pull request is then closed without a merge does not take the lock either: it ends `Superseded` with reason `AnotherRequestClosed` ([6.6.4](6-reconciliation.md#664-requests-after-a-pull-request-closed-without-a-merge), #643). With `--verify-outcomes` on, a request that waits behind a merged holder for the same field and from the same previous value ends `Superseded` with reason `AnotherRequestSucceeded` when the holder ends `Succeeded` ([6.6.5](6-reconciliation.md#665-requests-behind-a-change-being-verified), #719).
 
 ### Stopped holders
 
@@ -177,7 +177,7 @@ A request queued behind a stopped holder checks the limits every 10 minutes inst
 
 ### Deleting a request
 
-Deleting the request releases the lock once its finalizer is gone. The finalizer tries to close the pull request of every request that holds the lock, whatever its phase.
+Deleting the request releases the lock once its finalizer is gone. The finalizer tries to close the pull request of every request that holds the lock, whatever its phase, except a merged request that holds it only while its outcome is verified: its pull request is merged, so the finalizer reads nothing and goes (#719).
 
 The rule above that no release happens while an open pull request may still deliver the change does not cover deletion. The finalizer closes the pull requests that carry the request's marker and then goes, and the lock goes with the request, even when a pull request without the marker (one a person opened from the branch) is still open there and may be merged. This is deliberate: a person deleted the holder, and the open pull request is theirs to close (#688). The same holds for the recorded pull request when a person removed the request's marker from it while it is open: the finalizer leaves it open and goes. A recorded pull request that is really gone lets the finalizer go only on a second look of the same executor process at least two minutes after the first (6.5.3), so a restart of the executor starts that wait again.
 

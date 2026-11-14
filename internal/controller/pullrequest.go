@@ -1422,7 +1422,7 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
-	settleLock(rr)
+	settleLock(rr, r.VerifyOutcomes)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
@@ -1645,7 +1645,8 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // never touches the cluster. Settings that cannot reach the plan's repository any more do not block the
 // deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
 // Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
-// request that holds the lock on its target (status.holdsTarget), whatever its phase; a merged one refuses the
+// request that holds the lock on its target (status.holdsTarget), whatever its phase, except a merged request
+// that holds it only while its outcome is verified (heldForVerification, #719); a merged one refuses the
 // close with a conflict, and one without this request's marker is left alone. With a pull request recorded, every
 // open pull request of the branch that carries this request's marker is closed too, whatever its number. A 404 on
 // the recorded number that the branch does not confirm, an answer about another pull request or any failed read
@@ -1669,7 +1670,8 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		}
 	}
 	closes := r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
-		(closeOnDelete(rr.Status.Phase) || ptr.Deref(rr.Status.HoldsTarget, false))
+		(closeOnDelete(rr.Status.Phase) ||
+			(ptr.Deref(rr.Status.HoldsTarget, false) && !heldForVerification(rr, r.VerifyOutcomes)))
 	if closes {
 		// A pull request handed over to a replacement is the replacement's: never closed here (ADR-0028 section
 		// 4 item 8). While the replacement may still take it over, the deletion waits for it.

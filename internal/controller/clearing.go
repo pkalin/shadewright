@@ -512,7 +512,7 @@ func (r *RemediationRequestReconciler) succeed(ctx context.Context, rr *remediat
 	setCondition(rr, remediationv1alpha1.ConditionVerified, metav1.ConditionTrue, ReasonNoRecurrence, message)
 	r.setPhase(rr, remediationv1alpha1.PhaseSucceeded)
 	rr.Status.Deadline = nil
-	settleLock(rr)
+	settleLock(rr, r.VerifyOutcomes)
 	if err := r.writeIf(ctx, rr, true); err != nil {
 		return err
 	}

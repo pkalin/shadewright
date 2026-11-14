@@ -73,6 +73,13 @@ const ReasonAnotherRequestMerged = "AnotherRequestMerged"
 // next analysis is the way to a new proposal.
 const ReasonAnotherRequestClosed = "AnotherRequestClosed"
 
+// ReasonAnotherRequestSucceeded is the PlanFresh reason of a request that ended Superseded because it waited
+// behind the target lock of another request for the same target and field (of any Incident, recorded in
+// status.queuedBehind), planned from the same previous value, whose change was merged and then ended Succeeded
+// (#719). That change took this one's baseline away and fixed what this one was proposed for. The closure rules
+// of its Incident follow the holder's success instead of escalating.
+const ReasonAnotherRequestSucceeded = "AnotherRequestSucceeded"
+
 // HintSource is the system a hint came from. GitHub is the only one; Azure DevOps is planned.
 // +kubebuilder:validation:Enum=GitHub
 type HintSource string

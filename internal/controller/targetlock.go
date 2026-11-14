@@ -94,7 +94,7 @@ var closedReasons = map[string]bool{
 
 // prMayBeOpen is the status rule of the lock: whether a pull request of the request may still be open. It is
 // known not to be only when the status says so: Merged and the phases after it (Inconclusive included, which
-// only a merged request reaches) mean the merge; Superseded is
+// only a merged request reaches, and Failed with a merge receipt, mergedAndEnded) mean the merge; Superseded is
 // written only after the close, except Superseded after a handoff (handedOff), whose pull request its
 // replacement holds and which so may be open (ADR-0028 section 4 item 8: no status rule releases a lock on its
 // account; it released the lock in the status write that ended it); and PullRequestOpened with reason PullRequestClosed, ChangeRequestClosed or
@@ -113,29 +113,57 @@ func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
 			rr.Status.Phase != remediationv1alpha1.PhaseInconclusive
 	}
 	if slices.Contains(successPhases, rr.Status.Phase) || undecided(rr.Status.Phase) || rr.Status.Phase == remediationv1alpha1.PhaseInconclusive ||
-		(rr.Status.Phase == remediationv1alpha1.PhaseSuperseded && !handedOff(rr)) {
+		(rr.Status.Phase == remediationv1alpha1.PhaseSuperseded && !handedOff(rr)) || mergedAndEnded(rr) {
 		return false
 	}
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened)
 	return c == nil || !closedReasons[c.Reason]
 }
 
+// mergedAndEnded reports whether rr ended Failed after its merge: status.mergeReceipt is written only in the
+// write that records the merge of the recorded pull request (recordMerge), so that pull request is not open. Before
+// #719 such a request had released the lock at its merge; now one held through verification (heldForVerification)
+// releases it in the write that ends it Failed, as Succeeded and Inconclusive do.
+func mergedAndEnded(rr *remediationv1alpha1.RemediationRequest) bool {
+	return rr.Status.Phase == remediationv1alpha1.PhaseFailed && rr.Status.MergeReceipt != nil
+}
+
 // settleLock releases, in the status about to be written, the lock of a request that holds it, no longer moves
 // on and whose pull request the status rule says cannot be open, except when the rule says so only because the
-// recorded pull request is closed (closedOnly): that release needs the read of the branch (checkHeld). It never
-// takes the lock.
+// recorded pull request is closed (closedOnly): that release needs the read of the branch (checkHeld), and except
+// a merged request whose outcome is still being verified (heldForVerification, verify is the executor's
+// --verify-outcomes): that one keeps the lock until it ends. It never takes the lock.
 //
 // A request that no longer moves on and does not hold the lock has its pull requests read no more (only its
 // finalizer reads them again), so condition PullRequestUnreadable is removed in the same write, as TargetHeld is
 // (release): it would otherwise keep describing a read that is never made again. A request that keeps the lock
 // keeps it, since checkHeld reads on and keeps it in line (changeOf).
-func settleLock(rr *remediationv1alpha1.RemediationRequest) {
-	if ptr.Deref(rr.Status.HoldsTarget, false) && !progresses(rr) && !prMayBeOpen(rr) && !closedOnly(rr) {
+func settleLock(rr *remediationv1alpha1.RemediationRequest, verify bool) {
+	if ptr.Deref(rr.Status.HoldsTarget, false) && !progresses(rr) && !prMayBeOpen(rr) && !closedOnly(rr) &&
+		!heldForVerification(rr, verify) {
 		release(rr)
 	}
 	if !progresses(rr) && !ptr.Deref(rr.Status.HoldsTarget, false) {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 	}
+}
+
+// heldForVerification reports whether a merged request keeps the lock on its target while the executor verifies
+// its outcome (#719): with verify (the executor's --verify-outcomes) on, Merged with a merge receipt (the next
+// reconcile moves it to WaitingForDelivery), WaitingForDelivery and Verifying. Its change is merged in Git but
+// may not be applied yet, and whether it works is not known: a request queued behind it for the same field would
+// otherwise go on to the policy check against that change on its way to the cluster (ValueMismatch), so it waits
+// for the holder's end (Succeeded, Failed, Inconclusive) instead. It reads the recorded phase and receipt only,
+// so a restart neither releases the lock early nor holds it longer. With verify off a merged request is not held:
+// Merged is its end then, and a request found in WaitingForDelivery or Verifying ends Inconclusive at its next
+// reconcile (VerificationDisabled), which releases the lock in the same write. Its pull request is merged, so
+// nothing is left for the finalizer to close.
+func heldForVerification(rr *remediationv1alpha1.RemediationRequest, verify bool) bool {
+	if !verify {
+		return false
+	}
+	return undecided(rr.Status.Phase) ||
+		(rr.Status.Phase == remediationv1alpha1.PhaseMerged && rr.Status.MergeReceipt != nil)
 }
 
 // closedOnly reports whether the status says no pull request of the request is open only because its recorded
@@ -144,7 +172,7 @@ func settleLock(rr *remediationv1alpha1.RemediationRequest) {
 // branch may still carry its change, so the status alone does not release the lock.
 func closedOnly(rr *remediationv1alpha1.RemediationRequest) bool {
 	if rr.Status.PullRequest == nil || slices.Contains(successPhases, rr.Status.Phase) || undecided(rr.Status.Phase) ||
-		rr.Status.Phase == remediationv1alpha1.PhaseInconclusive {
+		rr.Status.Phase == remediationv1alpha1.PhaseInconclusive || mergedAndEnded(rr) {
 		return false
 	}
 	if rr.Status.Phase == remediationv1alpha1.PhaseSuperseded && !handedOff(rr) {
@@ -186,11 +214,12 @@ func release(rr *remediationv1alpha1.RemediationRequest) {
 // PullRequestUnreadable are returned as errors.
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
-	if !ptr.Deref(rr.Status.HoldsTarget, false) || progresses(rr) {
+	if !ptr.Deref(rr.Status.HoldsTarget, false) || progresses(rr) || heldForVerification(rr, r.VerifyOutcomes) {
+		// A merged request in verification keeps the lock without a look-up: its end settles it.
 		return reconcile.Result{}, nil
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
-	if settleLock(rr); !*rr.Status.HoldsTarget {
+	if settleLock(rr, r.VerifyOutcomes); !*rr.Status.HoldsTarget {
 		// The status already proves the release (a request backfilled or written before settleLock ran): no
 		// look-up is needed.
 		if err := r.Status().Update(ctx, rr); err != nil {

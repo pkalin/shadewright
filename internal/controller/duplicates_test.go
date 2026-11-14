@@ -271,7 +271,7 @@ func TestClosedHolderOf(t *testing.T) {
 			queuedBehindOf(rr, holder)
 		}
 		r := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme()}
-		got, err := r.closedHolderOf(context.Background(), rr)
+		got, _, err := r.recordedHolderOf(context.Background(), rr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -327,7 +327,7 @@ func TestClosedHolderOf(t *testing.T) {
 			UID: "77777777-7777-4777-8777-777777777777"}}
 		c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithObjects(closed()).Build()
 		r := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme()}
-		if got, err := r.closedHolderOf(context.Background(), rr); err != nil || got != nil {
+		if got, _, err := r.recordedHolderOf(context.Background(), rr); err != nil || got != nil {
 			t.Fatalf("got %v, %v; want nothing for a request recreated under the recorded name", got, err)
 		}
 	})
@@ -336,7 +336,7 @@ func TestClosedHolderOf(t *testing.T) {
 		queuedBehindOf(rr, closed())
 		c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).Build()
 		r := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme()}
-		if got, err := r.closedHolderOf(context.Background(), rr); err != nil || got != nil {
+		if got, _, err := r.recordedHolderOf(context.Background(), rr); err != nil || got != nil {
 			t.Fatalf("got %v, %v; want nothing for a recorded request that no longer exists", got, err)
 		}
 	})

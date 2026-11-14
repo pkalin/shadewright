@@ -426,7 +426,7 @@ func TestSettleLock(t *testing.T) {
 			meta.SetStatusCondition(&c.rr.Status.Conditions, metav1.Condition{
 				Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue,
 				Reason: ReasonGitForbidden, Message: "refused"})
-			settleLock(c.rr)
+			settleLock(c.rr, false)
 			if got := c.rr.Status.HoldsTarget; (got == nil) != (c.want == nil) || (got != nil && *got != *c.want) {
 				t.Fatalf("holdsTarget = %v, want %v", ptr.Deref(got, false), ptr.Deref(c.want, false))
 			}

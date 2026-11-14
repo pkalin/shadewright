@@ -47,6 +47,52 @@ A spoke is a standalone install plus a reporter. It keeps working when the hub i
 - A suspended or revoked spoke is refused with a clear status, and the refusals are counted in a metric. What it sent before stays readable and is marked stale. Nothing new is stored.
 - The spoke learns of it from the refusal. It sets a condition, backs off to a slow retry and keeps working standalone. The hub never calls it.
 - A spoke with no reachable issuer (Kind, on-premises): the `Cluster` object carries the public keys (JWKS) that sign the spoke's ServiceAccount tokens, and the hub verifies tokens against them. There is no shared secret and no hub CA. A key rotation in the spoke needs a reviewed change.
+- **Decided, 2026-11-14:** onboarding must not require copying identifiers by hand. The spoke publishes a ready-to-use registration in the operator namespace. The design that follows is **Proposed**.
+
+#### The registration manifest (Proposed)
+
+- **Proposed.** The reporter keeps a ConfigMap `shadewright-cluster-registration` in the operator namespace (`shadewright-system` by default) with one key, `cluster.yaml`: the complete `Cluster` manifest (section 7) for this spoke, ready to commit to the hub's GitOps repository. It holds:
+  - the `clusterId`;
+  - the issuer URL, read from the `iss` claim of the reporter's own projected token (the reporter decodes its own token and verifies nothing, it only reads where the cluster says it comes from);
+  - `keys: Discovery` or `Inline`;
+  - for `Inline`, the cluster's ServiceAccount signing keys, read from the API server's `/openid/v1/jwks`;
+  - the reporter's subject and the UID of `kube-system`.
+- **Proposed.** A second key, `status`, carries the last result from the hub: accepted, refused with the reason, or registration out of date. It is written only by the reporter, from what the hub answered.
+- **Proposed.** Which mode it writes: `Discovery` when a chart value says the issuer is reachable from the hub, `Inline` otherwise. The value name is not final (for example `reporter.registration.issuerReachable`). `Inline` is the safe default, because it needs no reachable issuer, which is the case for Kind and on-premises clusters. Whether that default is right is open (question 14).
+- **Proposed.** `kubectl shadewright` gets a command that prints this manifest or writes it to a file, for people who do not read ConfigMaps. The name `kubectl shadewright registration` is a proposal and is not final. The hub's status page may show the expected shape of the manifest. No hub component reads the ConfigMap.
+- **Proposed.** Onboarding then is three steps: install the spoke with the hub's URL, copy `cluster.yaml` into a pull request on the hub's GitOps repository, merge. Nothing is typed by hand.
+- **Proposed.** What a reviewer has to look at: the issuer host (does it belong to the cluster the name claims?) and the cluster name. The subject follows a fixed convention (`system:serviceaccount:<operator namespace>:<reporter service account>`), so a different one is a reason to ask. The `kube-system` UID and the keys are copied, not judged.
+- **Proposed.** Rotation for `Inline`: when the signing keys change, the reporter rewrites `cluster.yaml` and sets `registration out of date` in `status`. The hub refuses the new tokens until the reviewed change merges. This is the rule above (a rotation needs a reviewed change), made visible.
+
+Example, with placeholder values only (illustrative, not final):
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shadewright-cluster-registration
+  namespace: shadewright-system
+data:
+  cluster.yaml: |
+    apiVersion: fleet.shadewright.io/v1alpha1
+    kind: Cluster
+    metadata:
+      name: lab-kind
+    spec:
+      clusterId: lab-kind
+      identity:
+        keys: Inline
+        issuer: https://issuer.example.com
+        subject: system:serviceaccount:shadewright-system:shadewright-reporter
+        kubeSystemUID: <uid of the kube-system namespace>
+        jwks: |
+          { "keys": [ { "kty": "RSA", "kid": "<key id>", "n": "<modulus>", "e": "AQAB" } ] }
+  status: |
+    result: registration out of date   # or accepted, or refused: <reason>
+    reason: signing keys changed, the hub still holds the old ones
+```
+
+**The ConfigMap is a convenience, not evidence (Proposed).** Everything in it is public, there is no secret. It is self-reported by the spoke, so whoever can edit it can change what gets pasted. What makes a cluster trusted is the reviewed merge in the hub's repository, as before. For `Discovery` the hub also fetches the keys from the issuer itself, so a wrong issuer in the pasted manifest never verifies a token. **Open, not decided:** a CI check in the hub's repository that fetches the issuer's discovery document for a new `Cluster` object and reports whether keys resolve (question 15).
 
 ```mermaid
 sequenceDiagram
@@ -56,18 +102,21 @@ sequenceDiagram
     participant C as Fleet controller
     participant S as Reporter (spoke)
     participant I as Intake
-    P->>R: Pull request adds the Cluster object (issuer, subject, kube-system UID, keys)
-    P->>R: Review and merge
+    Note over S: Proposed: the reporter writes the ConfigMap shadewright-cluster-registration (cluster.yaml, status) when it starts
+    P->>S: Read cluster.yaml (kubectl shadewright registration, or the ConfigMap)
+    P->>R: Pull request with that manifest, copied unchanged
+    P->>R: Review (issuer host, cluster name) and merge
     F->>C: Cluster object applied
     C->>C: On a conflict (same issuer and subject, or a shared inline key) refuse both objects
     C->>C: Create the namespace, a RoleBinding to intake's ClusterRole, quota
     C->>C: Set Ready on the Cluster object
-    Note over S: The spoke admin installs the reporter with the hub URL and audience
+    Note over S: The spoke admin installs the reporter with the hub URL and audience, before or after the merge
     S->>I: First report to the path of its cluster, with a projected ServiceAccount token
     I->>I: Load that one Cluster object, verify the token against it, compare the kube-system UID
     I-->>S: Accepted
+    S->>S: Record the result in the status key of the ConfigMap
     C->>C: Set Reporting (last seen, versions) on the Cluster object
-    Note over S,I: Removing or suspending the object makes the next report a refusal
+    Note over S,I: Removing or suspending the object makes the next report a refusal. For inline keys, a rotation makes tokens fail until a reviewed change merges, and the status key says so
 ```
 
 ### 4. Components (Proposed)
@@ -77,6 +126,8 @@ In each spoke:
 - **`reporter`**, a fourth identity (invariant 6). Its reads, exactly:
   - In the operator namespace: Incidents, RemediationRequests and VerificationReports.
   - Cluster-scoped: `get` on `remediationsettings`, and `get` on the Namespace `kube-system` by `resourceNames` (for its UID).
+
+  Its writes, exactly (Proposed): `get` and `update` on the one ConfigMap `shadewright-cluster-registration`, by `resourceNames`, and `get` on the non-resource URL `/openid/v1/jwks`. `create` cannot be limited by name, so the chart creates the ConfigMap, empty, and the reporter never creates anything. No other new grant.
 
   It has no Secrets, no Git identity and no model credential. Its egress goes only to the hub's host. It reads the settings status only to report it, never to decide anything (`AGENTS.md`, invariant 6).
 
@@ -96,7 +147,7 @@ In phase 1 the hub has no model credential and no Git write identity.
 - **RBAC does not enforce the boundary between spokes.** Intake is one ServiceAccount, bound in every spoke namespace. The guard is intake's code: the namespace a report is written to comes from the verified `Cluster` object, never from the report or the request path. The build needs tests that a report cannot reach another cluster's namespace. Per-namespace impersonation by intake would move the guard into RBAC; it is an open question.
 - No hub identity is `cluster-admin`.
 
-[![Identities of control plane mode and what each may write: the three spoke identities keep their writes, the reporter reads and sends, intake writes only the reported kinds in the namespace of the cluster it verified, the fleet controller creates namespaces, ResourceQuotas and RoleBindings only, intake's writes are checked in its code and not by RBAC, and no hub component has a model credential or a Git write](../assets/diagrams/control-plane-identities.svg)](../assets/diagrams/control-plane-identities.svg "Open full size")
+[![Identities of control plane mode and what each may write: the three spoke identities keep their writes, the reporter reads, sends reports and updates only its own registration ConfigMap, intake writes only the reported kinds in the namespace of the cluster it verified, the fleet controller creates namespaces, ResourceQuotas and RoleBindings only, intake's writes are checked in its code and not by RBAC, and no hub component has a model credential or a Git write](../assets/diagrams/control-plane-identities.svg)](../assets/diagrams/control-plane-identities.svg "Open full size")
 
 ### 5. An intake service instead of the hub's Kubernetes API (Proposed)
 
@@ -259,7 +310,7 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 3. **Changes go through Git only.** The hub writes nothing to a spoke and nothing to any Git repository in phase 1. A new spoke is a reviewed pull request to the hub's repository. Configuration for a spoke, when it comes, is a pull request to that spoke's repository.
 4. **Everything from the cluster is untrusted input.** The spoke redacts before anything leaves it. The hub validates again, bounds every field, stores spoke objects as kinds of their own that no controller acts on, and escapes or fences what it shows or sends.
 5. **Reconciliation is idempotent.** Delivery is at least once. Intake upserts by deterministic names, so a repeated or replayed report changes nothing. Dropping an out-of-order report depends on the ordering rule, which is an open question (6); the candidate is an epoch and counter pair per report.
-6. **Separate identities.** The reporter is a fourth identity with read-only access and no Secret, Git identity or model credential. At the hub, intake writes only the reported kinds, and the fleet controller creates Namespaces, ResourceQuotas and RoleBindings only, with `bind` limited to one ClusterRole and no `escalate`. RBAC does not keep intake to one namespace, because it is one ServiceAccount bound in every spoke namespace: that guard is intake's code, which takes the namespace from the verified `Cluster` object, and it needs tests. No hub component has a model credential or a Git write identity. The build PR has to add the reporter, intake and the fleet controller to invariant 6; this ADR does not edit `AGENTS.md`.
+6. **Separate identities.** The reporter is a fourth identity with read-only access on the cluster's objects and no Secret, Git identity or model credential. Its only writes are `get` and `update` on its one registration ConfigMap by `resourceNames`, plus `get` on the non-resource URL `/openid/v1/jwks`. At the hub, intake writes only the reported kinds, and the fleet controller creates Namespaces, ResourceQuotas and RoleBindings only, with `bind` limited to one ClusterRole and no `escalate`. RBAC does not keep intake to one namespace, because it is one ServiceAccount bound in every spoke namespace: that guard is intake's code, which takes the namespace from the verified `Cluster` object, and it needs tests. No hub component has a model credential or a Git write identity. The build PR has to add the reporter, intake and the fleet controller to invariant 6; this ADR does not edit `AGENTS.md`.
 
 ## Threats and what stops each
 
@@ -272,6 +323,7 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 | Stale data read as current | Staleness is decided from the hub's own recorded receipt time. A suspended or revoked spoke's data stays readable and is marked stale. The status page shows when the hub last accepted a report. | A viewer who ignores the mark. |
 | A compromised hub | It holds no kubeconfig or spoke credential, never calls a spoke, and has no Git write identity in phase 1. Replies carry only accepted or refused, and later only restrictive directives. | It can show false data and send false notifications. It can pause remediation in later phases. It cannot cause an action. In the prototype, hub and spoke share one AKS cluster with an executor that holds the Git App, so this row does not hold for that cluster. |
 | Injection through the status page or notifications | Fields are bounded and redacted in the spoke. The status page escapes everything. The notifier fences spoke text and neutralises mentions. | Not built; the build tasks need tests for each. |
+| A tampered registration ConfigMap (Proposed) | The ConfigMap is a convenience, not evidence. A cluster is trusted only after the reviewed merge of its `Cluster` object, where the reviewer checks the issuer host and the name. For `Discovery` the hub fetches keys from the issuer itself, so a wrong issuer never verifies a token. Everything in it is public. A CI check on new `Cluster` objects is proposed as optional and is not decided. | Whoever can edit the ConfigMap can change what gets pasted. A reviewer who merges without looking approves it. With `Inline`, wrong keys that get merged make the hub trust whoever holds the matching private key. |
 | SSRF through issuer discovery | The URL comes only from a reviewed object. https only, no redirects, size and time limits, a cache, and an allow-list of host suffixes in the hub's settings. | Whether to refuse private or link-local addresses after name resolution: open. |
 
 ## Consequences
@@ -306,13 +358,16 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 4. Whether hashed names should be the default instead of an option.
 5. Multi-tenancy at the hub: who may read which cluster's namespace, and whether the status page shows every cluster to every viewer.
 6. How intake orders reports. An object's `resourceVersion` is opaque and must not be ordered. The candidate is the reporter's epoch plus a counter (section 9), and it is not chosen. How a reporter keeps the counter across a restart is part of it.
-7. Where the reporter records the condition it sets after a refusal. It has no write on Incidents or requests, so this needs an object it may write, or a new grant (invariant 6), which the build task must name.
+7. Where the reporter records the condition it sets after a refusal. It has no write on Incidents or requests. **Proposed answer:** the `status` key of its registration ConfigMap (section 3), which it may update by `resourceNames` and which needs no other grant. Open until the ADR is accepted.
 8. How the heartbeat gets the delivery source report of `doctor`. `doctor` is a kubectl plugin that runs with a person's permissions and reads Flux objects, and the reporter's reads above do not include them. Either the reporter gets that read, or the report comes from state another component already records.
 9. Whether `spec.clusterId` must equal the object name, and the rule for the name of a spoke's namespace.
 10. Whether a refusal for a rate limit or a malformed body makes the reporter back off like a refusal for a suspended cluster, the reason names, and the leeway for clock difference when intake checks a token's expiry.
 11. Whether intake refuses private and link-local addresses after name resolution of an issuer host, besides the host allow-list.
 12. Whether intake should impersonate a per-namespace identity when it writes, so that RBAC enforces the boundary between spokes, and the cost of that.
 13. The price of the prototype ([#669](https://github.com/pkalin/shadewright/issues/669)): `make lab-cost` in `shadewright-azure`.
+14. Whether the chart value that picks `Discovery` or `Inline` for the registration manifest has `Inline` as its default, and its name.
+15. Whether the hub's repository gets a CI check that fetches the issuer's discovery document for a new `Cluster` object and reports whether keys resolve, and who owns it.
+16. The name of the command that prints the registration (`kubectl shadewright registration` is a proposal), and whether the hub's status page shows the expected shape of the manifest.
 
 ## Amendments
 

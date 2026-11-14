@@ -38,15 +38,15 @@ The decisions below were taken on 2026-11-14. This ADR writes them down and stat
 
 5. **A model must pass the evaluation first.** As for any model ([ADR-0025](0025-analysis-claims-units-and-evaluation-manifest.md)), the intent is that the analyzer refuses automatic analysis with a model that has no passing record for the current prompt hash. That run-time check is planned, not built (`docs/design/11-model.md`, "It fails closed"). Until it exists, an `Anthropic` deployment is for lab evaluation only, exactly as a Foundry one is today. The evaluation manifest and every analysis record name the provider as well as the model, so a result cannot be read as belonging to the wrong one.
 
-6. **Data handling is stated, not hidden.** With this provider the redacted context leaves Azure. The region choice of [ADR-0016](0016-lab-region-sweden-central.md) does not cover it. Where data goes is decided per analyzer: it can use this provider only if a key file is present. After that, anyone who may edit `RemediationSettings` can move triage or escalation to this provider, so that permission is also a decision about where context goes. The data handling page says so in plain words next to the Foundry description, and says which vendor terms the operator has to check; it does not restate the vendor's retention or region terms as facts of this project (see the open questions).
+6. **Data handling is stated, not hidden.** With this provider the redacted context leaves Azure. The region choice of [ADR-0016](0016-lab-region-sweden-central.md) does not cover it. Where data goes is decided per analyzer: it can use this provider only if a key file is present. After that, anyone who may edit `RemediationSettings` can move triage or escalation to this provider, so that permission is also a decision about where context goes. The data handling page says so in plain words next to the Foundry description, and says which vendor terms the operator has to check; it does not restate the vendor's retention or region terms as facts of this project (see Vendor terms below and the open question).
 
-7. **The lab.** The key is put in a Secret (or the Key Vault behind a CSI volume) at lab-up from the admin machine, from a key kept outside every repository. It never goes through Git, and never through Terraform state or variables. Lab-down deletes a Secret with the namespace; the key itself is revoked or rotated in the vendor's console when the lab session ends if the spend limit below is not enough on its own.
+7. **The lab.** The key is put in a Secret (or the Key Vault behind a CSI volume) at lab-up from the admin machine, from a key kept outside every repository. It never goes through Git, and never through Terraform state or variables. Lab-down deletes a Secret with the namespace; the key itself is revoked or rotated in the vendor's console when the lab session ends if the workspace spend limit below is not enough on its own.
 
 ## Consequences
 
-**A leaked key.** What it allows is inference on the vendor account up to the spend limit set on that key. It gives no access to the cluster, the Git host or any Shadewright state. The cost of a leak is therefore bounded by the limit, not by anything Shadewright enforces. `maxTokensPerDay` of [ADR-0023](0023-how-the-analyzer-calls-the-model.md) limits the analyzer's own use and does not limit someone who holds the key.
+**A leaked key.** What it allows is inference on the vendor workspace the key belongs to, up to that workspace's spend limit. It gives no access to the cluster, the Git host or any Shadewright state. The cost of a leak is therefore bounded by the limit, not by anything Shadewright enforces. `maxTokensPerDay` of [ADR-0023](0023-how-the-analyzer-calls-the-model.md) limits the analyzer's own use and does not limit someone who holds the key.
 
-**What an operator must set.** A spend limit on the key (or on the workspace that owns it) at the vendor, sized to the daily token limit. The install notes say this is required, and the chart cannot check it. Use a key made for this cluster, never one shared with other work.
+**What an operator must set.** A dedicated workspace for Shadewright at the vendor, with a spend limit sized to the daily token limit, and a key of that workspace. The limit is per workspace, not per key, and not available on the default workspace. The install notes say this is required, and the chart cannot check it. Use a key made for this cluster, never one shared with other work.
 
 **Rotation.** Create a new key, update the Secret, wait for the kubelet to refresh the mounted file (it can take about a minute), revoke the old key. No restart. A call that races the refresh uses the old key until it is revoked; revoke after the first successful call with the new one. A file that is briefly unreadable during the refresh is a retryable error, not a hand-off with a final reason.
 
@@ -59,6 +59,14 @@ The decisions below were taken on 2026-11-14. This ADR writes them down and stat
 > and, only when a `ModelDeployment` has `provider: Anthropic` (ADR-0037), read-only access to one mounted file, the vendor API key, from a Secret the cluster operator creates; the analyzer has no RBAC on Secrets, the key is the one static credential that authorizes a call to an external service, and the executor and the verifier never receive it.
 
 This ADR does not edit `AGENTS.md`.
+
+**Vendor terms, checked 2026-11-14.** From the vendor's published pages. The terms can change, so the operator checks them again.
+- *Retention.* Inputs and outputs are deleted from the backend within 30 days by default. Zero data retention is an arrangement per organization, requested through sales, and some models are not available under it ([API and data retention](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention), [how long data is stored](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data)).
+- *Where inference runs.* The default is `global`, where inference may run in any available geography. The request parameter `inference_geo` accepts `global` and `us` (1.1 times the price). There is no EU option. So redacted context can be processed outside the EU, which the region choice of ADR-0016 does not cover. The adapter sends no `inference_geo`; a setting for it is not part of this ADR ([data residency](https://platform.claude.com/docs/en/manage-claude/data-residency)).
+- *Spend limit.* Set per workspace in the Console, not per key, and not on the default workspace ([rate limits](https://platform.claude.com/docs/en/api/rate-limits)).
+- *Key scoping.* A key belongs to a workspace and can have an expiry and an IP allow-list. No restriction to models or scopes was found ([authentication](https://platform.claude.com/docs/en/manage-claude/authentication)).
+- *Model IDs.* Every model ID is a pinned snapshot, including dateless ones such as `claude-haiku-5-5`, so there is no moving alias ([models overview](https://platform.claude.com/docs/en/about-claude/models/overview)).
+- *Prompt caching.* The minimum cacheable prefix is 512 tokens for Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5. A shorter prefix is not cached and returns no error ([prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)).
 
 **Other costs.**
 - The key is the analyzer's second possible Secret mount, next to the TLS Secret for metrics.
@@ -82,15 +90,9 @@ This ADR does not edit `AGENTS.md`.
 
 ## Open questions
 
-These need an answer from the vendor's published terms, with a link, before this ADR is accepted. None is stated as fact here.
+One needs an answer from the vendor's published terms, with a link, before this ADR is accepted. It is not stated as fact here. The other terms are under Consequences.
 
-1. How long the vendor keeps requests and replies sent through the API, whether an operator can ask for zero retention, and whether that setting belongs to the key, the workspace or the organization.
-2. Where inference runs and whether the operator can choose a region, so the data handling page can say what ADR-0016 does not cover.
-3. Whether the vendor trains on API traffic by default under the terms that apply to the lab account and to a typical operator.
-4. Whether a spend limit can be set per key or only per workspace, and how fast it takes effect, since the leak bound rests on it.
-5. Whether keys can be scoped (to one model, one workspace) so the leak bound is narrower than the whole account.
-6. Whether `deployment` can use an alias that moves to a new model, or only dated IDs. An alias would let the model change under a passing evaluation record; the adapter's check of the reply's model name would catch it, and this needs confirming with a real reply.
-7. Whether prompt caching is offered for the models the lab will use, and with what minimum prefix size (decision 5 of #728 depends on it).
+1. Whether API inputs and outputs are used for model training by default. The retention page says "Retained data is never used for model training without your express permission", but the default for API data is not stated on the pages read. Check the commercial terms that apply to the lab account and to a typical operator.
 
 ## Amendments
 

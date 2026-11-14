@@ -171,8 +171,9 @@ func TestSasKeyOnlyBeforeItsSeparator(t *testing.T) {
 }
 
 // After a secret flag or a compound key name, a value that opens with a quote, plain or escaped, runs to its
-// closing quote on the same line, with escapes handled; any other value is one token, ending at whitespace, a
-// quote, ",", "]" or "}" (#585). What follows the value stays.
+// closing quote on the same line, with escapes handled; any other value is one token, ending at whitespace or
+// the line end and nothing else, so a quote, ",", "]" or "}" of the surrounding text may go with it (#585).
+// What follows the value stays.
 func TestQuotedValueAfterAKeyName(t *testing.T) {
 	words := []string{"horse", "battery", "staple"}
 	for name, c := range map[string]struct{ in, kept string }{
@@ -195,14 +196,26 @@ func TestQuotedValueAfterAKeyName(t *testing.T) {
 	}
 	k := leakKey()
 	for in, kept := range map[string]string{
-		"args: [--client-secret, " + k + ", --region, west]": ", --region, west]",
-		`{"cmd": "run --token ` + k + `", "u": "x"}`:         `", "u": "x"}`,
-		"{run --token " + k + "}":                            "}",
-		"run --token '" + k + " --region x":                  " --region x",
-		"[--token " + k + "]next":                            "]next",
-		"run --token " + k + "'x' --region y":                "'x' --region y",
+		"args: [--client-secret, " + k + ", --region, west]":           " --region, west]",
+		`{"cmd": "run --token ` + k + `", "u": "x"}`:                   ` "u": "x"}`,
+		"{run --token " + k + "}\nnext":                                "\nnext",
+		"run --token '" + k + " --region x":                            " --region x",
+		"[--token " + k + "]next --region y":                           " --region y",
+		"run --token " + k + "'x' --region y":                          " --region y",
+		"set aws_secret_access_key " + k[:10] + "," + k[10:] + " next": " next",
 	} {
 		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:]}, []string{kept})
+	}
+	// A comma, a bracket, a brace or a quote inside the value, or at its start, does not end it.
+	for in, secrets := range map[string][]string{
+		"run --password p@ss}w0rdx --region x":           {"p@ss", "w0rdx"},
+		"run --password ]start --region x":               {"start"},
+		"run --password }start --region x":               {"start"},
+		"run --password abc,def --region x":              {"abc", "def"},
+		"run --password ab'cd\"ef --region x":            {"ab'", "ef"},
+		"set aws_secret_access_key ab12]cd34 --region x": {"ab12", "cd34"},
+	} {
+		checkRedacted(t, in, secrets, []string{" --region x"})
 	}
 	// A quote that does not close goes with the value.
 	if in, want := "run --token 'hunter2abc --region x", "run --token [REDACTED] --region x"; String(in) != want {
@@ -213,6 +226,8 @@ func TestQuotedValueAfterAKeyName(t *testing.T) {
 	for _, in := range []string{
 		`args: ["--password ", "--region", "x"]`,
 		`"args":"[\"--password \",\"--region\"]"`,
+		`"a":"{\"args\":\"[\\\"--password \\\",\\\"--region\\\"]\"}"`,
+		`"b":"{\"a\":\"{\\\"args\\\":\\\"[\\\\\\\"--password \\\\\\\",\\\\\\\"--region\\\\\\\"]\\\"}\"}"`,
 	} {
 		if out := String(in); out != in {
 			t.Errorf("value taken from the next argument:\n in: %q\nout: %q", in, out)
@@ -263,8 +278,8 @@ func TestSingleDashLongFlags(t *testing.T) {
 
 // A key name of two or more words before a blank counts joined by "-" and in camelCase too, not only by "_"
 // (#585). After such a name a value that reads as a flag is kept, as "kubectl describe secret db-password -n
-// prod" names a Secret. A name that starts upper-case counts only when it ends in a secret word and the value
-// has a digit, one of "/+=_-.:", mixed case inside or 16 or more bytes.
+// prod" names a Secret. The names follow the rules of the other forms, and for every name the value counts
+// only when it has a digit, one of "/+=_-.:", mixed case inside or 16 or more bytes.
 func TestSpelledCompoundKeyNames(t *testing.T) {
 	k := leakKey()
 	for _, in := range []string{
@@ -277,10 +292,19 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 		"set ApiKey " + k,
 		"set AccessKey " + k,
 		"set STORAGE_SAS " + k,
+		// The same names as in the other forms: a secret word anywhere in the name, and "stdin" is a
+		// reference suffix for flags only.
+		"vault write auth/approle/login secret_id " + k,
+		"set SecretId " + k,
+		"export SECRET_KEY_BASE " + k,
+		"set password_stdin " + k,
 	} {
 		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:]}, nil)
 	}
 	for in, v := range map[string]string{
+		"set client_secret hunter3 now":         "hunter3",
+		"set db-password hunter/two now":        "hunter/two",
+		"set client_secret \"hunter,x9\" now":   "hunter,x9",
 		"set ClientSecret hunter3 now":          "hunter3",
 		"set ClientSecret hunter/two now":       "hunter/two",
 		"set ClientSecret hunTer now":           "hunTer",
@@ -295,13 +319,16 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 		"deleted Secret/client-secret-7d9f8b6c5",
 		"ClientSecretCredential authentication failed",
 		"ClientAssertionCredential authentication failed.",
-		"ClientSecretCredential Abc123xyz9 failed",
 		"refresh token expired",
 		"ClientSecret is missing for tenant",
 		"AWS_SECRET_ACCESS_KEY is empty",
 		"MyPassword Expired",
 		"ClientSecret correcthorsebat",
 		"ClientSecret --namespace prod",
+		"client_secret is missing",
+		"db-password Opaque",
+		"secret-volume (ro)",
+		"volumes=[secret-volume kube-api-access-x]",
 	} {
 		if out := String(in); out != in {
 			t.Errorf("changed useful text:\n in: %q\nout: %q", in, out)
@@ -311,7 +338,7 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 
 // Known leaks after a key name, kept by decision and documented in design 10.3 and threat model G4.4 (#585):
 // after a key name only the first token of a value goes, or the text between its quotes on one line. Taking
-// more needs a tokenizer per format (follow-up issue to be linked). The test fails when one no longer leaks,
+// more needs a tokenizer per format (#708). The test fails when one no longer leaks,
 // so the list and the docs are updated with the change that closes it.
 func TestKeyNameKnownLeaks(t *testing.T) {
 	k := leakKey()
@@ -340,6 +367,18 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",
 				name, in, out)
+		}
+	}
+	// After a compound key name and a blank, a value that reads as a word stays, as prose does
+	// (compoundValueSpan, valueShaped).
+	for in, word := range map[string]string{
+		"export DB_PASSWORD changeme":   "changeme",
+		"set ClientSecret Password now": "Password",
+		"set client_secret hunter now":  "hunter",
+	} {
+		if out := String(in); !strings.Contains(out, word) {
+			t.Errorf("word value no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",
+				in, out)
 		}
 	}
 }
@@ -422,6 +461,21 @@ var evidenceRows = []evidenceRow{
 		main: "az storage blob list --sas sv=2024 --account-name acct",
 		want: "az storage blob list --sas *** --account-name acct",
 		why:  "the value after the flag --sas"},
+	// A compound key name before a word of a sentence or a table column keeps the word.
+	{in: "level=error msg=\"db_password not set\" component=db",
+		main: "level=error msg=\"db_password not set\" component=db"},
+	{in: "level=warn msg=\"client_secret expired\" app=web",
+		main: "level=warn msg=\"client_secret expired\" app=web"},
+	{in: "{\"msg\":\"api_key missing\",\"service\":\"billing\"}",
+		main: "{\"msg\":\"api_key missing\",\"service\":\"billing\"}"},
+	{in: "level=error msg=\"x-api-key header missing\" path=/v1",
+		main: "level=error msg=\"x-api-key header missing\" path=/v1"},
+	{in: "  Warning  Failed  3s  kubelet  Error: couldn't find key db_password in Secret prod/db-creds",
+		main: "  Warning  Failed  3s  kubelet  Error: couldn't find key db_password in Secret prod/db-creds"},
+	{in: "NAME          TYPE     DATA   AGE\ndb-password   Opaque   1      5d",
+		main: "NAME          TYPE     DATA   AGE\ndb-password   Opaque   1      5d"},
+	{in: "level=info msg=\"serviceAccountToken projected into pod\" pod=web-7f9",
+		main: "level=info msg=\"serviceAccountToken projected into pod\" pod=web-7f9"},
 	{in: "{\"msg\":\"login failed\",\"password\":\"hunter2\",\"user\":\"bob\"}",
 		main:      "{\"msg\":\"login failed\",\"password\":\"***\",\"user\":\"bob\"}",
 		mainSpans: [][2]int{{34, 41}}},

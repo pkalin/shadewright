@@ -33,10 +33,10 @@ limitations under the License.
 // secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
 // argument lists and after a flag that took the flag as its value), however it reads or starts with
 // ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
-// name of two or more words that ends in a secret word, joined by "_", "-" or in camelCase, and a blank
-// ("client_secret is missing" loses "is"; a name that starts upper-case, such as "ClientSecret", only before a
-// value that does not read as a word). After a flag or such a name the value is one token, or the text
-// between its quotes on one line (keyNameValue). Values that look like references rather than secrets, such
+// name of two or more words, joined by "_", "-" or in camelCase, and a blank ("aws_secret_access_key x",
+// "ClientSecret x"), when the value does not read as a word ("client_secret is missing" keeps "is"). After a
+// flag or such a name the value is one token, up to whitespace or the line end, or the text between its
+// quotes on one line (keyNameValue). Values that look like references rather than secrets, such
 // as "secretName: db-creds", are kept, because the name of a missing Secret is what a diagnosis needs, and so
 // is the hex of an image digest.
 //
@@ -476,7 +476,7 @@ func referenceKey(key string, flag bool) bool {
 var secretWordPattern = regexp.MustCompile(`(?i)` + secretWordExpr)
 
 // shortKeyNames are the short key names that hold secrets but are also parts of other words (shortKeyExpr):
-// the one list that the key patterns, isBareShortKey, isSasKey and secretNameEnd read.
+// the one list that the key patterns, isBareShortKey and isSasKey read.
 var shortKeyNames = strings.Split(shortKeyNamesExpr, "|")
 
 // sasKeyName is the short key name of an Azure shared access signature.
@@ -1137,10 +1137,10 @@ type windowPart struct {
 // Windows are bounded by maxBase64Window, so the cost is linear in the run.
 //
 // Known gaps when no secret key name stands before the key, kept for safety and simplicity over perfect paths
-// (TestSlashSplitBase64KnownLeaks; after a key name such as "client_secret=" or "--client-secret" the
-// key-value and flag rules redact the whole value whatever it reads as, #585): a key whose windows all score
-// as words stays whole; a short lower-case end of a key that no window covers
-// ("/wed7") stays, as a path word would; a key of upper-case parts with one short mixed part
+// (TestSlashSplitBase64KnownLeaks; after a key name the value goes whatever it reads as, #585: after
+// "client_secret=" up to the next whitespace, after "--client-secret" one token or a quoted value on one
+// line): a key whose windows all score as words stays whole; a short lower-case end of a key that no window
+// covers ("/wed7") stays, as a path word would; a key of upper-case parts with one short mixed part
 // ("ABCDEF/GHIJKL/.../yz2+ab3+cd4+") has too little evidence and stays; and a lower-case path word at either
 // end of a key ("cijt/...") is kept with the path around it.
 func base64Windows(run string, add func(start, end int)) {
@@ -1664,13 +1664,13 @@ func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd in
 // so does "--Hunter2pw" or the next flag ("--use-token --verbose" loses "--verbose", accepted
 // over-redaction). Each flag is judged on its own: one taken as the value of an earlier flag still has its
 // own value redacted ("--enable-auth --client-secret x"). The flag counts wherever its dash does not follow a
-// letter, a digit or another "-" ("EXTRA_ARGS=--client-secret x" counts, "a--token x" and "my-token x" do
-// not). A reference flag ("--secret-name", "--token-ttl", "--password-file", "--password-stdin") keeps its
-// value. A value that starts inside the previous value is skipped, as it is redacted already, so each value
-// is read once and the cost stays linear.
+// letter or a digit ("EXTRA_ARGS=--client-secret x" counts, "a--token x" and "my-token x" do not; after
+// another "-" the match starts at that dash). A reference flag ("--secret-name", "--token-ttl",
+// "--password-file", "--password-stdin") keeps its value. A value that starts inside the previous value is
+// skipped, as it is redacted already, so each value is read once and the cost stays linear.
 func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	switch {
-	case m[0] > 0 && (isAlnum(s[m[0]-1]) || s[m[0]-1] == '-'), m[1] < prevEnd, referenceKey(s[m[2]:m[3]], true):
+	case m[0] > 0 && isAlnum(s[m[0]-1]), m[1] < prevEnd, referenceKey(s[m[2]:m[3]], true):
 		return 0, 0, false
 	case m[2] == m[0]+1 && !isLetter(s[m[2]]):
 		// One dash: the flag needs a letter after it ("-password"), as "-_x" or "-1" is no flag.
@@ -1684,43 +1684,59 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 
 // compoundValueSpan is the span function of the rule for a key name of two or more words, a blank and the
 // value after it (keyNameValue), as in "aws configure set aws_secret_access_key x" (#585). The words are
-// joined by "_" ("client_secret", "STORAGE_SAS"), by "-" ("client-secret") or in camelCase ("clientSecret",
-// and starting upper-case "ClientSecret"). The key must start a word, and a one-word name ("secret", "token",
-// "password") never counts in this form, so "kubectl get secret foo" and "kubectl create token sa" stay
-// readable. A name joined by "-" or in camelCase is also how Kubernetes names a Secret ("kubectl describe
-// secret db-password -n prod"), so after such a name a value that reads as a flag ("-n", "--namespace",
-// flagWord) is kept. A name that starts upper-case is as often a type or a word of a sentence
-// ("ClientSecretCredential authentication failed", "Password expired"), so it counts only when it ends in a
-// secret word (secretNameEnd) and the value reads as one (valueShaped). It also takes a flag ("-client_secret
-// x", "--client_secret x", which the flag rule takes too), and leaves "=" or ":" after the blanks to the
-// key-value rules. A reference key ("client_id", "access_key_id", and as a flag "--password-stdin") keeps its
-// value, and a bare short key with a prose prefix ("re-auth") does not count.
+// joined by "_" ("client_secret", "STORAGE_SAS", "SECRET_KEY_BASE"), by "-" ("client-secret") or in camelCase
+// ("clientSecret", "ClientSecret", "SecretId"). The name rules are those of the other forms: a secret word
+// anywhere in the name and no reference suffix (referenceKey; "client_id" and "access_key_id" keep their
+// value, "secret_id" and "password_stdin" do not, as "stdin" is a reference only for a flag). The key must
+// start a word, and a one-word name ("secret", "token", "password") never counts in this form, so "kubectl
+// get secret foo" and "kubectl create token sa" stay readable. A key name before a blank is as often a word
+// of a sentence, a type or a column of a table ("db_password not set", "ClientSecretCredential authentication
+// failed", "db-password   Opaque"), so the value counts only when it reads as one (valueShaped; an unquoted
+// value is judged on its part before a quote, ",", "]" or "}", which may belong to the text around it:
+// "api_key missing\"," keeps "missing"). A name joined by "-" or in camelCase is also how Kubernetes names a
+// Secret ("kubectl describe secret db-password -n prod") or a volume ("volumes=[secret-volume
+// kube-api-access-x]"), so after such a name a value that reads as a flag ("-n", "--namespace", flagWord) is
+// kept, and so is the value after a name ending in "volume" (blankReferenceSuffixes). It also takes a flag
+// ("-client_secret x", "--client_secret x", which the flag rule takes too), and leaves "=" or ":" after the
+// blanks to the key-value rules. A bare short key with a prose prefix ("re-auth") does not count.
 func compoundValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	key := strings.TrimLeft(s[m[2]:m[3]], "-")
 	joined := strings.Contains(key, "_")
-	upper := key != "" && key[0] >= 'A' && key[0] <= 'Z'
 	spelled := !joined && !isBareShortKey(key) &&
 		(strings.Contains(key, "-") && !strings.Contains(key, "--") || isCamelCase(key))
 	switch {
 	case m[2] > 0 && isTokenByte(s[m[2]-1]), m[1] < prevEnd, !joined && !spelled,
 		m[1] < len(s) && (s[m[1]] == '=' || s[m[1]] == ':'), referenceKey(s[m[2]:m[3]], key != s[m[2]:m[3]]),
-		!secretNameEnd.MatchString(key):
+		hasSuffixFold(keySeparators.Replace(key), blankReferenceSuffixes):
 		return 0, 0, false
 	}
 	start, end := keyNameValue(s, m[1], m[2], false)
-	switch v := s[start:end]; {
-	case spelled && flagWord(v), upper && !valueShaped(v):
+	v := s[start:end]
+	word := v
+	if i := strings.IndexAny(v, `"',]}`); i > 0 && start == m[1] {
+		word = v[:i]
+	}
+	if spelled && flagWord(v) || !valueShaped(word) {
 		return 0, 0, false
 	}
 	return start, end, true
 }
 
-// secretNameEnd matches a key that ends in a secret word or a short key name ("client_secret", "db-password",
-// "ClientSecret", "ApiKey", "STORAGE_SAS"), not one that goes on into another word ("secret-volume",
-// "ClientSecretCredential"). "credential" does not count here: it ends SDK type names and the names of
-// credential files ("GOOGLE_APPLICATION_CREDENTIALS /etc/gcp.json").
-var secretNameEnd = regexp.MustCompile(`(?i)(?:` + strings.Replace(secretWordExpr, "|credentials?", "", 1) + `|` +
-	shortKeyNamesExpr + `)$`)
+// blankReferenceSuffixes mark key names that, before a blank and a value, name a Kubernetes object rather than
+// hold a secret: "secret-volume" is the name of a volume (#585). In the other forms such a name holds a secret
+// as before.
+var blankReferenceSuffixes = []string{"volume"}
+
+// hasSuffixFold reports whether key ends in one of suffixes, in any case.
+func hasSuffixFold(key string, suffixes []string) bool {
+	key = strings.ToLower(key)
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
+}
 
 // valueShaped reports whether v reads as a value rather than a word of a sentence: it holds a digit or one
 // of "/+=_-.:", mixes case after its first byte, or is 16 bytes or longer ("refresh token expired" and
@@ -1810,11 +1826,12 @@ func keyNameValue(s string, pos, keyStart int, closed bool) (int, int) {
 	return pos, tokenEnd(s, pos)
 }
 
-// tokenEnd returns the end of the token that starts at pos: the next whitespace (a line end included), quote,
-// ",", "]" or "}".
+// tokenEnd returns the end of the token that starts at pos: the next whitespace, a line end included, and
+// nothing else. A quote, ",", "]" or "}" of the text around the value goes with it ("[--password, abc, --x]"
+// loses "abc,"), as one inside the value cannot be told apart from it ("--password abc,def").
 func tokenEnd(s string, pos int) int {
 	for i := pos; i < len(s); i++ {
-		if isSpace(s[i]) || strings.IndexByte(`"',]}`, s[i]) >= 0 {
+		if isSpace(s[i]) {
 			return i
 		}
 	}

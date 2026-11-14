@@ -1169,11 +1169,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		}
 	}
 	if mark := staleMark(rr); mark != nil && outcome == prClosed {
-		// The cleanup of a stale plan started (ensureFresh) and its pull request is closed: the close that was
-		// cut short was ours, not a person's rejection, whatever the plan looks like now.
-		closedByUs(rr, staleClosed(mark.Reason))
-		return ctrl.Result{}, r.ignoreSuperseded(r.endFreshness(ctx, rr, remediationv1alpha1.PhaseSuperseded,
-			mark.Reason, mark.Message))
+		return r.endStaleClosed(ctx, rr, mark)
 	}
 	if intent(rr) != nil {
 		return r.waitHandedOver(ctx, rr, outcome)
@@ -1216,6 +1212,21 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		}
 		return r.advance(ctx, rr, fresh)
 	}
+}
+
+// endStaleClosed ends a request whose stale plan's cleanup started (the mark) and whose pull request is closed. While
+// the Git host refused every close so far (PullRequestNotClosed, #199) and no close since may have gone through
+// (that removes the condition), a person closed it: the normal end of a closed pull request, with the stale reason
+// kept on PlanFresh. Otherwise the close that was cut short was ours, not a person's rejection, whatever the plan
+// looks like now: Superseded.
+func (r *RemediationRequestReconciler) endStaleClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	mark *metav1.Condition) (ctrl.Result, error) {
+	if notClosed(rr) != nil {
+		return r.rejected(ctx, rr)
+	}
+	closedByUs(rr, staleClosed(mark.Reason))
+	return ctrl.Result{}, r.ignoreSuperseded(r.endFreshness(ctx, rr, remediationv1alpha1.PhaseSuperseded,
+		mark.Reason, mark.Message))
 }
 
 // waitHandedOver is the recheck of a request handed over in flight (handoff.go): the replacement decides what
@@ -1364,8 +1375,10 @@ func staleMark(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
 }
 
 // cleanUpStale closes the change request of a stale plan whose mark is written and ends the request: Superseded
-// with the stale reason, or NeedsIntervention when the change request cannot be closed for good. A failure
-// worth a retry is returned as it is and leaves the mark, so the retry closes again.
+// with the stale reason, or NeedsIntervention when the change request cannot be closed for good and no pull
+// request is recorded. A close of the recorded pull request that the Git host refuses for good keeps the request
+// in its phase, watching the pull request (keepWatchingStale, errStaleNotClosed). A failure worth a retry, and any
+// failed read of a change request, is returned as it is and leaves the mark, so the retry closes again.
 func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	staleErr *freshness.StaleError) error {
 	phase, reason, message := remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
@@ -1412,22 +1425,68 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		}
 		return endErr
 	case err != nil:
-		refused, _, ok := refusal(err)
-		if !ok {
+		if cf, refused, ok := refusedClose(err); ok && rr.Status.PullRequest != nil {
+			// The Git host refuses the close of the recorded pull request for good (#199): the request keeps its
+			// phase and the mark, and its pull request is still watched (recheck), so a merge or a close by a
+			// person is recorded; the close is tried again on every look, and nothing else is written to it.
+			return r.keepWatchingStale(ctx, rr, cf, refused)
+		}
+		if isUnknownChange(err) {
+			// A failed read of the change request, a refused one included (PullRequestUnreadable names it), is
+			// retried with the mark kept, never an end.
 			return err
 		}
-		// The Git host refuses the close, or the read of the change request before it, for good (a permission
-		// the App lacks, a rule): the plan is stale and nothing more may be written for it, so a person has to
-		// close the change request. The lock stays (prMayBeOpen keeps it) until checkHeld finds none open.
+		refused, _, ok := refusal(err)
+		if !ok {
+			if mayHaveClosed(err) && notClosed(rr) != nil {
+				// The close may have gone through: a pull request found closed next is taken as this close
+				// (Superseded), not as a person's.
+				if clearNotClosed(rr) {
+					if uerr := r.Status().Update(ctx, rr); uerr != nil {
+						return errors.Join(err, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
+							rr.Namespace, rr.Name, uerr))
+					}
+				}
+			}
+			return err
+		}
+		// The Git host refuses the close of a pull request found by the branch (none is recorded, so none is
+		// watched), or a step before it, for good (a permission the App lacks, a rule): the plan is stale and
+		// nothing more may be written for it, so a person has to close the change request. The lock stays
+		// (prMayBeOpen keeps it) until checkHeld finds none open.
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, refused
 		message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to close its " +
 			"change request; it was not closed"
-		if isUnknownChange(err) {
-			message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to read its " +
-				"change request; it was not closed"
-		}
 	}
 	return r.endFreshness(ctx, rr, phase, reason, message)
+}
+
+// errStaleNotClosed is cleanUpStale's answer when the Git host refused for good to close a stale plan's recorded
+// pull request: the request keeps its phase and watches the pull request (recheck requeues after the poll
+// interval). It is not a final phase.
+var errStaleNotClosed = errors.New("the Git host refused to close the stale plan's pull request")
+
+// keepWatchingStale records condition PullRequestNotClosed for a stale plan whose close the Git host refused for
+// good (cf, refused), in one status write when it changes, with one Warning Event when it is set or its reason
+// changes, and returns errStaleNotClosed. PlanFresh keeps the mark (False, the stale reason), so the plan is not
+// checked again and nothing but the close is written for it.
+func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cf *closeFailure, refused string) error {
+	want := notClosedCondition(rr, cf, refused, false)
+	changed, event := r.setNotClosed(rr, want)
+	if !changed {
+		return errStaleNotClosed
+	}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	if event {
+		r.notClosedEvent(rr, want)
+	}
+	logf.FromContext(ctx).Info("The Git host refused to close the pull request of a stale RemediationRequest; "+
+		"watching it", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cf.number,
+		"reason", refused)
+	return errStaleNotClosed
 }
 
 // endUnrecordedMerge handles the answer of closeChangeRequest for a request with no recorded pull request whose
@@ -1496,6 +1555,7 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
+	clearNotClosed(rr)
 	settleLock(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
@@ -1606,10 +1666,7 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	if err := r.stillOwns(ctx, rr); err != nil {
 		return err
 	}
-	if err := git.CloseChangeRequest(ctx, v.pr.Number); err != nil {
-		return freshness.WrapProvider("close the change request", err)
-	}
-	return nil
+	return closeFailed(v.pr, git.CloseChangeRequest(ctx, v.pr.Number))
 }
 
 // closeUnrecorded is closeOwn for a request with no recorded pull request: one may exist although the status write
@@ -1633,8 +1690,7 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 		if err := r.stillOwns(ctx, rr); err != nil {
 			return err
 		}
-		if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
-			err = freshness.WrapProvider("close the change request", err)
+		if err := closeFailed(cr, git.CloseChangeRequest(ctx, cr.Number)); err != nil {
 			if providers.IsConflict(err) {
 				return &closeConflictError{number: cr.Number, err: err}
 			}
@@ -1670,10 +1726,7 @@ func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git prov
 		if err := r.stillOwns(ctx, rr); err != nil {
 			return err
 		}
-		if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
-			return freshness.WrapProvider("close the change request", err)
-		}
-		return nil
+		return closeFailed(cr, git.CloseChangeRequest(ctx, cr.Number))
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: true, openOnBranch: true})
 	if v.state == changeUnknown && v.ownListed {

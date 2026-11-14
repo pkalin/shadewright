@@ -2686,6 +2686,148 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
 	})
 
+	// A close the Git host refuses for good on deletion (#288): the finalizer holds the request and tries again for
+	// closeRefusedGrace after the first refusal, then lets it go with the pull request left open and says so.
+	Context("when the Git host refuses the close on deletion for good (#288)", func() {
+		var closeErr error // the error of every close; nil lets it through
+		BeforeEach(func() {
+			recorder = record.NewFakeRecorder(20)
+			closeErr = nil
+		})
+		failClose := func(err error) {
+			closeErr = err
+			git.SetFail(func(op string) error {
+				if op == opClose {
+					return closeErr
+				}
+				return nil
+			})
+		}
+		refused403 := fmt.Errorf("status 403 from https://github.com/example/fleet with token ghs_leaked: %w",
+			providers.ErrForbidden)
+		// warnings returns the reasons of the Warning Events recorded since the last call, and their messages.
+		warnings := func() (reasons, messages []string) {
+			for len(recorder.Events) > 0 {
+				e := <-recorder.Events
+				if rest, ok := strings.CutPrefix(e, corev1.EventTypeWarning+" "); ok {
+					reason, message, _ := strings.Cut(rest, " ")
+					reasons, messages = append(reasons, reason), append(messages, message)
+				}
+			}
+			return reasons, messages
+		}
+		notClosedOf := func() *metav1.Condition {
+			return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+		}
+
+		DescribeTable("holds the finalizer and lets the request go with its pull request left open only after the grace",
+			func(class error, reason string) {
+				pr := drive(remediationv1alpha1.PhaseAwaitingApproval).Status.PullRequest
+				name := fmt.Sprintf("#%d (%s)", pr.Number, pr.URL)
+				failClose(fmt.Errorf("status 403 from https://github.com/example/fleet with token ghs_leaked: %w", class))
+				Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+				deleted := clock
+
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed to the error backoff")
+				Expect(res.RequeueAfter).To(Equal(closeRefusedRetry))
+				Expect(gone()).To(BeFalse(), "the finalizer holds the request")
+				c := notClosedOf()
+				Expect(c).NotTo(BeNil())
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Reason).To(Equal(reason))
+				Expect(c.Message).To(ContainSubstring(name))
+				Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
+				Expect(c.Message).NotTo(ContainSubstring("403"))
+				Expect(c.LastTransitionTime.Time).To(BeTemporally("==", deleted), "on the executor's clock")
+				reasons, _ := warnings()
+				Expect(reasons).To(Equal([]string{EventPullRequestNotClosed}))
+
+				// Refused again within the grace: held, no new write and no new Event, the first refusal kept.
+				clock = deleted.Add(closeRefusedGrace - time.Second)
+				before := fetch().ResourceVersion
+				res, err = reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(time.Second), "tried again when the grace ends")
+				Expect(gone()).To(BeFalse())
+				Expect(fetch().ResourceVersion).To(Equal(before))
+				reasons, _ = warnings()
+				Expect(reasons).To(BeEmpty())
+
+				// Past the grace: let go, the pull request left open, and an Event and a log line name it.
+				clock = deleted.Add(closeRefusedGrace)
+				Expect(reconcileOnce()).To(Succeed())
+				Eventually(gone).Should(BeTrue())
+				Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+				reasons, messages := warnings()
+				Expect(reasons).To(Equal([]string{EventPullRequestLeftOpen}))
+				Expect(messages[0]).To(ContainSubstring(name))
+				Expect(messages[0]).To(ContainSubstring(reason))
+				Expect(messages[0]).NotTo(ContainSubstring("ghs_leaked"))
+			},
+			Entry("403", providers.ErrForbidden, ReasonGitForbidden),
+			Entry("422", providers.ErrRejected, ReasonGitRejected),
+		)
+
+		It("never lets the request go on failures worth a retry, however long they last", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			failClose(&providers.RetryableError{Err: errors.New("bad gateway")})
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			for range 3 {
+				clock = clock.Add(closeRefusedGrace)
+				Expect(reconcileOnce()).NotTo(Succeed(), "retried with backoff")
+				Expect(gone()).To(BeFalse())
+			}
+			Expect(notClosedOf()).To(BeNil(), "a failure worth a retry is no refusal")
+			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		})
+
+		It("keeps holding past the grace while a retry fails, and keeps the time of the first refusal", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			failClose(refused403)
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			first := clock
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(notClosedOf()).NotTo(BeNil())
+
+			// Past the grace, a close that fails for a reason worth a retry, or a read of the pull request that
+			// fails (also one the host refuses), keeps the finalizer.
+			clock = first.Add(closeRefusedGrace + time.Minute)
+			failClose(&providers.RetryableError{Err: errors.New("bad gateway")})
+			Expect(reconcileOnce()).NotTo(Succeed())
+			Expect(gone()).To(BeFalse())
+			git.SetFail(func(op string) error {
+				if op == opGet {
+					return refused403
+				}
+				return nil
+			})
+			_, _ = reconcileResult()
+			Expect(gone()).To(BeFalse(), "a refused read is never a refused close")
+			Expect(notClosedOf().LastTransitionTime.Time).To(BeTemporally("==", first), "the first refusal is kept")
+
+			// The next refusal lets it go at once: the grace counts from the first one.
+			failClose(refused403)
+			Expect(reconcileOnce()).To(Succeed())
+			Eventually(gone).Should(BeTrue())
+		})
+
+		It("lets the request go once a retried close goes through within the grace", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			failClose(refused403)
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(gone()).To(BeFalse())
+			clock = clock.Add(closeRefusedRetry)
+			failClose(nil)
+			Expect(reconcileOnce()).To(Succeed())
+			Eventually(gone).Should(BeTrue())
+			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+			reasons, _ := warnings()
+			Expect(reasons).To(Equal([]string{EventPullRequestNotClosed}), "nothing was left open")
+		})
+	})
+
 	It("closes on deletion the open pull request of its branch behind a closed newer one that carries its marker (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
@@ -4541,7 +4683,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					failedRead:     o(awaiting, none, held, kept, failed),
 					unconfirmed404: o(awaiting, none, held, kept, failed),
 					contradicting:  o(awaiting, none, held, kept, failed),
-					forbidden:      o(stopped, none, held, kept, done),
+					// A refused read is retried with the mark kept, never an end (#199).
+					forbidden: o(awaiting, none, held, kept, failed),
 				},
 			},
 			"expire": {
@@ -4637,7 +4780,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					failedRead:     o(checked, none, held, kept, failed),
 					unconfirmed404: o(checked, none, held, kept, failed),
 					contradicting:  na,
-					forbidden:      o(stopped, none, held, kept, done),
+					// A refused read is retried with the mark kept, never an end (#199).
+					forbidden: o(checked, none, held, kept, failed),
 				},
 			},
 			"finalize without a recorded pull request": {

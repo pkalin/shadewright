@@ -206,6 +206,7 @@ var troubleshootingSections = map[string][]string{
 	"SourceNotFound":                    {secFlux},
 	"SourceNotReady":                    {secFlux},
 	"SourceOptions":                     {secFlux},
+	"StalePlanMerged":                   {secAfterMerge},
 	"StaleReport":                       {secAfterMerge},
 	"TargetBranchChanged":               {secPullRequest},
 	"TargetChanged":                     {secRequest, secFreshness},

@@ -171,14 +171,20 @@ func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remed
 	// the request keeps Merged and its rollout is reported once (#532).
 	if r.Delivery == nil || rr.Status.Source == nil || rr.Status.PullRequest == nil ||
 		rr.Status.PullRequest.MergeCommitSHA == "" || rolloutEnded(rr) {
-		return reconcile.Result{}, nil
+		// The check is over, or does not run: Merged is the final word, capped for a merged stale plan.
+		_, err := r.capStaleSuccess(ctx, rr)
+		return reconcile.Result{}, err
 	}
 	now := r.now()
 	if rolloutTarget(rr.Spec.TargetRef) == nil {
 		// Said once, so a person does not wait for a report that never comes.
-		return reconcile.Result{}, r.endRollout(ctx, rr, now, metav1.ConditionUnknown, rollout.ReasonKindNotChecked,
+		if err := r.endRollout(ctx, rr, now, metav1.ConditionUnknown, rollout.ReasonKindNotChecked,
 			fmt.Sprintf("The rollout check covers Deployments and StatefulSets only; a %s is not checked",
-				rr.Spec.TargetRef.Kind), "")
+				rr.Spec.TargetRef.Kind), ""); err != nil {
+			return reconcile.Result{}, err
+		}
+		_, err := r.capStaleSuccess(ctx, rr)
+		return reconcile.Result{}, err
 	}
 	stepCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
 	defer cancel()
@@ -189,10 +195,19 @@ func (r *RemediationRequestReconciler) afterMerge(ctx context.Context, rr *remed
 			err error
 		)
 		if res, fresh, err = r.waitForDelivery(ctx, stepCtx, rr, now); fresh == nil {
-			return res, err
+			if err != nil || !rolloutEnded(rr) {
+				return res, err
+			}
+			_, err = r.capStaleSuccess(ctx, rr)
+			return reconcile.Result{}, err
 		}
 	}
-	return r.judgeRollout(ctx, stepCtx, rr, now, fresh)
+	res, err := r.judgeRollout(ctx, stepCtx, rr, now, fresh)
+	if err != nil || !rolloutEnded(rr) {
+		return res, err
+	}
+	_, err = r.capStaleSuccess(ctx, rr)
+	return reconcile.Result{}, err
 }
 
 // waitForDelivery asks whether the merge commit is applied. When it is, it records in rr (not written yet; the

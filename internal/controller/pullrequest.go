@@ -1078,6 +1078,11 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 		return prUnchecked, err
 	}
+	if staleMark(rr) != nil {
+		// A stale plan whose close is pending or refused (#199): nothing but the close is written to its pull
+		// request, so no reply and no check run (the merge gate) either.
+		return prOpen, nil
+	}
 	if ctx.Err() == nil {
 		// The replies to the hints this look or an earlier one answered (hintreply.go), on a pull request found
 		// waiting for review; within a deadline of their own.
@@ -1364,11 +1369,15 @@ func (r *RemediationRequestReconciler) foreignHead(ctx context.Context, git prov
 // request is recorded), and returns errStopped.
 func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string) error {
-	if phase == remediationv1alpha1.PhaseMerged && staleMark(rr) != nil {
+	if phase == remediationv1alpha1.PhaseMerged && staleMark(rr) != nil && notClosed(rr) == nil {
 		// The cleanup of a stale plan started, but its pull request merged before the close: the change
-		// landed, so the plan's freshness no longer says anything and the mark is not left behind.
+		// landed, so the plan's freshness no longer says anything and the mark is not left behind. A merge after
+		// the Git host refused the close (PullRequestNotClosed, #199) keeps it: a person merged a plan Shadewright
+		// knew was stale, and the outcome after the merge is capped (capStaleSuccess).
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 	}
+	// The pull request is merged or closed now, or no longer this request's to close.
+	clearNotClosed(rr)
 	r.setPhase(rr, phase)
 	if phase == remediationv1alpha1.PhaseMerged {
 		// The Incident's count at the merge, in the write that sets Merged with the receipt (ADR-0030 section
@@ -1490,6 +1499,11 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 // its class: a read refused with 403 or 422 is retried, never taken for a refused write.
 func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
+	if errors.Is(err, errStaleNotClosed) {
+		// The close of the stale plan's pull request is refused (#199): looked at, and the close tried, again
+		// after the poll interval.
+		return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
+	}
 	if isUnknownChange(err) {
 		// A read of a pull request that failed, whatever its class (a 403 included), is never a refusal of a
 		// write: it is retried, until the request's own deadline (expire) or the handoff's (retryRecovery).
@@ -1618,7 +1632,10 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // open pull request of the branch that carries this request's marker is closed too, whatever its number. A 404 on
 // the recorded number that the branch does not confirm, an answer about another pull request or any failed read
 // keeps the finalizer for a retry; a recorded number that is not this request's while the branch lists one with
-// its marker does not (closeAllOwn). While writes are paused the deletion waits, because closing is a write.
+// its marker does not (closeAllOwn). While writes are paused (RemediationSettings spec.paused) the deletion waits,
+// because closing is a write. A close the Git host refuses for good (refusedClose) sets PullRequestNotClosed and
+// is tried again until closeRefusedGrace after the first refusal; then the finalizer goes and the pull request is
+// left open, with a Warning Event and a log line that name it (#288). A failure worth a retry never lets it go.
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
@@ -1655,11 +1672,16 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		}
 		defer freeSlot()
 	}
+	var (
+		left       *closeFailure
+		leftReason string
+	)
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeOnDeleteOf(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 		cancel()
+		cf, refused, isRefused := refusedClose(err)
 		switch {
 		case isUnknownChange(err):
 			// A read that failed is never an answer, whatever its class (ErrConflict included): retried.
@@ -1671,7 +1693,16 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
 		case errors.Is(err, freshness.ErrPaused):
 			return r.waitWhilePaused(ctx, rr)
+		case isRefused:
+			// The Git host refuses the close for good (#288): held and tried again for closeRefusedGrace after
+			// the first refusal, then let go with the pull request left open.
+			res, release, err := r.closeRefusedOnDelete(ctx, rr, cf, refused)
+			if !release {
+				return res, err
+			}
+			left, leftReason = cf, refused
 		default:
+			// A failure worth a retry never starts or ends the grace.
 			return r.waitOrFail(ctx, rr, err)
 		}
 	}
@@ -1687,6 +1718,10 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	controllerutil.RemoveFinalizer(rr, FinalizerName)
 	if err := r.Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
+	}
+	if left != nil {
+		// After the finalizer is gone, so a retry of a failed patch or restore does not report it twice.
+		r.leftOpen(ctx, rr, left, leftReason)
 	}
 	return reconcile.Result{}, nil
 }

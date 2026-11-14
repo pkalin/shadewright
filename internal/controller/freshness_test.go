@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -717,38 +719,175 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(reconciler().freshErr(ctx, fetch())).NotTo(Succeed())
 	})
 
-	DescribeTable("stops in NeedsIntervention, saying the change request was not closed, when the close of a stale plan is refused",
-		func(class error, reason string) {
-			_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
-			Expect(err).NotTo(HaveOccurred())
-			git.SetFail(func(op string) error {
-				if op == opClose {
-					closes.Add(1)
-					return fmt.Errorf("status 403 from https://github.com/example/fleet: %w", class)
+	// A stale plan whose close the Git host refuses for good (#199): the request keeps its phase and the mark, says
+	// why on PullRequestNotClosed, and watches the pull request, so a merge or a close by a person is recorded.
+	Context("when the Git host refuses the close of a stale plan for good (#199)", func() {
+		var (
+			events *record.FakeRecorder
+			refuse error // the error of every close; nil lets it through
+		)
+		watcher := func() (reconcile.Result, error) {
+			r := reconciler()
+			r.Recorder = events
+			return r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		}
+		notClosedEvents := func() int {
+			n := 0
+			for len(events.Events) > 0 {
+				if strings.HasPrefix(<-events.Events, corev1.EventTypeWarning+" "+EventPullRequestNotClosed+" ") {
+					n++
 				}
-				return nil
+			}
+			return n
+		}
+		// refused makes the plan stale and every close fail with class, and runs one reconcile.
+		refused := func(class error) {
+			GinkgoHelper()
+			events = record.NewFakeRecorder(20)
+			refuse = fmt.Errorf("status 403 from https://github.com/example/fleet with token ghs_leaked: %w", class)
+			git.SetFail(func(op string) error {
+				if op != opClose {
+					return nil
+				}
+				closes.Add(1)
+				return refuse
 			})
-			_, err = reconcileOnce()
+			// A policy edit makes the plan stale and leaves the pull request mergeable.
+			policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+			Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+			res, err := watcher()
 			Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
-			got := fetch()
-			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval), "the pull request is looked at again")
+		}
+		// expectStale checks the mark: PlanFresh False with the stale reason.
+		expectStale := func(got *remediationv1alpha1.RemediationRequest) {
+			GinkgoHelper()
 			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
 			Expect(c).NotTo(BeNil())
 			Expect(c.Status).To(Equal(metav1.ConditionFalse))
-			Expect(c.Reason).To(Equal(reason))
-			Expect(c.Message).To(ContainSubstring(freshness.ReasonTargetFileChanged))
-			Expect(c.Message).To(ContainSubstring("was not closed"))
-			Expect(c.Message).NotTo(ContainSubstring("https://"))
-			Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
-			stillOpen()
+			Expect(c.Reason).To(Equal(freshness.ReasonPolicyChanged))
+		}
 
-			_, err = reconcileOnce()
+		DescribeTable("keeps the phase, says why on PullRequestNotClosed and tries the close again on every look",
+			func(class error, reason string) {
+				refused(class)
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not NeedsIntervention")
+				expectStale(got)
+				c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+				Expect(c).NotTo(BeNil())
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Reason).To(Equal(reason))
+				Expect(c.Message).To(ContainSubstring(fmt.Sprintf("#%d (%s)", cr.Number, cr.URL)))
+				Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
+				Expect(c.Message).NotTo(ContainSubstring("403"))
+				Expect(notClosedEvents()).To(Equal(1))
+				stillOpen()
+				Expect(closes.Load()).To(Equal(int32(1)))
+
+				// Each look tries the close again and writes nothing else: no status write, no Event, no commit.
+				before := fetch().ResourceVersion
+				for i := range 3 {
+					res, err := watcher()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+					Expect(closes.Load()).To(Equal(int32(2 + i)))
+				}
+				Expect(fetch().ResourceVersion).To(Equal(before))
+				Expect(notClosedEvents()).To(BeZero())
+				Expect(changeRequest().HeadSHA).To(Equal(cr.HeadSHA), "nothing is pushed to the pull request")
+				Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+			},
+			Entry("403", providers.ErrForbidden, ReasonGitForbidden),
+			Entry("422", providers.ErrRejected, ReasonGitRejected),
+		)
+
+		It("records a merge by a person as Merged and keeps the stale reason", func() {
+			refused(providers.ErrForbidden)
+			_, err := git.Merge(cr.Number)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(closes.Load()).To(Equal(int32(1)), "the refused close is not tried again")
-		},
-		Entry("403", providers.ErrForbidden, ReasonGitForbidden),
-		Entry("422", providers.ErrRejected, ReasonGitRejected),
-	)
+			_, err = watcher()
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+			expectStale(got)
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				To(BeNil(), "the pull request is merged now")
+			Expect(stalePlanMerged(got)).To(BeTrue(), "the outcome after the merge is capped")
+		})
+
+		It("keeps the stale reason when a person merges between the look and a retried close", func() {
+			refused(providers.ErrForbidden)
+			merged := false
+			git.SetFail(func(op string) error {
+				if op == opClose && !merged {
+					merged = true
+					_, err := git.Merge(cr.Number)
+					Expect(err).NotTo(HaveOccurred())
+				}
+				return nil
+			})
+			_, err := watcher()
+			Expect(err).To(HaveOccurred(), "the close of a merged pull request is a conflict, retried")
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				NotTo(BeNil(), "a conflict closed nothing")
+			git.SetFail(nil)
+			_, err = watcher()
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+			expectStale(got)
+		})
+
+		It("records a close by a person as the normal end of a closed pull request and keeps the stale reason", func() {
+			refused(providers.ErrForbidden)
+			refuse = nil // a person's close goes through
+			Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+			refuse = fmt.Errorf("refused: %w", providers.ErrForbidden)
+			_, err := watcher()
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+			Expect(approved).NotTo(BeNil())
+			Expect(approved.Reason).To(Equal(ReasonChangeRequestClosed))
+			expectStale(got)
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				To(BeNil())
+		})
+
+		It("ends Superseded once a retried close goes through", func() {
+			refused(providers.ErrRejected)
+			refuse = nil
+			supersedes(freshness.ReasonPolicyChanged)
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				To(BeNil())
+		})
+
+		It("takes a pull request found closed after a close that may have gone through as its own close", func() {
+			refused(providers.ErrForbidden)
+			// The close takes effect, but its answer is a server error.
+			refuse = nil
+			git.SetAfter(func(op string) error {
+				if op == opClose {
+					return &providers.RetryableError{Err: errors.New("bad gateway")}
+				}
+				return nil
+			})
+			DeferCleanup(func() { git.SetAfter(nil) })
+			_, err := watcher()
+			Expect(err).To(HaveOccurred(), "retried")
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				To(BeNil(), "the close may have gone through")
+			git.SetAfter(nil)
+			_, err = watcher()
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded), "not a person's close")
+			closedForStalePlan(got, freshness.ReasonPolicyChanged)
+		})
+	})
 
 	It("keeps watching the pull request when the Git host refuses the freshness check's reads", func() {
 		git.SetFail(func(op string) error {

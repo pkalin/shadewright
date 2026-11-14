@@ -295,7 +295,11 @@ const (
 	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed). It is also False, with the
 	// stale reason and the phase unchanged, once the cleanup of a stale plan has started: it is written before
 	// the change request is closed, so a close whose answer was lost is known on the next reconcile to be
-	// Shadewright's own, and the request ends Superseded rather than NeedsIntervention. It is Unknown, with reason
+	// Shadewright's own, and the request ends Superseded rather than NeedsIntervention. When the Git host refuses
+	// that close for good (403 or 422), the request keeps its phase and this condition, and condition
+	// PullRequestNotClosed says why; a later merge by a person keeps it on the Merged request, so the outcome after
+	// the merge is never Succeeded (StalePlanMerged), and a later close by a person keeps it on the request that
+	// ends with ChangeRequestClosed. It is Unknown, with reason
 	// GitForbidden or GitRejected, while the Git host refuses the freshness check of a request whose pull
 	// request waits for review; the pull request is still watched and nothing is written to Git.
 	ConditionPlanFresh = "PlanFresh"
@@ -329,6 +333,18 @@ const (
 	// PullRequestUnreadable, is recorded when it is set or its reason changes, and one Normal Event,
 	// PullRequestReadable, when it is removed.
 	ConditionPullRequestUnreadable = "PullRequestUnreadable"
+	// ConditionPullRequestNotClosed is True, with reason GitForbidden or GitRejected, while the Git host refuses
+	// for good (403 or 422) to close a pull request Shadewright must close: the one of a stale plan (PlanFresh
+	// False keeps the stale reason, the request keeps its phase and its pull request is still watched, and the
+	// close is tried again on every look) or the one of a deleted request (the finalizer holds the deletion and
+	// tries again until 15 minutes after lastTransitionTime, then lets the request go and leaves the pull request
+	// open, with a Warning Event PullRequestLeftOpen). The message names the pull request; lastTransitionTime is
+	// the first refusal and stays while the refusals and failures worth a retry go on, except that a stale plan's
+	// close whose call failed in a way that may have closed the pull request (a timeout, a 5xx) removes it, so a
+	// pull request found closed after that is taken as Shadewright's close (Superseded) and not as a person's. A
+	// failed read is never a refusal of the close (PullRequestUnreadable says so). One Warning Event,
+	// PullRequestNotClosed, is recorded when it is set or its reason changes. It is removed when the request ends.
+	ConditionPullRequestNotClosed = "PullRequestNotClosed"
 )
 
 // PullRequestStatus records the pull request that carries the plan.

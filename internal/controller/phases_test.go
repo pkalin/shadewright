@@ -94,6 +94,9 @@ func kustomization(s ksStatus) *unstructured.Unstructured {
 	return u
 }
 
+// oomPodUID is the pod UID of the OOM kills the reports of these specs record.
+const oomPodUID = "77777777-7777-4777-8777-777777777777"
+
 // phasesWorld is one merged request with a merge receipt, its StatefulSet and the fakes around them.
 type phasesWorld struct {
 	git          *fakegit.Git
@@ -1107,7 +1110,7 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		start := applied.Add(30 * time.Second)
 		t, n := drive(w, start, start.Add(2*time.Minute), verification.PollInterval, 1, quiet(w, start))
 		putReport(w, n, t, start, func(vr *remediationv1alpha1.VerificationReport) {
-			vr.Status.OOMKill = &remediationv1alpha1.OOMKill{PodUID: "77777777-7777-4777-8777-777777777777",
+			vr.Status.OOMKill = &remediationv1alpha1.OOMKill{PodUID: oomPodUID,
 				Container: workerContainer}
 		})
 		mustReconcileAt(w, t)
@@ -1115,6 +1118,66 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		cleared := condition(rr, remediationv1alpha1.ConditionCleared)
 		Expect(cleared.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cleared.Reason).To(Equal(ReasonOOMKilled))
+	})
+
+	// markStalePlan writes on w's merged request what a person's merge of a stale plan leaves when the Git host
+	// refused its close (#199): PlanFresh False with the stale reason.
+	markStalePlan := func(w *phasesWorld) {
+		rr := fetch(w)
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionPlanFresh,
+			Status: metav1.ConditionFalse, Reason: freshness.ReasonTargetFileChanged, Message: "The target file changed"})
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+	}
+
+	It("ends a merged stale plan Inconclusive with StalePlanMerged where it would end Succeeded (#199)", func() {
+		w := newWorld(nil)
+		markStalePlan(w)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(need), verification.PollInterval, 1, quiet(w, start))
+		putReport(w, n, t, start, nil)
+		mustReconcileAt(w, t)
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonStalePlanMerged)
+		Expect(condition(rr, remediationv1alpha1.ConditionVerified).Message).To(ContainSubstring("#56"))
+		cleared := condition(rr, remediationv1alpha1.ConditionCleared)
+		Expect(cleared.Status).To(Equal(metav1.ConditionUnknown), "as any Inconclusive end from Verifying")
+		Expect(cleared.Reason).To(Equal(ReasonStalePlanMerged))
+		Expect(condition(rr, remediationv1alpha1.ConditionPlanFresh).Reason).To(Equal(freshness.ReasonTargetFileChanged))
+	})
+
+	It("still ends a merged stale plan Failed when the change fails (#199)", func() {
+		w := newWorld(nil)
+		markStalePlan(w)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		t, n := drive(w, start, start.Add(2*time.Minute), verification.PollInterval, 1, quiet(w, start))
+		putReport(w, n, t, start, func(vr *remediationv1alpha1.VerificationReport) {
+			vr.Status.OOMKill = &remediationv1alpha1.OOMKill{PodUID: oomPodUID,
+				Container: workerContainer}
+		})
+		mustReconcileAt(w, t)
+		expectEnd(w, remediationv1alpha1.PhaseFailed, ReasonOOMKilled)
+	})
+
+	It("ends a merged stale plan Inconclusive with StalePlanMerged once its rollout is reported with --verify-outcomes off (#199)", func() {
+		w := newWorld(nil)
+		markStalePlan(w)
+		w.r.VerifyOutcomes = false
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		mustReconcileAt(w, w.merged.Add(time.Minute))
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonStalePlanMerged)
+		Expect(meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut)).To(BeTrue(),
+			"the rollout is still reported")
+	})
+
+	It("keeps Merged for a plan that was fresh with --verify-outcomes off once its rollout is reported", func() {
+		w := newWorld(nil)
+		w.r.VerifyOutcomes = false
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		mustReconcileAt(w, w.merged.Add(time.Minute))
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut)).To(BeTrue())
 	})
 
 	// A revert (ADR-0030 section 8, #96): no report is read, the OOM rule and Cleared do not apply, and it ends

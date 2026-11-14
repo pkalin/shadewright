@@ -680,7 +680,7 @@ func TestNewRefusesInvalidConfig(t *testing.T) {
 }
 
 // New keeps the configured effort and thinking allowance, and a request sends them: max_tokens is the
-// request's limit plus the allowance.
+// request's limit plus the allowance, which OutputSpend reports.
 func TestCompleteSendsEffortAndThinkingAllowance(t *testing.T) {
 	p, err := New(Config{Model: testModel, KeyFile: "k", Effort: effortHigh, ThinkingAllowance: 2000})
 	if err != nil || p.effort != effortHigh || p.thinkingAllowance != 2000 {
@@ -702,6 +702,14 @@ func TestCompleteSendsEffortAndThinkingAllowance(t *testing.T) {
 	}
 	if got.MaxTokens != 3000 || got.OutputConfig["effort"] != effortHigh || got.OutputConfig["format"] != nil {
 		t.Errorf("max_tokens %d, output_config %v", got.MaxTokens, got.OutputConfig)
+	}
+	// The loop bounds the call's cost by what max_tokens allows, not by the request's limit alone.
+	var b providers.OutputBounder = h.p
+	if spend := b.OutputSpend(req.MaxOutputTokens); spend != got.MaxTokens {
+		t.Errorf("OutputSpend = %d, want max_tokens %d", spend, got.MaxTokens)
+	}
+	if spend := b.OutputSpend(0); spend != DefaultMaxOutputTokens+2000 {
+		t.Errorf("OutputSpend(0) = %d, want the default limit plus the allowance", spend)
 	}
 }
 

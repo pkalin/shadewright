@@ -42,6 +42,23 @@ func TestOpaqueHidesItsBytes(t *testing.T) {
 	if s := fmt.Sprintf("%v %+v %#v %s %s %s", m, m, m, o, enc, logged.String()); strings.Contains(s, mark) {
 		t.Errorf("the bytes show: %s", s)
 	}
+	// Every verb and flag, on the value, a pointer to it and a struct that holds it, prints no byte of the
+	// data. The format strings are built at run time, so vet does not refuse the verbs that do not fit.
+	verbs := []string{"v", "+v", "#v", "s", "q", "x", "X", "% x", "d", "+d", "5d", "c", "o", "O", "b", "U",
+		"#U", "e", "f", "g", "t", "p", "08b"}
+	for _, verb := range verbs {
+		for _, arg := range []any{o, &o, m, &m, struct{ B Opaque }{o}, []Opaque{o}} {
+			s := fmt.Sprintf("%"+verb, arg)
+			for _, leak := range []string{mark, "84 72 73", "[91 123", "U+005B", "5b7b", "1011011"} {
+				if strings.Contains(s, leak) {
+					t.Errorf("%%%s of %T shows the bytes: %s", verb, arg, s)
+				}
+			}
+		}
+	}
+	if o.Len() != len(src) || (Opaque{}).Len() != 0 {
+		t.Errorf("Len = %d, want %d", o.Len(), len(src))
+	}
 	got := o.Bytes()
 	if !strings.HasPrefix(string(got), `[{"type"`) || !strings.Contains(string(got), mark) {
 		t.Fatalf("Bytes = %s", got)

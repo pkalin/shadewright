@@ -284,6 +284,15 @@ func newHTTPClient(rt http.RoundTripper, headerTimeout time.Duration) *http.Clie
 	}
 }
 
+// OutputSpend implements [providers.OutputBounder]: max_tokens is the request's limit (or the default when it
+// sets none) plus the thinking allowance, and thinking counts as output.
+func (p *Provider) OutputSpend(maxOutputTokens int) int {
+	if maxOutputTokens == 0 {
+		maxOutputTokens = p.maxOutput
+	}
+	return maxOutputTokens + p.thinkingAllowance
+}
+
 // Complete sends one Messages API request, retrying transient failures. See the package documentation for
 // the classes of its errors.
 func (p *Provider) Complete(ctx context.Context, req providers.CompletionRequest) (providers.Completion, error) {

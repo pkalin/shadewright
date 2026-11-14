@@ -189,7 +189,9 @@ How the numbers read:
   current models; on some it cannot be turned off), and sends `EVAL_ANTHROPIC_EFFORT` as the effort. Thinking
   tokens are output tokens, so `max_tokens` is the run's 2048 output tokens per call plus
   `EVAL_ANTHROPIC_THINKING_ALLOWANCE`: thinking up to the allowance does not cut off an answer that fits in 2048
-  tokens. `output` counts every output token, thinking included, and so do the loop's token budgets. A reply that
+  tokens. `output` counts every output token, thinking included, and so do the loop's token budgets: a call with
+  unknown usage, or one that failed, is charged (`charged`) the allowance too, and the input estimate counts the
+  thinking blocks sent back. A reply that
   still reaches `max_tokens` is malformed output. In a tool round the adapter sends the thinking blocks of the turn that made
   the tool calls back unchanged, as the API expects; the loop carries them without reading them, and they never
   reach a log line, an error or the report.

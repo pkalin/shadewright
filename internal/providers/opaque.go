@@ -18,6 +18,7 @@ package providers
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 )
 
@@ -27,6 +28,12 @@ import (
 // nothing else with it. Its bytes are unexported and every printed or encoded form hides them, so it cannot
 // reach a log line, an error, a trace or a stored record by accident. The zero value is empty.
 type Opaque struct {
+	// d is a pointer so that fmt, when it prints the struct without its methods (the %p verb on a value),
+	// shows an address and not the bytes.
+	d *opaqueData
+}
+
+type opaqueData struct {
 	b []byte
 }
 
@@ -35,14 +42,24 @@ func NewOpaque(b []byte) Opaque {
 	if len(b) == 0 {
 		return Opaque{}
 	}
-	return Opaque{b: bytes.Clone(b)}
+	return Opaque{d: &opaqueData{b: bytes.Clone(b)}}
+}
+
+func (o Opaque) data() []byte {
+	if o.d == nil {
+		return nil
+	}
+	return o.d.b
 }
 
 // Bytes returns a copy of the data, for the adapter that made it.
-func (o Opaque) Bytes() []byte { return bytes.Clone(o.b) }
+func (o Opaque) Bytes() []byte { return bytes.Clone(o.data()) }
+
+// Len returns the number of bytes held, for a caller that bounds the size of a request.
+func (o Opaque) Len() int { return len(o.data()) }
 
 // IsZero reports whether o holds nothing.
-func (o Opaque) IsZero() bool { return len(o.b) == 0 }
+func (o Opaque) IsZero() bool { return o.Len() == 0 }
 
 // String hides the data.
 func (o Opaque) String() string {
@@ -52,8 +69,9 @@ func (o Opaque) String() string {
 	return "[opaque]"
 }
 
-// GoString hides the data from %#v.
-func (o Opaque) GoString() string { return "providers.Opaque{" + o.String() + "}" }
+// Format prints the same placeholder as String for every verb and flag, %#v, %d, %x, %c, %U and the
+// others included.
+func (o Opaque) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(o.String())) }
 
 // LogValue hides the data from slog.
 func (o Opaque) LogValue() slog.Value { return slog.StringValue(o.String()) }

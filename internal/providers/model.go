@@ -96,6 +96,15 @@ type Completion struct {
 	ProviderBlocks Opaque
 }
 
+// OutputBounder is implemented by a ModelProvider that may bill more output tokens for a request than its
+// MaxOutputTokens, for example because it adds room for thinking to the limit it sends. The caller then
+// bounds a call's cost with OutputSpend instead of MaxOutputTokens: in the budget check before the call, and
+// in the charge of a call that failed or whose usage is unknown.
+type OutputBounder interface {
+	// OutputSpend returns the most output tokens a request with this MaxOutputTokens can be billed.
+	OutputSpend(maxOutputTokens int) int
+}
+
 // ModelProvider calls a language model.
 type ModelProvider interface {
 	// Complete sends one request. Throttling and transient failures are returned as retryable errors; an

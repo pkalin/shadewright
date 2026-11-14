@@ -45,7 +45,7 @@ An Azure budget only alerts. It does not stop usage ([budgets](https://learn.mic
 ### Keeping calls down
 
 - Deduplication and cached diagnoses keep repeated calls down.
-- A failed or timed-out call is charged at its upper bound: the input estimate plus `MaxOutputTokens`.
+- A failed or timed-out call is charged at its upper bound: the input estimate (the provider blocks sent back included) plus the most output the call can be billed, which is `MaxOutputTokens`, or for the Anthropic adapter `MaxOutputTokens` plus its thinking allowance (#728).
 
 ### The daily count of analyses
 
@@ -62,7 +62,7 @@ The spend limit is a count of tokens per model deployment and UTC day (`maxToken
 - **Why per deployment.** The triage and escalation models differ in price.
 - **No default.** The admin sets it for each deployment.
 
-The money it allows is at most that count times the deployment's highest price per token (12.1). That holds only if the counter reserves a call's upper bound (the input bound plus `maxOutputTokens`) before calling, under one lock shared by concurrent analyses, and settles to the real usage afterwards.
+The money it allows is at most that count times the deployment's highest price per token (12.1). That holds only if the counter reserves a call's upper bound (the input bound plus the most output the call can be billed) before calling, under one lock shared by concurrent analyses, and settles to the real usage afterwards.
 
 **Planned.** That is a requirement on the counter ([#208](https://github.com/pkalin/shadewright/issues/208)). Where it is counted is open (#208).
 
@@ -76,7 +76,7 @@ The lab itself (AKS node, Key Vault, storage, Foundry) is priced in `shadewright
 | --- | --- |
 | Illustration volume | 100 analyses a day, 30 days, 6,000 input and 1,500 output tokens each |
 | Illustration escalation rate | 5% to variant B |
-| Failed or timed-out call | Charged at input estimate plus `MaxOutputTokens` |
+| Failed or timed-out call | Charged at input estimate plus `MaxOutputTokens` (plus the thinking allowance with the Anthropic adapter) |
 | Spend limit unit | Tokens per model deployment and UTC day (`maxTokensPerDay`), no default |
 | Budget ConfigMap | `shadewright-analysis-budget`, operator namespace, writable by the analyzer and admins only |
 | Count unreadable, unwritable or missing | Refuse |

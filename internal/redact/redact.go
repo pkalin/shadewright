@@ -41,8 +41,9 @@ limitations under the License.
 // quote character (a plain or backslash-escaped quote), and at nothing else, not at ",", "]" or "}"
 // (keyNameValue). The separator between a flag and its value is whitespace including real line ends, a
 // backslash directly followed by a real line end, a YAML list dash only at the start of a line after
-// indentation, a comma only directly after the flag's closing quote, and that quote, plain or
-// backslash-escaped; nothing else, so literal "\n" pairs, a bare comma and a bare "-" start the value. A
+// indentation, a comma only directly after the flag name or its closing quote, and that quote, plain or
+// backslash-escaped; nothing else, so literal "\n" pairs, a comma after whitespace and a bare "-" start the
+// value. A
 // match that starts inside a value already taken is skipped, except a secret-named flag, which is judged on
 // its own. Values that look like references rather than secrets, such
 // as "secretName: db-creds", are kept, because the name of a missing Secret is what a diagnosis needs, and so
@@ -67,8 +68,8 @@ limitations under the License.
 // flag name written with Unicode escapes, or in a here-document or here-string, the part of a value after a
 // key name past its first token or its quotes on one line (blanks inside an argument that holds the flag,
 // YAML flow, block, multi-line, anchored and tagged scalars, shell words of glued pieces and command
-// substitution, arrays and objects under a secret field, JSON comments), a value after a flag in a flow list
-// of plain items ("[--password, x]") or in pretty-printed escaped JSON ("\",\n  \""), the part of an
+// substitution, arrays and objects under a secret field, JSON comments), a value after a flag in
+// pretty-printed escaped JSON ("\",\n  \""), the part of an
 // unquoted value after a quote inside it, a value after a compound name and a blank that is no opaque token,
 // and a secret in a format no rule knows (TestKeyNameKnownLeaks).
 package redact
@@ -1963,11 +1964,12 @@ const (
 	// real line ends included, a YAML list dash and a blank only after a line end and indentation, or a
 	// backslash directly before a line end (a shell line continuation).
 	flagSpaceExpr = `(?:[ \t\r]|\n(?:[ \t]*-[ \t])?|\\\r?\n)`
-	// flagSeparatorExpr is what stands between a secret-named flag and its value: the flag's closing quote,
-	// plain or escaped, and a comma directly after it (JSON and YAML flow lists of quoted items), then
-	// flagSpaceExpr pieces; or flagSpaceExpr pieces alone. Nothing else: literal "\n", "\r" and "\t" pairs,
-	// a bare comma and a bare "-" are the start of the value.
-	flagSeparatorExpr = `(?:\\*["'](?:,` + flagSpaceExpr + `*|` + flagSpaceExpr + `+)|` + flagSpaceExpr + `+)`
+	// flagSeparatorExpr is what stands between a secret-named flag and its value: a comma directly after the
+	// flag name or after its closing quote, plain or escaped (JSON and YAML flow lists, of quoted or plain
+	// items), then flagSpaceExpr pieces if any; or the closing quote and flagSpaceExpr pieces; or
+	// flagSpaceExpr pieces alone. Nothing else: literal "\n", "\r" and "\t" pairs, a comma after whitespace
+	// and a bare "-" are the start of the value.
+	flagSeparatorExpr = `(?:(?:\\*["'])?,` + flagSpaceExpr + `*|\\*["']` + flagSpaceExpr + `+|` + flagSpaceExpr + `+)`
 )
 
 // Quoted value forms for the Authorization rule: double-quoted with backslash escapes, and single-quoted

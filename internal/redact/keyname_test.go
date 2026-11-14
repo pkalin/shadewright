@@ -199,7 +199,10 @@ func TestQuotedValueAfterAKeyName(t *testing.T) {
 		"{run --token " + k + "}\nnext":                            "\nnext",
 		"run --token '" + k + " --region x":                        " --region x",
 		"[--token " + k + "]next --region y":                       " --region y",
-		"run --token " + k + "'x' --region y":                      " --region y",
+		// A comma directly after the flag name: a YAML flow list of plain items.
+		"args: [--client-secret, " + k + ", --region, west]": " --region, west]",
+		"args: [--client-secret," + k + " , --region]":       " , --region]",
+		"run --token " + k + "'x' --region y":                " --region y",
 	} {
 		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:]}, []string{kept})
 	}
@@ -361,10 +364,9 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		"object value":               `{"token": {"a": "horse", "b": "` + k + `"}, "u": "x"}`,
 		"escaped array value":        `{\"apiKey\":[\"horse\",\"` + k + `\"],\"u\":1}`,
 		"json comment":               "{\"password\": // rotated\n  \"" + k + "\"}",
-		// The separator after a flag takes a comma only directly after the flag's closing quote, and no JSON
-		// escape for whitespace ("\n"): such a comma or escape is the start of the value.
-		"flow sequence of plain items": "args: [--client-secret, " + k + ", --region]",
-		"escaped json lines":           `"args":"[\n  \"--client-secret\",\n  \"` + k + `\"\n]"`,
+		// The separator after a flag takes no JSON escape for whitespace ("\n"): such an escape is the start
+		// of the value.
+		"escaped json lines": `"args":"[\n  \"--client-secret\",\n  \"` + k + `\"\n]"`,
 		// An unquoted value ends at a quote, also one that belongs to the value.
 		"quote inside a value": "run --password ab'" + k + " --region x",
 		// After a compound name and a blank, only an opaque token goes.

@@ -7,7 +7,8 @@
 # name the certificate is checked against). The test makes a throwaway CA and one serving certificate (its SAN is the
 # server name) with openssl, stores the certificate in the three Secrets the chart mounts, and checks that
 #   - all three Pods become Ready (the mounted key is readable by the non-root user: mode 0444),
-#   - the certificate each endpoint presents is the one the test issued (issuer = the test CA),
+#   - the certificate each endpoint presents is the one the test issued (issuer = the test CA; read again for up to
+#     30 seconds, a failed probe is retried, not taken as an answer),
 #   - a scrape with the right CA and server name and a valid token answers 200 with metrics,
 #   - a scrape with another CA, and one with another server name, fail the TLS verification (curl exit 60),
 #   - a scrape without a token is refused with 401 (the profile keeps TokenReview).
@@ -175,11 +176,36 @@ scrape() {
   echo "${code} ${rc}"
 }
 
+# wait_presented_cert <service>: sets "hello" to the verbose output of a TLS handshake with the Service, read again
+# until it shows the test's certificate or PRESENTED_CERT_TIMEOUT seconds have passed. The first probe can run
+# before the Service answers from the cluster IP (a probe that fails shows no certificate at all), while the binary
+# never serves a certificate of its own here: the Secret is mounted before it starts, so controller-runtime's
+# certificate watcher loads it before the listener exists (#703). The last probe is printed when the wait ends.
+PRESENTED_CERT_TIMEOUT=30
+hello=""
+wait_presented_cert() {
+  local svc="$1" rc=0 deadline=$((SECONDS + PRESENTED_CERT_TIMEOUT))
+  while :; do
+    set +e
+    hello="$(in_pod "${svc}" insecure "${SERVER_NAME}" no --verbose --output /dev/null 2>&1)"
+    rc=$?
+    set -e
+    if grep -qE "^\*[[:space:]]+issuer: CN=shadewright-test-ca$" <<<"${hello}" &&
+      grep -qE "^\*[[:space:]]+subject: CN=${SERVER_NAME}$" <<<"${hello}"; then
+      return 0
+    fi
+    [ "${SECONDS}" -ge "${deadline}" ] && break
+    sleep 1
+  done
+  echo "${svc}: no test certificate after ${PRESENTED_CERT_TIMEOUT}s; the last probe ended with curl exit ${rc}:" >&2
+  printf '%s\n' "${hello}" | sed 's/^/    /' >&2
+}
+
 for c in executor analyzer verifier; do
   svc="${REL}-${c}-metrics-service"
 
   # The endpoint serves the certificate the test issued, not the one it makes for itself.
-  hello="$(in_pod "${svc}" insecure "${SERVER_NAME}" no --verbose --output /dev/null 2>&1 || true)"
+  wait_presented_cert "${svc}"
   check "${c}: the presented certificate is issued by the test CA" grep -qE '^\*[[:space:]]+issuer: CN=shadewright-test-ca$' <<<"${hello}"
   check "${c}: the presented certificate is the one in the Secret" grep -qE "^\*[[:space:]]+subject: CN=${SERVER_NAME}$" <<<"${hello}"
 

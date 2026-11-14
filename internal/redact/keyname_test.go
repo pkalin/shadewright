@@ -367,6 +367,9 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		// The separator after a flag takes no JSON escape for whitespace ("\n"): such an escape is the start
 		// of the value.
 		"escaped json lines": `"args":"[\n  \"--client-secret\",\n  \"` + k + `\"\n]"`,
+		// Only a double quote escaped as JSON inside a string opens a quoted value: after "\'" the value is
+		// the quote and one token.
+		"escaped single quote": `--password \'horse battery ` + k + `\' --region x`,
 		// An unquoted value ends at a quote, also one that belongs to the value.
 		"quote inside a value": "run --password ab'" + k + " --region x",
 		// After a compound name and a blank, only an opaque token goes.
@@ -563,6 +566,38 @@ func TestKeepsWhatMainKept(t *testing.T) {
 					break
 				}
 			}
+		}
+	}
+}
+
+// Inputs where the code and the three stated rules differed (#585 review), with the whole output: a flag
+// whose quoted value starts inside the previous value and runs past it, an escaped quote that does not
+// close, vertical tab and form feed as the separator, and a YAML list dash after a line end of "\r" alone.
+func TestKeyNameRulesHoldAtTheirEdges(t *testing.T) {
+	for in, want := range map[string]string{
+		"--password,\"--token 'horse battery staple\" TAILSECRET' --region west": "--password,\"[REDACTED:credential]' --region west",
+		`--password \"horse battery staple --region west`:                        `--password *** battery staple --region west`,
+		"--password\vAbc123 --region west":                                       "--password\v*** --region west",
+		"--password\fAbc123 --region west":                                       "--password\f*** --region west",
+		"--password\r  - hunter2abc --region west":                               "--password\r  - [REDACTED] --region west",
+		"app --client-secret \\\r  hunter2abc --region west":                     "app --client-secret \\\r  [REDACTED] --region west",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// Over-redaction kept by decision (#585 review), pinned so that a change to it is seen: a flag's value that
+// is itself a compound key name takes the opaque token after it, as the compound rule reads the text on its
+// own; and a double-quoted value goes on past a backslash before its line end, as in YAML.
+func TestKeyNameAcceptedOverRedaction(t *testing.T) {
+	for in, want := range map[string]string{
+		"--password,client_secret 20261114T100000Z0 reason=FailedMount":      "--password,[credential] [credential] reason=FailedMount",
+		"--password \"abc\\\nreason=FailedMount node=worker\" --region west": "--password \"[REDACTED:credential]\" --region west",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
 		}
 	}
 }

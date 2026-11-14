@@ -1677,11 +1677,12 @@ func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd in
 // own value redacted ("--enable-auth --client-secret x"). The flag counts wherever its dash does not follow a
 // letter or a digit ("EXTRA_ARGS=--client-secret x" counts, "a--token x" and "my-token x" do not; after
 // another "-" the match starts at that dash). A reference flag ("--secret-name", "--token-ttl",
-// "--password-file", "--password-stdin") keeps its value. A value that starts inside the previous value is
-// skipped, as it is redacted already, so each value is read once and the cost stays linear.
+// "--password-file", "--password-stdin") keeps its value. A value that ends inside the previous value is
+// skipped, as it is redacted already; one that starts inside it and runs past its end (a quote opened inside
+// the previous value) is redacted to its own end.
 func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	switch {
-	case m[0] > 0 && isAlnum(s[m[0]-1]), m[1] < prevEnd, referenceKey(s[m[2]:m[3]], true):
+	case m[0] > 0 && isAlnum(s[m[0]-1]), referenceKey(s[m[2]:m[3]], true):
 		return 0, 0, false
 	case m[2] == m[0]+1 && !isLetter(s[m[2]]):
 		// One dash: the flag needs a letter after it ("-password"), as "-_x" or "-1" is no flag.
@@ -1691,7 +1692,8 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	q := strings.TrimLeft(sep, `\`)
 	closed := q != "" && (q[0] == '"' || q[0] == '\'')
 	start, end := keyNameValue(s, m[1], m[0], closed)
-	return start, end, true
+	// A value that lies inside the previous value is redacted already; one that runs past it is not.
+	return start, end, end > prevEnd
 }
 
 // compoundValueSpans is the spans function of the rule for a key name of two or more words, a blank and the
@@ -1837,7 +1839,16 @@ func keyNameValue(s string, pos, keyStart int, closed bool) (int, int) {
 		}
 	}
 	if level > 0 {
-		return escapedQuotedSpan(s, pos, level)
+		start, end := escapedQuotedSpan(s, pos, level)
+		q := end
+		for q < len(s) && s[q] == '\\' {
+			q++
+		}
+		if q < len(s) && s[q] == '"' {
+			return start, end
+		}
+		// The escaped quote does not close on its line: the quote and the token after it, as for a plain one.
+		return pos, tokenEnd(s, start)
 	}
 	if c := s[pos]; c == '"' || c == '\'' {
 		if end := quotedEnd(s, pos); end > 0 {
@@ -1963,7 +1974,7 @@ const (
 	// flagSpaceExpr is one piece of the separator between a secret-named flag and its value: whitespace,
 	// real line ends included, a YAML list dash and a blank only after a line end and indentation, or a
 	// backslash directly before a line end (a shell line continuation).
-	flagSpaceExpr = `(?:[ \t\r]|\n(?:[ \t]*-[ \t])?|\\\r?\n)`
+	flagSpaceExpr = `(?:[ \t\v\f]|(?:\r\n?|\n)(?:[ \t]*-[ \t])?|\\(?:\r\n?|\n))`
 	// flagSeparatorExpr is what stands between a secret-named flag and its value: a comma directly after the
 	// flag name or after its closing quote, plain or escaped (JSON and YAML flow lists, of quoted or plain
 	// items), then flagSpaceExpr pieces if any; or the closing quote and flagSpaceExpr pieces; or

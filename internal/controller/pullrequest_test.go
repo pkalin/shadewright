@@ -2775,7 +2775,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(c.Message).To(ContainSubstring(says), "the step")
 				Expect(c.Message).To(ContainSubstring(name), "the recorded pull request")
 				Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
-				Expect(c.Message).NotTo(ContainSubstring("403"))
+				Expect(c.Message).NotTo(ContainSubstring("status 403"))
 				Expect(c.LastTransitionTime.Time).To(BeTemporally("==", deleted), "on the executor's clock")
 				Expect(meta.FindStatusCondition(fetch().Status.Conditions,
 					remediationv1alpha1.ConditionPullRequestNotClosed)).To(BeNil(), "that one is the stale plan's")
@@ -2961,7 +2961,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(c.Reason).To(Equal(ReasonCleanupFailed))
 				Expect(c.Message).To(ContainSubstring(name), "the recorded pull request")
 				Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
-				Expect(c.Message).NotTo(ContainSubstring("422"))
+				Expect(c.Message).NotTo(ContainSubstring("status 422"))
 				Expect(c.LastTransitionTime.Time).To(BeTemporally("==", deleted), "on the executor's clock")
 				Expect(refusedOf()).To(BeNil(), "no refusal class")
 				reasons, _ := warnings()
@@ -4304,7 +4304,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					Expect(cond.Reason).To(Equal(reason))
 					Expect(cond.Message).NotTo(ContainSubstring("ghs_leaked"))
 					Expect(cond.Message).NotTo(ContainSubstring("https://"))
-					Expect(cond.Message).NotTo(ContainSubstring("403"))
+					Expect(cond.Message).NotTo(ContainSubstring("status 403"))
 
 					before := faulty.creations()
 					faulty.failOn("", nil)

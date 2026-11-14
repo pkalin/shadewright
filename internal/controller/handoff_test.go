@@ -418,7 +418,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		// request right before the update is what finds it merged.
 		merged := false
 		git.SetFail(func(op string) error {
-			if op == opFind && !merged {
+			if op == opGet && !merged {
 				merged = true
 				_, err := git.Merge(number)
 				return err
@@ -864,10 +864,10 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(r.Status.PullRequest.ReviewCheck.State).To(Equal(remediationv1alpha1.ReviewCheckRefused))
 		Expect(condition(r, remediationv1alpha1.ConditionApproved).Reason).To(Equal(ReasonReviewCheckRefused))
 		Expect(git.CheckRuns(r.Status.PullRequest.HeadSHA)).To(BeEmpty())
-		cr, err := reconciler().findOwnChangeRequest(ctx, r)
-		Expect(err).NotTo(HaveOccurred(), "the body still carries the predecessor's marker, which stays accepted")
-		Expect(cr).NotTo(BeNil())
-		Expect(cr.Number).To(Equal(number))
+		v, _, err := reconciler().lookHeld(ctx, r)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(v.state).To(Equal(changeOpen), "the body still carries the predecessor's marker, which stays accepted")
+		Expect(v.pr.Number).To(Equal(number))
 	})
 
 	It("owns a merge of its commit after a restart that lost the record of the handoff", func() {
@@ -984,7 +984,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(get(pred).Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
 	})
 
-	It("keeps a lock while another pull request of the branch may merge the replacement's commit", func() {
+	It("keeps a lock while another pull request of the branch may merge the replacement's commit, and reads the recorded one after the update (#688)", func() {
 		replace("512Mi", ref(hint))
 		untilIntent()
 		git.SetAfter(func(op string) error {
@@ -1000,9 +1000,147 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		})
 		pollOf(repl)
 		git.SetAfter(nil)
+		r := get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		c := condition(r, remediationv1alpha1.ConditionPROpened)
+		Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonHandoffAborted))
+		Expect(c.Message).To(ContainSubstring("was closed around the handoff"), "the recorded pull request was read")
 		drive(3)
 		Expect(holdsLock(get(pred)) || holdsLock(get(repl))).To(BeTrue(),
 			"an open pull request carries the replacement's commit")
+	})
+
+	It("reads the recorded pull request again after a 404 right after the update, and takes it over (#688)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		appended, missed := false, false
+		git.SetAfter(func(op string) error {
+			if op == opAppend {
+				appended = true
+			}
+			return nil
+		})
+		git.SetFail(func(op string) error {
+			if op == opGet && appended && !missed {
+				missed = true
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		pollOf(repl)
+		git.SetAfter(nil)
+		git.SetFail(nil)
+		Expect(missed).To(BeTrue())
+		Expect(get(repl).Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseCancelled), "a 404 alone aborts nothing")
+		updated := head()
+		Expect(updated).NotTo(Equal(oldHead))
+		pollUntil(tookOver)
+		Expect(head()).To(Equal(updated), "no second commit")
+		Expect(get(repl).Status.PullRequest.Number).To(Equal(number))
+	})
+
+	It("only requeues the predecessor whose intent stands on a 404 its branch does not confirm (#688)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		pollOf(pred)
+		pollOf(pred)
+		git.SetFail(nil)
+		p := get(pred)
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the 404 is a failed read")
+		Expect(intent(p)).NotTo(BeNil(), "the intent still stands")
+		Expect(get(repl).Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseCancelled))
+		pollUntil(tookOver)
+		Expect(get(repl).Status.PullRequest.Number).To(Equal(number))
+	})
+
+	It("reads the recorded pull request again after an answer about another pull request around the update, and takes it over (#688)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		appended, missedBefore, missedAfter := false, false, false
+		git.SetAfter(func(op string) error {
+			if op == opAppend {
+				appended = true
+			}
+			return nil
+		})
+		git.SetFail(func(op string) error {
+			switch {
+			case op != opGet:
+			case !appended && !missedBefore:
+				missedBefore = true
+				return fmt.Errorf("another pull request: %w", providers.ErrUntrustedAnswer)
+			case appended && !missedAfter:
+				missedAfter = true
+				return fmt.Errorf("another pull request: %w", providers.ErrUntrustedAnswer)
+			}
+			return nil
+		})
+		pollOf(repl)
+		Expect(missedBefore).To(BeTrue())
+		Expect(get(repl).Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseCancelled),
+			"an answer about another pull request says nothing about the recorded one")
+		Expect(head()).To(Equal(oldHead), "nothing was pushed on it")
+		pollOf(repl)
+		pollOf(repl)
+		git.SetAfter(nil)
+		git.SetFail(nil)
+		Expect(missedAfter).To(BeTrue())
+		Expect(get(repl).Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseCancelled), "not after the update either")
+		pollUntil(tookOver)
+		Expect(get(repl).Status.PullRequest.Number).To(Equal(number))
+	})
+
+	It("reads the recorded pull request again after a 404 before the update, and takes it over (#688)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		missed := false
+		git.SetFail(func(op string) error {
+			if op == opGet && !missed {
+				missed = true
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		pollOf(repl)
+		git.SetFail(nil)
+		Expect(missed).To(BeTrue())
+		Expect(get(repl).Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseCancelled), "a 404 alone aborts nothing")
+		Expect(head()).To(Equal(oldHead), "nothing was pushed on a 404")
+		pollUntil(tookOver)
+		Expect(get(repl).Status.PullRequest.Number).To(Equal(number))
+	})
+
+	It("reads the recorded pull request before the update, not a newer one of the branch (#688)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		done := false
+		git.SetFail(func(op string) error {
+			if (op == opGet || op == opFind) && !done {
+				done = true
+				if err := git.CloseChangeRequest(ctx, number); err != nil {
+					return err
+				}
+				_, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: branch(),
+					BaseBranch: mainBranch, Title: "newer", Body: "opened by hand"})
+				return err
+			}
+			return nil
+		})
+		pollOf(repl)
+		git.SetFail(nil)
+		Expect(done).To(BeTrue())
+		r := get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		c := condition(r, remediationv1alpha1.ConditionPROpened)
+		Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonHandoffAborted))
+		Expect(c.Message).To(ContainSubstring("was closed before the handoff"), "the recorded pull request was read")
+		Expect(head()).To(Equal(oldHead), "no update of a closed pull request")
 	})
 
 	It("lets one of two replacements racing for one hint take the pull request over", func() {
@@ -1034,7 +1172,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		untilIntent()
 		closed := false
 		git.SetFail(func(op string) error {
-			if op == opFind && !closed {
+			if op == opGet && !closed {
 				closed = true
 				return git.CloseChangeRequest(ctx, number)
 			}

@@ -66,7 +66,7 @@ stateDiagram-v2
 
 The API also defines `AutoMergeQueued` and `Cancelled`. Nothing sets them yet (planned). `Succeeded` is set after `Verifying` (`Cleared=True` and `Verified=True`, reason `NoRecurrence`; `Cleared` has `ResolvedBeforeRollout` instead when the Incident's count did not move from the merge to the rollout); it is final, and the circuit breaker clears older outcomes by it. Auto-merge is not built: even with a policy that has `approval: Optional` and a request with `approvalRequired: false`, a person decides.
 
-Conditions give the reasons: `PolicyAllowed` (the policy check), `PullRequestOpened`, `Approved`, `PlanFresh` (the plan is still current, checked every five minutes before merge), `Delivered`, `Configured` and `RolledOut` (after the merge) and `Verified` (after the merge: `False` for `Failed`, `Unknown` for `Inconclusive` and for `MergedBeforeVerification`). A pause adds `WritesPaused`, see [pause and resume](how-to/pause-and-resume.md).
+Conditions give the reasons: `PolicyAllowed` (the policy check), `PullRequestOpened`, `Approved`, `PlanFresh` (the plan is still current, checked every five minutes before merge), `Delivered`, `Configured` and `RolledOut` (after the merge) and `Verified` (after the merge: `False` for `Failed`, `Unknown` for `Inconclusive` and for `MergedBeforeVerification`). A request that stopped and keeps the lock on its target because another pull request is open on its branch has `TargetHeld`, which names that pull request. A pause adds `WritesPaused`, see [pause and resume](how-to/pause-and-resume.md).
 
 ## After the merge: did it reach the pods?
 

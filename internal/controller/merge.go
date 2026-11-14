@@ -28,7 +28,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -191,44 +190,6 @@ func setVerifiedUnknown(rr *remediationv1alpha1.RemediationRequest, reason, mess
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
-}
-
-// findRecorded finds the recorded pull request again by its number, in the repository git is bound to (the
-// plan's), and checks that it is from the request's branch to its target branch (ADR-0030 section 1). The look-up
-// by branch would return the newest pull request of the branch, which after a merge may be another one (a
-// supersede chain shares its branch), so the merge of the recorded one would never be recorded.
-//
-// It returns, besides the pull request, why the recorded one is gone, when it is: the host has none with that
-// number (ErrNotFound), the one with that number is from another branch or to another target branch, or the host
-// answered with another pull request (ErrUntrustedAnswer). Each is final; the caller stops the request with the
-// cause in its message. Any other failure is returned as it is, for a retry, and never reads as gone.
-func findRecorded(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest) (
-	cr providers.ChangeRequest, gone string, err error) {
-	pr, src := rr.Status.PullRequest, rr.Status.Source
-	if pr == nil || src == nil {
-		return providers.ChangeRequest{}, "", errors.New("no pull request or source recorded")
-	}
-	cr, err = git.GetChangeRequest(ctx, pr.Number)
-	switch {
-	case providers.IsNotFound(err):
-		return providers.ChangeRequest{}, fmt.Sprintf("the Git host has no pull request #%d of Shadewright to the "+
-			"target branch", pr.Number), nil
-	case providers.IsUntrustedAnswer(err):
-		return providers.ChangeRequest{}, fmt.Sprintf("the Git host answered with another pull request than #%d",
-			pr.Number), nil
-	case err != nil:
-		return providers.ChangeRequest{}, "", err
-	case cr.Number != pr.Number:
-		return providers.ChangeRequest{}, fmt.Sprintf("the Git host answered with another pull request than #%d",
-			pr.Number), nil
-	case cr.HeadBranch != freshness.BranchName(rr):
-		return providers.ChangeRequest{}, fmt.Sprintf("pull request #%d is from another branch than the request's",
-			pr.Number), nil
-	case cr.BaseBranch != string(src.TargetBranch):
-		return providers.ChangeRequest{}, fmt.Sprintf("pull request #%d targets another branch than the request's "+
-			"target branch", pr.Number), nil
-	}
-	return cr, "", nil
 }
 
 // settleReceipt runs on a Merged request before the check after the merge, and reports whether it ended the

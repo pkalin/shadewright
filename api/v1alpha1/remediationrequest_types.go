@@ -311,6 +311,24 @@ const (
 	// when the holder changes, behind a lock held by a request that stopped); the condition is removed once the
 	// limits let the request through, or at the decision of the policy check.
 	ConditionQueued = "Queued"
+	// ConditionTargetHeld is True, with reason PullRequestOpenOnBranch, while a request that stopped keeps the
+	// lock on its target (status.holdsTarget) because its recorded pull request is closed or merged but another
+	// pull request is open on its branch and may still deliver its change; the message names that pull request.
+	// It is written when the executor finds that, not on every look, and removed when the lock is released.
+	ConditionTargetHeld = "TargetHeld"
+	// ConditionPullRequestUnreadable is True while the executor cannot read the request's pull requests (#688):
+	// with reason GitForbidden or GitRejected while the Git host refuses the read (403 or 422), and, on a request
+	// that keeps the lock on its target, with reason RepositoryUnavailable while the repository of the plan is not
+	// in RemediationSettings any more, TargetBranchChanged while its entry names another target branch, or
+	// RepositoryUnusable while its entry cannot be used, and with reason RecordedMissingOtherListed while the Git
+	// host has no pull request of this request with the recorded number but the request's branch lists another one
+	// with its marker (the message names both numbers and what ends it). The message names the read;
+	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
+	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
+	// once the repository can be opened again). One Warning Event,
+	// PullRequestUnreadable, is recorded when it is set or its reason changes, and one Normal Event,
+	// PullRequestReadable, when it is removed.
+	ConditionPullRequestUnreadable = "PullRequestUnreadable"
 )
 
 // PullRequestStatus records the pull request that carries the plan.
@@ -638,8 +656,9 @@ type RemediationRequestStatus struct {
 	BreakerProbe bool `json:"breakerProbe,omitempty"`
 
 	// holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
-	// write of the allowed decision and cleared only once the request's pull request is known merged or closed,
-	// or a look-up by its branch and marker found none of its own open. While it is true no other request on the
+	// write of the allowed decision and cleared only once the request's pull request is known merged or closed and
+	// no other pull request that may deliver its change is open on its branch (condition TargetHeld says when one
+	// is), or a look-up by its branch and marker found none of its own open. While it is true no other request on the
 	// same target goes through the policy check. Unset on a request not yet decided, and on one written before the
 	// field existed; the executor then derives it once from the request's phase and pull request, keeping the
 	// lock when in doubt.

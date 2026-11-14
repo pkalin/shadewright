@@ -136,6 +136,11 @@ const (
 	// refusal. Nothing is retried.
 	ReasonGitRejected = "GitRejected"
 
+	// ReasonRecordedMissingOtherListed (condition PullRequestUnreadable): the Git host has no pull request of this
+	// request with the recorded number, but the request's branch lists another one with its marker, so the request
+	// cannot tell whether its change is gone and is read again until a person acts (#688).
+	ReasonRecordedMissingOtherListed = "RecordedMissingOtherListed"
+
 	reasonTargetBranchChanged   = "TargetBranchChanged"
 	reasonRepositoryUnavailable = "RepositoryUnavailable"
 )
@@ -411,7 +416,7 @@ func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *re
 		errors.Is(err, errRepositoryGone):
 		outcome = "; the settings no longer reach its repository, so the pull request was not closed"
 	case errors.Is(err, errChangeRequestNotOurs):
-		outcome = "; the recorded pull request is not the branch's own, so it was not closed"
+		outcome = "; the recorded pull request could not be confirmed as this request's, so it was not closed"
 	default:
 		return err
 	}
@@ -490,12 +495,21 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	branch := freshness.BranchName(rr)
 	src := rr.Status.Source
 
-	// The pull request may exist although the status write that records it failed (design section 6).
-	switch cr, err := git.FindChangeRequest(ctx, branch); {
-	case err == nil:
-		return reconcile.Result{}, r.adoptChangeRequest(ctx, git, rr, cr, fresh.File)
-	case !errors.Is(err, providers.ErrNotFound):
-		return reconcile.Result{}, freshness.WrapProvider("find the change request", err)
+	// The pull request may exist although the status write that records it failed (design section 6). Every pull
+	// request of the branch is read (changeOf), since the newest may hide an older one of this request: an open one
+	// of its own is adopted, else a merged one, else a closed one. With none of its own, a pull request of the
+	// branch without its marker stops the request; with none at all the branch steps go on. Unknown is retried.
+	switch v := r.changeOf(ctx, git, rr, changeQuery{}); adoptRule[v.state] {
+	case adoptRetry:
+		return reconcile.Result{}, v.err
+	case adoptIt:
+		return reconcile.Result{}, r.adoptChangeRequest(ctx, git, rr, v.pr, fresh.File)
+	case adoptNone:
+		if v.foreign {
+			return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+				ReasonForeignChangeRequest, "A pull request for the branch exists without this request's marker; "+
+					"it was not touched")
+		}
 	}
 
 	head, err := git.BranchHead(ctx, branch)
@@ -597,6 +611,21 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	return reconcile.Result{}, r.recordPullRequest(ctx, rr, cr)
 }
 
+// adoptOutcome is what pullRequestStep does per verdict on the pull requests of the branch.
+type adoptOutcome int
+
+const (
+	adoptRetry adoptOutcome = iota
+	adoptIt
+	adoptNone
+)
+
+// adoptRule is pullRequestStep's rule per verdict: open, merged and closed adopt the pull request (record it, end
+// Merged, or stop as closed), gone goes on to the branch steps, unknown is retried.
+var adoptRule = map[changeState]adoptOutcome{
+	changeOpen: adoptIt, changeMerged: adoptIt, changeClosed: adoptIt, changeGone: adoptNone, changeUnknown: adoptRetry,
+}
+
 // checkPlanned checks a branch head whose file holds the planned value before its pull request is opened or
 // recorded (#524): data, the file at head, must be byte for byte the planned change of the target file the
 // freshness check read (freshFile), exactly what Shadewright commits, and head must be one commit on top of
@@ -644,8 +673,8 @@ func (r *RemediationRequestReconciler) checkPlanned(ctx context.Context, git pro
 // pull request unrecorded.
 func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, ref *renderRefusal) error {
-	before := rr.Status.DeepCopy()
-	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	before, rv := rr.Status.DeepCopy(), rr.ResourceVersion
+	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,
 		Status:             metav1.ConditionTrue,
@@ -653,10 +682,10 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 		Message:            fmt.Sprintf("Pull request #%d is open", cr.Number),
 		ObservedGeneration: rr.Generation,
 	})
-	// retry hands err back with the status as it was: nothing is decided, and the next reconcile finds the
-	// pull request again by its branch and checks it again.
+	// retry hands err back with the status as it was, except what changeOf wrote meanwhile (restoreStatus):
+	// nothing is decided, and the next reconcile finds the pull request again by its branch and checks it again.
 	retry := func(err error) error {
-		rr.Status = *before
+		restoreStatus(rr, before, rv)
 		return err
 	}
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
@@ -675,8 +704,9 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	// A person may have merged or closed it since the open: that is looked at first, because closing a closed
 	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
 	// decides nothing; the close by number below still runs.
-	if found, err := git.FindChangeRequest(cleanCtx, freshness.BranchName(rr)); err == nil && found.Number == cr.Number {
-		if ok, err := ended(found); ok {
+	read := changeQuery{number: cr.Number}
+	if v := r.changeOf(cleanCtx, git, rr, read); v.state == changeMerged || v.state == changeClosed {
+		if ok, err := ended(v.pr); ok {
 			return err
 		}
 	}
@@ -689,13 +719,13 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	case providers.IsConflict(err):
 		// A merge between the look-up and the close is a conflict, but so is any other 409 of the host: only a
 		// look-up that shows the pull request merged (or closed) decides; anything else is retried.
-		found, findErr := git.FindChangeRequest(cleanCtx, freshness.BranchName(rr))
-		if findErr == nil && found.Number == cr.Number {
-			if ok, err := ended(found); ok {
+		v := r.changeOf(cleanCtx, git, rr, read)
+		if v.state == changeMerged || v.state == changeClosed {
+			if ok, err := ended(v.pr); ok {
 				return err
 			}
 		}
-		return retry(errors.Join(freshness.WrapProvider("close the pull request", err), findErr))
+		return retry(errors.Join(freshness.WrapProvider("close the pull request", err), v.err))
 	default:
 		if _, _, final := refusal(err); !final {
 			// A host failure, the deadline or paused writes: retried (a pause waits for the kill switch).
@@ -806,7 +836,7 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 	if err != nil {
 		return err
 	}
-	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	if ref != nil {
 		return r.mergedForeign(ctx, rr, ref)
 	}
@@ -860,22 +890,30 @@ func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git prov
 
 // mergedUnrecorded ends a request whose stale plan's cleanup found its change request merged (closing a merged
 // one is a conflict) before any status recorded it: the merge of its own pull request is what made the plan
-// stale. It looks the pull request up again and ends the request through endMerged. A look-up that fails is
-// returned with closeErr for a retry; one that finds no merged pull request of this request returns closeErr.
+// stale, or whose close at the deadline was refused the same way. It reads the pull request again by the number
+// the close tried (closeConflictError; changeOf with the marker; ADR-0030 section 1: a newer pull request on the
+// same branch never stands in for it), and ends the request through endMerged when it is merged. Unknown (a failed
+// read, a 404 the branch does not confirm, an answer about another pull request) is returned joined with closeErr
+// for a retry. Open, closed or gone (a 404 the branch confirms, another branch or base, no marker), or a closeErr
+// without a number, returns closeErr.
 func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	closeErr error) error {
+	tried, ok := errors.AsType[*closeConflictError](closeErr)
+	if !ok {
+		return closeErr
+	}
 	git, err := r.openPlanRepository(ctx, rr)
 	if err != nil {
 		return errors.Join(closeErr, err)
 	}
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
-	if err != nil {
-		return errors.Join(closeErr, freshness.WrapProvider("find the merged change request", err))
+	// openPlanRepository returned, so the source is recorded and its target branch is the repository's.
+	switch v := r.changeOf(ctx, git, rr, changeQuery{number: tried.number, marker: true}); v.state {
+	case changeMerged:
+		return r.endMerged(ctx, git, rr, v.pr)
+	case changeUnknown:
+		return errors.Join(closeErr, v.err)
 	}
-	if !hasMarker(cr.Body, rr) || cr.State != providers.ChangeRequestMerged {
-		return closeErr
-	}
-	return r.endMerged(ctx, git, rr, cr)
+	return closeErr
 }
 
 // mergedForeign ends a request whose recorded pull request a person merged although its head failed a check
@@ -894,7 +932,7 @@ func (r *RemediationRequestReconciler) mergedForeign(ctx context.Context, rr *re
 func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) error {
 	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
-	rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	rr.Status.Deadline = nil
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,
@@ -909,6 +947,11 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	logf.FromContext(ctx).Info("Opened pull request for RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "pullRequest", cr.Number)
 	return nil
+}
+
+// recordNumber records pr as the request's pull request, in the status write the caller makes.
+func recordNumber(rr *remediationv1alpha1.RemediationRequest, pr remediationv1alpha1.PullRequestStatus) {
+	rr.Status.PullRequest = &pr
 }
 
 // markClosed rewrites PullRequestOpened of a request whose recorded pull request is closed without a merge (or,
@@ -1057,26 +1100,28 @@ func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remedia
 		ReasonChangeRequestClosed, "The pull request was closed without a merge; automation stopped"))
 }
 
-// conflictConfirmWait is how long, on the executor's clock, a merge conflict the Git host reports must last before
-// it ends the request. GitHub computes mergeability lazily: after the target branch moves (and moves back) it may
-// answer "dirty" for a pull request that merges cleanly, until it computes the answer again.
-const conflictConfirmWait = 2 * time.Minute
+// confirmWait is how long, on the executor's clock, an answer of the Git host that ends something must last
+// before it is believed: a merge conflict before it ends the request (GitHub computes mergeability lazily: after
+// the target branch moves, and moves back, it may answer "dirty" for a pull request that merges cleanly, until it
+// computes the answer again), and a pull request missing by its number and from the listing of its branch before
+// it is gone (goneLooks, #688), since both reads may come from a replica that lags.
+const confirmWait = 2 * time.Minute
 
-// conflictWaitRemaining is what is left of conflictConfirmWait since the conflict was first seen, never negative.
+// confirmWaitRemaining is what is left of confirmWait since the answer was first seen, never negative.
 // ok is false when the recorded time lies more than mergeCommitClockSlack after now: the clock went back and the
 // wait can no longer be measured, so the caller starts it again rather than end the request on it. Inside the
-// slack the wait is at most conflictConfirmWait plus the slack.
-func conflictWaitRemaining(since, now time.Time) (left time.Duration, ok bool) {
+// slack the wait is at most confirmWait plus the slack.
+func confirmWaitRemaining(since, now time.Time) (left time.Duration, ok bool) {
 	if since.After(now.Add(mergeCommitClockSlack)) {
 		return 0, false
 	}
-	return max(since.Add(conflictConfirmWait).Sub(now), 0), true
+	return max(since.Add(confirmWait).Sub(now), 0), true
 }
 
 // conflicted handles a fresh plan whose open pull request the Git host reports with a merge conflict (#680). A
 // first report is recorded in status.pullRequest.conflictSeen, with the time on the executor's clock, the
 // recorded head and the target branch head the freshness check read, and the request waits. It ends only on a
-// conflicted read at least conflictConfirmWait later on the same recorded head; a clock that went back records
+// conflicted read at least confirmWait later on the same recorded head; a clock that went back records
 // the report anew. The target branch head is recorded as what the first report was about and decides nothing:
 // a branch that moves more often than the wait would otherwise start the wait again without end. A failed status write is returned for a retry and decides
 // nothing.
@@ -1088,7 +1133,7 @@ func (r *RemediationRequestReconciler) conflicted(ctx context.Context, rr *remed
 	fresh freshness.Result) (reconcile.Result, error) {
 	pr := rr.Status.PullRequest
 	if seen := pr.ConflictSeen; seen != nil && seen.HeadSHA == pr.HeadSHA {
-		left, ok := conflictWaitRemaining(seen.At.Time, r.now())
+		left, ok := confirmWaitRemaining(seen.At.Time, r.now())
 		if ok && left == 0 {
 			return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 				ReasonChangeRequestConflict, "The Git host reports that the pull request conflicts with the target "+
@@ -1107,8 +1152,8 @@ func (r *RemediationRequestReconciler) conflicted(ctx context.Context, rr *remed
 			rr.Namespace, rr.Name, err)
 	}
 	logf.FromContext(ctx).Info("The Git host reports a merge conflict; waiting to see it again",
-		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "wait", conflictConfirmWait)
-	return reconcile.Result{RequeueAfter: max(min(conflictConfirmWait, r.pullRequestPollInterval()), stepDelay)}, nil
+		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "wait", confirmWait)
+	return reconcile.Result{RequeueAfter: max(min(confirmWait, r.pullRequestPollInterval()), stepDelay)}, nil
 }
 
 // endLooked handles a fresh plan on what the look at its pull request found: closed without a merge (rejected)
@@ -1147,16 +1192,19 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{}, err
 	}
 	// By its number, not its branch: the branch may carry a newer pull request (ADR-0030 section 1).
-	cr, gone, err := findRecorded(ctx, git, rr)
-	switch {
-	case err != nil:
-		return hintLook{}, freshness.WrapProvider("find the change request", err)
-	case gone != "":
+	// Unknown is returned for a retry and ends nothing; gone is confirmed (changeOf).
+	v := r.changeOf(ctx, git, rr, changeQuery{})
+	switch v.state {
+	case changeUnknown:
+		return hintLook{}, v.err
+	case changeGone:
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
-			"The recorded pull request cannot be found any more ("+gone+"); automation stopped")
+			"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
 	}
-	if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
-		if cr.Number == rr.Status.PullRequest.Number && intent(rr) != nil {
+	// changeOf read the recorded number and answers about it only, so cr is that pull request.
+	cr := v.pr
+	if cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
+		if intent(rr) != nil {
 			// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
 			// what happens to the pull request from here, and this request waits for it.
 			switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
@@ -1364,26 +1412,52 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 	err := r.closeChangeRequest(cleanCtx, rr)
 	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
+	if done, err := r.endUnrecordedMerge(ctx, rr, err); done {
+		// Its own pull request was merged before any status recorded it: it ends Merged (or
+		// MergedWithForeignChange), never Expired, as for a stale plan's cleanup (cleanUpStale).
+		if err != nil && !errors.Is(err, errStopped) {
+			return r.retry(ctx, rr, err)
+		}
+		return reconcile.Result{}, nil
+	}
 	if reason, _, ok := refusal(err); ok {
 		// The deadline has passed either way; waiting for a permission or a rule to change would only keep
-		// the request open longer. The message says that a pull request of its own may be left open.
-		// The lock on the target stays: a pull request of its own may be open (settleLock keeps it, since none
-		// is recorded), until checkHeld finds none open.
+		// the request open longer. The message says that a pull request of its own may be left open, and
+		// whether the host refused the read of the pull requests (an unknown verdict, isUnknownChange) or the
+		// close. The lock on the target stays: the status rule keeps it (prMayBeOpen), until checkHeld's read of
+		// the branch finds none open that may deliver the change.
+		what := "to close a pull request Shadewright may have opened on the branch"
+		if isUnknownChange(err) {
+			what = "to read the pull requests of the branch, so none was closed"
+		}
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
 			ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and the "+
-				"Git host refused ("+reason+") to find or close a pull request Shadewright may have opened on the "+
-				"branch; if one is open, close it by hand. The target stays locked until none is found open"))
+				"Git host refused ("+reason+") "+what+"; if one is open, close it by hand. The target stays "+
+				"locked until none is found open"))
 	}
 	if err != nil && !errors.Is(err, errRepositoryGone) && !errors.Is(err, errTargetBranchChanged) &&
 		!errors.Is(err, freshness.ErrRepositoryUnusable) && !errors.Is(err, errChangeRequestNotOurs) {
 		return r.retry(ctx, rr, err)
 	}
-	if err == nil && rr.Status.HoldsTarget != nil {
-		// The cleanup closed the branch's pull request of this request, or found none of its own: none is open.
-		rr.Status.HoldsTarget = new(false)
+	// The lock is not released here, even when the cleanup closed every pull request of the branch with this
+	// request's marker: one without the marker may be open on the branch and still deliver the change. The read
+	// of the branch after the stop (checkHeld, through openHolding) releases it. A repository that left the
+	// settings allows no such read: condition PullRequestUnreadable says so in the same status write, and the
+	// lock is kept until it is configured again or the request is deleted.
+	var gone, was *metav1.Condition
+	if errors.Is(err, errRepositoryGone) {
+		gone = repositoryGoneRead(rr)
+		if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
+			was = c.DeepCopy()
+		}
+		putUnreadable(&rr.Status.Conditions, gone)
 	}
-	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
-		ReasonPullRequestDeadline, "The pull request was not opened before the deadline"))
+	err = r.stop(ctx, rr, remediationv1alpha1.PhaseExpired, ReasonPullRequestDeadline,
+		"The pull request was not opened before the deadline")
+	if gone != nil && errors.Is(err, errStopped) {
+		r.unreadableEvent(rr, was, gone)
+	}
+	return reconcile.Result{}, r.ignoreStopped(err)
 }
 
 // retry maps a step error to a requeue: paused writes wait, a host that asked for a delay gets it, the rest
@@ -1412,9 +1486,15 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 // request ends in NeedsIntervention, while one whose pull request waits for review (PRCreated,
 // AwaitingApproval) keeps its phase, says why on PlanFresh (Unknown) and keeps watching the pull request, so
 // a later merge is still recorded (a close without a merge is decided once the freshness check runs again).
-// Any other error goes to waitOrFail.
+// Any other error goes to waitOrFail, and so does a failed read of a pull request (isUnknownChange), whatever
+// its class: a read refused with 403 or 422 is retried, never taken for a refused write.
 func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
+	if isUnknownChange(err) {
+		// A read of a pull request that failed, whatever its class (a 403 included), is never a refusal of a
+		// write: it is retried, until the request's own deadline (expire) or the handoff's (retryRecovery).
+		return r.waitOrFail(ctx, rr, err)
+	}
 	reason, message, ok := refusal(err)
 	if !ok {
 		return r.waitOrFail(ctx, rr, err)
@@ -1534,8 +1614,11 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
 // Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
 // request that holds the lock on its target (status.holdsTarget), whatever its phase; a merged one refuses the
-// close with a conflict, and one without this request's marker is left alone. While writes are paused the
-// deletion waits, because closing is a write.
+// close with a conflict, and one without this request's marker is left alone. With a pull request recorded, every
+// open pull request of the branch that carries this request's marker is closed too, whatever its number. A 404 on
+// the recorded number that the branch does not confirm, an answer about another pull request or any failed read
+// keeps the finalizer for a retry; a recorded number that is not this request's while the branch lists one with
+// its marker does not (closeAllOwn). While writes are paused the deletion waits, because closing is a write.
 func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
@@ -1566,22 +1649,26 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if closes && ended(rr.Status.Phase) {
 		// A request that ended was not active until it was deleted, so another may have been let through
 		// meanwhile: the close waits for a slot under the cap (waitForCapOnDelete).
-		release, res, wait, err := r.waitForCapOnDelete(ctx, rr)
+		freeSlot, res, wait, err := r.waitForCapOnDelete(ctx, rr)
 		if wait || err != nil {
 			return res, err
 		}
-		defer release()
+		defer freeSlot()
 	}
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-		err := r.closeChangeRequest(cleanCtx, rr)
+		err := r.closeOnDeleteOf(cleanCtx, rr)
 		err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
 		cancel()
 		switch {
+		case isUnknownChange(err):
+			// A read that failed is never an answer, whatever its class (ErrConflict included): retried.
+			return r.waitOrFail(ctx, rr, err)
 		case err == nil, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
-			errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, providers.ErrConflict),
+			errors.Is(err, freshness.ErrRepositoryUnusable), isMergedUnrecorded(err),
 			errors.Is(err, errChangeRequestNotOurs):
-			// Closed, nothing reachable to close, already merged, or not ours to close.
+			// Closed, nothing reachable to close, the open ones closed and a merged one read as merged, or not
+			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
 		case errors.Is(err, freshness.ErrPaused):
 			return r.waitWhilePaused(ctx, rr)
 		default:

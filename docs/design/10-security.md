@@ -153,8 +153,9 @@ The lock is per target object, not per file in Git. Two targets declared in one 
 The executor records the lock in `status.holdsTarget` (#294, #376). It is set in the status write of the allowed decision and cleared only when the release is proven. The release is proven by one of these:
 
 - the pull request merged (`Merged` or a later phase, or seen merged after a stop);
-- the pull request closed by Shadewright or seen closed (`Superseded`, written only after the close, or `PullRequestOpened` with reason `PullRequestClosed`, `ChangeRequestClosed` or `ChangeRequestMerged`);
-- a cleanup or a look-up that found none of the request's own open.
+- the pull request seen merged (`PullRequestOpened` with reason `ChangeRequestMerged`);
+- the pull request closed by Shadewright or seen closed (`Superseded`, written only after the close, or `PullRequestOpened` with reason `PullRequestClosed` or `ChangeRequestClosed`), and a read of the branch that finds no other open pull request that may deliver the change (see [stopped holders](#stopped-holders));
+- a look-up of the branch that found none of the request's own open and no other open pull request that may deliver the change (`openHolding`). A cleanup (the stale plan's, the deadline's) closes only the pull requests with the request's marker, so it never releases the lock itself: a person may have opened one without the marker from the branch (#688).
 
 Everything else keeps the lock (fail closed):
 
@@ -167,13 +168,15 @@ A request that waits behind a holder of the same Incident whose pull request is 
 
 ### Stopped holders
 
-A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its branch and marker (`AGENTS.md` invariant 5) and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A look-up that fails keeps the lock.
+A stopped request that holds the lock is looked at every 10 minutes. Its pull request is found by its recorded number, or by its branch when none is recorded, and its marker (`AGENTS.md` invariant 5), and recorded when the status did not have it. The lock is released once the pull request is closed or merged, so a person who closes it frees the target without deleting the request. A recorded pull request closed without a merge releases it only after a read of every open pull request of the branch (#688, [ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md) amendment of 2026-11-13): any open one keeps the lock, since it has the branch head and so the request's commit, unless it is the recorded pull request of another request on the same target and branch that holds the lock itself (a replacement that took it over). The status alone never releases the lock on a closed pull request, so the stop of the watch, the close of a stale plan and the close at the deadline all go through that read, in the same reconcile or the next. One function writes `status.holdsTarget` false (`release`), and only the lock rule (`settleLock`, `checkHeld`) calls it on a pull request's account; a test over the package source checks both. While an open pull request keeps the lock, condition `TargetHeld` (reason `PullRequestOpenOnBranch`) names it. A look-up that fails keeps the lock, and so does a 404 for the recorded number. A look-up the Git host refuses (403 or 422), or one that cannot be made because the repository of the plan left the settings, also keeps the lock, and condition `PullRequestUnreadable` (reason `GitForbidden`, `GitRejected` or `RepositoryUnavailable`; `TargetBranchChanged` or `RepositoryUnusable` when the repository is in the settings again with another target branch or an entry that cannot be used) says which read failed and since when, with one Warning Event when it is set; the next look-up that works removes it (#688). The status write that releases the lock of a stopped request removes it too, since no look-up follows.
 
 A request queued behind a stopped holder checks the limits every 10 minutes instead of every 30 seconds, and at once when the holder changes.
 
 ### Deleting a request
 
 Deleting the request releases the lock once its finalizer is gone. The finalizer tries to close the pull request of every request that holds the lock, whatever its phase.
+
+The rule above that no release happens while an open pull request may still deliver the change does not cover deletion. The finalizer closes the pull requests that carry the request's marker and then goes, and the lock goes with the request, even when a pull request without the marker (one a person opened from the branch) is still open there and may be merged. This is deliberate: a person deleted the holder, and the open pull request is theirs to close (#688). The same holds for the recorded pull request when a person removed the request's marker from it while it is open: the finalizer leaves it open and goes. A recorded pull request that is really gone lets the finalizer go only on a second look of the same executor process at least two minutes after the first (6.5.3), so a restart of the executor starts that wait again.
 
 A close the Git host refuses leaves the request `Terminating` and the lock held, until a person fixes the permission or removes the finalizer by hand ([uninstall, step 3](../upgrade-uninstall.md#uninstall)).
 

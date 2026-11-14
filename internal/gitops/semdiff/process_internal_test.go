@@ -36,13 +36,26 @@ import (
 const helperArg = "-semdiff-test-helper"
 
 // TestMain lets the test binary serve as the render process of Check ([RunRenderProcess]) and as the helper
-// processes of the tests below.
+// processes of the tests below. Check renders in this process ([RenderInProcessForTests]), except in the tests
+// of the render process, which call [UseRenderProcess] or [runRenderProcess] itself (#717).
 func TestMain(m *testing.M) {
 	RunRenderProcess()
 	if len(os.Args) > 2 && os.Args[1] == helperArg {
 		os.Exit(runHelper(os.Args[2]))
 	}
+	if err := RenderInProcessForTests(); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
+}
+
+// UseRenderProcess makes Check render in a render process until the test ends, for the tests of the package
+// semdiff_test that are about it. The tests of this package do not run in parallel.
+func UseRenderProcess(t *testing.T) {
+	t.Helper()
+	inProcess.Store(false)
+	t.Cleanup(func() { inProcess.Store(true) })
 }
 
 // sink keeps the helper's allocations alive.

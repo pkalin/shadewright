@@ -83,6 +83,9 @@ func Check(ctx context.Context, in Input) (Result, error) {
 	if _, _, _, err := plan(in); err != nil {
 		return Result{}, err
 	}
+	if inProcess.Load() {
+		return renderHere(ctx, in) // only in a test binary ([RenderInProcessForTests])
+	}
 	return runRenderProcess(ctx, in)
 }
 

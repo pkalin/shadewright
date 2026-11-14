@@ -16,15 +16,23 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 )
 
-// TestMain lets the test binary serve as the render process of the render check (semdiff.RunRenderProcess),
-// which the pull request step runs.
+// TestMain makes the render check of the pull request step render in this process
+// (semdiff.RenderInProcessForTests): no spec here is about the render process, which the tests of
+// internal/gitops/semdiff cover, and a race-built test binary started for each check slowed the suite past its
+// margin (#717). The test binary still serves as the render process (semdiff.RunRenderProcess), so the suite
+// passes without the in-process render too.
 func TestMain(m *testing.M) {
 	semdiff.RunRenderProcess()
+	if err := semdiff.RenderInProcessForTests(); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
 }

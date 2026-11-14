@@ -80,16 +80,23 @@ func heapPeak(f func()) uint64 {
 var memoryRefusal = regexp.MustCompile(fmt.Sprintf(
 	`^semdiff: TooLarge: the render needs more than (%d MiB of memory|[0-9]+ MiB of resident memory)$`, semdiff.MaxRenderMemory>>20))
 
+// chainDeadline bounds TestCheckBoundsAChainedNameReference: ten times the 26 s its render process took to reach
+// the memory limit alone, with the race detector and coverage on (8 cores, arm64, 2026-11-14), so that a busy
+// runner does not fail it (#717). It is a bound on a hang, not on the limit: what the test proves is the refusal
+// at a memory limit and the small heap of this process, whatever the time.
+const chainDeadline = 260 * time.Second
+
 // TestCheckBoundsAChainedNameReference reproduces #614: a 64 KiB annotation moved into a ConfigMap name that
 // 1,000 references copy, about 100 KB of input within every budget the walk checks, rendered 66 MB and peaked
 // at 374 MiB of Go heap in the executor's process (5.6 s), and the check passed. The render process stops at
 // its memory limit, so the check is refused with TooLarge, and the executor's own heap stays small.
 func TestCheckBoundsAChainedNameReference(t *testing.T) {
+	semdiff.UseRenderProcess(t)
 	files := chainedRepo(64<<10, 1000)
 	if _, err := load(t, files, "apps/orders"); err != nil {
 		t.Fatalf("Load: %v, want the build within every budget of the walk", err)
 	}
-	deadline.Within(t, 60*time.Second, func(t *testing.T) {
+	deadline.Within(t, chainDeadline, func(t *testing.T) {
 		var err error
 		peak := heapPeak(func() {
 			_, err = semdiff.Check(context.Background(), soInput(t, files, "apps/orders", 15))
@@ -108,6 +115,7 @@ func TestCheckBoundsAChainedNameReference(t *testing.T) {
 // TestCheckRendersAnOrdinaryChain checks the same chain with a short value: a base annotation moved into a name
 // that kustomize copies into 1,000 references renders in the render process and passes.
 func TestCheckRendersAnOrdinaryChain(t *testing.T) {
+	semdiff.UseRenderProcess(t)
 	started := semdiff.CountRenderProcesses(t)
 	res, err := semdiff.Check(context.Background(), soInput(t, chainedRepo(16, 1000), "apps/orders", 15))
 	if err != nil || res.Objects != 4 || res.Desired != "15" {

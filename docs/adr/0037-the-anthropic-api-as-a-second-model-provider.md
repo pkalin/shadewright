@@ -9,36 +9,38 @@ Microsoft Foundry is the only model provider the analyzer can use today ([ADR-00
 
 Two things change, and each touches an invariant:
 
-- **A long-lived credential.** Every identity in the system is federated today: the analyzer reaches Foundry with a workload identity token, the executor gets short-lived Git App tokens. The Anthropic API takes a static API key. It is the first secret that does not expire by itself.
+- **A static credential.** The identities that authorize calls to external services are federated today: the analyzer reaches Foundry with a workload identity token, the executor gets short-lived Git App tokens. The Anthropic API takes a static API key. It is the first static credential that authorizes a call to an external service and does not expire by itself.
 - **Redacted context goes to a second place.** With Foundry the context stays inside the Azure resource the operator chose, in the region of [ADR-0016](0016-lab-region-sweden-central.md). With the Anthropic API it is sent to the vendor's own service. Invariant 4 still decides what may be sent (everything is redacted first); it says nothing about where it goes.
 
 The decisions below were taken on 2026-11-14. This ADR writes them down and states what follows from them.
 
 ## Decision
 
-[![Where the context goes and where the key lives for each provider: the analyzer builds the same redacted context and calls the provider of the deployment; Foundry is reached with a workload identity token and stays in Azure, the Anthropic API with a key read from a mounted Secret and leaves Azure; executor and verifier never see the key](../assets/diagrams/model-providers.svg)](../assets/diagrams/model-providers.svg "Open full size")
+[![Where the context goes and where the key lives for each provider: the analyzer builds the same redacted context and calls the provider of the deployment; Foundry is reached with a workload identity token and stays in Azure, the Anthropic API only at its fixed host with a key read from a mounted file (Secret or CSI volume) and leaves Azure; executor and verifier never see the key](../assets/diagrams/model-providers.svg)](../assets/diagrams/model-providers.svg "Open full size")
 
-1. **The provider is chosen per `ModelDeployment`.** An optional field `provider` takes `Foundry` (the default, so existing objects keep their meaning) or `Anthropic`. Triage and escalation are separate deployments and may use different providers. There is no fallback between providers at run time: if a call fails and the bounds of [ADR-0023](0023-how-the-analyzer-calls-the-model.md) are used up, the analysis is handed off.
+1. **The provider is chosen per `ModelDeployment`.** An optional field `provider` takes `Foundry` (the default, so existing objects keep their meaning) or `Anthropic`. It names the API the adapter speaks, not the model family: a Claude model served by Microsoft Foundry is still `provider: Foundry`. Triage and escalation are separate deployments and may use different providers. There is no fallback between providers at run time: if a call fails and the bounds of [ADR-0023](0023-how-the-analyzer-calls-the-model.md) are used up, the analysis is handed off.
 
-2. **What `Anthropic` requires of a deployment.**
-   - `endpoint` must be `https://api.anthropic.com`, enforced by a CEL rule on the object, so the API server refuses anything else.
-   - `deployment` holds the model ID exactly as replies name it. The adapter refuses a reply that names another model, as the Foundry adapter does, and the evaluation list of [ADR-0023](0023-how-the-analyzer-calls-the-model.md) point 8 is keyed on that ID.
-   - The host must still be listed in the analyzer's `--model-endpoint-suffixes`. There is no built-in allowance for it: an operator who has not listed `api.anthropic.com` has not agreed to send context there.
+2. **The host of an `Anthropic` deployment is fixed in code.**
+   - The adapter talks only to `api.anthropic.com`. The operator chooses no host for this provider, and `--model-endpoint-suffixes` never applies to it: that list stays the allow-list of the Foundry path only.
+   - The Foundry path refuses `api.anthropic.com` whatever the list says. So the Entra token can never go to the vendor, and the key never to a Foundry host.
+   - `endpoint` stays a required field and must equal `https://api.anthropic.com` for `provider: Anthropic`; a CEL rule on the object makes the API server refuse anything else, and a second rule refuses that host on a `Foundry` deployment. Making `endpoint` optional for this provider would need one more rule (required unless `Anthropic`) and a defaulting story; requiring the constant keeps the schema to the existing field plus two rules. The existing pattern already accepts the host alone, with no path (`api/v1alpha1/remediationsettings_types.go`).
+   - `deployment` holds the model ID exactly as replies name it. The expected model stays the `--triage-model` / `--escalation-model` flag, checked in the analysis loop (`internal/analysis/loop.go`), not in the adapter. For `Anthropic`, `deployment` must equal that flag's value, and the analyzer refuses to start the analysis otherwise. The evaluation list of [ADR-0023](0023-how-the-analyzer-calls-the-model.md) point 8 is keyed on that ID.
 
-3. **The key is the one long-lived credential in the system, and it is handled as one.**
-   - It lives in a Secret that the operator of the cluster creates. Shadewright's chart never creates it and never contains its value.
-   - The chart mounts that Secret read-only into the analyzer pod only, and refuses to render an `Anthropic` deployment without a Secret name. The executor and the verifier never get it.
-   - The analyzer gets no RBAC on Secrets. The kubelet mounts the file; the analyzer cannot list or read any other Secret because of this change.
-   - The adapter reads the file on every call, so rotation is a Secret update and needs no restart. A missing or empty file is a refusal to start the analysis with a reason that does not name the key.
-   - The key never appears in logs, events, status, analysis records, traces or error text. The adapter sends it only in the request header, only to the host the endpoint names, and refuses any other host.
+3. **The key is a static credential and is handled as one.**
+   - The analyzer's contract is a file at a path given by a flag. What puts it there is the operator's choice: a Kubernetes Secret, or a CSI volume such as the Secrets Store CSI driver with Azure Key Vault. Shadewright's chart never creates a Secret and never contains the key.
+   - The chart takes either the name of an existing Secret or a volume source for that path. The volume is mounted whole, read-only, into the analyzer pod only, with no `subPath` (a `subPath` mount never refreshes). The executor and the verifier never get it.
+   - The analyzer gets no RBAC on Secrets in either case. The kubelet or the CSI driver mounts the file; the analyzer cannot list or read any other Secret because of this change.
+   - The analyzer is the gate, not the chart: `RemediationSettings` is created only when absent and edited live afterwards, so a chart check cannot see the current deployments. A deployment with `provider: Anthropic` and no key path flag is refused by the analyzer with a named reason. The render check in the chart stays as a convenience at install.
+   - The adapter reads the file on every call, so rotation is an update of the source and needs no restart. A missing, empty or unreadable file is retryable within the bounds of [ADR-0023](0023-how-the-analyzer-calls-the-model.md), then a hand-off; never a crash and never a refusal to start. The reason does not name the key.
+   - The key never appears in logs, events, status, analysis records, traces or error text. The adapter sends it only in the request header, only to `api.anthropic.com`.
 
 4. **Invariants 1 and 4 hold unchanged.** The context sent is the same redacted context as for Foundry, built by the same code. The reply is untrusted: it is parsed by the same typed code into the same result, and the proposal still goes through the one validator and the policy gate. Model output is never authorization.
 
-5. **A model must pass the evaluation first.** As for any model ([ADR-0025](0025-analysis-claims-units-and-evaluation-manifest.md)), the analyzer refuses automatic analysis with a model that has no passing record for the current prompt hash. The evaluation manifest and every analysis record name the provider as well as the model, so a result cannot be read as belonging to the wrong one.
+5. **A model must pass the evaluation first.** As for any model ([ADR-0025](0025-analysis-claims-units-and-evaluation-manifest.md)), the intent is that the analyzer refuses automatic analysis with a model that has no passing record for the current prompt hash. That run-time check is planned, not built (`docs/design/11-model.md`, "It fails closed"). Until it exists, an `Anthropic` deployment is for lab evaluation only, exactly as a Foundry one is today. The evaluation manifest and every analysis record name the provider as well as the model, so a result cannot be read as belonging to the wrong one.
 
-6. **Data handling is stated, not hidden.** With this provider the redacted context leaves Azure. The region choice of [ADR-0016](0016-lab-region-sweden-central.md) does not cover it. The operator decides this per deployment by creating the Secret and listing the host. The data handling page says so in plain words next to the Foundry description, and says which vendor terms the operator has to check; it does not restate the vendor's retention or region terms as facts of this project (see the open questions).
+6. **Data handling is stated, not hidden.** With this provider the redacted context leaves Azure. The region choice of [ADR-0016](0016-lab-region-sweden-central.md) does not cover it. Where data goes is decided per analyzer: it can use this provider only if a key file is present. After that, anyone who may edit `RemediationSettings` can move triage or escalation to this provider, so that permission is also a decision about where context goes. The data handling page says so in plain words next to the Foundry description, and says which vendor terms the operator has to check; it does not restate the vendor's retention or region terms as facts of this project (see the open questions).
 
-7. **The lab.** The Secret is created at lab-up from the admin machine, from a key kept outside every repository. It never goes through Git, and never through Terraform state or variables. Lab-down deletes it with the namespace; the key itself is revoked or rotated in the vendor's console when the lab session ends if the spend limit below is not enough on its own.
+7. **The lab.** The key is put in a Secret (or the Key Vault behind a CSI volume) at lab-up from the admin machine, from a key kept outside every repository. It never goes through Git, and never through Terraform state or variables. Lab-down deletes a Secret with the namespace; the key itself is revoked or rotated in the vendor's console when the lab session ends if the spend limit below is not enough on its own.
 
 ## Consequences
 
@@ -50,16 +52,18 @@ The decisions below were taken on 2026-11-14. This ADR writes them down and stat
 
 **Who can read the key.** Anyone who can `exec` into the analyzer pod, read the Secret in the API, or read the node's kubelet volume. This is the same boundary as for any mounted Secret. The operator limits it with RBAC on Secrets in the operator namespace; the chart does not grant it to anyone.
 
-**NetworkPolicy does not help.** The analyzer's egress rule already allows TCP 443 to any address, and a standard NetworkPolicy cannot tell hosts apart ([design 10](../design/10-security.md), accepted in [#391](https://github.com/pkalin/shadewright/issues/391)). Adding the Anthropic API changes no rule. What keeps the key and the context going to one host is the endpoint check in the adapter, the CEL rule, and the allow-list of suffixes. A compromised analyzer could send what it holds, now including this key, to any HTTPS host. A policy that names hosts needs a CNI with that feature and is not part of this ADR.
+**NetworkPolicy does not help.** The analyzer's egress rule already allows TCP 443 to any address, and a standard NetworkPolicy cannot tell hosts apart ([design 10](../design/10-security.md), accepted in [#391](https://github.com/pkalin/shadewright/issues/391)). Adding the Anthropic API changes no rule. What keeps the key to one host and the Entra token away from it is the host fixed in code, the refusal on the Foundry path and the CEL rules. A compromised analyzer could send what it holds, now including this key, to any HTTPS host. A policy that names hosts needs a CNI with that feature and is not part of this ADR.
 
 **Invariant 6 wording.** `AGENTS.md` lists what the analyzer may do and has no sentence for a mounted file. The build PR has to add this sentence to the analyzer's part of invariant 6, after "plus model inference and creating analysis records in its blob container (ADR-0015, ADR-0029)":
 
-> and, only when a `ModelDeployment` has `provider: Anthropic` (ADR-0037), read-only access to one mounted file, the vendor API key, from a Secret the cluster operator creates; the analyzer has no RBAC on Secrets, the key is the one long-lived credential in the system, and the executor and the verifier never receive it.
+> and, only when a `ModelDeployment` has `provider: Anthropic` (ADR-0037), read-only access to one mounted file, the vendor API key, from a Secret the cluster operator creates; the analyzer has no RBAC on Secrets, the key is the one static credential that authorizes a call to an external service, and the executor and the verifier never receive it.
 
 This ADR does not edit `AGENTS.md`.
 
 **Other costs.**
-- The chart gets a Secret name value and a rule that refuses to render without it; the kustomize manifests in `config/` get no mount, so this provider is Helm only until someone asks.
+- The key is the analyzer's second possible Secret mount, next to the TLS Secret for metrics.
+- Azure is still required: the workload identity token source, the `clientId` chart check and the analysis records in Blob stay. Making the token source conditional on a Foundry deployment is not part of this ADR.
+- The chart gets a value for an existing Secret name or a volume source, and a render check as a convenience; the kustomize manifests in `config/` get no mount, so this provider is Helm only until someone asks.
 - The adapter and the analyzer need a test that no error path holds the key.
 - There are now two sets of evaluation results per model family, and a model comparison must say which provider produced a row.
 - A leak through a heap dump or a core file of the analyzer is possible, as for any process that holds a key in memory for the length of a call.
@@ -71,8 +75,9 @@ This ADR does not edit `AGENTS.md`.
 - **Fallback to the other provider on failure.** It would send context to a provider the operator did not choose for that call, and a bug in one adapter could be hidden by the other. Rejected, as in [#387](https://github.com/pkalin/shadewright/issues/387).
 - **The key read by the operator with `get` on a Secret.** Rotation would be a watch or a read per call, and the analyzer would hold RBAC on Secrets, a grant that is one `resourceNames` mistake away from reading the Git App's. A mounted file needs no grant.
 - **The key in an environment variable.** Needs a restart to rotate, and shows up in process listings of some debug tools. A file is read on every call instead.
-- **The key from a cloud secret store with a federated identity.** Fits the rest of the system, but ties the provider to one cloud's store and adds a dependency the first slice does not need. Possible later behind the same file interface (a CSI driver mounts to the same path).
-- **A built-in allowance for `api.anthropic.com`.** Convenient, but it would make sending context to a vendor the default for anyone who sets `provider: Anthropic` without reading the allow-list. Rejected.
+- **A gateway in Azure that holds the key and takes the analyzer's workload identity.** The analyzer would carry no static credential. Rejected for now: it is a new Azure component with its own cost and it ties the provider to Azure. It can be added later without changing the adapter contract.
+- **The key from a cloud secret store with a federated identity, read by the analyzer.** Would need cloud-specific code in the adapter. A CSI driver gives the same result behind the file interface and is allowed by decision 3.
+- **Listing `api.anthropic.com` in `--model-endpoint-suffixes`.** It would make the vendor host operator-chosen and let the Entra token or the key meet the wrong host. Rejected for the fixed host of decision 2.
 - **A vendor SDK.** Plain `net/http`, as the Foundry adapter, so the dependency list does not grow and the host check stays in one place ([#728](https://github.com/pkalin/shadewright/issues/728)).
 
 ## Open questions
@@ -86,7 +91,6 @@ These need an answer from the vendor's published terms, with a link, before this
 5. Whether keys can be scoped (to one model, one workspace) so the leak bound is narrower than the whole account.
 6. Whether `deployment` can use an alias that moves to a new model, or only dated IDs. An alias would let the model change under a passing evaluation record; the adapter's check of the reply's model name would catch it, and this needs confirming with a real reply.
 7. Whether prompt caching is offered for the models the lab will use, and with what minimum prefix size (decision 5 of #728 depends on it).
-8. Whether the `endpoint` pattern of the current API accepts `https://api.anthropic.com` unchanged (no trailing path); the CEL rule and the pattern must agree.
 
 ## Amendments
 

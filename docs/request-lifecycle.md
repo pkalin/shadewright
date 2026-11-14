@@ -17,6 +17,7 @@ stateDiagram-v2
     Pending --> NeedsIntervention: source unclear or ScaledObject not ready
     Pending --> Superseded: another request of the Incident was merged
     Pending --> Superseded: the pull request it waited behind was closed without a merge
+    Pending --> Superseded: the request it waited behind succeeded
     PolicyChecked --> PRCreated: branch, commit, pull request
     PRCreated --> AwaitingApproval: review required
     AwaitingApproval --> Merged: a person merges it

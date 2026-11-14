@@ -172,9 +172,9 @@ func lifecycleReason(inc *remediationv1alpha1.Incident) string {
 //     another one was merged ([mergedElsewhere], reason AnotherRequestMerged) is never the newest: the merged
 //     request decides. A request Superseded because the request it waited behind for the same field succeeded
 //     ([succeededElsewhere], reason AnotherRequestSucceeded, #719) follows that success: Resolved with
-//     ReasonHolderSucceeded, never Escalated. A lone Merged request (the end of a request with --verify-outcomes
-//     off, or the step before WaitingForDelivery with it on) moves nothing: it is not active, so the quiet rule
-//     applies. WaitingForDelivery and Verifying are active and keep the Incident where it is.
+//     ReasonHolderSucceeded, not Escalated, when every holder it records that still exists is Succeeded. A lone
+//     Merged request (the end of a request with --verify-outcomes off, or the step before WaitingForDelivery
+//     with it on) moves nothing: it is not active, so the quiet rule applies. WaitingForDelivery and Verifying are active and keep the Incident where it is.
 //   - Otherwise an Incident quiet for QuietBeforeResolved moves to Resolved. It is quiet since the latest of lastSeen, held, lastAnalysisTime and the Lifecycle
 //     condition's lastTransitionTime, so an escalation stands for at least that long before the Incident can
 //     go on to Resolved. An Incident whose newest occurrence is a lasting symptom state ([lastingState]) is

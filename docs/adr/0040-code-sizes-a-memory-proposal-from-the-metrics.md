@@ -22,7 +22,7 @@ What the code has today (at `0220bc9b`):
 
 ## Decision
 
-[![Sizing from metrics: the context builder reads the memory working set and the limit from the metrics source and keeps the numbers, and the Incident's own OOMKilled symptom is the other pressure evidence; code takes only the action and the container from the model and accepts them only where it saw memory pressure for that container; it computes the size from the peak plus headroom (a multiplicative step when at the limit), rounds, clamps to the policy and rounds down; no measurement, no pressure or no room under the policy ends without a proposal; the request carries the new limit and optional typed evidence; the policy engine decides as before; the executor prints the evidence in the pull request body; the model sits beside the path](../assets/diagrams/sizing-from-metrics.svg)](../assets/diagrams/sizing-from-metrics.svg "Open full size")
+[![Sizing from metrics: the context builder reads the memory working set and the limit from the metrics source and keeps the numbers, and the Incident's own OOMKilled symptom is the other pressure evidence; code takes only the action and the container from the model and accepts them only where it saw memory pressure for that container; it computes the size from the peak plus headroom (a multiplicative step when at the limit, which without Prometheus rests on the OOMKilled symptom corroborated by the metrics server), rounds, clamps to the policy and rounds down; no measurement, no pressure or no room under the policy ends without a proposal; the request carries the new limit and optional typed evidence; the policy engine decides as before; the executor prints the evidence in the pull request body; the model sits beside the path](../assets/diagrams/sizing-from-metrics.svg)](../assets/diagrams/sizing-from-metrics.svg "Open full size")
 
 ### Decided on 2026-11-14
 
@@ -101,9 +101,9 @@ What the code has today (at `0220bc9b`):
 19. **Evaluation (ADR-0025).** This changes the model's input (no bounds block for memory) and its output schema (no size), so the manifest digest changes and a new recorded evaluation is needed before the loop is used with the change. The cases assert different things: the model's reply is scored for the action, the container and the diagnosis; the size is asserted on the code's output for the recorded context, as a unit test of the rule with exact numbers (for example `oom`: peak at the 48Mi limit gives 72Mi; the 100Mi case gives 144Mi with `limitedBy: Step`). The "oversized proposal" score planned in [#505](https://github.com/pkalin/shadewright/issues/505) has nothing to score for memory and moves to the rule's tests. A recorded case with no metrics must end `MissingData`.
 20. **Outcome verification (ADR-0030).** The recorded peak, window and headroom give a later "cleared" check a baseline to read, for example that the new working set stays below the new limit. Pointer only: the verifier's evidence stays container status in v0.5.0 (ADR-0030 decision 2) and nothing here changes it.
 
-### Proposed: evidence tiers (raised 2026-11-14, not decided)
+### Decided on 2026-11-14: evidence tiers
 
-The question raised on 2026-11-14: the Kubernetes metrics server (`metrics.k8s.io`) is installed on most clusters (AKS ships it) and Prometheus is not. Should it be a metrics source? Nothing in this section is decided. Decisions 1 to 3 and the rule above stay as they are unless the maintainer accepts tier 2 (open question 7).
+The question raised on 2026-11-14: the Kubernetes metrics server (`metrics.k8s.io`) is installed on most clusters (AKS ships it) and Prometheus is not. Should it be a metrics source? Decided on 2026-11-14 (last comment of #508): tier 2 is accepted. Where there is no Prometheus, the code-observed `OOMKilled` symptom, cross-checked with the container status and corroborated by the metrics server, counts as the measurement for the "at the limit" step. Decisions 1 to 3 and the rule above stay as they are.
 
 What the code does today without Prometheus: `--prometheus-url` empty means no metrics source, and the builder renders the metrics block as "not available: no metrics source is configured". Nothing in the loop turns that into a hand-off. The status block still shows the container's last termination (reason `OOMKilled`, which is sticky until the next termination) and the pod's own memory limit, so the model can propose a size, and today it is the model's. A hand-off with `MissingData` happens only if the model lists missing data in its reply (`internal/analysis/loop.go`). Decision 2 is what adds the hand-off for a missing measurement, so it holds only once this ADR is built.
 
@@ -113,7 +113,7 @@ What the code does today without Prometheus: `--prometheus-url` empty means no m
     1. Prometheus: the peak over the window, the full rule of items 4 to 11.
     2. Metrics server only: the Incident's code-observed `OOMKilled` symptom for the container proves that the need was above the limit (the symptom comes from container status, and the limit is that of the pod's own spec). As a cross-check, `lastState.terminated.finishedAt` of that container must lie inside the Incident's time span; if it does not, the symptom is not used and the container is handed off. The "at the limit" step of item 6 then applies without a peak: the need is the limit times 1.5, clamped as in item 9. The current working set from the metrics server is recorded as corroboration (for example, already above some share of the limit again), never used as the peak. For a container without that symptom, the metrics server alone gives no size and no pressure evidence (item 6a), and the Incident is handed off.
     3. Neither: hand-off with `MissingData`, as decided (decision 2).
-24. **Tier 2 revises nothing decided.** There is still no model value and no guessed number, but it widens what counts as a measurement from a series of samples to the OOM symptom the collector observed. That is for the maintainer to decide (open question 7).
+24. **Tier 2 revises nothing decided.** There is still no model value and no guessed number, but it widens what counts as a measurement from a series of samples to the OOM symptom the collector observed. The maintainer accepted this on 2026-11-14.
 25. **The evidence fields name the tier.** `spec.sizing` gets a `source` value (`Prometheus`, `MetricsServer`, `ContainerStatus` or similar, an enum), and the pull request body prints it, so the person merging sees how strong the evidence is. For tier 2, `observedPeak` is the working set that was read, labelled as current, and `atLimit` is true because of the symptom.
 26. **Model context (follow-up, not decided here).** The same adapter would give the model a current usage figure on installs without Prometheus. That changes the model's input, so it needs an evaluation (ADR-0025) and belongs to a separate decision.
 
@@ -124,7 +124,7 @@ What the code does today without Prometheus: `--prometheus-url` empty means no m
 3. Changes still go through Git by pull request.
 4. The measurement is read from the metrics source by an approved template with no free-form query text, and the evidence fields are bounded values, redacted in the body; metric text from the source is never copied as prose (series labels are not in the evidence).
 5. The request name and the pull request marker derive from the UID and the plan digest as before. If the digest covers `sizing`, the same request still maps to the same pull request.
-6. No new identity and no new grant for the decisions above: the analyzer already reads the metrics source and the named policies; the executor reads only the request. The grant stays but its purpose changes: invariant 6 in `AGENTS.md` justifies the analyzer's `get` on `remediationpolicies` by showing the model the bounds (ADR-0026). When this ADR is accepted, that purpose clause is amended: the grant is for sizing (decision 12), not for the model's context. Tier 2 (item 22, not decided) would add `get` and `list` on `pods.metrics.k8s.io` in the watched namespaces, and the same invariant 6 note would carry that grant.
+6. No new identity and no new grant for the decisions above: the analyzer already reads the metrics source and the named policies; the executor reads only the request. The grant stays but its purpose changes: invariant 6 in `AGENTS.md` justifies the analyzer's `get` on `remediationpolicies` by showing the model the bounds (ADR-0026). When this ADR is accepted, that purpose clause is amended: the grant is for sizing (decision 12), not for the model's context. Tier 2 (item 22, decided on 2026-11-14) adds `get` and `list` on `pods.metrics.k8s.io` in the watched namespaces, and the same invariant 6 note carries that grant.
 
 ## Consequences
 
@@ -154,7 +154,7 @@ What the code does today without Prometheus: `--prometheus-url` empty means no m
 - **Link to the analysis record instead of printing the evidence.** Keeps the request small, but the record is outside the pull request and the reviewer has to look for it. Rejected for the body; the record stays the place for the diagnosis.
 - **Headroom in a flag of the analyzer.** One number for all policies, no CRD change. Kept as the fallback if the policy field is refused.
 - **A percentile of the working set.** Item 5.
-- **The metrics server as the only source for the full rule.** It has no history, so there is no peak over the window and nothing from before a restart. Rejected; it is used only for tier 2 if accepted.
+- **The metrics server as the only source for the full rule.** It has no history, so there is no peak over the window and nothing from before a restart. Rejected; it is used only for tier 2.
 
 ## Open questions
 
@@ -164,7 +164,6 @@ What the code does today without Prometheus: `--prometheus-url` empty means no m
 4. Whether the plan digest covers `sizing` (item 14).
 5. Whether the model keeps seeing that a policy exists for the action (item 16).
 6. Whether one analysis of a workload with several containers may size more than one (the action names one container today).
-7. Is tier 2 accepted: the Incident's `OOMKilled` symptom, cross-checked with container status and with the metrics server as corroboration, counts as a measurement for the "at the limit" step (items 21 to 25).
 
 ## Amendments
 

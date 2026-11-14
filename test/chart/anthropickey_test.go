@@ -37,10 +37,20 @@ const (
 
 // keySources are the ways to put the model API key file in the analyzer (ADR-0037 decision 3).
 var keySources = map[string][]string{
-	"secret":      {"analyzer.analysis.anthropic.apiKey.secretName=model-key"},
-	"secret, key": {"analyzer.analysis.anthropic.apiKey.secretName=model-key", "analyzer.analysis.anthropic.apiKey.secretKey=token"},
-	"csi volume":  {"analyzer.analysis.anthropic.apiKey.volume.csi.driver=secrets-store.csi.k8s.io", "analyzer.analysis.anthropic.apiKey.volume.csi.readOnly=true", "analyzer.analysis.anthropic.apiKey.volume.csi.volumeAttributes.secretProviderClass=model-key"},
-	"csi, file":   {"analyzer.analysis.anthropic.apiKey.volume.csi.driver=secrets-store.csi.k8s.io", "analyzer.analysis.anthropic.apiKey.fileName=anthropic-key"},
+	"secret": {"analyzer.analysis.anthropic.apiKey.secretName=model-key"},
+	"secret, key": {
+		"analyzer.analysis.anthropic.apiKey.secretName=model-key",
+		"analyzer.analysis.anthropic.apiKey.secretKey=token",
+	},
+	"csi volume": {
+		"analyzer.analysis.anthropic.apiKey.volume.csi.driver=secrets-store.csi.k8s.io",
+		"analyzer.analysis.anthropic.apiKey.volume.csi.readOnly=true",
+		"analyzer.analysis.anthropic.apiKey.volume.csi.volumeAttributes.secretProviderClass=model-key",
+	},
+	"csi, file": {
+		"analyzer.analysis.anthropic.apiKey.volume.csi.driver=secrets-store.csi.k8s.io",
+		"analyzer.analysis.anthropic.apiKey.fileName=anthropic-key",
+	},
 }
 
 func deployment(t *testing.T, r rendered, k string) appsv1.Deployment {
@@ -52,17 +62,17 @@ func deployment(t *testing.T, r rendered, k string) appsv1.Deployment {
 	return *convert[appsv1.Deployment](t, u)
 }
 
-// helmTemplate renders the chart with the value files and --set arguments and returns the output, or helm's
-// error text.
-func helmTemplate(t *testing.T, files []string, set ...string) (string, string) {
+// helmTemplate renders the chart with the value files and --set arguments and returns helm's error text, or
+// "" when it renders.
+func helmTemplate(t *testing.T, files []string, set ...string) string {
 	t.Helper()
 	cmd := exec.Command(tool(t, "HELM", "helm"), helmArgsWith(t, files, set...)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", err.Error() + "\n" + stderr.String()
+		return err.Error() + "\n" + stderr.String()
 	}
-	return stdout.String(), ""
+	return ""
 }
 
 func keyFlag(args []string) []string {
@@ -100,7 +110,8 @@ func TestAnthropicKeyIsMountedIntoTheAnalyzerOnly(t *testing.T) {
 			case "csi, file":
 				wantFile = "anthropic-key"
 			}
-			if got := keyFlag(a.Spec.Template.Spec.Containers[0].Args); !reflect.DeepEqual(got, []string{"--anthropic-api-key-file=" + anthropicMount + "/" + wantFile}) {
+			wantFlag := []string{"--anthropic-api-key-file=" + anthropicMount + "/" + wantFile}
+			if got := keyFlag(a.Spec.Template.Spec.Containers[0].Args); !reflect.DeepEqual(got, wantFlag) {
 				t.Errorf("flag = %v, want the file %s", got, wantFile)
 			}
 			var vols []corev1.Volume
@@ -126,7 +137,8 @@ func TestAnthropicKeyIsMountedIntoTheAnalyzerOnly(t *testing.T) {
 					mounts = append(mounts, m)
 				}
 			}
-			if len(mounts) != 1 || mounts[0].MountPath != anthropicMount || !mounts[0].ReadOnly || mounts[0].SubPath != "" || mounts[0].SubPathExpr != "" {
+			if len(mounts) != 1 || mounts[0].MountPath != anthropicMount || !mounts[0].ReadOnly ||
+				mounts[0].SubPath != "" || mounts[0].SubPathExpr != "" {
 				t.Errorf("mounts = %+v, want one read-only whole mount at %s", mounts, anthropicMount)
 			}
 
@@ -134,7 +146,9 @@ func TestAnthropicKeyIsMountedIntoTheAnalyzerOnly(t *testing.T) {
 			pod := &a.Spec.Template.Spec
 			pod.Volumes = slices.DeleteFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == anthropicVolume })
 			c := &pod.Containers[0]
-			c.VolumeMounts = slices.DeleteFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == anthropicVolume })
+			c.VolumeMounts = slices.DeleteFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
+				return m.Name == anthropicVolume
+			})
 			c.Args = slices.DeleteFunc(c.Args, func(s string) bool { return strings.HasPrefix(s, "--anthropic-api-key-file") })
 			if len(pod.Volumes) == 0 {
 				pod.Volumes = nil
@@ -175,17 +189,29 @@ func TestAnthropicKeyNeedsNoRBAC(t *testing.T) {
 }
 
 func TestAnthropicKeyRefusals(t *testing.T) {
-	both := []string{"analyzer.analysis.anthropic.apiKey.secretName=k", "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"}
+	both := []string{
+		"analyzer.analysis.anthropic.apiKey.secretName=k",
+		"analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory",
+	}
 	if out := helmFails(t, both...); !strings.Contains(out, "sets both secretName and volume") {
 		t.Errorf("both sources: %s", out)
 	}
-	if out := helmFails(t, "analyzer.analysis.anthropic.apiKey.secretName=k", "analyzer.analysis.anthropic.apiKey.secretKey=a/b"); !strings.Contains(out, "secretKey") {
+	badKey := []string{
+		"analyzer.analysis.anthropic.apiKey.secretName=k",
+		"analyzer.analysis.anthropic.apiKey.secretKey=a/b",
+	}
+	if out := helmFails(t, badKey...); !strings.Contains(out, "secretKey") {
 		t.Errorf("a key with a slash: %s", out)
 	}
-	if out := helmFails(t, "analyzer.analysis.anthropic.apiKey.volume.name=x", "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"); !strings.Contains(out, "may not set name") {
+	named := []string{
+		"analyzer.analysis.anthropic.apiKey.volume.name=x",
+		"analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory",
+	}
+	if out := helmFails(t, named...); !strings.Contains(out, "may not set name") {
 		t.Errorf("a named volume: %s", out)
 	}
-	if out := helmFails(t, "analyzer.extraArgs={--anthropic-api-key-file=/x}"); !strings.Contains(out, "anthropic-api-key-file") {
+	extra := "analyzer.extraArgs={--anthropic-api-key-file=/x}"
+	if out := helmFails(t, extra); !strings.Contains(out, "anthropic-api-key-file") {
 		t.Errorf("extraArgs: %s", out)
 	}
 }
@@ -195,23 +221,27 @@ func TestAnthropicKeyRefusals(t *testing.T) {
 func TestAnthropicDeploymentNeedsAKeySource(t *testing.T) {
 	dir := t.TempDir()
 	for role, spec := range map[string]string{
-		"triage":     "spec:\n  analysis:\n    models:\n      triage: {provider: Anthropic, endpoint: https://api.anthropic.com, deployment: m}\n",
-		"escalation": "spec:\n  analysis:\n    models:\n      escalation: {provider: Anthropic, endpoint: https://api.anthropic.com, deployment: m}\n",
+		"triage": "spec:\n  analysis:\n    models:\n" +
+			"      triage: {provider: Anthropic, endpoint: https://api.anthropic.com, deployment: m}\n",
+		"escalation": "spec:\n  analysis:\n    models:\n" +
+			"      escalation: {provider: Anthropic, endpoint: https://api.anthropic.com, deployment: m}\n",
 	} {
 		f := filepath.Join(dir, role+".yaml")
-		if err := os.WriteFile(f, []byte("settings:\n  create: true\n  "+strings.ReplaceAll(strings.TrimSuffix(spec, "\n"), "\n", "\n  ")+"\n"), 0o600); err != nil {
+		body := "settings:\n  create: true\n  " + strings.ReplaceAll(strings.TrimSuffix(spec, "\n"), "\n", "\n  ") + "\n"
+		if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		files := []string{"-f", testValues(t), "-f", f}
-		if _, err := helmTemplate(t, files); err == "" {
+		if err := helmTemplate(t, files); err == "" {
 			t.Fatalf("%s: rendered with no key source", role)
-		} else if !strings.Contains(err, "settings.spec.analysis.models."+role) || !strings.Contains(err, "analyzer.analysis.anthropic.apiKey") {
+		} else if !strings.Contains(err, "settings.spec.analysis.models."+role) ||
+			!strings.Contains(err, "analyzer.analysis.anthropic.apiKey") {
 			t.Errorf("%s: unhelpful message: %s", role, err)
 		}
-		if _, err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.secretName=k"); err != "" {
+		if err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.secretName=k"); err != "" {
 			t.Errorf("%s: with a Secret: %s", role, err)
 		}
-		if _, err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"); err != "" {
+		if err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"); err != "" {
 			t.Errorf("%s: with a volume: %s", role, err)
 		}
 	}

@@ -1975,22 +1975,25 @@ func (r *RemediationRequestReconciler) pullRequestText(ctx context.Context,
 	return commitTitle(rr), pullRequestBody(rr, r.verifiedIncidentName(ctx, rr), failed), nil
 }
 
-// revertedRequest returns the request a revert names in spec.reverts, read from the API server, or nil when rr is
-// no revert, the request is gone or its name now belongs to another UID: the body then names it from spec.reverts
-// alone. Any other failed read is an error, never taken for a missing request.
+// revertedRequest returns the request a revert names in spec.reverts, read from the API server (readReverted), or
+// nil when rr is no revert, the request is gone or its name now belongs to another UID: the body then names it
+// from spec.reverts alone. Any other failed read is an error, never taken for a missing request. The read has a
+// deadline of its own, as the Incident read of verifiedIncidentName (incidentReadTimeout), so a stalled API
+// server fails it with time left in the step instead of using the step's deadline up; the error is then retried
+// like any other, and no pull request is opened or rewritten without the paragraph on what it reverts.
 func (r *RemediationRequestReconciler) revertedRequest(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (*remediationv1alpha1.RemediationRequest, error) {
 	ref := rr.Spec.Reverts
 	if ref == nil {
 		return nil, nil
 	}
-	failed := &remediationv1alpha1.RemediationRequest{}
-	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: ref.Name}, failed); {
-	case apierrors.IsNotFound(err):
-		return nil, nil
+	readCtx, cancel := context.WithTimeout(ctx, incidentReadTimeout(ctx, r.IncidentReadTimeout))
+	defer cancel()
+	failed, err := r.readReverted(readCtx, rr)
+	switch {
 	case err != nil:
-		return nil, fmt.Errorf("get the RemediationRequest %s reverts for its pull request: %w", rr.Name, err)
-	case failed.UID != types.UID(ref.UID):
+		return nil, fmt.Errorf("write the pull request text of a revert: %w", err)
+	case failed == nil || failed.UID != types.UID(ref.UID):
 		return nil, nil
 	}
 	return failed, nil
@@ -2029,10 +2032,12 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 	fmt.Fprintf(&b, "**Evidence:** RemediationRequest `%s/%s` (UID `%s`), incident `%s`, policy `%s` "+
 		"(decision `WithinApprovedBounds`), plan digest `%s`.\n\n",
 		rr.Namespace, rr.Name, rr.UID, rr.Spec.IncidentRef.Name, rr.Status.PolicyRevision, rr.Status.PlanDigest)
-	if size := stepSize(rr); size != "" && revert {
+	switch size := stepSize(rr); {
+	case size == "":
+	case revert:
 		fmt.Fprintf(&b, "**Size:** %s, within policy `%s`: the step of the failed request, undone. No model chose "+
 			"it.\n\n", size, rr.Spec.PolicyRef)
-	} else if size != "" {
+	default:
 		fmt.Fprintf(&b, "**Size:** %s, within policy `%s`. The policy bounds the step; it does not say the step is "+
 			"the right size. The diagnosis, with the model's unverified reason for the size, is in the analysis record "+
 			"and the analyzer's log for this request's name, not in this pull request (ADR-0026): check it before "+

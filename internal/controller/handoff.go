@@ -733,6 +733,10 @@ func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *re
 			return err
 		}
 		log := logf.FromContext(ctx).WithValues("remediationRequest", key)
+		// pullRequestText reads from the API server only for a revert, and a revert never reaches this step: it
+		// never replaces another request (CEL on the spec, which is immutable), and only a request with
+		// spec.replaces gets status.handoff.from (reserveOnAdmission). Here it reads nothing and never fails, so no
+		// failed read of a reverted request can end in the caller's log at Info.
 		title, body, err := r.pullRequestText(stepCtx, rr)
 		if err != nil {
 			return err

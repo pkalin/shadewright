@@ -17,13 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
@@ -204,12 +208,42 @@ func TestRevertPullRequestText(t *testing.T) {
 	}
 }
 
-// TestRevertNameRedaction (#720): a revert's "namespace/name" is shown only when the name is RevertName of the UID
-// in its own spec.reverts, and the reverted request's only when it is the RequestName of its spec, so a hex
-// secret written as "revert-<secret>" or "remediation-<secret>" stays redacted (invariant 4).
+// hangingRequestReader is a reader whose get of a RemediationRequest blocks until its context ends, as a stalled
+// API server would.
+type hangingRequestReader struct{ client.Reader }
+
+func (hangingRequestReader) Get(ctx context.Context, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestRevertedRequestReadTimeout (#720): a read of the reverted request that never answers fails on its own
+// deadline, well before the step's, so the step gets a retry error with time left and no pull request text, and
+// nothing is opened with a body that leaves out what the revert reverts.
+func TestRevertedRequestReadTimeout(t *testing.T) {
+	_, revert := revertForBody(t)
+	r := &RemediationRequestReconciler{APIReader: hangingRequestReader{}, IncidentReadTimeout: 50 * time.Millisecond}
+	step, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	title, body, err := r.pullRequestText(step, revert)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the read's deadline", err)
+	}
+	if step.Err() != nil || time.Since(start) > 2*time.Second {
+		t.Errorf("the read used up the step: took %s, step err %v", time.Since(start), step.Err())
+	}
+	if title != "" || body != "" {
+		t.Errorf("text returned with the error: %q, %q", title, body)
+	}
+}
+
 // redactedEvidence is the Evidence line of a body whose request name was redacted.
 const redactedEvidence = "**Evidence:** RemediationRequest `[REDACTED:token]` (UID"
 
+// TestRevertNameRedaction (#720): a revert's "namespace/name" is shown only when the name is RevertName of the UID
+// in its own spec.reverts, and the reverted request's only when it is the RequestName of its spec, so a hex
+// secret written as "revert-<secret>" or "remediation-<secret>" stays redacted (invariant 4).
 func TestRevertNameRedaction(t *testing.T) {
 	secret24 := "3f1c9a7be2d84f06a5b1c3e9" // #nosec G101 -- made-up hex run, not a credential
 	for name, tc := range map[string]struct {

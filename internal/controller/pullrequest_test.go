@@ -533,7 +533,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				lastErr = err
 			}
 		}
-		Expect(lastErr).To(MatchError(ContainSubstring("reverts for its pull request")))
+		Expect(lastErr).To(MatchError(ContainSubstring("pull request text of a revert")))
 		Expect(git.ChangeRequests()).To(BeEmpty())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 

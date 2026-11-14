@@ -34,8 +34,8 @@ import (
 // and the executor's link check below is the control. The check runs before the policy check, once: a request
 // whose link does not hold ends Denied with InvalidRevert before any Git write and is never treated as a revert.
 // A valid revert then goes through the policy check, the freshness check, the target lock and the pull request
-// like any request, always with approval required, and after the merge it is never checked for clearing: the
-// verifier writes no report for it, Cleared stays Unknown with RevertApplied, and it ends Inconclusive with
+// like any request, always with approval required (its pull request's title, body and rollback line differ:
+// pullRequestText), and after the merge it is never checked for clearing: the verifier writes no report for it, Cleared stays Unknown with RevertApplied, and it ends Inconclusive with
 // RevertApplied once rolled out, configured and available held for stableFor (clearRevertStep), never
 // Succeeded.
 
@@ -55,17 +55,32 @@ func (r *RemediationRequestReconciler) checkRevertLink(ctx context.Context, rr *
 		// The name derives from the failed request's UID, so a failed request has at most one revert.
 		return deny("The request's name is not the one derived from the UID in spec.reverts")
 	}
-	failed := &remediationv1alpha1.RemediationRequest{}
-	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: ref.Name}, failed); {
-	case apierrors.IsNotFound(err):
-		return deny("The request it reverts does not exist")
+	failed, err := r.readReverted(ctx, rr)
+	switch {
 	case err != nil:
-		return outcome{}, false, fmt.Errorf("get the RemediationRequest %s reverts: %w", rr.Name, err)
+		return outcome{}, false, err
+	case failed == nil:
+		return deny("The request it reverts does not exist")
 	}
 	if why := revertLinkProblem(rr, failed); why != "" {
 		return deny(why)
 	}
 	return outcome{}, false, nil
+}
+
+// readReverted reads the request rr's spec.reverts names from the API server (never the cache), whatever its UID,
+// and returns nil when no request has that name. Any other failed read is an error for a retry, never taken for
+// a missing request. rr must carry spec.reverts.
+func (r *RemediationRequestReconciler) readReverted(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	*remediationv1alpha1.RemediationRequest, error) {
+	failed := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: rr.Spec.Reverts.Name}, failed); {
+	case apierrors.IsNotFound(err):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("get the RemediationRequest %s reverts: %w", rr.Name, err)
+	}
+	return failed, nil
 }
 
 // revertLinkProblem says why rr is not a valid revert of failed, the request its spec.reverts names as read

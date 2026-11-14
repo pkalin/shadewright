@@ -1,0 +1,26 @@
+# Synthetic: written from the lab run of 2026-11-14 (v0.5.0-rc.1, pkalin/shadewright#724), not recorded. The
+# collector's pod watch writes OOMKilled from the container's termination, with the note "Container <name>
+# terminated with exit code <n>". UIDs and the fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-replaced-pod
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000007b0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000007b0
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-0000000007b1
+  reason: OOMKilled
+  type: Warning
+  reportingController: kubelet
+  symptom: Container web terminated with exit code 137
+status:
+  phase: Open
+  count: 1
+  firstSeen: "2026-11-14T14:37:40Z"
+  lastSeen: "2026-11-14T14:37:40Z"

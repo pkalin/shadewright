@@ -1,0 +1,11 @@
+# How the diagnosis of startup-probe is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored), or why it is not scored.
+# The outcome is the case: a proposal fails it, whatever the diagnosis says.
+facts:
+  - fact: a single readiness probe failure with connection refused while the pod was starting
+    all: ["readiness probe"]
+    any: ["connection refused", "connect: connection refused"]
+  - fact: the pod is Ready now and has not restarted
+    any: ["restarts 0", "0 restarts", "no restarts", "not restarted", "never restarted", "has not restarted", "zero restarts", "restart count 0", "restart count of 0"]
+  - fact: no container was OOMKilled and nothing points at memory
+    any: ["no oomkilled", "not oomkilled", "no oom", "no memory", "memory pressure", "no sign of memory", "no evidence of memory", "nothing points at memory", "no memory evidence"]

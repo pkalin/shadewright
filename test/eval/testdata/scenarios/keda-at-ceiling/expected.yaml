@@ -4,15 +4,15 @@ name: keda-at-ceiling
 summary: The worker's ScaledObject has maxReplicaCount 2 while steady load makes its trigger ask for 3 replicas, so the HPA KEDA manages sits at its ceiling.
 incident:
   reason: ReplicaCeiling
-  status: planned
-  source: The KEDA module's HorizontalPodAutoscaler symptom source (ScalingLimited=True with reason TooManyReplicas, internal/modules/keda/symptoms.go in pkalin/shadewright). Nothing the collector reads fires at a ceiling (it reads Warning events and terminations only, and has no read access to HPAs), so there is no Incident until the analyzer consumes module symptom sources, planned in pkalin/shadewright#380. Not observed.
+  status: observed
+  source: The KEDA module's HorizontalPodAutoscaler symptom source (ScalingLimited=True with reason TooManyReplicas, internal/modules/keda/symptoms.go in pkalin/shadewright). Observed on the lab on 2026-11-08 (v0.3.0-rc.5) at about 08:18:54 UTC, as a ReplicaCeiling Incident on the ScaledObject. Before that, 2026-11-07 (rc.4) opened the Incident but the analysis ended MissingData (pkalin/shadewright#480), and the first rc.5 run had no Incident for 14 minutes because since pkalin/shadewright#478 the KEDA symptom sources run only while spec.modules.integrations of the RemediationSettings lists keda (fixed by pkalin/shadewright-fleet#52).
   object:
     apiVersion: keda.sh/v1alpha1
     kind: ScaledObject
     namespace: demo
     name: worker
 diagnosis:
-  status: planned
+  status: observed
   evidence:
     - fact: the HPA runs at its maximum, ScalingLimited is True with reason TooManyReplicas, and spec.maxReplicas and status.currentReplicas are both 2
       source: the KEDA module's ReplicaCeiling symptom evidence (built and unit-tested in pkalin/shadewright, not consumed by the analyzer yet, #380)
@@ -26,8 +26,8 @@ diagnosis:
       source: a Prometheus query through the MetricsSource interface (planned, not wired into the analyzer yet)
 outcome:
   type: pull-request
-  status: planned
-  note: Planned. Not run on Kind or the lab. The pull request step has not been exercised for this action against the fleet, and the lab has no policy that allows AdjustKedaMaxReplicas for demo yet (the operator's lab samples hold only a memory limit policy).
+  status: observed
+  note: Observed on the lab on 2026-11-08 (v0.3.0-rc.5). pkalin/shadewright-fleet#52 listed keda in the settings and added the policy demo-keda (2 to 3, at most +50%, no decrease, apps/demo/*-scaledobject.yaml). Then pkalin/shadewright-fleet#53 (maxReplicaCount 2 to 3, one field) opened 53 s after the Incident, with one Incident and one request, no duplicates. Merged 08:22:00 UTC, the executor saw it at 08:22:01, and the HPA was at 3 of 3 with ScalingLimited False (DesiredWithinRange) by 08:23:51. The real-model replay evaluation on rc.5 (5 repeats) proposed AdjustKedaMaxReplicas within bounds in 5 of 5 runs with all scored facts (https://shadewright.io/evaluation/).
   action: AdjustKedaMaxReplicas
   bounds:
     min: 2

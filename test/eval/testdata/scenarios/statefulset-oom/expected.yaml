@@ -4,15 +4,15 @@ name: statefulset-oom
 summary: A cache StatefulSet pod loads 36 MB into memory against a 48Mi limit, so it is OOMKilled and restarts.
 incident:
   reason: OOMKilled
-  status: planned
-  source: The kubelet writes lastState.terminated.reason on the container status of pod cache-1; the collector's pod watch reads it and follows the pod's controller reference to the StatefulSet (internal/analyzer/collector/owners.go in pkalin/shadewright, unit test TestStatefulSetPod). Not seen on a cluster yet.
+  status: observed
+  source: The kubelet writes lastState.terminated.reason on the container status of pod cache-1; the collector's pod watch reads it and follows the pod's controller reference to the StatefulSet (internal/analyzer/collector/owners.go in pkalin/shadewright, unit test TestStatefulSetPod). Observed on the lab on 2026-11-08 (v0.3.0-rc.5) at about 08:24:44 UTC, with BackOff and Unhealthy Incidents for the same subject.
   object:
     apiVersion: apps/v1
     kind: StatefulSet
     namespace: demo
     name: cache
 diagnosis:
-  status: planned
+  status: planned   # the diagnosis runs (https://shadewright.io/evaluation/) but it never names cache-0 and often leaves out the metric names, so 0 of 5 rc.5 replay runs had all facts
   evidence:
     - fact: OOMKilled from the container status (last state), not from an event reason
       source: the Incident reason, and the lastState.terminated.reason of pod cache-1
@@ -22,8 +22,8 @@ diagnosis:
       source: a Prometheus query through the MetricsSource interface, whose pod templates resolve StatefulSet pods by owner reference (planned, not wired into the analyzer yet)
 outcome:
   type: pull-request
-  status: planned
-  note: Not run. The pull request step has been seen for a Deployment only (pkalin/shadewright-fleet#26); the operator accepts a StatefulSet as target (internal/gitops/sourcemap/field.go, internal/policy/decide.go). After a merge the stuck pod needs a manual delete (see the README).
+  status: observed
+  note: Observed on the lab on 2026-11-08 (v0.3.0-rc.5), after pkalin/shadewright-fleet#52 added apps/demo/*-statefulset.yaml to the policy demo-memory. The OOMKilled Incident at about 08:24:44 UTC led to pkalin/shadewright-fleet#54 (cache container 48Mi to 72Mi, +50%) at 08:27:39. Two more Incidents (BackOff, Unhealthy) for the same subject did not make more pull requests (pkalin/shadewright#432). It was merged at 08:30:03 UTC as the lab was destroyed, so the delivery and the manual pod delete after a merge are still not checked (see the README). The real-model replay evaluation on rc.5 had 0 of 5 runs with all facts.
   action: SetContainerMemoryLimit
   bounds:
     min: 64Mi

@@ -5,14 +5,14 @@ summary: The web container loads 36 MB into memory against a 48Mi limit, so it i
 incident:
   reason: OOMKilled
   status: observed
-  source: The kubelet writes lastState.terminated.reason on the container status; the collector's pod watch reads it (there is no event with this reason). Observed on the lab on 2026-11-04 together with BackOff and Unhealthy Incidents for Deployment demo/web.
+  source: The kubelet writes lastState.terminated.reason on the container status; the collector's pod watch reads it (there is no event with this reason). Observed on the lab on 2026-11-04 together with BackOff and Unhealthy Incidents for Deployment demo/web, and again in the analyzer-driven runs of 2026-11-06 (v0.3.0-rc.2), 2026-11-07 (rc.4) and 2026-11-08 (rc.5).
   object:
     apiVersion: apps/v1
     kind: Deployment
     namespace: demo
     name: web
 diagnosis:
-  status: planned
+  status: planned   # the diagnosis runs (https://shadewright.io/evaluation/) but the metric name container_memory_limit_bytes is often missing, so not every fact is observed
   evidence:
     - fact: OOMKilled from the container status (last state), not from an event reason
       source: the Incident reason, and the pod's lastState.terminated.reason
@@ -23,7 +23,7 @@ diagnosis:
 outcome:
   type: pull-request
   status: observed
-  note: Observed on 2026-11-04 with a hand-written request, not one the analyzer created, so the path from diagnosis to request is still planned. It opened pkalin/shadewright-fleet#26 (one line, 48Mi to 64Mi in apps/demo/web-deployment.yaml), AwaitingApproval in about a minute, then Superseded 307 s after a policy bounds change.
+  note: Observed from the analyzer. On 2026-11-08 (v0.3.0-rc.5) it opened pkalin/shadewright-fleet#51 (48Mi to 64Mi in apps/demo/web-deployment.yaml) 3m13s after the first symptom. One OOM opened three Incidents for demo/web (OOMKilled, BackOff, Unhealthy), each analyzed (proposals 64Mi, 72Mi, 64Mi), and the target lock kept it to one pull request (pkalin/shadewright#432). Merged 07:33:28 UTC, the executor recorded the merge 12 s later, Flux applied it at 07:34:10 and the new pod ran at 64Mi without restarts. The two waiting duplicate requests then ended NeedsIntervention with reason KustomizationNotReady (Flux was mid-reconcile of the fix). Earlier runs. 2026-11-06 (rc.2) the analyzer created the request itself and opened pkalin/shadewright-fleet#45 3m34s after the symptom, the executor saw the merge 4m07s late (pkalin/shadewright#434). 2026-11-07 (rc.4) two proposals were Denied by policy, correctly. 48Mi to 96Mi was over the 50% step because the model did not see the policy bounds (pkalin/shadewright#493), and one from a readiness-probe Incident took 64Mi from an old pod as the previous value (pkalin/shadewright#494). History. 2026-11-04 with a hand-written request opened pkalin/shadewright-fleet#26 (48Mi to 64Mi), AwaitingApproval in about a minute, then Superseded 307 s after a policy bounds change.
   action: SetContainerMemoryLimit
   bounds:
     min: 64Mi

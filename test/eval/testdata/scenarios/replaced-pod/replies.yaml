@@ -1,0 +1,13 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2600, outputTokens: 270}
+    content: |
+      {"summary": "The OOMKilled evidence of Deployment demo/web comes from the pod web-8d4c6b9f7-t5r9k, which belongs to the previous ReplicaSet (revision 2, no desired replicas) and was running with a 48Mi limit. The current template (revision 3) has a 64Mi limit and its pod web-6c5b8d9f4-k8w3z is Running and Ready with 0 restarts. The cause is already gone, so no change is proposed.",
+       "hypotheses": [{"description": "The pod was the last one of the replaced ReplicaSet and was killed under the old 48Mi limit; the current template no longer has that limit."}],
+       "evidence": [{"source": "c1", "quote": "OOMKilled"},
+                    {"source": "c2", "quote": "controlled by ReplicaSet web-8d4c6b9f7"}],
+       "missingData": [],
+       "uncertainty": "Whether the current pod stays under 64Mi under load is not shown by this evidence.",
+       "proposal": null}

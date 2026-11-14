@@ -1,0 +1,24 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: replaced-pod
+summary: The web Deployment's current template is healthy (64Mi, its new pod Running and Ready), and the only OOMKilled evidence is a terminating pod of the previous ReplicaSet under a 48Mi limit.
+incident:
+  reason: OOMKilled
+  status: observed
+  source: The kubelet writes the termination reason on the container status; the collector's pod watch reads it. Observed on the lab on 2026-11-14 (v0.5.0-rc.1) after the switch from oom-leak to keda-ceiling-persists, from the last pod of the old ReplicaSet while it was terminating (pkalin/shadewright#724).
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: planned
+  evidence:
+    - fact: the OOMKilled container belongs to a pod of the previous ReplicaSet, which is being terminated
+      source: the pod's controller owner reference, deletionTimestamp and pod-template-hash label against the Deployment's ReplicaSets
+    - fact: the current template has a 64Mi limit and its pod is Running and Ready
+      source: the Deployment's pod template and the status of the pod of the current ReplicaSet
+outcome:
+  type: refusal
+  status: planned
+  reason: The OOM evidence comes from a replaced template that is already fixed, so there is nothing left to change; a memory proposal built from the current template's 64Mi fails the case. The lab run of 2026-11-14 proposed 64Mi to 96Mi, and the request ended Succeeded (pkalin/shadewright#724).

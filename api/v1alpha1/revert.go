@@ -66,7 +66,7 @@ const (
 )
 
 // RevertReason is why an entry of an Incident's status.revertsProposed is Abandoned.
-// +kubebuilder:validation:Enum=TargetGone;TargetKindUnsupported;OutsideAgeBound;IncidentDeleting;RequestGone;NameTaken;CreateInvalid
+// +kubebuilder:validation:Enum=TargetGone;TargetKindUnsupported;OutsideAgeBound;IncidentDeleting;RequestGone;NotRevertible;NameTaken;CreateInvalid
 type RevertReason string
 
 const (
@@ -85,6 +85,9 @@ const (
 	// RevertReasonRequestGone: the failed request was deleted, is being deleted, or its name now belongs to
 	// another request (another UID).
 	RevertReasonRequestGone RevertReason = "RequestGone"
+	// RevertReasonNotRevertible: the failed request is there with its UID, but no longer ended Failed with
+	// Verified False, or its action can no longer be inverted.
+	RevertReasonNotRevertible RevertReason = "NotRevertible"
 	// RevertReasonNameTaken: a request with the revert's name exists and does not revert this request; it is
 	// left as it is.
 	RevertReasonNameTaken RevertReason = "NameTaken"

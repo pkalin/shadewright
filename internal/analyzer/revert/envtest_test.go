@@ -177,7 +177,7 @@ func addEntries(t *testing.T, inc *remediationv1alpha1.Incident, es ...remediati
 // settled from the Incident's side, by the controller SetupWithManager registers. At start-up: an entry whose
 // request is gone, and one whose request name now belongs to another UID, move to Abandoned (RequestGone); one
 // whose request is gone but whose linked revert exists moves to Created; one whose request is there with its
-// UID stays Pending. Later, an entry of a gone request added to a running analyzer's Incident is settled too.
+// UID but never ended Failed moves to Abandoned (NotRevertible, which the API server's enum accepts). Later, an entry of a gone request added to a running analyzer's Incident is settled too.
 func TestEnvtestPendingSettledFromTheIncident(t *testing.T) {
 	startEnv(t)
 	ctx := t.Context()
@@ -237,9 +237,10 @@ func TestEnvtestPendingSettledFromTheIncident(t *testing.T) {
 	eventually(t, "the entry whose revert exists is Created", func() bool {
 		return entries(t, inc)[madeUID].State == remediationv1alpha1.RevertCreated
 	})
-	if e := entries(t, inc)[remediationv1alpha1.UID(live.UID)]; e.State != remediationv1alpha1.RevertPending {
-		t.Errorf("the entry of a request that is there is %+v, want Pending", e)
-	}
+	eventually(t, "the entry of the request that never ended Failed is Abandoned", func() bool {
+		e := entries(t, inc)[remediationv1alpha1.UID(live.UID)]
+		return e.State == remediationv1alpha1.RevertAbandoned && e.Reason == remediationv1alpha1.RevertReasonNotRevertible
+	})
 
 	addEntries(t, inc, pendingEntry("remediation-later", laterUID))
 	eventually(t, "the entry added later is Abandoned", func() bool { return abandoned(laterUID) })

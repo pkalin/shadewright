@@ -58,6 +58,7 @@ const (
 	// The kinds the tests name.
 	kindDeployment = "Deployment"
 	kindRequest    = "RemediationRequest"
+	kindIncident   = "Incident"
 )
 
 var errBoom = errors.New("boom")
@@ -398,19 +399,41 @@ func TestRevertible(t *testing.T) {
 	}
 }
 
-// TestFailedReadIsRetried: a failed read of the request, the Incident or the target returns an error for a
-// retry, creates nothing and records nothing; it is never taken for "gone".
+// TestFailedReadIsRetried: a failed read of the request, the Incident, the target, or (for a Pending entry) of
+// the revert's name, which is read before the checks, returns an error for a retry, creates nothing and changes
+// no entry; it is never taken for "gone".
 func TestFailedReadIsRetried(t *testing.T) {
-	for _, kind := range []string{kindRequest, "Incident", kindDeployment} {
-		t.Run(kind, func(t *testing.T) {
+	for name, c := range map[string]struct {
+		down  func(c client.WithWatch, key client.ObjectKey, obj client.Object) bool
+		entry bool
+	}{
+		kindRequest: {func(c client.WithWatch, key client.ObjectKey, obj client.Object) bool {
+			return objKind(c, obj) == kindRequest && key.Name == failedName
+		}, false},
+		kindIncident: {func(c client.WithWatch, _ client.ObjectKey, obj client.Object) bool {
+			return objKind(c, obj) == kindIncident
+		}, false},
+		kindDeployment: {func(c client.WithWatch, _ client.ObjectKey, obj client.Object) bool {
+			return objKind(c, obj) == kindDeployment
+		}, false},
+		"the revert of a Pending entry": {func(_ client.WithWatch, key client.ObjectKey, _ client.Object) bool {
+			return key.Name == revertKey.Name
+		}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
 			w := newWorld()
+			var want []remediationv1alpha1.ProposedRevert
+			if c.entry {
+				want = []remediationv1alpha1.ProposedRevert{pending0}
+				w.inc.Status.RevertsProposed = want
+			}
 			down := true
-			w.funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			w.funcs.Get = func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object,
 				opts ...client.GetOption) error {
-				if down && objKind(c, obj) == kind {
+				if down && c.down(cl, key, obj) {
 					return apierrors.NewServiceUnavailable("down")
 				}
-				return c.Get(ctx, key, obj, opts...)
+				return cl.Get(ctx, key, obj, opts...)
 			}
 			p, k := w.build(t)
 			if err := reconcileFailed(p); err == nil {
@@ -420,8 +443,8 @@ func TestFailedReadIsRetried(t *testing.T) {
 			if revertOf(t, k) != nil {
 				t.Error("a revert was created after a failed read")
 			}
-			if got := recorded(t, k); len(got) != 0 {
-				t.Errorf("status.revertsProposed = %+v after a failed read, want nothing", got)
+			if got := recorded(t, k); !equality.Semantic.DeepEqual(got, want) {
+				t.Errorf("status.revertsProposed = %+v after a failed read, want %+v", got, want)
 			}
 			if err := reconcileFailed(p); err != nil {
 				t.Fatalf("the healthy retry: %v", err)
@@ -583,14 +606,12 @@ func TestDecisionRecordedBeforeCreate(t *testing.T) {
 }
 
 // TestPendingKeepsTheDecision: a Pending entry keeps the decision that no second revert is proposed, not that
-// this one must be made. It leads to the create when the checks pass, also with a full list (the entry is
-// already in it), and to Abandoned when a check refuses, also with a full list.
+// this one must be made: it leads to Abandoned when a check refuses, also with a full list.
 func TestPendingKeepsTheDecision(t *testing.T) {
 	for name, c := range map[string]struct {
 		edit func(w *world)
 		want remediationv1alpha1.ProposedRevert
 	}{
-		"the checks pass": {func(*world) {}, created0},
 		caseTargetGone: {func(w *world) { w.target = nil }, remediationv1alpha1.ProposedRevert{RequestRef: link0,
 			State: remediationv1alpha1.RevertAbandoned, Reason: remediationv1alpha1.RevertReasonTargetGone}},
 		casePastAgeBound: {func(w *world) {
@@ -607,8 +628,8 @@ func TestPendingKeepsTheDecision(t *testing.T) {
 			if err := reconcileFailed(p); err != nil {
 				t.Fatal(err)
 			}
-			if made := revertOf(t, k) != nil; made != (c.want == created0) {
-				t.Errorf("revert created = %v, want %v", made, c.want == created0)
+			if revertOf(t, k) != nil {
+				t.Error("a revert was created")
 			}
 			got := recorded(t, k)
 			if got[len(got)-1] != c.want {
@@ -710,7 +731,7 @@ func TestDeletedRequestAbandons(t *testing.T) {
 		edit func(w *world)
 		on   string
 	}{
-		"gone": {func(w *world) { w.failed = nil }, "Incident"},
+		"gone": {func(w *world) { w.failed = nil }, kindIncident},
 		"being deleted": {func(w *world) {
 			w.failed.DeletionTimestamp = &metav1.Time{Time: now}
 			w.failed.Finalizers = []string{hold}
@@ -752,7 +773,7 @@ type kindRecorder struct {
 func (r *kindRecorder) Eventf(obj runtime.Object, eventType, reason, format string, args ...any) {
 	switch obj.(type) {
 	case *remediationv1alpha1.Incident:
-		r.kinds = append(r.kinds, "Incident")
+		r.kinds = append(r.kinds, kindIncident)
 	case *remediationv1alpha1.RemediationRequest:
 		r.kinds = append(r.kinds, kindRequest)
 	default:
@@ -994,7 +1015,8 @@ func TestTargetForbidden(t *testing.T) {
 
 // TestExistingRevertWins: a Pending entry whose revert exists, linked to the failed request (the create
 // succeeded, the move to Created was not written), moves to Created whatever the checks say now, with no
-// Warning event: the checks guard only a create that has not happened.
+// Warning event and no create tried: the revert's name is read before the checks, which guard only a create that
+// has not happened.
 func TestExistingRevertWins(t *testing.T) {
 	for name, edit := range map[string]func(w *world){
 		"the checks pass":      func(*world) {},
@@ -1017,6 +1039,12 @@ func TestExistingRevertWins(t *testing.T) {
 			w.extra = append(w.extra, &remediationv1alpha1.RemediationRequest{
 				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: revertKey.Name}, Spec: spec})
 			edit(w)
+			creates := 0
+			w.funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object,
+				opts ...client.CreateOption) error {
+				creates++
+				return c.Create(ctx, obj, opts...)
+			}
 			p, k := w.build(t)
 			if err := reconcileFailed(p); err != nil {
 				t.Fatalf("Reconcile: %v", err)
@@ -1026,6 +1054,9 @@ func TestExistingRevertWins(t *testing.T) {
 			}
 			if ev := events(p); len(ev) != 0 {
 				t.Errorf("events = %q, want none", ev)
+			}
+			if creates != 0 {
+				t.Errorf("%d creates tried, want none: the existing revert decides", creates)
 			}
 		})
 	}

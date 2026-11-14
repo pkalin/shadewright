@@ -1077,7 +1077,7 @@ Used by: [IncidentStatus](#incidentstatus).
 | `name` | string | Yes | name of the request.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
 | `uid` | [UID](#uid) | Yes | uid of the request, so a request recreated under the same name is never taken for it.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `state` | [RevertState](#revertstate) | Yes | state is Pending from the decision until the revert exists, then Created, or Abandoned when no revert will be made. Created and Abandoned are final. A new entry is always Pending.<br>One of `Pending`, `Created`, `Abandoned` |
-| `reason` | [RevertReason](#revertreason) | No | reason is why the entry is Abandoned. It is set with that state, only with it, and never changes.<br>One of `TargetGone`, `TargetKindUnsupported`, `OutsideAgeBound`, `IncidentDeleting`, `RequestGone`, `NameTaken`, `CreateInvalid` |
+| `reason` | [RevertReason](#revertreason) | No | reason is why the entry is Abandoned. It is set with that state, only with it, and never changes.<br>One of `TargetGone`, `TargetKindUnsupported`, `OutsideAgeBound`, `IncidentDeleting`, `RequestGone`, `NotRevertible`, `NameTaken`, `CreateInvalid` |
 
 ### PullRequestStatus
 
@@ -1378,7 +1378,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 RevertReason is why an entry of an Incident's status.revertsProposed is Abandoned.
 
 - Underlying type: string
-- One of `TargetGone`, `TargetKindUnsupported`, `OutsideAgeBound`, `IncidentDeleting`, `RequestGone`, `NameTaken`, `CreateInvalid`
+- One of `TargetGone`, `TargetKindUnsupported`, `OutsideAgeBound`, `IncidentDeleting`, `RequestGone`, `NotRevertible`, `NameTaken`, `CreateInvalid`
 
 Used by: [ProposedRevert](#proposedrevert).
 
@@ -1389,6 +1389,7 @@ Used by: [ProposedRevert](#proposedrevert).
 | `OutsideAgeBound` | RevertReasonOutsideAgeBound: the failed request's Verified condition moved more than 24 hours ago (or is too far ahead of the analyzer's clock, or has no time) before the revert could be created. A target the analyzer was refused access to (Forbidden) is retried until then and ends here. |
 | `IncidentDeleting` | RevertReasonIncidentDeleting: the Incident is being deleted. |
 | `RequestGone` | RevertReasonRequestGone: the failed request was deleted, is being deleted, or its name now belongs to another request (another UID). |
+| `NotRevertible` | RevertReasonNotRevertible: the failed request is there with its UID, but no longer ended Failed with Verified False, or its action can no longer be inverted. |
 | `NameTaken` | RevertReasonNameTaken: a request with the revert's name exists and does not revert this request; it is left as it is. |
 | `CreateInvalid` | RevertReasonCreateInvalid: the API server refused the revert as invalid. The analyzer's log has the error. |
 

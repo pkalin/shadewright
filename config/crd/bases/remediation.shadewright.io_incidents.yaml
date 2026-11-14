@@ -419,6 +419,7 @@ spec:
                       - OutsideAgeBound
                       - IncidentDeleting
                       - RequestGone
+                      - NotRevertible
                       - NameTaken
                       - CreateInvalid
                       type: string

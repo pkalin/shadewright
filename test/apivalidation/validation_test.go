@@ -933,14 +933,20 @@ var _ = Describe("Incident", func() {
 		for _, bad := range [][]v1alpha1.ProposedRevert{
 			{created, second, abandoned, ref("remediation-d", string(second.UID), v1alpha1.RevertPending)},
 			{created, second, abandoned, ref("remediation-d", "30303030-3030-4030-8030-303030303030", "Done")},
-			{created, second, abandoned, with(ref("remediation-d", "30303030-3030-4030-8030-303030303030",
-				v1alpha1.RevertPending), "NoSuchReason")},
 		} {
 			changed := inc.DeepCopy()
 			changed.Status.RevertsProposed = bad
 			err := k8sClient.Status().Update(ctx, changed)
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error for %v: %v", bad, err)
 		}
+
+		// A Pending entry moving to Abandoned, which the state rules allow, with a reason outside the enum.
+		changed := inc.DeepCopy()
+		changed.Status.RevertsProposed = []v1alpha1.ProposedRevert{created,
+			with(ref(second.Name, string(second.UID), v1alpha1.RevertAbandoned), "NoSuchReason"), abandoned}
+		err := k8sClient.Status().Update(ctx, changed)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error for an unknown reason: %v", err)
+		Expect(err.Error()).To(ContainSubstring("Unsupported value: \"NoSuchReason\""))
 	})
 
 	const (

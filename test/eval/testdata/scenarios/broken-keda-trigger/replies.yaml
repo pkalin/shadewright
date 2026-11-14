@@ -4,9 +4,10 @@ replies:
   - model: eval-fake-1
     usage: {inputTokens: 1700, outputTokens: 240}
     content: |
-      {"summary": "KEDA cannot query the trigger of ScaledObject demo/worker: the Prometheus address prometheus-server.monitoring.svc.cluster.local does not resolve. A broken trigger is not fixed by raising maxReplicaCount, and no catalog action edits a trigger, so no change is proposed.",
+      {"summary": "KEDA cannot query the trigger of ScaledObject demo/worker: its Ready condition is False with reason TriggerError, and the Prometheus address prometheus-server.monitoring.svc.cluster.local does not resolve. A broken trigger is not fixed by raising maxReplicaCount, and no catalog action edits a trigger, so no change is proposed.",
        "hypotheses": [{"description": "The trigger's serverAddress names a Service that does not exist."}],
-       "evidence": [{"source": "c1", "quote": "lookup prometheus-server.monitoring.svc.cluster.local"}],
-       "missingData": [],
-       "uncertainty": "The ScaledObject's conditions are not in the context.",
+       "evidence": [{"source": "c1", "quote": "lookup prometheus-server.monitoring.svc.cluster.local"},
+                    {"source": "c2", "quote": "Triggers defined in ScaledObject are not working correctly"}],
+       "missingData": ["a fix of the trigger's serverAddress in Git, which no catalog action makes"],
+       "uncertainty": "The trigger's address is known only from the event's error text: the context does not show the trigger's metadata.",
        "proposal": null}

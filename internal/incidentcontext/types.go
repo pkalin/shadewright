@@ -113,6 +113,10 @@ const (
 	ProvenanceIncident Provenance = "incident"
 	// ProvenanceObjectStatus is the status of the target and its pods, read from the cluster.
 	ProvenanceObjectStatus Provenance = "pod status"
+	// ProvenanceScaledObject is a KEDA ScaledObject that is the Incident's subject, read from the cluster with
+	// one get and shown from an allow-list of its fields (ADR-0036). Cluster data, quotable like a workload's
+	// status.
+	ProvenanceScaledObject Provenance = "keda scaledobject"
 	// ProvenanceLogExcerpt is a log excerpt from the log source.
 	ProvenanceLogExcerpt Provenance = "log excerpt"
 	// ProvenanceMetric is the answer of the metrics source.
@@ -238,6 +242,12 @@ type Context struct {
 	// analysis loop takes a proposal's previous memory limit from it, never from the model (#494). During a
 	// rollout the running pods may still hold an older value.
 	Template []TemplateContainer
+	// ScaledObject is the subject's KEDA ScaledObject as one get from the API server returned it, with the
+	// subject's UID, decoded from JSON (ADR-0036 decision 2); nil when the subject is not a ScaledObject or the
+	// read failed, was refused or found no such object. It is the snapshot the analysis loop decides from: the
+	// previous maxReplicaCount of a proposal, and whether the scaler is ready (kedaready.Readiness). Only the
+	// fields of the status section are shown to the model, never this object.
+	ScaledObject map[string]any
 }
 
 // TemplateContainer is one container of the subject's pod template, as the API server returned it.

@@ -399,6 +399,8 @@ type spySource struct {
 	replaySource
 	mu    sync.Mutex
 	tools [][]providers.ToolDefinition
+	// messages are the messages of every request, in order.
+	messages [][]providers.Message
 }
 
 type spyModel struct {
@@ -409,6 +411,7 @@ type spyModel struct {
 func (m spyModel) Complete(ctx context.Context, req providers.CompletionRequest) (providers.Completion, error) {
 	m.src.mu.Lock()
 	m.src.tools = append(m.src.tools, req.Tools)
+	m.src.messages = append(m.src.messages, req.Messages)
 	m.src.mu.Unlock()
 	return m.inner.Complete(ctx, req)
 }

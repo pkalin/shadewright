@@ -197,6 +197,7 @@ var troubleshootingSections = map[string][]string{
 	"ScaledObjectNotReady":              {secPolicy, secFreshness},
 	"ScaledObjectReadinessUnknown":      {secPolicy},
 	"ScaledToZero":                      {secAfterMerge},
+	"ScalerNotReady":                    {secNotRequest},
 	"SchemaInvalid":                     {secRender},
 	"SettingsChanged":                   {secFreshness},
 	"SettingsNotFound":                  {secRequest},

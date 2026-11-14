@@ -33,7 +33,11 @@ limitations under the License.
 // of a memory limit change is the subject's pod template's, as the context builder read it, never the
 // model's ([incidentcontext.Context.Template], #494), and the catalog check runs on the plan with it; without
 // one, or when the template already holds the desired value or its value reverses the direction of the change,
-// the proposal is handed off (PreviousValueUnknown, NoChange, DirectionReversed). The [Controller], not the model, creates the
+// the proposal is handed off (PreviousValueUnknown, NoChange, DirectionReversed). The previous maxReplicaCount
+// of a KEDA change is taken the same way from the ScaledObject the builder read before the model call
+// ([incidentcontext.Context.ScaledObject], ADR-0036); when that object is not ready by the policy's own rule
+// ([kedaready.Readiness]), AdjustKedaMaxReplicas is left out of the catalog shown, and a result that proposes
+// it or nothing ends ScalerNotReady. The [Controller], not the model, creates the
 // RemediationRequest, in the operator namespace with approvalRequired true; the executor's policy check
 // decides it (invariant 1). The result has no confidence field, and a reply that adds one is invalid.
 //

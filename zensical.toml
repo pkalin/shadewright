@@ -122,6 +122,7 @@ nav = [
       { "0032 Azure DevOps provider" = "adr/0032-azure-devops-as-a-second-git-provider.md" },
       { "0033 Argo CD delivery" = "adr/0033-argo-cd-delivery-and-source-mapping.md" },
       { "0034 Declarative packs" = "adr/0034-declarative-pack-format.md" },
+      { "0036 ScaledObject for the model" = "adr/0036-the-model-sees-the-scaledobject-of-a-keda-incident.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

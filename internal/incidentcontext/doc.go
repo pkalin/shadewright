@@ -24,7 +24,9 @@ limitations under the License.
 //   - summary: the Incident itself (subject, reason, symptom, counts and times);
 //   - object status and owners: the target workload's status and conditions, the memory limits of its pod
 //     template, the owner chain and the status of each of its current pods with that pod's own memory limits,
-//     each labelled as the template's or the pod's (during a rollout they differ);
+//     each labelled as the template's or the pod's (during a rollout they differ); for a KEDA ScaledObject
+//     subject, the allow-listed fields of that one object, read with one get (ADR-0036), and the object itself
+//     as [Context.ScaledObject] for the analysis loop to decide from;
 //   - log excerpt: at most two excerpts from a [providers.LogSource], of the containers that look most
 //     relevant (a terminated previous instance first, then a waiting or unready container);
 //   - metrics: the approved metric templates for the target's pods from a [providers.MetricsSource];

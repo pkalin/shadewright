@@ -1,2 +1,53 @@
-# No objects: the context builder and the read tools do not read ScaledObjects or HorizontalPodAutoscalers, so
-# the summary of the Incident is all the context holds.
+# The worker's ScaledObject, the Incident's subject: its spec from
+# scenarios/keda-at-ceiling/apps/demo/worker-scaledobject.yaml of the fleet repository at the commit
+# source.yaml names (maxReplicaCount 2), with the UID of incident.yaml. The status is synthetic, written from
+# the conditions KEDA v2.21 sets while its trigger is active and healthy. The context builder reads it with one
+# get and shows only the fields ADR-0036 allows (never the trigger's serverAddress or query); the analyzer
+# takes the previous maxReplicaCount of a proposal from it. The HorizontalPodAutoscaler is not read.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000791
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/part-of: demo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  pollingInterval: 30
+  minReplicaCount: 1
+  maxReplicaCount: 2
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.prometheus.svc.cluster.local
+        query: sum(rate(http_requests_total{namespace="demo", app_kubernetes_io_name="worker"}[1m]))
+        threshold: "5"
+        ignoreNullValues: "false"
+status:
+  scaleTargetKind: apps/v1.Deployment
+  originalReplicaCount: 1
+  hpaName: keda-hpa-worker
+  externalMetricNames:
+    - s0-prometheus
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: ScaledObjectReady
+      message: ScaledObject is defined correctly and is ready for scaling
+    - type: Active
+      status: "True"
+      reason: ScalerActive
+      message: Scaling is performed because triggers are active
+    - type: Fallback
+      status: "False"
+      reason: NoFallbackFound
+      message: No fallbacks are active on this scaled object
+    - type: Paused
+      status: "False"
+      reason: ScaledObjectUnpaused
+      message: pause annotation removed for ScaledObject

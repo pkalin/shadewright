@@ -27,11 +27,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/ownership"
 )
 
@@ -79,6 +81,8 @@ type target struct {
 	state targetState
 	// workload is the target object when it is a workload (Deployment, StatefulSet or ReplicaSet).
 	workload client.Object
+	// scaledObject is the target object when it is a KEDA ScaledObject, as one get returned it (ADR-0036).
+	scaledObject *unstructured.Unstructured
 	// replicaSets are the verified ReplicaSets of a Deployment target that control a pod in pods.
 	replicaSets []*appsv1.ReplicaSet
 	// pods are the target's current pods, most relevant first, at most MaxPods.
@@ -118,6 +122,8 @@ func (b *Builder) resolve(ctx context.Context, ref remediationv1alpha1.ObjectRef
 		err = b.resolveReplicaSet(ctx, &t)
 	case ref.APIVersion == apiCore && ref.Kind == kindPod:
 		err = b.resolvePod(ctx, &t)
+	case ref.APIVersion == kedaready.APIVersion && ref.Kind == kedaready.KindScaledObject:
+		err = b.resolveScaledObject(ctx, &t)
 	default:
 		t.state = targetUnsupported
 		return t

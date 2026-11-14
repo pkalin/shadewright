@@ -23,7 +23,7 @@ This section lists what we analyse in each controller and the fix path (7.1), th
 
 A broken trigger authentication is not fixed by raising `maxReplicaCount` ([ScaledObject spec](https://keda.sh/docs/2.21/reference/scaledobject-spec/)), and neither is any other trigger error.
 
-So the policy check refuses `AdjustKedaMaxReplicas` unless the `ScaledObject` is ready (`KedaReady`). It does so at the decision and before every write (sections 5.1 and 6).
+So the policy check refuses `AdjustKedaMaxReplicas` unless the `ScaledObject` is ready (`KedaReady`). It does so at the decision and before every write (sections 5.1 and 6). The analyzer applies the same rule earlier, to the ScaledObject it read before the model call: one that is not ready is not offered the action, and the analysis ends `ScalerNotReady` ([ADR-0036](../adr/0036-the-model-sees-the-scaledobject-of-a-keda-incident.md), section 3.3).
 
 ### Versions
 

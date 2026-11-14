@@ -189,7 +189,7 @@ type Hint struct {
 	// ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise, or
 	// HintsTurnedOff when the executor runs with reviewer hints off, which declines every Pending or Reserved
 	// hint. HintDeclineReasons lists them.
-	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded;ReplacementDenied;HandoffAborted;HintsTurnedOff
+	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;ScalerNotReady;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded;ReplacementDenied;HandoffAborted;HintsTurnedOff
 	// +optional
 	Reason string `json:"reason,omitempty"`
 
@@ -237,7 +237,7 @@ const (
 // no replacement, and the executor's own.
 var HintDeclineReasons = []string{"NoModelConfigured", "BudgetSpent", "BudgetUnavailable", "NoProposal",
 	"MissingData", "NoEvidence", "TargetNotSupported", "PreviousValueUnknown", "NoChange", "DirectionReversed",
-	"NoPolicyForAction", "ActionOutOfBounds", "InvalidOutput", "EscalationNotConfigured", "StepLimit",
+	"ScalerNotReady", "NoPolicyForAction", "ActionOutOfBounds", "InvalidOutput", "EscalationNotConfigured", "StepLimit",
 	"TokenLimit", "DeadlineExceeded", "ModelUnavailable", "ModelNotFound", "ModelForbidden", "ModelError",
 	"UnexpectedModel", "EndpointNotAllowed", "PlanUnchanged", "HintNotPending", "RequestNotCreated",
 	"CoolingDown", "NoAnswer", "PullRequestMerged", "PullRequestClosed", "RequestEnded", "ReplacementDenied",

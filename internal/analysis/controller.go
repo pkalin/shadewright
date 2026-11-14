@@ -977,6 +977,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonEndpointNotAllowed:      "The model endpoint is outside the analyzer's allow-list of host suffixes; nothing was sent; handed off to a person",
 	ReasonPlanUnchanged:           "The analysis with a reviewer hint proposed the plan of the request it would replace; no replacement was created",
 	ReasonHintNotPending:          "The reviewer hint was no longer pending; no replacement was created for it",
+	ReasonScalerNotReady:          "The subject's ScaledObject is not ready, so raising maxReplicaCount was not offered; handed off to a person",
 }
 
 // finish writes the outcome in one status update: Proposed with the request's name, or Escalated, and the

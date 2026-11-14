@@ -17,10 +17,12 @@ limitations under the License.
 package analysis
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -33,6 +35,7 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/policy"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/quantity"
@@ -129,6 +132,12 @@ const (
 	// ReasonPlanUnchanged: an analysis with a reviewer hint proposed the plan of the request it would replace,
 	// so no replacement was created (ADR-0028 section 4).
 	ReasonPlanUnchanged Reason = "PlanUnchanged"
+	// ReasonScalerNotReady: the Incident's subject is a KEDA ScaledObject that the context builder read and that
+	// the KedaReady rule finds not ready ([kedaready.Readiness], the rule of the policy check), so
+	// AdjustKedaMaxReplicas was not offered, and the valid result ended without a proposal or proposed that
+	// action anyway (ADR-0036 decision 5). It is decided by code from the snapshot, never by the model; the
+	// model's missing data stays in [Outcome.MissingData].
+	ReasonScalerNotReady Reason = "ScalerNotReady"
 	// ReasonHintNotPending: the reviewer hint of an analysis was no longer pending, so no replacement was
 	// created for it: a lost run was released without running again, or the hint was answered, declined or
 	// removed while the model ran (ADR-0028).
@@ -378,8 +387,13 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 	}
 	r.pods = c.Pods
 	r.template = c.Template
+	r.scaledObject = c.ScaledObject
+	r.scalerNotReady = scalerNotReady(c.ScaledObject)
 	var shownContext string
 	shownContext, r.shown = contextMessage(c)
+	if r.scalerNotReady {
+		shownContext += scalerNotReadyNotice
+	}
 	if hint != "" {
 		shownContext += hintMessage(r.redact(hint))
 	}
@@ -513,8 +527,14 @@ type run struct {
 	out         *Outcome
 	pods        []string
 	// template is the subject's pod template as the context builder read it ([incidentcontext.Context.Template]).
-	template    []incidentcontext.TemplateContainer
-	contextText string
+	template []incidentcontext.TemplateContainer
+	// scaledObject is the subject's ScaledObject as the context builder read it, once, before the model call
+	// ([incidentcontext.Context.ScaledObject]); nil when it is not one or was not read (ADR-0036).
+	scaledObject map[string]any
+	// scalerNotReady says the KedaReady rule finds scaledObject not ready: AdjustKedaMaxReplicas is not offered
+	// and the analysis ends ScalerNotReady unless the result proposes another action (ADR-0036 decision 5).
+	scalerNotReady bool
+	contextText    string
 	// shown is each block and tool result as the model saw it, by ID, with its quotable parts.
 	shown map[string]shownBlock
 	// maxCalls is the most model calls of the analysis, retries included: 3 + MaxToolSteps (ADR-0023
@@ -556,7 +576,7 @@ const lastTurnMessage = "No tool calls are left. Answer now with the JSON object
 // output was invalid twice (an escalation signal).
 func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alpha1.Action, Reason, error) {
 	msgs := []providers.Message{
-		{Role: providers.RoleSystem, Content: systemPrompt(false, 0)},
+		{Role: providers.RoleSystem, Content: systemPrompt(false, 0, r.withheld()...)},
 		{Role: providers.RoleUser, Content: r.contextText},
 	}
 	var code string
@@ -607,7 +627,7 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 		offered[d.Name] = true
 	}
 	msgs := []providers.Message{
-		{Role: providers.RoleSystem, Content: systemPrompt(steps > 0, steps)},
+		{Role: providers.RoleSystem, Content: systemPrompt(steps > 0, steps, r.withheld()...)},
 		{Role: providers.RoleUser, Content: r.contextText},
 	}
 	used := 0
@@ -975,14 +995,22 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 		r.out.MissingData = append(r.out.MissingData, r.redact(m))
 	}
 	if res.Proposal == nil || action == nil {
-		if len(res.MissingData) > 0 {
+		switch {
+		case r.scalerNotReady:
+			// Decided by code from the snapshot: the one action that could change a ScaledObject was not offered.
+			return r.handOff(ReasonScalerNotReady)
+		case len(res.MissingData) > 0:
 			return r.handOff(ReasonMissingData)
 		}
 		return r.handOff(ReasonNoProposal)
 	}
+	if r.scalerNotReady && action.Type == remediationv1alpha1.ActionAdjustKedaMaxReplicas {
+		// Not offered in this analysis: dropped before any other check, so the reply learns nothing more.
+		return r.handOff(ReasonScalerNotReady)
+	}
 	// The catalog check runs on the plan as it will be proposed, after the previous value was taken from the
-	// pod template, and before the evidence check, so the model learns nothing of the bounds from the order.
-	planned, reason := r.previousFromTemplate(*action)
+	// cluster, and before the evidence check, so the model learns nothing of the bounds from the order.
+	planned, reason := r.previousFromCluster(*action)
 	if reason != "" {
 		return r.handOff(reason)
 	}
@@ -1002,6 +1030,78 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 	return r.a.accept(r.inc, *r.out, ReasonProposed, Plan{Action: planned, Checks: checks})
 }
 
+// previousFromCluster replaces the previous value of a proposal with the one the analyzer read from the
+// cluster: the pod template's memory limit ([run.previousFromTemplate]) or the ScaledObject's maxReplicaCount
+// ([run.previousFromScaledObject]).
+func (r *run) previousFromCluster(a remediationv1alpha1.Action) (remediationv1alpha1.Action, Reason) {
+	if a.Type == remediationv1alpha1.ActionAdjustKedaMaxReplicas {
+		return r.previousFromScaledObject(a)
+	}
+	return r.previousFromTemplate(a)
+}
+
+// previousFromScaledObject does for AdjustKedaMaxReplicas what [run.previousFromTemplate] does for a memory
+// limit, from the snapshot of the subject's ScaledObject the context builder read before the model call
+// (ADR-0036 decision 4): the model still states previousValue, as a check that it reasoned about the right
+// change. It hands off a change whose ScaledObject was not read or holds no integer maxReplicaCount
+// (PreviousValueUnknown), whose desired value the snapshot already holds (NoChange), and one whose direction
+// from the model's previous value differs from its direction from the snapshot, or whose model previous value
+// equals its desired value (DirectionReversed). Otherwise the plan carries the snapshot's value. Decreases are
+// not refused here: the policy bounds them. A subject the action may not target ends TargetNotSupported first.
+// The executor's baseline check still decides against the Git file.
+func (r *run) previousFromScaledObject(a remediationv1alpha1.Action) (remediationv1alpha1.Action, Reason) {
+	s := r.inc.Spec.Subject
+	if a.AdjustKedaMaxReplicas == nil {
+		return a, ""
+	}
+	if s.Namespace == "" || s.UID == "" || !policy.ActionMayTarget(a.Type, s.APIVersion, s.Kind) {
+		return a, ReasonTargetNotSupported
+	}
+	current, ok := maxReplicaCount(r.scaledObject)
+	if !ok {
+		return a, ReasonPreviousValueUnknown
+	}
+	p := *a.AdjustKedaMaxReplicas
+	planned := cmp.Compare(p.DesiredValue, current)
+	if planned == 0 {
+		return a, ReasonNoChange
+	}
+	if cmp.Compare(p.DesiredValue, p.PreviousValue) != planned {
+		return a, ReasonDirectionReversed
+	}
+	p.PreviousValue = current
+	a.AdjustKedaMaxReplicas = &p
+	return a, ""
+}
+
+// maxReplicaCount reads spec.maxReplicaCount of a ScaledObject decoded from JSON. ok is false when obj is nil
+// or the field is missing, not an integer, below 1 or above the int32 range: no value the analyzer reads.
+func maxReplicaCount(obj map[string]any) (int32, bool) {
+	spec, _ := obj["spec"].(map[string]any)
+	v, ok := spec["maxReplicaCount"].(int64)
+	if !ok || v < 1 || v > math.MaxInt32 {
+		return 0, false
+	}
+	return int32(v), true
+}
+
+// scalerNotReady reports whether obj, the subject's ScaledObject as the context builder read it, is not ready
+// by the KedaReady rule ([kedaready.Readiness]), the function the policy check of AdjustKedaMaxReplicas uses,
+// so the analyzer and the policy cannot disagree (ADR-0036 decision 5). Only [kedaready.NotReady] counts: a
+// ScaledObject KEDA has not reported on yet is one the policy waits for, not one it refuses. No snapshot (not a
+// ScaledObject, or a failed read) is not "not ready": the baseline is unknown instead.
+func scalerNotReady(obj map[string]any) bool {
+	return obj != nil && kedaready.Readiness(obj) == kedaready.NotReady
+}
+
+// withheld are the catalog actions not offered in this analysis.
+func (r *run) withheld() []remediationv1alpha1.ActionType {
+	if r.scalerNotReady {
+		return []remediationv1alpha1.ActionType{remediationv1alpha1.ActionAdjustKedaMaxReplicas}
+	}
+	return nil
+}
+
 // previousFromTemplate replaces the previous value the model wrote with the one the subject's pod template
 // holds, as the context builder read it from the API server (#494). That is the value the executor's
 // baseline check compares the request with (invariant 1: the check stays, and decides): during a rollout a
@@ -1012,8 +1112,7 @@ func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, 
 // (DirectionReversed): the model reasoned about another change than the one that would be proposed, or a model's previous value equal to its desired
 // value, which states no direction: a reply that sees no change never becomes one. A memory limit change that
 // may not target the subject (another kind, or a subject without a namespace or UID) ends TargetNotSupported
-// before the catalog check, so a model's previous value is never checked against the bounds. AdjustKedaMaxReplicas keeps the model's
-// previousValue: the builder does not read ScaledObjects, and the executor's check refuses a wrong one.
+// before the catalog check, so a model's previous value is never checked against the bounds.
 func (r *run) previousFromTemplate(a remediationv1alpha1.Action) (remediationv1alpha1.Action, Reason) {
 	s := r.inc.Spec.Subject
 	if a.Type != remediationv1alpha1.ActionSetContainerMemoryLimit || a.SetContainerMemoryLimit == nil {

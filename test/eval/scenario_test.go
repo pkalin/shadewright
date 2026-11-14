@@ -32,6 +32,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -385,6 +387,26 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 	return s, nil
 }
 
+// unstructuredKinds are the group versions an objects.yaml may hold without a Go type in the scheme.
+var unstructuredKinds = []string{kedaready.APIVersion}
+
+// decodeUnstructured decodes one document of an allowed group version as unstructured JSON.
+func decodeUnstructured(doc []byte) (runtime.Object, error) {
+	// Through JSON, as the API server's answer is decoded: whole numbers become int64.
+	raw, err := yaml.YAMLToJSON(doc)
+	if err != nil {
+		return nil, err
+	}
+	u := &unstructured.Unstructured{}
+	if err := u.UnmarshalJSON(raw); err != nil {
+		return nil, err
+	}
+	if !slices.Contains(unstructuredKinds, u.GetAPIVersion()) {
+		return nil, fmt.Errorf("%s %s is not in the scheme", u.GetAPIVersion(), u.GetKind())
+	}
+	return u, nil
+}
+
 // readObjects decodes the cluster objects of an objects.yaml.
 func readObjects(decoder runtime.Decoder, path string) ([]client.Object, error) {
 	raw, err := os.ReadFile(path)
@@ -406,6 +428,11 @@ func readObjects(decoder runtime.Decoder, path string) ([]client.Object, error) 
 			continue
 		}
 		obj, _, err := decoder.Decode(doc, nil, nil)
+		if runtime.IsNotRegisteredError(err) {
+			// A kind the operator has no Go type for (a KEDA ScaledObject): the analyzer reads it as
+			// unstructured JSON, and so does the fake API server.
+			obj, err = decodeUnstructured(doc)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("objects.yaml document %d: %w", i, err)
 		}

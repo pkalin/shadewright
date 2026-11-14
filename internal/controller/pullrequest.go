@@ -179,7 +179,8 @@ func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, r
 	return git, err
 }
 
-// openPlanRepositoryOf is openPlanRepository that also returns the type of the provider that hosts it.
+// openPlanRepositoryOf is openPlanRepository that also returns the type of the provider that hosts it. While rr
+// carries the stale mark, every write of the provider but the close returns errStalePlanWrite.
 func (r *RemediationRequestReconciler) openPlanRepositoryOf(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
@@ -199,7 +200,9 @@ func (r *RemediationRequestReconciler) openPlanRepositoryOf(ctx context.Context,
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {
 		return nil, "", errTargetBranchChanged
 	}
-	git, err := r.openRepository(ctx, repo)
+	// While the plan is stale (staleMark, read at each write) the provider writes nothing but the close: the one
+	// guard every step that writes to the plan's pull request passes (#199).
+	git, err := r.openGated(ctx, repo, func() bool { return staleMark(rr) != nil })
 	if providers.IsInvalidConfig(err) {
 		return nil, "", freshness.ErrRepositoryUnusable
 	}
@@ -1293,7 +1296,8 @@ func commentMarker(rr *remediationv1alpha1.RemediationRequest) string {
 // When it is the same pull request and the new head may carry more than the planned change (CheckBranch is not
 // one change, or the target file differs from the recorded head's), it is foreign: merged already, the request
 // ends MergedWithForeignChange; open, Shadewright posts one comment that hands the pull request to a person and
-// stops with BranchDiverged, leaving it open, since a person may be working on it. Anything else, a clean move
+// stops with BranchDiverged, leaving it open, since a person may be working on it; for a stale plan without the
+// comment (errStalePlanWrite), which ends the retried close of its pull request too. Anything else, a clean move
 // to the same planned change included, stops with HeadMoved as before. A read that fails is returned for a
 // retry, as is a comment the kill switch held back; another failure to comment is logged and the request
 // stops all the same. A comment already there (its marker) is not posted again.
@@ -1328,7 +1332,14 @@ func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git provid
 	outcome := "; a comment on the pull request hands it to a person"
 	mark := commentMarker(rr)
 	if err := git.CommentChangeRequest(ctx, cr.Number, mark, commentForeign+"\n\n"+mark); err != nil {
-		if errors.Is(err, freshness.ErrPaused) || errors.Is(err, freshness.ErrWriteBlocked) {
+		switch {
+		case errors.Is(err, errStalePlanWrite):
+			// A stale plan (#199): its pull request gets no write but the close, so no comment either. The
+			// request stops all the same; the pull request now holds a person's commits and is theirs to close.
+			return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonBranchDiverged,
+				"Someone else pushed to the pull request of a stale plan, and its branch no longer holds only the "+
+					"planned change; it is left open for a person to review or close, without a comment")
+		case errors.Is(err, freshness.ErrPaused) || errors.Is(err, freshness.ErrWriteBlocked):
 			// The kill switch held the comment back: it is posted once writes go on.
 			return err
 		}

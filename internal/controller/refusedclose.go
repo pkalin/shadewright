@@ -181,6 +181,16 @@ const closeRefusedRetry = time.Minute
 // refusal class names.
 const cleanupFailingBound = 24 * time.Hour
 
+// boundLeft is what is left of bound since the lastTransitionTime of c, on the executor's clock; zero or less
+// once the bound has passed. The time is read as persisted, whole seconds (metav1.Time keeps no fractions), so
+// the transition itself may lie up to a second after it: the bound counts from that second plus one second, and
+// is never shorter than stated. A time held only in memory, with its fractions, is read the same way. Both
+// deletion bounds (closeRefusedGrace, cleanupFailingBound) use it.
+func boundLeft(c *metav1.Condition, bound time.Duration, now time.Time) time.Duration {
+	start := c.LastTransitionTime.Truncate(time.Second).Add(time.Second)
+	return start.Add(bound).Sub(now)
+}
+
 // notClosedCondition is condition PullRequestNotClosed for the close of a stale plan's pull request cf, refused
 // with reason.
 func notClosedCondition(rr *remediationv1alpha1.RemediationRequest, cf *closeFailure, reason string) metav1.Condition {
@@ -360,15 +370,13 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 	now := r.now()
 	var refusedLeft time.Duration
 	if refused {
-		since := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupRefused).
-			LastTransitionTime.Time
-		if refusedLeft = since.Add(closeRefusedGrace).Sub(now); refusedLeft <= 0 {
+		c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupRefused)
+		if refusedLeft = boundLeft(c, closeRefusedGrace, now); refusedLeft <= 0 {
 			return reconcile.Result{}, &cleanupRelease{step: s, refused: true}, nil
 		}
 	}
-	since := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing).
-		LastTransitionTime.Time
-	failingLeft := since.Add(cleanupFailingBound).Sub(now)
+	failingLeft := boundLeft(meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing),
+		cleanupFailingBound, now)
 	if failingLeft <= 0 {
 		step := stepOf(err)
 		step.reason = failing.Reason

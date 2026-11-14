@@ -2783,8 +2783,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(reasons).To(ContainElement(EventCleanupRefused))
 				Expect(reasons).NotTo(ContainElement(EventPullRequestLeftOpen))
 
-				// Refused again within the grace: held, no new write and no new Event, the first refusal kept.
-				clock = deleted.Add(closeRefusedGrace - time.Second)
+				// Refused again when the grace has passed since the persisted second: held one second more (boundLeft),
+				// no new write and no new Event, the first refusal kept.
+				clock = deleted.Add(closeRefusedGrace)
 				before := fetch().ResourceVersion
 				res, err = reconcileResult()
 				Expect(err).NotTo(HaveOccurred())
@@ -2795,7 +2796,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(reasons).NotTo(ContainElement(EventCleanupRefused))
 
 				// Past the grace: let go, the pull request untouched, and an Event names it.
-				clock = deleted.Add(closeRefusedGrace)
+				clock = deleted.Add(closeRefusedGrace + time.Second)
 				Expect(reconcileOnce()).To(Succeed())
 				Eventually(gone).Should(BeTrue())
 				Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
@@ -2827,7 +2828,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(gone()).To(BeFalse())
 			Expect(refusedOf().Message).To(ContainSubstring("the listing of the pull requests of branch"))
 			Expect(refusedOf().Message).To(ContainSubstring("no pull request is recorded"))
-			clock = deleted.Add(closeRefusedGrace)
+			clock = deleted.Add(closeRefusedGrace + time.Second)
 			Expect(reconcileOnce()).To(Succeed())
 			Eventually(gone).Should(BeTrue())
 			left := leftOpenOf()
@@ -2932,8 +2933,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(reasons).To(ContainElement(EventCleanupFailing))
 				Expect(reasons).NotTo(ContainElement(EventPullRequestLeftOpen))
 
-				// Before the bound: held, the first failure kept, no new Event.
-				clock = deleted.Add(cleanupFailingBound - time.Second)
+				// At the bound from the persisted second: held one second more (boundLeft), the first failure kept, no new Event.
+				clock = deleted.Add(cleanupFailingBound)
 				res, err := reconcileResult()
 				if err == nil {
 					Expect(res.RequeueAfter).To(BeNumerically("<=", time.Second), "never later than the bound")
@@ -2943,8 +2944,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				reasons, _ = warnings()
 				Expect(reasons).To(BeEmpty())
 
-				// At the bound: let go, and an Event says the state of the pull request is not known.
-				clock = deleted.Add(cleanupFailingBound)
+				// Past the bound: let go, and an Event says the state of the pull request is not known.
+				clock = deleted.Add(cleanupFailingBound + time.Second)
 				Expect(reconcileOnce()).To(Succeed())
 				Eventually(gone).Should(BeTrue())
 				Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
@@ -3004,7 +3005,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 			first := clock
 			Expect(reconcileOnce()).NotTo(Succeed())
-			clock = first.Add(cleanupFailingBound)
+			clock = first.Add(cleanupFailingBound + time.Second)
 			failClose(refused403)
 			Expect(reconcileOnce()).To(Succeed())
 			Eventually(gone).Should(BeTrue())
@@ -3018,7 +3019,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			failClose(refused403)
 			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 			Expect(reconcileOnce()).To(Succeed())
-			clock = clock.Add(closeRefusedGrace)
+			clock = clock.Add(closeRefusedGrace + time.Second)
 			r := reconciler()
 			r.Client = &patchGone{Client: k8sClient}
 			_, err := r.Reconcile(ctx, key())

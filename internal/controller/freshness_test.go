@@ -868,6 +868,22 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			expectClosedUnknown(fetch())
 		})
 
+		It("posts no comment when someone else pushes to the pull request, and stops with BranchDiverged", func() {
+			refused(providers.ErrForbidden)
+			_, err := git.Push(freshness.BranchName(fetch()), "README.yaml", []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = watcher()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(git.Comments(cr.Number)).To(BeEmpty(), "nothing but the close is written to a stale plan's pull request")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+			Expect(c).NotTo(BeNil())
+			Expect(c.Reason).To(Equal(ReasonBranchDiverged))
+			Expect(c.Message).To(ContainSubstring("without a comment"))
+			Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen), "left open for a person")
+		})
+
 		It("ends Superseded once a retried close goes through", func() {
 			refused(providers.ErrRejected)
 			refuse = nil

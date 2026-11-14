@@ -6,7 +6,7 @@ title: The life of a request
 
 What a `RemediationRequest` goes through, what you see at each step, what moves it on and what you can do. This summarises [design 6](design/6-reconciliation.md#6-reconciliation); every condition reason is explained in [troubleshooting](troubleshooting.md).
 
-The steps after `Merged` are built: the merge receipt, the wait for delivery, the executor's own checks after it, and `Cleared`, which the executor judges from the verifier's `VerificationReport`, so a request can end `Succeeded`. They run only when the executor runs with `--verify-outcomes` (chart value `executor.verification.enabled`), which is off by default until a lab run with a release candidate decides it. With it on and no verifier deployed, no report is written and every merge ends `Inconclusive` (`StaleReport`) or `Failed`. Off, a merged request stays `Merged` and `RolledOut` reports its rollout.
+The steps after `Merged` are built: the merge receipt, the wait for delivery, the executor's own checks after it, and `Cleared`, which the executor judges from the verifier's `VerificationReport`, so a request can end `Succeeded`. They run only when the executor runs with `--verify-outcomes` (chart value `executor.verification.enabled`), which is off by default until a lab run with a release candidate decides it. With it on and no verifier deployed, no report is written and every merge ends `Inconclusive` (`StaleReport`) or `Failed`. Off, a merged request stays `Merged` and `RolledOut` reports its rollout, except a plan merged after it was known stale, which ends `Inconclusive` (`StalePlanMerged`) once its rollout check is over.
 
 ```mermaid
 stateDiagram-v2
@@ -30,12 +30,14 @@ stateDiagram-v2
     PRCreated --> NeedsIntervention: cannot continue alone
     AwaitingApproval --> NeedsIntervention: pull request closed, head moved or not found
     Merged --> Inconclusive: no merge receipt (NoMergeReceipt)
+    Merged --> Inconclusive: a stale plan merged, once its rollout check is over, --verify-outcomes off (StalePlanMerged)
     Merged --> WaitingForDelivery: next reconcile, with --verify-outcomes
     WaitingForDelivery --> Verifying: Flux applied the merge commit
     WaitingForDelivery --> Failed: Flux failed on the merge commit (DeliveryFailed)
     WaitingForDelivery --> Inconclusive: not delivered within the hour, the target is gone, or --verify-outcomes off
     Verifying --> Failed: an OOM kill in the verifier's report (OOMKilled), or at the timeout rollout stuck, ScaledObject not ready or restarts (RolloutStuck, KedaNotReady, Restarted)
     Verifying --> Inconclusive: value changed, template replaced, target gone or unreadable, a ScaledObject after stableFor, no evidence at the timeout, or --verify-outcomes off
+    Verifying --> Inconclusive: a quiet window for a plan merged after it was known stale (StalePlanMerged)
     Verifying --> Succeeded: a quiet window, Cleared True
     Denied --> [*]
     Superseded --> [*]

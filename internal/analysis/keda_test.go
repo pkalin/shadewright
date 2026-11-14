@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -151,8 +152,13 @@ func TestPreviousMaxReplicasComesFromTheScaledObject(t *testing.T) {
 		"the snapshot's value as desired":     {2, snapshot, scaledObject(kedaReadyConditions()), ReasonNoChange},
 		"no snapshot":                         {snapshot, 5, nil, ReasonPreviousValueUnknown},
 		"no maxReplicaCount in the snapshot":  {snapshot, 5, withoutMax(scaledObject(kedaReadyConditions())), ReasonPreviousValueUnknown},
-		"a maxReplicaCount that is not whole": {snapshot, 5, withMax(scaledObject(kedaReadyConditions()), 4.5), ReasonPreviousValueUnknown},
+		"a maxReplicaCount that is not whole": {snapshot, 5, withMax(scaledObject(kedaReadyConditions()), 5.5), ReasonPreviousValueUnknown},
 		"a maxReplicaCount of zero":           {snapshot, 5, withMax(scaledObject(kedaReadyConditions()), int64(0)), ReasonPreviousValueUnknown},
+		"a negative maxReplicaCount":          {snapshot, 5, withMax(scaledObject(kedaReadyConditions()), int64(-1)), ReasonPreviousValueUnknown},
+		"a maxReplicaCount above int32":       {snapshot, 5, withMax(scaledObject(kedaReadyConditions()), int64(4294967301)), ReasonPreviousValueUnknown},
+		"a whole float above int32":           {snapshot, 5, withMax(scaledObject(kedaReadyConditions()), 4294967301.0), ReasonPreviousValueUnknown},
+		"a maxReplicaCount of another type":   {snapshot, 5, withMax(scaledObject(kedaReadyConditions()), "5"), ReasonPreviousValueUnknown},
+		"a whole float maxReplicaCount":       {snapshot, 5, withMax(scaledObject(kedaReadyConditions()), float64(snapshot)), ReasonProposed},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -308,6 +314,15 @@ func TestScalerNotReadyWithholdsTheAction(t *testing.T) {
 	}
 }
 
+// The outcome message says what the notice says: no change of maxReplicaCount was offered, a decrease
+// included.
+func TestScalerNotReadyMessageMatchesTheNotice(t *testing.T) {
+	if !strings.Contains(outcomeMessages[ReasonScalerNotReady], "a change of maxReplicaCount was not offered") ||
+		!strings.Contains(scalerNotReadyNotice, "a change of its maxReplicaCount is not offered") {
+		t.Errorf("message %q, notice %q", outcomeMessages[ReasonScalerNotReady], scalerNotReadyNotice)
+	}
+}
+
 // The prompt version covers the fixed sentence, so changing it is a new prompt version.
 func TestPromptVersionCoversTheScalerNotice(t *testing.T) {
 	f := newFixture()
@@ -318,6 +333,19 @@ func TestPromptVersionCoversTheScalerNotice(t *testing.T) {
 	}
 	if systemPrompt(false, 0) == systemPrompt(false, 0, remediationv1alpha1.ActionAdjustKedaMaxReplicas) {
 		t.Error("withholding changed nothing")
+	}
+	parts := promptParts()
+	if promptDigest(parts) != PromptVersion() {
+		t.Fatal("the prompt version is not the digest of its parts")
+	}
+	i := slices.Index(parts, scalerNotReadyNotice)
+	if i < 0 {
+		t.Fatal("the prompt version does not cover the notice")
+	}
+	changed := slices.Clone(parts)
+	changed[i] = strings.Replace(scalerNotReadyNotice, "not offered", "offered", 1)
+	if promptDigest(changed) == PromptVersion() {
+		t.Error("a changed notice kept the prompt version")
 	}
 }
 

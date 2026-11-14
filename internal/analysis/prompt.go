@@ -91,27 +91,29 @@ func systemPrompt(withTools bool, steps int, withheld ...remediationv1alpha1.Act
 	return b.String()
 }
 
-var promptVersion = sync.OnceValue(func() string {
-	h := sha256.New()
-	h.Write([]byte(systemTemplate))
-	h.Write([]byte{0})
-	h.Write(responseSchema())
+var promptVersion = sync.OnceValue(func() string { return promptDigest(promptParts()) })
+
+// promptParts are the texts the prompt version covers, in order: the templates, the generated schema and
+// catalog, and every fixed sentence the user message can carry.
+func promptParts() []string {
+	parts := []string{systemTemplate, string(responseSchema())}
 	for _, e := range catalog() {
-		h.Write([]byte{0})
-		h.Write([]byte(string(e.Type) + "\x00" + e.Description))
+		parts = append(parts, string(e.Type)+"\x00"+e.Description)
 	}
-	h.Write([]byte{0})
-	h.Write([]byte(contextPreamble))
-	h.Write([]byte{0})
-	h.Write([]byte(dataNotice))
-	h.Write([]byte{0})
-	h.Write([]byte(configurationNotice))
-	h.Write([]byte{0})
-	h.Write([]byte(hintNotice))
-	h.Write([]byte{0})
-	h.Write([]byte(scalerNotReadyNotice))
+	return append(parts, contextPreamble, dataNotice, configurationNotice, hintNotice, scalerNotReadyNotice)
+}
+
+// promptDigest is the SHA-256 of parts separated by a zero byte.
+func promptDigest(parts []string) string {
+	h := sha256.New()
+	for i, p := range parts {
+		if i > 0 {
+			h.Write([]byte{0})
+		}
+		h.Write([]byte(p))
+	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
-})
+}
 
 // PromptVersion is the content hash of the prompt's templates and generated parts (the schema and the
 // catalog), for the analysis record and the evaluation gate (ADR-0023 decisions 1 and 8).

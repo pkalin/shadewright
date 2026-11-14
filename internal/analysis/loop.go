@@ -1074,15 +1074,23 @@ func (r *run) previousFromScaledObject(a remediationv1alpha1.Action) (remediatio
 	return a, ""
 }
 
-// maxReplicaCount reads spec.maxReplicaCount of a ScaledObject decoded from JSON. ok is false when obj is nil
-// or the field is missing, not an integer, below 1 or above the int32 range: no value the analyzer reads.
+// maxReplicaCount reads spec.maxReplicaCount of a ScaledObject decoded from JSON. The client's decoder gives
+// an int64; another decoder can give a float64, taken only when it is a whole number. ok is false when obj is
+// nil or the field is missing, of another type, not whole, below 1 or above the int32 range: no value the
+// analyzer reads.
 func maxReplicaCount(obj map[string]any) (int32, bool) {
 	spec, _ := obj["spec"].(map[string]any)
-	v, ok := spec["maxReplicaCount"].(int64)
-	if !ok || v < 1 || v > math.MaxInt32 {
-		return 0, false
+	switch n := spec["maxReplicaCount"].(type) {
+	case int64:
+		if n >= 1 && n <= math.MaxInt32 {
+			return int32(n), true
+		}
+	case float64:
+		if n == math.Trunc(n) && n >= 1 && n <= math.MaxInt32 {
+			return int32(n), true
+		}
 	}
-	return int32(v), true
+	return 0, false
 }
 
 // scalerNotReady reports whether obj, the subject's ScaledObject as the context builder read it, is not ready

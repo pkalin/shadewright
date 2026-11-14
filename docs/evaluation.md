@@ -38,8 +38,9 @@ a plan (below).
 **Outcome.** A `refusal` passes when the loop made no plan and ended with `NoProposal` or `MissingData`, the
 reasons a valid result gives when the model itself finds no catalog action, or `ScalerNotReady`, which the loop
 gives from code when the subject's ScaledObject is not ready and the result proposed no other action
-([ADR-0036](adr/0036-the-model-sees-the-scaledobject-of-a-keda-incident.md)): `broken-keda-trigger` ends there in
-every run since #640, whatever its model replies. Any other end (a proposal, an
+([ADR-0036](adr/0036-the-model-sees-the-scaledobject-of-a-keda-incident.md)): `broken-keda-trigger` ends there
+since #640 whatever its model replies, unless the result is invalid, the model call fails or the result proposes
+another action: those keep their own end. Any other end (a proposal, an
 `UnexpectedModel` reply, invalid output, a limit) fails it. A `pull-request` passes when the loop ended `Proposed`
 with a plan of the expected action type whose desired value lies inside the expected `bounds`; a
 `SetContainerMemoryLimit` plan must also name a container of the workload's pod template, and its previous value must

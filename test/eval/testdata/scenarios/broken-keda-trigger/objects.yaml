@@ -1,9 +1,11 @@
 # The worker's ScaledObject, the Incident's subject: its spec from
 # scenarios/broken-keda-trigger/apps/demo/worker-scaledobject.yaml of the fleet repository at the commit
 # source.yaml names, with the UID of incident.yaml. The status is synthetic, written from the conditions KEDA
-# v2.21 sets when every trigger fails (Ready False with reason TriggerError); the DNS error itself is only in
-# the event the Incident was made from. The context builder reads it with one get and shows only the fields
-# ADR-0036 allows (never the trigger's serverAddress or query); the analyzer decides readiness from it.
+# v2.21 sets when every trigger fails: Ready False with reason TriggerError and a fixed message
+# (pkg/scaling/executor/scale_scaledobjects.go). KEDA puts the scaler's error, here the DNS error, in a
+# KEDAScalerFailed Event (pkg/scaling/scale_handler.go), the event the Incident was made from, where only the
+# redactor guards it. The context builder reads the object with one get and shows only the fields ADR-0036
+# allows (the trigger's serverAddress and query stay out of the block); the analyzer decides readiness from it.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:

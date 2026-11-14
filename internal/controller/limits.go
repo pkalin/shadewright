@@ -718,7 +718,7 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 	if rr.Status.Phase != phase && !beforeMerge(phase) {
 		// A first look at a missing pull request belongs to the request that was still moving on (#688): a
 		// later read of the ended request, by the lock or the finalizer, waits again.
-		r.goneLooks.forget(client.ObjectKeyFromObject(rr))
+		r.looks().forget(client.ObjectKeyFromObject(rr))
 	}
 	if rr.Status.Phase == phase && rr.Status.LastPhaseTransitionTime != nil {
 		return

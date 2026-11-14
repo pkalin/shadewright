@@ -684,10 +684,10 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		r := reconciler()
 		err = r.mergedUnrecorded(ctx, fetch(), gone)
 		Expect(errors.Is(err, errGoneUnconfirmed)).To(BeTrue(), "a first confirmed 404 waits: %v", err)
-		first, ok := r.goneLooks.first(fetch(), 9999)
+		first, ok := r.looks().first(fetch(), 9999)
 		Expect(ok).To(BeTrue(), "the first look is kept in this process's memory")
 		// The same process looks again once the wait is over.
-		r.goneLooks.note(fetch(), 9999, first.Add(-confirmWait-time.Second))
+		r.looks().note(fetch(), 9999, first.Add(-confirmWait-time.Second))
 		Expect(r.mergedUnrecorded(ctx, fetch(), gone)).To(BeIdenticalTo(error(gone)))
 	})
 

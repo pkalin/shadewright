@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1380 600" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<title id="t">Shadewright sizing from metrics</title>
+<desc id="d">Overview of ADR-0040, accepted. The context builder reads the memory working set and the limit of the target's containers from the metrics source with approved query templates and keeps the numbers as typed values. After the model replies, the analysis loop takes only the action and the container from the reply, accepts them only where code saw memory pressure for that container (the Incident's OOMKilled symptom or a peak near the limit) and ignores any size. Code computes the size: observed peak plus headroom, a multiplicative step when at the limit, rounded up, clamped to the policy range and step, rounded down to the unit. Without a measurement the Incident is handed off as MissingData, without pressure as NoMemoryPressure. The request is created with the new limit and optional typed sizing evidence. The executor's policy engine decides the request as before, and the executor prints the evidence in the pull request body. Where there is no Prometheus, the OOMKilled symptom, whose termination must be the one in the container status, is the measurement for the at-the-limit step, and only when the metrics server answers; if it is absent or the read fails there is no proposal. The symptom must name the container, which needs ADR-0039; until then the gate stays shut. The model sits beside this path and chooses only the action and the container.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+<style>
+.bt{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4}
+.ext{fill:#1d1b2b;stroke:#4fd1c5;stroke-width:1.4}
+.mdl{fill:#1d1b2b;stroke:#ffb86b;stroke-width:1.4}
+.lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.12em}
+.h{fill:#f1edff;font-size:15px;font-weight:650}
+.s{fill:#a9a4c4;font-size:12.5px}
+.no{fill:#ff8fa3;font-size:12.5px;font-weight:600}
+.fb{stroke:#a879ff;stroke-width:1.8;fill:none}
+.fm{stroke:#ffb86b;stroke-width:1.8;fill:none;stroke-dasharray:6 4}
+</style></defs>
+<rect width="1380" height="600" rx="18" fill="#0e0e16"/>
+<text class="lanet" x="20" y="52">1  MEASURED</text>
+<text class="lanet" x="360" y="52">2  COMPUTED BY CODE</text>
+<text class="lanet" x="700" y="52">3  PROPOSED AND DECIDED</text>
+<text class="lanet" x="1040" y="52">4  SHOWN TO A PERSON</text>
+
+<rect class="ext" x="20" y="70" width="300" height="124" rx="10"/>
+<text class="h" x="34" y="96">Metrics source (Prometheus)</text>
+<text class="s" x="34" y="118">approved template, range query</text>
+<text class="s" x="34" y="137">container_memory_working_set_bytes</text>
+<text class="s" x="34" y="156">container_memory_limit_bytes</text>
+<text class="s" x="34" y="175">the analysis window, no free text</text>
+<path class="fb" d="M170 194 L170 230" marker-end="url(#a)"/>
+<rect class="bt" x="20" y="234" width="300" height="144" rx="10"/>
+<text class="h" x="34" y="260">Typed measurement (context builder)</text>
+<text class="s" x="34" y="282">per container: peak over pods and</text>
+<text class="s" x="34" y="301">samples (recent ones needed), window,</text>
+<text class="s" x="34" y="320">limit of the same pod; the Incident's</text>
+<text class="s" x="34" y="339">OOMKilled symptom is the other signal</text>
+<text class="s" x="34" y="358">partial or capped answer: none</text>
+<rect class="bt" x="20" y="414" width="300" height="104" rx="10"/>
+<text class="h" x="34" y="440">No measurement</text>
+<text class="s" x="34" y="462">Incident handed off: MissingData</text>
+<text class="s" x="34" y="481">no fixed step, no model value</text>
+<text class="s" x="34" y="500">a failed read is a retry, not "none"</text>
+<path class="fb" d="M170 378 L170 410" marker-end="url(#a)"/>
+
+<rect class="bt" x="360" y="70" width="300" height="166" rx="10"/>
+<text class="h" x="374" y="96">Size</text>
+<text class="s" x="374" y="118">need = peak + headroom (25%)</text>
+<text class="s" x="374" y="137">OOMKilled symptom or peak &gt;= 90%:</text>
+<text class="s" x="374" y="156">at least limit x 1.5 (it understates)</text>
+<text class="s" x="374" y="175">round up to 8Mi; clamp, round down</text>
+<text class="s" x="374" y="194">policy min, max, step (previous: #494)</text>
+<text class="s" x="374" y="213">the model's size is not read</text>
+<rect class="bt" x="360" y="270" width="300" height="148" rx="10"/>
+<text class="h" x="374" y="296">No proposal, with a reason</text>
+<text class="s" x="374" y="318">need above the policy max:</text>
+<text class="s" x="374" y="337">PolicyMaxBelowNeed; no pressure seen:</text>
+<text class="s" x="374" y="356">NoMemoryPressure; not above limit:</text>
+<text class="s" x="374" y="375">SizeNotAnIncrease (decreases</text>
+<text class="s" x="374" y="394">and #497 are out of scope)</text>
+<path class="fb" d="M320 290 L356 150" marker-end="url(#a)"/>
+<path class="fb" d="M510 236 L510 266" marker-end="url(#a)"/>
+
+<rect class="bt" x="700" y="70" width="300" height="146" rx="10"/>
+<text class="h" x="714" y="96">RemediationRequest (created)</text>
+<text class="s" x="714" y="118">action, container: from the model,</text>
+<text class="s" x="714" y="137">only where pressure was seen</text>
+<text class="s" x="714" y="156">desired: the size from code</text>
+<text class="s" x="714" y="175">sizing (optional): metric, peak,</text>
+<text class="s" x="714" y="194">window, headroom, limitedBy</text>
+<rect class="ext" x="700" y="250" width="300" height="146" rx="10"/>
+<text class="h" x="714" y="276">Policy engine (unchanged)</text>
+<text class="s" x="714" y="298">decides every request in the executor</text>
+<text class="s" x="714" y="317">min, max, step, kind, target</text>
+<text class="s" x="714" y="336">the evidence authorizes nothing</text>
+<text class="s" x="714" y="355">invariants 1 and 2 stand</text>
+<path class="fb" d="M660 150 L696 140" marker-end="url(#a)"/>
+<path class="fb" d="M850 216 L850 246" marker-end="url(#a)"/>
+
+<rect class="ext" x="1040" y="70" width="320" height="166" rx="10"/>
+<text class="h" x="1054" y="96">Pull request body (executor)</text>
+<text class="s" x="1054" y="118">Size: from 48Mi to 72Mi, 50%</text>
+<text class="s" x="1054" y="137">Evidence: working set peak 47.9Mi</text>
+<text class="s" x="1054" y="156">over 1 h, 58 samples, headroom 25%,</text>
+<text class="s" x="1054" y="175">at the limit: 1.5 x limit, equal to</text>
+<text class="s" x="1054" y="194">the step limit. Typed fields</text>
+<text class="s" x="1054" y="213">only, never model prose</text>
+<rect class="bt" x="1040" y="270" width="320" height="126" rx="10"/>
+<text class="h" x="1054" y="296">Later use (pointer)</text>
+<text class="s" x="1054" y="318">ADR-0030 "cleared": the recorded</text>
+<text class="s" x="1054" y="337">peak is a baseline for a metrics</text>
+<text class="s" x="1054" y="356">check; not built or decided here</text>
+<path class="fb" d="M1000 140 L1036 140" marker-end="url(#a)"/>
+
+<rect class="mdl" x="360" y="450" width="640" height="110" rx="10"/>
+<text class="h" x="374" y="476">The model, beside the path</text>
+<text class="s" x="374" y="498">chooses the action and the container; says what is wrong and quotes the evidence</text>
+<text class="s" x="374" y="517">the size argument is gone from the output schema; a size in a reply is ignored</text>
+<text class="s" x="374" y="536">the policy bounds block of ADR-0026 is no longer needed for the size</text>
+<text class="s" x="1040" y="450">Not decided here</text>
+<text class="s" x="1040" y="469">decreases, AdjustKedaMaxReplicas,</text>
+<text class="s" x="1040" y="488">a percentile instead of the peak</text>
+</svg>

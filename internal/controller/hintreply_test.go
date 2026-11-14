@@ -55,8 +55,10 @@ func replyWorld(t *testing.T, hints []api.Hint, refused []api.RefusedHint) (*Rem
 	return r, g, p
 }
 
+// declinedHint is a hint accepted at reconcilerClock, the clock of replyWorld's reconciler, and declined with
+// reason.
 func declinedHint(id int64, reason, text string) api.Hint {
-	at := metav1.NewTime(time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC))
+	at := metav1.NewTime(reconcilerClock)
 	return api.Hint{Source: api.HintSourceGitHub, CommentID: id, Digest: "sha256:" + strings.Repeat("c", 64),
 		Author: api.HintAuthor{ID: 2002, Login: "octo-cat"}, Text: text, UpdatedAt: at, AcceptedAt: at,
 		State: api.HintDeclined, Reason: reason}
@@ -125,7 +127,7 @@ func TestReplyToADeclinedHintOnceAcrossLooksAndRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted := &RemediationRequestReconciler{Client: r.Client, APIReader: r.APIReader, ReviewerHints: true,
-		OpenRepository: r.OpenRepository}
+		OpenRepository: r.OpenRepository, Now: r.Now}
 	if _, err := restarted.watchPullRequest(ctx, lost); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +199,7 @@ func TestReplyToARefusedCommand(t *testing.T) {
 	ctx := context.Background()
 	refused := api.RefusedHint{Source: api.HintSourceGitHub, CommentID: 44,
 		Author: api.HintAuthor{ID: 2003, Login: reviewerB}, Reason: api.HintRefusalCapReached,
-		RefusedAt: metav1.NewTime(time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC))}
+		RefusedAt: metav1.NewTime(reconcilerClock)}
 	r, g, p := replyWorld(t, nil, []api.RefusedHint{refused})
 	if _, err := r.watchPullRequest(ctx, p); err != nil {
 		t.Fatal(err)
@@ -216,8 +218,9 @@ func TestNoReplyToPendingOrReservedHints(t *testing.T) {
 	ctx := context.Background()
 	pending := declinedHint(45, "", "pending")
 	pending.State = api.HintPending
-	// Accepted now, so the look does not decline it as NoAnswer (HintAnswerTimeout) before the replies.
-	pending.AcceptedAt = metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+	// Accepted at the reconciler's clock, so the look does not decline it as NoAnswer (HintAnswerTimeout) before
+	// the replies.
+	pending.AcceptedAt = metav1.NewTime(reconcilerClock)
 	r, g, p := replyWorld(t, []api.Hint{pending}, nil)
 	if _, err := r.watchPullRequest(ctx, p); err != nil {
 		t.Fatal(err)
@@ -276,7 +279,7 @@ func mustOpen(t *testing.T, r *RemediationRequestReconciler, rr *api.Remediation
 func TestReplyRetriedThenGivenUp(t *testing.T) {
 	ctx := context.Background()
 	r, g, p := replyWorld(t, []api.Hint{declinedHint(46, "NoAnswer", "x")}, nil)
-	now := time.Now()
+	now := reconcilerClock
 	r.Now = func() time.Time { return now }
 	tries := 0
 	g.SetFail(func(op string) error {
@@ -326,7 +329,7 @@ func TestReplyRefusedForGoodAndAfterALostAnswer(t *testing.T) {
 
 	// A post whose answer was lost is retried, and the marker keeps it from being posted twice.
 	r, g, p = replyWorld(t, []api.Hint{declinedHint(49, "NoAnswer", "z")}, nil)
-	now := time.Now()
+	now := reconcilerClock
 	r.Now = func() time.Time { return now }
 	lost := true
 	g.SetAfter(func(op string) error {
@@ -388,13 +391,13 @@ func TestEveryReasonHasItsOwnWords(t *testing.T) {
 func refusedCommand(id int64, rec api.HintReply) api.RefusedHint {
 	return api.RefusedHint{Source: api.HintSourceGitHub, CommentID: id,
 		Author: api.HintAuthor{ID: 2003, Login: reviewerB}, Reason: api.HintRefusalEmpty,
-		RefusedAt: metav1.NewTime(time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)), Reply: rec}
+		RefusedAt: metav1.NewTime(reconcilerClock), Reply: rec}
 }
 
 func TestGaveUpSurvivesALostStatusWrite(t *testing.T) {
 	ctx := context.Background()
 	r, g, p := replyWorld(t, []api.Hint{declinedHint(50, "NoAnswer", "x")}, nil)
-	now := time.Now()
+	now := reconcilerClock
 	r.Now = func() time.Time { return now }
 	tries := 0
 	g.SetFail(func(op string) error {
@@ -477,7 +480,7 @@ func TestHandoffCarriesRefusedCommands(t *testing.T) {
 
 func TestRefusedHintsKeepEntriesThatWaitForAReply(t *testing.T) {
 	st := &api.RemediationRequestStatus{}
-	now := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	now := reconcilerClock
 	fb := func(id int64) providers.Feedback {
 		return providers.Feedback{ID: id, Author: providers.FeedbackAuthor{ID: 2003, Login: reviewerB}}
 	}
@@ -501,7 +504,7 @@ func TestRefusedHintsKeepEntriesThatWaitForAReply(t *testing.T) {
 func TestReplyRateLimitIsNoTry(t *testing.T) {
 	ctx := context.Background()
 	r, g, p := replyWorld(t, []api.Hint{declinedHint(54, "NoAnswer", "x")}, nil)
-	now := time.Now()
+	now := reconcilerClock
 	r.Now = func() time.Time { return now }
 	tries := 0
 	limited := true
@@ -544,7 +547,7 @@ func TestReplyRateLimitIsNoTry(t *testing.T) {
 func TestReplyWaitsAfterAnAmbiguousFailure(t *testing.T) {
 	ctx := context.Background()
 	r, g, p := replyWorld(t, []api.Hint{declinedHint(55, "NoAnswer", "x"), declinedHint(56, "NoAnswer", "y")}, nil)
-	now := time.Now()
+	now := reconcilerClock
 	r.Now = func() time.Time { return now }
 	tries := 0
 	g.SetFail(func(op string) error {

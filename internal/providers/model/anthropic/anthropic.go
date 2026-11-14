@@ -310,18 +310,24 @@ func (p *Provider) Complete(ctx context.Context, req providers.CompletionRequest
 func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest) (providers.Completion, int, error) {
 	body, offered, err := p.encode(req)
 	if err != nil {
-		return providers.Completion{}, 0, err
+		return providers.Completion{}, 0, providers.NotSent(err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	// unknown stays set once an attempt was billed without a usage that reaches the caller.
 	unknown := false
+	// sent is set once any attempt handed its request to the HTTP client; until then nothing can be billed.
+	sent := false
 	done := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
 		c.UsageUnknown = c.UsageUnknown || unknown
+		if !sent {
+			err = providers.NotSent(err)
+		}
 		return c, attempts, err
 	}
 	for attempt := 0; ; attempt++ {
-		data, billed, err := p.once(ctx, body)
+		data, billed, attemptSent, err := p.once(ctx, body)
+		sent = sent || attemptSent
 		if err == nil {
 			c, perr := parseResponse(data, p.model, offered, len(req.ResponseSchema) > 0)
 			return done(c, attempt+1, perr)
@@ -351,33 +357,40 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 	}
 }
 
-// readKey reads the API key from the key file. A file that cannot be read, or holds only white space, is
-// retryable (a mounted Secret may be between two versions); a key too long or with characters a header cannot
-// carry is ErrForbidden. Errors never hold the path, the file's content or the os error.
+// readKey reads the API key from the key file. Every error matches [providers.ErrCredentialUnavailable]. A
+// file that cannot be read, or holds only white space, is retryable (a mounted Secret may be between two
+// versions); a file too large, or a key too long or with characters a header cannot carry, is malformed and
+// permanent until a person fixes the file. Errors never hold the path, the file's content or the os error.
 func (p *Provider) readKey() (string, error) {
+	unreadable := func(what string) error {
+		return &providers.RetryableError{Err: fmt.Errorf("anthropic: the API key file %s: %w", what,
+			providers.ErrCredentialUnavailable)}
+	}
+	malformed := func(what string) error {
+		return fmt.Errorf("anthropic: the API key file is malformed (%s): %w", what, providers.ErrCredentialUnavailable)
+	}
 	f, err := os.Open(p.keyFile)
 	if err != nil {
-		return "", &providers.RetryableError{Err: errors.New("anthropic: the API key file could not be read")}
+		return "", unreadable("could not be read")
 	}
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileBytes+1))
 	if err != nil {
-		return "", &providers.RetryableError{Err: errors.New("anthropic: the API key file could not be read")}
+		return "", unreadable("could not be read")
 	}
 	if len(data) > maxKeyFileBytes {
-		return "", fmt.Errorf("anthropic: the API key file is too large: %w", providers.ErrForbidden)
+		return "", malformed("the file is too large")
 	}
 	key := strings.TrimSpace(string(data))
 	if key == "" {
-		return "", &providers.RetryableError{Err: errors.New("anthropic: the API key file is empty")}
+		return "", unreadable("is empty")
 	}
 	if len(key) > maxKeyBytes {
-		return "", fmt.Errorf("anthropic: the API key is too long: %w", providers.ErrForbidden)
+		return "", malformed("the key is too long")
 	}
 	for i := 0; i < len(key); i++ {
 		if c := key[i]; c <= ' ' || c > '~' {
-			return "", fmt.Errorf("anthropic: the API key holds a character a header cannot carry: %w",
-				providers.ErrForbidden)
+			return "", malformed("the key holds a character a header cannot carry")
 		}
 	}
 	return key, nil
@@ -387,60 +400,61 @@ func (p *Provider) readKey() (string, error) {
 // fixed text. billed is true once a 200 arrived before the attempt's deadline, error or not. A response that
 // net/http returns after the attempt's context ended is the timeout whatever its status, and not billed. With
 // an error, data is the body when it was read whole within the bound, so that its usage can still be read,
-// and nil otherwise.
-func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed bool, err error) {
+// and nil otherwise. sent is false only when the attempt ended before the request was handed to the HTTP client.
+func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, sent bool, err error) {
 	if ctx.Err() != nil {
-		return nil, false, ctxError(ctx)
+		return nil, false, false, ctxError(ctx)
 	}
 	key, err := p.readKey()
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	actx, cancel := context.WithTimeout(ctx, p.attemptTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(actx, http.MethodPost, messagesURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, false, errors.New("anthropic: could not build the request")
+		return nil, false, false, errors.New("anthropic: could not build the request")
 	}
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", APIVersion)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "shadewright")
+	// From here on the request may have left, even when Do returns an error.
 	resp, err := p.client.Do(req)
 	if err != nil {
 		// The error of http.Client.Do holds the URL and possibly response-controlled text: replace it.
-		return nil, false, transportError(ctx, err)
+		return nil, false, true, transportError(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if actx.Err() != nil {
 		// A response that raced the end of the attempt's context: the deadline came first, so it is the
 		// timeout, retryable, and nothing of it is read.
-		return nil, false, transportError(ctx, context.DeadlineExceeded)
+		return nil, false, true, transportError(ctx, context.DeadlineExceeded)
 	}
 
 	code := resp.StatusCode
 	if code != http.StatusOK {
 		// The body of an error may quote the request: it is drained, never read into an error.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
-		return nil, false, statusError(resp)
+		return nil, false, true, statusError(resp)
 	}
 	// A 200 was billed. An oversized body is not parsed (a cut JSON body has no reliable usage).
 	tooLarge := fmt.Errorf("anthropic: the reply is larger than %d bytes: %w", p.maxBody, providers.ErrTooLarge)
 	if resp.ContentLength > p.maxBody {
-		return nil, true, tooLarge
+		return nil, true, true, tooLarge
 	}
 	data, err = io.ReadAll(io.LimitReader(resp.Body, p.maxBody+1))
 	if err != nil {
-		return nil, true, transportError(ctx, err)
+		return nil, true, true, transportError(ctx, err)
 	}
 	if int64(len(data)) > p.maxBody {
-		return nil, true, tooLarge
+		return nil, true, true, tooLarge
 	}
 	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		return data, true, fmt.Errorf("anthropic: the reply is not JSON: %w", providers.ErrMalformedOutput)
+		return data, true, true, fmt.Errorf("anthropic: the reply is not JSON: %w", providers.ErrMalformedOutput)
 	}
-	return data, true, nil
+	return data, true, true, nil
 }
 
 // statusError classifies a status other than 200.

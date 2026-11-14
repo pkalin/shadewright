@@ -1659,6 +1659,73 @@ var _ = Describe("RemediationSettings", func() {
 			Entry("longer than 64 characters", "a"+strings.Repeat("b", 64)),
 		)
 
+		Describe("provider (ADR-0037)", func() {
+			anthropic := func(m *v1alpha1.ModelDeployment) {
+				m.Provider, m.Endpoint, m.Deployment = v1alpha1.ModelProviderAnthropic, "https://api.anthropic.com",
+					"claude-haiku-5-5"
+			}
+
+			It("defaults to Foundry", func() {
+				s := withModel(func(*v1alpha1.ModelDeployment) {})
+				expectAccepted(s)
+				Expect(s.Spec.Analysis.Models.Triage.Provider).To(Equal(v1alpha1.ModelProviderFoundry))
+			})
+
+			It("accepts an Anthropic deployment at the API's host", func() {
+				expectAccepted(withModel(anthropic))
+			})
+
+			It("accepts Anthropic for one role and Foundry for the other", func() {
+				expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+					e := strong()
+					anthropic(e)
+					a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: e}
+				}))
+			})
+
+			DescribeTable("refuses an Anthropic deployment at another endpoint",
+				func(endpoint string) {
+					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+						anthropic(m)
+						m.Endpoint = endpoint
+					}), "a deployment with provider Anthropic must have the endpoint https://api.anthropic.com")
+				},
+				Entry("a Foundry resource", "https://example.services.ai.azure.com/"),
+				Entry("another host under the vendor's domain", "https://console.anthropic.com"),
+				Entry("the host with a path", "https://api.anthropic.com/v1"),
+				Entry("the host with port 443", "https://api.anthropic.com:443"),
+				Entry("the host with a trailing slash", "https://api.anthropic.com/"),
+			)
+
+			It("accepts an update of another field of a deployment written without provider", func() {
+				s := withModel(func(*v1alpha1.ModelDeployment) {})
+				expectAccepted(s)
+				got := &v1alpha1.RemediationSettings{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(s), got)).To(Succeed())
+				// The client leaves provider out, as a writer from before the field did.
+				got.Spec.Analysis.Models.Triage.Provider = ""
+				got.Spec.Analysis.Models.Triage.MaxTokensPerDay = ptr.To[int64](400000)
+				Expect(k8sClient.Update(ctx, got)).To(Succeed())
+				Expect(got.Spec.Analysis.Models.Triage.Provider).To(Equal(v1alpha1.ModelProviderFoundry))
+			})
+
+			DescribeTable("refuses the API's host on a Foundry deployment",
+				func(provider v1alpha1.ModelProvider, endpoint string) {
+					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+						m.Provider, m.Endpoint = provider, endpoint
+					}), "the host api.anthropic.com is only for a deployment with provider Anthropic")
+				},
+				Entry("named Foundry", v1alpha1.ModelProviderFoundry, "https://api.anthropic.com"),
+				Entry("left out", v1alpha1.ModelProvider(""), "https://api.anthropic.com/"),
+				Entry("with a port and a path", v1alpha1.ModelProviderFoundry, "https://api.anthropic.com:443/openai/v1"),
+			)
+
+			It("refuses an unknown provider", func() {
+				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.Provider = "OpenAI" }),
+					"spec.analysis.models.triage.provider")
+			})
+		})
+
 		It("accepts a deployment name of 64 characters", func() {
 			expectAccepted(withModel(func(m *v1alpha1.ModelDeployment) { m.Deployment = "a" + strings.Repeat("b", 63) }))
 		})

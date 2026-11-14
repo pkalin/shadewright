@@ -389,7 +389,8 @@ Policies and requests refer to repositories by name only.
 - So are two that name the same endpoint (ignoring a trailing `/`) and deployment (ignoring case), so the escalation cap cannot become a second budget for the triage model.
 - Each names an `endpoint`, a `deployment` name and an `apiVersion` (`v1` or a valid-looking date, optionally `-preview`). The endpoint rules are in 5.5.
 - Each must set a daily cap `maxTokensPerDay`. It has no default, so the admin chooses it per deployment. Range 0 to 1,000,000,000, and 0 stops calls to it.
-- There is no field for a key or any other credential. The analyzer authenticates with its workload identity (11.1).
+- Each may name a `provider`: `Foundry` (the default) or `Anthropic`, the API the adapter speaks ([ADR-0037](../adr/0037-the-anthropic-api-as-a-second-model-provider.md)). Two CEL rules: an `Anthropic` deployment must have the endpoint `https://api.anthropic.com`, and a `Foundry` deployment may not name that host.
+- There is no field for a key or any other credential. The analyzer authenticates to Foundry with its workload identity (11.1) and reads an Anthropic API key from the file of its `--anthropic-api-key-file` flag.
 
 **Why write access is security-relevant.** The schema is vendor-neutral ([ADR-0013](../adr/0013-adapters-for-every-external-system.md)), but the endpoint decides where the analyzer's Entra ID token and the redacted context go. This includes the `patch` right that the [emergency runbook](../emergency.md) hands out for the kill switch.
 
@@ -400,7 +401,7 @@ Policies and requests refer to repositories by name only.
 - `maxOutputTokens`: per model call, sent as `MaxOutputTokens`, default 2048, 256 to 16384.
 - `maxConcurrentAnalyses`: default 1, 1 to 8.
 - An analysis makes at most 3 + `maxToolSteps` model calls: the triage call, one retry after invalid output, and `maxToolSteps` + 1 escalated turns. An invalid escalated result gets no retry and is handed off.
-- The analyzer refuses a host outside an allow-list of suffixes held by the operator (`--model-endpoint-suffixes`, not these settings), and a port other than 443, before it requests a token (`EndpointNotAllowed`). It refuses private, loopback and link-local addresses when it dials, and requests a token for the Cognitive Services audience only ([#76](https://github.com/pkalin/shadewright/issues/76)).
+- The analyzer refuses a host outside an allow-list of suffixes held by the operator (`--model-endpoint-suffixes`, not these settings), and a port other than 443, before it requests a token (`EndpointNotAllowed`). That list is for `Foundry` deployments only; the host `api.anthropic.com` is refused on them whatever it says, and an `Anthropic` deployment is refused without `--anthropic-api-key-file` (`ProviderNotConfigured`) or when its `deployment` is not its role's model flag (`UnexpectedModel`) (11.1). It refuses private, loopback and link-local addresses when it dials, and requests a token for the Cognitive Services audience only ([#76](https://github.com/pkalin/shadewright/issues/76)).
 - The operator also names the model each role must answer with (`--triage-model`, `--escalation-model`); a reply from another model is refused (ADR-0023 decision 8). A role without its flag is not configured, whatever these settings name.
 - When a model is missing: with no `triage` model it makes no model call, uses no unit of `analysis.maxAnalysesPerDay`, and hands an incident no runbook matched off to a person. With no `escalation` model an escalation trigger (ADR-0023) hands off. A deployment whose `maxTokensPerDay` is 0, or whose cap for the day is spent, is not called and the incident is handed off.
 

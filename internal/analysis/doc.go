@@ -57,12 +57,14 @@ limitations under the License.
 // Each tool call is bound to the namespace of the Incident's subject (another namespace is refused before the
 // tool reads), get_delivery_status is not offered, and an answer about a pod the context builder did not
 // attribute to the subject is labelled so. Each call is charged its reported usage, or its upper bound (the
-// input estimate plus maxOutputTokens) when the usage is unknown or the call failed; a call that could take
+// input estimate plus maxOutputTokens) when the usage is unknown or the call failed, and nothing when the
+// adapter marks its error as sent on no attempt (providers.ErrNotSent); a call that could take
 // the analysis past its token bound, or a deployment past its maxTokensPerDay within this analysis, is not
 // made. The analysis has a deadline under the trigger's analysis timeout. A retryable model error that asks
 // for a short delay is waited out once, within the deadline and within the bound of 3 + maxToolSteps model
 // calls per analysis, which the retry counts toward; otherwise it, ErrNotFound, ErrForbidden and malformed
-// escalated output hand the incident off.
+// escalated output hand the incident off. A provider's key file that could not be used on a call that sent
+// nothing (providers.ErrCredentialUnavailable) hands it off with ReasonProviderNotConfigured.
 //
 // The [Controller] claims an Incident the trigger marked due for its current generation (Open, or Analyzing
 // taken as lost; never Resolved) by writing the phase Analyzing, lastAnalysisTime and the AnalysisDue
@@ -86,8 +88,11 @@ limitations under the License.
 //
 // Only the models the operator configured answer: a reply must name the model of its role
 // (Config.ExpectedModels, ADR-0023 decision 8), and a role without one is not configured. The analyzer binary
-// starts the controller only with its --triage-model flag, with the Foundry adapter behind a host allow-list
-// ([ErrEndpointNotAllowed]).
+// starts the controller only with its --triage-model flag, with the adapter each deployment's provider names:
+// Foundry behind a host allow-list ([ErrEndpointNotAllowed]), or the Anthropic API at its fixed host with the
+// analyzer's key file ([ErrProviderNotConfigured], [ErrDeploymentNotExpected]; ADR-0037). The analysis whose
+// call to a role's provider is the first to return having sent a request, since the start or a change, logs
+// it and records EventModelProviderChanged on its Incident (Config.Recorder).
 //
 // With a tracer provider (Config.TracerProvider, #90) each analysis is one OpenTelemetry trace: a root span
 // with the outcome, and spans for the context, the budget reservation, the triage and escalation phases, each

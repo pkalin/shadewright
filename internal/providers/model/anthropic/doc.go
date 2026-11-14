@@ -29,9 +29,13 @@ limitations under the License.
 // no configuration can send the key elsewhere; the Provider follows no redirect and uses no proxy.
 //
 // Authentication is an API key in the x-api-key header, read from Config.KeyFile at every attempt, so a
-// rotated key is used without a restart. A key file that cannot be read, or is empty, is a retryable error; a
-// key that is too long or holds characters a header cannot carry is [providers.ErrForbidden] (a person fixes
-// the file). The key never appears in an error, a [CallReport] or a log line, and nothing is logged.
+// rotated key is used without a restart. Every key file error matches [providers.ErrCredentialUnavailable]: a
+// file that cannot be read, or is empty, is retryable; a file that is too large, or a key that is too long or
+// holds characters a header cannot carry (an inner newline, a UTF-8 byte order mark), is malformed, not
+// retried, and stays so until a person fixes the file. It is never [providers.ErrForbidden]: nothing was sent.
+// The error of a call none of whose attempts handed a request to the HTTP client is marked
+// [providers.ErrNotSent], so nothing of it can have been billed. The key never appears in an error, a
+// [CallReport] or a log line, and nothing is logged.
 //
 // The request: the leading system messages become the top-level system prompt, whose last block carries a
 // cache_control breakpoint, so the stable prefix (tool definitions and instructions) is cached where the

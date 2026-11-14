@@ -441,7 +441,9 @@ Since shadewright-fleet [#37](https://github.com/pkalin/shadewright-fleet/pull/3
    which carries the label `remediation.shadewright.io/incident-uid`) or `Escalated`, with the condition `Analyzed`
    and its reason. `UnexpectedModel` means the reply named another model than `triageModel`: the `Refused` log line
    names both. `EndpointNotAllowed`, `ModelForbidden` or `ModelNotFound` point at the endpoint, the role assignment or
-   the deployment name.
+   the deployment name. `ProviderNotConfigured` means a deployment names the Anthropic provider and the analyzer runs
+   without `--anthropic-api-key-file`, or its key file could not be read or is malformed: the analyzer's log line
+   `A call to the Anthropic API failed` says which.
 
    The model is shown the bounds of `demo-memory` for the subject (the policy bounds block, design 3.3, #493): from
    the template's 48Mi, `desired from 64Mi to 72Mi`. A proposal the executor then Denies on its bounds

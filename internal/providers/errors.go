@@ -67,7 +67,34 @@ var (
 	// with another number), so nothing in the answer can be used. It is not retried: the caller ends what it was
 	// doing instead of asking again without an end.
 	ErrUntrustedAnswer = errors.New("untrusted answer")
+	// ErrCredentialUnavailable means the adapter could not use the static credential the cluster operator
+	// provides as a file: it could not be read, was empty or is malformed. The adapter sent nothing with it.
+	// A file that could not be read or was empty comes inside a [RetryableError] (a mounted Secret may be between
+	// two versions); a malformed one is permanent until a person fixes the file.
+	ErrCredentialUnavailable = errors.New("the credential file could not be used")
+	// ErrNotSent marks the error of a call that sent no request at all, on any attempt, so nothing of it can
+	// have been billed. Only an adapter that can tell this for certain marks an error with it ([NotSent]).
+	ErrNotSent = errors.New("no request was sent")
 )
+
+// notSentError keeps the text and the chain of err and adds ErrNotSent to it.
+type notSentError struct{ err error }
+
+func (e *notSentError) Error() string { return e.err.Error() }
+
+// Unwrap returns the underlying error.
+func (e *notSentError) Unwrap() error { return e.err }
+
+// Is reports whether target is ErrNotSent.
+func (e *notSentError) Is(target error) bool { return target == ErrNotSent }
+
+// NotSent marks err as the error of a call that sent no request, keeping its text and its chain. Nil stays nil.
+func NotSent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &notSentError{err: err}
+}
 
 // RetryableError is a transient failure with an optional delay requested by the remote system, for example
 // from a Retry-After header. It matches ErrRetryable with errors.Is.
@@ -124,6 +151,12 @@ func IsMalformedOutput(err error) bool { return errors.Is(err, ErrMalformedOutpu
 
 // IsUntrustedAnswer reports whether err is or wraps ErrUntrustedAnswer.
 func IsUntrustedAnswer(err error) bool { return errors.Is(err, ErrUntrustedAnswer) }
+
+// IsCredentialUnavailable reports whether err means the adapter's credential file could not be used.
+func IsCredentialUnavailable(err error) bool { return errors.Is(err, ErrCredentialUnavailable) }
+
+// IsNotSent reports whether err is marked as the error of a call that sent no request.
+func IsNotSent(err error) bool { return errors.Is(err, ErrNotSent) }
 
 // RetryAfter returns the delay requested by the remote system, if err carries one.
 func RetryAfter(err error) (time.Duration, bool) {

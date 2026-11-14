@@ -54,7 +54,7 @@ func TestHintOutcomesAreHintDeclineReasons(t *testing.T) {
 		ReasonDirectionReversed, ReasonNoPolicyForAction, ReasonActionOutOfBounds, ReasonInvalidOutput,
 		ReasonEscalationNotConfigured, ReasonStepLimit, ReasonTokenLimit, ReasonDeadlineExceeded,
 		ReasonModelUnavailable, ReasonModelNotFound, ReasonModelForbidden, ReasonModelError, ReasonUnexpectedModel,
-		ReasonEndpointNotAllowed, ReasonPlanUnchanged, ReasonHintNotPending, ReasonRequestNotCreated,
+		ReasonEndpointNotAllowed, ReasonProviderNotConfigured, ReasonPlanUnchanged, ReasonHintNotPending, ReasonRequestNotCreated,
 		incidents.OutcomeHintCoolingDown, incidents.OutcomeHintBudgetSpent}
 	for _, o := range reasons {
 		if !slices.Contains(remediationv1alpha1.HintDeclineReasons, string(o)) {

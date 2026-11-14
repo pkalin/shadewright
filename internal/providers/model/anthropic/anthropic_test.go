@@ -520,7 +520,10 @@ func TestCompleteKeyFileErrors(t *testing.T) {
 		{"missing", func(path string) { _ = os.Remove(path) }, true},
 		{"empty", func(path string) { _ = os.WriteFile(path, []byte(" \n"), 0o600) }, true},
 		{"not header safe", func(path string) { _ = os.WriteFile(path, []byte("sk ant\n"), 0o600) }, false},
+		{"inner newline", func(path string) { _ = os.WriteFile(path, []byte("sk-ant\nsk-ant\n"), 0o600) }, false},
+		{"UTF-8 BOM", func(path string) { _ = os.WriteFile(path, []byte("\xef\xbb\xbfsk-ant\n"), 0o600) }, false},
 		{"too long", func(path string) { _ = os.WriteFile(path, []byte(strings.Repeat("k", maxKeyBytes+1)), 0o600) }, false},
+		{"file too large", func(path string) { _ = os.WriteFile(path, []byte(strings.Repeat(" ", maxKeyFileBytes+1)), 0o600) }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -529,8 +532,14 @@ func TestCompleteKeyFileErrors(t *testing.T) {
 			})
 			tt.setup(h.keyFile)
 			_, err := h.p.Complete(context.Background(), structuredRequest())
-			if tt.retryable && !providers.IsRetryable(err) || !tt.retryable && !providers.IsForbidden(err) {
-				t.Fatalf("err = %v, want retryable %v (else forbidden)", err, tt.retryable)
+			// Nothing was sent, so the error is never the endpoint refusing the identity, and it says so.
+			if providers.IsRetryable(err) != tt.retryable || !providers.IsCredentialUnavailable(err) ||
+				providers.IsForbidden(err) || !providers.IsNotSent(err) {
+				t.Fatalf("err = %v, want retryable %v, credential unavailable, not sent", err, tt.retryable)
+			}
+			// A malformed file is not retried: it stays malformed until a person fixes it.
+			if want := map[bool]int{true: DefaultMaxAttempts, false: 1}[tt.retryable]; h.lastReport(t).Attempts != want {
+				t.Errorf("%d attempts, want %d", h.lastReport(t).Attempts, want)
 			}
 			if h.requests.Load() != 0 {
 				t.Errorf("sent %d requests without a key, want 0", h.requests.Load())
@@ -539,6 +548,20 @@ func TestCompleteKeyFileErrors(t *testing.T) {
 				t.Errorf("the error names the key file: %v", err)
 			}
 		})
+	}
+}
+
+// A call whose first attempt was sent is never marked as not sent, even when a later attempt could not read
+// the key file: the first may have been billed.
+func TestCompleteSentThenKeyFileGone(t *testing.T) {
+	var h *harness
+	h = newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = os.Remove(h.keyFile)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	_, err := h.p.Complete(context.Background(), structuredRequest())
+	if !providers.IsCredentialUnavailable(err) || providers.IsNotSent(err) || h.requests.Load() != 1 {
+		t.Errorf("err = %v (not sent %v), %d requests", err, providers.IsNotSent(err), h.requests.Load())
 	}
 }
 
@@ -841,4 +864,62 @@ func TestCompleteReplyTooLarge(t *testing.T) {
 			}
 		})
 	}
+}
+
+// roundTripFunc is an http.RoundTripper made of a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A call whose request reached the transport may have been billed, whatever happened next: it is never marked
+// as not sent.
+func TestCompleteReachedTheTransportIsSent(t *testing.T) {
+	newProviderWith := func(t *testing.T, tr http.RoundTripper, attemptTimeout time.Duration) *Provider {
+		t.Helper()
+		keyFile := filepath.Join(t.TempDir(), "api-key")
+		writeKey(t, keyFile, keyMark)
+		p, err := newProvider(Config{Model: testModel, KeyFile: keyFile, MaxAttempts: 1, AttemptTimeout: attemptTimeout},
+			testHooks{transport: tr})
+		if err != nil {
+			t.Fatalf("newProvider: %v", err)
+		}
+		return p
+	}
+	t.Run("the transport returns an error", func(t *testing.T) {
+		var calls atomic.Int32
+		p := newProviderWith(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			return nil, errors.New("connection reset")
+		}), 0)
+		_, err := p.Complete(context.Background(), structuredRequest())
+		if err == nil || providers.IsNotSent(err) || calls.Load() != 1 {
+			t.Errorf("err = %v (not sent %v), %d round trips", err, providers.IsNotSent(err), calls.Load())
+		}
+	})
+	t.Run("a response races the attempt deadline", func(t *testing.T) {
+		// The transport answers only after the attempt's context ended, as a reply can arrive just after it.
+		p := newProviderWith(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{},
+				Body: io.NopCloser(strings.NewReader(messageJSON(testModel, "end_turn", "{}"))), Request: r}, nil
+		}), 20*time.Millisecond)
+		_, err := p.Complete(context.Background(), structuredRequest())
+		if !providers.IsRetryable(err) || !strings.Contains(err.Error(), "timed out") || providers.IsNotSent(err) {
+			t.Errorf("err = %v (not sent %v), want the timeout, sent", err, providers.IsNotSent(err))
+		}
+	})
+	t.Run("the server hangs past the attempt deadline", func(t *testing.T) {
+		h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+		})
+		h.p.attemptTimeout = 20 * time.Millisecond
+		h.p.attempts = 1
+		_, err := h.p.Complete(context.Background(), structuredRequest())
+		if err == nil || providers.IsNotSent(err) || h.requests.Load() != 1 {
+			t.Errorf("err = %v (not sent %v), %d requests", err, providers.IsNotSent(err), h.requests.Load())
+		}
+	})
 }

@@ -310,7 +310,7 @@ func TestKedaReadinessLostSupersedesThePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	cr, err := w.git.OpenChangeRequest(ctx, providers.NewChangeRequest{
-		HeadBranch: branch, BaseBranch: mainBranch, Title: "t", Body: pullRequestBody(got, "")})
+		HeadBranch: branch, BaseBranch: mainBranch, Title: "t", Body: pullRequestBody(got, "", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

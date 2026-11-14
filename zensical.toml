@@ -126,6 +126,7 @@ nav = [
       { "0036 ScaledObject for the model" = "adr/0036-the-model-sees-the-scaledobject-of-a-keda-incident.md" },
       { "0037 Anthropic API provider" = "adr/0037-the-anthropic-api-as-a-second-model-provider.md" },
       { "0038 Control plane mode" = "adr/0038-control-plane-mode-a-hub-that-many-clusters-report-to.md" },
+      { "0039 Cause rule" = "adr/0039-consequence-symptoms-attach-to-their-causes-incident.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

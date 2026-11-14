@@ -2868,7 +2868,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
 		})
 
-		It("keeps holding past the grace while a retry fails, and keeps the time of the first refusal", func() {
+		It("keeps holding past the 15 minutes while an attempt fails other than by a refusal, until the next refused attempt releases it", func() {
 			drive(remediationv1alpha1.PhaseAwaitingApproval)
 			failClose(refused403)
 			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
@@ -2905,6 +2905,41 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Eventually(gone).Should(BeTrue())
 			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
 			Expect(leftOpenOf()).To(BeEmpty(), "nothing was left open")
+		})
+
+		It("clears CleanupRefused and CleanupFailing in one write when the cleanup completes after a refusal", func() {
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			// Another finalizer keeps the deleted request readable after Shadewright's goes.
+			const other = "example.com/keep"
+			got := fetch()
+			base := got.DeepCopy()
+			controllerutil.AddFinalizer(got, other)
+			Expect(k8sClient.Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+			DeferCleanup(func() {
+				got := &remediationv1alpha1.RemediationRequest{}
+				if k8sClient.Get(ctx, key().NamespacedName, got) == nil {
+					base := got.DeepCopy()
+					if controllerutil.RemoveFinalizer(got, other) {
+						Expect(k8sClient.Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+					}
+				}
+			})
+			failClose(refused403)
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(refusedOf()).NotTo(BeNil())
+			Expect(failingOf()).NotTo(BeNil())
+
+			clock = clock.Add(closeRefusedRetry)
+			failClose(nil)
+			Expect(reconcileOnce()).To(Succeed())
+			after := fetch()
+			Expect(controllerutil.ContainsFinalizer(after, FinalizerName)).To(BeFalse(), "the cleanup completed")
+			Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+			Expect(meta.IsStatusConditionTrue(after.Status.Conditions, remediationv1alpha1.ConditionCleanupRefused)).
+				To(BeFalse(), "a completed cleanup shows no refusal")
+			Expect(meta.IsStatusConditionTrue(after.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)).
+				To(BeFalse(), "nor a failure")
 		})
 
 		// Failures no refusal class names (#288): the token mint answered 422 or 404 (a repository removed from the

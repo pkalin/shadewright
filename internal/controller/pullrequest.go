@@ -1703,7 +1703,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			errors.Is(err, errChangeRequestNotOurs):
 			// Closed, nothing reachable to close, the open ones closed and a merged one read as merged, or not
 			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
-			if err := r.clearCleanupFailing(ctx, rr); err != nil {
+			if err := r.clearCleanupConditions(ctx, rr); err != nil {
 				return reconcile.Result{}, err
 			}
 		case errors.Is(err, freshness.ErrPaused):

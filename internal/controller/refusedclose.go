@@ -167,8 +167,11 @@ func refusedClose(err error) (*closeFailure, string, bool) {
 }
 
 // closeRefusedGrace is how long after the first refusal of a step of a deleted request's cleanup (the
-// lastTransitionTime of CleanupRefused, on the executor's clock) the finalizer keeps trying, before it lets the
-// request go and leaves the pull request as it is (#288).
+// lastTransitionTime of CleanupRefused, on the executor's clock) the finalizer keeps trying (#288). The finalizer
+// is released by the first attempt that is refused 15 minutes or more after the first refusal, so the refusal still
+// holds at the moment of the release, and the pull request is left as it is. An attempt that fails another way
+// after the 15 minutes (a 5xx, a signer error) decides nothing about the refusal: the finalizer stays until the next
+// refused attempt or the end of cleanupFailingBound.
 const closeRefusedGrace = handoffRecoveryGrace
 
 // closeRefusedRetry is how often the finalizer tries the cleanup again while the Git host refuses a step of it,
@@ -327,7 +330,8 @@ type cleanupRelease struct {
 //     is set); its lastTransitionTime is kept while it stays True, and cleanupFailingBound after it the request is
 //     let go;
 //   - a refusal for good (refusedCleanup) also sets CleanupRefused (one Warning Event when it is set or its reason
-//     changes), and closeRefusedGrace after its lastTransitionTime the request is let go.
+//     changes); the first attempt refused closeRefusedGrace or more after its lastTransitionTime lets the request
+//     go, and an attempt that fails another way lets it go only at the end of cleanupFailingBound.
 //
 // Then release is non-nil and the caller reports it (leftOpen, gaveUp) before it removes the finalizer. Until then
 // a refusal is tried again every closeRefusedRetry and any other failure as waitOrFail says, never later than the
@@ -392,15 +396,19 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 	return res, nil, werr
 }
 
-// clearCleanupFailing removes condition CleanupFailing once the cleanup of a deleted request has finished, in one
-// status write, so a later failure (the finalizer stays while restoreCleared fails) starts a new bound. A failed
-// write is returned for a retry.
-func (r *RemediationRequestReconciler) clearCleanupFailing(ctx context.Context,
+// clearCleanupConditions removes conditions CleanupFailing and CleanupRefused once the cleanup of a deleted request
+// has finished, in one status write, so a request whose cleanup is done never shows either of them, and a later
+// failure (the finalizer stays while restoreCleared fails or its patch conflicts) starts new bounds. A failed write
+// is returned for a retry.
+func (r *RemediationRequestReconciler) clearCleanupConditions(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) error {
-	if meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing) == nil {
+	failing := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing) != nil
+	refused := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupRefused) != nil
+	if !failing && !refused {
 		return nil
 	}
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionCleanupRefused)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}

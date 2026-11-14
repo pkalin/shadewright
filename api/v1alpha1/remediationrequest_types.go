@@ -350,12 +350,14 @@ const (
 	// read of the recorded pull request, the listing of the request's branch or the close. The message says which
 	// step and names the recorded pull request, if any. It is set only while the request is being deleted, so its
 	// lastTransitionTime is the first refusal after the deletion began, on the executor's clock; it is kept while
-	// refusals and failures worth a retry go on. The finalizer tries the cleanup again every minute and, 15 minutes
-	// after lastTransitionTime, lets the request go with a Warning Event PullRequestLeftOpen that names the pull
-	// request (left open when the close was refused; of unknown state, maybe open, when an earlier step was). A
-	// failure worth a retry, or a failed read that is not a refusal, never sets it. One Warning Event,
-	// CleanupRefused, is recorded when it is set or its reason changes. CleanupFailing is set with it, and its
-	// longer bound applies too.
+	// refusals and failures worth a retry go on, and removed, with CleanupFailing, when the cleanup completes. The
+	// finalizer tries the cleanup again every minute; it is released by the first attempt that is refused 15
+	// minutes or more after lastTransitionTime, with a Warning Event PullRequestLeftOpen that names the pull request
+	// (left open when the close was refused; of unknown state, maybe open, when an earlier step was). An attempt
+	// that fails another way after the 15 minutes releases nothing: the next refused attempt or the 24 hour bound
+	// of CleanupFailing does. A failure worth a retry, or a failed read that is not a refusal, never sets it. One
+	// Warning Event, CleanupRefused, is recorded when it is set or its reason changes. CleanupFailing is set with
+	// it, and its longer bound applies too.
 	ConditionCleanupRefused = "CleanupRefused"
 	// ConditionCleanupFailing is True once a step of the cleanup of a deleted request failed, whatever the class of
 	// the failure (a refusal, a failure worth a retry, a token the Git App cannot get, a signer that cannot sign, a

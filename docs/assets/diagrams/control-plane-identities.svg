@@ -41,7 +41,7 @@
   <rect class="key" x="806" y="72" width="236" height="176" rx="12"/>
   <text class="h" x="822" y="100">Reporter (new, proposed)</text>
   <text class="s" x="822" y="128">reads: Incidents, requests,</text>
-  <text class="s" x="822" y="146">reports; get: settings, kube-system</text>
+  <text class="s" x="822" y="146">reports, settings, kube-system</text>
   <text class="no" x="822" y="178">never: Secrets, Git, model key</text>
   <text class="s" x="822" y="204">egress: the hub's host only</text>
   <text class="s" x="822" y="222">token audience names this hub</text>

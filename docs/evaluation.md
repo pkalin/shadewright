@@ -150,7 +150,7 @@ locally without such an identity; run it once by hand after setting it up.
 `EVAL_MODEL=anthropic make eval-model` runs the same harness against a Claude model through the Anthropic API
 adapter (`internal/providers/model/anthropic`, [#728](https://github.com/pkalin/shadewright/issues/728)), so the
 model comparison of [#503](https://github.com/pkalin/shadewright/issues/503) gets Claude rows. Only the
-evaluation uses this adapter; the analyzer cannot be configured with it yet ([#387](https://github.com/pkalin/shadewright/issues/387)).
+evaluation uses this adapter; the analyzer cannot be configured with it yet ([#729](https://github.com/pkalin/shadewright/issues/729)).
 It runs by hand on the maintainer's machine, never in CI or in the Evaluation workflow, and it costs money. There
 is no fallback: a model that is throttled or unavailable fails its runs, it is never replaced by Foundry or by
 another Claude model.
@@ -161,13 +161,16 @@ another Claude model.
 | `EVAL_ANTHROPIC_KEY_FILE` | yes | Path of a private file (mode 0600) holding the API key. It is read at every request, so a rotated key needs no restart. The key never appears in the report, an error or a log line |
 | `EVAL_TRIAGE_MODEL` | yes | Model ID, exactly as the replies name it, for example `claude-sonnet-5-5`; a reply naming another model is refused (`UnexpectedModel`) |
 | `EVAL_ESCALATION_MODEL` | no | Model ID of the escalation role; without it an escalation is handed off |
+| `EVAL_ANTHROPIC_EFFORT` | no | `output_config.effort` of every call: `low` (default), `medium`, `high`, `xhigh` or `max` |
+| `EVAL_ANTHROPIC_THINKING_ALLOWANCE` | no | Tokens added to the run's output limit in `max_tokens`, as room for thinking; default 4096, at most 32768 |
 | `EVAL_PRICE_*`, `EVAL_ESCALATION_PRICE_*`, `EVAL_REPEATS`, `EVAL_MIN_PASS_RATE`, `EVAL_FORCE_ESCALATION` | no | As in the table above (`EVAL_FORCE_ESCALATION=1` needs `EVAL_ESCALATION_MODEL`); take the prices from Anthropic's price list |
 
 `EVAL_ENDPOINT`, `EVAL_ENDPOINT_SUFFIXES`, `EVAL_API_VERSION` and the `*_DEPLOYMENT` variables apply to Foundry
 only, and a run with one of them set fails before any call. The adapter posts to `https://api.anthropic.com` only (a
-constant, not a setting) and follows no redirect. The manifest names the provider (`provider: anthropic`), and each
-role's `deployment` is the model ID, with the API's address and version as `apiVersion`, so its digest differs
-from any Foundry run.
+constant, not a setting) and follows no redirect. The manifest names the provider (`provider: anthropic`) and its
+settings (`anthropic.effort`, `anthropic.thinkingAllowance`, also on the report's first lines), and each role's
+`deployment` is the model ID, with the API's address and version as `apiVersion`, so its digest differs from any
+Foundry run.
 
 With this provider the redacted context and the redacted tool results go to the Anthropic API under the account of
 the key, outside the lab's Azure subscription and its region; the adapter does not ask for an inference region.
@@ -179,12 +182,17 @@ How the numbers read:
   same tool definitions and instructions reads them from the cache, where the model caches a prefix that long
   (`cachedInput` shows how much was read).
 - **Tokens.** `input` is the whole prompt: the API's `input_tokens` plus `cache_creation_input_tokens` plus
-  `cache_read_input_tokens`. `cachedInput` is `cache_read_input_tokens`. Tokens written to the cache count as plain
-  input, but the API bills them at 1.25 times the input price (five-minute cache), so `costUSD` is low by a
-  quarter of the input price for each token written to the cache. The report does not count cache writes apart.
-- **Thinking.** The adapter sends no `thinking` or effort setting, so the model runs with its own defaults
-  (adaptive thinking on the current models). Thinking tokens are output tokens: they count against the 2048
-  output tokens per call of the run limits, and a reply cut off there is malformed output.
+  `cache_read_input_tokens`. `cachedInput` is `cache_read_input_tokens`. Cache writes are billed above the input
+  price (five-minute writes at 1.25 times) and the report prices them as plain input, so the estimated cost is
+  slightly low. The report does not count cache writes apart.
+- **Thinking.** The adapter sends no `thinking` setting, so the model runs with its own (adaptive thinking on the
+  current models; on some it cannot be turned off), and sends `EVAL_ANTHROPIC_EFFORT` as the effort. Thinking
+  tokens are output tokens, so `max_tokens` is the run's 2048 output tokens per call plus
+  `EVAL_ANTHROPIC_THINKING_ALLOWANCE`: thinking up to the allowance does not cut off an answer that fits in 2048
+  tokens. `output` counts every output token, thinking included, and so do the loop's token budgets. A reply that
+  still reaches `max_tokens` is malformed output. In a tool round the adapter sends the thinking blocks of the turn that made
+  the tool calls back unchanged, as the API expects; the loop carries them without reading them, and they never
+  reach a log line, an error or the report.
 
 ### Benchmarking escalation models
 
@@ -327,7 +335,8 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 
 | Field | Content |
 | --- | --- |
-| `provider` | The model provider of the run: `fake`, `foundry` or `anthropic` |
+| `provider` | `anthropic` with the Anthropic API; left out for fake and Foundry runs, so their digests are those they had before the field |
+| `anthropic` | With the Anthropic API only: `effort` and `thinkingAllowance` (tokens added to the output limit in `max_tokens`) |
 | `models` | Per role: `deployment` (with `anthropic`, the model ID), `model` (the ID and version replies must name), `apiVersion` |
 | `promptVersion` | `analysis.PromptVersion()`: the prompt templates, the generated schema and the catalog |
 | `toolDefinitions` | Hash of the tool definitions offered on escalation, `query_metrics` included; a scenario without `metrics.yaml` is offered them without it |

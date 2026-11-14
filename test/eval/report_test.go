@@ -278,8 +278,11 @@ func (p *prices) forRole(role string) *prices {
 // manifest is the evaluation manifest of ADR-0025 decision 3: the inputs that affect behaviour, and its
 // digest.
 type manifest struct {
-	// Provider is the model provider of the run: fake, foundry or anthropic.
-	Provider string `json:"provider"`
+	// Provider is the model provider of the run when it is anthropic; left out for fake and foundry, whose
+	// manifests and digests stay as they were before the field.
+	Provider string `json:"provider,omitempty"`
+	// Anthropic holds the settings of the anthropic provider; left out for the others.
+	Anthropic *manifestAnthropic `json:"anthropic,omitempty"`
 	// Models are the deployments by role: deployment name and the model ID and version the replies must name.
 	Models map[string]manifestModel `json:"models"`
 	// PromptVersion is analysis.PromptVersion: the prompt templates and their generated parts.
@@ -304,6 +307,14 @@ type manifest struct {
 	Repeats     int     `json:"repeats"`
 	// Digest is the SHA-256 of the manifest's JSON without this field (see manifestDigest).
 	Digest string `json:"digest,omitempty"`
+}
+
+// manifestAnthropic are the settings of the Anthropic API adapter that change the replies.
+type manifestAnthropic struct {
+	// Effort is the output_config.effort sent with every call.
+	Effort string `json:"effort"`
+	// ThinkingAllowance is added to maxOutputTokens in max_tokens, as room for thinking.
+	ThinkingAllowance int `json:"thinkingAllowance"`
 }
 
 type manifestRunLimits struct {
@@ -361,7 +372,6 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 	minPassRate float64, repeats int) (manifest, error) {
 	l := incidentcontext.DefaultLimits()
 	m := manifest{
-		Provider:      models.provider(),
 		Models:        map[string]manifestModel{},
 		PromptVersion: analysis.PromptVersion(),
 		MinPassRate:   minPassRate, Repeats: repeats, ForcedEscalation: models.forcesEscalation(),
@@ -375,6 +385,7 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 		RunLimits: manifestRunLimits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens},
 		Rubric:    manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
 	}
+	m.Provider, m.Anthropic = models.manifestProvider()
 	triage, escalation := models.deployments()
 	expectedModels := models.expectedModels()
 	for role, d := range map[analysis.Role]*remediationv1alpha1.ModelDeployment{
@@ -502,6 +513,10 @@ func (r *report) markdown() string {
 	}
 	fmt.Fprintf(&b, "# Evaluation: %s\n\n", verdict)
 	fmt.Fprintf(&b, "- Mode: %s; manifest digest `%s`\n", r.Mode, r.Manifest.Digest)
+	if a := r.Manifest.Anthropic; a != nil {
+		fmt.Fprintf(&b, "- Effort %s; thinking allowance %d tokens above the output limit\n", a.Effort,
+			a.ThinkingAllowance)
+	}
 	fmt.Fprintf(&b, "- Prompt `%s`; rubric %s@%s\n", r.Manifest.PromptVersion, r.Manifest.Rubric.FleetRepository,
 		r.Manifest.Rubric.FleetCommit[:min(12, len(r.Manifest.Rubric.FleetCommit))])
 	fmt.Fprintf(&b, "- Passed %d of %d runs (%.0f%%, threshold %.0f%%, %d repeat(s))\n", r.Totals.Passed, r.Totals.Runs,

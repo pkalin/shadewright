@@ -653,7 +653,9 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 		if len(c.ToolCalls) > MaxToolCallsPerReply {
 			return nil, nil, ReasonInvalidOutput, nil
 		}
-		msgs = append(msgs, providers.Message{Role: providers.RoleAssistant, ToolCalls: c.ToolCalls})
+		// ProviderBlocks goes back unchanged and unread: the adapter's own data, such as thinking blocks.
+		msgs = append(msgs, providers.Message{Role: providers.RoleAssistant, ToolCalls: c.ToolCalls,
+			ProviderBlocks: c.ProviderBlocks})
 		for _, call := range c.ToolCalls {
 			var content string
 			if used >= steps {

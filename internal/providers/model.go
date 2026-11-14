@@ -40,6 +40,9 @@ type Message struct {
 	ToolCalls []ToolCall
 	// ToolCallID ties a tool result to the call it answers (tool messages only).
 	ToolCallID string
+	// ProviderBlocks is the Completion.ProviderBlocks of the reply whose ToolCalls this assistant message
+	// carries, copied unchanged; empty otherwise. Adapters that do not use it ignore it.
+	ProviderBlocks Opaque
 }
 
 // ToolDefinition describes a tool the model may call.
@@ -87,6 +90,10 @@ type Completion struct {
 	// Usage then counts only what was read; a budget should count the call conservatively, for example as
 	// the request's whole output limit.
 	UsageUnknown bool
+	// ProviderBlocks is what the adapter needs back on the assistant message that carries ToolCalls in the
+	// next request of the conversation (Message.ProviderBlocks), for example thinking blocks. The caller never
+	// reads, logs or stores it. Empty without tool calls and for adapters that need nothing back.
+	ProviderBlocks Opaque
 }
 
 // ModelProvider calls a language model.

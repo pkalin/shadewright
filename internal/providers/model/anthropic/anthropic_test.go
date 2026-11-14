@@ -49,10 +49,14 @@ const (
 
 // Fixtures used in several tests.
 const (
-	testModel = "claude-opus-5-5"
-	logsTool  = "get_logs"
-	callZero  = "toolu_0"
-	callOne   = "toolu_1"
+	testModel   = "claude-opus-5-5"
+	logsTool    = "get_logs"
+	callZero    = "toolu_0"
+	callOne     = "toolu_1"
+	contextText = "context"
+	logLine     = "log line"
+	notJSON     = "not JSON"
+	effortHigh  = "high"
 )
 
 // harness is a provider wired to an httptest TLS server that stands in for the API's host.
@@ -177,8 +181,11 @@ func TestCompleteStructuredSuccess(t *testing.T) {
 		t.Errorf("x-api-key as expected: %v, anthropic-version %q", hdr.Get("x-api-key") == keyMark,
 			hdr.Get("anthropic-version"))
 	}
-	if got["model"] != testModel || got["max_tokens"] != float64(DefaultMaxOutputTokens) {
+	if got["model"] != testModel || got["max_tokens"] != float64(DefaultMaxOutputTokens+DefaultThinkingAllowance) {
 		t.Errorf("model %v, max_tokens %v", got["model"], got["max_tokens"])
+	}
+	if effort := got["output_config"].(map[string]any)["effort"]; effort != DefaultEffort {
+		t.Errorf("output_config.effort = %v, want %s", effort, DefaultEffort)
 	}
 	for _, k := range []string{"temperature", "top_p", "top_k", "thinking", "fallbacks"} {
 		if _, ok := got[k]; ok {
@@ -225,12 +232,12 @@ func TestCompleteToolUseRoundTrip(t *testing.T) {
 	req := providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: providers.RoleSystem, Content: "instructions"},
-			{Role: providers.RoleUser, Content: "context"},
+			{Role: providers.RoleUser, Content: contextText},
 			{Role: providers.RoleAssistant, ToolCalls: []providers.ToolCall{
 				{ID: callZero, Name: logsTool, Arguments: json.RawMessage(`{"pod":"web-0"}`)},
 				{ID: callOne, Name: logsTool, Arguments: json.RawMessage(`{"pod":"web-2"}`)},
 			}},
-			{Role: providers.RoleTool, ToolCallID: callZero, Content: "log line"},
+			{Role: providers.RoleTool, ToolCallID: callZero, Content: logLine},
 			{Role: providers.RoleTool, ToolCallID: callOne, Content: ""},
 			{Role: providers.RoleUser, Content: "last turn"},
 		},
@@ -262,7 +269,7 @@ func TestCompleteToolUseRoundTrip(t *testing.T) {
 		t.Errorf("assistant turn = %v", asst)
 	}
 	if len(results) != 3 || results[0]["type"] != blockToolResult || results[0]["tool_use_id"] != callZero ||
-		results[0]["content"] != "log line" || results[1]["tool_use_id"] != callOne ||
+		results[0]["content"] != logLine || results[1]["tool_use_id"] != callOne ||
 		results[2]["type"] != blockText || results[2]["text"] != "last turn" {
 		t.Errorf("results turn = %v", results)
 	}
@@ -317,7 +324,7 @@ func TestCompleteMalformedOutputKeepsUsage(t *testing.T) {
 			}
 		})
 	}
-	t.Run("not JSON", func(t *testing.T) {
+	t.Run(notJSON, func(t *testing.T) {
 		h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = io.WriteString(w, messageJSON(testModel, stopEndTurn, text(`"{}"`)))
@@ -566,7 +573,7 @@ func TestNoSecretInErrorsReportsOrLogs(t *testing.T) {
 		{"another model", func(w http.ResponseWriter, r *http.Request) {
 			reply(w, messageJSON("claude-opus-4-8", stopEndTurn, `[{"type":"text","text":"`+replyMark+`"}]`))
 		}},
-		{"not JSON", func(w http.ResponseWriter, r *http.Request) {
+		{notJSON, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = io.WriteString(w, replyMark+keyMark)
 		}},
@@ -602,7 +609,7 @@ func TestNoSecretInErrorsReportsOrLogs(t *testing.T) {
 }
 
 func TestCompleteRefusesInvalidRequests(t *testing.T) {
-	user := providers.Message{Role: providers.RoleUser, Content: "context"}
+	user := providers.Message{Role: providers.RoleUser, Content: contextText}
 	tests := map[string]providers.CompletionRequest{
 		"no messages":       {},
 		"only system":       {Messages: []providers.Message{{Role: providers.RoleSystem, Content: "x"}}},
@@ -614,6 +621,26 @@ func TestCompleteRefusesInvalidRequests(t *testing.T) {
 		"output limit":      {Messages: []providers.Message{user}, MaxOutputTokens: MaxOutputTokens + 1},
 		"tool message ID":   {Messages: []providers.Message{user, {Role: providers.RoleTool, ToolCallID: "a b"}}},
 	}
+	call := providers.ToolCall{ID: callOne, Name: logsTool, Arguments: json.RawMessage(`{}`)}
+	turn := `{"type":"tool_use","id":"` + callOne + `","name":"` + logsTool + `","input":{}}`
+	for name, blocks := range map[string]string{
+		"blocks not a list":  `{"type":"thinking"}`,
+		"blocks empty":       `[]`,
+		"another tool call":  `[{"type":"tool_use","id":"toolu_9","name":"` + logsTool + `","input":{}}]`,
+		"another tool":       `[{"type":"tool_use","id":"` + callOne + `","name":"other","input":{}}]`,
+		"a call missing":     `[{"type":"thinking","thinking":"","signature":"s"}]`,
+		"a call too many":    `[` + turn + `,{"type":"tool_use","id":"toolu_9","name":"` + logsTool + `","input":{}}]`,
+		"unknown block type": `[{"type":"server_tool_use"},` + turn + `]`,
+	} {
+		tests[name] = providers.CompletionRequest{Messages: []providers.Message{user,
+			{Role: providers.RoleAssistant, ToolCalls: []providers.ToolCall{call},
+				ProviderBlocks: providers.NewOpaque([]byte(blocks))},
+			{Role: providers.RoleTool, ToolCallID: callOne, Content: "x"}}}
+	}
+	tests["blocks with text"] = providers.CompletionRequest{Messages: []providers.Message{user,
+		{Role: providers.RoleAssistant, Content: "x", ToolCalls: []providers.ToolCall{call},
+			ProviderBlocks: providers.NewOpaque([]byte(`[` + turn + `]`))},
+		{Role: providers.RoleTool, ToolCallID: callOne, Content: "x"}}}
 	for name, req := range tests {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {})
@@ -629,13 +656,16 @@ func TestCompleteRefusesInvalidRequests(t *testing.T) {
 
 func TestNewRefusesInvalidConfig(t *testing.T) {
 	tests := map[string]Config{
-		"no model":      {KeyFile: "k"},
-		"bad model":     {Model: "Claude Opus", KeyFile: "k"},
-		"no key file":   {Model: testModel},
-		"output limit":  {Model: testModel, KeyFile: "k", MaxOutputTokens: MaxOutputTokens + 1},
-		"attempts":      {Model: testModel, KeyFile: "k", MaxAttempts: MaxAttempts + 1},
-		"negative":      {Model: testModel, KeyFile: "k", Timeout: -1},
-		"timeout bound": {Model: testModel, KeyFile: "k", Timeout: maxConfigTimeout + 1},
+		"no model":           {KeyFile: "k"},
+		"bad model":          {Model: "Claude Opus", KeyFile: "k"},
+		"no key file":        {Model: testModel},
+		"output limit":       {Model: testModel, KeyFile: "k", MaxOutputTokens: MaxOutputTokens + 1},
+		"attempts":           {Model: testModel, KeyFile: "k", MaxAttempts: MaxAttempts + 1},
+		"negative":           {Model: testModel, KeyFile: "k", Timeout: -1},
+		"timeout bound":      {Model: testModel, KeyFile: "k", Timeout: maxConfigTimeout + 1},
+		"allowance":          {Model: testModel, KeyFile: "k", ThinkingAllowance: MaxThinkingAllowance + 1},
+		"negative allowance": {Model: testModel, KeyFile: "k", ThinkingAllowance: -1},
+		"effort":             {Model: testModel, KeyFile: "k", Effort: "minimal"},
 	}
 	for name, cfg := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -646,5 +676,161 @@ func TestNewRefusesInvalidConfig(t *testing.T) {
 	}
 	if _, err := New(Config{Model: testModel, KeyFile: "k"}); err != nil {
 		t.Fatalf("New: %v", err)
+	}
+}
+
+// New keeps the configured effort and thinking allowance, and a request sends them: max_tokens is the
+// request's limit plus the allowance.
+func TestCompleteSendsEffortAndThinkingAllowance(t *testing.T) {
+	p, err := New(Config{Model: testModel, KeyFile: "k", Effort: effortHigh, ThinkingAllowance: 2000})
+	if err != nil || p.effort != effortHigh || p.thinkingAllowance != 2000 {
+		t.Fatalf("New: %v, effort %q, allowance %d", err, p.effort, p.thinkingAllowance)
+	}
+	var got struct {
+		MaxTokens    int            `json:"max_tokens"`
+		OutputConfig map[string]any `json:"output_config"`
+	}
+	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		reply(w, messageJSON(testModel, stopEndTurn, `[{"type":"text","text":"done"}]`))
+	})
+	h.p.effort, h.p.thinkingAllowance = p.effort, p.thinkingAllowance
+	req := providers.CompletionRequest{Messages: []providers.Message{{Role: providers.RoleUser, Content: "x"}},
+		MaxOutputTokens: 1000}
+	if _, err := h.p.Complete(context.Background(), req); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if got.MaxTokens != 3000 || got.OutputConfig["effort"] != effortHigh || got.OutputConfig["format"] != nil {
+		t.Errorf("max_tokens %d, output_config %v", got.MaxTokens, got.OutputConfig)
+	}
+}
+
+// The thinking block of a tool round reaches the caller only inside ProviderBlocks, which no printed form
+// shows, and goes back on the next request exactly as the API sent it, before the tool calls of its turn.
+func TestCompleteSendsThinkingBlocksBackUnchanged(t *testing.T) {
+	const thinking = `{"type":"thinking","thinking":"` + replyMark + `","signature":"sig-` + replyMark + `"}`
+	var bodies []map[string]json.RawMessage
+	var mu sync.Mutex
+	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		mu.Lock()
+		bodies = append(bodies, b)
+		n := len(bodies)
+		mu.Unlock()
+		if n == 1 {
+			reply(w, messageJSON(testModel, stopToolUse, `[`+thinking+`,{"type":"redacted_thinking","data":"enc"},`+
+				`{"type":"tool_use","id":"`+callOne+`","name":"`+logsTool+`","input":{"pod":"web-1"}}]`))
+			return
+		}
+		reply(w, messageJSON(testModel, stopEndTurn, `[{"type":"text","text":"{}"}]`))
+	})
+	req := providers.CompletionRequest{
+		Messages: []providers.Message{{Role: providers.RoleUser, Content: contextText}},
+		Tools:    []providers.ToolDefinition{{Name: logsTool, Parameters: json.RawMessage(`{"type":"object"}`)}},
+	}
+	c, err := h.p.Complete(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if c.ProviderBlocks.IsZero() || len(c.ToolCalls) != 1 || c.Content != "" {
+		t.Fatalf("completion = %+v", c)
+	}
+	shown, _ := json.Marshal(c)
+	if s := fmt.Sprintf("%v %+v %#v %s", c, c, c, shown); strings.Contains(s, replyMark) {
+		t.Errorf("a printed or encoded completion shows the thinking block: %s", s)
+	}
+	req.Messages = append(req.Messages,
+		providers.Message{Role: providers.RoleAssistant, ToolCalls: c.ToolCalls, ProviderBlocks: c.ProviderBlocks},
+		providers.Message{Role: providers.RoleTool, ToolCallID: callOne, Content: logLine})
+	if _, err := h.p.Complete(context.Background(), req); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	var msgs []struct {
+		Role    string            `json:"role"`
+		Content []json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(bodies[1]["messages"], &msgs); err != nil || len(msgs) != 3 {
+		t.Fatalf("messages = %s (%v)", bodies[1]["messages"], err)
+	}
+	asst := msgs[1].Content
+	if msgs[1].Role != roleAssistant || len(asst) != 3 || string(asst[0]) != thinking ||
+		string(asst[1]) != `{"type":"redacted_thinking","data":"enc"}` ||
+		!strings.Contains(string(asst[2]), `"id":"`+callOne+`"`) {
+		t.Errorf("assistant turn = %s", bodies[1]["messages"])
+	}
+}
+
+// The production transport uses no proxy, whatever the environment says: the key goes to the API's host only.
+func TestProductionTransportIgnoresProxyEnvironment(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+	t.Setenv("HTTP_PROXY", "http://proxy.invalid:3128")
+	p, err := New(Config{Model: testModel, KeyFile: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, ok := p.client.Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Fatalf("transport %T with a proxy function: the proxy environment would be used", p.client.Transport)
+	}
+}
+
+// A billed 200 whose body cannot be read is retried; the successful retry carries its own usage and says that
+// a billed answer was not counted.
+func TestCompleteBilledReadFailureThenRetryReportsUnknownUsage(t *testing.T) {
+	var n atomic.Int32
+	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			// Declares more body than it sends, so the read ends early.
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "4096")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"type":"message"`)
+			return
+		}
+		reply(w, messageJSON(testModel, stopEndTurn, `[{"type":"text","text":"{}"}]`))
+	})
+	c, err := h.p.Complete(context.Background(), structuredRequest())
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !c.UsageUnknown || c.Usage != wantUsage {
+		t.Errorf("completion = %+v, want the retry's usage and UsageUnknown", c)
+	}
+	if r := h.lastReport(t); r.Attempts != 2 || !r.UsageUnknown {
+		t.Errorf("report = %+v", r)
+	}
+}
+
+// A billed reply larger than the bound is ErrTooLarge with unknown usage, whether its Content-Length says so
+// before any read or a chunked body runs past the bound while it is read. Neither is retried.
+func TestCompleteReplyTooLarge(t *testing.T) {
+	big := messageJSON(testModel, stopEndTurn, `[{"type":"text","text":"`+strings.Repeat("x", 512)+`"}]`)
+	for name, handler := range map[string]http.HandlerFunc{
+		// The declared length is above the bound and no body follows: only the declared length can tell.
+		"declared length": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "100000")
+			w.WriteHeader(http.StatusOK)
+		},
+		// No declared length: the body itself runs past the bound.
+		"chunked body": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			_, _ = io.WriteString(w, big)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, handler)
+			h.p.maxBody = 256
+			c, err := h.p.Complete(context.Background(), structuredRequest())
+			if !errors.Is(err, providers.ErrTooLarge) || !c.UsageUnknown {
+				t.Fatalf("err = %v, completion = %+v, want ErrTooLarge with unknown usage", err, c)
+			}
+			if h.requests.Load() != 1 || !h.lastReport(t).UsageUnknown {
+				t.Errorf("sent %d requests, report %+v", h.requests.Load(), h.lastReport(t))
+			}
+		})
 	}
 }

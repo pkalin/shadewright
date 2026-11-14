@@ -18,6 +18,7 @@ package anthropic
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -62,12 +63,19 @@ const (
 	DefaultTimeout = 3 * time.Minute
 	// DefaultAttemptTimeout bounds one attempt, from sending the request to reading the whole reply.
 	DefaultAttemptTimeout = 90 * time.Second
-	// DefaultMaxOutputTokens is sent as max_tokens when neither the request nor Config sets a limit. On the
-	// current models thinking tokens count against it.
+	// DefaultMaxOutputTokens is the output limit of a request that leaves its own at zero, when Config sets
+	// none. max_tokens is this limit plus the thinking allowance.
 	DefaultMaxOutputTokens = 2048
 	// MaxOutputTokens is the highest output limit a request may ask for, the maximum of
 	// spec.analysis.maxOutputTokens.
 	MaxOutputTokens = 16384
+	// DefaultThinkingAllowance is added to the request's output limit in max_tokens, as room for thinking,
+	// which counts as output.
+	DefaultThinkingAllowance = 4096
+	// MaxThinkingAllowance is the largest thinking allowance Config may ask for.
+	MaxThinkingAllowance = 32768
+	// DefaultEffort is the output_config.effort sent when Config sets none.
+	DefaultEffort = "low"
 	// DefaultMaxResponseBytes bounds the body of a reply that is read.
 	DefaultMaxResponseBytes = 1 << 20
 	// maxRequestBytes bounds the encoded request. The context the analyzer sends is at most 256 KiB.
@@ -87,6 +95,9 @@ const (
 
 // modelPattern is what a configured model ID may look like, for example claude-opus-5-5.
 var modelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,63}$`)
+
+// efforts are the values of output_config.effort the API knows.
+var efforts = map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true}
 
 // CallReport describes one Complete call, for metrics and cost accounting. It holds no prompt, reply text,
 // key or URL.
@@ -113,9 +124,15 @@ type Config struct {
 	Model string
 	// KeyFile is the path of a file that holds the API key, read at every attempt. Required.
 	KeyFile string
-	// MaxOutputTokens is sent when a request leaves its own limit at zero. Zero means DefaultMaxOutputTokens;
-	// at most MaxOutputTokens.
+	// MaxOutputTokens is the output limit of a request that leaves its own at zero. Zero means
+	// DefaultMaxOutputTokens; at most MaxOutputTokens.
 	MaxOutputTokens int
+	// ThinkingAllowance is added to the request's output limit in max_tokens, so that thinking, which counts
+	// as output, does not cut the answer off. Zero means DefaultThinkingAllowance; at most
+	// MaxThinkingAllowance.
+	ThinkingAllowance int
+	// Effort is sent as output_config.effort: low, medium, high, xhigh or max. Empty means DefaultEffort.
+	Effort string
 	// MaxAttempts bounds the attempts of one call. Zero means DefaultMaxAttempts; at most MaxAttempts.
 	MaxAttempts int
 	// BaseDelay is the first backoff delay. Zero means DefaultBaseDelay.
@@ -144,20 +161,22 @@ type testHooks struct {
 
 // Provider is a [providers.ModelProvider] for one Claude model. It is safe for concurrent use.
 type Provider struct {
-	model          string
-	keyFile        string
-	client         *http.Client
-	maxOutput      int
-	attempts       int
-	base           time.Duration
-	maxDelay       time.Duration
-	timeout        time.Duration
-	attemptTimeout time.Duration
-	maxBody        int64
-	onCall         func(CallReport)
-	sleep          func(context.Context, time.Duration) error
-	jitter         func(time.Duration) time.Duration
-	now            func() time.Time
+	model             string
+	keyFile           string
+	client            *http.Client
+	maxOutput         int
+	thinkingAllowance int
+	effort            string
+	attempts          int
+	base              time.Duration
+	maxDelay          time.Duration
+	timeout           time.Duration
+	attemptTimeout    time.Duration
+	maxBody           int64
+	onCall            func(CallReport)
+	sleep             func(context.Context, time.Duration) error
+	jitter            func(time.Duration) time.Duration
+	now               func() time.Time
 }
 
 var _ providers.ModelProvider = (*Provider)(nil)
@@ -179,6 +198,12 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	if cfg.MaxOutputTokens < 0 || cfg.MaxOutputTokens > MaxOutputTokens {
 		return nil, invalid("the output token limit is out of range")
 	}
+	if cfg.ThinkingAllowance < 0 || cfg.ThinkingAllowance > MaxThinkingAllowance {
+		return nil, invalid("the thinking allowance is out of range")
+	}
+	if cfg.Effort != "" && !efforts[cfg.Effort] {
+		return nil, invalid("the effort is not one the API knows")
+	}
 	if cfg.MaxAttempts < 0 || cfg.MaxAttempts > MaxAttempts {
 		return nil, invalid("the attempt count is out of range")
 	}
@@ -190,20 +215,22 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 		return nil, invalid("a duration or size is above its bound")
 	}
 	p := &Provider{
-		model:          cfg.Model,
-		keyFile:        cfg.KeyFile,
-		client:         newHTTPClient(h.transport, cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout)),
-		maxOutput:      cmpOr(cfg.MaxOutputTokens, DefaultMaxOutputTokens),
-		attempts:       cmpOr(cfg.MaxAttempts, DefaultMaxAttempts),
-		base:           cmpOr(cfg.BaseDelay, DefaultBaseDelay),
-		maxDelay:       cmpOr(cfg.MaxDelay, DefaultMaxDelay),
-		timeout:        cmpOr(cfg.Timeout, DefaultTimeout),
-		attemptTimeout: cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout),
-		maxBody:        cmpOr(cfg.MaxResponseBytes, DefaultMaxResponseBytes),
-		onCall:         cfg.OnCall,
-		sleep:          h.sleep,
-		jitter:         h.jitter,
-		now:            h.now,
+		model:             cfg.Model,
+		keyFile:           cfg.KeyFile,
+		client:            newHTTPClient(h.transport, cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout)),
+		maxOutput:         cmpOr(cfg.MaxOutputTokens, DefaultMaxOutputTokens),
+		thinkingAllowance: cmpOr(cfg.ThinkingAllowance, DefaultThinkingAllowance),
+		effort:            cmp.Or(cfg.Effort, DefaultEffort),
+		attempts:          cmpOr(cfg.MaxAttempts, DefaultMaxAttempts),
+		base:              cmpOr(cfg.BaseDelay, DefaultBaseDelay),
+		maxDelay:          cmpOr(cfg.MaxDelay, DefaultMaxDelay),
+		timeout:           cmpOr(cfg.Timeout, DefaultTimeout),
+		attemptTimeout:    cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout),
+		maxBody:           cmpOr(cfg.MaxResponseBytes, DefaultMaxResponseBytes),
+		onCall:            cfg.OnCall,
+		sleep:             h.sleep,
+		jitter:            h.jitter,
+		now:               h.now,
 	}
 	if p.sleep == nil {
 		p.sleep = sleep

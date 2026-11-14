@@ -19,6 +19,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -76,7 +77,7 @@ func apiTurnError(body []byte) string {
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		return "not JSON"
+		return notJSON
 	}
 	if len(req.System) == 0 || req.System[len(req.System)-1]["cache_control"] == nil {
 		return "no cached system prompt"
@@ -85,7 +86,7 @@ func apiTurnError(body []byte) string {
 	for i, m := range req.Messages {
 		want := "user"
 		if i%2 == 1 {
-			want = "assistant"
+			want = roleAssistant
 		}
 		if m.Role != want {
 			return "roles do not alternate from the user"
@@ -111,6 +112,31 @@ func apiTurnError(body []byte) string {
 	return ""
 }
 
+// thinkingError checks that every assistant turn of a request starts with the thinking block of the reply
+// that made its tool call, unchanged (toolUseReply signs it with the call's ID), as the API requires of a
+// model whose thinking cannot be turned off. It returns "" when every turn does.
+func thinkingError(body []byte) string {
+	var req struct {
+		Messages []struct {
+			Role    string           `json:"role"`
+			Content []map[string]any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return notJSON
+	}
+	for _, m := range req.Messages {
+		if m.Role != roleAssistant {
+			continue
+		}
+		if len(m.Content) < 2 || m.Content[0]["type"] != "thinking" || m.Content[1]["type"] != blockToolUse ||
+			m.Content[0]["signature"] != "sig-"+fmt.Sprint(m.Content[1]["id"]) || m.Content[0]["thinking"] != "" {
+			return "an assistant turn lacks the thinking block of the reply that made its tool call"
+		}
+	}
+	return ""
+}
+
 // runLoop runs one analysis whose escalation model is the adapter, answering the calls with replies in order.
 func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools) {
 	t.Helper()
@@ -121,7 +147,11 @@ func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			t.Errorf("decoding the request: %v", err)
 		}
-		if msg := apiTurnError(raw); msg != "" {
+		msg := apiTurnError(raw)
+		if msg == "" {
+			msg = thinkingError(raw)
+		}
+		if msg != "" {
 			t.Errorf("request %d breaks the API's turn rules: %s", sent+1, msg)
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -163,7 +193,7 @@ func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools
 }
 
 func toolUseReply(model, id string) string {
-	return messageJSON(model, stopToolUse, `[{"type":"thinking","thinking":"","signature":"s"},`+
+	return messageJSON(model, stopToolUse, `[{"type":"thinking","thinking":"","signature":"sig-`+id+`"},`+
 		`{"type":"tool_use","id":"`+id+`","name":"`+tools.NameListEvents+`","input":{"namespace":"shop"}}]`)
 }
 

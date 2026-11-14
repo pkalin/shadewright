@@ -41,10 +41,15 @@ const (
 
 // Content block types.
 const (
-	blockText       = "text"
-	blockToolUse    = "tool_use"
-	blockToolResult = "tool_result"
+	blockText             = "text"
+	blockToolUse          = "tool_use"
+	blockToolResult       = "tool_result"
+	blockThinking         = "thinking"
+	blockRedactedThinking = "redacted_thinking"
 )
+
+// roleAssistant is the role of the model's turns.
+const roleAssistant = "assistant"
 
 // Stop reasons of a reply the adapter accepts.
 const (
@@ -75,8 +80,10 @@ type (
 		Role    string  `json:"role"`
 		Content []block `json:"content"`
 	}
-	// block is a text, tool_use or tool_result block; only the fields of its type are set.
+	// block is a text, tool_use or tool_result block; only the fields of its type are set. A block with raw
+	// set is a block of an earlier reply, sent back exactly as the API returned it.
 	block struct {
+		raw          json.RawMessage
 		Type         string          `json:"type"`
 		Text         string          `json:"text,omitempty"`
 		ID           string          `json:"id,omitempty"`
@@ -95,7 +102,8 @@ type (
 		InputSchema json.RawMessage `json:"input_schema"`
 	}
 	outputConfig struct {
-		Format outputFormat `json:"format"`
+		Effort string        `json:"effort,omitempty"`
+		Format *outputFormat `json:"format,omitempty"`
 	}
 	outputFormat struct {
 		Type   string          `json:"type"`
@@ -103,15 +111,24 @@ type (
 	}
 )
 
+// MarshalJSON writes a block of an earlier reply exactly as it came, and any other block from its fields.
+func (b block) MarshalJSON() ([]byte, error) {
+	if b.raw != nil {
+		return b.raw, nil
+	}
+	type plain block // without this method
+	return json.Marshal(plain(b))
+}
+
 // The reply of the Messages API, only the fields the adapter reads.
 type (
 	messagesResponse struct {
-		Type       string       `json:"type"`
-		Role       string       `json:"role"`
-		Model      string       `json:"model"`
-		Content    []replyBlock `json:"content"`
-		StopReason string       `json:"stop_reason"`
-		Usage      *apiUsage    `json:"usage"`
+		Type       string          `json:"type"`
+		Role       string          `json:"role"`
+		Model      string          `json:"model"`
+		Content    json.RawMessage `json:"content"`
+		StopReason string          `json:"stop_reason"`
+		Usage      *apiUsage       `json:"usage"`
 	}
 	replyBlock struct {
 		Type  string          `json:"type"`
@@ -143,7 +160,10 @@ func (p *Provider) encode(req providers.CompletionRequest) ([]byte, map[string]b
 	if maxOut < 1 || maxOut > MaxOutputTokens {
 		return nil, nil, rejected("the output token limit is out of range")
 	}
-	body := messagesRequest{Model: p.model, MaxTokens: maxOut}
+	// Thinking tokens count as output: the allowance on top of the request's limit leaves room for them, so
+	// thinking does not cut off the answer. Usage still reports all output tokens, thinking included.
+	body := messagesRequest{Model: p.model, MaxTokens: maxOut + p.thinkingAllowance,
+		OutputConfig: &outputConfig{Effort: p.effort}}
 	offered := map[string]bool{}
 	for _, t := range req.Tools {
 		if !toolNamePattern.MatchString(t.Name) || offered[t.Name] {
@@ -160,7 +180,7 @@ func (p *Provider) encode(req providers.CompletionRequest) ([]byte, map[string]b
 		if err != nil {
 			return nil, nil, rejected("the response schema is not a JSON object")
 		}
-		body.OutputConfig = &outputConfig{Format: outputFormat{Type: "json_schema", Schema: schema}}
+		body.OutputConfig.Format = &outputFormat{Type: "json_schema", Schema: schema}
 	}
 	system, msgs, err := encodeMessages(req.Messages)
 	if err != nil {
@@ -230,6 +250,10 @@ func encodeMessage(m providers.Message) (string, []block, error) {
 		if m.ToolCallID != "" {
 			return "", nil, errors.New("an assistant message has a tool call ID")
 		}
+		if !m.ProviderBlocks.IsZero() {
+			blocks, err := replayedBlocks(m)
+			return roleAssistant, blocks, err
+		}
 		var blocks []block
 		if m.Content != "" {
 			blocks = append(blocks, block{Type: blockText, Text: m.Content})
@@ -245,7 +269,7 @@ func encodeMessage(m providers.Message) (string, []block, error) {
 		if len(blocks) == 0 {
 			return "", nil, errors.New("an assistant message has no content and no tool call")
 		}
-		return "assistant", blocks, nil
+		return roleAssistant, blocks, nil
 	case providers.RoleTool:
 		if !toolCallIDPattern.MatchString(m.ToolCallID) || len(m.ToolCalls) > 0 {
 			return "", nil, errors.New("a tool message needs a valid tool call ID and no tool calls")
@@ -253,6 +277,45 @@ func encodeMessage(m providers.Message) (string, []block, error) {
 		return "user", []block{{Type: blockToolResult, ToolUseID: m.ToolCallID, Content: m.Content}}, nil
 	}
 	return "", nil, errors.New("a message has an unknown role")
+}
+
+// replayedBlocks returns the content blocks of the reply an assistant message stands for, from its
+// ProviderBlocks, to be sent back exactly as the API returned them: the API expects the thinking blocks of the
+// turn that made the tool calls unchanged. The blocks must be the kinds parseResponse accepts and their tool
+// calls must be the message's, in order, so the request says what the caller believes it says. Error text is
+// fixed and never quotes the blocks.
+func replayedBlocks(m providers.Message) ([]block, error) {
+	invalid := errors.New("the provider blocks of an assistant message do not match its tool calls")
+	if m.Content != "" || len(m.ToolCalls) == 0 {
+		return nil, invalid
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal(m.ProviderBlocks.Bytes(), &raw); err != nil || len(raw) == 0 {
+		return nil, invalid
+	}
+	blocks := make([]block, 0, len(raw))
+	calls := 0
+	for _, r := range raw {
+		var b replyBlock
+		if err := json.Unmarshal(r, &b); err != nil {
+			return nil, invalid
+		}
+		switch b.Type {
+		case blockText, blockThinking, blockRedactedThinking:
+		case blockToolUse:
+			if calls >= len(m.ToolCalls) || m.ToolCalls[calls].ID != b.ID || m.ToolCalls[calls].Name != b.Name {
+				return nil, invalid
+			}
+			calls++
+		default:
+			return nil, invalid
+		}
+		blocks = append(blocks, block{raw: r})
+	}
+	if calls != len(m.ToolCalls) {
+		return nil, invalid
+	}
+	return blocks, nil
 }
 
 // unsupportedBounds are the JSON Schema keywords the API refuses in a structured output schema (a 400). They
@@ -345,6 +408,8 @@ func parseResponse(data []byte, model string, offered map[string]bool, structure
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return unknown, malformed("the reply has data after the message")
 	}
+	var content []replyBlock
+	contentErr := json.Unmarshal(r.Content, &content)
 	u, ok := usageOf(r.Usage)
 	if !ok {
 		return unknown, malformed("the reply has no usage, or its usage is out of range")
@@ -358,7 +423,7 @@ func parseResponse(data []byte, model string, offered map[string]bool, structure
 	if r.Model != model {
 		return fail("the reply names another model than the configured one")
 	}
-	if r.Type != "message" || r.Role != "assistant" {
+	if r.Type != "message" || r.Role != roleAssistant {
 		return fail("the reply is not an assistant message")
 	}
 	switch r.StopReason {
@@ -370,15 +435,18 @@ func parseResponse(data []byte, model string, offered map[string]bool, structure
 	default:
 		return fail("the reply ended for an unknown reason")
 	}
+	if contentErr != nil {
+		return fail("the reply's content is not a list of blocks")
+	}
 	var text strings.Builder
 	var calls []providers.ToolCall
 	seen := map[string]bool{}
-	for _, b := range r.Content {
+	for _, b := range content {
 		switch b.Type {
 		case blockText:
 			text.WriteString(b.Text)
-		case "thinking", "redacted_thinking":
-			// Reasoning, not part of the answer; never returned to the caller.
+		case blockThinking, blockRedactedThinking:
+			// Reasoning, not part of the answer: it reaches the caller only inside ProviderBlocks, opaque.
 		case blockToolUse:
 			switch {
 			case len(calls) >= maxToolCalls:
@@ -397,16 +465,21 @@ func parseResponse(data []byte, model string, offered map[string]bool, structure
 			return fail("the reply has a content block of an unknown type")
 		}
 	}
-	content := text.String()
+	answer := text.String()
 	if len(calls) == 0 {
 		switch {
-		case content == "":
+		case answer == "":
 			return fail("the reply has no text and no tool call")
-		case structured && !isJSONObject([]byte(content)):
+		case structured && !isJSONObject([]byte(answer)):
 			return fail("the reply is not the JSON object the response schema asks for")
 		}
 	}
-	return providers.Completion{Content: content, ToolCalls: calls, Usage: u, Model: r.Model}, nil
+	c := providers.Completion{Content: answer, ToolCalls: calls, Usage: u, Model: r.Model}
+	if len(calls) > 0 {
+		// The whole content goes back on the next turn of the tool loop, thinking blocks included and unchanged.
+		c.ProviderBlocks = providers.NewOpaque(r.Content)
+	}
+	return c, nil
 }
 
 // usageOf converts a usage block, and reports false when there is none or it is out of range. InputTokens is

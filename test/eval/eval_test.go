@@ -17,6 +17,7 @@ limitations under the License.
 package eval
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -45,6 +46,8 @@ const (
 	envReportDir = "EVAL_REPORT_DIR"
 	envModel     = "EVAL_MODEL" // "foundry" runs TestEvalFoundry, "anthropic" TestEvalAnthropic
 	envKeyFile   = "EVAL_ANTHROPIC_KEY_FILE"
+	envEffort    = "EVAL_ANTHROPIC_EFFORT"
+	envAllowance = "EVAL_ANTHROPIC_THINKING_ALLOWANCE"
 	envEndpoint  = "EVAL_ENDPOINT"
 	envSuffixes  = "EVAL_ENDPOINT_SUFFIXES"
 	envAPI       = "EVAL_API_VERSION"
@@ -106,7 +109,7 @@ func (replaySource) factory(s *scenario) (analysis.ModelFactory, func() error, e
 	}, done, nil
 }
 
-func (replaySource) provider() string { return providerFake }
+func (replaySource) manifestProvider() (string, *manifestAnthropic) { return "", nil }
 
 func (replaySource) expectedModels() map[analysis.Role]string {
 	return map[analysis.Role]string{analysis.RoleTriage: fakeModelName, analysis.RoleEscalation: fakeModelName}
@@ -191,7 +194,7 @@ func (f *foundrySource) factory(*scenario) (analysis.ModelFactory, func() error,
 	return f.factoryFn, nil, nil
 }
 
-func (*foundrySource) provider() string { return providerFoundry }
+func (*foundrySource) manifestProvider() (string, *manifestAnthropic) { return "", nil }
 
 func (f *foundrySource) expectedModels() map[analysis.Role]string {
 	m := map[analysis.Role]string{analysis.RoleTriage: f.triageModel}
@@ -206,13 +209,15 @@ func (f *foundrySource) deployments() (*remediationv1alpha1.ModelDeployment, *re
 }
 
 // anthropicSource calls Claude models through the Anthropic API adapter. The analyzer has no such wiring yet
-// (#387): only the evaluation builds this provider. The deployments carry the API's endpoint and version and
+// (#729): only the evaluation builds this provider. The deployments carry the API's endpoint and version and
 // the model ID as the deployment name, so the manifest and report read as for Foundry.
 type anthropicSource struct {
 	providers             map[analysis.Role]*anthropic.Provider
 	triage, escalation    *remediationv1alpha1.ModelDeployment
 	triageModel, escModel string
 	force                 bool
+	// settings are the effort and thinking allowance both roles' providers send, for the manifest.
+	settings manifestAnthropic
 }
 
 // foundryOnly are the settings that mean nothing with EVAL_MODEL=anthropic; one that is set is refused, so a
@@ -236,12 +241,18 @@ func newAnthropicSource() (*anthropicSource, error) {
 		return nil, err
 	}
 	src.force = force
+	src.settings.Effort = cmp.Or(os.Getenv(envEffort), anthropic.DefaultEffort)
+	if src.settings.ThinkingAllowance, err = envInt(envAllowance, anthropic.DefaultThinkingAllowance, 1,
+		anthropic.MaxThinkingAllowance); err != nil {
+		return nil, err
+	}
 	for role, model := range map[analysis.Role]string{analysis.RoleTriage: src.triageModel,
 		analysis.RoleEscalation: src.escModel} {
 		if model == "" {
 			continue
 		}
-		p, err := anthropic.New(anthropic.Config{Model: model, KeyFile: keyFile})
+		p, err := anthropic.New(anthropic.Config{Model: model, KeyFile: keyFile, Effort: src.settings.Effort,
+			ThinkingAllowance: src.settings.ThinkingAllowance})
 		if err != nil {
 			return nil, fmt.Errorf("the %s model: %w", role, err)
 		}
@@ -256,7 +267,10 @@ func newAnthropicSource() (*anthropicSource, error) {
 
 func (a *anthropicSource) forcesEscalation() bool { return a.force }
 
-func (*anthropicSource) provider() string { return providerAnthropic }
+func (a *anthropicSource) manifestProvider() (string, *manifestAnthropic) {
+	s := a.settings
+	return providerAnthropic, &s
+}
 
 func (a *anthropicSource) factory(*scenario) (analysis.ModelFactory, func() error, error) {
 	return func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {

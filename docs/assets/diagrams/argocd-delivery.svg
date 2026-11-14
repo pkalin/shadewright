@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">What the executor reads from Argo CD</title>
-  <desc id="d">Planned, not built. Four columns, left to right. Column 1, the workload: its tracking-id annotation names an Application and is not trusted; the instance label is not read; a workload that also carries Flux labels is refused. Column 2, the Application, read with get in one configured namespace: metadata (the skip-reconcile annotation, owner references, deletion time), spec (source, sources, source hydrator, destination, ignore differences, automated sync) and status (sync, resources, operation state, conditions, source type, health, history). Below it, what is never read: the argocd-cm ConfigMap, AppProjects, Secrets and the repo server. Column 3, the checks the executor makes on those fields, and below them the Git host outside the cluster, which answers the branch head, file reads, directory listings and whether one commit is in the history of another. Column 4, the two results: the source mapping, which writes repository, branch, path, file and base commit to the request status or stops with a reason, and the delivery status that DeliveryVerifier returns, read from the sync and operation state, with health not an input.</desc>
+  <desc id="d">Planned, not built. Four columns, left to right. Column 1, the workload: its tracking-id annotation names an Application and is not trusted; the instance label is not read; a workload that carries the evidence of the other delivery system (Flux labels) is refused. Column 2, the Application, read with get in the Argo CD control plane namespace: metadata (the skip-reconcile annotation, owner references, deletion time), spec (source, sources, source hydrator, destination, ignore differences, automated sync) and status (sync, resources, operation state, conditions, source type, health, history). Below it, what is never read: the argocd-cm ConfigMap, AppProjects, Secrets and the repo server. Column 3, the checks the executor makes on those fields, and below them the Git host outside the cluster, which answers the branch head, file reads, directory listings and whether one commit is in the history of another. Column 4, the two results: the source mapping, which writes repository, branch, path, file and base commit to the request status or stops with a reason, and the delivery status that DeliveryVerifier returns, read from the sync and operation state, with health not an input.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <style>
@@ -36,14 +36,14 @@
   <text class="s" x="38" y="274">(Helm charts set it too)</text>
 
   <rect class="no" x="24" y="316" width="270" height="110" rx="10"/>
-  <text class="h" x="38" y="342">Flux labels as well</text>
-  <text class="s" x="38" y="364">Two delivery systems claim</text>
-  <text class="s" x="38" y="384">the object: refused, no guess</text>
-  <text class="bad" x="38" y="408">AmbiguousDelivery</text>
+  <text class="h" x="38" y="342">Other system evidence</text>
+  <text class="s" x="38" y="364">Flux labels in an Argo CD install:</text>
+  <text class="s" x="38" y="384">not read here, refused</text>
+  <text class="bad" x="38" y="408">OtherDeliverySystem</text>
 
   <rect class="pl" x="326" y="58" width="310" height="420" rx="10"/>
   <text class="h" x="340" y="84">Application, read with get</text>
-  <text class="s" x="340" y="104">one namespace of a configured list</text>
+  <text class="s" x="340" y="104">control plane namespace only</text>
   <text class="lbl" x="340" y="134">metadata</text>
   <text class="s" x="340" y="154">skip-reconcile annotation,</text>
   <text class="s" x="340" y="172">ownerReferences, deletion time</text>

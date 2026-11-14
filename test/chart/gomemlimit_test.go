@@ -42,7 +42,7 @@ func goMemLimit(t *testing.T, r rendered, k string) string {
 }
 
 // TestGoMemLimitFollowsTheMemoryLimit: the analyzer and the verifier get 90 percent of their memory limit in
-// bytes, the executor 45 percent (the rest is for its render process, ADR-0035), by default and after a change
+// bytes, the executor 36 percent (the rest is for its render process, ADR-0035), by default and after a change
 // to the limit, and the override wins (#601). The executor's default stays 241591910 bytes, as it was with 90
 // percent of the former 256Mi.
 func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
@@ -51,11 +51,12 @@ func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
 		wantExecutor string
 		wantAnalyzer string
 	}{
-		"default 512Mi and 128Mi": {nil, "241591910", "120795955"},
-		"2Gi executor only":       {[]string{"executor.resources.limits.memory=2Gi"}, "966367641", "120795955"},
+		"default 640Mi and 128Mi": {nil, "241591910", "120795955"},
+		"2Gi executor only":       {[]string{"executor.resources.limits.memory=2Gi"}, "773094113", "120795955"},
 		"1Gi analyzer":            {[]string{"analyzer.resources.limits.memory=1Gi"}, "241591910", "966367641"},
-		"decimal 1000M":           {[]string{"executor.resources.limits.memory=1000M"}, "450000000", "120795955"},
-		"plain bytes":             {[]string{"executor.resources.limits.memory=536870912"}, "241591910", "120795955"},
+		"decimal 1000M":           {[]string{"executor.resources.limits.memory=1000M"}, "360000000", "120795955"},
+		"plain bytes":             {[]string{"executor.resources.limits.memory=671088640"}, "241591910", "120795955"},
+		"fraction":                {[]string{"analyzer.resources.limits.memory=1.5Gi"}, "241591910", "1449551462"},
 		"override":                {[]string{"executor.goMemLimit=100MiB", "analyzer.goMemLimit=64MiB"}, "100MiB", "64MiB"},
 	}
 	for name, tc := range tests {
@@ -99,17 +100,18 @@ func TestExecutorMemoryLimitHoldsARenderProcess(t *testing.T) {
 
 // TestChartRefusesAnExecutorMemoryLimitBelowItsBudget checks that the chart refuses to render an executor whose
 // memory limit cannot hold its Go soft limit, the render process's resident limit and the margin (ADR-0035),
-// with the default goMemLimit (45 percent of the limit) and with an explicit one, and renders one that can:
+// with the default goMemLimit (36 percent of the limit) and with an explicit one, and renders one that can:
 // exactly the budget passes, a byte less fails. The template's numbers are checked against
 // semdiff.MaxRenderResident and semdiff.RenderOutsideData.
 func TestChartRefusesAnExecutorMemoryLimitBelowItsBudget(t *testing.T) {
 	const room = semdiff.MaxRenderResident + semdiff.RenderOutsideData
 	for _, set := range [][]string{
 		{"executor.resources.limits.memory=256Mi"},
-		{"executor.resources.limits.memory=465Mi"}, // 45 percent of it plus room is just over
+		// The default's bytes in 512Mi leave 89.6 MiB besides the render process, not 128.
+		{"executor.resources.limits.memory=512Mi", "executor.goMemLimit=241591910B"},
+		{"executor.resources.limits.memory=499Mi"}, // 36 percent of it plus room is just over
 		{"executor.resources.limits.memory=1Gi", "executor.goMemLimit=900MiB"},
 		{fmt.Sprintf("executor.resources.limits.memory=%d", 200<<20+room-1), "executor.goMemLimit=200MiB"},
-		{"executor.resources.limits.memory=1.5Gi", "executor.goMemLimit=1GiB"}, // a limit the chart cannot read
 	} {
 		out := helmFails(t, set...)
 		if !strings.Contains(out, "executor.resources.limits.memory") || !strings.Contains(out, "render process") {
@@ -120,8 +122,8 @@ func TestChartRefusesAnExecutorMemoryLimitBelowItsBudget(t *testing.T) {
 		set  []string
 		want string
 	}{
-		{[]string{"executor.resources.limits.memory=466Mi"}, "219886387"},
-		{[]string{"executor.resources.limits.memory=1Gi"}, "483183820"},
+		{[]string{"executor.resources.limits.memory=500Mi"}, "188743680"},
+		{[]string{"executor.resources.limits.memory=1Gi"}, "386547056"},
 		{[]string{fmt.Sprintf("executor.resources.limits.memory=%d", 200<<20+room), "executor.goMemLimit=200MiB"}, "200MiB"},
 		{[]string{"executor.resources.limits.memory=2Gi", "executor.goMemLimit=1GiB"}, "1GiB"},
 	} {
@@ -132,22 +134,74 @@ func TestChartRefusesAnExecutorMemoryLimitBelowItsBudget(t *testing.T) {
 	}
 }
 
-func TestChartRefusesAMemoryLimitItCannotReadWithoutAnOverride(t *testing.T) {
-	out := helmFails(t, "executor.resources.limits.memory=1.5Gi")
-	if !strings.Contains(out, "executor.resources.limits.memory") {
-		t.Errorf("error does not name executor.resources.limits.memory:\n%s", out)
+// TestChartReadsTheFormsOfAMemoryLimit checks that the chart reads an executor memory limit written with a
+// binary or decimal suffix, a fraction or as plain bytes, and accepts or refuses it by its size alone (the budget
+// is 500Mi with the default goMemLimit, 1620Mi with 1300MiB): a valid quantity is never refused for its form.
+func TestChartReadsTheFormsOfAMemoryLimit(t *testing.T) {
+	const big = "1300MiB"
+	for _, c := range []struct {
+		limit, goMemLimit string
+		want              string // the executor's GOMEMLIMIT, or "" for a refusal
+	}{
+		{"1.5Gi", "", "579820584"},
+		{"1.5Gi", big, ""},
+		{"1.6Gi", big, big}, // 1717986918.4 bytes, rounded up
+		{"600M", "", "216000000"},
+		{"500M", "", ""},
+		{"1G", "", "360000000"},
+		{"0.5Gi", "", "193273528"},
+		{"0.48Gi", "", ""},
+		{"536870912", "", "193273528"},
+		{"524288000", "", "188743680"},
+		{"524287990", "", ""},
+		{"0.000001Ti", "", ""},
+		{"512000Ki", "", "188743680"},
+		{"0.524288G", "", "188743680"},
+	} {
+		set := []string{"executor.resources.limits.memory=" + c.limit}
+		if c.goMemLimit != "" {
+			set = append(set, "executor.goMemLimit="+c.goMemLimit)
+		}
+		if c.want == "" {
+			out := helmFails(t, set...)
+			if !strings.Contains(out, "render process") {
+				t.Errorf("%v: refused, but not for its size:\n%s", set, out)
+			}
+			continue
+		}
+		r := defaultRender(t, set...)
+		if got := goMemLimit(t, r, executorDeployment); got != c.want {
+			t.Errorf("%v: GOMEMLIMIT = %s, want %s", set, got, c.want)
+		}
 	}
-	if out := helmFails(t, "analyzer.resources.limits.memory=1.5Gi"); !strings.Contains(out, "analyzer.goMemLimit") {
+}
+
+// TestChartSkipsTheBudgetOfAFormItCannotRead checks that an executor memory limit in a valid form the chart does
+// not read, an exponent, renders with executor.goMemLimit set, although 900MiB plus the render process's room is
+// more than 1e9 bytes: the chart skips the check instead of refusing a valid quantity. Without goMemLimit the
+// chart cannot take its share and asks for one.
+func TestChartSkipsTheBudgetOfAFormItCannotRead(t *testing.T) {
+	r := defaultRender(t, "executor.resources.limits.memory=1e9", "executor.goMemLimit=900MiB")
+	if got := goMemLimit(t, r, executorDeployment); got != "900MiB" {
+		t.Errorf("GOMEMLIMIT = %s, want 900MiB", got)
+	}
+	if out := helmFails(t, "executor.resources.limits.memory=1e9"); !strings.Contains(out, "executor.goMemLimit") {
+		t.Errorf("error does not ask for executor.goMemLimit:\n%s", out)
+	}
+}
+
+func TestChartRefusesAMemoryLimitItCannotReadWithoutAnOverride(t *testing.T) {
+	if out := helmFails(t, "analyzer.resources.limits.memory=1e9"); !strings.Contains(out, "analyzer.goMemLimit") {
 		t.Errorf("error does not ask for analyzer.goMemLimit:\n%s", out)
 	}
 	if out := helmFails(t, "analyzer.goMemLimit=lots"); !strings.Contains(out, "goMemLimit") {
 		t.Errorf("a malformed override is not refused:\n%s", out)
 	}
-	r := defaultRender(t, "analyzer.resources.limits.memory=1.5Gi", "analyzer.goMemLimit=1GiB")
+	r := defaultRender(t, "analyzer.resources.limits.memory=1e9", "analyzer.goMemLimit=1GiB")
 	if got := goMemLimit(t, r, analyzerDeployment); got != "1GiB" {
 		t.Errorf("GOMEMLIMIT = %s, want 1GiB", got)
 	}
-	if out := helmFails(t, "verifier.resources.limits.memory=1.5Gi"); !strings.Contains(out, "verifier.goMemLimit") {
+	if out := helmFails(t, "verifier.resources.limits.memory=1e9"); !strings.Contains(out, "verifier.goMemLimit") {
 		t.Errorf("error does not ask for verifier.goMemLimit:\n%s", out)
 	}
 	r = defaultRender(t, withVerifier, "verifier.goMemLimit=64MiB")

@@ -55,8 +55,10 @@ const (
 	MaxRenderResident = 192 << 20
 	// RenderOutsideData is the room the executor's memory limit keeps besides the executor's Go soft limit and
 	// [MaxRenderResident]: memory the Go soft limit does not count (the executor's binary text, stacks, pipe
-	// buffers, page tables) and what a render can add between two samples.
-	RenderOutsideData = 64 << 20
+	// buffers, page tables) and what a render can add between two samples. On Linux arm64 the parent's kill
+	// came 1 to 48 MiB over [MaxRenderResident], and the render grew 16 to 64 MiB between two readings
+	// (ADR-0035); this is twice the largest growth.
+	RenderOutsideData = 128 << 20
 	// MaxRenderData is the data limit of the render process (RLIMIT_DATA, Linux, what /proc shows as VmData).
 	// It is a partial guard, not a bound: the kernel checks it on a fresh writable mapping, but the Go runtime
 	// maps its heap over address space it reserved earlier (mmap with MAP_FIXED over a PROT_NONE reservation),

@@ -200,7 +200,7 @@ done
 
 if [ "${RENDER}" = 1 ]; then
   echo
-  echo "== worst-case render in a container limited to 512 MiB and 500m CPU (the executor's limits)"
+  echo "== worst-case render in a container limited to 640 MiB and 500m CPU (the executor's limits)"
   mkdir -p "${WORK}/render"
   CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" go build -o "${WORK}/render/render" ./hack/load/render
   # At the build budget (4), just over it (5, refused before the render), the old 16 MiB budget (15, refused),
@@ -214,7 +214,7 @@ if [ "${RENDER}" = 1 ]; then
   for args in "flat 4" "diamond 4" "flat 5" "diamond 5" "flat 15" "diamond 15" "tiny 1" "tiny 4" \
     "docs 4095" "heavy 4095" "patches 1708" "patches 3072" "docs 4096" "annotations 100" "annotations 101" "images 100" \
     "images 101" "dense 100" "dense 101" "denseseq 100" "denseannotations 100" "chained 16" "chained 64"; do
-    out="$(docker run --rm --memory=512m --memory-swap=512m --cpus=0.5 -v "${WORK}/render:/r:ro" "${ALPINE}" \
+    out="$(docker run --rm --memory=640m --memory-swap=640m --cpus=0.5 -v "${WORK}/render:/r:ro" "${ALPINE}" \
       sh -c "/r/render ${args}; echo exit=\$?" 2>&1 | tail -2 | tr '\n' ' ')"
     echo "${args}: ${out}"
   done

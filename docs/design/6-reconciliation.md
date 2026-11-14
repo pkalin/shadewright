@@ -494,7 +494,7 @@ The close happens only in the repository the plan was made for (same URL and ins
 
 The mapping keeps the files it reads at a commit, which never change, in a cache shared by the policy check and the rechecks (`sourcemap.ReadCache`). The rechecks of a branch that has not moved read none of the build's files again.
 
-- **Size.** At most 4,096 reads and 16 MiB, least recently used evicted first, in the executor's memory (512 Mi in `config/manager/manager.yaml` since #614, shared with the render process of the render check; 256 Mi from #615).
+- **Size.** At most 4,096 reads and 16 MiB, least recently used evicted first, in the executor's memory (640 Mi in `config/manager/manager.yaml` since #614, shared with the render process of the render check; 256 Mi from #615).
 - **Key.** An entry is keyed by the whole settings entry (URL, installation, App and signing key), the full commit ID and the path, so no other entry or repository reads it.
 - **What is kept.** Only a file, a file too large and a path the adapter found absent from a tree it read at that commit (`providers.ErrPathNotInTree`), and in the same way a directory listing (`ListDir`), a directory over 1000 entries and a path that is not a directory: a tree at a commit ID never changes, so a listing is as safe to keep as a file, and a listing and a file read of one path have separate entries. A failed read is never kept, and neither is a plain not found. The GitHub adapter also gives a plain not found for a commit it does not have yet, any 404 or 410 and a token it cannot get, so an outage cannot hide a `.sourceignore` or a second kustomization file.
 - **Verdicts.** Every read and listing, cached or not, counts against the mapping's read bound and byte budget, so a hit or an eviction never changes a verdict.
@@ -554,6 +554,6 @@ While writes are paused the deletion waits, because closing is a write. Deleting
 | Secondary rate limit message | Searched in at most 16 KiB of the body, never kept |
 | Delay for a rate-limited answer | `Retry-After`, else until `x-ratelimit-reset`, else one minute |
 | Create of branch or pull request after an unexplained 422 | Up to four attempts with backoff |
-| Read cache | `sourcemap.ReadCache`: at most 4,096 reads and 16 MiB; executor memory 512 Mi, shared with the render process (#614) |
+| Read cache | `sourcemap.ReadCache`: at most 4,096 reads and 16 MiB; executor memory 640 Mi, shared with the render process (#614) |
 | Finalizer | `remediation.shadewright.io/close-pull-request` |
 | Pull request number in messages | Example: "Pull request #26 was closed without a merge" |

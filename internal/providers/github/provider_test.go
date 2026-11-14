@@ -62,6 +62,7 @@ const (
 	other      = "release"
 	mainRef    = "/git/ref/heads/main"
 	hRetry     = "Retry-After"
+	hLink      = "Link"
 	// graphQLPath stands for the GraphQL endpoint in steps.
 	graphQLPath = "/graphql"
 	pullsPath   = "/pulls"
@@ -1392,6 +1393,147 @@ func TestFindChangeRequestNone(t *testing.T) {
 	if _, err := h.p.FindChangeRequest(ctx, "feature/x"); err == nil {
 		t.Error("a branch outside shadewright/ was allowed")
 	}
+}
+
+// branchPull is one pull request of a listing by branch, as JSON.
+func branchPull(number int, state, headRef, headRepo, baseRef string) string {
+	merged := "null"
+	if state == "merged" {
+		state, merged = stateClosed, `"2026-11-02T11:00:00Z"`
+	}
+	return fmt.Sprintf(`{"number":%d,"state":%q,"merged_at":%s,"merge_commit_sha":null,"body":"b",`+
+		`"head":{"ref":%q,"sha":"7777777777777777777777777777777777777777","repo":{"full_name":%q}},`+
+		`"base":{"ref":%q,"sha":"1111111111111111111111111111111111111111","repo":{"full_name":"acme/fleet"}}}`,
+		number, state, merged, headRef, headRepo, baseRef)
+}
+
+// listBranch is one page of ListChangeRequests' listing in a state, with the pull requests given and, when
+// last is above page, a Link header that names it as the last page.
+func listBranch(state string, page, last int, pulls ...string) step {
+	st := step{method: http.MethodGet, path: pullsPath, status: http.StatusOK,
+		query: "base=main&direction=desc&head=acme%3Ashadewright%2Freq-1&page=" + strconv.Itoa(page) +
+			"&per_page=50&sort=created&state=" + state,
+		raw: "[" + strings.Join(pulls, ",") + "]"}
+	if last > page {
+		st.header = map[string]string{hLink: `<https://api.github.com/repositories/1/pulls?page=` +
+			strconv.Itoa(page+1) + `>; rel="next", <https://api.github.com/repositories/1/pulls?page=` +
+			strconv.Itoa(last) + `>; rel="last"`}
+	}
+	return st
+}
+
+// TestListChangeRequests checks that the listing by branch reads every page, keeps a pull request that moved
+// to the next page once, and returns them newest first.
+func TestListChangeRequests(t *testing.T) {
+	h := newHarness(t,
+		listBranch("all", 1, 2, branchPull(14, stateOpen, branch, "acme/fleet", target),
+			branchPull(12, "merged", branch, "acme/fleet", target)),
+		listBranch("all", 2, 2, branchPull(12, "merged", branch, "acme/fleet", target),
+			branchPull(11, stateClosed, branch, "acme/fleet", target)))
+	got, err := h.p.ListChangeRequests(ctx, branch, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	numbers := make([]int64, 0, len(got))
+	for _, cr := range got {
+		numbers = append(numbers, cr.Number)
+	}
+	if !slices.Equal(numbers, []int64{14, 12, 11}) || got[0].State != providers.ChangeRequestOpen ||
+		got[1].State != providers.ChangeRequestMerged || got[2].State != providers.ChangeRequestClosed {
+		t.Errorf("got %+v", got)
+	}
+
+	h = newHarness(t, listBranch(stateOpen, 1, 1))
+	if got, err := h.p.ListChangeRequests(ctx, branch, true); err != nil || len(got) != 0 {
+		t.Errorf("none open: got %+v, %v", got, err)
+	}
+	if _, err := h.p.ListChangeRequests(ctx, "feature/x", true); err == nil {
+		t.Error("a branch outside shadewright/ was allowed")
+	}
+}
+
+// TestListChangeRequestsRefused checks that an answer that is not to the question asked, a listing past the
+// bound and a failed read are errors, never a list cut short or an empty one.
+func TestListChangeRequestsRefused(t *testing.T) {
+	ours := branchPull(14, stateOpen, branch, "acme/fleet", target)
+	for name, tc := range map[string]struct {
+		steps []step
+		want  error
+	}{
+		"another repository": {[]step{listBranch(stateOpen, 1, 1, ours,
+			branchPull(15, stateOpen, branch, "fork/fleet", target))}, providers.ErrUntrustedAnswer},
+		"another base branch": {[]step{listBranch(stateOpen, 1, 1,
+			branchPull(15, stateOpen, branch, "acme/fleet", other))}, providers.ErrUntrustedAnswer},
+		"another branch": {[]step{listBranch(stateOpen, 1, 1,
+			branchPull(15, stateOpen, "shadewright/req-2", "acme/fleet", target))}, providers.ErrUntrustedAnswer},
+		"closed in an open listing": {[]step{listBranch(stateOpen, 1, 1,
+			branchPull(15, stateClosed, branch, "acme/fleet", target))}, providers.ErrUntrustedAnswer},
+		"past the bound": {[]step{listBranch(stateOpen, 1, 3, ours), listBranch(stateOpen, 2, 3)},
+			providers.ErrTooLarge},
+		"listing answered 404": {[]step{status(http.MethodGet, pullsPath, http.StatusNotFound, fxForbidden)},
+			providers.ErrNotFound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, tc.steps...)
+			got, err := h.p.ListChangeRequests(ctx, branch, true)
+			if !errors.Is(err, tc.want) || got != nil {
+				t.Fatalf("got %+v, %v; want %v", got, err, tc.want)
+			}
+			assertSafe(t, err)
+		})
+	}
+	more := make([]string, 0, providers.MaxBranchChangeRequests+1)
+	for i := range providers.MaxBranchChangeRequests + 1 {
+		more = append(more, branchPull(200-i, stateClosed, branch, "acme/fleet", target))
+	}
+	h := newHarness(t, listBranch("all", 1, 1, more...))
+	if _, err := h.p.ListChangeRequests(ctx, branch, false); !errors.Is(err, providers.ErrTooLarge) {
+		t.Errorf("a page past the bound: got %v", err)
+	}
+}
+
+// TestListChangeRequestsContradicting checks that a pull request two pages list with a different state or head is an
+// error, never the first answer: the listing contradicts itself (#688).
+func TestListChangeRequestsContradicting(t *testing.T) {
+	h := newHarness(t,
+		listBranch("all", 1, 2, branchPull(14, stateOpen, branch, "acme/fleet", target),
+			branchPull(12, stateOpen, branch, "acme/fleet", target)),
+		listBranch("all", 2, 2, branchPull(12, stateClosed, branch, "acme/fleet", target)))
+	got, err := h.p.ListChangeRequests(ctx, branch, false)
+	if err == nil || got != nil || providers.IsNotFound(err) {
+		t.Fatalf("got %+v, %v; want an error", got, err)
+	}
+	assertSafe(t, err)
+
+	// The same state with another head (a push between the pages) contradicts too.
+	moved := strings.Replace(branchPull(12, stateOpen, branch, "acme/fleet", target), strings.Repeat("7", 40),
+		strings.Repeat("8", 40), 1)
+	h = newHarness(t,
+		listBranch("all", 1, 2, branchPull(14, stateOpen, branch, "acme/fleet", target),
+			branchPull(12, stateOpen, branch, "acme/fleet", target)),
+		listBranch("all", 2, 2, moved))
+	got, err = h.p.ListChangeRequests(ctx, branch, false)
+	if err == nil || got != nil || providers.IsNotFound(err) {
+		t.Fatalf("other head: got %+v, %v; want an error", got, err)
+	}
+	assertSafe(t, err)
+}
+
+// jsonNull is a JSON null as a whole answer.
+const jsonNull = "null"
+
+// TestListChangeRequestsNotAList checks that a JSON null as the whole answer is an error, never an empty list that
+// would read as "no pull request on the branch" (#688). An object instead of an array already fails to decode, so
+// it needs no case of its own.
+func TestListChangeRequestsNotAList(t *testing.T) {
+	st := listBranch("all", 1, 1)
+	st.raw = jsonNull
+	h := newHarness(t, st)
+	got, err := h.p.ListChangeRequests(ctx, branch, false)
+	if err == nil || got != nil || providers.IsNotFound(err) || errors.Is(err, providers.ErrUntrustedAnswer) {
+		t.Fatalf("got %+v, %v; want an unclassified error", got, err)
+	}
+	assertSafe(t, err)
 }
 
 func TestGetChangeRequest(t *testing.T) {

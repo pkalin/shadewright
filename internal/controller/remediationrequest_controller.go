@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -209,6 +210,14 @@ type RemediationRequestReconciler struct {
 	// only: after a restart or a change of leader no reading at the applied time is taken. Dropped like
 	// reportCounters.
 	mergeReadings mergeReadings
+	// goneLooks holds, per request, the first look of this process that found a pull request number of the
+	// request missing from the Git host (change.go, #688). Memory only: after a restart or a change of leader
+	// the confirmation wait starts again. Dropped by any other outcome of a read, when the request ends
+	// (setPhase) and when it is gone. It also holds the lock per request that keeps calls of changeOf for one
+	// request from overlapping, dropped with the request's entry. Tests that model one process over several reconcilers set the same one;
+	// otherwise looks makes it on first use (goneLooksOnce).
+	goneLooks     *goneLooks
+	goneLooksOnce sync.Once
 	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
 	// it. Memory only, set once.
 	since reconcilingSince
@@ -337,9 +346,24 @@ const (
 // recorded), so its change request cannot be closed safely.
 var errRepositoryGone = errors.New("the repository of the plan is not configured")
 
-// errChangeRequestNotOurs means a pull request is recorded, but the branch's pull request is not that number
-// with this request's marker (or there is none), so the recorded number is not closed.
-var errChangeRequestNotOurs = errors.New("the recorded change request is not the request's own")
+// afterRecheckEnd is what reconcile does after the recheck ended the request, with the recheck's result and error.
+// A step not recorded is not retried for an ended request: the next reconcile does not run it. An end that closed
+// the recorded pull request or found it closed kept the lock, because only the read of the branch may release it
+// then (settleLock): that read is made now.
+func (r *RemediationRequestReconciler) afterRecheckEnd(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	res ctrl.Result, err error) (ctrl.Result, error) {
+	if err != nil || !ptr.Deref(rr.Status.HoldsTarget, false) || !closedOnly(rr) {
+		return res, err
+	}
+	held, err := r.checkHeld(ctx, rr)
+	return earlier(res, held), err
+}
+
+// errChangeRequestNotOurs means a pull request is recorded but cannot be confirmed as this request's: the Git host
+// has no pull request with that number and the branch confirms it, or it is from another branch or base branch, or
+// lacks this request's marker (changeOf's gone). An answer about another pull request and a 404 the
+// branch does not confirm are failed reads, never this error (#688). The recorded number is not closed.
+var errChangeRequestNotOurs = errors.New("the recorded change request could not be confirmed as the request's own")
 
 // errHandoffInFlight means the request's intent to hand its pull request over stands (ADR-0028 section 4): the
 // replacement may hold the pull request, so nothing closes it until the intent is done or aborted.
@@ -430,6 +454,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 			r.reportCounters.forget(req.NamespacedName)
 			r.unwrittenResets.forget(req.NamespacedName)
 			r.mergeReadings.forget(req.NamespacedName)
+			r.looks().forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -473,8 +498,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		if !progresses(rr) {
 			// The recheck ended the request (Merged, Superseded, NeedsIntervention, ...): it is never looked at again.
 			r.forget(req.NamespacedName)
-			// A step not recorded is not retried for an ended request: the next reconcile does not run it.
-			return res, err
+			return r.afterRecheckEnd(ctx, rr, res, err)
 		}
 		return orStepErr(res, err, stepErr)
 	}
@@ -541,7 +565,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		reserveOnAdmission(rr)
 	} else if rr.Status.HoldsTarget == nil {
 		// A refusal never takes the lock; false keeps it out of the limits' lock list (limitsSelectors).
-		rr.Status.HoldsTarget = new(false)
+		release(rr)
 	}
 
 	rr.Status.ObservedGeneration = rr.Generation
@@ -1366,49 +1390,70 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			"its change request, if any, was not closed"
 	case errors.Is(err, errChangeRequestNotOurs):
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, ReasonForeignChangeRequest
-		message = "The plan is stale and the pull request recorded for it is not the branch's pull request " +
-			"with this request's marker; it was not closed"
+		message = "The plan is stale and the pull request recorded for it could not be confirmed as this " +
+			"request's (neither the Git host nor the request's branch has a pull request with that number, or it is " +
+			"from another branch or lacks this request's marker); it was not closed"
 	case errors.Is(err, errRepositoryGone):
 		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
 		// reached through the settings any more, and closing a number elsewhere could close someone else's.
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnavailable
 		message = "The plan is stale and the repository it was made for is not configured any more; " +
 			"its change request, if any, was not closed"
-	case isMergedUnrecorded(err):
-		// The branch's marked pull request was merged before any status recorded it (#524): it ends Merged or
-		// MergedWithForeignChange, not Superseded. The end is a final phase, as ErrSuperseded tells the caller.
-		// Nothing is closed; a read that fails in the check is retried, and the retry finds it merged again.
-		mu, _ := errors.AsType[*mergedUnrecordedError](err)
-		cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-		err = r.endMerged(cleanCtx, mu.git, rr, mu.cr)
-		err = boundErr(ctx, cleanCtx, "check of the merged change request", err)
-		cleanCancel()
-		if errors.Is(err, errStopped) {
+	case isMergedUnrecorded(err), providers.IsConflict(err) && rr.Status.PullRequest == nil && !isUnknownChange(err):
+		// The branch's marked pull request was merged before any status recorded it (#524), or a close was refused
+		// as a conflict: it ends Merged or MergedWithForeignChange, not Superseded (endUnrecordedMerge). The end is
+		// a final phase, as ErrSuperseded tells the caller.
+		done, endErr := r.endUnrecordedMerge(ctx, rr, err)
+		switch {
+		case !done:
+			return err
+		case errors.Is(endErr, errStopped):
 			return ErrSuperseded
 		}
-		return err
-	case providers.IsConflict(err) && rr.Status.PullRequest == nil:
-		// Merged between the look-up and the close: it is looked up again (mergedUnrecorded).
-		cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-		err = r.mergedUnrecorded(cleanCtx, rr, closeErr)
-		err = boundErr(ctx, cleanCtx, "look-up of the merged change request", err)
-		cleanCancel()
-		if errors.Is(err, errStopped) {
-			return ErrSuperseded
-		}
-		return err
+		return endErr
 	case err != nil:
 		refused, _, ok := refusal(err)
 		if !ok {
 			return err
 		}
-		// The Git host refuses the close for good (a permission the App lacks, a rule): the plan is stale
-		// and nothing more may be written for it, so a person has to close the change request.
+		// The Git host refuses the close, or the read of the change request before it, for good (a permission
+		// the App lacks, a rule): the plan is stale and nothing more may be written for it, so a person has to
+		// close the change request. The lock stays (prMayBeOpen keeps it) until checkHeld finds none open.
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, refused
 		message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to close its " +
 			"change request; it was not closed"
+		if isUnknownChange(err) {
+			message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to read its " +
+				"change request; it was not closed"
+		}
 	}
 	return r.endFreshness(ctx, rr, phase, reason, message)
+}
+
+// endUnrecordedMerge handles the answer of closeChangeRequest for a request with no recorded pull request whose
+// own pull request may have been merged before any status recorded it (#524): a *mergedUnrecordedError (the
+// listing of the branch found it merged) is checked and ended through endMerged; a *closeConflictError (a close
+// refused as a conflict, maybe merged between the read and the close) is read again by its number
+// (mergedUnrecorded). done is false for any other closeErr, and for a request with a recorded pull request; the
+// caller then handles closeErr itself. A read that fails in the check is returned for a retry, and the retry finds
+// it merged again; errStopped means the request ended. Nothing is closed here. A failed read, whatever its class,
+// is never taken for the merge (isUnknownChange).
+func (r *RemediationRequestReconciler) endUnrecordedMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	closeErr error) (done bool, err error) {
+	if rr.Status.PullRequest != nil || closeErr == nil || isUnknownChange(closeErr) {
+		return false, nil
+	}
+	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	defer cancel()
+	if mu, ok := errors.AsType[*mergedUnrecordedError](closeErr); ok {
+		err = r.endMerged(cleanCtx, mu.git, rr, mu.cr)
+		return true, boundErr(ctx, cleanCtx, "check of the merged change request", err)
+	}
+	if _, ok := errors.AsType[*closeConflictError](closeErr); ok {
+		err = r.mergedUnrecorded(cleanCtx, rr, closeErr)
+		return true, boundErr(ctx, cleanCtx, "look-up of the merged change request", err)
+	}
+	return false, nil
 }
 
 // mergedUnrecordedError is closeChangeRequest's answer for a pull request of the request, found by its marker,
@@ -1486,12 +1531,24 @@ func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remedi
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
 // settings, [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
-// when a recorded pull request is not the branch's own, and [freshness.ErrPaused] when the settings read now
-// pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
+// when a recorded pull request is gone (changeOf: not this request's, or without its marker), and
+// [freshness.ErrPaused] when the settings read now pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
 // request is, or may become, its replacement's ([errChangeRequestNotOurs] when handed over,
 // [errHandoffInFlight] while the intent stands), judged on the copy it was given and, right before the close,
 // on a fresh read (stillOwns).
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	return r.closeOwn(ctx, rr, false)
+}
+
+// closeOnDeleteOf is closeChangeRequest for the finalizer. With a pull request recorded it closes every open one
+// that is this request's change (closeAllOwn), and returns nil only when none is left open.
+func (r *RemediationRequestReconciler) closeOnDeleteOf(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	return r.closeOwn(ctx, rr, true)
+}
+
+// closeOwn is closeChangeRequest; deleting is true for the finalizer (closeOnDeleteOf).
+func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	deleting bool) error {
 	if r.OpenRepository == nil {
 		return errors.New("cannot close the change request: no Git provider")
 	}
@@ -1525,39 +1582,189 @@ func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, r
 	if err != nil {
 		return freshness.WrapProvider("open the repository", err)
 	}
-	// The pull request is found by the request's branch, also when one is recorded: it may exist although the
-	// status write that records it failed (design section 6), and a recorded number is closed only when the
-	// branch's pull request is that number and carries this request's marker.
-	cr, err := git.FindChangeRequest(ctx, freshness.BranchName(rr))
+	// Without a recorded pull request it is found by the request's branch: it may exist although the status
+	// write that records it failed (design section 6). A recorded one is read by its number, so a newer pull
+	// request on the same branch never stands in for it (ADR-0030 section 1), and it is closed only when it is
+	// from the request's branch to the target branch and carries this request's marker (changeOf).
 	recorded := rr.Status.PullRequest
-	switch {
-	case errors.Is(err, providers.ErrNotFound) && recorded == nil:
-		return nil
-	case errors.Is(err, providers.ErrNotFound):
-		return errChangeRequestNotOurs
-	case err != nil:
-		return freshness.WrapProvider("find the change request", err)
+	if recorded != nil && deleting {
+		return r.closeAllOwn(ctx, git, rr)
 	}
-	ours, err := r.ownsMarker(ctx, cr.Body, rr)
-	if err != nil {
-		return err
+	if recorded == nil {
+		return r.closeUnrecorded(ctx, git, rr)
 	}
-	if !ours || (recorded != nil && cr.Number != recorded.Number) {
-		if recorded == nil {
-			// Someone else's pull request on our branch name, or one of another plan: never ours to close.
-			return nil
-		}
-		return errChangeRequestNotOurs
-	}
-	if recorded == nil && cr.State == providers.ChangeRequestMerged {
-		// Ours, merged before any status recorded it (#524): nothing to close; the caller checks the merge.
-		return &mergedUnrecordedError{git: git, cr: cr}
+	v := r.changeOf(ctx, git, rr, changeQuery{marker: true})
+	switch v.state {
+	case changeUnknown:
+		// A 404 the branch does not confirm, an answer about another pull request and any other failure are
+		// retried (#688), so a stale plan's cleanup, the deadline's and a render refusal's never end the request
+		// with its pull request open on a single read.
+		return v.err
+	case changeGone:
+		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
 	}
 	if err := r.stillOwns(ctx, rr); err != nil {
 		return err
 	}
-	if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
+	if err := git.CloseChangeRequest(ctx, v.pr.Number); err != nil {
 		return freshness.WrapProvider("close the change request", err)
 	}
 	return nil
 }
+
+// closeUnrecorded is closeOwn for a request with no recorded pull request: one may exist although the status write
+// that records it failed (design section 6). It reads every pull request of the branch (changeOf), and looks at
+// each that carries this request's marker: an open one is closed, after stillOwns. One without the marker is
+// someone else's, or another plan's, and is never touched. When one of them is merged, the change landed before
+// any status recorded it (#524), and it returns a *mergedUnrecordedError for the newest merged one once the open
+// ones are closed; the caller checks the merge. A close refused as a conflict (maybe merged between the read and
+// the close) is a *closeConflictError, which mergedUnrecorded reads again by its number. Unknown is returned for a
+// retry: a failed listing never means none was opened.
+func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	v := r.changeOf(ctx, git, rr, changeQuery{})
+	if v.state == changeUnknown {
+		return v.err
+	}
+	for _, cr := range v.own {
+		if cr.State != providers.ChangeRequestOpen {
+			continue
+		}
+		if err := r.stillOwns(ctx, rr); err != nil {
+			return err
+		}
+		if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
+			err = freshness.WrapProvider("close the change request", err)
+			if providers.IsConflict(err) {
+				return &closeConflictError{number: cr.Number, err: err}
+			}
+			return err
+		}
+	}
+	if merged := v.ownMerged(); merged != nil {
+		return &mergedUnrecordedError{git: git, cr: *merged}
+	}
+	return nil
+}
+
+// closeAllOwn is the finalizer's close of a request with a recorded pull request. It returns nil, and the
+// finalizer may go, only when the recorded pull request is not open, or open without this request's marker, and
+// no open pull request of the request's branch carries this request's marker:
+//   - the recorded one and the open pull requests of the branch are read together (changeOf with the open
+//     listing). Unknown (a failed read, a 404 the branch does not confirm, an answer about another pull request, or
+//     the recorded one read as not open while the branch lists it open) is returned for a retry and keeps the
+//     finalizer; its error class, ErrConflict included, is never taken for a merge.
+//   - the recorded one, open with this request's marker, is closed; gone (not this request's, or without its
+//     marker), closed or merged, nothing is closed on its account;
+//   - then every open pull request of the branch that carries this request's marker is this request's change,
+//     whatever its number, and is closed. One without the marker is left alone and does not hold the finalizer;
+//   - a recorded number that is missing, or not this request's, while a listing of the branch shows a pull request
+//     with this request's marker (errOwnListed, retried on every other path) is the one exception: a person deleted
+//     the holder, so every open one with the marker is closed and the finalizer goes (closeListedOwn).
+//
+// Every close is preceded by stillOwns. A close that fails, a conflict included (the pull request may have been
+// merged since the read, or the host refused for another reason), is returned for a retry, which reads again.
+func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	closeIt := func(cr providers.ChangeRequest) error {
+		if err := r.stillOwns(ctx, rr); err != nil {
+			return err
+		}
+		if err := git.CloseChangeRequest(ctx, cr.Number); err != nil {
+			return freshness.WrapProvider("close the change request", err)
+		}
+		return nil
+	}
+	v := r.changeOf(ctx, git, rr, changeQuery{marker: true, openOnBranch: true})
+	if v.state == changeUnknown && v.ownListed {
+		// A person deleted the holder (ADR-0030): the recorded number is not this request's while the branch lists
+		// pull requests with its marker, so those are its change. Each open one is closed, and the finalizer goes,
+		// whatever the recorded number was read as. The verdict carries both listings of the branch (ownListed); one
+		// that a later failure made unknown again does not, and is retried.
+		return r.closeListedOwn(ctx, rr, v, closeIt)
+	}
+	switch finalizeRule[v.state] {
+	case finalizeRetry:
+		return v.err
+	case finalizeClose:
+		// Open with this request's marker: changeOf checked both (an unmarked one is gone).
+		if err := closeIt(v.pr); err != nil {
+			return err
+		}
+	}
+	for _, o := range v.open {
+		if o.Number == v.pr.Number && v.state == changeOpen {
+			continue
+		}
+		switch ours, err := r.ownsMarker(ctx, o.Body, rr); {
+		case err != nil:
+			return err
+		case !ours:
+			continue
+		}
+		if err := closeIt(o); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// closeListedOwn is closeAllOwn on errOwnListed: it closes every pull request with this request's marker that a
+// listing of the branch in v shows open (v.own, from the listing that checked the 404, and v.open), each once.
+func (r *RemediationRequestReconciler) closeListedOwn(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict, closeIt func(providers.ChangeRequest) error) error {
+	closed := map[int64]bool{}
+	for _, cr := range v.own {
+		if cr.State != providers.ChangeRequestOpen || closed[cr.Number] {
+			continue
+		}
+		if err := closeIt(cr); err != nil {
+			return err
+		}
+		closed[cr.Number] = true
+	}
+	for _, o := range v.open {
+		if closed[o.Number] {
+			continue
+		}
+		switch ours, err := r.ownsMarker(ctx, o.Body, rr); {
+		case err != nil:
+			return err
+		case !ours:
+			continue
+		}
+		if err := closeIt(o); err != nil {
+			return err
+		}
+		closed[o.Number] = true
+	}
+	return nil
+}
+
+// finalizeOutcome is what closeAllOwn does with the recorded pull request per verdict.
+type finalizeOutcome int
+
+const (
+	finalizeRetry finalizeOutcome = iota
+	finalizeClose
+	finalizeNothing
+)
+
+// finalizeRule is closeAllOwn's rule per verdict: open is closed, merged, closed and gone close nothing on the
+// recorded one's account (the open pull requests of the branch are looked at either way), unknown is retried
+// and keeps the finalizer.
+var finalizeRule = map[changeState]finalizeOutcome{
+	changeOpen: finalizeClose, changeMerged: finalizeNothing, changeClosed: finalizeNothing,
+	changeGone: finalizeNothing, changeUnknown: finalizeRetry,
+}
+
+// closeConflictError is closeChangeRequest's answer when the close of a pull request it found by the branch of a
+// request with none recorded was a conflict: number is the pull request it tried to close.
+type closeConflictError struct {
+	number int64
+	err    error
+}
+
+func (e *closeConflictError) Unwrap() error { return e.err }
+
+func (e *closeConflictError) Error() string { return e.err.Error() }

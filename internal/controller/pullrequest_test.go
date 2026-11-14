@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +83,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		opens atomic.Int32
 		// recorder, when set, records the reconciler's Events.
 		recorder *record.FakeRecorder
+		// process is the memory of first looks at a missing pull request (goneLooks) that every reconciler of a
+		// spec shares, as one executor process would; the other memory of a reconciler starts empty.
+		process *goneLooks
 	)
 
 	manifest := func(limit string) []byte {
@@ -111,6 +116,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			WriteTimeout:        writeTimeout,
 			IncidentReadTimeout: incidentReadTimeout,
 		}
+		r.goneLooks = process
 		if apiReader != nil {
 			r.APIReader = apiReader
 		}
@@ -157,11 +163,43 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		return out
 	}
 
+	// seenGone records that this process saw pull request n missing confirmWait ago (goneLooks), so the next look
+	// that finds it missing again takes it for gone (#688).
+	seenGone := func(n int64) {
+		process.note(fetch(), n, clock.Add(-confirmWait))
+	}
+	// firstLook returns the number and the time of the first look at a missing pull request that this process
+	// keeps for the request (0 without one).
+	firstLook := func() (int64, time.Time) {
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		s, ok := process.keys[client.ObjectKeyFromObject(request)]
+		if !ok || s.look == nil {
+			return 0, time.Time{}
+		}
+		return s.look.number, s.look.at
+	}
+	// lookedAt is the number of firstLook.
+	lookedAt := func() int64 {
+		n, _ := firstLook()
+		return n
+	}
+	// lockHolders is the number of changeOf calls that hold or wait for the lock of the request (goneLooks.lock).
+	lockHolders := func() int {
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		if s, ok := process.keys[client.ObjectKeyFromObject(request)]; ok {
+			return s.holders
+		}
+		return 0
+	}
+
 	BeforeEach(func() {
 		seq++
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
 		faulty, openErr, writeTimeout, recorder = nil, nil, 0, nil
+		process = &goneLooks{}
 		opens.Store(0)
 		apiReader, incidentReadTimeout = nil, 0
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
@@ -871,7 +909,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	// mergedAfterLostOpen opens the pull request with its response lost, lets push run on the branch, and has a
 	// person merge it before the restart. It returns the request after the restart.
-	mergedAfterLostOpen := func(push func(branch string), merge ...func(int64) (string, error)) *remediationv1alpha1.RemediationRequest {
+	// lostOpen drives the request up to the open of its pull request and loses the answer of the open: the pull
+	// request is open with this request's marker and unrecorded.
+	lostOpen := func() {
 		GinkgoHelper()
 		faulty = newFaultyGit(git)
 		for faulty.count(opCommit) == 0 {
@@ -880,6 +920,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		faulty.crashAfter(opOpen)
 		Expect(reconcileOnce()).NotTo(Succeed())
 		Expect(openRequests()).To(HaveLen(1))
+	}
+
+	mergedAfterLostOpen := func(push func(branch string), merge ...func(int64) (string, error)) *remediationv1alpha1.RemediationRequest {
+		GinkgoHelper()
+		lostOpen()
 		push(freshness.BranchName(fetch()))
 		mergeWith := git.Merge
 		if len(merge) > 0 {
@@ -894,6 +939,39 @@ var _ = Describe("RemediationRequest pull request step", func() {
 	It("records a merged pull request found after a lost open as Merged when it held the planned change (#524)", func() {
 		got := mergedAfterLostOpen(func(string) {})
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("ends Merged on an older merged pull request of its own that a newer closed one of the branch hides (#688)", func() {
+		lostOpen()
+		merged := openRequests()[0]
+		_, err := git.Merge(merged.Number)
+		Expect(err).NotTo(HaveOccurred())
+		// The merge is reverted on the target branch, so the plan is fresh again and the step looks for its pull
+		// request rather than the stale plan's cleanup.
+		_, err = git.Push(mainBranch, sourcePath, manifest("256Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		newer, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: merged.HeadBranch,
+			BaseBranch: mainBranch, Title: "opened after the merge, then closed", Body: merged.Body})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.CloseChangeRequest(ctx, newer.Number)).To(Succeed())
+		_ = reconcileOnce()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged), "the merge is not hidden by the newer closed one")
+		Expect(got.Status.PullRequest).NotTo(BeNil())
+		Expect(got.Status.PullRequest.Number).To(Equal(merged.Number))
+	})
+
+	It("ends Merged, not Expired and not in a loop, when its unrecorded pull request was merged before the deadline cleanup (#688)", func() {
+		lostOpen()
+		_, err := git.Merge(openRequests()[0].Number)
+		Expect(err).NotTo(HaveOccurred())
+		clock = fetch().Status.Deadline.Add(time.Minute)
+		_, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the merged pull request is recorded")
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "a merge releases the lock")
 	})
 
 	It("records the pull request and its merge commit when it was merged after a lost open (#561)", func() {
@@ -1049,7 +1127,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.MergeReceipt).To(BeNil())
 	})
 
-	It("stops with ChangeRequestGone when the Git host answers the look-up by number with another pull request (#678)", func() {
+	It("retries the watch when the Git host answers the look-up by number with another pull request, and never stops on it (#688)", func() {
 		drive(remediationv1alpha1.PhaseAwaitingApproval)
 		git.SetFail(func(op string) error {
 			if op == opGet {
@@ -1057,12 +1135,17 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			}
 			return nil
 		})
-		_ = reconcileOnce()
+		res, err := reconcileResult()
+		// A look that fails goes on to the full recheck (prUnchecked), whose freshness check passes: the pull
+		// request is read again at the next poll, and nothing is handed to the error backoff.
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval), "read again at the next poll")
 		got := fetch()
-		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention), "never retried without an end")
-		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
-		Expect(approved.Reason).To(Equal(ReasonChangeRequestGone))
-		Expect(approved.Message).To(ContainSubstring("answered with another pull request"))
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval),
+			"an answer about another pull request is a failed read: nothing is ended on it")
+		git.SetFail(nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 	})
 
 	It("retries a look-up by number that fails, deciding nothing (#678)", func() {
@@ -1415,13 +1498,13 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(seen.TargetHead).To(Equal(mainHead))
 
-		clock = start.Add(conflictConfirmWait - time.Second)
+		clock = start.Add(confirmWait - time.Second)
 		Expect(reconcileOnce()).To(Succeed())
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "still inside the wait")
 		Expect(conflictSeen(got).At.Time.Equal(start)).To(BeTrue(), "the first report is not moved")
 
-		clock = start.Add(conflictConfirmWait)
+		clock = start.Add(confirmWait)
 		Expect(reconcileOnce()).To(Succeed())
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
@@ -1449,7 +1532,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 		// The host computes the answer again: no conflict. The report is dropped.
 		Expect(git.SetConflicted(n, false)).To(Succeed())
-		clock = clock.Add(conflictConfirmWait + time.Minute)
+		clock = clock.Add(confirmWait + time.Minute)
 		Expect(reconcileOnce()).To(Succeed())
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
@@ -1477,7 +1560,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// busy target branch would otherwise postpone the end for as long as it keeps moving.
 		_, err := git.Push(mainBranch, "apps/other/notes.yaml", []byte("a: b\n"))
 		Expect(err).NotTo(HaveOccurred())
-		clock = first.At.Add(conflictConfirmWait)
+		clock = first.At.Add(confirmWait)
 		Expect(reconcileOnce()).To(Succeed())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 	})
@@ -1521,7 +1604,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		git.SetFail(nil)
 		Expect(reconcileOnce()).To(Succeed())
 		Expect(conflictSeen(fetch())).NotTo(BeNil())
-		clock = clock.Add(conflictConfirmWait)
+		clock = clock.Add(confirmWait)
 		Expect(reconcileOnce()).To(Succeed())
 		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
 			To(Equal(ReasonChangeRequestConflict))
@@ -1688,6 +1771,842 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		expectClosedElsewhere(reconcileSecond())
 	})
 
+	It("keeps the target of a stopped holder whose recorded pull request is closed while another one is open on its branch (#688)", func() {
+		got := stopHeadMoved()
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		// A newer pull request on the same branch, with this request's own marker: it may carry its commit.
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: "opened after the close", Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.Number).NotTo(Equal(n))
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "another pull request is open on the branch")
+		Expect(got.Status.PullRequest.Number).To(Equal(n))
+		held := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
+		Expect(held).NotTo(BeNil(), "the status says why the lock is kept")
+		Expect(held.Reason).To(Equal(ReasonOpenOnBranch))
+		Expect(held.Message).To(ContainSubstring(fmt.Sprintf("#%d", next.Number)))
+		before := got.ResourceVersion
+		_, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().ResourceVersion).To(Equal(before), "the reason is written once, not on every look")
+
+		// Once the branch has no open pull request, the closed recorded one releases the lock.
+		Expect(git.CloseChangeRequest(ctx, next.Number)).To(Succeed())
+		res, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).To(Equal(reconcile.Result{}), "a released lock is not looked at again")
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(got.Status.PullRequest.Number).To(Equal(n))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+			To(Equal(ReasonChangeRequestClosed))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)).To(BeNil())
+	})
+
+	It("keeps the target of a stopped holder when the read by its branch fails (#688)", func() {
+		got := stopHeadMoved()
+		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+		git.SetFail(func(op string) error {
+			if op == opList {
+				return &providers.RetryableError{Err: errors.New("connection reset")}
+			}
+			return nil
+		})
+		res, err := reconcileResult()
+		git.SetFail(nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()), "a failed read keeps the lock")
+	})
+
+	// reopenBehindNewer leaves the branch of got with its recorded pull request closed, #2 open with body, and #3
+	// closed: #2 is closed, #3 opened and closed, then #2 reopened, so the newest pull request of the branch is
+	// closed and hides the open one from a look-up of the newest. It returns #2.
+	reopenBehindNewer := func(got *remediationv1alpha1.RemediationRequest, body string) providers.ChangeRequest {
+		GinkgoHelper()
+		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+		open := func() providers.ChangeRequest {
+			cr, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+				BaseBranch: mainBranch, Title: "opened on the branch", Body: body})
+			Expect(err).NotTo(HaveOccurred())
+			return cr
+		}
+		two := open()
+		Expect(git.CloseChangeRequest(ctx, two.Number)).To(Succeed())
+		three := open()
+		Expect(git.CloseChangeRequest(ctx, three.Number)).To(Succeed())
+		Expect(git.Reopen(two.Number)).To(Succeed())
+		newest, err := git.FindChangeRequest(ctx, freshness.BranchName(got))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(newest.Number).To(Equal(three.Number))
+		Expect(newest.State).To(Equal(providers.ChangeRequestClosed), "the newest hides the open one")
+		return two
+	}
+
+	It("keeps the target of a stopped holder while an older pull request of its branch is open behind a closed newer one (#688)", func() {
+		got := stopHeadMoved()
+		reopened := reopenBehindNewer(got, "a body without a marker")
+		_, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "#2 is open on the branch")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld).Message).
+			To(ContainSubstring(fmt.Sprintf("#%d", reopened.Number)))
+		Expect(git.CloseChangeRequest(ctx, reopened.Number)).To(Succeed())
+		_, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()))
+	})
+
+	It("keeps the target when a person closes the pull request while another one is open on its branch (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: "opened on the branch", Body: "a body without a marker"})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestClosed))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the watch's stop does not release the lock on its own")
+		held := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
+		Expect(held).NotTo(BeNil())
+		Expect(held.Message).To(ContainSubstring(fmt.Sprintf("#%d", next.Number)))
+		_, reconcileSecond := second()
+		expectLocked(reconcileSecond())
+
+		Expect(git.CloseChangeRequest(ctx, next.Number)).To(Succeed())
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).To(Equal(reconcile.Result{}))
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)).To(BeNil())
+	})
+
+	It("stops the watch with ChangeRequestGone only on a 404 its branch confirms (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		_ = reconcileOnce()
+		git.SetFail(nil)
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval),
+			"the branch still lists the number: the 404 is a failed read")
+
+		lost := func() (reconcile.Result, error) {
+			r := reconciler()
+			r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				return &lostChangeRequest{Git: git, n: n}, nil
+			}
+			return r.Reconcile(ctx, key())
+		}
+		// The first look that finds it missing from the host and the branch is only kept in memory, and waits.
+		start := clock
+		res, err := lost()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0), "the look is asked again")
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "one look is not enough")
+		seen, at := firstLook()
+		Expect(seen).To(Equal(n))
+		Expect(at).To(BeTemporally("==", start))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+		// Within the wait it still waits, and the first look is not moved.
+		clock = start.Add(confirmWait - time.Second)
+		_, _ = lost()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		_, at = firstLook()
+		Expect(at).To(BeTemporally("==", start))
+		// Once the wait is over, the same answer is gone.
+		clock = start.Add(confirmWait)
+		_, _ = lost()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonChangeRequestGone))
+	})
+
+	It("drops the first look at a missing pull request when a later read shows it open (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		lost := reconciler()
+		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		_, _ = lost.Reconcile(ctx, key())
+		Expect(lookedAt()).To(Equal(n))
+		// The host answers again with the pull request open: the first look goes, so a later 404 waits again.
+		clock = clock.Add(time.Minute)
+		_, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lookedAt()).To(BeZero(), "a read that shows the pull request drops the first look")
+		clock = clock.Add(confirmWait)
+		_, _ = lost.Reconcile(ctx, key())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval),
+			"a 404 after a read that showed the pull request starts the wait again")
+		_, at := firstLook()
+		Expect(at).To(BeTemporally("==", clock))
+	})
+
+	It("drops the first look when the open listing shows the missing number, and the next 404 waits again (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		seenGone(n)
+		// The read by number answers 404 and the listing in all states misses it, but the open listing has it.
+		v := reconciler().changeOf(ctx, &openListedOnly{Git: git, n: n}, fetch(),
+			changeQuery{marker: true, openOnBranch: true})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(errConflictingReads))
+		Expect(lookedAt()).To(BeZero(), "the open listing showed the number: the first look is dropped")
+		// A single 404 with nothing listed now waits again, never answers gone at once.
+		v = reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{marker: true})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+	})
+
+	It("waits again after a restart, after goneLookMaxAge and when the clock went back (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		lostIn := func(r *RemediationRequestReconciler) changeVerdict {
+			return r.changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{marker: true})
+		}
+		before := reconciler()
+		Expect(lostIn(before).err).To(MatchError(errGoneUnconfirmed))
+		// A new executor process (a restart or a change of leader) has no first look: it waits two minutes again.
+		clock = clock.Add(confirmWait)
+		restarted := reconciler()
+		restarted.goneLooks = &goneLooks{}
+		v := lostIn(restarted)
+		Expect(v.state).To(Equal(changeUnknown), "the first look of the earlier process is not this one's")
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+		clock = clock.Add(confirmWait - time.Second)
+		Expect(lostIn(restarted).err).To(MatchError(errGoneUnconfirmed), "still within its own wait")
+		clock = clock.Add(time.Second)
+		Expect(lostIn(restarted).state).To(Equal(changeGone), "its own first look, confirmWait old, confirms")
+		// A first look older than goneLookMaxAge is no evidence any more: the wait starts again.
+		process.note(fetch(), n, clock.Add(-goneLookMaxAge))
+		Expect(lostIn(reconciler()).err).To(MatchError(errGoneUnconfirmed))
+		_, at := firstLook()
+		Expect(at).To(BeTemporally("==", clock), "the wait starts again from this look")
+		// A first look ahead of the clock (it went back) is never confirmed.
+		process.note(fetch(), n, clock.Add(time.Hour))
+		Expect(lostIn(reconciler()).err).To(MatchError(errGoneUnconfirmed))
+		_, at = firstLook()
+		Expect(at).To(BeTemporally("==", clock))
+	})
+
+	It("never keeps a look at a missing pull request that a later read showing it follows (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		// Call A reads 404 and, before it settles, call B (another worker) asks to read the pull request: B waits
+		// for A, then reads it open.
+		var reads atomic.Int32
+		var b <-chan changeVerdict
+		a := reconciler().changeOf(ctx, &pausedLost{lostChangeRequest: lostChangeRequest{Git: git, n: n},
+			pause: func() {
+				b = startOtherWorker(func() changeVerdict {
+					return reconciler().changeOf(ctx, &countedReads{GitProvider: git, reads: &reads}, fetch(), changeQuery{})
+				})
+				Eventually(lockHolders).Should(Equal(2), "B waits for the lock A holds")
+				Expect(reads.Load()).To(BeZero(), "B reads nothing while A has not settled")
+			}}, fetch(), changeQuery{})
+		Expect(a.state).To(Equal(changeUnknown))
+		Expect(a.err).To(MatchError(errGoneUnconfirmed), "A settles on its own reads")
+		Expect((<-b).state).To(Equal(changeOpen))
+		Expect(lookedAt()).To(BeZero(), "B's read, after A's, drops the first look A kept")
+		// So one 404 two minutes later only starts the wait, never answers gone.
+		clock = clock.Add(confirmWait)
+		v := reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+	})
+
+	It("never confirms a missing pull request from a 404 that waited behind a read showing it (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		seenGone(n)
+		// Call B reads the pull request open and, before it settles, call A (a 404) and then call C (another 404)
+		// ask to read it. Both wait for B, then for each other.
+		var reads atomic.Int32
+		var a, c <-chan changeVerdict
+		b := reconciler().changeOf(ctx, &pausedOpen{Git: git, pause: func() {
+			a = startOtherWorker(func() changeVerdict {
+				return reconciler().changeOf(ctx, &countedReads{GitProvider: &lostChangeRequest{Git: git, n: n},
+					reads: &reads}, fetch(), changeQuery{})
+			})
+			Eventually(lockHolders).Should(Equal(2), "A waits for the lock B holds")
+			Expect(reads.Load()).To(BeZero(), "A reads nothing while B has not settled")
+		}}, fetch(), changeQuery{openOnBranch: true})
+		Expect(b.state).To(Equal(changeOpen))
+		va := <-a
+		Expect(va.state).To(Equal(changeUnknown), "B's read dropped the first look before A read")
+		Expect(va.err).To(MatchError(errGoneUnconfirmed))
+		c = startOtherWorker(func() changeVerdict {
+			return reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
+		})
+		Expect((<-c).err).To(MatchError(errGoneUnconfirmed), "C finds A's first look younger than confirmWait")
+		_, at := firstLook()
+		Expect(at).To(BeTemporally("==", clock), "A's first look is kept")
+		clock = clock.Add(confirmWait)
+		Expect(reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{}).state).
+			To(Equal(changeGone), "a look confirmWait after A's confirms")
+	})
+
+	It("never answers gone while another read of the pull request is between a 404 and its listing (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		seenGone(n)
+		// Call B reads the number open and pauses in its open listing. Call A, asked to read meanwhile, would read
+		// 404 and an empty listing: it waits for B, which drops the first look, so A only starts the wait.
+		var reads atomic.Int32
+		var a <-chan changeVerdict
+		b := reconciler().changeOf(ctx, &pausedOpen{Git: git, pause: func() {
+			a = startOtherWorker(func() changeVerdict {
+				return reconciler().changeOf(ctx, &countedReads{GitProvider: &lostChangeRequest{Git: git, n: n},
+					reads: &reads}, fetch(), changeQuery{})
+			})
+			Eventually(lockHolders).Should(Equal(2))
+			Expect(reads.Load()).To(BeZero(), "A neither reads by number nor lists while B has not settled")
+		}}, fetch(), changeQuery{openOnBranch: true})
+		Expect(b.state).To(Equal(changeOpen))
+		va := <-a
+		Expect(va.state).NotTo(Equal(changeGone), "a 404 never outlives a read that showed the pull request")
+		Expect(va.err).To(MatchError(errGoneUnconfirmed))
+		Expect(lockHolders()).To(BeZero())
+	})
+
+	It("drops the lock of a request with the request, also when a read held it as the request ended (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		// A read that finds the pull request missing holds the lock while the request ends.
+		v := reconciler().changeOf(ctx, &pausedLost{lostChangeRequest: lostChangeRequest{Git: git, n: n},
+			pause: func() {
+				Expect(reconciler().stop(ctx, fetch(), remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
+					"The head moved")).To(MatchError(errStopped))
+				Expect(lockHolders()).To(Equal(1), "the entry stays while the read holds the lock")
+			}}, fetch(), changeQuery{})
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+		Expect(lookedAt()).To(Equal(n), "the read settled after the request ended")
+		// The request goes: its entry, the lock with it, is dropped.
+		Expect(k8sClient.Delete(ctx, fetch())).To(Succeed())
+		base := fetch()
+		patched := base.DeepCopy()
+		controllerutil.RemoveFinalizer(patched, FinalizerName)
+		Expect(k8sClient.Patch(ctx, patched, client.MergeFrom(base))).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(request), &remediationv1alpha1.RemediationRequest{}))
+		}).Should(BeTrue())
+		Expect(reconcileOnce()).To(Succeed())
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		Expect(process.keys).NotTo(HaveKey(client.ObjectKeyFromObject(request)), "nothing is left of the request")
+	})
+
+	It("gives up the wait for the lock when the context ends, and reads nothing (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		key := client.ObjectKeyFromObject(got)
+		Expect(process.lock(ctx, key)).To(Succeed())
+		waiting, cancel := context.WithCancel(ctx)
+		cancel()
+		var reads atomic.Int32
+		v := reconciler().changeOf(waiting, &countedReads{GitProvider: git, reads: &reads}, fetch(), changeQuery{})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(context.Canceled))
+		Expect(reads.Load()).To(BeZero())
+		Expect(lockHolders()).To(Equal(1), "the call that gave up holds nothing")
+		process.unlock(key)
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		Expect(process.keys).NotTo(HaveKey(key), "the last unlock drops an entry that keeps no first look")
+	})
+
+	It("reads nothing when the context has ended and the lock is free (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		key := client.ObjectKeyFromObject(got)
+		ended, cancel := context.WithCancel(ctx)
+		cancel()
+		var reads atomic.Int32
+		// With the lock free both cases of the wait are ready, so the outcome of one try proves nothing.
+		for range 64 {
+			v := reconciler().changeOf(ended, &countedReads{GitProvider: git, reads: &reads}, fetch(), changeQuery{})
+			Expect(v.state).To(Equal(changeUnknown))
+			Expect(v.err).To(MatchError(context.Canceled))
+		}
+		Expect(reads.Load()).To(BeZero())
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		Expect(process.keys).NotTo(HaveKey(key), "a call that gave the lock back holds nothing")
+	})
+
+	It("does not confirm on a first look of an earlier request with the same name and number (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		earlier := got.DeepCopy()
+		earlier.UID = "uid-of-an-earlier-request"
+		process.note(earlier, n, clock.Add(-confirmWait))
+		v := reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+		at, ok := process.first(fetch(), n)
+		Expect(ok).To(BeTrue(), "a fresh first look of this request is kept")
+		Expect(at).To(BeTemporally("==", clock))
+	})
+
+	It("sweeps the expired first looks of every request when it keeps one (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{}).err).
+			To(MatchError(errGoneUnconfirmed))
+		Expect(lookedAt()).To(Equal(n))
+		// The request is never read again; an hour later another request keeps a first look.
+		clock = clock.Add(time.Hour)
+		other := got.DeepCopy()
+		other.Name, other.UID = other.Name+"-other", "uid-of-another-request"
+		r := reconciler()
+		v := r.settleGone(ctx, other, 7, true, changeVerdict{state: changeGone, gone: "missing"})
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+		Expect(lookedAt()).To(BeZero(), "the expired first look of the first request is swept")
+		process.mu.Lock()
+		defer process.mu.Unlock()
+		Expect(process.keys).To(HaveLen(1))
+	})
+
+	It("drops the first look at a missing pull request when the branch shows it and the adoption records it (#688)", func() {
+		// The open's status write is lost, so the pull request is on the branch but not recorded.
+		failStatus := true
+		r := reconciler()
+		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return failStatus && len(git.ChangeRequests()) > 0 }}
+		for range 10 {
+			_, _ = r.Reconcile(ctx, key())
+			if len(openRequests()) == 1 {
+				break
+			}
+		}
+		Expect(openRequests()).To(HaveLen(1))
+		failStatus = false
+		n := openRequests()[0].Number
+		// An old look saw that number missing (a lagging replica), long enough ago to confirm.
+		seenGone(n)
+		// The adoption alone: no read by number has looked at the pull request since.
+		got := drive(remediationv1alpha1.PhasePRCreated)
+		Expect(got.Status.PullRequest.Number).To(Equal(n))
+		Expect(lookedAt()).To(BeZero(), "the look that found the pull request dropped the first look")
+		// One lagging 404 now only keeps a first look anew and waits.
+		lost := reconciler()
+		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		_, _ = lost.Reconcile(ctx, key())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated), "one 404 is not enough")
+		_, at := firstLook()
+		Expect(at).To(BeTemporally("==", clock))
+	})
+
+	It("says while the Git host refuses the read of the pull request, once, and clears it when a read works (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		recorder = record.NewFakeRecorder(20)
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("status 403: secret body: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		unreadable := func() *metav1.Condition {
+			return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		}
+		for range 3 {
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0), "the read is retried as before")
+			clock = clock.Add(time.Minute)
+		}
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a refused read decides nothing")
+		c := unreadable()
+		Expect(c).NotTo(BeNil(), "a refused read is not silent")
+		Expect(c.Status).To(Equal(metav1.ConditionTrue))
+		Expect(c.Reason).To(Equal(ReasonGitForbidden))
+		Expect(c.Message).To(ContainSubstring(fmt.Sprintf("#%d", n)))
+		Expect(c.Message).NotTo(ContainSubstring("secret body"), "no answer of the host in the status")
+		Expect(recorder.Events).To(HaveLen(1), "one Event per transition, not per retry")
+		event := <-recorder.Events
+		Expect(event).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+		Expect(event).NotTo(ContainSubstring("secret body"))
+		git.SetFail(nil)
+		_, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(unreadable()).To(BeNil(), "the next read that works removes it")
+		Expect(recorder.Events).To(HaveLen(1))
+		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeNormal + " " + EventPullRequestReadable))
+	})
+
+	It("drops the first look at a missing pull request when the request ends (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		seenGone(got.Status.PullRequest.Number)
+		Expect(reconciler().stop(ctx, fetch(), remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
+			"The head moved")).To(MatchError(errStopped))
+		Expect(lookedAt()).To(BeZero(), "a later read of the ended request, by the lock or the finalizer, waits again")
+	})
+
+	It("drops a first look for another number, and never confirms one for another number (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		// A first look for another number, old enough to confirm that one.
+		seenGone(n + 100)
+		_, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lookedAt()).To(BeZero(), "the read of the recorded number found the pull request")
+		// Such a first look, kept again, is replaced for the missing number, never confirmed.
+		seenGone(n + 100)
+		lost := reconciler()
+		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		res, err := lost.Reconcile(ctx, key())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the old look names another number")
+		seen, at := firstLook()
+		Expect(seen).To(Equal(n))
+		Expect(at).To(BeTemporally("==", clock))
+	})
+
+	It("never takes a recorded pull request for gone while its branch lists another of this request (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		seenGone(n)
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.Number).NotTo(Equal(n))
+		lost := reconciler()
+		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		_, _ = lost.Reconcile(ctx, key())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval),
+			"the listing that checks the 404 shows a pull request of this request")
+		Expect(lookedAt()).To(BeZero(), "that listing dropped the old first look")
+	})
+
+	It("shows a recorded pull request that is missing while its branch lists another of this request, once, until a read answers (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		recorder = record.NewFakeRecorder(20)
+		lost := reconciler()
+		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		for range 3 {
+			_, _ = lost.Reconcile(ctx, key())
+			clock = clock.Add(confirmWait)
+		}
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "nothing is decided on it")
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		Expect(c).NotTo(BeNil(), "a request in the known limit is shown to a person")
+		Expect(c.Status).To(Equal(metav1.ConditionTrue))
+		Expect(c.Reason).To(Equal(ReasonRecordedMissingOtherListed))
+		Expect(c.Message).To(ContainSubstring(fmt.Sprintf("#%d", n)))
+		Expect(c.Message).To(ContainSubstring(fmt.Sprintf("#%d", next.Number)))
+		Expect(c.Message).To(ContainSubstring("Delete the request"))
+		Expect(recorder.Events).To(HaveLen(1), "one Event per transition, not per retry")
+		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+		// The next read that answers (the Git host has the recorded number again) removes it.
+		_, _ = reconcileResult()
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions,
+			remediationv1alpha1.ConditionPullRequestUnreadable)).To(BeNil())
+		var events []string
+		for len(recorder.Events) > 0 {
+			events = append(events, <-recorder.Events)
+		}
+		Expect(events).To(ContainElement(HavePrefix(corev1.EventTypeNormal + " " + EventPullRequestReadable)))
+	})
+
+	It("never answers gone while the open listing of the branch shows a pull request of this request (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		seenGone(n)
+		// The listing in all states misses the newer one; the open listing has it.
+		g := &missedInAll{lostChangeRequest: lostChangeRequest{Git: git, n: n}, missed: next.Number}
+		v := reconciler().changeOf(ctx, g, fetch(), changeQuery{marker: true, openOnBranch: true})
+		Expect(v.state).To(Equal(changeUnknown), "a read in the call showed a pull request of this request")
+		Expect(v.err).To(MatchError(errOwnListed))
+		Expect(lookedAt()).To(BeZero(), "that read drops the first look")
+	})
+
+	It("settles the first look at a missing pull request without reading the API server (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		reads := &countingReader{Reader: k8sClient}
+		r := reconciler()
+		r.APIReader = reads
+		seenGone(n + 100)
+		Expect(r.changeOf(ctx, git, fetch(), changeQuery{marker: true}).state).To(Equal(changeOpen))
+		Expect(lookedAt()).To(BeZero())
+		v := r.changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+		clock = clock.Add(confirmWait)
+		Expect(r.changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{}).state).To(Equal(changeGone))
+		Expect(reads.requests.Load()).To(BeZero(), "the first look is this process's memory, not stored state")
+	})
+
+	It("drops the first look when a refused opened pull request is read, although the close is retried (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		cr, err := git.GetChangeRequest(ctx, n)
+		Expect(err).NotTo(HaveOccurred())
+		seenGone(n)
+		rr := fetch()
+		git.SetFail(func(op string) error {
+			if op == opClose {
+				return errors.New("status 502: bad gateway")
+			}
+			return nil
+		})
+		err = reconciler().refuseOpened(ctx, git, rr, cr, &renderRefusal{reason: ReasonHeadMoved, message: "The head moved"})
+		git.SetFail(nil)
+		Expect(err).To(HaveOccurred(), "the close is retried")
+		Expect(lookedAt()).To(BeZero(), "the read that found the pull request dropped the first look")
+		// One 404 for that number now only keeps a first look anew and waits.
+		v := reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+	})
+
+	It("keeps PullRequestUnreadable that a refused opened pull request wrote when its close waits for the kill switch (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		cr, err := git.GetChangeRequest(ctx, n)
+		Expect(err).NotTo(HaveOccurred())
+		rr := fetch()
+		git.SetFail(func(op string) error {
+			switch op {
+			case opGet:
+				return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+			case opClose:
+				return freshness.ErrPaused
+			}
+			return nil
+		})
+		err = reconciler().refuseOpened(ctx, git, rr, cr, &renderRefusal{reason: ReasonHeadMoved, message: "The head moved"})
+		git.SetFail(nil)
+		Expect(err).To(MatchError(freshness.ErrPaused))
+		_, err = reconciler().waitWhilePaused(ctx, rr)
+		Expect(err).NotTo(HaveOccurred())
+		got = fetch()
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).To(BeTrue())
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		Expect(c).NotTo(BeNil(), "the status write of the pause keeps what the refused read wrote")
+		Expect(c.Reason).To(Equal(ReasonGitForbidden))
+	})
+
+	It("closes a request's pull request by its recorded number, never a newer one of the branch (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.Number).NotTo(Equal(n))
+		Expect(reconciler().closeChangeRequest(ctx, fetch())).To(Succeed(),
+			"the recorded pull request is this request's, and closing a closed one succeeds")
+		crs := git.ChangeRequests()
+		Expect(crs[n-1].State).To(Equal(providers.ChangeRequestClosed))
+		Expect(crs[next.Number-1].State).To(Equal(providers.ChangeRequestOpen), "the newer pull request is not touched")
+	})
+
+	It("never takes a 404 its branch does not confirm, or an answer about another pull request, as the end of a close by number (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		for name, fault := range map[string]error{
+			"404":                  fmt.Errorf("pull request: %w", providers.ErrNotFound),
+			"another pull request": fmt.Errorf("pull request: %w", providers.ErrUntrustedAnswer),
+		} {
+			git.SetFail(func(op string) error {
+				if op == opGet {
+					return fault
+				}
+				return nil
+			})
+			err := reconciler().closeChangeRequest(ctx, fetch())
+			git.SetFail(nil)
+			Expect(err).To(HaveOccurred(), name)
+			Expect(errors.Is(err, errChangeRequestNotOurs)).To(BeFalse(), name+": a failed read is retried, never an answer")
+			Expect(git.ChangeRequests()[n-1].State).To(Equal(providers.ChangeRequestOpen), name)
+		}
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		err := r.closeChangeRequest(ctx, fetch())
+		Expect(errors.Is(err, errGoneUnconfirmed)).To(BeTrue(), "a first 404 the branch confirms waits: %v", err)
+		clock = clock.Add(confirmWait)
+		Expect(errors.Is(r.closeChangeRequest(ctx, fetch()), errChangeRequestNotOurs)).To(BeTrue(),
+			"a 404 the branch confirms on two looks is an answer")
+		Expect(reconciler().closeChangeRequest(ctx, fetch())).To(Succeed())
+		Expect(git.ChangeRequests()[n-1].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	// forgetRecorded stands for a request whose status write after the open was lost: no pull request recorded.
+	forgetRecorded := func() {
+		GinkgoHelper()
+		got := fetch()
+		got.Status.PullRequest = nil
+		meta.RemoveStatusCondition(&got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+	}
+
+	It("closes the open pull request with its marker behind a closed newer one when none is recorded (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
+		forgetRecorded()
+		Expect(reconciler().closeChangeRequest(ctx, fetch())).To(Succeed())
+		Expect(git.ChangeRequests()[reopened.Number-1].State).To(Equal(providers.ChangeRequestClosed),
+			"every pull request of the branch with the marker is looked at, not only the newest")
+	})
+
+	It("closes on deletion the open pull request with its marker behind a closed newer one when none is recorded (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
+		forgetRecorded()
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[reopened.Number-1].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("keeps the finalizer when the listing of the branch answers 404 and none is recorded (#688)", func() {
+		drive(remediationv1alpha1.PhaseAwaitingApproval)
+		forgetRecorded()
+		git.SetFail(func(op string) error {
+			if op == opList {
+				return fmt.Errorf("pull requests: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		_ = reconcileOnce()
+		Consistently(gone, "300ms").Should(BeFalse(), "a 404 never means none was opened")
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		git.SetFail(nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("keeps the target of a stopped holder with none recorded while its open pull request hides behind a closed newer one (#688)", func() {
+		got := stopHeadMoved()
+		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
+		forgetRecorded()
+		_, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+		Expect(got.Status.PullRequest).NotTo(BeNil())
+		Expect(got.Status.PullRequest.Number).To(Equal(reopened.Number), "the open one is recorded, not the newest")
+	})
+
+	It("keeps the lock when its own pull request, read closed by its number, is listed open on the branch (#688)", func() {
+		got := stopHeadMoved()
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		before := fetch().ResourceVersion
+		// The listing says open: the pull request was reopened between the read by number and the listing, or the
+		// read lags. Either way the two reads conflict, and the lock is kept until they agree.
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &laggingList{Git: git, n: n}, nil
+		}
+		res, err := r.Reconcile(ctx, key())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval), "held and looked at again")
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the listing says it is open")
+		Expect(got.ResourceVersion).To(Equal(before), "conflicting reads write nothing")
+		// The reads agree again: closed, and nothing else open on the branch.
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()))
+	})
+
+	It("clears TargetHeld once the pull request that held the lock closes and the recorded one is reopened (#688)", func() {
+		got := stopHeadMoved()
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: "opened after the close", Body: "a body without a marker"})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionTargetHeld)).NotTo(BeNil())
+		Expect(git.CloseChangeRequest(ctx, next.Number)).To(Succeed())
+		Expect(git.Reopen(n)).To(Succeed())
+		_, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the recorded pull request is open again")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)).To(BeNil(),
+			"TargetHeld no longer names a pull request that holds the lock")
+	})
+
+	It("frees the target of a stopped holder whose recorded pull request is confirmed gone and none is open (#688)", func() {
+		got := stopHeadMoved()
+		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+		// The recorded number names no pull request of the host any more, and the branch lists none with it, nor
+		// one with this request's marker (a person edited it out of the closed one).
+		Expect(git.SetBody(got.Status.PullRequest.Number, unmarkedBody)).To(Succeed())
+		got.Status.PullRequest.Number = 9999
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		seenGone(9999)
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).To(Equal(reconcile.Result{}), "a released lock is not looked at again")
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()))
+	})
+
+	It("keeps the lock of a stopped holder whose recorded pull request is gone while another is open on its branch (#688)", func() {
+		got := stopHeadMoved()
+		// The pull request of the request stays open on the branch without its marker (a person edited it out).
+		Expect(git.SetBody(got.Status.PullRequest.Number, unmarkedBody)).To(Succeed())
+		got.Status.PullRequest.Number = 9999
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		seenGone(9999)
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
+		got = fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the open pull request of the branch may still deliver")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)).NotTo(BeNil())
+	})
+
 	It("frees the target once a person merges the pull request of a stopped holder", func() {
 		got := stopHeadMoved()
 		_, err := git.Merge(got.Status.PullRequest.Number)
@@ -1767,6 +2686,165 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
 	})
 
+	It("closes on deletion the open pull request of its branch behind a closed newer one that carries its marker (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		reopened := reopenBehindNewer(got, pullRequestBody(got, ""))
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[reopened.Number-1].State).To(Equal(providers.ChangeRequestClosed),
+			"#2 carries this request's marker: it is this request's change, whatever its number")
+	})
+
+	It("closes on deletion the open pull request with its marker when the recorded number is gone (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: "opened again", Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return &lostChangeRequest{Git: git, n: n}, nil
+		}
+		_, err = r.Reconcile(ctx, key())
+		Expect(err).NotTo(HaveOccurred(), "a person deleted the holder: the branch's pull requests with its marker are its change")
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[next.Number-1].State).To(Equal(providers.ChangeRequestClosed),
+			"a 404 on the recorded number never hides an open pull request with this request's marker")
+	})
+
+	It("keeps the finalizer when the read that showed another pull request of the request on deletion fails afterwards (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: "opened again", Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		r := reconciler()
+		// The read shows #next with this request's marker (errOwnListed), then the write of condition
+		// PullRequestUnreadable must read the stored request, and that read fails: the verdict is unknown again,
+		// without the listings, and must not be taken for the deletion exception.
+		r.APIReader = failingRequestReader{Reader: k8sClient, name: got.Name}
+		err = r.closeAllOwn(ctx, &lostChangeRequest{Git: git, n: n}, fetch())
+		Expect(err).To(HaveOccurred(), "a verdict without its listings is retried")
+		Expect(err).To(MatchError(errOwnListed), "the error still says what the read showed")
+		Expect(git.ChangeRequests()[next.Number-1].State).To(Equal(providers.ChangeRequestOpen))
+	})
+
+	It("closes on deletion an open pull request with its marker that only the open listing shows (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			// The listing in all states misses #next; only the open listing has it.
+			return &missedInAll{lostChangeRequest: lostChangeRequest{Git: git, n: n}, missed: next.Number}, nil
+		}
+		_, err = r.Reconcile(ctx, key())
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[next.Number-1].State).To(Equal(providers.ChangeRequestClosed),
+			"the open listing is read for the close as well as the listing that checked the 404")
+	})
+
+	It("lets the finalizer go when a person removed the marker from the open recorded pull request (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.SetBody(n, unmarkedBody)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed(), "open without the marker is not a conflict with the open listing")
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[n-1].State).To(Equal(providers.ChangeRequestOpen),
+			"a pull request without this request's marker is not its change and is left alone")
+	})
+
+	It("keeps the finalizer while the recorded number cannot be read, and never takes that as finished (#688)", func() {
+		for name, fault := range map[string]func(op string) error{
+			"another pull request answered": func(op string) error {
+				if op == opGet {
+					return fmt.Errorf("pull request: %w", providers.ErrUntrustedAnswer)
+				}
+				return nil
+			},
+			"a read refused as a conflict": func(op string) error {
+				if op == opGet {
+					return fmt.Errorf("pull request: %w", providers.ErrConflict)
+				}
+				return nil
+			},
+			"404 on both look-ups": func(op string) error {
+				if op == opGet || op == opList {
+					return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+				}
+				return nil
+			},
+		} {
+			By(name)
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			n := got.Status.PullRequest.Number
+			git.SetFail(fault)
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			_ = reconcileOnce()
+			Consistently(gone, "300ms").Should(BeFalse(), name)
+			Expect(git.ChangeRequests()[n-1].State).To(Equal(providers.ChangeRequestOpen), name)
+			git.SetFail(nil)
+			Expect(reconcileOnce()).To(Succeed())
+			Eventually(gone).Should(BeTrue())
+			Expect(git.ChangeRequests()[n-1].State).To(Equal(providers.ChangeRequestClosed), name)
+			// A new request for the next case.
+			request = fx.MemoryLimitRequest(requestNamespace, fmt.Sprintf("pr-rr-%d-%s", seq, strings.ReplaceAll(name, " ", "-")))
+			request.Spec.PolicyRef = remediationv1alpha1.Name(policy.Name)
+			request.Spec.TargetRef.Name = deployment.Name
+			request.Spec.TargetRef.UID = remediationv1alpha1.UID(deployment.UID)
+			Expect(k8sClient.Create(ctx, request)).To(Succeed())
+		}
+	})
+
+	It("keeps the finalizer while the branch still lists the number the Git host answers 404 for (#688)", func() {
+		drive(remediationv1alpha1.PhaseAwaitingApproval)
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		_ = reconcileOnce()
+		Consistently(gone, "300ms").Should(BeFalse(), "a 404 the branch does not confirm is a failed read")
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		git.SetFail(nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("keeps the finalizer when the read by branch after a 404 fails (#688)", func() {
+		drive(remediationv1alpha1.PhaseAwaitingApproval)
+		git.SetFail(func(op string) error {
+			switch op {
+			case opGet:
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			case opList:
+				return &providers.RetryableError{Err: errors.New("connection reset")}
+			}
+			return nil
+		})
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		_ = reconcileOnce()
+		Consistently(gone, "300ms").Should(BeFalse(), "a 404 alone never finishes the cleanup")
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+		git.SetFail(nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[0].State).To(Equal(providers.ChangeRequestClosed))
+	})
+
 	It("writes nothing to Git while writes are paused", func() {
 		live := &remediationv1alpha1.RemediationSettings{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
@@ -1782,7 +2860,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 
 	// Issue #87: the kill switch is read right before every write, not only by the freshness check at the start
 	// of the reconcile. pauseOnLookup sets spec.paused in the API server when the pull request step (or the close)
-	// looks up the change request, which it does after the freshness check passed and before any write.
+	// looks up the change request, by its branch or by its recorded number, which it does after the freshness check
+	// passed and before any write.
 	Context("when writes are paused right before a write (kill switch)", func() {
 		var (
 			armed  bool
@@ -1801,7 +2880,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			armed, writes = false, nil
 			recorder = record.NewFakeRecorder(20)
 			git.SetFail(func(op string) error {
-				if op == opFind && armed {
+				if (op == opList || op == opGet) && armed {
 					armed = false
 					setPaused(true)
 				}
@@ -1947,7 +3026,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(reconcileOnce()).To(Succeed()) // finalizer
 				broken := false
 				git.SetFail(func(op string) error {
-					if op == opFind {
+					if op == opList {
 						broken = true
 					}
 					return nil
@@ -2384,7 +3463,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			for !controllerutil.ContainsFinalizer(fetch(), FinalizerName) {
 				Expect(reconcileOnce()).To(Succeed())
 			}
-			faulty.beforeOp(opFind, func() {
+			faulty.beforeOp(opList, func() {
 				defer GinkgoRecover()
 				_, err := git.Push(mainBranch, sourcePath, withMemoryRequest(manifest("256Mi"), "320Mi"))
 				Expect(err).NotTo(HaveOccurred())
@@ -2574,12 +3653,130 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					To(Equal(ReasonPullRequestDeadline))
 				Expect(openRequests()).To(HaveLen(1))
 				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestClosed), "no open pull request is left behind")
-				Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "the cleanup proved none open: the lock is released")
 				Expect(faulty.count(opOpen)).To(Equal(1))
+				// The cleanup closes only the pull requests with this request's marker, so the expiry does not
+				// release the lock itself (#688): the read of the branch after it does (checkHeld).
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the expiry does not release the lock on its own")
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "the read of the branch finds none open")
+			})
+
+			It("drops an old first look when the cleanup at the deadline finds its pull request on the branch (#688)", func() {
+				loseStatusWrites()
+				n := openRequests()[0].Number
+				// An old look saw that number missing, long enough ago to confirm.
+				seenGone(n)
+				clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+				Expect(got.Status.PullRequest).To(BeNil(), "no status write recorded the pull request")
+				Expect(lookedAt()).To(BeZero(), "the listing of the branch that found it dropped the first look")
+				// One 404 for that number now only keeps a first look anew and waits.
+				v := reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, got, changeQuery{number: n})
+				Expect(v.state).To(Equal(changeUnknown))
+				Expect(v.err).To(MatchError(errGoneUnconfirmed))
+			})
+
+			It("says why it keeps the lock after the deadline while its repository is not in the settings (#688)", func() {
+				recorder = record.NewFakeRecorder(20)
+				loseStatusWrites()
+				marked := openRequests()[0]
+				setRepositories := func(repos []remediationv1alpha1.GitRepository) {
+					GinkgoHelper()
+					live := &remediationv1alpha1.RemediationSettings{}
+					Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
+					live.Spec.Repositories = repos
+					Expect(k8sClient.Update(ctx, live)).To(Succeed())
+				}
+				repos := settings.Spec.Repositories
+				setRepositories(nil)
+				clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "its pull request may be open")
+				unreadable := func() *metav1.Condition {
+					return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+				}
+				c := unreadable()
+				Expect(c).NotTo(BeNil(), "the status says why the lock stays")
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Reason).To(Equal(reasonRepositoryUnavailable))
+				since := c.LastTransitionTime
+				Expect(recorder.Events).To(HaveLen(1))
+				Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+				// The later looks keep the lock and the condition, with no new Event.
+				_, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+				Expect(unreadable().LastTransitionTime).To(Equal(since))
+				Expect(recorder.Events).To(BeEmpty())
+				// The repository comes back with another target branch, then with an entry that cannot be used: the
+				// condition says what is true now, with one Warning Event per reason.
+				changed := slices.Clone(repos)
+				changed[0].TargetBranch = "next-target"
+				setRepositories(changed)
+				_, err = reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+				Expect(unreadable().Reason).To(Equal(reasonTargetBranchChanged))
+				Expect(recorder.Events).To(HaveLen(1))
+				Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+				setRepositories(repos)
+				openErr = fmt.Errorf("bad key: %w", providers.ErrInvalidConfig)
+				_, err = reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+				Expect(unreadable().Reason).To(Equal(string(sourcemap.ReasonRepositoryUnusable)))
+				Expect(recorder.Events).To(HaveLen(1))
+				Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+				openErr = nil
+				// Once the repository is configured again the look works: the condition goes, and the open pull
+				// request of its own is recorded and keeps the lock.
+				setRepositories(repos)
+				_, err = reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(unreadable()).To(BeNil())
+				got = fetch()
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+				Expect(got.Status.PullRequest.Number).To(Equal(marked.Number))
+				Expect(recorder.Events).To(HaveLen(1))
+				Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeNormal + " " + EventPullRequestReadable))
+			})
+
+			It("keeps the lock after the deadline while an unmarked pull request is open on the branch (#688)", func() {
+				// Marked #1 is opened and its status write lost; a person closes it and opens #2, without the
+				// marker, from the same branch. The deadline's cleanup closes only marked ones: #2 may still be
+				// merged and deliver the change, so the target stays locked until it is closed or merged.
+				loseStatusWrites()
+				marked := openRequests()[0]
+				Expect(git.CloseChangeRequest(ctx, marked.Number)).To(Succeed())
+				other, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: marked.HeadBranch,
+					BaseBranch: mainBranch, Title: "opened by a person", Body: unmarkedBody})
+				Expect(err).NotTo(HaveOccurred())
+				clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
+				Expect(reconcileOnce()).To(Succeed())
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the expiry does not release the lock")
+				Expect(faulty.count(opClose)).To(BeZero(), "the unmarked one is not closed")
+				_, err = reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				got = fetch()
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the unmarked open one keeps the lock")
+				held := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
+				Expect(held).NotTo(BeNil())
+				Expect(held.Message).To(ContainSubstring(fmt.Sprintf("#%d", other.Number)))
+				_, reconcileSecond := second()
+				expectLocked(reconcileSecond())
+				Expect(git.CloseChangeRequest(ctx, other.Number)).To(Succeed())
+				Expect(reconcileOnce()).To(Succeed())
+				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "none is open any more")
 			})
 
 			DescribeTable("expires with a clear message when the close after the deadline is refused",
-				func(op string, class error, reason string) {
+				func(op string, class error, reason, what string) {
 					loseStatusWrites()
 					clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
 					faulty.failOn(op, fmt.Errorf("status 403 from https://github.com/example/fleet: %w", class))
@@ -2592,6 +3789,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					Expect(c.Reason).To(Equal(ReasonPullRequestDeadlineCleanupRefused))
 					Expect(c.Message).To(ContainSubstring(reason))
 					Expect(c.Message).To(ContainSubstring("close it by hand"))
+					Expect(c.Message).To(ContainSubstring(what), "the message says what the host refused")
 					Expect(c.Message).NotTo(ContainSubstring("https://"))
 					Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen), "the refused close left it open")
 
@@ -2601,7 +3799,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					_, reconcileSecond := second()
 					expectLocked(reconcileSecond())
 					// A look-up that fails keeps the lock and is tried again after the slow interval.
-					faulty.failOn(opFind, providers.ErrForbidden)
+					faulty.failOn(opList, providers.ErrForbidden)
 					res, err = reconcileResult()
 					Expect(err).NotTo(HaveOccurred())
 					Expect(res.RequeueAfter).To(Equal(heldRecheckInterval))
@@ -2627,9 +3825,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 						To(Equal(ReasonChangeRequestClosed))
 					Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 				},
-				Entry("finding it (403)", opFind, providers.ErrForbidden, ReasonGitForbidden),
-				Entry("closing it (403)", opClose, providers.ErrForbidden, ReasonGitForbidden),
-				Entry("closing it (422)", opClose, providers.ErrRejected, ReasonGitRejected),
+				Entry("finding it (403)", opList, providers.ErrForbidden, ReasonGitForbidden, "to read the pull requests"),
+				Entry("closing it (403)", opClose, providers.ErrForbidden, ReasonGitForbidden, "to close a pull request"),
+				Entry("closing it (422)", opClose, providers.ErrRejected, ReasonGitRejected, "to close a pull request"),
 			)
 
 			It("closes the pull request it finds by its marker when the target file changes first", func() {
@@ -2657,8 +3855,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			steps := []TableEntry{
 				Entry("reading the target branch head in the freshness check", opBranchHead, ""),
 				Entry("reading the target file in the freshness check", opReadFile+" "+sourcePath, ""),
-				Entry("finding the pull request", opFind, ""),
-				Entry("reading the head of the pull request branch", opBranchHead, opFind),
+				Entry("finding the pull request", opList, ""),
+				Entry("reading the head of the pull request branch", opBranchHead, opList),
 				Entry("creating the branch", opCreateBranch, ""),
 				Entry("reading the target file on the pull request branch", opReadFile+" "+sourcePath,
 					opBranchHead+" shadewright/"),
@@ -2700,8 +3898,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			for _, c := range []struct{ name, op, after string }{
 				{"reading the target branch head in the freshness check", opBranchHead, ""},
 				{"reading the target file in the freshness check", opReadFile + " " + sourcePath, ""},
-				{"finding the pull request", opFind, ""},
-				{"reading the head of the pull request branch", opBranchHead, opFind},
+				// Not "finding the pull request": a refused read of the branch's pull requests is retried until the
+				// deadline (#688); see the cells "adoption on unknown from a 403" and "expire without a recorded
+				// pull request on unknown from a 403".
+				{"reading the head of the pull request branch", opBranchHead, opList},
 				{"creating the branch", opCreateBranch, ""},
 				{"reading the target file on the pull request branch", opReadFile + " " + sourcePath,
 					opBranchHead + " shadewright/"},
@@ -2983,6 +4183,520 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			})
 		})
 	})
+
+	// Every caller that reads a pull request goes through changeOf (#688), and each gets every verdict here, in each
+	// of the ways it arises, so a missing cell is a missing entry of the table. Each cell checks what the caller
+	// did, not only the phase: which pull request it closed, the lock, the finalizer and how it asked to be called
+	// again. Unknown never ends, releases or deletes anything.
+	Context("for each caller and each verdict of changeOf (#688)", func() {
+		// verdictCase is one way the Git host makes changeOf answer state.
+		type verdictCase struct {
+			state changeState
+			how   string
+		}
+		var (
+			isOpen         = verdictCase{changeOpen, ""}
+			isMerged       = verdictCase{changeMerged, ""}
+			isClosed       = verdictCase{changeClosed, ""}
+			isGone         = verdictCase{changeGone, ""}
+			goneOtherOpen  = verdictCase{changeGone, "another pull request open on the branch"}
+			goneFirstLook  = verdictCase{changeUnknown, "a first look that finds it missing"}
+			failedRead     = verdictCase{changeUnknown, "a server error"}
+			unconfirmed404 = verdictCase{changeUnknown, "an unconfirmed 404"}
+			contradicting  = verdictCase{changeUnknown, "contradicting reads"}
+			forbidden      = verdictCase{changeUnknown, "a 403"}
+			cases          = []verdictCase{isOpen, isMerged, isClosed, isGone, goneOtherOpen, goneFirstLook,
+				failedRead, unconfirmed404, contradicting, forbidden}
+		)
+		name := func(c verdictCase) string {
+			if c.how == "" {
+				return c.state.String()
+			}
+			return c.state.String() + " from " + c.how
+		}
+		// openOther opens a pull request without the request's marker from its branch, as a person can.
+		openOther := func() int64 {
+			GinkgoHelper()
+			other, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(fetch()),
+				BaseBranch: mainBranch, Title: "opened by a person", Body: unmarkedBody})
+			Expect(err).NotTo(HaveOccurred())
+			return other.Number
+		}
+		// fault makes the reads of pull request n fail as c says; n is 0 for a request with none recorded, whose
+		// read is the listing of the branch. It replaces faulty, which then counts the caller's calls only.
+		fault := func(c verdictCase, n int64) {
+			faulty = newFaultyGit(git)
+			switch c {
+			case failedRead:
+				git.SetFail(func(op string) error {
+					if op == opGet || op == opList {
+						return &providers.RetryableError{Err: errors.New("server error")}
+					}
+					return nil
+				})
+			case forbidden:
+				git.SetFail(func(op string) error {
+					if op == opGet || op == opList {
+						return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+					}
+					return nil
+				})
+			case unconfirmed404:
+				// The listing of the branch still has the number, so the 404 is not believed.
+				op := opGet
+				if n == 0 {
+					op = opList
+				}
+				faulty.failOn(op, fmt.Errorf("status 404: %w", providers.ErrNotFound))
+			case contradicting:
+				// Read as closed by its number while the branch lists it open: a lagging read.
+				faulty.stale[n] = providers.ChangeRequestClosed
+			}
+		}
+		// recordedIn leaves a recorded pull request in the state c; it returns its number and that of another
+		// pull request opened from the branch, if any.
+		recordedIn := func(c verdictCase, n int64) (own, other int64) {
+			GinkgoHelper()
+			switch c {
+			case isMerged:
+				_, err := git.Merge(n)
+				Expect(err).NotTo(HaveOccurred())
+			case isClosed:
+				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+			case isGone, goneOtherOpen, goneFirstLook:
+				// Closed, and the status records a number the host has not: a 404 the branch confirms. Gone needs
+				// it seen missing once before by this process, at least confirmWait earlier (goneLooks). The closed one loses
+				// the marker: a listing that shows a pull request of this request is never gone.
+				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+				Expect(git.SetBody(n, unmarkedBody)).To(Succeed())
+				got := fetch()
+				got.Status.PullRequest.Number = 9999
+				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+				if c != goneFirstLook {
+					seenGone(9999)
+				}
+				if c == goneOtherOpen {
+					other = openOther()
+				}
+			}
+			fault(c, n)
+			return n, other
+		}
+		recorded := func(c verdictCase) (int64, int64) {
+			GinkgoHelper()
+			return recordedIn(c, drive(remediationv1alpha1.PhaseAwaitingApproval).Status.PullRequest.Number)
+		}
+		// unrecorded leaves the request in PolicyChecked with a pull request of its own whose recording was lost,
+		// in the state c; for gone there is none of its own.
+		unrecorded := func(c verdictCase) (own, other int64) {
+			GinkgoHelper()
+			if c.state == changeGone {
+				faulty = newFaultyGit(git)
+				for faulty.count(opCommit) == 0 {
+					Expect(reconcileOnce()).To(Succeed())
+				}
+				if c == goneOtherOpen {
+					other = openOther()
+				}
+				fault(c, 0)
+				return 0, other
+			}
+			lostOpen()
+			own = openRequests()[0].Number
+			switch c {
+			case isMerged:
+				_, err := git.Merge(own)
+				Expect(err).NotTo(HaveOccurred())
+			case isClosed:
+				Expect(git.CloseChangeRequest(ctx, own)).To(Succeed())
+			}
+			fault(c, 0)
+			return own, other
+		}
+		// outcome is what a caller did. closed names the pull requests it called the close on ("own", "another"; a
+		// close of a merged one is refused by the host and retried after the watch records the merge), lock and
+		// finalizer are "-" once the request is deleted, and result is how it asked to be called again: "requeue"
+		// with a delay, "error" for the error backoff, or "done". cond is the reason of condition
+		// PullRequestUnreadable ("" without it), warnings the PullRequestUnreadable Warning Events recorded, seen the
+		// number of the first look this process keeps (goneLooks, 0 without it), class the class of a returned error ("" without one) and delay
+		// the delay asked for.
+		type outcome struct {
+			phase, closed, lock, finalizer, result string
+			cond                                   string
+			warnings                               int
+			seen                                   int64
+			class                                  string
+			delay                                  time.Duration
+		}
+		const (
+			held, released, kept, removed, none = "held", "released", "kept", "removed", "none"
+			requeue, failed, done, deleted      = "requeue", "error", "done", "deleted"
+		)
+		var (
+			awaiting = string(remediationv1alpha1.PhaseAwaitingApproval)
+			stopped  = string(remediationv1alpha1.PhaseNeedsIntervention)
+			expired  = string(remediationv1alpha1.PhaseExpired)
+			merged   = string(remediationv1alpha1.PhaseMerged)
+			stale    = string(remediationv1alpha1.PhaseSuperseded)
+			created  = string(remediationv1alpha1.PhasePRCreated)
+			checked  = string(remediationv1alpha1.PhasePolicyChecked)
+		)
+		// classOf names the class of an error a caller returned.
+		classOf := func(err error) string {
+			switch {
+			case errors.Is(err, errGoneUnconfirmed):
+				return "gone-wait"
+			case errors.Is(err, errUnconfirmedNotFound):
+				return "unconfirmed-404"
+			case errors.Is(err, errConflictingReads):
+				return "contradicting"
+			case providers.IsForbidden(err):
+				return "refused-403"
+			case providers.IsRetryable(err):
+				return "retryable"
+			case providers.IsConflict(err):
+				return "host-conflict"
+			case providers.IsNotFound(err):
+				return "not-found"
+			}
+			return "other: " + err.Error()
+		}
+		observe := func(own, other int64, res reconcile.Result, err error) outcome {
+			GinkgoHelper()
+			git.SetFail(nil)
+			var closed []string
+			if faulty != nil {
+				for _, n := range []int64{own, other} {
+					if n != 0 && faulty.count(opClose+" "+strconv.FormatInt(n, 10)) > 0 {
+						closed = append(closed, map[bool]string{true: "own", false: "another"}[n == own])
+					}
+				}
+				Expect(faulty.count(opClose)).To(Equal(len(closed)), "no other pull request is closed")
+			}
+			o := outcome{phase: deleted, closed: none, lock: "-", finalizer: "-", result: done, delay: res.RequeueAfter}
+			if len(closed) > 0 {
+				o.closed = strings.Join(closed, ",")
+			}
+			switch {
+			case err != nil && !errors.Is(err, errStopped) && !errors.Is(err, ErrSuperseded):
+				o.result, o.class = failed, classOf(err)
+			case res.RequeueAfter > 0:
+				o.result = requeue
+			}
+			for len(recorder.Events) > 0 {
+				if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+EventPullRequestUnreadable+" ") {
+					o.warnings++
+				}
+			}
+			got := &remediationv1alpha1.RemediationRequest{}
+			if apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(request), got)) {
+				return o
+			}
+			if c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Message).NotTo(ContainSubstring("status 403"), "no answer of the host in the message")
+				o.cond = c.Reason
+			}
+			o.seen, _ = firstLook()
+			o.phase, o.lock, o.finalizer = string(got.Status.Phase), released, removed
+			if holdsLock(got) {
+				o.lock = held
+			}
+			if controllerutil.ContainsFinalizer(got, FinalizerName) {
+				o.finalizer = kept
+			}
+			return o
+		}
+		deleteOnce := func(own, other int64) outcome {
+			GinkgoHelper()
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			res, err := reconcileResult()
+			return observe(own, other, res, err)
+		}
+		staleErr := &freshness.StaleError{Reason: freshness.ReasonTargetFileChanged, Message: "stale"}
+		cleanUp := func(own, other int64) outcome {
+			GinkgoHelper()
+			return observe(own, other, reconcile.Result{}, reconciler().cleanUpStale(ctx, fetch(), staleErr))
+		}
+		// o builds an outcome: phase, closed, lock, finalizer, result; the other fields follow from the verdict
+		// (expect).
+		o := func(phase, closed, lock, finalizer, result string) outcome {
+			return outcome{phase: phase, closed: closed, lock: lock, finalizer: finalizer, result: result}
+		}
+		na := outcome{phase: "n/a"}
+		// delayOf is the delay a requeue asks for: a stopped holder looks again after heldRecheckInterval, a first look
+		// that finds the number missing after the confirmation wait, and the watch after its poll interval.
+		delayOf := func(vc verdictCase, base outcome) time.Duration {
+			switch {
+			case base.phase == stopped:
+				return heldRecheckInterval
+			case vc == goneFirstLook:
+				return confirmWait
+			}
+			return reconciler().pullRequestPollInterval()
+		}
+		// expect completes the outcome base of a cell with what follows from the verdict case vc: the condition and
+		// its one Warning Event for a refused read, the first look at a number seen missing (own is 0 without a recorded
+		// number; recorded is false for a caller without one), the class of a returned error, and the delay of a requeue.
+		expect := func(vc verdictCase, recorded bool, base outcome) outcome {
+			if base.phase == deleted {
+				return base
+			}
+			if vc == forbidden {
+				base.cond, base.warnings = ReasonGitForbidden, 1
+			}
+			if recorded && vc == goneFirstLook {
+				// The first look is kept while it waits; the look that confirms gone drops it.
+				base.seen = 9999
+			}
+			if base.result == failed {
+				base.class = map[verdictCase]string{failedRead: "retryable", forbidden: "refused-403",
+					unconfirmed404: "unconfirmed-404", contradicting: "contradicting", goneFirstLook: "gone-wait",
+					isMerged: "host-conflict"}[vc]
+				if vc == unconfirmed404 && !recorded {
+					// Without a recorded number the 404 is the listing's own, never an answer.
+					base.class = "not-found"
+				}
+			}
+			if base.result == requeue {
+				base.delay = delayOf(vc, base)
+			}
+			return base
+		}
+		// A caller is setup, which leaves the request and the Git host in a verdict case, and act, which runs the
+		// caller once and observes it.
+		type caller struct {
+			setup func(verdictCase) (own, other int64)
+			act   func(own, other int64) outcome
+			want  map[verdictCase]outcome
+		}
+		callers := map[string]caller{
+			"watch": {
+				setup: recorded,
+				act: func(own, other int64) outcome {
+					res, err := reconcileResult()
+					return observe(own, other, res, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(awaiting, none, held, kept, requeue),
+					isMerged:       o(merged, none, released, kept, done),
+					isClosed:       o(stopped, none, released, kept, done),
+					isGone:         o(stopped, none, held, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, done),
+					goneFirstLook:  o(awaiting, none, held, kept, requeue),
+					failedRead:     o(awaiting, none, held, kept, requeue),
+					unconfirmed404: o(awaiting, none, held, kept, requeue),
+					contradicting:  o(awaiting, none, held, kept, requeue),
+					forbidden:      o(awaiting, none, held, kept, requeue),
+				},
+			},
+			"checkHeld": {
+				setup: func(c verdictCase) (int64, int64) {
+					return recordedIn(c, stopHeadMoved().Status.PullRequest.Number)
+				},
+				act: func(own, other int64) outcome {
+					res, err := reconcileResult()
+					return observe(own, other, res, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(stopped, none, held, kept, requeue),
+					isMerged:       o(stopped, none, released, kept, done),
+					isClosed:       o(stopped, none, released, kept, done),
+					isGone:         o(stopped, none, released, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, requeue),
+					goneFirstLook:  o(stopped, none, held, kept, requeue),
+					failedRead:     o(stopped, none, held, kept, requeue),
+					unconfirmed404: o(stopped, none, held, kept, requeue),
+					contradicting:  o(stopped, none, held, kept, requeue),
+					forbidden:      o(stopped, none, held, kept, requeue),
+				},
+			},
+			"finalize": {
+				setup: recorded,
+				act:   deleteOnce,
+				want: map[verdictCase]outcome{
+					isOpen:         o(deleted, "own", "-", "-", done),
+					isMerged:       o(deleted, none, "-", "-", done),
+					isClosed:       o(deleted, none, "-", "-", done),
+					isGone:         o(deleted, none, "-", "-", done),
+					goneOtherOpen:  o(deleted, none, "-", "-", done),
+					goneFirstLook:  o(awaiting, none, held, kept, requeue),
+					failedRead:     o(awaiting, none, held, kept, failed),
+					unconfirmed404: o(awaiting, none, held, kept, failed),
+					contradicting:  o(awaiting, none, held, kept, failed),
+					forbidden:      o(awaiting, none, held, kept, failed),
+				},
+			},
+			"cleanUpStale": {
+				// A recorded merge is the watch's to record, which runs first: the close is retried meanwhile.
+				setup: recorded,
+				act:   cleanUp,
+				want: map[verdictCase]outcome{
+					isOpen:         o(stale, "own", held, kept, done),
+					isMerged:       o(awaiting, "own", held, kept, failed),
+					isClosed:       o(stale, "own", held, kept, done),
+					isGone:         o(stopped, none, held, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, done),
+					goneFirstLook:  o(awaiting, none, held, kept, failed),
+					failedRead:     o(awaiting, none, held, kept, failed),
+					unconfirmed404: o(awaiting, none, held, kept, failed),
+					contradicting:  o(awaiting, none, held, kept, failed),
+					forbidden:      o(stopped, none, held, kept, done),
+				},
+			},
+			"expire": {
+				setup: recorded,
+				act: func(own, other int64) outcome {
+					res, err := reconciler().expire(ctx, fetch())
+					return observe(own, other, res, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(expired, "own", held, kept, done),
+					isMerged:       o(awaiting, "own", held, kept, failed),
+					isClosed:       o(expired, "own", held, kept, done),
+					isGone:         o(expired, none, held, kept, done),
+					goneOtherOpen:  o(expired, none, held, kept, done),
+					goneFirstLook:  o(awaiting, none, held, kept, requeue),
+					failedRead:     o(awaiting, none, held, kept, failed),
+					unconfirmed404: o(awaiting, none, held, kept, failed),
+					contradicting:  o(awaiting, none, held, kept, failed),
+					forbidden:      o(expired, none, held, kept, done),
+				},
+			},
+			"refuseWaiting": {
+				setup: recorded,
+				act: func(own, other int64) outcome {
+					err := reconciler().refuseWaiting(ctx, fetch(), &renderRefusal{reason: ReasonBranchDiverged, message: "m"})
+					return observe(own, other, reconcile.Result{}, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(stopped, "own", held, kept, done),
+					isMerged:       o(awaiting, "own", held, kept, failed),
+					isClosed:       o(stopped, "own", held, kept, done),
+					isGone:         o(stopped, none, held, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, done),
+					goneFirstLook:  o(awaiting, none, held, kept, failed),
+					failedRead:     o(awaiting, none, held, kept, failed),
+					unconfirmed404: o(awaiting, none, held, kept, failed),
+					contradicting:  o(awaiting, none, held, kept, failed),
+					forbidden:      o(awaiting, none, held, kept, failed),
+				},
+			},
+			"adoption": {
+				setup: unrecorded,
+				act: func(own, other int64) outcome {
+					res, err := reconcileResult()
+					return observe(own, other, res, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(created, none, held, kept, done),
+					isMerged:       o(merged, none, released, kept, done),
+					isClosed:       o(stopped, none, held, kept, done),
+					isGone:         o(created, none, held, kept, done),
+					goneOtherOpen:  o(stopped, none, held, kept, done),
+					goneFirstLook:  na,
+					failedRead:     o(checked, none, held, kept, failed),
+					unconfirmed404: o(checked, none, held, kept, failed),
+					contradicting:  na,
+					forbidden:      o(checked, none, held, kept, failed),
+				},
+			},
+			"expire without a recorded pull request": {
+				setup: func(c verdictCase) (int64, int64) {
+					own, other := unrecorded(c)
+					clock = fetch().Status.Deadline.Add(time.Minute)
+					return own, other
+				},
+				act: func(own, other int64) outcome {
+					res, err := reconcileResult()
+					return observe(own, other, res, err)
+				},
+				want: map[verdictCase]outcome{
+					isOpen:         o(expired, "own", held, kept, done),
+					isMerged:       o(merged, none, released, kept, done),
+					isClosed:       o(expired, none, held, kept, done),
+					isGone:         o(expired, none, held, kept, done),
+					goneOtherOpen:  o(expired, none, held, kept, done),
+					goneFirstLook:  na,
+					failedRead:     o(checked, none, held, kept, failed),
+					unconfirmed404: o(checked, none, held, kept, failed),
+					contradicting:  na,
+					forbidden:      o(expired, none, held, kept, done),
+				},
+			},
+			"cleanUpStale without a recorded pull request": {
+				setup: unrecorded,
+				act:   cleanUp,
+				want: map[verdictCase]outcome{
+					isOpen:         o(stale, "own", held, kept, done),
+					isMerged:       o(merged, none, released, kept, done),
+					isClosed:       o(stale, none, held, kept, done),
+					isGone:         o(stale, none, held, kept, done),
+					goneOtherOpen:  o(stale, none, held, kept, done),
+					goneFirstLook:  na,
+					failedRead:     o(checked, none, held, kept, failed),
+					unconfirmed404: o(checked, none, held, kept, failed),
+					contradicting:  na,
+					forbidden:      o(stopped, none, held, kept, done),
+				},
+			},
+			"finalize without a recorded pull request": {
+				setup: unrecorded,
+				act:   deleteOnce,
+				want: map[verdictCase]outcome{
+					isOpen:         o(deleted, "own", "-", "-", done),
+					isMerged:       o(deleted, none, "-", "-", done),
+					isClosed:       o(deleted, none, "-", "-", done),
+					isGone:         o(deleted, none, "-", "-", done),
+					goneOtherOpen:  o(deleted, none, "-", "-", done),
+					goneFirstLook:  na,
+					failedRead:     o(checked, none, held, kept, failed),
+					unconfirmed404: o(checked, none, held, kept, failed),
+					contradicting:  na,
+					forbidden:      o(checked, none, held, kept, failed),
+				},
+			},
+		}
+		entries := make([]TableEntry, 0, len(callers)*len(cases))
+		for _, caller := range slices.Sorted(maps.Keys(callers)) {
+			for i, c := range cases {
+				if callers[caller].want[c] == na {
+					// Without a recorded number the listing of the branch is the one read: there is nothing for it to
+					// contradict, and no number to see missing (no pull request of its own on the branch is gone at
+					// once, as before any was opened).
+					continue
+				}
+				entries = append(entries, Entry(caller+" on "+name(c), caller, i))
+			}
+		}
+		It("has a cell for every caller and every way to each verdict", func() {
+			states := map[changeState]bool{}
+			for _, c := range cases {
+				states[c.state] = true
+			}
+			Expect(states).To(HaveLen(len(changeStates)))
+			for caller, c := range callers {
+				Expect(c.want).To(HaveLen(len(cases)), caller)
+			}
+		})
+		DescribeTable("answers each verdict as its rule says", func(name string, i int) {
+			c, vc := callers[name], cases[i]
+			want, ok := c.want[vc]
+			Expect(ok).To(BeTrue(), "no expected result for %s on %s", name, vc.how)
+			recorder = record.NewFakeRecorder(50)
+			own, other := c.setup(vc)
+			// A caller without a recorded number has no cell for a first look that finds it missing.
+			recorded := c.want[goneFirstLook] != na
+			Expect(c.act(own, other)).To(Equal(expect(vc, recorded, want)))
+			if vc == goneFirstLook {
+				// The first look only waits; once the wait is over the same answer is the confirmed end, as when the
+				// number was seen missing before (isGone).
+				clock = clock.Add(confirmWait)
+				Expect(c.act(own, other)).To(Equal(expect(isGone, recorded, c.want[isGone])))
+			}
+		}, entries)
+	})
+
 })
 
 // statusFailer fails status writes while fail returns true, as a lost write after a successful Git call.
@@ -3007,10 +4721,149 @@ func (f *failingStatus) Update(ctx context.Context, obj client.Object, opts ...c
 	return f.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
+// unmarkedBody is the body of a pull request a person opened from a request's branch, without its marker.
+const unmarkedBody = "no marker"
+
+// lostChangeRequest is a Git host that has lost change request n: GetChangeRequest answers 404 for it, and the
+// listing of its branch leaves it out.
+type lostChangeRequest struct {
+	*fakegit.Git
+	n int64
+}
+
+func (l *lostChangeRequest) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	if n == l.n {
+		return providers.ChangeRequest{}, fmt.Errorf("pull request %d: %w", n, providers.ErrNotFound)
+	}
+	return l.Git.GetChangeRequest(ctx, n)
+}
+
+func (l *lostChangeRequest) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := l.Git.ListChangeRequests(ctx, branch, openOnly)
+	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == l.n }), err
+}
+
+// pausedLost is lostChangeRequest that runs pause once, on the first listing of the branch in all states: after
+// the read by number answered 404 and before the call settles, as a call that another worker overtakes.
+type pausedLost struct {
+	lostChangeRequest
+	pause  func()
+	paused bool
+}
+
+func (p *pausedLost) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	if !openOnly && !p.paused {
+		p.paused = true
+		p.pause()
+	}
+	return p.lostChangeRequest.ListChangeRequests(ctx, branch, openOnly)
+}
+
+// startOtherWorker runs read in another goroutine, as another worker of the controller, and returns its verdict
+// once it is done, without waiting for it.
+func startOtherWorker(read func() changeVerdict) <-chan changeVerdict {
+	done := make(chan changeVerdict, 1)
+	go func() {
+		defer GinkgoRecover()
+		done <- read()
+	}()
+	return done
+}
+
+// pausedOpen is a Git host that runs pause once, on the first listing of the open pull requests of the branch:
+// after the read by number and before the call settles.
+type pausedOpen struct {
+	*fakegit.Git
+	pause  func()
+	paused bool
+}
+
+func (p *pausedOpen) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	if openOnly && !p.paused {
+		p.paused = true
+		p.pause()
+	}
+	return p.Git.ListChangeRequests(ctx, branch, openOnly)
+}
+
+// countedReads counts the reads of pull requests that go through it.
+type countedReads struct {
+	providers.GitProvider
+	reads *atomic.Int32
+}
+
+func (c *countedReads) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	c.reads.Add(1)
+	return c.GitProvider.GetChangeRequest(ctx, n)
+}
+
+func (c *countedReads) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	c.reads.Add(1)
+	return c.GitProvider.ListChangeRequests(ctx, branch, openOnly)
+}
+
+// openedLater is the title of a newer pull request a test opens on the branch.
+const openedLater = "opened later"
+
+// missedInAll is lostChangeRequest whose listing of the branch in all states also misses pull request missed,
+// which its open listing still has, as a listing that lags may.
+type missedInAll struct {
+	lostChangeRequest
+	missed int64
+}
+
+func (m *missedInAll) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := m.lostChangeRequest.ListChangeRequests(ctx, branch, openOnly)
+	if openOnly {
+		return all, err
+	}
+	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == m.missed }), err
+}
+
+// countingReader counts the reads of a RemediationRequest through it.
+type countingReader struct {
+	client.Reader
+	requests atomic.Int64
+}
+
+func (c *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.RemediationRequest); ok {
+		c.requests.Add(1)
+	}
+	return c.Reader.Get(ctx, key, obj, opts...)
+}
+
+// laggingList is a Git host whose listing of the open pull requests of a branch still shows pull request n open
+// after it was closed, as a listing that lags behind the read by number may.
+type laggingList struct {
+	*fakegit.Git
+	n int64
+}
+
+func (l *laggingList) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := l.Git.ListChangeRequests(ctx, branch, openOnly)
+	if err != nil || !openOnly || slices.ContainsFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == l.n }) {
+		return all, err
+	}
+	cr, err := l.GetChangeRequest(ctx, l.n)
+	if err != nil {
+		return nil, err
+	}
+	cr.State = providers.ChangeRequestOpen
+	return append([]providers.ChangeRequest{cr}, all...), nil
+}
+
 // Operation names of faultyGit. A ReadFile fault or count may name the path too: "ReadFile <path>".
 const (
 	opFind         = "FindChangeRequest"
 	opGet          = "GetChangeRequest"
+	opList         = "ListChangeRequests"
 	opCreateBranch = "CreateBranch"
 	opReadFile     = "ReadFile"
 	opListDir      = "ListDir"
@@ -3035,10 +4888,13 @@ type faultyGit struct {
 	crash  string
 	block  string
 	before map[string]func()
+	// stale, per number, is the state GetChangeRequest answers instead of the host's, as a lagging read.
+	stale map[int64]providers.ChangeRequestState
 }
 
 func newFaultyGit(g *fakegit.Git) *faultyGit {
-	return &faultyGit{Git: g, calls: map[string]int{}, before: map[string]func(){}}
+	return &faultyGit{Git: g, calls: map[string]int{}, before: map[string]func(){},
+		stale: map[int64]providers.ChangeRequestState{}}
 }
 
 // failOn makes op ("ReadFile <path>" for one file) fail with fault before it runs; a nil fault fails nothing.
@@ -3204,6 +5060,11 @@ func (f *faultyGit) GetChangeRequest(ctx context.Context, n int64) (providers.Ch
 	if err = f.leave(ctx, opGet, err); err != nil {
 		return providers.ChangeRequest{}, err
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st, ok := f.stale[n]; ok {
+		cr.State = st
+	}
 	return cr, nil
 }
 
@@ -3218,8 +5079,19 @@ func (f *faultyGit) FindChangeRequest(ctx context.Context, branch string) (provi
 	return cr, nil
 }
 
+func (f *faultyGit) ListChangeRequests(ctx context.Context, branch string, openOnly bool) ([]providers.ChangeRequest, error) {
+	if err := f.enter(opList, branch); err != nil {
+		return nil, err
+	}
+	crs, err := f.Git.ListChangeRequests(ctx, branch, openOnly)
+	if err = f.leave(ctx, opList, err); err != nil {
+		return nil, err
+	}
+	return crs, nil
+}
+
 func (f *faultyGit) CloseChangeRequest(ctx context.Context, n int64) error {
-	if err := f.enter(opClose, ""); err != nil {
+	if err := f.enter(opClose, strconv.FormatInt(n, 10)); err != nil {
 		return err
 	}
 	return f.leave(ctx, opClose, f.Git.CloseChangeRequest(ctx, n))
@@ -3405,4 +5277,27 @@ func (h hangingIncidentReader) Get(ctx context.Context, key client.ObjectKey, ob
 		return ctx.Err()
 	}
 	return h.Reader.Get(ctx, key, obj, opts...)
+}
+
+// openListedOnly is a Git host that answers 404 for pull request n and leaves it out of the listing of its branch
+// in all states, while the open listing still shows it, as reads that lag behind each other may.
+type openListedOnly struct {
+	*fakegit.Git
+	n int64
+}
+
+func (o *openListedOnly) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	if n == o.n {
+		return providers.ChangeRequest{}, fmt.Errorf("pull request %d: %w", n, providers.ErrNotFound)
+	}
+	return o.Git.GetChangeRequest(ctx, n)
+}
+
+func (o *openListedOnly) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := o.Git.ListChangeRequests(ctx, branch, openOnly)
+	if openOnly {
+		return all, err
+	}
+	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == o.n }), err
 }

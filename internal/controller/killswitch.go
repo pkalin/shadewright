@@ -162,6 +162,11 @@ func (g *gatedGit) GetChangeRequest(ctx context.Context, number int64) (provider
 	return g.git.GetChangeRequest(ctx, number)
 }
 
+func (g *gatedGit) ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	return g.git.ListChangeRequests(ctx, headBranch, openOnly)
+}
+
 // IsAncestor is a read and passes straight through, when the wrapped provider can answer it
 // ([providers.AncestryChecker]); otherwise it returns errNoAncestry. The check after the merge uses it.
 func (g *gatedGit) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {

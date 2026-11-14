@@ -473,14 +473,20 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 	It("does not close a recorded pull request that is not the branch's own when it resumes a marked cleanup", func() {
 		head, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(git.CreateBranch(ctx, "someone-else", head)).To(Succeed())
+		// Another branch of the agent's prefix, so the host answers about the number rather than with a 404 (a 404
+		// would wait for a second look, #688).
+		const elsewhere = "shadewright/someone-else"
+		Expect(git.CreateBranch(ctx, elsewhere, head)).To(Succeed())
 		foreign, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
-			HeadBranch: "someone-else", BaseBranch: mainBranch, Title: "f", Body: pullRequestBody(fetch(), ""),
+			HeadBranch: elsewhere, BaseBranch: mainBranch, Title: "f", Body: pullRequestBody(fetch(), ""),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		markCleanup(func(got *remediationv1alpha1.RemediationRequest) {
 			got.Status.PullRequest.Number = foreign.Number
 		})
+		// The request's own pull request lost its marker (a person edited it out): a listing that shows a pull
+		// request of this request is never gone (#688).
+		Expect(git.SetBody(cr.Number, unmarkedBody)).To(Succeed())
 		// The look at the recorded pull request fails once, so the cleanup is reached with the forged number.
 		finds := 0
 		git.SetFail(func(op string) error {
@@ -500,7 +506,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(planFresh().Reason).To(Equal(ReasonForeignChangeRequest))
 		Expect(closes.Load()).To(BeZero())
-		other, err := git.FindChangeRequest(ctx, "someone-else")
+		other, err := git.FindChangeRequest(ctx, elsewhere)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(other.State).To(Equal(providers.ChangeRequestOpen))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
@@ -575,6 +581,114 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
 		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha), "delivery is checked against this commit")
+	})
+
+	It("records the merge of the pull request it tried to close, not a newer one of the branch (#688)", func() {
+		markCleanup(forgetPullRequest)
+		var sha string
+		var next providers.ChangeRequest
+		git.SetFail(func(op string) error {
+			if op != opClose || sha != "" {
+				return nil
+			}
+			// A person merges right before the close, and a newer pull request is opened on the same branch.
+			var err error
+			sha, err = git.Merge(cr.Number)
+			Expect(err).NotTo(HaveOccurred())
+			next, err = git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: cr.HeadBranch,
+				BaseBranch: mainBranch, Title: "opened after the merge", Body: cr.Body})
+			Expect(err).NotTo(HaveOccurred())
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.Number).NotTo(Equal(cr.Number))
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded")
+		Expect(got.Status.PullRequest.Number).To(Equal(cr.Number))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
+	})
+
+	It("records an unrecorded merge that a newer closed pull request of the branch hides (#688)", func() {
+		markCleanup(forgetPullRequest)
+		sha, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: cr.HeadBranch,
+			BaseBranch: mainBranch, Title: "opened after the merge", Body: cr.Body})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.CloseChangeRequest(ctx, next.Number)).To(Succeed())
+		newest, err := git.FindChangeRequest(ctx, cr.HeadBranch)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(newest.Number).To(Equal(next.Number), "the newest of the branch is the closed one")
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest).NotTo(BeNil())
+		Expect(got.Status.PullRequest.Number).To(Equal(cr.Number))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
+	})
+
+	It("binds the look-up of an unrecorded merge to the number it tried and to the target branch (#688)", func() {
+		markCleanup(forgetPullRequest)
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		for name, c := range map[string]struct {
+			bend func(*providers.ChangeRequest)
+			// retried: an answer about another pull request is a failed read, never an answer.
+			retried bool
+		}{
+			"another number":      {func(c *providers.ChangeRequest) { c.Number++ }, true},
+			"another base branch": {func(c *providers.ChangeRequest) { c.BaseBranch = "maintenance" }, false},
+		} {
+			r := reconciler()
+			r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				return &bentAnswer{Git: git, bend: c.bend}, nil
+			}
+			closeErr := &closeConflictError{number: cr.Number, err: fmt.Errorf("close: %w", providers.ErrConflict)}
+			err := r.mergedUnrecorded(ctx, fetch(), closeErr)
+			if c.retried {
+				Expect(isUnknownChange(err)).To(BeTrue(), name)
+				Expect(errors.Is(err, closeErr)).To(BeTrue(), name)
+			} else {
+				Expect(err).To(BeIdenticalTo(error(closeErr)), name)
+			}
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), name)
+			Expect(got.Status.PullRequest).To(BeNil(), name)
+		}
+	})
+
+	It("retries an unrecorded merge whose number the Git host answers 404 for while the branch lists it (#688)", func() {
+		markCleanup(forgetPullRequest)
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		git.SetFail(func(op string) error {
+			if op == opGet {
+				return fmt.Errorf("pull request: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		defer git.SetFail(nil)
+		closeErr := &closeConflictError{number: cr.Number, err: fmt.Errorf("close: %w", providers.ErrConflict)}
+		err = reconciler().mergedUnrecorded(ctx, fetch(), closeErr)
+		Expect(isUnknownChange(err)).To(BeTrue(), "a 404 the branch does not confirm is a failed read")
+		Expect(errors.Is(err, errUnconfirmedNotFound)).To(BeTrue())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		// A 404 the branch confirms is an answer once it was seen before (#688): no merged pull request of this
+		// request with that number. The first such look is only kept in memory.
+		// The merged one loses the marker, since a listing that shows a pull request of this request is never gone.
+		Expect(git.SetBody(cr.Number, unmarkedBody)).To(Succeed())
+		gone := &closeConflictError{number: 9999, err: fmt.Errorf("close: %w", providers.ErrConflict)}
+		r := reconciler()
+		err = r.mergedUnrecorded(ctx, fetch(), gone)
+		Expect(errors.Is(err, errGoneUnconfirmed)).To(BeTrue(), "a first confirmed 404 waits: %v", err)
+		first, ok := r.looks().first(fetch(), 9999)
+		Expect(ok).To(BeTrue(), "the first look is kept in this process's memory")
+		// The same process looks again once the wait is over.
+		r.looks().note(fetch(), 9999, first.Add(-confirmWait-time.Second))
+		Expect(r.mergedUnrecorded(ctx, fetch(), gone)).To(BeIdenticalTo(error(gone)))
 	})
 
 	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {
@@ -918,4 +1032,19 @@ func (f sourceFunc) Resolve(ctx context.Context, in sourcemap.Input) (sourcemap.
 func (r *RemediationRequestReconciler) freshErr(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	_, err := r.ensureFresh(ctx, rr)
 	return err
+}
+
+// bentAnswer answers GetChangeRequest with what the fake holds, changed by bend: a Git host whose answer does not
+// match the question.
+type bentAnswer struct {
+	*fakegit.Git
+	bend func(*providers.ChangeRequest)
+}
+
+func (b *bentAnswer) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	cr, err := b.Git.GetChangeRequest(ctx, n)
+	if err == nil {
+		b.bend(&cr)
+	}
+	return cr, err
 }

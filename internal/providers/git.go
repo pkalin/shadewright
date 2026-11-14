@@ -175,6 +175,11 @@ type CheckRun struct {
 	Summary string
 }
 
+// MaxBranchChangeRequests is the most change requests GitProvider.ListChangeRequests returns for one branch. A
+// Shadewright branch carries one change request, or a few when a supersede chain shares it and people closed and
+// opened some; more is refused with ErrTooLarge.
+const MaxBranchChangeRequests = 100
+
 // MaxCommentMarkerBytes is the longest marker GitProvider.CommentChangeRequest accepts.
 const MaxCommentMarkerBytes = 256
 
@@ -311,6 +316,15 @@ type GitProvider interface {
 	// FindChangeRequest returns the most recent change request for a head branch, in any state.
 	// ErrNotFound when there is none.
 	FindChangeRequest(ctx context.Context, headBranch string) (ChangeRequest, error)
+
+	// ListChangeRequests returns every change request from headBranch, a Shadewright branch of this repository,
+	// to the target branch, newest first: only the open ones when openOnly is true, those in any state otherwise.
+	// Unlike FindChangeRequest it hides none behind a newer one, so an empty answer with openOnly is the proof that
+	// the branch has no open change request. An entry of the host's answer from another branch or repository, or
+	// to another base branch, is ErrUntrustedAnswer for the whole call: the answer is not to the question asked.
+	// More than MaxBranchChangeRequests is ErrTooLarge, never a list cut short. Any error is a failure to find
+	// out, never an answer (an ErrNotFound included: no branch is not an empty list). It only reads.
+	ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) ([]ChangeRequest, error)
 
 	// GetChangeRequest returns the change request with number, in any state. It finds the recorded change
 	// request of a request again after a lost status write, also when its branch carries a newer change request

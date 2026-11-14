@@ -370,7 +370,7 @@ func TestKedaStaleCleanupFinishesAfterAFailedClose(t *testing.T) {
 			failClose := true
 			tc.breakIt(w)
 			w.git.SetFail(func(op string) error {
-				if failClose && (op == opClose || op == "FindChangeRequest") {
+				if failClose && (op == opClose || op == opList) {
 					return providers.ErrRetryable
 				}
 				return nil

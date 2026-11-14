@@ -244,7 +244,7 @@ func (p *Provider) look(ctx context.Context, op, path string, query url.Values, 
 	locating := cur.AfterID > 0 && first > 1
 	page := first
 	for range providers.MaxFeedbackPages {
-		q := url.Values{paramPerPage: {strconv.Itoa(feedbackPerPage)}, "page": {strconv.Itoa(page)}}
+		q := url.Values{paramPerPage: {strconv.Itoa(feedbackPerPage)}, paramPage: {strconv.Itoa(page)}}
 		maps.Copy(q, query)
 		var pr pageResult
 		sweepFirst := cur.Page == 0 && page == 1

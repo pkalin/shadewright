@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 640" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Control plane identities and their writes</title>
-  <desc id="d">Identities of ADR-0038, proposed and not built. In each spoke, the analyzer, executor and verifier keep the writes that invariant 6 gives them today. The new reporter, a fourth identity, reads Incidents, RemediationRequests, VerificationReports and the settings status in the operator namespace, has no Secrets, no Git identity and no model credential, and may reach only the hub's host. It sends reports to the hub's intake service. At the hub, intake may write the reported record kinds only in the namespace of the cluster whose token it verified, through a Role and RoleBinding that the fleet controller creates per namespace; it has no Git write and no model credential, and it fetches issuer discovery documents only from allow-listed hosts. The fleet controller reconciles Cluster objects into namespaces, Roles, RoleBindings, quotas and conditions, and holds no spoke credential or kubeconfig. The status page can only read. People who may merge in the hub GitOps repository approve each new spoke. No hub component has a model credential or a Git write identity in phase 1.</desc>
+  <desc id="d">Identities of ADR-0038, proposed and not built. In each spoke, the analyzer, executor and verifier keep the writes that invariant 6 gives them today. The new reporter, a fourth identity, reads Incidents, RemediationRequests and VerificationReports in the operator namespace, plus get on remediationsettings and get on the kube-system Namespace by resource name, has no Secrets, no Git identity and no model credential, and may reach only the hub's host. It sends reports to the hub's intake service. At the hub, intake may write the reported record kinds, using one static ClusterRole from the chart bound in each spoke namespace. RBAC does not keep it to one namespace: that guard is intake's code, which takes the namespace from the verified Cluster object, and it needs tests. Intake has no Git write and no model credential, and it fetches issuer discovery documents only from allow-listed hosts. The fleet controller creates Namespaces, ResourceQuotas and RoleBindings only, with bind limited to that one ClusterRole and no escalate, never Roles, and holds no spoke credential or kubeconfig. The status page can only read. People who may merge in the hub GitOps repository approve each new spoke. No hub identity is cluster-admin, and none has a model credential or a Git write identity in phase 1.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -41,7 +41,7 @@
   <rect class="key" x="806" y="72" width="236" height="176" rx="12"/>
   <text class="h" x="822" y="100">Reporter (new, proposed)</text>
   <text class="s" x="822" y="128">reads: Incidents, requests,</text>
-  <text class="s" x="822" y="146">reports, settings status</text>
+  <text class="s" x="822" y="146">reports; get: settings, kube-system</text>
   <text class="no" x="822" y="178">never: Secrets, Git, model key</text>
   <text class="s" x="822" y="204">egress: the hub's host only</text>
   <text class="s" x="822" y="222">token audience names this hub</text>
@@ -51,15 +51,15 @@
   <rect class="key" x="44" y="378" width="330" height="150" rx="12"/>
   <text class="h" x="60" y="406">Intake</text>
   <text class="s" x="60" y="432">writes: ReportedIncident, ReportedRequest,</text>
-  <text class="s" x="60" y="450">heartbeat, only in the namespace of the</text>
-  <text class="s" x="60" y="468">cluster whose token it verified</text>
+  <text class="s" x="60" y="450">heartbeat; the namespace comes from the</text>
+  <text class="s" x="60" y="468">verified Cluster object: code guard, not RBAC</text>
   <text class="no" x="60" y="496">never: Git write, model credential</text>
   <text class="s" x="60" y="516">egress: issuer hosts on the allow-list</text>
   <rect class="box" x="396" y="378" width="330" height="150" rx="12"/>
   <text class="h" x="412" y="406">Fleet controller</text>
-  <text class="s" x="412" y="432">writes: namespaces, Role and RoleBinding</text>
-  <text class="s" x="412" y="450">for intake, quota, Cluster conditions</text>
-  <text class="no" x="412" y="496">never: spoke credential, kubeconfig</text>
+  <text class="s" x="412" y="432">writes: namespaces, quota, RoleBindings</text>
+  <text class="s" x="412" y="450">(bind: one ClusterRole), conditions</text>
+  <text class="no" x="412" y="496">never: Roles, escalate, kubeconfig</text>
   <text class="s" x="412" y="516">reads: Cluster objects</text>
   <rect class="box" x="748" y="378" width="328" height="70" rx="12"/>
   <text class="h" x="764" y="406">Status page</text>
@@ -70,6 +70,7 @@
   <path class="f" d="M924 248V300H209V378" marker-end="url(#a)"/>
   <text class="lbl" x="300" y="292">report over HTTPS: the only line from spoke to hub</text>
   <path class="f" d="M396 453H378" marker-end="url(#a)"/>
+  <text class="s" x="44" y="558">One static ClusterRole for intake; no hub identity is cluster-admin.</text>
   <text class="s" x="44" y="578">No hub component has a model credential or a Git write identity in phase 1.</text>
-  <text class="s" x="44" y="598">Each spoke has its own model credential and budget (ADR-0037, ADR-0023).</text>
+  <text class="s" x="44" y="598">Each spoke has its own model credential (key: ADR-0037) and daily budget (ADR-0023).</text>
 </svg>

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
 <title id="t">Shadewright cause rule</title>
-<desc id="d">Overview of ADR-0039. The symptoms of one container, for example web in the Deployment demo/web, arrive as observations: an OOMKilled termination read from pod status, then a BackOff event and an Unhealthy probe event. For each BackOff or Unhealthy the collector reads that container's pod status, which the kubelet wrote: an OOM kill that finished within the last 10 minutes, or a waiting reason for an image or configuration error now. If the status shows a cause and the Incident of that cause (found by its fingerprint) exists, the observation is recorded as evidence in that Incident's own bounded list status.absorbed, which the analysis trigger and the quiet rule never read, and opens nothing. If the status shows a cause but its Incident does not exist yet, the consequence waits for the cause observation within the 2 minute hold, then goes through the existing gate. With no cause in the pod status the observation is held 2 minutes and opens an Incident only if the container is still failing at the end and was seen failing at least twice. An Event alone never creates a cause and never folds another Incident. When a cause Incident is created, a consequence Incident of the same container whose creationTimestamp is at most 10 minutes earlier is closed as Resolved with the Lifecycle reason FoldedIntoCause and status.foldedInto naming the cause Incident. The closure rules skip a folded Incident. The executor reads the Incident live as its last step before it creates a pull request and cancels a request that has none yet with reason IncidentFolded; a failed read, NotFound or another UID holds the request and retries. The fingerprint does not change, and an unrelated problem of the same workload, such as a missing Secret on another container, keeps its own Incident.</desc>
+<desc id="d">Overview of ADR-0039. The symptoms of one container, for example web in the Deployment demo/web, arrive as observations: an OOMKilled termination read from pod status, then a BackOff event and an Unhealthy probe event. For each BackOff or Unhealthy the collector reads that container's pod status, which the kubelet wrote: an OOM kill that finished within 10 minutes before the observation's own time (both written by the same node's kubelet), or a waiting reason for an image or configuration error now. If the status shows a cause and the Incident of that cause (found by its fingerprint) exists, the observation is recorded as evidence in that Incident's own bounded list status.absorbed, which the analysis trigger and the quiet rule never read, and opens nothing. If the status shows a cause but its Incident does not exist yet, the consequence waits for the cause observation within the 2 minute hold, then goes through the existing gate. With no cause in the pod status the observation is held 2 minutes and opens an Incident only if the container is still failing at the end and was seen failing at least twice. An Event alone never creates a cause and never folds another Incident: only a pod-status observation, which has the source in its fingerprint, can make a cause. When a cause Incident is created, a consequence Incident of the same container whose creationTimestamp is at most 15 minutes earlier (the gate's RecurWithin) and none of whose requests has a pull request is closed as Resolved with the Lifecycle reason FoldedIntoCause and status.foldedInto naming the cause Incident. The closure rules skip a folded Incident. The executor reads the Incident live as its last step before it creates a pull request and cancels a request that has none yet with reason IncidentFolded; NotFound, a definite answer, cancels it with reason IncidentGone, and a failed read or another UID holds the request and retries. The fingerprint does not change, and an unrelated problem of the same workload, such as a missing Secret on another container, keeps its own Incident.</desc>
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
 <style>
 .bt{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4}
@@ -38,15 +38,15 @@
 
 <rect class="bt" x="420" y="62" width="320" height="132" rx="10"/>
 <text class="h" x="434" y="88">Collector, then Incident controller</text>
-<text class="s" x="434" y="110">pod status of the container: OOM-killed in the</text>
-<text class="s" x="434" y="129">last 10 min, or an image or config wait now?</text>
-<text class="s" x="434" y="148">then the Incident of that cause, by its</text>
-<text class="s" x="434" y="167">fingerprint, exists? Code only, no model</text>
+<text class="s" x="434" y="110">pod status of the container: OOM kill within</text>
+<text class="s" x="434" y="129">10 min before the observation, or an image</text>
+<text class="s" x="434" y="148">or config wait now? Then the Incident of that</text>
+<text class="s" x="434" y="167">cause exists? Code only, no model, no Event cause</text>
 <rect class="bt" x="420" y="214" width="320" height="104" rx="10"/>
 <text class="h" x="434" y="240">Cause Incident exists: evidence</text>
 <text class="s" x="434" y="262">kept in the cause's own list, no Incident,</text>
 <text class="s" x="434" y="281">no wait; no use of the cause's phase</text>
-<text class="s" x="434" y="300">an Event alone never makes a cause</text>
+<text class="s" x="434" y="300">only a pod-status cause counts (status.cause)</text>
 <rect class="hold" x="420" y="338" width="320" height="104" rx="10"/>
 <text class="h" x="434" y="364">Cause not open yet, or none: hold</text>
 <text class="s" x="434" y="386">waits 2 min for the cause observation;</text>
@@ -66,14 +66,14 @@
 <text class="s" x="814" y="167">bounded lists; the trigger never reads them</text>
 <rect class="bt" x="800" y="214" width="380" height="104" rx="10"/>
 <text class="h" x="814" y="240">Late cause: the consequence Incident</text>
-<text class="s" x="814" y="262">created up to 10 min before the cause (its</text>
-<text class="s" x="814" y="281">creationTimestamp): Resolved, FoldedIntoCause,</text>
-<text class="s" x="814" y="300">foldedInto; closure rules skip it</text>
+<text class="s" x="814" y="262">created up to 15 min (the gate window) before</text>
+<text class="s" x="814" y="281">the cause, no request with a PR: Resolved,</text>
+<text class="s" x="814" y="300">FoldedIntoCause, foldedInto; closure skips it</text>
 <rect class="bt" x="800" y="338" width="380" height="104" rx="10"/>
 <text class="h" x="814" y="364">Its request, no pull request yet</text>
-<text class="s" x="814" y="386">last step before the PR: live read; Cancelled,</text>
-<text class="s" x="814" y="405">IncidentFolded; failed read or NotFound holds;</text>
-<text class="s" x="814" y="424">a pull request already open runs its course</text>
+<text class="s" x="814" y="386">live read before the PR; folded: Cancelled,</text>
+<text class="s" x="814" y="405">IncidentFolded; gone: Cancelled, IncidentGone;</text>
+<text class="s" x="814" y="424">failed read or other UID holds; PR open: unchanged</text>
 <path class="fb" d="M740 266 L800 266" marker-end="url(#a)"/>
 <path class="fb" d="M740 150 L760 150 L760 120 L800 120" marker-end="url(#a)"/>
 <path class="fb" d="M990 318 L990 338" marker-end="url(#a)"/>

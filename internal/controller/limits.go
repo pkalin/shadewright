@@ -715,6 +715,11 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase) {
 	declineOnEnd(rr, phase)
+	if rr.Status.Phase != phase && !beforeMerge(phase) {
+		// A first look at a missing pull request belongs to the request that was still moving on (#688): a
+		// later read of the ended request, by the lock or the finalizer, waits again.
+		r.looks().forget(client.ObjectKeyFromObject(rr))
+	}
 	if rr.Status.Phase == phase && rr.Status.LastPhaseTransitionTime != nil {
 		return
 	}

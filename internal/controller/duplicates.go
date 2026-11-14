@@ -293,7 +293,8 @@ func (r *RemediationRequestReconciler) supersedeDuplicate(ctx context.Context, r
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseSuperseded)
 	rr.Status.ObservedGeneration = rr.Generation
-	rr.Status.HoldsTarget = new(false)
+	// It waited in the queue and never took the lock: false keeps it out of the limits' lock list.
+	release(rr)
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPlanFresh,

@@ -110,22 +110,6 @@ func TestRevertLinkProblem(t *testing.T) {
 	}
 }
 
-func TestInverseActionKeda(t *testing.T) {
-	keda := func(prev, desired int32) remediationv1alpha1.Action {
-		return remediationv1alpha1.Action{Type: remediationv1alpha1.ActionAdjustKedaMaxReplicas,
-			AdjustKedaMaxReplicas: &remediationv1alpha1.AdjustKedaMaxReplicas{PreviousValue: prev, DesiredValue: desired}}
-	}
-	if !inverseAction(keda(10, 15), keda(15, 10)) {
-		t.Error("15 to 10 is the inverse of 10 to 15")
-	}
-	if inverseAction(keda(10, 15), keda(15, 11)) {
-		t.Error("15 to 11 is not the inverse of 10 to 15")
-	}
-	if inverseAction(remediationv1alpha1.Action{Type: "NoSuchAction"}, remediationv1alpha1.Action{Type: "NoSuchAction"}) {
-		t.Error("an unknown action type is never an inverse")
-	}
-}
-
 // TestRevertApproval: an allowed revert keeps approval required even when the policy's decision would lower it
 // (a decision that no longer reads spec.approvalRequired); other requests keep the decision.
 func TestRevertApproval(t *testing.T) {

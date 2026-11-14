@@ -20,17 +20,24 @@ API group and version: `remediation.shadewright.io/v1alpha1`
 
 ## Incident
 
-Incident groups repeated symptoms of one problem on one workload.
+Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
+removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
+entries, and refuse a new entry of that list in any state but Pending, also in the first status write.
 
 - API version: `remediation.shadewright.io/v1alpha1`
 - Kind: `Incident`
 - Scope: Namespaced
 
+Validation rules:
+
+- status cannot be removed while status.revertsProposed has entries: `!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed) == 0 || has(self.status)`
+- a new entry of status.revertsProposed must be Pending: `!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n, n.state == 'Pending' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed) && oldSelf.status.revertsProposed.exists(o, o.uid == n.uid)))`
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [IncidentSpec](#incidentspec) | Yes | spec identifies the incident.<br>Rule: spec is immutable; a different symptom is a new Incident<br>Rule: occurrenceNumber and previousIncident are set together<br>Rule: previousIncident must be the occurrence before this one of the same fingerprint |
-| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved |
+| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes |
 
 ## RemediationPolicy
 
@@ -710,6 +717,7 @@ IncidentStatus holds the deduplication state that must survive restarts (ADR-000
 Validation rules:
 
 - resolvedTime cannot change while the phase stays Resolved: `!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)`
+- revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes: `!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || (n.state == o.state && (!has(o.reason) || (has(n.reason) && n.reason == o.reason)))))))`
 
 Used by: [Incident](#incident).
 
@@ -726,6 +734,7 @@ Used by: [Incident](#incident).
 | `handledHint` | [HintRef](#hintref) | No | handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3): written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint. Absent for an analysis without a hint. The trigger also writes it, with the Analyzed reason CoolingDown or BudgetSpent, for a hint it refuses without an analysis. |
 | `analysisRecords` | [RecordID](#recordid) array | No | analysisRecords are the newest analysis record IDs, oldest first (at most MaxAnalysisRecords).<br>Maximum items: 20<br>Maximum length: 200<br>Minimum length: 1<br>Pattern: `^[a-z0-9][a-z0-9-]{0,199}$`<br>List type: atomic |
 | `remediationRequests` | [Name](#name) array | No | remediationRequests are the names of requests made for this incident, oldest first.<br>Maximum items: 20<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: atomic |
+| `revertsProposed` | [ProposedRevert](#proposedrevert) array | No | revertsProposed are the failed requests of this incident, by name and UID, that the analyzer's revert proposer decided to revert (ADR-0030 section 8, #96), oldest first. The proposer writes an entry in state Pending before it creates the revert and moves it to Created once the revert exists; it never takes a new decision for a request listed here, so a failed request gets one revert for good, also after that revert was deleted. When a check before a create says no (the target is gone, the request passed the age bound, the request was deleted, the revert's name is taken by another request, the create is refused as invalid), the entry moves to Abandoned instead, with a reason, which is final: no revert is made for it. A new entry is always Pending, entries are never removed, a state moves only from Pending to Created or Abandoned, a reason never changes, and the status cannot be removed while the list has entries; a full list stops new reverts for this incident instead (condition RevertsStopped).<br>Maximum items: 20<br>List type: map<br>List key: `uid`<br>Rule: reason is set exactly when state is Abandoned |
 | `conditions` | [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#condition-v1-meta) array | No | conditions explain the phase.<br>List type: map<br>List key: `type` |
 
 ### IncomingHandoff
@@ -1051,6 +1060,25 @@ Used by: [RemediationPolicySpec](#remediationpolicyspec).
 | `namespaces` | [Name](#name) array | Yes | namespaces the policy covers. Required: there is no "all namespaces".<br>Maximum items: 64<br>Maximum length: 63<br>Minimum items: 1<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: set |
 | `objectSelector` | [LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#labelselector-v1-meta) | No | objectSelector further limits targets by label. |
 
+### ProposedRevert
+
+ProposedRevert is an entry of an Incident's status.revertsProposed: a failed request, by name and UID, and
+how far the proposer got with its revert.
+
+
+Validation rules:
+
+- reason is set exactly when state is Abandoned: `has(self.reason) == (self.state == 'Abandoned')`
+
+Used by: [IncidentStatus](#incidentstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | Yes | name of the request.<br>Maximum length: 253<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
+| `uid` | [UID](#uid) | Yes | uid of the request, so a request recreated under the same name is never taken for it.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
+| `state` | [RevertState](#revertstate) | Yes | state is Pending from the decision until the revert exists, then Created, or Abandoned when no revert will be made. Created and Abandoned are final. A new entry is always Pending.<br>One of `Pending`, `Created`, `Abandoned` |
+| `reason` | [RevertReason](#revertreason) | No | reason is why the entry is Abandoned. It is set with that state, only with it, and never changes.<br>One of `TargetGone`, `TargetKindUnsupported`, `OutsideAgeBound`, `IncidentDeleting`, `RequestGone`, `NotRevertible`, `NameTaken`, `CreateInvalid` |
+
 ### PullRequestStatus
 
 PullRequestStatus records the pull request that carries the plan.
@@ -1211,7 +1239,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `verification` | [Verification](#verification) | No | verification says when the change counts as a success.<br>Default: `{}`<br>Rule: stableFor must be at least 1m<br>Rule: timeout must be at most 24h<br>Rule: timeout must be longer than stableFor |
 | `replaces` | [RequestReplacement](#requestreplacement) | No | replaces names the request this one replaces and the reviewer hint of that request it answers (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of the plan, so it is part of the request's name: the same plan answering another hint is another request. The executor checks the link once, at the policy check, and then takes the pull request over (the handoff). |
 | `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (shadewright/&lt;chainRoot>), so every request of a chain works on the same branch and pull request.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
-| `reverts` | [RequestRef](#requestref) | No | reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a revert. A deterministic revert proposer in the analyzer is planned (#96, second part) to create one for a request that ended Failed with Verified False; none is built, so no component creates a revert yet. A model proposal has no such field. A revert requires approvalRequired: true, never replaces another request, and is never changed after create (the spec is immutable). The executor checks the link before the policy check: the named request exists with this UID, ended Failed with Verified False, is not a revert itself, has the same Incident, target and action type (and container), and this request's previous and desired values are its desired and previous values; this request's name is RevertName of that UID, so a failed request has at most one revert at a time (a revert that was deleted can be created again; the proposer must cover that). Otherwise the request ends Denied with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier writes no report for it, and once rolled out, configured and available for stableFor it ends Inconclusive with reason RevertApplied, never Succeeded. |
+| `reverts` | [RequestRef](#requestref) | No | reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a revert, which the analyzer's deterministic revert proposer creates, with no model call, for a request that ended Failed with Verified False. A model proposal has no such field. A revert requires approvalRequired: true, never replaces another request, and is never changed after create (the spec is immutable). The executor checks the link before the policy check: the named request exists with this UID, ended Failed with Verified False, is not a revert itself, has the same Incident, target and action type (and container), and this request's previous and desired values are its desired and previous values; this request's name is RevertName of that UID, so a failed request has at most one revert at a time (the proposer also records it in the Incident's status.revertsProposed and never makes a second one). Otherwise the request ends Denied with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier writes no report for it, and once rolled out, configured and available for stableFor it ends Inconclusive with reason RevertApplied, never Succeeded. |
 
 ### RemediationRequestStatus
 
@@ -1226,7 +1254,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `phase` | [RemediationPhase](#remediationphase) | No | phase summarizes progress. It is a selectable field (field selector status.phase), so the executor's limits list only the phases they need from the API server.<br>One of `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`, `Merged`, `WaitingForDelivery`, `Verifying`, `Succeeded`, `Denied`, `Failed`, `Expired`, `Cancelled`, `Superseded`, `NeedsIntervention`, `Inconclusive` |
 | `lastPhaseTransitionTime` | [MicroTime](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#microtime-v1-meta) | No | lastPhaseTransitionTime is when phase last changed, to the microsecond. The circuit breaker orders the outcomes of requests by it. |
 | `breakerProbe` | boolean | No | breakerProbe is true on a request the policy check let through while the circuit breaker was tripped (half-open): it is the breaker's probe. It is written with the allowed decision and never cleared. The breaker finds a running probe, or one that ended without a success, by this field only; a request without it is not a probe. It is a selectable field (field selector status.breakerProbe). |
-| `holdsTarget` | boolean | No | holdsTarget is true while the request holds the executor's lock on its target: it is set in the status write of the allowed decision and cleared only once the request's pull request is known merged or closed, or a look-up by its branch and marker found none of its own open. While it is true no other request on the same target goes through the policy check. Unset on a request not yet decided, and on one written before the field existed; the executor then derives it once from the request's phase and pull request, keeping the lock when in doubt. A refused request gets false with its refusal. It is a selectable field (field selector status.holdsTarget), so the executor's lock reads only holders. |
+| `holdsTarget` | boolean | No | holdsTarget is true while the request holds the executor's lock on its target: it is set in the status write of the allowed decision and cleared only once the request's pull request is known merged or closed and no other pull request that may deliver its change is open on its branch (condition TargetHeld says when one is), or a look-up by its branch and marker found none of its own open. While it is true no other request on the same target goes through the policy check. Unset on a request not yet decided, and on one written before the field existed; the executor then derives it once from the request's phase and pull request, keeping the lock when in doubt. A refused request gets false with its refusal. It is a selectable field (field selector status.holdsTarget), so the executor's lock reads only holders. |
 | `breakerCounts` | boolean | No | breakerCounts says whether the executor's limits still read the request for the circuit breaker. It is set in the status write that ends the request: true for a success (Merged or a later phase), a failure (Failed, NeedsIntervention) or a probe (breakerProbe) that ended in any other way, false for any other end. The executor sets it to false only when a newer request in Succeeded is recorded (breakerClearedBy names it), and back to true when that request is deleted, or when a request whose deletion may still close a pull request (NeedsIntervention, Expired) is being deleted. It is unset while the request has not ended and on one that ended before the field existed; an unset request is read (fail closed), and the executor sets the field once on an ended one from its status. It is a selectable field (field selector status.breakerCounts), so the breaker reads only the outcomes that still count. |
 | `breakerClearedBy` | string | No | breakerClearedBy is the name of the request in Succeeded whose success made the executor set breakerCounts to false on this one, written in the same status write. When that request is deleted, its finalizer sets breakerCounts back to true on every request that names it, before the finalizer is removed. It is a selectable field (field selector status.breakerClearedBy).<br>Maximum length: 253 |
 | `queuedBehind` | [RequestRef](#requestref) array | No | queuedBehind names the requests that held the lock on the target when the executor last held this one back (Queued, with any reason) while the target was locked, written in that status write (#643). When a later check finds other holders, the executor first reads the recorded ones from the API server and only then replaces them. Until the request is decided, it ends Superseded (PlanFresh False, reason AnotherRequestClosed) when a recorded request ended NeedsIntervention because its pull request for the same target and field was closed without a merge. A request that never waited behind that one has no record of it and is decided as usual. Only the executor writes it; once set it is never removed or emptied (a validation rule refuses that). At most four holders are recorded, those for the same field first: a request behind more holders than that may have no record of one, and is then decided as usual when that one's pull request is closed.<br>Maximum items: 4<br>List type: map<br>List key: `uid` |
@@ -1285,7 +1313,7 @@ Used by: [RemediationSettings](#remediationsettings).
 RequestRef names another RemediationRequest in the same namespace.
 
 
-Used by: [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus).
+Used by: [ProposedRevert](#proposedrevert), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1344,6 +1372,41 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `path` | [GitFilePath](#gitfilepath) | Yes | path is the file that declares the target.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$` |
 | `buildPath` | [GitDirPath](#gitdirpath) | No | buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root). Before every commit the pull request step renders it with and without the change and refuses anything but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan digest covers it; a request without it is never committed.<br>Maximum length: 512<br>Minimum length: 1<br>Pattern: <code>^(\.&#124;&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*(/&#91;A-Za-z0-9_]&#91;A-Za-z0-9_.-]*)*)$</code> |
 | `baseCommit` | string | Yes | baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch is created; later merges to the target branch do not change it.<br>Pattern: `^[0-9a-f]{40}$` |
+
+### RevertReason
+
+RevertReason is why an entry of an Incident's status.revertsProposed is Abandoned.
+
+- Underlying type: string
+- One of `TargetGone`, `TargetKindUnsupported`, `OutsideAgeBound`, `IncidentDeleting`, `RequestGone`, `NotRevertible`, `NameTaken`, `CreateInvalid`
+
+Used by: [ProposedRevert](#proposedrevert).
+
+| Value | Description |
+| --- | --- |
+| `TargetGone` | RevertReasonTargetGone: the failed request's target is not found, was replaced by another object of that name (another UID) or is being deleted. |
+| `TargetKindUnsupported` | RevertReasonTargetKindUnsupported: the API server no longer serves the target's kind (KEDA uninstalled, for example), or the action cannot target that kind. |
+| `OutsideAgeBound` | RevertReasonOutsideAgeBound: the failed request's Verified condition moved more than 24 hours ago (or is too far ahead of the analyzer's clock, or has no time) before the revert could be created. A target the analyzer was refused access to (Forbidden) is retried until then and ends here. |
+| `IncidentDeleting` | RevertReasonIncidentDeleting: the Incident is being deleted. |
+| `RequestGone` | RevertReasonRequestGone: the failed request was deleted, is being deleted, or its name now belongs to another request (another UID). |
+| `NotRevertible` | RevertReasonNotRevertible: the failed request is there with its UID, but no longer ended Failed with Verified False, or its action can no longer be inverted. |
+| `NameTaken` | RevertReasonNameTaken: a request with the revert's name exists and does not revert this request; it is left as it is. |
+| `CreateInvalid` | RevertReasonCreateInvalid: the API server refused the revert as invalid. The analyzer's log has the error. |
+
+### RevertState
+
+RevertState is the state of an entry of an Incident's status.revertsProposed.
+
+- Underlying type: string
+- One of `Pending`, `Created`, `Abandoned`
+
+Used by: [ProposedRevert](#proposedrevert).
+
+| Value | Description |
+| --- | --- |
+| `Pending` | RevertPending: the proposer decided that the request gets no second revert, and a create is still coming. Every create, the first or a retried one, runs the same checks first; the entry then moves to Created or, when a check says no, to Abandoned. |
+| `Created` | RevertCreated: the revert exists or existed. Nothing more is done for the request, also after the revert was deleted. |
+| `Abandoned` | RevertAbandoned: no revert was made and none will be: a check before the create said no, the revert's name is taken by another request, or the create was refused as invalid. The entry's reason says which, and a Warning event RevertAbandoned says it too. |
 
 ### ReviewCheck
 
@@ -1473,7 +1536,7 @@ already holds, so the API server can bound the cost of CEL rules that read the f
 - Maximum length: 36
 - Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 
-Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [OOMKill](#oomkill), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [PodBaseline](#podbaseline), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestRef](#requestref), [RequestReplacement](#requestreplacement), [VerificationReportSpec](#verificationreportspec).
+Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [OOMKill](#oomkill), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [PodBaseline](#podbaseline), [ProposedRevert](#proposedrevert), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestRef](#requestref), [RequestReplacement](#requestreplacement), [VerificationReportSpec](#verificationreportspec).
 
 ### Verification
 

@@ -238,13 +238,13 @@ func TestConflictWaitIsBoundedWhenTheClockGoesBack(t *testing.T) {
 		want   time.Duration
 		wantOK bool
 	}{
-		"just started":              {start, conflictConfirmWait, true},
+		"just started":              {start, confirmWait, true},
 		"one minute in":             {start.Add(time.Minute), time.Minute, true},
-		"over":                      {start.Add(conflictConfirmWait + time.Second), 0, true},
-		"clock back inside slack":   {start.Add(-30 * time.Second), conflictConfirmWait + 30*time.Second, true},
+		"over":                      {start.Add(confirmWait + time.Second), 0, true},
+		"clock back inside slack":   {start.Add(-30 * time.Second), confirmWait + 30*time.Second, true},
 		"clock back past the slack": {start.Add(-mergeCommitClockSlack - time.Second), 0, false},
 	} {
-		if got, ok := conflictWaitRemaining(start, tc.now); got != tc.want || ok != tc.wantOK {
+		if got, ok := confirmWaitRemaining(start, tc.now); got != tc.want || ok != tc.wantOK {
 			t.Errorf("%s: got %s %v, want %s %v", name, got, ok, tc.want, tc.wantOK)
 		}
 	}

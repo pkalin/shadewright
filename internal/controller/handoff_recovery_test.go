@@ -3,9 +3,12 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -179,8 +182,8 @@ func TestCloseChangeRequestAfterTwoRefusedRewrites(t *testing.T) {
 	if hasMarker(cr.Body, rr) {
 		t.Fatal("fixture: the replacement accepts the root's marker without reading the chain")
 	}
-	if got, err := r.findOwnChangeRequest(ctx, rr); err != nil || got == nil || got.Number != cr.Number {
-		t.Fatalf("the lock's look-up lost the inherited pull request: %v, %v", got, err)
+	if v, _, err := r.lookHeld(ctx, rr); err != nil || v.state != changeOpen || v.pr.Number != cr.Number {
+		t.Fatalf("the lock's look-up lost the inherited pull request: %v, %v", v, err)
 	}
 	if err := r.closeChangeRequest(ctx, rr); err != nil {
 		t.Fatalf("replacement lost ownership after two refused rewrites: %v", err)
@@ -249,4 +252,85 @@ func TestInheritedMarkerNeedsTheChain(t *testing.T) {
 			t.Fatalf("ownsMarker = %v, %v, want false", ok, err)
 		}
 	})
+}
+
+// One 404 for the branch while the predecessor's pull request is open is a failed read, never "nothing to
+// recover" (#688): the recovery is retried, and the replacement does not go on to the freshness check, which could
+// let it expire with its commit on the pull request.
+func TestRecoverHandoffRetriesABranch404WhileThePullRequestIsOpen(t *testing.T) {
+	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	g.SetFail(func(op string) error {
+		if op == opBranchHead {
+			return fmt.Errorf("branch: %w", providers.ErrNotFound)
+		}
+		return nil
+	})
+	_, recovered, err := r.recoverStep(ctx, rr)
+	if err == nil || !recovered {
+		t.Fatalf("a 404 for the branch of an open pull request was taken as nothing to recover: recovered=%v, err=%v",
+			recovered, err)
+	}
+	if !errors.Is(err, errConflictingReads) {
+		t.Fatalf("want the conflicting reads in the error, got %v", err)
+	}
+	if rr.Status.Phase != api.PhasePolicyChecked {
+		t.Fatalf("the replacement moved on a failed read: %s", rr.Status.Phase)
+	}
+}
+
+// A 404 for the branch of a merged pull request (a branch deleted after the merge) is judged by the pull request's
+// head: the merge of the handoff's commit is the replacement's.
+func TestRecoverHandoffJudgesTheMergedHeadWhenTheBranchIsGone(t *testing.T) {
+	r, g, _, rr, cr, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	g.SetFail(func(op string) error {
+		if op == opBranchHead {
+			return fmt.Errorf("branch: %w", providers.ErrNotFound)
+		}
+		return nil
+	})
+	_, recovered, err := r.recoverStep(ctx, rr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered || rr.Status.Phase != api.PhaseMerged {
+		t.Fatalf("the merge of the handoff's commit was not recovered: recovered=%v, phase=%s", recovered, rr.Status.Phase)
+	}
+}
+
+// A read of the predecessor's pull request that the Git host refuses (403) is an unknown verdict, not a refused
+// write (#688): the recovery retries it before the deadline, and once the grace after it is over ends with the
+// recovery's own reason, never with a refusal of a close.
+func TestRecoverHandoffRetriesARefusedReadUntilTheGraceEnds(t *testing.T) {
+	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	g.SetFail(func(op string) error {
+		switch op {
+		case opBranchHead:
+			return fmt.Errorf("branch: %w", providers.ErrNotFound)
+		case opGet, opList:
+			return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+		}
+		return nil
+	})
+	if _, err := r.recheck(ctx, rr); err == nil {
+		t.Fatal("a refused read was not handed back for a retry")
+	}
+	if rr.Status.Phase != api.PhasePolicyChecked {
+		t.Fatalf("a refused read before the deadline ended the replacement: %s", rr.Status.Phase)
+	}
+	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
+	if _, err := r.recheck(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != api.PhaseNeedsIntervention {
+		t.Fatalf("phase %s", rr.Status.Phase)
+	}
+	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened); c == nil || c.Reason != ReasonHandoffRecoveryFailed {
+		t.Fatalf("PullRequestOpened: %+v", c)
+	}
 }

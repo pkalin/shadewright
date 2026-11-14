@@ -46,7 +46,54 @@ A spoke is a standalone install plus a reporter. It keeps working when the hub i
 - The object records the spoke's OIDC issuer URL and the UID of its `kube-system` namespace. The hub accepts reports for a name only from that issuer and UID. A rebuilt cluster needs a reviewed change of the object.
 - A suspended or revoked spoke is refused with a clear status, and the refusals are counted in a metric. What it sent before stays readable and is marked stale. Nothing new is stored.
 - The spoke learns of it from the refusal. It sets a condition, backs off to a slow retry and keeps working standalone. The hub never calls it.
-- A spoke with no reachable issuer (Kind, on-premises): the `Cluster` object carries the public keys (JWKS) that sign the spoke's ServiceAccount tokens, and the hub verifies tokens against them. There is no shared secret and no hub CA. A key rotation in the spoke needs a reviewed change.
+- A spoke with no reachable issuer (Kind, on-premises): the `Cluster` object carries the public keys (JWKS) that sign the spoke's ServiceAccount tokens, and the hub verifies tokens against them. There is no shared secret and no hub CA. Two decisions of 2026-11-14 apply, the second revising the first. Earlier: a key rotation in the spoke needs a reviewed change. Later: the reviewed merge that registers a cluster happens once, and after it a spoke with inline keys may update its signing keys at the hub without another pull request, but slowly and visibly (design below, Proposed). The earlier rule now applies only where key continuity is lost.
+- **Decided, 2026-11-14:** onboarding must not require copying identifiers by hand. The spoke publishes a ready-to-use registration in the operator namespace. The design that follows is **Proposed**.
+
+#### The registration manifest (Proposed)
+
+- **Proposed.** The reporter keeps a ConfigMap `shadewright-cluster-registration` in the operator namespace (`shadewright-system` by default) with one key, `cluster.yaml`: the complete `Cluster` manifest (section 7) for this spoke, ready to commit to the hub's GitOps repository. It holds:
+  - the `clusterId`;
+  - the issuer URL, read from the `iss` claim of the reporter's own projected token (the reporter decodes its own token and verifies nothing, it only reads where the cluster says it comes from);
+  - `keys: Discovery` or `Inline`;
+  - for `Inline`, the cluster's ServiceAccount signing keys, read from the API server's `/openid/v1/jwks`;
+  - the reporter's subject and the UID of `kube-system`.
+- **Proposed.** A second key, `status`, carries the last result from the hub: accepted, refused with the reason, or registration out of date (key continuity lost, see "Key continuity for Inline"). The reporter writes it, from what the hub answered. Who else can write it is decided by RBAC on ConfigMaps in the operator namespace, not by this ADR: anyone with `update` on ConfigMaps there can change both keys.
+- **Proposed.** The chart creates the ConfigMap only when it is absent, and never overwrites `cluster.yaml` or `status` on an upgrade or a reconcile. The reporter rewrites both keys on every pass, so a cleared ConfigMap heals. A deleted one comes back with the next chart upgrade, because the reporter cannot create it.
+- **Proposed.** Which mode it writes: `Discovery` when a chart value says the issuer is reachable from the hub, `Inline` otherwise. The value name is not final (for example `reporter.registration.issuerReachable`). `Inline` is the safe default, because it needs no reachable issuer, which is the case for Kind and on-premises clusters. Whether that default is right is open (question 14).
+- **Proposed.** `kubectl shadewright` gets a command that prints this manifest or writes it to a file, for people who do not read ConfigMaps. The name `kubectl shadewright registration` is a proposal and is not final. The hub's status page may show the expected shape of the manifest. No hub component reads the ConfigMap.
+- **Proposed.** Onboarding then is three steps: install the spoke with the hub's URL, copy `cluster.yaml` into a pull request on the hub's GitOps repository, merge. Nothing is typed by hand.
+- **Proposed.** What a reviewer has to look at: the issuer host (does it belong to the cluster the name claims?) and the cluster name. The subject follows a fixed convention (`system:serviceaccount:<operator namespace>:<reporter service account>`), so a different one is a reason to ask. The `kube-system` UID is copied, not judged. For `Inline`, the issuer host and name say nothing about the keys, so the reviewer needs a check on them: `kubectl shadewright registration` (proposed) reads `/openid/v1/jwks` live from the cluster, compares it with the ConfigMap and prints a mismatch, and the person who opens the pull request runs it. The reviewer of the pull request sees that output only if it is pasted into the description.
+- **Proposed.** Rotation for `Inline`: with `keyUpdates: Automatic` (below) a rotation needs no new pull request: the reporter sends the current key set and the hub follows it, after a window (hours, not seconds). The reporter rewrites `cluster.yaml` to match, so a later re-registration starts from current keys. Only when continuity is lost does it set `registration out of date` in `status`, and the hub then refuses the new tokens until a reviewed change merges.
+
+Example, with placeholder values only (illustrative, not final):
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shadewright-cluster-registration
+  namespace: shadewright-system
+data:
+  cluster.yaml: |
+    apiVersion: fleet.shadewright.io/v1alpha1
+    kind: Cluster
+    metadata:
+      name: lab-kind
+    spec:
+      clusterId: lab-kind
+      identity:
+        keys: Inline
+        issuer: https://issuer.example.com
+        subject: system:serviceaccount:shadewright-system:shadewright-reporter
+        kubeSystemUID: <uid of the kube-system namespace>
+        jwks: |
+          { "keys": [ { "kty": "RSA", "kid": "<key id>", "n": "<modulus>", "e": "AQAB" } ] }
+  status: |
+    result: registration out of date   # or accepted, or refused: <reason>
+    reason: continuity lost, the old signing key was removed before the hub saw the new one
+```
+
+**The ConfigMap is a convenience, not evidence (Proposed).** Everything in it is public, there is no secret. It is self-reported by the spoke, so whoever can edit it can change what gets pasted. What makes a cluster trusted is the reviewed merge in the hub's repository, as before, and for `Inline` the keys are checked against the live cluster by the command above. For `Discovery` the hub also fetches the keys from the issuer itself, so a wrong issuer in the pasted manifest never verifies a token. **Open, not decided:** a CI check in the hub's repository that fetches the issuer's discovery document for a new `Cluster` object and reports whether keys resolve (question 15).
 
 ```mermaid
 sequenceDiagram
@@ -56,19 +103,38 @@ sequenceDiagram
     participant C as Fleet controller
     participant S as Reporter (spoke)
     participant I as Intake
-    P->>R: Pull request adds the Cluster object (issuer, subject, kube-system UID, keys)
-    P->>R: Review and merge
+    Note over S: Proposed: the reporter writes the ConfigMap shadewright-cluster-registration (cluster.yaml, status) on every pass
+    P->>S: Read cluster.yaml (kubectl shadewright registration, or the ConfigMap)
+    P->>R: Pull request with that manifest, copied unchanged
+    P->>R: Review (issuer host, cluster name) and merge
     F->>C: Cluster object applied
     C->>C: On a conflict (same issuer and subject, or a shared inline key) refuse both objects
     C->>C: Create the namespace, a RoleBinding to intake's ClusterRole, quota
     C->>C: Set Ready on the Cluster object
-    Note over S: The spoke admin installs the reporter with the hub URL and audience
+    Note over S: The spoke admin installs the reporter with the hub URL and audience, before or after the merge
     S->>I: First report to the path of its cluster, with a projected ServiceAccount token
     I->>I: Load that one Cluster object, verify the token against it, compare the kube-system UID
     I-->>S: Accepted
+    S->>S: Record the result in the status key of the ConfigMap
     C->>C: Set Reporting (last seen, versions) on the Cluster object
-    Note over S,I: Removing or suspending the object makes the next report a refusal
+    Note over S,I: Removing or suspending the object makes the next report a refusal. For inline keys, a rotation is followed by the hub without a new merge but only after a window (keyUpdates Automatic), and only a lost continuity makes tokens fail until a reviewed change merges, which the status key says
 ```
+
+#### Key continuity for `Inline` (automatic, slow and visible)
+
+**Decided, 2026-11-14:** the reviewed merge happens once. After it, a spoke with inline keys may update its signing keys at the hub without another pull request, but slowly and visibly: a new key is pending first and becomes trusted only after reports carrying it were authenticated by several tokens issued over a longer window, with a notification when it goes pending, and keys are dropped only after a long absence. A single captured token must not be enough to change the trusted keys. The mechanism below is **Proposed**, and its numbers are not final.
+
+- **Anchor.** `spec.identity.jwks` in the reviewed `Cluster` object. The hub keeps the keys it currently trusts in `Cluster.status`, which starts equal to the anchor. Flux does not write status, so Git and the hub do not fight over it.
+- **Who writes what.** Intake verifies every token against the trusted set only. It records what it saw in an object in that spoke's namespace (working name `KeyObservation`): the key set a report carried, and for each authenticated report an identifier of the token and the hub's own receipt time. Intake has no write on `Cluster`. The fleet controller alone writes `Cluster.status` (grant: `update` on `clusters/status`), promoting and dropping keys from those records.
+- **Pending.** A key in a reported key set that the hub does not trust yet becomes pending, at that moment, with a condition and an Event on the `Cluster` object and a notification. A pending key verifies no token.
+- **Promotion.** A pending key becomes trusted only after reports carrying it were authenticated by several different tokens (different issue times) spread over a window, all signed by keys that were already trusted. Proposed: at least 3 tokens over at least 1 hour. The window is measured on the hub's clock from the receipt times it recorded. The issue time in a token only tells tokens apart and is never compared with the hub's clock.
+- **Drop.** A trusted key is dropped only after it has been absent from every reported key set for a long period. Proposed: 7 days, measured the same way. A key that is still in the anchor is never dropped by this rule.
+- **Suspending** the `Cluster` object discards pending keys.
+- **Never updated by themselves:** the cluster name, `clusterId`, issuer, subject and the `kube-system` UID. A rebuilt cluster, or a rotation where the old key was removed before the hub saw the new one, has lost continuity and needs a reviewed change. The reporter's `status` key and the hub's condition say so.
+- **Fail closed.** Any reviewed change to `spec.identity` replaces the trusted set with `spec.jwks` and discards pending keys, so a re-registration removes a key an attacker added. If `status` is lost after a rotation (a hub restore, an object recreated), the hub does not fall back to keys that were rotated out. The `Cluster` object holds only the reviewed keys, a hub with empty status trusts only those, and a spoke whose tokens do not verify against `spec.jwks` is refused until a reviewed change merges. **So a hub restore can require re-registration of every spoke that had rotated.** Whether the trusted keys in status should be backed up is open (question 18).
+- **Limits and visibility:** a cap on trusted and pending keys per cluster, a condition and an Event on the `Cluster` object, and a notification for each key that goes pending, is promoted or is dropped. The uniqueness rule (section 6) is checked before a key is promoted.
+- **A switch per cluster:** `spec.identity.keyUpdates: Automatic` or `Reviewed` (name not final). The proposed default is `Automatic`. With `Reviewed` a key outside the anchor is never pending: it is refused with a condition, and every key change is a reviewed pull request. `Discovery` clusters are unaffected, because the hub already follows their issuer's keys.
+- **Trade-off.** A single captured token (lifetime about 10 minutes) can at most add a pending key, which is visible and is discarded by a suspension or a reviewed change. Whoever can keep minting tokens for the reporter's identity for the whole window can still get a key trusted: that is the accepted cost (threat table). The damage is bounded to that spoke's namespace at the hub: false or missing reports. In phase 1 nothing a spoke sends reaches a model, a Git write or another spoke. The remedy is to suspend the `Cluster` object and register again with a reviewed change. With `Discovery`, a spoke token cannot change the issuer's key document, and exposure ends when the issuer's keys rotate; with `Inline` and `Automatic` it ends only with a reviewed re-registration. This must be re-examined before any later phase lets the hub act on spoke data (invariant 4).
 
 ### 4. Components (Proposed)
 
@@ -77,26 +143,29 @@ In each spoke:
 - **`reporter`**, a fourth identity (invariant 6). Its reads, exactly:
   - In the operator namespace: Incidents, RemediationRequests and VerificationReports.
   - Cluster-scoped: `get` on `remediationsettings`, and `get` on the Namespace `kube-system` by `resourceNames` (for its UID).
+  - Proposed: `get` on the one ConfigMap `shadewright-cluster-registration` by `resourceNames`, and `get` on the non-resource URL `/openid/v1/jwks`.
+
+  Its writes, exactly (Proposed): `update` on that one ConfigMap, by `resourceNames`. `create` cannot be limited by name, so the chart creates the ConfigMap, only when it is absent and never overwriting it, and the reporter never creates anything. No other new grant.
 
   It has no Secrets, no Git identity and no model credential. Its egress goes only to the hub's host. It reads the settings status only to report it, never to decide anything (`AGENTS.md`, invariant 6).
 
 At the hub:
 
-- **`intake`**: an HTTPS service, stateless, N replicas. It verifies the token, validates the report and stores it.
-- **`fleet controller`**: reconciles `Cluster` objects into a namespace, a RoleBinding for intake in that namespace, an object-count quota and staleness conditions.
+- **`intake`**: an HTTPS service, stateless, N replicas. It verifies the token, validates the report and stores it, together with the key observations of section 3 (pending keys seen and the tokens that carried them). It reads `Cluster` objects and has no write on them.
+- **`fleet controller`**: reconciles `Cluster` objects into a namespace, a RoleBinding for intake in that namespace, an object-count quota and staleness conditions. It alone writes `Cluster.status` (`update` on `clusters/status`), including the trusted and pending keys, which it promotes and drops from the key observations intake recorded. It reads those records in the spoke namespaces.
 - **A read-only status page**, and later the notifier ([#97](https://github.com/pkalin/shadewright/issues/97)).
 
 In phase 1 the hub has no model credential and no Git write identity.
 
 **Hub RBAC (Proposed).**
 
-- The chart ships one static ClusterRole for intake's writes (the reported kinds). The fleet controller never creates Roles.
-- The fleet controller creates Namespaces, ResourceQuotas and RoleBindings only. Its `bind` verb is limited by `resourceNames` to that one ClusterRole, and it has no `escalate`.
+- The chart ships one static ClusterRole for intake's writes (the reported kinds and the key observations). The fleet controller never creates Roles.
+- The fleet controller creates Namespaces, ResourceQuotas and RoleBindings only, and updates `clusters/status`. Its `bind` verb is limited by `resourceNames` to that one ClusterRole, and it has no `escalate`.
 - RBAC cannot limit `create` on Namespaces by name. So a compromised fleet controller could create any namespace. A ValidatingAdmissionPolicy that limits the controller to the spoke namespace prefix is proposed to close this.
 - **RBAC does not enforce the boundary between spokes.** Intake is one ServiceAccount, bound in every spoke namespace. The guard is intake's code: the namespace a report is written to comes from the verified `Cluster` object, never from the report or the request path. The build needs tests that a report cannot reach another cluster's namespace. Per-namespace impersonation by intake would move the guard into RBAC; it is an open question.
 - No hub identity is `cluster-admin`.
 
-[![Identities of control plane mode and what each may write: the three spoke identities keep their writes, the reporter reads and sends, intake writes only the reported kinds in the namespace of the cluster it verified, the fleet controller creates namespaces, ResourceQuotas and RoleBindings only, intake's writes are checked in its code and not by RBAC, and no hub component has a model credential or a Git write](../assets/diagrams/control-plane-identities.svg)](../assets/diagrams/control-plane-identities.svg "Open full size")
+[![Identities of control plane mode and what each may write: the three spoke identities keep their writes, the reporter reads, sends reports and updates only its own registration ConfigMap, intake writes only the reported kinds and key observations in the namespace of the cluster it verified and cannot write Cluster objects, the fleet controller creates namespaces, ResourceQuotas and RoleBindings only and alone writes Cluster status, intake's writes are checked in its code and not by RBAC, and no hub component has a model credential or a Git write](../assets/diagrams/control-plane-identities.svg)](../assets/diagrams/control-plane-identities.svg "Open full size")
 
 ### 5. An intake service instead of the hub's Kubernetes API (Proposed)
 
@@ -127,16 +196,16 @@ The `kube-system` UID travels in the report and is compared with the object. Thi
 
 Issuer discovery is a fetch of a URL taken from a reviewed object, with these limits: https only, no redirects, size and time limits, a cache, and an issuer host that must match an allow-list of suffixes in the hub's settings.
 
-**Uniqueness.** For `Discovery`, issuer plus subject must be unique. For `Inline`, no two objects may share a signing key. On a conflict the fleet controller refuses both objects (condition `IdentityConflict`). The older one does not stay: neither is accepted until a reviewed change resolves it.
+**Uniqueness.** For `Discovery`, issuer plus subject must be unique. For `Inline`, no two objects may share a signing key. On a conflict between reviewed specs the fleet controller refuses both objects (condition `IdentityConflict`). The older one does not stay: neither is accepted until a reviewed change resolves it. A key held only in a cluster's status or pending set never refuses the reviewed `spec.jwks` of another cluster: that status or pending key is dropped and an alert is raised. The "both refused" rule applies between reviewed specs only.
 
 ### 7. The `Cluster` object (Proposed)
 
 API group `fleet.shadewright.io/v1alpha1`, cluster-scoped, applied by Flux from the hub's GitOps repository.
 
 - `spec.clusterId`: equal to the spoke's `clusterId`.
-- `spec.identity`: `issuer`, `keys` (`Discovery` or `Inline`), `jwks`, `subject`, `kubeSystemUID`.
+- `spec.identity`: `issuer`, `keys` (`Discovery` or `Inline`), `jwks` (the anchor for `Inline`), `keyUpdates` (`Automatic` or `Reviewed`, `Inline` only), `subject`, `kubeSystemUID`. The spec holds only reviewed keys.
 - `spec.suspended`.
-- Status conditions `Ready`, `Reporting` (last seen) and `Stale`, and the reported versions.
+- Status conditions `Ready`, `Reporting` (last seen) and `Stale`, the reported versions, and for `Inline` the currently trusted keys and the pending ones, written by the fleet controller only.
 
 This sketch is illustrative and not final. Field names, validation and the way a value is derived are for the build task.
 
@@ -256,10 +325,10 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 
 1. **Model output is never authorization.** The hub has no model credential, and nothing a spoke sends reaches a model there. The analyzer and the policy gate in each spoke are unchanged.
 2. **Actions are a closed catalog.** Phase 1 adds no action and no way to ask for one. A report is data about requests that already exist. The directives of phase 2 can only restrict.
-3. **Changes go through Git only.** The hub writes nothing to a spoke and nothing to any Git repository in phase 1. A new spoke is a reviewed pull request to the hub's repository. Configuration for a spoke, when it comes, is a pull request to that spoke's repository.
-4. **Everything from the cluster is untrusted input.** The spoke redacts before anything leaves it. The hub validates again, bounds every field, stores spoke objects as kinds of their own that no controller acts on, and escapes or fences what it shows or sends.
+3. **Changes go through Git only.** The hub writes nothing to a spoke and nothing to any Git repository in phase 1. Automatic key updates change the hub's own trust state in `Cluster.status`, not a cluster, so no cluster is changed outside Git. Invariant 4 is the one they touch. A new spoke is a reviewed pull request to the hub's repository. Configuration for a spoke, when it comes, is a pull request to that spoke's repository.
+4. **Everything from the cluster is untrusted input.** The spoke redacts before anything leaves it. The hub validates again, bounds every field, stores spoke objects as kinds of their own that no controller acts on, and escapes or fences what it shows or sends. **With `keyUpdates: Automatic` this invariant is bent, not simply held:** data a spoke sends changes who the hub authenticates as that spoke, which is untrusted input changing trust state. The bounds: it changes only that spoke's own identity, only its keys (never name, issuer, subject or UID), only after the window of section 3, visibly (condition, Event, notification), and phase 1 has no hub action on spoke data. `Reviewed` removes it. It must be re-examined before phase 2, and it is the reason for open question 17.
 5. **Reconciliation is idempotent.** Delivery is at least once. Intake upserts by deterministic names, so a repeated or replayed report changes nothing. Dropping an out-of-order report depends on the ordering rule, which is an open question (6); the candidate is an epoch and counter pair per report.
-6. **Separate identities.** The reporter is a fourth identity with read-only access and no Secret, Git identity or model credential. At the hub, intake writes only the reported kinds, and the fleet controller creates Namespaces, ResourceQuotas and RoleBindings only, with `bind` limited to one ClusterRole and no `escalate`. RBAC does not keep intake to one namespace, because it is one ServiceAccount bound in every spoke namespace: that guard is intake's code, which takes the namespace from the verified `Cluster` object, and it needs tests. No hub component has a model credential or a Git write identity. The build PR has to add the reporter, intake and the fleet controller to invariant 6; this ADR does not edit `AGENTS.md`.
+6. **Separate identities.** The reporter is a fourth identity with read-only access on the cluster's objects and no Secret, Git identity or model credential. Its only write is `update` on its one registration ConfigMap by `resourceNames`; its `get` on that ConfigMap and on the non-resource URL `/openid/v1/jwks` are reads. At the hub, intake writes only the reported kinds and the key observations, and has no write on `Cluster`. The fleet controller alone writes `Cluster.status` (`update` on `clusters/status`, which holds the trusted keys), and otherwise creates Namespaces, ResourceQuotas and RoleBindings only, with `bind` limited to one ClusterRole and no `escalate`. RBAC does not keep intake to one namespace, because it is one ServiceAccount bound in every spoke namespace: that guard is intake's code, which takes the namespace from the verified `Cluster` object, and it needs tests. No hub component has a model credential or a Git write identity. The build PR has to add the reporter, intake and the fleet controller to invariant 6; this ADR does not edit `AGENTS.md`.
 
 ## Threats and what stops each
 
@@ -272,6 +341,9 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 | Stale data read as current | Staleness is decided from the hub's own recorded receipt time. A suspended or revoked spoke's data stays readable and is marked stale. The status page shows when the hub last accepted a report. | A viewer who ignores the mark. |
 | A compromised hub | It holds no kubeconfig or spoke credential, never calls a spoke, and has no Git write identity in phase 1. Replies carry only accepted or refused, and later only restrictive directives. | It can show false data and send false notifications. It can pause remediation in later phases. It cannot cause an action. In the prototype, hub and spoke share one AKS cluster with an executor that holds the Git App, so this row does not hold for that cluster. |
 | Injection through the status page or notifications | Fields are bounded and redacted in the spoke. The status page escapes everything. The notifier fences spoke text and neutralises mentions. | Not built; the build tasks need tests for each. |
+| A tampered registration ConfigMap (Proposed) | The ConfigMap is a convenience, not evidence. A cluster is trusted only after the reviewed merge of its `Cluster` object, where the reviewer checks the issuer host and the name. For `Discovery` the hub fetches keys from the issuer itself, so a wrong issuer never verifies a token. For `Inline` the issuer host and name say nothing about the keys, so `kubectl shadewright registration` (proposed) compares the ConfigMap with `/openid/v1/jwks` read live from the cluster and prints a mismatch, run by the person who opens the pull request. Everything in it is public. A CI check on new `Cluster` objects is proposed as optional and is not decided. | Whoever can write ConfigMaps in the operator namespace (RBAC decides who) can change what gets pasted. A reviewer who merges without the comparison approves it. With `Inline`, wrong keys that get merged make the hub trust whoever holds the matching private key. |
+| A captured reporter token used to add a key (Proposed) | A key the hub does not trust becomes pending, not trusted, with a condition, an Event and a notification at once. It is promoted only after several tokens with different issue times over a window (proposed at least 3 over at least 1 hour), all signed by already trusted keys. A token lives about 10 minutes. Suspending the object discards pending keys, and a reviewed change to `spec.identity` resets the trusted set. `keyUpdates: Reviewed` turns it off per cluster. | The window stops one captured token. A reader who ignores the notification leaves the pending key to be promoted if more tokens follow. |
+| Someone who can mint reporter tokens (`create serviceaccounts/token`, or pod create in the operator namespace) (Proposed) | The window does not stop this: they can produce tokens for as long as they like. Everything else stays: the identity fields never change by themselves, a cap on keys, the uniqueness check before promotion, and visibility at each step. | **Accepted cost for phase 1.** They can get a key of their own trusted and keep reporting as that spoke after cleanup, until a reviewed re-registration. Damage is bounded to that spoke's namespace in phase 1. Re-examine before any phase lets the hub act on spoke data. |
 | SSRF through issuer discovery | The URL comes only from a reviewed object. https only, no redirects, size and time limits, a cache, and an allow-list of host suffixes in the hub's settings. | Whether to refuse private or link-local addresses after name resolution: open. |
 
 ## Consequences
@@ -281,12 +353,13 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 **Harder.**
 - There is a new API group, a new set of components to build and operate, and a fourth identity in the spokes, with an `AGENTS.md` change in the build PR.
 - The hub is a service that spokes depend on for the fleet view only. Its availability is an open question.
-- A spoke rebuild or a key rotation needs a reviewed change at the hub.
+- A spoke rebuild, or a rotation that loses key continuity, needs a reviewed change at the hub. So can a hub restore that loses `Cluster.status`, for every spoke that had rotated.
 - Hashed names (an optional setting) make the fleet view harder to read.
 
 **Accepted.**
 - In phase 1 the fleet view is read-only. The hub shows and notifies and proposes nothing.
 - Reports are as true as the spoke that sends them. A compromised spoke can lie about itself.
+- With `keyUpdates: Automatic` (the proposed default), data a spoke sends changes who the hub trusts as that spoke (invariant 4). Whoever can mint reporter tokens for the whole window can keep their place after cleanup. This is slow, bounded and visible (see "Key continuity for Inline") and is accepted for phase 1 only.
 - Cost: the prototype must be priced with `make lab-cost` before it is built.
 
 ## Alternatives considered
@@ -306,13 +379,18 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 4. Whether hashed names should be the default instead of an option.
 5. Multi-tenancy at the hub: who may read which cluster's namespace, and whether the status page shows every cluster to every viewer.
 6. How intake orders reports. An object's `resourceVersion` is opaque and must not be ordered. The candidate is the reporter's epoch plus a counter (section 9), and it is not chosen. How a reporter keeps the counter across a restart is part of it.
-7. Where the reporter records the condition it sets after a refusal. It has no write on Incidents or requests, so this needs an object it may write, or a new grant (invariant 6), which the build task must name.
+7. Where the reporter records the condition it sets after a refusal. It has no write on Incidents or requests. **Proposed answer:** the `status` key of its registration ConfigMap (section 3), which it may update by `resourceNames` and which needs no other grant. Open until the ADR is accepted.
 8. How the heartbeat gets the delivery source report of `doctor`. `doctor` is a kubectl plugin that runs with a person's permissions and reads Flux objects, and the reporter's reads above do not include them. Either the reporter gets that read, or the report comes from state another component already records.
 9. Whether `spec.clusterId` must equal the object name, and the rule for the name of a spoke's namespace.
 10. Whether a refusal for a rate limit or a malformed body makes the reporter back off like a refusal for a suspended cluster, the reason names, and the leeway for clock difference when intake checks a token's expiry.
 11. Whether intake refuses private and link-local addresses after name resolution of an issuer host, besides the host allow-list.
 12. Whether intake should impersonate a per-namespace identity when it writes, so that RBAC enforces the boundary between spokes, and the cost of that.
 13. The price of the prototype ([#669](https://github.com/pkalin/shadewright/issues/669)): `make lab-cost` in `shadewright-azure`.
+14. Whether the chart value that picks `Discovery` or `Inline` for the registration manifest has `Inline` as its default, and its name.
+15. Whether the hub's repository gets a CI check that fetches the issuer's discovery document for a new `Cluster` object and reports whether keys resolve, and who owns it.
+16. The name of the command that prints the registration (`kubectl shadewright registration` is a proposal), and whether the hub's status page shows the expected shape of the manifest.
+17. Whether `keyUpdates: Automatic` is the right default once phase 2 or 3 exists, when the hub can act on what spokes send, and the name, the cap, the number of tokens, the window and the absence period of the key updates (the values in section 3 are not final).
+18. Whether the trusted keys in `Cluster.status` should be backed up, so that a hub restore does not require re-registration of every spoke that had rotated (see "Fail closed" in section 3).
 
 ## Amendments
 

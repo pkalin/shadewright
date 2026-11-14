@@ -59,22 +59,53 @@ const (
 	// RevertCreated: the revert exists or existed. Nothing more is done for the request, also after the revert
 	// was deleted.
 	RevertCreated RevertState = "Created"
-	// RevertAbandoned: a check before the create said no (the target is gone, replaced or not readable, the
-	// request passed the age bound or was deleted, the Incident is being deleted, the revert's name is taken by
-	// another request, the create was refused as invalid), so no revert is made for the request, for good. A
-	// Warning event RevertAbandoned says why.
+	// RevertAbandoned: no revert was made and none will be: a check before the create said no, the revert's name
+	// is taken by another request, or the create was refused as invalid. The entry's reason says which, and a
+	// Warning event RevertAbandoned says it too.
 	RevertAbandoned RevertState = "Abandoned"
+)
+
+// RevertReason is why an entry of an Incident's status.revertsProposed is Abandoned.
+// +kubebuilder:validation:Enum=TargetGone;TargetKindUnsupported;OutsideAgeBound;IncidentDeleting;RequestGone;NameTaken;CreateInvalid
+type RevertReason string
+
+const (
+	// RevertReasonTargetGone: the failed request's target is not found, was replaced by another object of that
+	// name (another UID) or is being deleted.
+	RevertReasonTargetGone RevertReason = "TargetGone"
+	// RevertReasonTargetKindUnsupported: the API server no longer serves the target's kind (KEDA uninstalled, for
+	// example), or the action cannot target that kind.
+	RevertReasonTargetKindUnsupported RevertReason = "TargetKindUnsupported"
+	// RevertReasonOutsideAgeBound: the failed request's Verified condition moved more than 24 hours ago (or is
+	// too far ahead of the analyzer's clock, or has no time) before the revert could be created. A target the
+	// analyzer was refused access to (Forbidden) is retried until then and ends here.
+	RevertReasonOutsideAgeBound RevertReason = "OutsideAgeBound"
+	// RevertReasonIncidentDeleting: the Incident is being deleted.
+	RevertReasonIncidentDeleting RevertReason = "IncidentDeleting"
+	// RevertReasonRequestGone: the failed request was deleted, is being deleted, or its name now belongs to
+	// another request (another UID).
+	RevertReasonRequestGone RevertReason = "RequestGone"
+	// RevertReasonNameTaken: a request with the revert's name exists and does not revert this request; it is
+	// left as it is.
+	RevertReasonNameTaken RevertReason = "NameTaken"
+	// RevertReasonCreateInvalid: the API server refused the revert as invalid. The analyzer's log has the error.
+	RevertReasonCreateInvalid RevertReason = "CreateInvalid"
 )
 
 // ProposedRevert is an entry of an Incident's status.revertsProposed: a failed request, by name and UID, and
 // how far the proposer got with its revert.
+// +kubebuilder:validation:XValidation:rule="has(self.reason) == (self.state == 'Abandoned')",message="reason is set exactly when state is Abandoned"
 type ProposedRevert struct {
 	RequestRef `json:",inline"`
 
-	// state is Pending from the decision until the revert exists, then Created, or Abandoned when a check
-	// before the create said no. Created and Abandoned are final.
+	// state is Pending from the decision until the revert exists, then Created, or Abandoned when no revert
+	// will be made. Created and Abandoned are final. A new entry is always Pending.
 	// +required
 	State RevertState `json:"state"`
+
+	// reason is why the entry is Abandoned. It is set with that state, only with it, and never changes.
+	// +optional
+	Reason RevertReason `json:"reason,omitempty"`
 }
 
 // RevertName is the name of the revert of the request with UID failed: "revert-" and, in hex, the first 12

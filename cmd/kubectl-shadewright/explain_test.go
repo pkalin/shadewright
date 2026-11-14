@@ -373,46 +373,57 @@ func TestExplainRevert(t *testing.T) {
 	}
 }
 
-// TestExplainRevertedBy: a failed request whose Incident records it in status.revertsProposed shows the revert
-// the analyzer proposed, by its derived name, when the request is explained and when its Incident is; a request
-// of the same name and another UID shows none.
-func TestExplainRevertedBy(t *testing.T) {
+// TestExplainRevertProposed: a failed request whose Incident records it in status.revertsProposed shows the
+// entry's state, its reason when Abandoned, and the revert's derived name, when the request is explained and when
+// its Incident is; the Incident also lists the entries of requests that no longer exist. A request of the same
+// name and another UID shows no entry.
+func TestExplainRevertProposed(t *testing.T) {
+	const incA = "incident-a"
 	rr := explainRequestObj(testRR, remediationv1alpha1.PhaseFailed, time.Hour,
 		cond(remediationv1alpha1.ConditionVerified, metav1.ConditionFalse, "OOMKilled", "OOM killed", time.Minute))
 	rr.UID = "uid-failed"
-	inc := testIncident("incident-a", "a", testSubject, "OOM")
-	inc.Status.RevertsProposed = []remediationv1alpha1.ProposedRevert{{
-		RequestRef: remediationv1alpha1.RequestRef{Name: testRR, UID: "uid-failed"},
-		State:      remediationv1alpha1.RevertCreated}}
-	want := string(remediationv1alpha1.RevertName("uid-failed"))
-	for _, name := range []string{testRR, "incident-a"} {
-		e, err := explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text, js := explainOut(t, e)
-		if !strings.Contains(text, "Reverted by:  "+want) {
-			t.Errorf("explain %s: text lacks the revert %s:\n%s", name, want, text)
-		}
-		if !strings.Contains(js, `"revertedBy": "`+want+`"`) && !strings.Contains(js, `"revertedBy":"`+want+`"`) {
-			t.Errorf("explain %s: JSON lacks revertedBy:\n%s", name, js)
+	inc := testIncident(incA, "a", testSubject, "OOM")
+	inc.Status.RevertsProposed = []remediationv1alpha1.ProposedRevert{
+		{RequestRef: remediationv1alpha1.RequestRef{Name: testRR, UID: "uid-failed"},
+			State: remediationv1alpha1.RevertCreated},
+		{RequestRef: remediationv1alpha1.RequestRef{Name: "remediation-deleted", UID: "uid-deleted"},
+			State: remediationv1alpha1.RevertAbandoned, Reason: remediationv1alpha1.RevertReasonRequestGone},
+	}
+	revert := string(remediationv1alpha1.RevertName("uid-failed"))
+	for name, c := range map[string]struct {
+		state, reason, line string
+	}{
+		"Created":   {"Created", "", "Revert:       Created, revert " + revert},
+		"Pending":   {"Pending", "", "Revert:       Pending, revert " + revert},
+		"Abandoned": {"Abandoned", "TargetGone", "Revert:       Abandoned, reason TargetGone, revert " + revert},
+	} {
+		inc.Status.RevertsProposed[0].State = remediationv1alpha1.RevertState(c.state)
+		inc.Status.RevertsProposed[0].Reason = remediationv1alpha1.RevertReason(c.reason)
+		for _, explained := range []string{testRR, incA} {
+			e, err := explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, explained)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text, js := explainOut(t, e)
+			if !strings.Contains(text, c.line) {
+				t.Errorf("%s, explain %s: text lacks %q:\n%s", name, explained, c.line, text)
+			}
+			if !strings.Contains(js, `"state": "`+c.state+`"`) && !strings.Contains(js, `"state":"`+c.state+`"`) {
+				t.Errorf("%s, explain %s: JSON lacks the state:\n%s", name, explained, js)
+			}
+			deleted := "remediation-deleted: Abandoned, reason RequestGone, revert " +
+				string(remediationv1alpha1.RevertName("uid-deleted"))
+			if got := strings.Contains(text, deleted); got != (explained == incA) {
+				t.Errorf("%s, explain %s: the entry of the deleted request shown %v:\n%s", name, explained, got, text)
+			}
 		}
 	}
-	inc.Status.RevertsProposed[0].State = remediationv1alpha1.RevertPending
+	inc.Status.RevertsProposed[0].UID = "uid-other"
 	e, err := explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, testRR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text, _ := explainOut(t, e); strings.Contains(text, "Reverted by:") {
-		t.Errorf("a Pending entry shows a revert:\n%s", text)
-	}
-	inc.Status.RevertsProposed[0].State = remediationv1alpha1.RevertCreated
-	inc.Status.RevertsProposed[0].UID = "uid-other"
-	e, err = explain(context.Background(), explainClient(t, rr, inc, testSettings()), testNS, testRR)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if text, _ := explainOut(t, e); strings.Contains(text, "Reverted by:") {
+	if text, _ := explainOut(t, e); strings.Contains(text, "Revert:") {
 		t.Errorf("a record of another UID shows a revert:\n%s", text)
 	}
 }

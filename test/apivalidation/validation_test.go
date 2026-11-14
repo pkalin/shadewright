@@ -901,19 +901,27 @@ var _ = Describe("Incident", func() {
 		inc.Status.RevertsProposed = append(inc.Status.RevertsProposed, third)
 		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
 		inc.Status.RevertsProposed[2].State = v1alpha1.RevertAbandoned
+		inc.Status.RevertsProposed[2].Reason = v1alpha1.RevertReasonTargetGone
 		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "Pending may move to Abandoned")
 		abandoned := inc.Status.RevertsProposed[2]
+		with := func(e v1alpha1.ProposedRevert, reason v1alpha1.RevertReason) v1alpha1.ProposedRevert {
+			e.Reason = reason
+			return e
+		}
 
+		// Each row changes one thing of the stored list.
 		for _, kept := range [][]v1alpha1.ProposedRevert{
 			{second, abandoned},
 			{created, second},
 			nil,
-			{ref(created.Name, "29292929-2929-4929-8929-292929292929", v1alpha1.RevertCreated), second},
-			{ref("remediation-c", string(created.UID), v1alpha1.RevertCreated), second},
+			{ref(created.Name, "29292929-2929-4929-8929-292929292929", v1alpha1.RevertCreated), second, abandoned},
+			{ref("remediation-c", string(created.UID), v1alpha1.RevertCreated), second, abandoned},
 			{ref(created.Name, string(created.UID), v1alpha1.RevertPending), second, abandoned},
-			{ref(created.Name, string(created.UID), v1alpha1.RevertAbandoned), second, abandoned},
+			{with(ref(created.Name, string(created.UID), v1alpha1.RevertAbandoned), v1alpha1.RevertReasonTargetGone),
+				second, abandoned},
 			{created, second, ref(abandoned.Name, string(abandoned.UID), v1alpha1.RevertPending)},
 			{created, second, ref(abandoned.Name, string(abandoned.UID), v1alpha1.RevertCreated)},
+			{created, second, with(abandoned, v1alpha1.RevertReasonNameTaken)},
 		} {
 			changed := inc.DeepCopy()
 			changed.Status.RevertsProposed = kept
@@ -925,11 +933,76 @@ var _ = Describe("Incident", func() {
 		for _, bad := range [][]v1alpha1.ProposedRevert{
 			{created, second, abandoned, ref("remediation-d", string(second.UID), v1alpha1.RevertPending)},
 			{created, second, abandoned, ref("remediation-d", "30303030-3030-4030-8030-303030303030", "Done")},
+			{created, second, abandoned, with(ref("remediation-d", "30303030-3030-4030-8030-303030303030",
+				v1alpha1.RevertPending), "NoSuchReason")},
 		} {
 			changed := inc.DeepCopy()
 			changed.Status.RevertsProposed = bad
 			err := k8sClient.Status().Update(ctx, changed)
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error for %v: %v", bad, err)
+		}
+	})
+
+	const (
+		nameA = "remediation-a"
+		uidA  = "27272727-2727-4727-8727-272727272727"
+	)
+
+	It("sets the reason of a revertsProposed entry exactly with Abandoned", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Status.Phase = v1alpha1.IncidentEscalated
+		inc.Status.RevertsProposed = []v1alpha1.ProposedRevert{
+			{RequestRef: v1alpha1.RequestRef{Name: nameA, UID: uidA},
+				State: v1alpha1.RevertPending},
+			{RequestRef: v1alpha1.RequestRef{Name: "remediation-b", UID: "28282828-2828-4828-8828-282828282828"},
+				State: v1alpha1.RevertPending},
+		}
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		for name, edit := range map[string]func(e []v1alpha1.ProposedRevert){
+			"Abandoned without a reason": func(e []v1alpha1.ProposedRevert) { e[0].State = v1alpha1.RevertAbandoned },
+			"Pending with a reason":      func(e []v1alpha1.ProposedRevert) { e[0].Reason = v1alpha1.RevertReasonTargetGone },
+			"Created with a reason": func(e []v1alpha1.ProposedRevert) {
+				e[0].State, e[0].Reason = v1alpha1.RevertCreated, v1alpha1.RevertReasonTargetGone
+			},
+		} {
+			changed := inc.DeepCopy()
+			edit(changed.Status.RevertsProposed)
+			err := k8sClient.Status().Update(ctx, changed)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			Expect(err.Error()).To(ContainSubstring("reason is set exactly when state is Abandoned"), name)
+		}
+		inc.Status.RevertsProposed[0].State = v1alpha1.RevertAbandoned
+		inc.Status.RevertsProposed[0].Reason = v1alpha1.RevertReasonRequestGone
+		inc.Status.RevertsProposed[1].State = v1alpha1.RevertCreated
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+	})
+
+	// A new entry is a decision not acted on yet. The rule sits on the root, so it also holds in the first status
+	// write, which the transition rule of the status object does not see.
+	It("refuses a new revertsProposed entry in any state but Pending", func() {
+		for _, first := range []bool{true, false} {
+			inc := fx.Incident("default", unique("inc"))
+			Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+			if !first {
+				inc.Status.Phase = v1alpha1.IncidentEscalated
+				Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+			}
+			for _, e := range []v1alpha1.ProposedRevert{
+				{RequestRef: v1alpha1.RequestRef{Name: nameA, UID: uidA},
+					State: v1alpha1.RevertCreated},
+				{RequestRef: v1alpha1.RequestRef{Name: nameA, UID: uidA},
+					State: v1alpha1.RevertAbandoned, Reason: v1alpha1.RevertReasonTargetGone},
+			} {
+				changed := inc.DeepCopy()
+				changed.Status.RevertsProposed = []v1alpha1.ProposedRevert{e}
+				err := k8sClient.Status().Update(ctx, changed)
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "first write %v, %s: unexpected error: %v", first, e.State, err)
+				Expect(err.Error()).To(ContainSubstring("a new entry of status.revertsProposed must be Pending"))
+			}
+			inc.Status.RevertsProposed = []v1alpha1.ProposedRevert{{RequestRef: v1alpha1.RequestRef{
+				Name: nameA, UID: uidA}, State: v1alpha1.RevertPending}}
+			Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
 		}
 	})
 
@@ -946,7 +1019,7 @@ var _ = Describe("Incident", func() {
 		Expect(cleared.Status).To(Equal(v1alpha1.IncidentStatus{}))
 
 		cleared.Status.RevertsProposed = []v1alpha1.ProposedRevert{{RequestRef: v1alpha1.RequestRef{
-			Name: "remediation-a", UID: "27272727-2727-4727-8727-272727272727"}, State: v1alpha1.RevertCreated}}
+			Name: "remediation-a", UID: "27272727-2727-4727-8727-272727272727"}, State: v1alpha1.RevertPending}}
 		Expect(k8sClient.Status().Update(ctx, cleared)).To(Succeed())
 		removed := cleared.DeepCopy()
 		removed.Status = v1alpha1.IncidentStatus{}

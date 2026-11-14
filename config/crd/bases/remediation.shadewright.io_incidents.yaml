@@ -58,9 +58,9 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          Incident groups repeated symptoms of one problem on one workload. The rule on the root keeps a write from
+          Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
           removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
-          entries.
+          entries, and refuse a new entry of that list in any state but Pending, also in the first status write.
         properties:
           apiVersion:
             description: |-
@@ -395,9 +395,10 @@ spec:
                   decision for a request listed here, so a failed request gets one revert for good, also after that revert
                   was deleted. When a check before a create says no (the target is gone, the request passed the age bound,
                   the request was deleted, the revert's name is taken by another request, the create is refused as invalid),
-                  the entry moves to Abandoned instead, which is final: no revert is made for it. Entries are never removed, a
-                  state moves only from Pending to Created or Abandoned, and the status cannot be removed while the list has
-                  entries; a full list stops new reverts for this incident instead (condition RevertsStopped).
+                  the entry moves to Abandoned instead, with a reason, which is final: no revert is made for it. A new entry
+                  is always Pending, entries are never removed, a state moves only from Pending to Created or Abandoned, a
+                  reason never changes, and the status cannot be removed while the list has entries; a full list stops new
+                  reverts for this incident instead (condition RevertsStopped).
                 items:
                   description: |-
                     ProposedRevert is an entry of an Incident's status.revertsProposed: a failed request, by name and UID, and
@@ -409,10 +410,22 @@ spec:
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                       type: string
+                    reason:
+                      description: reason is why the entry is Abandoned. It is set
+                        with that state, only with it, and never changes.
+                      enum:
+                      - TargetGone
+                      - TargetKindUnsupported
+                      - OutsideAgeBound
+                      - IncidentDeleting
+                      - RequestGone
+                      - NameTaken
+                      - CreateInvalid
+                      type: string
                     state:
                       description: |-
-                        state is Pending from the decision until the revert exists, then Created, or Abandoned when a check
-                        before the create said no. Created and Abandoned are final.
+                        state is Pending from the decision until the revert exists, then Created, or Abandoned when no revert
+                        will be made. Created and Abandoned are final. A new entry is always Pending.
                       enum:
                       - Pending
                       - Created
@@ -429,6 +442,9 @@ spec:
                   - state
                   - uid
                   type: object
+                  x-kubernetes-validations:
+                  - message: reason is set exactly when state is Abandoned
+                    rule: has(self.reason) == (self.state == 'Abandoned')
                 maxItems: 20
                 type: array
                 x-kubernetes-list-map-keys:
@@ -440,12 +456,13 @@ spec:
               rule: '!(has(oldSelf.phase) && oldSelf.phase == ''Resolved'' && has(oldSelf.resolvedTime)
                 && has(self.phase) && self.phase == ''Resolved'') || (has(self.resolvedTime)
                 && self.resolvedTime == oldSelf.resolvedTime)'
-            - message: 'revertsProposed only grows: an entry is never removed, and
-                its state only moves from Pending to Created or Abandoned'
+            - message: 'revertsProposed only grows: an entry is never removed, its
+                state only moves from Pending to Created or Abandoned, and its reason
+                never changes'
               rule: '!has(oldSelf.revertsProposed) || (has(self.revertsProposed) &&
                 oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid
-                == o.uid && n.name == o.name && (o.state == ''Pending'' || n.state
-                == o.state))))'
+                == o.uid && n.name == o.name && (o.state == ''Pending'' || (n.state
+                == o.state && (!has(o.reason) || (has(n.reason) && n.reason == o.reason)))))))'
         required:
         - spec
         type: object
@@ -453,6 +470,10 @@ spec:
         - message: status cannot be removed while status.revertsProposed has entries
           rule: '!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed)
             == 0 || has(self.status)'
+        - message: a new entry of status.revertsProposed must be Pending
+          rule: '!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n,
+            n.state == ''Pending'' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed)
+            && oldSelf.status.revertsProposed.exists(o, o.uid == n.uid)))'
     served: true
     storage: true
     subresources:

@@ -84,6 +84,12 @@ func TestRenderInProcessOnlyFromTests(t *testing.T) {
 			if id, ok := n.(*ast.Ident); ok && id.Name == name {
 				t.Errorf("%s names %s: only tests may render without the render process", path, name)
 			}
+			// The switch itself is set in inprocess.go only; other files of the package may read it.
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name != "Load" {
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "inProcess" {
+					t.Errorf("%s uses inProcess.%s: only inprocess.go sets the switch", path, sel.Sel.Name)
+				}
+			}
 			return true
 		})
 	})

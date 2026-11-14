@@ -52,7 +52,16 @@ func renderHere(ctx context.Context, in Input) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	data, err := json.Marshal(answerFor(ctx, in))
+	// A render process reads its input as JSON, so this render reads the same copy.
+	sent, err := json.Marshal(in)
+	if err != nil {
+		return Result{}, fmt.Errorf("semdiff: encode the render input: %w", err)
+	}
+	var input Input
+	if err := json.Unmarshal(sent, &input); err != nil {
+		return Result{}, fmt.Errorf("semdiff: decode the render input: %w", err)
+	}
+	data, err := json.Marshal(answerFor(ctx, input))
 	if err != nil {
 		return Result{}, fmt.Errorf("semdiff: encode the render answer: %w", err)
 	}

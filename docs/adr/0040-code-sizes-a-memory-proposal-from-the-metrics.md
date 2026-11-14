@@ -78,6 +78,22 @@ What the code has today (at `0220bc9b`):
 
 16. **The model no longer needs the policy bounds to size**, and ADR-0026's block stays only if another use appears: with this ADR, the model does not pick a number, so the block that was added so the model could stay inside the policy has no job. Proposed: stop adding the block for `SetContainerMemoryLimit`, and keep the analyzer's `get` on the named policies, which the loop now needs for the bounds (decision 12). The amendment of ADR-0026 says so. **Open:** whether the model should keep seeing that a policy exists for the action at all (`NoPolicyForAction` stays decided in code). The tool schema loses `desired` and `previous` of `MemoryLimitChange`; it keeps `container`. The prompt rule about the size ("the smallest change the evidence supports") is removed, and the catalog text says that the system sets the size. The `metrics` block stays, as evidence for the diagnosis.
 
+### Proposed: evidence tiers (raised 2026-11-14, not decided)
+
+The question raised on 2026-11-14: the Kubernetes metrics server (`metrics.k8s.io`) is installed on most clusters (AKS ships it) and Prometheus is not. Should it be a metrics source? Nothing in this section is decided. Decisions 1 to 3 and the rule above stay as they are unless the maintainer accepts tier 2 (open question 7).
+
+What the code does today without Prometheus: `--prometheus-url` empty means no metrics source, and the builder renders the metrics block as "not available: no metrics source is configured". Nothing in the loop turns that into a hand-off. The status block still shows the container's last termination (reason `OOMKilled`) and the pod's own memory limit, so the model can propose a size, and today it is the model's. A hand-off with `MissingData` happens only if the model lists missing data in its reply (`internal/analysis/loop.go`). Decision 2 is what adds the hand-off for a missing measurement, so it holds only once this ADR is built.
+
+21. **What the metrics server can and cannot say.** The current working set of each container, sampled over a short window. It has no history: no peak, and nothing from before a restart. After an OOM kill it describes the new container instance only.
+22. **A second adapter behind the same interface.** `MetricsSource` has one method, `Query`, with approved templates (ADR-0013, ADR-0017). A metrics server adapter answers the working set template only and returns `ErrNotFound` for every other template. It reads with `get` and `list` on `pods.metrics.k8s.io` (API group `metrics.k8s.io`, resource `pods`), granted to the analyzer by a Role and RoleBinding in each watched namespace and never cluster-wide. It is off unless the API is present and a chart value allows it (name not fixed here). This adds a grant to the analyzer, so invariant 6 in `AGENTS.md` would be amended with it.
+23. **Three tiers of evidence for a memory size.**
+    1. Prometheus: the peak over the window, the full rule of items 4 to 11.
+    2. Metrics server only: the OOM kill itself, read from container status (last terminated reason `OOMKilled`, and the limit of that pod's own spec, which the status block already shows), proves that the need was above the limit. The "at the limit" step of item 6 then applies without a peak: the need is the limit times 1.5, clamped as in item 9. The current working set from the metrics server is recorded as corroboration (for example, already above some share of the limit again), never used as the peak. For a container that was not OOM-killed, the metrics server alone gives no size, and the Incident is handed off.
+    3. Neither: hand-off with `MissingData`, as decided (decision 2).
+24. **Tier 2 revises nothing decided.** There is still no model value and no guessed number, but it widens what counts as a measurement from a series of samples to the kill recorded in container status. That is for the maintainer to decide (open question 7).
+25. **The evidence fields name the tier.** `spec.sizing` gets a `source` value (`Prometheus`, `MetricsServer`, `ContainerStatus` or similar, an enum), and the pull request body prints it, so the person merging sees how strong the evidence is. For tier 2, `observedPeak` is the working set that was read, labelled as current, and `atLimit` is true because of the kill.
+26. **Model context (follow-up, not decided here).** The same adapter would give the model a current usage figure on installs without Prometheus. That changes the model's input, so it needs an evaluation (ADR-0025) and belongs to a separate decision.
+
 ### Out of scope, named
 
 17. **Decreases.** Not proposed. They need their own rule (a low peak is not a reason to cut a limit while the workload may be seasonal) and `maxDecreasePercent` is 0 by default. A follow-up may use the same measurement.
@@ -95,7 +111,7 @@ What the code has today (at `0220bc9b`):
 3. Changes still go through Git by pull request.
 4. The measurement is read from the metrics source by an approved template with no free-form query text, and the evidence fields are bounded values, redacted in the body; metric text from the source is never copied as prose (series labels are not in the evidence).
 5. The request name and the pull request marker derive from the UID and the plan digest as before. If the digest covers `sizing`, the same request still maps to the same pull request.
-6. No new identity and no new grant: the analyzer already reads the metrics source and the named policies; the executor reads only the request.
+6. No new identity and no new grant for the decisions above: the analyzer already reads the metrics source and the named policies; the executor reads only the request. Tier 2 (item 22, not decided) would add `get` and `list` on `pods.metrics.k8s.io` in the watched namespaces, and invariant 6 in `AGENTS.md` would be amended with it.
 
 ## Consequences
 
@@ -112,6 +128,7 @@ What the code has today (at `0220bc9b`):
 - **Stale or missing metrics.** Decision 11: no measurement, no proposal. The count of samples, not a timestamp comparison, is the freshness test.
 - **A Prometheus that lies.** It can make the peak small (a proposal that is too low, which does not fix the fault, and the Incident returns) or large (a proposal at the policy `max`, which is Allowed and which a person reads). It cannot make a value outside the policy pass. The source is configured by the operator and the adapter uses approved templates only (ADR-0017); a second source would be a different ADR.
 - **The peak understates after an OOM kill.** Item 6.
+- **Tier 2: current usage shaped at the moment of the read.** A tenant can shape its working set at the instant the metrics server is sampled more easily than a peak over hours. In tier 2 the size comes from the kill and the limit, not from that number, which is only corroboration; the policy range bounds the result in any case.
 - **A sample taken between two scrapes.** The step is at least a minute, so a spike shorter than the step can be missed; the headroom is the margin, and the next kill gives a new Incident.
 
 ## Alternatives considered
@@ -121,6 +138,7 @@ What the code has today (at `0220bc9b`):
 - **Link to the analysis record instead of printing the evidence.** Keeps the request small, but the record is outside the pull request and the reviewer has to look for it. Rejected for the body; the record stays the place for the diagnosis.
 - **Headroom in a flag of the analyzer.** One number for all policies, no CRD change. Kept as the fallback if the policy field is refused.
 - **A percentile of the working set.** Item 5.
+- **The metrics server as the only source for the full rule.** It has no history, so there is no peak over the window and nothing from before a restart. Rejected; it is used only for tier 2 if accepted.
 
 ## Open questions
 
@@ -130,6 +148,7 @@ What the code has today (at `0220bc9b`):
 4. Whether the plan digest covers `sizing` (item 14).
 5. Whether the model keeps seeing that a policy exists for the action (item 16).
 6. Whether one analysis of a workload with several containers may size more than one (the action names one container today).
+7. Is tier 2 accepted: an OOM kill read from container status, with the metrics server as corroboration, counts as a measurement for the "at the limit" step (items 21 to 25).
 
 ## Amendments
 

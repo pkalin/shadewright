@@ -473,16 +473,16 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 	It("does not close a recorded pull request that is not the branch's own when it resumes a marked cleanup", func() {
 		head, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(git.CreateBranch(ctx, "someone-else", head)).To(Succeed())
+		// Another branch of the agent's prefix, so the host answers about the number rather than with a 404 (a 404
+		// would wait for a second look, #688).
+		const elsewhere = "shadewright/someone-else"
+		Expect(git.CreateBranch(ctx, elsewhere, head)).To(Succeed())
 		foreign, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
-			HeadBranch: "someone-else", BaseBranch: mainBranch, Title: "f", Body: pullRequestBody(fetch(), ""),
+			HeadBranch: elsewhere, BaseBranch: mainBranch, Title: "f", Body: pullRequestBody(fetch(), ""),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		markCleanup(func(got *remediationv1alpha1.RemediationRequest) {
 			got.Status.PullRequest.Number = foreign.Number
-			// Seen missing from the host and the branch once before, long enough ago to be believed (#688).
-			got.Status.GoneSeen = &remediationv1alpha1.GoneSeen{At: metav1.NewTime(time.Now().Add(-confirmWait - time.Second)),
-				Number: foreign.Number}
 		})
 		// The request's own pull request lost its marker (a person edited it out): a listing that shows a pull
 		// request of this request is never gone (#688).
@@ -506,7 +506,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(planFresh().Reason).To(Equal(ReasonForeignChangeRequest))
 		Expect(closes.Load()).To(BeZero())
-		other, err := git.FindChangeRequest(ctx, "someone-else")
+		other, err := git.FindChangeRequest(ctx, elsewhere)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(other.State).To(Equal(providers.ChangeRequestOpen))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
@@ -677,18 +677,18 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(errors.Is(err, errUnconfirmedNotFound)).To(BeTrue())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 		// A 404 the branch confirms is an answer once it was seen before (#688): no merged pull request of this
-		// request with that number. The first such look only records the mark.
+		// request with that number. The first such look is only kept in memory.
 		// The merged one loses the marker, since a listing that shows a pull request of this request is never gone.
 		Expect(git.SetBody(cr.Number, unmarkedBody)).To(Succeed())
 		gone := &closeConflictError{number: 9999, err: fmt.Errorf("close: %w", providers.ErrConflict)}
-		err = reconciler().mergedUnrecorded(ctx, fetch(), gone)
+		r := reconciler()
+		err = r.mergedUnrecorded(ctx, fetch(), gone)
 		Expect(errors.Is(err, errGoneUnconfirmed)).To(BeTrue(), "a first confirmed 404 waits: %v", err)
-		got := fetch()
-		Expect(got.Status.GoneSeen).NotTo(BeNil())
-		Expect(got.Status.GoneSeen.Number).To(Equal(int64(9999)))
-		got.Status.GoneSeen.At = metav1.NewTime(time.Now().Add(-confirmWait - time.Second))
-		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
-		Expect(reconciler().mergedUnrecorded(ctx, fetch(), gone)).To(BeIdenticalTo(error(gone)))
+		first, ok := r.goneLooks.first(fetch(), 9999)
+		Expect(ok).To(BeTrue(), "the first look is kept in this process's memory")
+		// The same process looks again once the wait is over.
+		r.goneLooks.note(fetch(), 9999, first.Add(-confirmWait-time.Second))
+		Expect(r.mergedUnrecorded(ctx, fetch(), gone)).To(BeIdenticalTo(error(gone)))
 	})
 
 	It("still ends a fresh request whose pull request a person closed in NeedsIntervention", func() {

@@ -423,9 +423,19 @@ func TestSettleLock(t *testing.T) {
 		"never taken is not taken":                          {rr(remediationv1alpha1.PhaseNeedsIntervention, nil, ReasonPullRequestOpened, true), nil},
 	} {
 		t.Run(name, func(t *testing.T) {
+			meta.SetStatusCondition(&c.rr.Status.Conditions, metav1.Condition{
+				Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue,
+				Reason: ReasonGitForbidden, Message: "refused"})
 			settleLock(c.rr)
 			if got := c.rr.Status.HoldsTarget; (got == nil) != (c.want == nil) || (got != nil && *got != *c.want) {
 				t.Fatalf("holdsTarget = %v, want %v", ptr.Deref(got, false), ptr.Deref(c.want, false))
+			}
+			// A request that ended without the lock reads its pull requests no more: the condition goes with the
+			// lock, as TargetHeld does. One that keeps the lock, or still moves on, is read on and keeps it (#688).
+			wantUnreadable := ptr.Deref(c.want, false) || c.rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval
+			if got := meta.FindStatusCondition(c.rr.Status.Conditions,
+				remediationv1alpha1.ConditionPullRequestUnreadable) != nil; got != wantUnreadable {
+				t.Fatalf("PullRequestUnreadable present = %v, want %v", got, wantUnreadable)
 			}
 		})
 	}

@@ -605,34 +605,6 @@ spec:
                 description: effectiveApprovalRequired is what policy decided, which
                   may be stricter than spec.approvalRequired.
                 type: boolean
-              goneSeen:
-                description: |-
-                  goneSeen records the first look in which the Git host answered 404 for a pull request number of this
-                  request while the listing of every pull request of its branch had none with that number either (#688). One
-                  such look does not make the pull request gone: it is gone only on a later look, at least two minutes after
-                  at on the executor's clock, that finds the same number missing, as for a merge conflict
-                  (pullRequest.conflictSeen). Any other answer about that number, any look that finds a pull request of this
-                  request (by its number or on its branch), and any status write that records or adopts one remove it; a
-                  read that fails answers nothing and leaves it. A mark for another number than the one read, or one more
-                  than a minute ahead of the clock (it went back), is recorded anew, never confirmed. It sits here rather
-                  than in pullRequest because the number read may not be recorded yet (the read after a close that a merge
-                  refused, before any status recorded the pull request). Only the executor writes it.
-                properties:
-                  at:
-                    description: at is when the executor saw it missing, on its own
-                      clock.
-                    format: date-time
-                    type: string
-                  number:
-                    description: number is the pull request number the Git host answered
-                      404 for.
-                    format: int64
-                    minimum: 1
-                    type: integer
-                required:
-                - at
-                - number
-                type: object
               handoff:
                 description: |-
                   handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over

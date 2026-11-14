@@ -704,8 +704,7 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	// A person may have merged or closed it since the open: that is looked at first, because closing a closed
 	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
 	// decides nothing; the close by number below still runs.
-	// recordNumber removed a mark in memory only: changeOf reads the stored one (markRemoved).
-	read := changeQuery{number: cr.Number, markRemoved: before.GoneSeen != nil}
+	read := changeQuery{number: cr.Number}
 	if v := r.changeOf(cleanCtx, git, rr, read); v.state == changeMerged || v.state == changeClosed {
 		if ok, err := ended(v.pr); ok {
 			return err
@@ -950,12 +949,9 @@ func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr
 	return nil
 }
 
-// recordNumber records pr as the request's pull request, in the status write the caller makes, and removes
-// status.goneSeen in the same write (#688): a pull request of this request was just found, so an older look that
-// saw a number missing confirms nothing any more, and a later 404 waits again.
+// recordNumber records pr as the request's pull request, in the status write the caller makes.
 func recordNumber(rr *remediationv1alpha1.RemediationRequest, pr remediationv1alpha1.PullRequestStatus) {
 	rr.Status.PullRequest = &pr
-	rr.Status.GoneSeen = nil
 }
 
 // markClosed rewrites PullRequestOpened of a request whose recorded pull request is closed without a merge (or,
@@ -1108,7 +1104,7 @@ func (r *RemediationRequestReconciler) rejected(ctx context.Context, rr *remedia
 // before it is believed: a merge conflict before it ends the request (GitHub computes mergeability lazily: after
 // the target branch moves, and moves back, it may answer "dirty" for a pull request that merges cleanly, until it
 // computes the answer again), and a pull request missing by its number and from the listing of its branch before
-// it is gone (status.goneSeen, #688), since both reads may come from a replica that lags.
+// it is gone (goneLooks, #688), since both reads may come from a replica that lags.
 const confirmWait = 2 * time.Minute
 
 // confirmWaitRemaining is what is left of confirmWait since the answer was first seen, never negative.

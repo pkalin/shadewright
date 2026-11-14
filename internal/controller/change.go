@@ -21,12 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -43,7 +45,7 @@ import (
 //     retried with backoff and ends nothing, releases nothing and removes no finalizer.
 //   - changeOpen, changeMerged, changeClosed: the pull request was read in that state.
 //   - changeGone: the pull request is confirmed not to be this request's: a 404 that the listing of every pull
-//     request of the branch confirms, on two looks at least confirmWait apart (status.goneSeen), an answer about
+//     request of the branch confirms, on two looks at least confirmWait apart (goneLooks), an answer about
 //     the recorded number itself that is from another branch or to another base branch, a recorded one without
 //     this request's marker when the caller asked for it, or, with no number to read, a branch that has no pull
 //     request with this request's marker.
@@ -84,9 +86,6 @@ type changeQuery struct {
 	// openOnBranch also lists the open pull requests of the branch when a number is read (the lock and the
 	// finalizer need them). The listing of the branch has them anyway.
 	openOnBranch bool
-	// markRemoved says the caller removed status.goneSeen from rr in memory before the read (recordNumber), so the
-	// request as the API server has it may still hold a mark that rr does not show: settleMark then reads it.
-	markRemoved bool
 }
 
 // changeVerdict is changeOf's answer.
@@ -108,8 +107,6 @@ type changeVerdict struct {
 	// open is every open pull request of the branch to the target branch, whoever opened it (the listing of the
 	// branch, or openOnBranch).
 	open []providers.ChangeRequest
-	// absent is true for changeGone from a 404 that the listing of the branch confirms, before settleMark confirms it.
-	absent bool
 	// ownListed is true for changeUnknown with errOwnListed when the verdict carries every listing of the branch
 	// that the call read (own, and open with openOnBranch). A verdict made unknown again by a later failure (a
 	// listing, a status write) is a new one without it, so closeAllOwn never acts on a listing it does not have.
@@ -143,7 +140,7 @@ func (e *ownListedError) Error() string {
 func (e *ownListedError) Is(target error) bool { return target == errOwnListed }
 
 // errGoneUnconfirmed means the Git host answered 404 for the pull request number and the listing of the branch
-// has none with that number either, but not yet on two looks at least confirmWait apart (status.goneSeen): both
+// has none with that number either, but not yet on two looks at least confirmWait apart (goneLooks): both
 // reads may come from a replica that lags, so the pull request is not taken for gone yet.
 var errGoneUnconfirmed = errors.New("the Git host has no pull request with that number; a later look must find the same")
 
@@ -175,7 +172,7 @@ func unknownChange(err error) changeVerdict {
 // it (ADR-0030 section 1): the number asked for, the request's branch, its target branch. A newer pull request on
 // the same branch never stands in for it. A 404 is gone only when the listing of every pull request of the branch
 // to the target branch has none with that number and none with this request's marker, and only on a look at
-// least confirmWait after the first that found the same (settleMark, status.goneSeen); before that, or when the
+// least confirmWait after the first that found the same (settleGone, goneLooks); before that, or when the
 // listing has the number or a pull request of this request, or fails, the verdict is unknown.
 // With q.openOnBranch it also lists the open pull requests of the branch, and a pull request read as closed,
 // merged or missing that the listing has open is unknown (conflicting reads): the lock and the finalizer then
@@ -188,31 +185,13 @@ func unknownChange(err error) changeVerdict {
 // caller reads own and open for what it needs. No own one is gone. A listing that fails, a 404 included, is
 // unknown, never an empty branch.
 //
-// Every call settles status.goneSeen once, from what its reads showed and against the request as the API server
-// has it (settleMark), and keeps condition PullRequestUnreadable in line with the read (noteRead): set while the
-// host refuses it, removed by the next read that works.
+// Every call settles this process's record of a first look at a missing number once, from what its reads showed
+// (settleGone), and keeps condition PullRequestUnreadable in line with the read (noteRead): set while the host
+// refuses it, removed by the next read that works.
 func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, q changeQuery) changeVerdict {
 	v, n := r.readChange(ctx, git, rr, q)
 	return r.noteRead(ctx, rr, n, v)
-}
-
-// markFacts is what the reads of one changeOf call showed that bears on status.goneSeen (settleMark).
-type markFacts struct {
-	// n is the number read by its number; 0 for the listing of the branch alone.
-	n int64
-	// answered is true when the host answered about n other than with its absence: the pull request in any state,
-	// from another branch or base, or listed on the branch.
-	answered bool
-	// absent is true when the host has no pull request n, and the listing of the branch has neither n nor a pull
-	// request of this request.
-	absent bool
-	// own is true when a read showed a pull request of this request: by its number (from its branch to its target
-	// branch, with its marker when the caller asked for it), on the branch, in the listing that checks a 404, or in
-	// the open listing of the branch.
-	own bool
-	// markRemoved is changeQuery.markRemoved.
-	markRemoved bool
 }
 
 // readChange is changeOf without the condition; it also returns the number it read (0 for the listing).
@@ -227,8 +206,7 @@ func (r *RemediationRequestReconciler) readChange(ctx context.Context, git provi
 		n = rr.Status.PullRequest.Number
 	}
 	if n == 0 {
-		v := r.changeOnBranch(ctx, git, rr)
-		return r.settleMark(ctx, rr, markFacts{own: len(v.own) > 0, markRemoved: q.markRemoved}, v), 0
+		return r.settleGone(ctx, rr, 0, false, r.changeOnBranch(ctx, git, rr)), 0
 	}
 	return r.readByNumber(ctx, git, rr, q, n), n
 }
@@ -236,65 +214,71 @@ func (r *RemediationRequestReconciler) readChange(ctx context.Context, git provi
 // readByNumber is readChange for a number.
 func (r *RemediationRequestReconciler) readByNumber(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, q changeQuery, n int64) changeVerdict {
-	v, f := r.changeByNumber(ctx, git, rr, n, string(rr.Status.Source.TargetBranch))
-	f.markRemoved = q.markRemoved
+	v, absent := r.changeByNumber(ctx, git, rr, n, string(rr.Status.Source.TargetBranch))
 	switch {
 	case v.state == changeUnknown && errors.Is(v.err, errOwnListed) && q.openOnBranch:
 		// The finalizer closes what the branch lists of this request (closeAllOwn): it needs the open ones too.
-		v = r.checkOpenListing(ctx, git, rr, q, n, v, &f)
+		v = r.checkOpenListing(ctx, git, rr, q, n, v, &absent)
 	case v.state == changeUnknown:
-	case f.absent:
-		v = r.checkOpenListing(ctx, git, rr, q, n, v, &f)
+	case absent:
+		v = r.checkOpenListing(ctx, git, rr, q, n, v, &absent)
 	default:
-		f.own = v.state != changeGone
 		if q.marker && v.state != changeGone {
 			switch ours, err := r.ownsMarker(ctx, v.pr.Body, rr); {
 			case err != nil:
-				v, f.own = unknownChange(err), false
+				v = unknownChange(err)
 			case !ours:
-				v.state, v.gone, f.own = changeGone, fmt.Sprintf("pull request #%d lacks this request's marker", n), false
+				v.state, v.gone = changeGone, fmt.Sprintf("pull request #%d lacks this request's marker", n)
 			}
 		}
 		if v.state != changeUnknown {
-			v = r.checkOpenListing(ctx, git, rr, q, n, v, &f)
+			v = r.checkOpenListing(ctx, git, rr, q, n, v, &absent)
 		}
 	}
-	return r.settleMark(ctx, rr, f, v)
+	return r.settleGone(ctx, rr, n, absent, v)
 }
 
 // checkOpenListing checks v, an answer about pull request n, against the listing of the open pull requests of the
 // branch, when the caller asked for it (q.openOnBranch) or v is closed (one extra read, on closed only):
-//   - a pull request read as closed, merged or missing that the listing has open is unknown (conflicting reads),
-//     so a stale closed answer must not end, release or cancel anything while the pull request is open;
-//   - for gone, a listed pull request with this request's marker is a read that shows a change of this request,
-//     so n is not gone (errOwnListed, f.own): no read of the call answers gone while one shows such a change.
+//   - a pull request read as closed, merged or missing (or as not this request's from another branch or base)
+//     that the listing has open is unknown (conflicting reads), so a stale closed answer must not end, release or
+//     cancel anything while the pull request is open. One read open but without this request's marker (gone for
+//     that alone) does not conflict with the listing: both say it is open;
+//   - for gone, another listed pull request with this request's marker is a read that shows a change of this
+//     request, so n is not gone (errOwnListed): no read of the call answers gone while one shows such a change.
 //
+// Any outcome but gone from a missing number clears *absent, so settleGone records no first look on it.
 // With q.openOnBranch the listing is v.open, also on errOwnListed from the read by number.
 func (r *RemediationRequestReconciler) checkOpenListing(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, q changeQuery, n int64, v changeVerdict, f *markFacts) changeVerdict {
+	rr *remediationv1alpha1.RemediationRequest, q changeQuery, n int64, v changeVerdict, absent *bool) changeVerdict {
 	if !q.openOnBranch && v.state != changeClosed {
 		return v
 	}
 	open, err := git.ListChangeRequests(ctx, freshness.BranchName(rr), true)
 	if err != nil {
 		// A failed read shows nothing: no first look at a missing number is recorded on it.
-		f.absent = false
+		*absent = false
 		return unknownChange(freshness.WrapProvider("list the open change requests of the branch", err))
 	}
 	listed := slices.ContainsFunc(open, func(cr providers.ChangeRequest) bool { return cr.Number == n })
+	readOpen := v.pr.Number == n && v.pr.State == providers.ChangeRequestOpen
 	switch {
 	case v.state == changeUnknown:
-	case listed && v.state != changeOpen:
-		f.absent = false
+	case listed && !readOpen:
+		*absent = false
 		return unknownChange(fmt.Errorf("%w: #%d", errConflictingReads, n))
 	case v.state == changeGone:
 		for _, o := range open {
+			if o.Number == n {
+				// Read open by its number without this request's marker: that read decides about n.
+				continue
+			}
 			switch ours, err := r.ownsMarker(ctx, o.Body, rr); {
 			case err != nil:
-				f.absent = false
+				*absent = false
 				return unknownChange(err)
 			case ours:
-				f.absent, f.own = false, true
+				*absent = false
 				v = unknownChange(&ownListedError{n: n, listed: o.Number})
 				v.open, v.ownListed = open, true
 				return v
@@ -307,11 +291,11 @@ func (r *RemediationRequestReconciler) checkOpenListing(ctx context.Context, git
 	return v
 }
 
-// changeByNumber is changeOf's read by number, without the marker, the open listing and the mark. Its facts say
-// what the reads showed (settleMark); own is left to the caller, which checks the marker.
+// changeByNumber is changeOf's read by number, without the marker, the open listing and the first look. absent
+// is true when the host has no pull request n and the listing of the branch has neither n nor a pull request of
+// this request (settleGone).
 func (r *RemediationRequestReconciler) changeByNumber(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, n int64, target string) (changeVerdict, markFacts) {
-	f := markFacts{n: n}
+	rr *remediationv1alpha1.RemediationRequest, n int64, target string) (changeVerdict, bool) {
 	cr, err := git.GetChangeRequest(ctx, n)
 	switch {
 	case providers.IsNotFound(err):
@@ -319,124 +303,138 @@ func (r *RemediationRequestReconciler) changeByNumber(ctx context.Context, git p
 		if lerr != nil {
 			// The 404 is left out of the chain: a caller must never read it as an answer.
 			return unknownChange(fmt.Errorf("the Git host answered 404 for pull request #%d, and %w", n,
-				freshness.WrapProvider("list the change requests of the branch", lerr))), f
+				freshness.WrapProvider("list the change requests of the branch", lerr))), false
 		}
 		var own []providers.ChangeRequest
 		for _, o := range all {
 			switch ours, err := r.ownsMarker(ctx, o.Body, rr); {
 			case err != nil:
-				return unknownChange(err), f
+				return unknownChange(err), false
 			case ours:
 				own = append(own, o)
 			}
 		}
-		f.own = len(own) > 0
 		switch {
 		case slices.ContainsFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == n }):
-			f.answered = true
-			return unknownChange(fmt.Errorf("%w: #%d", errUnconfirmedNotFound, n)), f
-		case f.own:
+			return unknownChange(fmt.Errorf("%w: #%d", errUnconfirmedNotFound, n)), false
+		case len(own) > 0:
 			v := unknownChange(&ownListedError{n: n, listed: own[0].Number})
 			v.own, v.ownListed = own, true
-			return v, f
+			return v, false
 		}
-		f.absent = true
-		return changeVerdict{state: changeGone, absent: true, gone: fmt.Sprintf(
-			"the Git host has no pull request #%d of Shadewright to the target branch", n)}, f
+		return changeVerdict{state: changeGone, gone: fmt.Sprintf(
+			"the Git host has no pull request #%d of Shadewright to the target branch", n)}, true
 	case providers.IsUntrustedAnswer(err):
 		return unknownChange(fmt.Errorf("the Git host answered with another pull request than #%d; it is read "+
-			"again: %w", n, freshness.WrapProvider("find the change request", err))), f
+			"again: %w", n, freshness.WrapProvider("find the change request", err))), false
 	case err != nil:
-		return unknownChange(freshness.WrapProvider("find the change request", err)), f
+		return unknownChange(freshness.WrapProvider("find the change request", err)), false
 	case cr.Number != n:
 		return unknownChange(fmt.Errorf("the Git host answered with another pull request than #%d; it is read "+
-			"again: %w", n, providers.ErrUntrustedAnswer)), f
+			"again: %w", n, providers.ErrUntrustedAnswer)), false
 	case cr.HeadBranch != freshness.BranchName(rr):
-		f.answered = true
 		return changeVerdict{state: changeGone, gone: fmt.Sprintf(
-			"pull request #%d is from another branch than the request's", n)}, f
+			"pull request #%d is from another branch than the request's", n)}, false
 	case cr.BaseBranch != target:
-		f.answered = true
 		return changeVerdict{state: changeGone, gone: fmt.Sprintf(
-			"pull request #%d targets another branch than the request's target branch", n)}, f
+			"pull request #%d targets another branch than the request's target branch", n)}, false
 	}
 	state, ok := stateOf(cr)
 	if !ok {
-		return unknownChange(fmt.Errorf("pull request #%d has a state the executor does not know: %q", n, cr.State)), f
+		return unknownChange(fmt.Errorf("pull request #%d has a state the executor does not know: %q", n, cr.State)), false
 	}
-	f.answered = true
-	return changeVerdict{state: state, pr: cr}, f
+	return changeVerdict{state: state, pr: cr}, false
 }
 
-// settleMark is the one place that decides status.goneSeen, the confirmation wait of a pull request missing by
-// its number (#688), on the same terms as a merge conflict (conflicted). It runs once per changeOf call, after
-// its reads, and decides from what they showed (f) against the request as the API server has it, never against
-// the caller's copy, which may hold unsaved changes (a number recorded in memory, a status put back):
-//   - a read that showed a pull request of this request (f.own), or any other answer about the number the mark
-//     names, removes the mark;
-//   - the first look that finds the number missing (f.absent) records the mark with the time on the executor's
-//     clock and the number, and answers unknown (errGoneUnconfirmed, with the time left as the delay to ask for);
-//     a later look that finds it missing again at least confirmWait after the mark answers gone. A mark for
-//     another number, or one that lies more than mergeCommitClockSlack ahead of the clock (it went back), is
-//     recorded anew, never confirmed;
-//   - a failed read, which shows nothing, leaves the mark, and so reads nothing from the API server.
+// settleGone is the one place that decides the confirmation wait of a pull request missing by its number (#688),
+// on the same terms as a merge conflict (conflicted). It runs once per changeOf call, after its reads, with n, the
+// number read (0 for the listing of the branch), and absent, true only when this call's reads found n missing: a
+// 404 that neither the listing of every pull request of the branch nor the open listing contradicts, with no
+// pull request of this request listed. The first look is evidence about the Git host as this process saw it, so
+// it lives in this process's memory (goneLooks), never in status:
+//   - a look that finds n missing with no first look kept for this request and n (or one for another number, of
+//     an earlier request with the same name, older than goneLookMaxAge, or ahead of the clock) keeps one with the
+//     time on this process's clock and answers unknown (errGoneUnconfirmed, with the time left as the delay to
+//     ask for); one that finds it missing at least confirmWait after the first look answers gone;
+//   - any other outcome (a read that showed n or a pull request of this request, conflicting reads, a failed read,
+//     any verdict but gone) drops the first look, so the next 404 waits again.
 //
-// When rr has no mark and the call found no number missing, there is no mark to remove or confirm, and it reads
-// nothing from the API server either, unless the caller removed one from rr in memory (f.markRemoved). Whenever
-// a mark is involved, it is decided against the stored request.
-//
-// So gone is never answered by a call in which a read showed a pull request of this request. The mark is
-// written alone, as a patch of the stored request at the resourceVersion of rr (writeGoneSeen); a read or a
-// write that fails answers unknown with its error, so nothing is decided on a mark that may not be there.
-func (r *RemediationRequestReconciler) settleMark(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	f markFacts, v changeVerdict) changeVerdict {
-	if !f.own && !f.answered && !f.absent || !f.absent && rr.Status.GoneSeen == nil && !f.markRemoved {
+// So gone is never answered by a call in which a read showed a pull request of this request, and never on a time
+// from another clock or from stored state. After a restart or a change of leader the wait starts again.
+func (r *RemediationRequestReconciler) settleGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	n int64, absent bool, v changeVerdict) changeVerdict {
+	if !absent || v.state != changeGone {
+		r.goneLooks.forget(client.ObjectKeyFromObject(rr))
 		return v
 	}
-	failed := func(err error) changeVerdict {
-		if v.state == changeUnknown {
-			return unknownChange(errors.Join(v.err, err))
-		}
-		return unknownChange(err)
-	}
-	live := &remediationv1alpha1.RemediationRequest{}
-	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
-		return failed(fmt.Errorf("read RemediationRequest %s/%s to settle the mark of a missing pull request: %w",
-			rr.Namespace, rr.Name, err))
-	}
-	if live.UID != rr.UID {
-		return failed(fmt.Errorf("RemediationRequest %s/%s was replaced since it was read", rr.Namespace, rr.Name))
-	}
-	seen := live.Status.GoneSeen
-	switch {
-	case f.own || f.answered && seen != nil && seen.Number == f.n:
-		if seen != nil {
-			if err := r.writeGoneSeen(ctx, rr, live, nil); err != nil {
-				return failed(err)
-			}
-		}
-		return v
-	case !f.absent:
-		return v
-	}
-	if seen != nil && seen.Number == f.n {
-		left, ok := confirmWaitRemaining(seen.At.Time, r.now())
-		if ok && left == 0 {
-			v.absent = false
+	now := r.now()
+	if first, ok := r.goneLooks.first(rr, n); ok {
+		switch age := now.Sub(first); {
+		case age >= confirmWait && age < goneLookMaxAge:
+			r.goneLooks.forget(client.ObjectKeyFromObject(rr))
 			return v
-		}
-		if ok {
-			return unknownChange(goneWait(f.n, left))
+		case age >= 0 && age < confirmWait:
+			return unknownChange(goneWait(n, confirmWait-age))
 		}
 	}
-	mark := &remediationv1alpha1.GoneSeen{At: metav1.NewTime(r.now().Truncate(time.Second)), Number: f.n}
-	if err := r.writeGoneSeen(ctx, rr, live, mark); err != nil {
-		return unknownChange(err)
-	}
+	r.goneLooks.note(rr, n, now)
 	logf.FromContext(ctx).Info("The Git host has no pull request with the number of RemediationRequest; waiting to "+
-		"see it missing again", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", f.n,
+		"see it missing again", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", n,
 		"wait", confirmWait)
-	return unknownChange(goneWait(f.n, confirmWait))
+	return unknownChange(goneWait(n, confirmWait))
+}
+
+// goneLookMaxAge bounds how long a first look at a missing pull request is kept: one older than this is no
+// evidence about the host now, and the wait starts again from the next look.
+const goneLookMaxAge = 30 * time.Minute
+
+// goneLooks keeps, per request, the first look of this process that found a pull request number missing
+// (settleGone): the number and the time on this process's clock, bound to the request's UID. It is memory only,
+// like mergeReadings: after a restart or a change of leader every wait starts again. An entry is dropped by any
+// other outcome of a read of the request's pull requests, when the request ends (setPhase) and when it is gone.
+type goneLooks struct {
+	m sync.Map
+	// via, when set, is the memory used instead of m: tests that model one process over several reconciler values
+	// share one. It is never set outside tests.
+	via *goneLooks
+}
+
+// goneLook is one entry of goneLooks.
+type goneLook struct {
+	uid    types.UID
+	number int64
+	at     time.Time
+}
+
+func (g *goneLooks) store() *sync.Map {
+	if g.via != nil {
+		return &g.via.m
+	}
+	return &g.m
+}
+
+// note keeps the first look at n missing for rr, made at at, in place of any other.
+func (g *goneLooks) note(rr *remediationv1alpha1.RemediationRequest, n int64, at time.Time) {
+	g.store().Store(client.ObjectKeyFromObject(rr), goneLook{uid: rr.UID, number: n, at: at})
+}
+
+// first returns the time of the first look kept for rr and n. An entry of an earlier request with the same name
+// (another UID) or for another number is not returned.
+func (g *goneLooks) first(rr *remediationv1alpha1.RemediationRequest, n int64) (time.Time, bool) {
+	v, ok := g.store().Load(client.ObjectKeyFromObject(rr))
+	if !ok {
+		return time.Time{}, false
+	}
+	kept := v.(goneLook)
+	if kept.uid != rr.UID || kept.number != n {
+		return time.Time{}, false
+	}
+	return kept.at, true
+}
+
+// forget drops the first look kept for the request with key.
+func (g *goneLooks) forget(key types.NamespacedName) {
+	g.store().Delete(key)
 }
 
 // goneWait is the error of a pull request missing on a look that does not confirm it yet: errGoneUnconfirmed,
@@ -446,37 +444,13 @@ func goneWait(n int64, left time.Duration) error {
 		Op: "confirm that the pull request is gone", RetryAfter: max(left, stepDelay)})
 }
 
-// writeGoneSeen writes status.goneSeen as mark (nil removes it), alone, as a patch of live, the request as the API
-// server has it, so it never carries a caller's unsaved status. live must be at the resourceVersion of rr, and the
-// patch is made with it: a request changed since rr was read is a conflict, returned for a retry. rr gets the
-// field and the new resourceVersion.
-func (r *RemediationRequestReconciler) writeGoneSeen(ctx context.Context, rr, live *remediationv1alpha1.RemediationRequest,
-	mark *remediationv1alpha1.GoneSeen) error {
-	if live.ResourceVersion != rr.ResourceVersion {
-		return fmt.Errorf("record whether the pull request of RemediationRequest %s/%s is missing: %w",
-			rr.Namespace, rr.Name, apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource(
-				"remediationrequests").GroupResource(), rr.Name, errors.New("it changed since it was read")))
-	}
-	base := live.DeepCopy()
-	live.Status.GoneSeen = mark
-	if err := r.Status().Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return fmt.Errorf("record whether the pull request of RemediationRequest %s/%s is missing: %w",
-			rr.Namespace, rr.Name, err)
-	}
-	rr.ResourceVersion = live.ResourceVersion
-	rr.Status.GoneSeen = live.Status.GoneSeen
-	return nil
-}
-
 // restoreStatus puts back before, the status of rr a caller saved at resourceVersion rv, when it gives up a step
-// and returns its error for a retry. What changeOf wrote since then (status.goneSeen and condition
-// PullRequestUnreadable) is kept: a write since the save moved the resourceVersion, and rr holds what was
-// written, so a later status write built from rr never undoes it. A mark the caller removed in memory before the
-// read (recordNumber) stays removed then, which only makes a later 404 wait again.
+// and returns its error for a retry. What changeOf wrote since then (condition PullRequestUnreadable) is kept: a
+// write since the save moved the resourceVersion, and rr holds what was written, so a later status write built
+// from rr never undoes it.
 func restoreStatus(rr *remediationv1alpha1.RemediationRequest, before *remediationv1alpha1.RemediationRequestStatus,
 	rv string) {
 	if rr.ResourceVersion != rv {
-		before.GoneSeen = rr.Status.GoneSeen
 		putUnreadable(&before.Conditions,
 			meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable))
 	}

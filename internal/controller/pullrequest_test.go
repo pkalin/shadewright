@@ -83,6 +83,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		opens atomic.Int32
 		// recorder, when set, records the reconciler's Events.
 		recorder *record.FakeRecorder
+		// process is the memory of first looks at a missing pull request (goneLooks) that every reconciler of a
+		// spec shares, as one executor process would; the other memory of a reconciler starts empty.
+		process *goneLooks
 	)
 
 	manifest := func(limit string) []byte {
@@ -113,6 +116,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			WriteTimeout:        writeTimeout,
 			IncidentReadTimeout: incidentReadTimeout,
 		}
+		r.goneLooks.via = process
 		if apiReader != nil {
 			r.APIReader = apiReader
 		}
@@ -159,13 +163,24 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		return out
 	}
 
-	// seenGone records that pull request n was seen missing confirmWait ago (status.goneSeen), so the next look
+	// seenGone records that this process saw pull request n missing confirmWait ago (goneLooks), so the next look
 	// that finds it missing again takes it for gone (#688).
 	seenGone := func(n int64) {
-		GinkgoHelper()
-		got := fetch()
-		got.Status.GoneSeen = &remediationv1alpha1.GoneSeen{At: metav1.NewTime(clock.Add(-confirmWait)), Number: n}
-		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		process.note(fetch(), n, clock.Add(-confirmWait))
+	}
+	// firstLook returns the number and the time of the first look at a missing pull request that this process
+	// keeps for the request (0 without one).
+	firstLook := func() (int64, time.Time) {
+		v, ok := process.m.Load(client.ObjectKeyFromObject(request))
+		if !ok {
+			return 0, time.Time{}
+		}
+		return v.(goneLook).number, v.(goneLook).at
+	}
+	// lookedAt is the number of firstLook.
+	lookedAt := func() int64 {
+		n, _ := firstLook()
+		return n
 	}
 
 	BeforeEach(func() {
@@ -173,6 +188,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
 		faulty, openErr, writeTimeout, recorder = nil, nil, 0, nil
+		process = &goneLooks{}
 		opens.Store(0)
 		apiReader, incidentReadTimeout = nil, 0
 		err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fx.TargetNamespace}})
@@ -1886,23 +1902,24 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			}
 			return r.Reconcile(ctx, key())
 		}
-		// The first look that finds it missing from the host and the branch only records the mark and waits.
+		// The first look that finds it missing from the host and the branch is only kept in memory, and waits.
 		start := clock
 		res, err := lost()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(BeNumerically(">", 0), "the look is asked again")
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "one look is not enough")
-		Expect(got.Status.GoneSeen).NotTo(BeNil())
-		Expect(got.Status.GoneSeen.Number).To(Equal(n))
-		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", start))
+		seen, at := firstLook()
+		Expect(seen).To(Equal(n))
+		Expect(at).To(BeTemporally("==", start))
 		Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
-		// Within the wait it still waits, and the mark is not moved.
+		// Within the wait it still waits, and the first look is not moved.
 		clock = start.Add(confirmWait - time.Second)
 		_, _ = lost()
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", start))
+		_, at = firstLook()
+		Expect(at).To(BeTemporally("==", start))
 		// Once the wait is over, the same answer is gone.
 		clock = start.Add(confirmWait)
 		_, _ = lost()
@@ -1912,7 +1929,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			To(Equal(ReasonChangeRequestGone))
 	})
 
-	It("clears the mark of a missing pull request when a later look finds it (#688)", func() {
+	It("drops the first look at a missing pull request when a later read shows it open (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number
 		lost := reconciler()
@@ -1920,21 +1937,69 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			return &lostChangeRequest{Git: git, n: n}, nil
 		}
 		_, _ = lost.Reconcile(ctx, key())
-		Expect(fetch().Status.GoneSeen).NotTo(BeNil())
-		// The host answers again: the mark goes, so a later 404 starts the wait again.
+		Expect(lookedAt()).To(Equal(n))
+		// The host answers again with the pull request open: the first look goes, so a later 404 waits again.
 		clock = clock.Add(time.Minute)
 		_, err := reconcileResult()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fetch().Status.GoneSeen).To(BeNil(), "a look that finds the pull request removes the mark")
+		Expect(lookedAt()).To(BeZero(), "a read that shows the pull request drops the first look")
 		clock = clock.Add(confirmWait)
 		_, _ = lost.Reconcile(ctx, key())
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval),
-			"a 404 after the mark was cleared starts the wait again")
-		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", clock.Truncate(time.Second)))
+			"a 404 after a read that showed the pull request starts the wait again")
+		_, at := firstLook()
+		Expect(at).To(BeTemporally("==", clock))
 	})
 
-	It("clears the mark of a missing pull request when the branch shows it and the adoption records it (#688)", func() {
+	It("drops the first look when the open listing shows the missing number, and the next 404 waits again (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		seenGone(n)
+		// The read by number answers 404 and the listing in all states misses it, but the open listing has it.
+		v := reconciler().changeOf(ctx, &openListedOnly{Git: git, n: n}, fetch(),
+			changeQuery{marker: true, openOnBranch: true})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(errConflictingReads))
+		Expect(lookedAt()).To(BeZero(), "the open listing showed the number: the first look is dropped")
+		// A single 404 with nothing listed now waits again, never answers gone at once.
+		v = reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{marker: true})
+		Expect(v.state).To(Equal(changeUnknown))
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+	})
+
+	It("waits again after a restart, after goneLookMaxAge and when the clock went back (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		lostIn := func(r *RemediationRequestReconciler) changeVerdict {
+			return r.changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{marker: true})
+		}
+		before := reconciler()
+		Expect(lostIn(before).err).To(MatchError(errGoneUnconfirmed))
+		// A new executor process (a restart or a change of leader) has no first look: it waits two minutes again.
+		clock = clock.Add(confirmWait)
+		restarted := reconciler()
+		restarted.goneLooks.via = nil
+		v := lostIn(restarted)
+		Expect(v.state).To(Equal(changeUnknown), "the first look of the earlier process is not this one's")
+		Expect(v.err).To(MatchError(errGoneUnconfirmed))
+		clock = clock.Add(confirmWait - time.Second)
+		Expect(lostIn(restarted).err).To(MatchError(errGoneUnconfirmed), "still within its own wait")
+		clock = clock.Add(time.Second)
+		Expect(lostIn(restarted).state).To(Equal(changeGone), "its own first look, confirmWait old, confirms")
+		// A first look older than goneLookMaxAge is no evidence any more: the wait starts again.
+		process.note(fetch(), n, clock.Add(-goneLookMaxAge))
+		Expect(lostIn(reconciler()).err).To(MatchError(errGoneUnconfirmed))
+		_, at := firstLook()
+		Expect(at).To(BeTemporally("==", clock), "the wait starts again from this look")
+		// A first look ahead of the clock (it went back) is never confirmed.
+		process.note(fetch(), n, clock.Add(time.Hour))
+		Expect(lostIn(reconciler()).err).To(MatchError(errGoneUnconfirmed))
+		_, at = firstLook()
+		Expect(at).To(BeTemporally("==", clock))
+	})
+
+	It("drops the first look at a missing pull request when the branch shows it and the adoption records it (#688)", func() {
 		// The open's status write is lost, so the pull request is on the branch but not recorded.
 		failStatus := true
 		r := reconciler()
@@ -1953,8 +2018,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// The adoption alone: no read by number has looked at the pull request since.
 		got := drive(remediationv1alpha1.PhasePRCreated)
 		Expect(got.Status.PullRequest.Number).To(Equal(n))
-		Expect(got.Status.GoneSeen).To(BeNil(), "the look that found the pull request removed the mark")
-		// One lagging 404 now only records the mark anew and waits.
+		Expect(lookedAt()).To(BeZero(), "the look that found the pull request dropped the first look")
+		// One lagging 404 now only keeps a first look anew and waits.
 		lost := reconciler()
 		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
 			return &lostChangeRequest{Git: git, n: n}, nil
@@ -1962,31 +2027,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		_, _ = lost.Reconcile(ctx, key())
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated), "one 404 is not enough")
-		Expect(got.Status.GoneSeen).NotTo(BeNil())
-		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", clock.Truncate(time.Second)))
-	})
-
-	It("removes the mark in the status write that records an adopted pull request (#688)", func() {
-		failStatus := true
-		r := reconciler()
-		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return failStatus && len(git.ChangeRequests()) > 0 }}
-		for range 10 {
-			_, _ = r.Reconcile(ctx, key())
-			if len(openRequests()) == 1 {
-				break
-			}
-		}
-		Expect(openRequests()).To(HaveLen(1))
-		failStatus = false
-		n := openRequests()[0].Number
-		seenGone(n)
-		got := fetch()
-		cr := openRequests()[0]
-		// The record alone, with the mark still in the status it was read with.
-		Expect(reconciler().recordPullRequest(ctx, got, cr)).To(Succeed())
-		got = fetch()
-		Expect(got.Status.PullRequest.Number).To(Equal(n))
-		Expect(got.Status.GoneSeen).To(BeNil(), "recording a pull request removes the mark in the same write")
+		_, at := firstLook()
+		Expect(at).To(BeTemporally("==", clock))
 	})
 
 	It("says while the Git host refuses the read of the pull request, once, and clears it when a read works (#688)", func() {
@@ -2028,15 +2070,23 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeNormal + " " + EventPullRequestReadable))
 	})
 
-	It("removes a mark for another number when a read by number finds a pull request of this request (#688)", func() {
+	It("drops the first look at a missing pull request when the request ends (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		seenGone(got.Status.PullRequest.Number)
+		Expect(reconciler().stop(ctx, fetch(), remediationv1alpha1.PhaseNeedsIntervention, ReasonHeadMoved,
+			"The head moved")).To(MatchError(errStopped))
+		Expect(lookedAt()).To(BeZero(), "a later read of the ended request, by the lock or the finalizer, waits again")
+	})
+
+	It("drops a first look for another number, and never confirms one for another number (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number
-		// A mark for another number, old enough to confirm that one.
+		// A first look for another number, old enough to confirm that one.
 		seenGone(n + 100)
 		_, err := reconcileResult()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fetch().Status.GoneSeen).To(BeNil(), "the read of the recorded number found the pull request")
-		// Such a mark, written again, is recorded anew for the missing number, never confirmed.
+		Expect(lookedAt()).To(BeZero(), "the read of the recorded number found the pull request")
+		// Such a first look, kept again, is replaced for the missing number, never confirmed.
 		seenGone(n + 100)
 		lost := reconciler()
 		lost.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
@@ -2046,9 +2096,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
 		got = fetch()
-		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the old mark names another number")
-		Expect(got.Status.GoneSeen.Number).To(Equal(n))
-		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", clock.Truncate(time.Second)))
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the old look names another number")
+		seen, at := firstLook()
+		Expect(seen).To(Equal(n))
+		Expect(at).To(BeTemporally("==", clock))
 	})
 
 	It("never takes a recorded pull request for gone while its branch lists another of this request (#688)", func() {
@@ -2068,7 +2119,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval),
 			"the listing that checks the 404 shows a pull request of this request")
-		Expect(got.Status.GoneSeen).To(BeNil(), "that listing removed the old mark")
+		Expect(lookedAt()).To(BeZero(), "that listing dropped the old first look")
 	})
 
 	It("shows a recorded pull request that is missing while its branch lists another of this request, once, until a read answers (#688)", func() {
@@ -2122,39 +2173,26 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		v := reconciler().changeOf(ctx, g, fetch(), changeQuery{marker: true, openOnBranch: true})
 		Expect(v.state).To(Equal(changeUnknown), "a read in the call showed a pull request of this request")
 		Expect(v.err).To(MatchError(errOwnListed))
-		Expect(fetch().Status.GoneSeen).To(BeNil(), "that read removes the mark")
+		Expect(lookedAt()).To(BeZero(), "that read drops the first look")
 	})
 
-	It("reads the stored request to settle the mark only when a mark is involved (#688)", func() {
+	It("settles the first look at a missing pull request without reading the API server (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number
 		reads := &countingReader{Reader: k8sClient}
 		r := reconciler()
 		r.APIReader = reads
-		v := r.changeOf(ctx, git, fetch(), changeQuery{marker: true})
-		Expect(v.state).To(Equal(changeOpen))
-		Expect(reads.requests.Load()).To(BeZero(), "no mark held and none set: nothing to settle")
-		// A stored mark the caller's copy shows is removed against the stored request.
 		seenGone(n + 100)
-		v = r.changeOf(ctx, git, fetch(), changeQuery{marker: true})
-		Expect(v.state).To(Equal(changeOpen))
-		Expect(reads.requests.Load()).To(BeNumerically("==", 1))
-		Expect(fetch().Status.GoneSeen).To(BeNil())
-		// A mark the caller removed in memory (recordNumber) is still read and removed from the stored request.
-		seenGone(n + 100)
-		rr := fetch()
-		rr.Status.GoneSeen = nil
-		v = r.changeOf(ctx, git, rr, changeQuery{number: n, markRemoved: true})
-		Expect(v.state).To(Equal(changeOpen))
-		Expect(reads.requests.Load()).To(BeNumerically("==", 2))
-		Expect(fetch().Status.GoneSeen).To(BeNil(), "the stored mark is removed")
-		// A first look at a missing number reads the stored request to record the mark.
-		v = r.changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
+		Expect(r.changeOf(ctx, git, fetch(), changeQuery{marker: true}).state).To(Equal(changeOpen))
+		Expect(lookedAt()).To(BeZero())
+		v := r.changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
 		Expect(v.err).To(MatchError(errGoneUnconfirmed))
-		Expect(reads.requests.Load()).To(BeNumerically("==", 3))
+		clock = clock.Add(confirmWait)
+		Expect(r.changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{}).state).To(Equal(changeGone))
+		Expect(reads.requests.Load()).To(BeZero(), "the first look is this process's memory, not stored state")
 	})
 
-	It("removes the stored mark when a refused opened pull request is read, although the close is retried (#688)", func() {
+	It("drops the first look when a refused opened pull request is read, although the close is retried (#688)", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number
 		cr, err := git.GetChangeRequest(ctx, n)
@@ -2170,9 +2208,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		err = reconciler().refuseOpened(ctx, git, rr, cr, &renderRefusal{reason: ReasonHeadMoved, message: "The head moved"})
 		git.SetFail(nil)
 		Expect(err).To(HaveOccurred(), "the close is retried")
-		Expect(fetch().Status.GoneSeen).To(BeNil(), "the read that found the pull request removed the stored mark")
-		Expect(rr.Status.GoneSeen).To(BeNil(), "the status put back for the retry keeps the removal")
-		// One 404 for that number now only records the mark anew and waits.
+		Expect(lookedAt()).To(BeZero(), "the read that found the pull request dropped the first look")
+		// One 404 for that number now only keeps a first look anew and waits.
 		v := reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, fetch(), changeQuery{})
 		Expect(v.state).To(Equal(changeUnknown))
 		Expect(v.err).To(MatchError(errGoneUnconfirmed))
@@ -2203,37 +2240,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 		Expect(c).NotTo(BeNil(), "the status write of the pause keeps what the refused read wrote")
 		Expect(c.Reason).To(Equal(ReasonGitForbidden))
-	})
-
-	It("records the mark of a missing pull request again when its status write was lost, or the clock went back (#688)", func() {
-		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
-		n := got.Status.PullRequest.Number
-		lostWith := func(c client.Client) {
-			r := reconciler()
-			if c != nil {
-				r.Client = c
-			}
-			r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
-				return &lostChangeRequest{Git: git, n: n}, nil
-			}
-			_, _ = r.Reconcile(ctx, key())
-		}
-		lostWith(&statusPatchFailer{Client: k8sClient})
-		got = fetch()
-		Expect(got.Status.GoneSeen).To(BeNil(), "the mark was not written")
-		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "nothing is decided without it")
-		// Much later, the first look whose mark is written still only waits: the lost one counts for nothing.
-		clock = clock.Add(time.Hour)
-		lostWith(nil)
-		got = fetch()
-		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-		Expect(got.Status.GoneSeen).NotTo(BeNil())
-		// A clock that went back records the mark anew and waits again.
-		clock = clock.Add(-time.Hour)
-		lostWith(nil)
-		got = fetch()
-		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-		Expect(got.Status.GoneSeen.At.Time).To(BeTemporally("==", clock.Truncate(time.Second)))
 	})
 
 	It("closes a request's pull request by its recorded number, never a newer one of the branch (#688)", func() {
@@ -2529,13 +2535,46 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
 			BaseBranch: mainBranch, Title: "opened again", Body: pullRequestBody(got, "")})
 		Expect(err).NotTo(HaveOccurred())
-		seenGone(n)
 		r := reconciler()
-		// The mark must be removed against the stored request, and that read fails.
+		// The read shows #next with this request's marker (errOwnListed), then the write of condition
+		// PullRequestUnreadable must read the stored request, and that read fails: the verdict is unknown again,
+		// without the listings, and must not be taken for the deletion exception.
 		r.APIReader = failingRequestReader{Reader: k8sClient, name: got.Name}
 		err = r.closeAllOwn(ctx, &lostChangeRequest{Git: git, n: n}, fetch())
 		Expect(err).To(HaveOccurred(), "a verdict without its listings is retried")
+		Expect(err).To(MatchError(errOwnListed), "the error still says what the read showed")
 		Expect(git.ChangeRequests()[next.Number-1].State).To(Equal(providers.ChangeRequestOpen))
+	})
+
+	It("closes on deletion an open pull request with its marker that only the open listing shows (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		next, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+			BaseBranch: mainBranch, Title: openedLater, Body: pullRequestBody(got, "")})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			// The listing in all states misses #next; only the open listing has it.
+			return &missedInAll{lostChangeRequest: lostChangeRequest{Git: git, n: n}, missed: next.Number}, nil
+		}
+		_, err = r.Reconcile(ctx, key())
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[next.Number-1].State).To(Equal(providers.ChangeRequestClosed),
+			"the open listing is read for the close as well as the listing that checked the 404")
+	})
+
+	It("lets the finalizer go when a person removed the marker from the open recorded pull request (#688)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		Expect(git.SetBody(n, unmarkedBody)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed(), "open without the marker is not a conflict with the open listing")
+		Eventually(gone).Should(BeTrue())
+		Expect(git.ChangeRequests()[n-1].State).To(Equal(providers.ChangeRequestOpen),
+			"a pull request without this request's marker is not its change and is left alone")
 	})
 
 	It("keeps the finalizer while the recorded number cannot be read, and never takes that as finished (#688)", func() {
@@ -3435,7 +3474,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "the read of the branch finds none open")
 			})
 
-			It("removes an old mark when the cleanup at the deadline finds its pull request on the branch (#688)", func() {
+			It("drops an old first look when the cleanup at the deadline finds its pull request on the branch (#688)", func() {
 				loseStatusWrites()
 				n := openRequests()[0].Number
 				// An old look saw that number missing, long enough ago to confirm.
@@ -3445,8 +3484,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				got := fetch()
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
 				Expect(got.Status.PullRequest).To(BeNil(), "no status write recorded the pull request")
-				Expect(got.Status.GoneSeen).To(BeNil(), "the listing of the branch that found it removed the mark")
-				// One 404 for that number now only records the mark anew and waits.
+				Expect(lookedAt()).To(BeZero(), "the listing of the branch that found it dropped the first look")
+				// One 404 for that number now only keeps a first look anew and waits.
 				v := reconciler().changeOf(ctx, &lostChangeRequest{Git: git, n: n}, got, changeQuery{number: n})
 				Expect(v.state).To(Equal(changeUnknown))
 				Expect(v.err).To(MatchError(errGoneUnconfirmed))
@@ -4039,7 +4078,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 			case isGone, goneOtherOpen, goneFirstLook:
 				// Closed, and the status records a number the host has not: a 404 the branch confirms. Gone needs
-				// it seen missing once before, at least confirmWait earlier (status.goneSeen). The closed one loses
+				// it seen missing once before by this process, at least confirmWait earlier (goneLooks). The closed one loses
 				// the marker: a listing that shows a pull request of this request is never gone.
 				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 				Expect(git.SetBody(n, unmarkedBody)).To(Succeed())
@@ -4092,7 +4131,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// finalizer are "-" once the request is deleted, and result is how it asked to be called again: "requeue"
 		// with a delay, "error" for the error backoff, or "done". cond is the reason of condition
 		// PullRequestUnreadable ("" without it), warnings the PullRequestUnreadable Warning Events recorded, seen the
-		// number status.goneSeen names (0 without it), class the class of a returned error ("" without one) and delay
+		// number of the first look this process keeps (goneLooks, 0 without it), class the class of a returned error ("" without one) and delay
 		// the delay asked for.
 		type outcome struct {
 			phase, closed, lock, finalizer, result string
@@ -4171,9 +4210,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(c.Message).NotTo(ContainSubstring("status 403"), "no answer of the host in the message")
 				o.cond = c.Reason
 			}
-			if got.Status.GoneSeen != nil {
-				o.seen = got.Status.GoneSeen.Number
-			}
+			o.seen, _ = firstLook()
 			o.phase, o.lock, o.finalizer = string(got.Status.Phase), released, removed
 			if holdsLock(got) {
 				o.lock = held
@@ -4212,7 +4249,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			return reconciler().pullRequestPollInterval()
 		}
 		// expect completes the outcome base of a cell with what follows from the verdict case vc: the condition and
-		// its one Warning Event for a refused read, the mark of a number seen missing (own is 0 without a recorded
+		// its one Warning Event for a refused read, the first look at a number seen missing (own is 0 without a recorded
 		// number; recorded is false for a caller without one), the class of a returned error, and the delay of a requeue.
 		expect := func(vc verdictCase, recorded bool, base outcome) outcome {
 			if base.phase == deleted {
@@ -4221,7 +4258,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			if vc == forbidden {
 				base.cond, base.warnings = ReasonGitForbidden, 1
 			}
-			if recorded && (vc == isGone || vc == goneOtherOpen || vc == goneFirstLook) {
+			if recorded && vc == goneFirstLook {
+				// The first look is kept while it waits; the look that confirms gone drops it.
 				base.seen = 9999
 			}
 			if base.result == failed {
@@ -4498,19 +4536,6 @@ func (f *failingStatus) Update(ctx context.Context, obj client.Object, opts ...c
 
 // unmarkedBody is the body of a pull request a person opened from a request's branch, without its marker.
 const unmarkedBody = "no marker"
-
-// statusPatchFailer fails every status patch, as a lost write; other writes go through.
-type statusPatchFailer struct{ client.Client }
-
-func (s *statusPatchFailer) Status() client.SubResourceWriter {
-	return &failingStatusPatch{SubResourceWriter: s.Client.Status()}
-}
-
-type failingStatusPatch struct{ client.SubResourceWriter }
-
-func (f *failingStatusPatch) Patch(context.Context, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
-	return errors.New("status write lost")
-}
 
 // lostChangeRequest is a Git host that has lost change request n: GetChangeRequest answers 404 for it, and the
 // listing of its branch leaves it out.
@@ -5003,4 +5028,27 @@ func (h hangingIncidentReader) Get(ctx context.Context, key client.ObjectKey, ob
 		return ctx.Err()
 	}
 	return h.Reader.Get(ctx, key, obj, opts...)
+}
+
+// openListedOnly is a Git host that answers 404 for pull request n and leaves it out of the listing of its branch
+// in all states, while the open listing still shows it, as reads that lag behind each other may.
+type openListedOnly struct {
+	*fakegit.Git
+	n int64
+}
+
+func (o *openListedOnly) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	if n == o.n {
+		return providers.ChangeRequest{}, fmt.Errorf("pull request %d: %w", n, providers.ErrNotFound)
+	}
+	return o.Git.GetChangeRequest(ctx, n)
+}
+
+func (o *openListedOnly) ListChangeRequests(ctx context.Context, branch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := o.Git.ListChangeRequests(ctx, branch, openOnly)
+	if openOnly {
+		return all, err
+	}
+	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == o.n }), err
 }

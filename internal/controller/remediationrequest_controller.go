@@ -210,6 +210,11 @@ type RemediationRequestReconciler struct {
 	// only: after a restart or a change of leader no reading at the applied time is taken. Dropped like
 	// reportCounters.
 	mergeReadings mergeReadings
+	// goneLooks holds, per request, the first look of this process that found a pull request number of the
+	// request missing from the Git host (change.go, #688). Memory only: after a restart or a change of leader
+	// the confirmation wait starts again. Dropped by any other outcome of a read, when the request ends
+	// (setPhase) and when it is gone.
+	goneLooks goneLooks
 	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
 	// it. Memory only, set once.
 	since reconcilingSince
@@ -446,6 +451,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 			r.reportCounters.forget(req.NamespacedName)
 			r.unwrittenResets.forget(req.NamespacedName)
 			r.mergeReadings.forget(req.NamespacedName)
+			r.goneLooks.forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}

@@ -124,9 +124,17 @@ func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
 // on and whose pull request the status rule says cannot be open, except when the rule says so only because the
 // recorded pull request is closed (closedOnly): that release needs the read of the branch (checkHeld). It never
 // takes the lock.
+//
+// A request that no longer moves on and does not hold the lock has its pull requests read no more (only its
+// finalizer reads them again), so condition PullRequestUnreadable is removed in the same write, as TargetHeld is
+// (release): it would otherwise keep describing a read that is never made again. A request that keeps the lock
+// keeps it, since checkHeld reads on and keeps it in line (changeOf).
 func settleLock(rr *remediationv1alpha1.RemediationRequest) {
 	if ptr.Deref(rr.Status.HoldsTarget, false) && !progresses(rr) && !prMayBeOpen(rr) && !closedOnly(rr) {
 		release(rr)
+	}
+	if !progresses(rr) && !ptr.Deref(rr.Status.HoldsTarget, false) {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 	}
 }
 

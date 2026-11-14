@@ -8,7 +8,7 @@ Reviewer hints let a person steer a proposal from its pull request with a `/shad
 
 ## Why the repository rule comes first
 
-With hints on, the executor creates a check run `shadewright/review` on every head of the pull requests it opened. It passes only when the latest head has an approving review from someone who wrote no hint in the chain, so the person who steered a change cannot be its only approver. That check is the merge gate, and it blocks only what the repository requires:
+With hints on, the executor creates a check run `shadewright/review` on every head of the pull requests it opened. It passes only when the latest head has an approving review from someone who wrote no hint in the chain, so the person who steered a change cannot be its only approver. The check is evaluated until it passes on a head and not again on that head ([#748](https://github.com/pkalin/shadewright/issues/748)), so a change of the reviews after the pass does not change it. That check is the merge gate, and it blocks only what the repository requires:
 
 - **With the rule** (the target branch requires `shadewright/review`, with the Shadewright App as the expected source), a pull request cannot merge until the check passes.
 - **Without the rule, or without the source**, the check only informs. A hint author can approve and merge their own steered change, and with no source anyone with push access could post a commit status of that name. Do not turn hints on for that repository.

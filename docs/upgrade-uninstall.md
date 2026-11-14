@@ -122,9 +122,9 @@ What happens to requests that are waiting for a person when you upgrade:
 
 Symptoms of integration modules (KEDA ceilings, trigger errors and readiness; Flux and Kyverno conditions, cloudflared Pods) open Incidents from v0.3.0 on, and only for the modules that `spec.modules.integrations` of the `RemediationSettings` lists ([#380](https://github.com/pkalin/shadewright/issues/380)). An upgrade from v0.2.0 turns none on: list the modules you want, for example `kubectl patch remediationsettings default --type merge -p '{"spec":{"modules":{"integrations":["keda"]}}}'`, and change the same in the manifests you keep in Git. The release candidates v0.3.0-rc.1 to rc.4 ran the KEDA HPA source for a detected KEDA without that entry; from rc.5 on, a KEDA that is detected but not listed opens no Incident (see [No Incident appears](troubleshooting.md#no-incident-appears)).
 
-### Known limits in v0.5.0
+### Known limits
 
-- **The review check is not evaluated again after it passes** ([#748](https://github.com/pkalin/shadewright/issues/748), planned for v0.6.0). With reviewer hints on, `shadewright/review` is evaluated until it passes on a head and not again on that head, so a change of the reviews after the pass does not change it. The repository's own rules apply then: dismissal of stale approvals on a push, approval of the most recent push, code owner review, and who may dismiss a review.
+- **The review check is not evaluated again after it passes** (since reviewer hints shipped in v0.4.0; [#748](https://github.com/pkalin/shadewright/issues/748), the fix is planned for v0.6.0). With reviewer hints on, `shadewright/review` is evaluated until it passes on a head and not again on that head, so a change of the reviews after the pass does not change it. The repository's own rules apply then: dismissal of stale approvals on a push, approval of the most recent push, code owner review, and who may dismiss a review.
 
 ### Known issues in v0.3.0
 

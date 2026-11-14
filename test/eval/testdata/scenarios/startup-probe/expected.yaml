@@ -1,0 +1,26 @@
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: startup-probe
+summary: A new worker pod fails its readiness probe once while it starts (connection refused), is Ready seconds later and never restarts, so no change is warranted.
+incident:
+  reason: Unhealthy
+  status: observed
+  source: The kubelet's Warning event Unhealthy on the new pod, read by the collector's event watch and attributed to Deployment demo/worker through ReplicaSet. Observed on the lab on 2026-11-14 (v0.5.0-rc.1, model gpt-5.4-mini-2026-03-17) when KEDA scaled the worker during keda-ceiling-persists (pkalin/shadewright#726).
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: worker
+diagnosis:
+  status: planned
+  evidence:
+    - fact: a single readiness probe failure with connection refused while the pod was starting
+      source: the Incident reason and symptom, and the Unhealthy event
+    - fact: the pod is Ready now and has not restarted
+      source: the pod's containerStatuses[].ready and restartCount, and its Ready condition
+    - fact: no container was OOMKilled and nothing points at memory
+      source: the pod's container states (no terminated or last state) and its memory limit
+outcome:
+  type: refusal
+  status: planned
+  reason: The probe failure cleared by itself and nothing in the evidence points at memory, so no catalog action is supported; a proposal to change the memory limit fails the case. The lab run of 2026-11-14 proposed 64Mi to 96Mi (pkalin/shadewright#726).

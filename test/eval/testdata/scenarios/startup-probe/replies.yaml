@@ -1,0 +1,13 @@
+# Synthetic: a triage reply written by hand to the output schema for the recorded context (see bad-image).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2300, outputTokens: 260}
+    content: |
+      {"summary": "The new pod of Deployment demo/worker failed its readiness probe once while it started (Readiness probe failed ... connection refused): the server was not listening yet. The pod is Ready now with 0 restarts and no container was OOMKilled, and nothing points at memory. No catalog action is supported by this evidence, so no change is proposed.",
+       "hypotheses": [{"description": "A one-off probe failure at start: the container began serving after the first readiness probe."}],
+       "evidence": [{"source": "c1", "quote": "connect: connection refused"},
+                    {"source": "c2", "quote": "restarts 0"}],
+       "missingData": [],
+       "uncertainty": "Whether the probe's start delay is too short for the image is not visible; it is not a catalog action.",
+       "proposal": null}

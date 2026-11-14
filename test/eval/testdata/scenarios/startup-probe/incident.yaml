@@ -1,0 +1,26 @@
+# Synthetic: written from the lab run of 2026-11-14 (v0.5.0-rc.1, pkalin/shadewright#726), not recorded. The
+# symptom is the kubelet's probe note as fingerprint.Normalize leaves it. UIDs and the fingerprint are
+# placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-startup-probe
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000007a0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000007a0
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: worker
+    uid: 00000000-0000-4000-8000-0000000007a1
+  reason: Unhealthy
+  type: Warning
+  reportingController: kubelet
+  symptom: 'Readiness probe failed: Get "http://10.244.1.23:9898/readyz": dial tcp 10.244.1.23:9898: connect: connection refused'
+status:
+  phase: Open
+  count: 1
+  firstSeen: "2026-11-14T15:29:44Z"
+  lastSeen: "2026-11-14T15:29:44Z"

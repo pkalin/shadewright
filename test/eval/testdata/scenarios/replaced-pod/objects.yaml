@@ -1,0 +1,193 @@
+# Synthetic: the objects the context builder and the read tools read for this case, from the lab run of
+# 2026-11-14 (pkalin/shadewright#724), not recorded. The Deployment's template is back to the healthy 64Mi and
+# its pod, of the new ReplicaSet, is Running and Ready. The last pod of the previous ReplicaSet (48Mi) is
+# terminating: it has a deletion timestamp and still reports OOMKilled. A pod being deleted needs a finalizer
+# for the fake API server to keep it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000007b1
+  generation: 3
+  creationTimestamp: "2026-11-14T09:00:00Z"
+  labels:
+    app.kubernetes.io/name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: web
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/stefanprodan/podinfo:6.17.0
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+status:
+  observedGeneration: 3
+  replicas: 2
+  updatedReplicas: 1
+  readyReplicas: 1
+  availableReplicas: 1
+  unavailableReplicas: 1
+  conditions:
+    - type: Available
+      status: "True"
+      reason: MinimumReplicasAvailable
+      message: Deployment has minimum availability.
+      lastTransitionTime: "2026-11-14T14:37:30Z"
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-8d4c6b9f7
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000007b2
+  creationTimestamp: "2026-11-14T13:50:00Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 8d4c6b9f7
+  annotations:
+    deployment.kubernetes.io/revision: "2"
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: web
+      uid: 00000000-0000-4000-8000-0000000007b1
+      controller: true
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      pod-template-hash: 8d4c6b9f7
+status:
+  replicas: 1
+  readyReplicas: 0
+  availableReplicas: 0
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-6c5b8d9f4
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000007b3
+  creationTimestamp: "2026-11-14T14:37:25Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 6c5b8d9f4
+  annotations:
+    deployment.kubernetes.io/revision: "3"
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: web
+      uid: 00000000-0000-4000-8000-0000000007b1
+      controller: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      pod-template-hash: 6c5b8d9f4
+status:
+  replicas: 1
+  readyReplicas: 1
+  availableReplicas: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-6c5b8d9f4-k8w3z
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000007b4
+  creationTimestamp: "2026-11-14T14:37:26Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 6c5b8d9f4
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: web-6c5b8d9f4
+      uid: 00000000-0000-4000-8000-0000000007b3
+      controller: true
+spec:
+  containers:
+    - name: web
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      resources:
+        limits:
+          memory: 64Mi
+status:
+  phase: Running
+  conditions:
+    - type: Ready
+      status: "True"
+      lastTransitionTime: "2026-11-14T14:37:32Z"
+  containerStatuses:
+    - name: web
+      ready: true
+      restartCount: 0
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      imageID: ""
+      state:
+        running:
+          startedAt: "2026-11-14T14:37:28Z"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-8d4c6b9f7-t5r9k
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000007b5
+  creationTimestamp: "2026-11-14T13:50:05Z"
+  deletionTimestamp: "2026-11-14T14:37:35Z"
+  deletionGracePeriodSeconds: 30
+  finalizers:
+    - eval.shadewright.io/keep-terminating
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 8d4c6b9f7
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: web-8d4c6b9f7
+      uid: 00000000-0000-4000-8000-0000000007b2
+      controller: true
+spec:
+  containers:
+    - name: web
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      resources:
+        limits:
+          memory: 48Mi
+status:
+  phase: Running
+  conditions:
+    - type: Ready
+      status: "False"
+      reason: ContainersNotReady
+      message: "containers with unready status: [web]"
+      lastTransitionTime: "2026-11-14T14:37:40Z"
+  containerStatuses:
+    - name: web
+      ready: false
+      restartCount: 0
+      image: ghcr.io/stefanprodan/podinfo:6.17.0
+      imageID: ""
+      state:
+        terminated:
+          reason: OOMKilled
+          exitCode: 137
+          startedAt: "2026-11-14T14:30:00Z"
+          finishedAt: "2026-11-14T14:37:40Z"

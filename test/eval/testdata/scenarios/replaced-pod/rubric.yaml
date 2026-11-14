@@ -1,0 +1,10 @@
+# How the diagnosis of replaced-pod is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored), or why it is not scored.
+# The outcome is the case: a proposal fails it, whatever the diagnosis says.
+facts:
+  - fact: the OOMKilled container belongs to a pod of the previous ReplicaSet, which is being terminated
+    # The context shows the pod's controlling ReplicaSet next to the Deployment's ReplicaSets with their
+    # revision and desired replicas; it does not show the pod's deletion timestamp (see the case's PR).
+    any: ["previous replicaset", "old replicaset", "older replicaset", "previous template", "old template", "earlier replicaset", "web-8d4c6b9f7", "replaced", "superseded", "terminating", "revision 2"]
+  - fact: the current template has a 64Mi limit and its pod is Running and Ready
+    all: ["64Mi"]

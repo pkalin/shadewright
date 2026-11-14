@@ -4,7 +4,7 @@ The evaluation harness checks what the analysis concludes for every lab scenario
 replays recorded replies, and on demand against the real model ([design 11.2](design/11-model.md#evaluation-gate),
 [ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 3, [#78](https://github.com/pkalin/shadewright/issues/78)).
 
-<span class="sw-status sw-built">built</span> The harness, the recorded contexts of all eight fleet scenarios and of
+<span class="sw-status sw-built">built</span> The harness, the recorded contexts of ten fleet scenarios and of
 their variants, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
 <span class="sw-status sw-planned">planned</span> Contexts and replies recorded from lab runs instead of written by
 hand, passing results stored in this repository, and the analyzer's run-time check that refuses automatic analysis
@@ -139,7 +139,7 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the eight scenarios and their variants (one so far, `oom/rollout`) is nine analyses per repeat, each bounded by the loop's limits (at most 7 model
+A run of the ten scenarios and their variants (one so far, `oom/rollout`) is eleven analyses per repeat, each bounded by the loop's limits (at most 7 model
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
@@ -210,6 +210,17 @@ external metrics, and its subject, a `ScaledObject`, resolves no pods, so the bu
 metric value against its target is evidence of the Incident's symptom in the analyzer (design 2.5.3), but the
 recorded Incident leaves it out: the analyzer's symptom normalization turns a milli quantity such as `6500m` into a
 placeholder, so a real Incident would not reliably hold it either. Both facts stay unscored, with that reason in the rubric.
+
+**Cases that expect no proposal after a wrong one.** `startup-probe` (a readiness probe that failed once at pod start,
+the pod Ready now, no restart, no `OOMKilled`; [#726](https://github.com/pkalin/shadewright/issues/726)) and
+`replaced-pod` (a healthy current template and one terminating pod of the previous ReplicaSet that still reports
+`OOMKilled`; [#724](https://github.com/pkalin/shadewright/issues/724)) come from lab runs where the model proposed a
+memory increase the evidence did not support. Both expect a refusal (`NoProposal` or `MissingData`), and a memory
+proposal of any value fails the case. The fixture of `replaced-pod` carries the pod's controller owner, its
+`pod-template-hash` and its deletion timestamp, but the context builder shows only the owner (as "controlled by
+ReplicaSet ...") next to the Deployment's ReplicaSets with their revision and desired replicas. It leaves out the
+deletion timestamp and the hash and does not mark which ReplicaSet is current, so the model must infer it. Whether the
+collector or the builder should drop or mark such evidence is the work of #724.
 
 Today every context and reply is `source: synthetic`: written by hand from the scenario manifests and the
 observations in `expected.yaml`, so CI checks the harness, the loop and the scoring end to end. They hold no

@@ -100,6 +100,11 @@ func (b *Builder) statusBlock(t *target) Block {
 		l.add("%s %s/%s no longer exists, or was replaced by another object of the same name",
 			l.data(b.value(t.ref.Kind)), l.data(b.value(t.ref.Namespace)), l.data(b.value(t.ref.Name)))
 	default:
+		if t.scaledObject != nil {
+			blk.Provenance = ProvenanceScaledObject
+			b.scaledObjectLines(&l, t.scaledObject)
+			break
+		}
 		b.workloadLines(&l, t)
 		b.podLines(&l, t)
 	}

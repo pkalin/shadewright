@@ -250,18 +250,17 @@ func TestPolicyBlockNeedsAResolvedSubject(t *testing.T) {
 		AdjustKedaMaxReplicas: &remediationv1alpha1.KedaMaxReplicasBounds{Min: 1, Max: 3, MaxIncreasePercent: 50}}}
 	st := settingsObject()
 	st.Spec.Modules = &remediationv1alpha1.Modules{Integrations: []remediationv1alpha1.ModuleName{"keda"}}
-	r := reader(t, kp, st)
+	// The builder reads a ScaledObject subject (ADR-0036): its bounds are shown once it was read with its UID.
+	r := reader(t, kp, st, scaledObject(soUID, readyConditions()))
 	c := build(t, newBuilder(t, r, sources{}, func(c *Config) {
 		withPolicies(r)(c)
 		c.Policies = map[remediationv1alpha1.ActionType]remediationv1alpha1.Name{
 			remediationv1alpha1.ActionAdjustKedaMaxReplicas: "demo-keda"}
 	}), incident(so))
 	blk := one(t, c, SectionPolicy)
-	for _, want := range []string{"desired maxReplicaCount from 1 to 3",
-		"this subject's kind is not read by the context builder, so whether it still exists is not checked here"} {
-		if !strings.Contains(blk.Text, want) {
-			t.Errorf("ScaledObject block lacks %q:\n%s", want, blk.Text)
-		}
+	if !strings.Contains(blk.Text, "desired maxReplicaCount from 1 to 3") ||
+		strings.Contains(blk.Text, "this subject's kind is not read by the context builder") {
+		t.Errorf("ScaledObject block:\n%s", blk.Text)
 	}
 }
 

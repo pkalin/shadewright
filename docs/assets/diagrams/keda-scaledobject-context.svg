@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1380 620" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<title id="t">Shadewright ScaledObject context</title>
+<desc id="d">Overview of ADR-0036. When the Incident's subject is a KEDA ScaledObject, the context builder gets that one object once, before the model call, with the analyzer's existing get on scaledobjects; a refused or failed read leaves no snapshot and is a failed source. The snapshot feeds three things. Code decides readiness with kedaready.Readiness, the policy check's own rule, and takes the previous maxReplicaCount of a proposal from it. The model sees an allow-listed status block (name, replica bounds, scale target, trigger types, metric names, the conditions Ready, Active, Fallback and Paused), each string redacted and then left out whole when over 1 KiB; never the server address, authentication references, query text, annotations or labels. When the ScaledObject is not ready the catalog shown leaves out AdjustKedaMaxReplicas and one fixed sentence says so. After the reply, a not-ready analysis that ends without a proposal or proposes that action anyway ends ScalerNotReady; a ready one has its previous value replaced from the snapshot, with DirectionReversed, NoChange and PreviousValueUnknown checks. The executor's policy gate and baseline check are unchanged.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+<style>
+.bt{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4}
+.ext{fill:#1d1b2b;stroke:#4fd1c5;stroke-width:1.4}
+.lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.12em}
+.h{fill:#f1edff;font-size:15px;font-weight:650}
+.s{fill:#a9a4c4;font-size:12.5px}
+.no{fill:#ff8fa3;font-size:12.5px;font-weight:600}
+.fb{stroke:#a879ff;stroke-width:1.8;fill:none}
+</style></defs>
+<rect width="1380" height="620" rx="18" fill="#0e0e16"/>
+<text class="lanet" x="20" y="52">1  ONE READ</text>
+<text class="lanet" x="360" y="52">2  DECIDED BY CODE</text>
+<text class="lanet" x="700" y="52">3  WHAT THE MODEL SEES</text>
+<text class="lanet" x="1040" y="52">4  AFTER THE REPLY</text>
+
+<rect class="ext" x="20" y="70" width="300" height="96" rx="10"/>
+<text class="h" x="34" y="96">API server</text>
+<text class="s" x="34" y="118">get keda.sh/v1alpha1 ScaledObject</text>
+<text class="s" x="34" y="137">the subject, by name and UID</text>
+<text class="s" x="34" y="156">KEDA module role: no new RBAC</text>
+<path class="fb" d="M170 166 L170 206" marker-end="url(#a)"/>
+<rect class="bt" x="20" y="210" width="300" height="124" rx="10"/>
+<text class="h" x="34" y="236">Snapshot</text>
+<text class="s" x="34" y="258">Context.ScaledObject, read once</text>
+<text class="s" x="34" y="277">before the model call, kept for</text>
+<text class="s" x="34" y="296">the whole analysis</text>
+<text class="s" x="34" y="315">no list, no HPA, no scale target</text>
+<rect class="bt" x="20" y="370" width="300" height="104" rx="10"/>
+<text class="h" x="34" y="396">Read refused or failed</text>
+<text class="s" x="34" y="418">no snapshot, block "could not fetch"</text>
+<text class="s" x="34" y="437">a failed source: escalates</text>
+<text class="s" x="34" y="456">never "not found"</text>
+
+<rect class="bt" x="360" y="70" width="300" height="124" rx="10"/>
+<text class="h" x="374" y="96">Readiness</text>
+<text class="s" x="374" y="118">kedaready.Readiness(snapshot)</text>
+<text class="s" x="374" y="137">the policy check's own rule</text>
+<text class="s" x="374" y="156">NotReady: action withheld</text>
+<text class="s" x="374" y="175">Ready, Pending, none: offered</text>
+<rect class="bt" x="360" y="230" width="300" height="104" rx="10"/>
+<text class="h" x="374" y="256">Baseline</text>
+<text class="s" x="374" y="278">spec.maxReplicaCount of the snapshot</text>
+<text class="s" x="374" y="297">replaces the model's previousValue</text>
+<text class="s" x="374" y="316">none or not an integer: unknown</text>
+<path class="fb" d="M320 250 L356 160" marker-end="url(#a)"/>
+<path class="fb" d="M320 280 L356 280" marker-end="url(#a)"/>
+
+<rect class="bt" x="700" y="70" width="300" height="186" rx="10"/>
+<text class="h" x="714" y="96">Status block (cluster data)</text>
+<text class="s" x="714" y="118">name, min and maxReplicaCount</text>
+<text class="s" x="714" y="137">scale target kind and name</text>
+<text class="s" x="714" y="156">trigger types, metric names</text>
+<text class="s" x="714" y="175">Ready, Active, Fallback, Paused</text>
+<text class="s" x="714" y="194">with reason and message</text>
+<text class="s" x="714" y="213">redacted, then over 1 KiB: left</text>
+<text class="s" x="714" y="232">out whole, never cut; quotable</text>
+<rect class="bt" x="700" y="276" width="300" height="104" rx="10"/>
+<text class="h" x="714" y="302">Catalog and one sentence</text>
+<text class="s" x="714" y="324">not ready: AdjustKedaMaxReplicas</text>
+<text class="s" x="714" y="343">left out, fixed sentence says so</text>
+<text class="s" x="714" y="362">schema unchanged</text>
+<text class="no" x="700" y="410">Never shown</text>
+<text class="s" x="700" y="432">serverAddress, query text,</text>
+<text class="s" x="700" y="451">authentication references,</text>
+<text class="s" x="700" y="470">annotations, labels</text>
+<path class="fb" d="M320 240 L696 160" marker-end="url(#a)"/>
+<path class="fb" d="M660 130 L696 320" marker-end="url(#a)"/>
+
+<rect class="bt" x="1040" y="70" width="320" height="124" rx="10"/>
+<text class="h" x="1054" y="96">Not ready</text>
+<text class="s" x="1054" y="118">no proposal, missing data, or the</text>
+<text class="s" x="1054" y="137">withheld action anyway:</text>
+<text class="s" x="1054" y="156">ScalerNotReady (code decides)</text>
+<text class="s" x="1054" y="175">another action: as before</text>
+<rect class="bt" x="1040" y="214" width="320" height="124" rx="10"/>
+<text class="h" x="1054" y="240">Ready or pending</text>
+<text class="s" x="1054" y="262">claimed direction differs:</text>
+<text class="s" x="1054" y="281">DirectionReversed; equal: NoChange</text>
+<text class="s" x="1054" y="300">no snapshot: PreviousValueUnknown</text>
+<text class="s" x="1054" y="319">else the plan carries the snapshot</text>
+<rect class="ext" x="1040" y="358" width="320" height="104" rx="10"/>
+<text class="h" x="1054" y="384">Executor (unchanged)</text>
+<text class="s" x="1054" y="406">KedaReady gate on the live object</text>
+<text class="s" x="1054" y="425">policy bounds, baseline against Git</text>
+<text class="s" x="1054" y="444">a person merges the pull request</text>
+<path class="fb" d="M1000 330 L1036 130" marker-end="url(#a)"/>
+<path class="fb" d="M510 334 L510 495 L1020 495 L1020 290 L1036 290" marker-end="url(#a)"/>
+<path class="fb" d="M1200 338 L1200 354" marker-end="url(#a)"/>
+<text class="s" x="20" y="530">Accepted risk: a condition message can carry text from a metrics endpoint, and the model may quote it.</text>
+<text class="s" x="20" y="550">What it can win is capped by the policy bounds, the readiness gate and the review of the pull request.</text>
+<text class="s" x="20" y="580">Built: the read, the block, the readiness and baseline decisions and ScalerNotReady (#640). Status of the ADR: Proposed.</text>
+</svg>

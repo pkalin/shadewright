@@ -249,7 +249,7 @@ func newFixture() *fixture {
 		},
 		Policies: map[remediationv1alpha1.ActionType]remediationv1alpha1.Name{
 			remediationv1alpha1.ActionSetContainerMemoryLimit: memoryPolicy,
-			remediationv1alpha1.ActionAdjustKedaMaxReplicas:   "keda",
+			remediationv1alpha1.ActionAdjustKedaMaxReplicas:   kedaPolicyName,
 		},
 		ExpectedModels: map[Role]string{RoleTriage: fakeModel, RoleEscalation: fakeModel},
 	}

@@ -36,11 +36,16 @@ a plan (below).
 ## Scoring
 
 **Outcome.** A `refusal` passes when the loop made no plan and ended with `NoProposal` or `MissingData`, the
-reasons a valid result gives when the model itself finds no catalog action. Any other end (a proposal, an
+reasons a valid result gives when the model itself finds no catalog action, or `ScalerNotReady`, which the loop
+gives from code when the subject's ScaledObject is not ready and the result proposed no other action
+([ADR-0036](adr/0036-the-model-sees-the-scaledobject-of-a-keda-incident.md)): `broken-keda-trigger` ends there
+since #640 whatever its model replies, unless the result is invalid, the model call fails or the result proposes
+another action: those keep their own end. Any other end (a proposal, an
 `UnexpectedModel` reply, invalid output, a limit) fails it. A `pull-request` passes when the loop ended `Proposed`
 with a plan of the expected action type whose desired value lies inside the expected `bounds`; a
 `SetContainerMemoryLimit` plan must also name a container of the workload's pod template, and its previous value must
-be the limit that template sets. The plan must also pass the scenario's policy: the executor's checks that need no
+be the limit that template sets; an `AdjustKedaMaxReplicas` plan's previous value must be the `maxReplicaCount` of the
+recorded ScaledObject. The plan must also pass the scenario's policy: the executor's checks that need no
 Git (`policy.Preflight`: request and target namespace, labels, module, the policy's entry, `min`, `max` and the
 step limits), on a request of the plan for the Incident's subject ([#493](https://github.com/pkalin/shadewright/issues/493)).
 So in `oom`, under `demo-memory` (64Mi to 128Mi, at most +50%), 48Mi to 96Mi fails with `IncreaseTooLarge` although
@@ -167,7 +172,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `expected.yaml` | The scenario's expectation, copied unchanged from `pkalin/shadewright-fleet` at the commit `source.yaml` names (schema `scenarios.shadewright.io/v1alpha1`, owned by the fleet repository) |
 | `rubric.yaml` | How each fact of `expected.yaml` is scored (above) |
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
-| `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events |
+| `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events, and the KEDA ScaledObject of `broken-keda-trigger` and `keda-at-ceiling` (spec from the fleet's scenario file, synthetic status; decoded as unstructured JSON, as the analyzer reads it) |
 | `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom` and `statefulset-oom` have one (and the `oom/rollout` variant, below) |
 | `policy.yaml` | The RemediationPolicies of the scenario's cluster (#493): the lab's `demo-memory`, its spec copied from the fleet repository (the file names the commit), and a synthetic `demo-keda` (the lab has no KEDA policy yet). The context shows their bounds and a plan they refuse fails |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |

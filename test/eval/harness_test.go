@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -270,15 +271,18 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 }
 
 // Reasons that come from a valid result without a proposal: the model itself concluded that no catalog
-// action applies. A refusal for any other reason (a model failure, a limit, a proposal the loop dropped) is
-// not the refusal the scenario expects.
-var refusalReasons = []analysis.Reason{analysis.ReasonNoProposal, analysis.ReasonMissingData}
+// action applies, or the loop decided from the cluster that the one action for the subject is not offered
+// (ScalerNotReady: the subject's ScaledObject is not ready, ADR-0036 decision 5). A refusal for any other
+// reason (a model failure, a limit, another proposal the loop dropped) is not the refusal the scenario expects.
+var refusalReasons = []analysis.Reason{analysis.ReasonNoProposal, analysis.ReasonMissingData,
+	analysis.ReasonScalerNotReady}
 
 // resultReasons are the ends of an analysis whose last reply was a valid result the loop accepted, so its
 // text is the diagnosis: the result's own ends, and the checks of its proposal after decoding.
 var resultReasons = []analysis.Reason{analysis.ReasonProposed, analysis.ReasonNoProposal, analysis.ReasonMissingData,
 	analysis.ReasonNoEvidence, analysis.ReasonTargetNotSupported, analysis.ReasonNoPolicyForAction,
-	analysis.ReasonPreviousValueUnknown, analysis.ReasonNoChange, analysis.ReasonDirectionReversed}
+	analysis.ReasonPreviousValueUnknown, analysis.ReasonNoChange, analysis.ReasonDirectionReversed,
+	analysis.ReasonScalerNotReady}
 
 // scoreOutcome compares the loop's outcome with expected.yaml's.
 func scoreOutcome(scn *scenario, out analysis.Outcome) outcomeScore {
@@ -325,6 +329,11 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 	}
 	if a.SetContainerMemoryLimit != nil {
 		if detail := checkMemoryTarget(scn, a.SetContainerMemoryLimit); detail != "" {
+			return false, detail
+		}
+	}
+	if a.AdjustKedaMaxReplicas != nil {
+		if detail := checkKedaTarget(scn, a.AdjustKedaMaxReplicas); detail != "" {
 			return false, detail
 		}
 	}
@@ -391,6 +400,28 @@ func checkPolicy(scn *scenario, p *analysis.Plan) string {
 		return fmt.Sprintf("policy %s refuses the plan: %s (%s)", p.PolicyRef, d.Reason, d.Message)
 	}
 	return ""
+}
+
+// checkKedaTarget returns why an AdjustKedaMaxReplicas does not fit the scenario, or "": the loop takes the
+// previous maxReplicaCount from the ScaledObject the context builder read (ADR-0036), so the plan must carry
+// the value the recorded ScaledObject holds, whatever the model wrote.
+func checkKedaTarget(scn *scenario, p *remediationv1alpha1.AdjustKedaMaxReplicas) string {
+	o := scn.expected.Incident.Object
+	for _, obj := range scn.objects {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok || u.GetKind() != o.Kind || u.GetNamespace() != o.Namespace || u.GetName() != o.Name {
+			continue
+		}
+		cur, found, err := unstructured.NestedInt64(u.Object, "spec", "maxReplicaCount")
+		if err != nil || !found {
+			return fmt.Sprintf("the scenario's %s %s/%s has no maxReplicaCount", o.Kind, o.Namespace, o.Name)
+		}
+		if int64(p.PreviousValue) != cur {
+			return fmt.Sprintf("the ScaledObject holds maxReplicaCount %d, the loop proposed previous %d", cur, p.PreviousValue)
+		}
+		return ""
+	}
+	return fmt.Sprintf("the scenario holds no %s %s/%s", o.Kind, o.Namespace, o.Name)
 }
 
 // checkMemoryTarget returns why a SetContainerMemoryLimit does not fit the scenario, or "".

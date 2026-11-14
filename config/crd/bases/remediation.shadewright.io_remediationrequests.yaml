@@ -843,6 +843,7 @@ spec:
                       - PreviousValueUnknown
                       - NoChange
                       - DirectionReversed
+                      - ScalerNotReady
                       - NoPolicyForAction
                       - ActionOutOfBounds
                       - InvalidOutput

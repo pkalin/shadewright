@@ -409,7 +409,7 @@ func declineText(reason string) string {
 	case "CoolingDown":
 		return "the Incident was analyzed shortly before, and the cooldown still runs"
 	case "NoProposal", "MissingData", "NoEvidence", "TargetNotSupported", "PreviousValueUnknown",
-		"EscalationNotConfigured":
+		"ScalerNotReady", "EscalationNotConfigured":
 		return "the new analysis made no proposal"
 	case "NoChange", "DirectionReversed", "PlanUnchanged":
 		return "the new analysis proposed no different plan"

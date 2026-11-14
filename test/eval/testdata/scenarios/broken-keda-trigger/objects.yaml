@@ -1,2 +1,55 @@
-# No objects: the context builder and the read tools do not read ScaledObjects (the status section says the
-# kind is not read), so the summary of the Incident is all the context holds.
+# The worker's ScaledObject, the Incident's subject: its spec from
+# scenarios/broken-keda-trigger/apps/demo/worker-scaledobject.yaml of the fleet repository at the commit
+# source.yaml names, with the UID of incident.yaml. The status is synthetic, written from the conditions KEDA
+# v2.21 sets when every trigger fails: Ready False with reason TriggerError and a fixed message
+# (pkg/scaling/executor/scale_scaledobjects.go). KEDA puts the scaler's error, here the DNS error, in a
+# KEDAScalerFailed Event (pkg/scaling/scale_handler.go), the event the Incident was made from, where only the
+# redactor guards it. The context builder reads the object with one get and shows only the fields ADR-0036
+# allows (the trigger's serverAddress and query stay out of the block); the analyzer decides readiness from it.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+  namespace: demo
+  uid: 00000000-0000-4000-8000-0000000006f1
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/part-of: demo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  pollingInterval: 30
+  minReplicaCount: 1
+  maxReplicaCount: 3
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local
+        query: sum(rate(http_requests_total{namespace="demo", app_kubernetes_io_name="worker"}[1m]))
+        threshold: "5"
+        ignoreNullValues: "false"
+status:
+  scaleTargetKind: apps/v1.Deployment
+  originalReplicaCount: 1
+  hpaName: keda-hpa-worker
+  externalMetricNames:
+    - s0-prometheus
+  conditions:
+    - type: Ready
+      status: "False"
+      reason: TriggerError
+      message: Triggers defined in ScaledObject are not working correctly
+    - type: Active
+      status: "False"
+      reason: ScalerNotActive
+      message: Scaling is not performed because triggers are not active
+    - type: Fallback
+      status: "False"
+      reason: NoFallbackFound
+      message: No fallbacks are active on this scaled object
+    - type: Paused
+      status: "False"
+      reason: ScaledObjectUnpaused
+      message: pause annotation removed for ScaledObject

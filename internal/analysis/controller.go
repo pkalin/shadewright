@@ -958,7 +958,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonMissingData:             "The analysis made no proposal and named missing data; handed off to a person",
 	ReasonNoEvidence:              "The proposal quoted no evidence found in the context or tool results; handed off to a person",
 	ReasonTargetNotSupported:      "The proposed action cannot target the incident's subject; handed off to a person",
-	ReasonPreviousValueUnknown:    "The previous value could not be taken from the subject's pod template (not read, no such container, or no memory limit set); handed off to a person",
+	ReasonPreviousValueUnknown:    "The previous value could not be taken from the cluster: the subject's pod template (not read, no such container, or no memory limit set) or its ScaledObject (not read, or no usable maxReplicaCount); handed off to a person",
 	ReasonNoChange:                "The proposed value is the one the subject's pod template already sets; handed off to a person",
 	ReasonDirectionReversed:       "The pod template's current value reverses the direction of the proposed change; handed off to a person",
 	ReasonNoPolicyForAction:       "No RemediationPolicy is configured for the proposed action; handed off to a person",
@@ -977,6 +977,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonEndpointNotAllowed:      "The model endpoint is outside the analyzer's allow-list of host suffixes; nothing was sent; handed off to a person",
 	ReasonPlanUnchanged:           "The analysis with a reviewer hint proposed the plan of the request it would replace; no replacement was created",
 	ReasonHintNotPending:          "The reviewer hint was no longer pending; no replacement was created for it",
+	ReasonScalerNotReady:          "The subject's ScaledObject is not ready, so a change of maxReplicaCount was not offered; handed off to a person",
 }
 
 // finish writes the outcome in one status update: Proposed with the request's name, or Escalated, and the

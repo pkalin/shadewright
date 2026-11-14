@@ -17,7 +17,7 @@ limitations under the License.
 // Package keda makes the ClusterRole analyzer-watch-keda: the reads of the KEDA module's symptom sources in the
 // watched namespaces, bound there by one RoleBinding each (chart value analyzer.modules.keda.enabled, on by
 // default), with --module-grants naming keda. get on scaledobjects verifies the ScaledObject a KEDA HPA names as
-// its owner; list and watch feed the informers of the ScaledObject and ScaledJob sources. ScaledJobs get no get:
+// its owner, and reads the subject ScaledObject once before the model call (ADR-0036); list and watch feed the informers of the ScaledObject and ScaledJob sources. ScaledJobs get no get:
 // nothing reads one by name.
 //
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch

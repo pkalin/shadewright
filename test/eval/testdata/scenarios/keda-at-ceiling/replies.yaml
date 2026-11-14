@@ -4,9 +4,10 @@ replies:
   - model: eval-fake-1
     usage: {inputTokens: 1800, outputTokens: 290}
     content: |
-      {"summary": "The HPA of ScaledObject demo/worker is limited at its maximum of 2 replicas (ScalingLimited, TooManyReplicas) while its trigger asks for more. Raising maxReplicaCount by one, the smallest step, within the policy's bounds, lets it follow the load; the metric behind the desired count is not shown, so one step sets the size.",
+      {"summary": "The HPA of ScaledObject demo/worker is limited at its maximum of 2 replicas (ScalingLimited, TooManyReplicas) while its trigger asks for more; the ScaledObject is Ready with maxReplicaCount 2. Raising maxReplicaCount by one, the smallest step, within the policy's bounds, lets it follow the load; the metric behind the desired count is not shown, so one step sets the size.",
        "hypotheses": [{"description": "Steady load needs 3 replicas and maxReplicaCount is 2."}],
-       "evidence": [{"source": "c1", "quote": "ScalingLimited is True, reason TooManyReplicas"}],
+       "evidence": [{"source": "c1", "quote": "ScalingLimited is True, reason TooManyReplicas"},
+                    {"source": "c2", "quote": "Scaling is performed because triggers are active"}],
        "missingData": [],
        "uncertainty": "The metric values behind the desired count are not in the context.",
        "proposal": {"action": {"type": "AdjustKedaMaxReplicas", "setContainerMemoryLimit": null,

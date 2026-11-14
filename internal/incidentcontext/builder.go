@@ -202,6 +202,7 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 		c.Pods = append(c.Pods, t.pods[i].Name)
 	}
 	c.Template = templateOf(&t)
+	c.ScaledObject = scaledObjectOf(&t)
 	status := b.statusBlock(&t)
 	if t.state == targetFailed {
 		c.failed(SectionStatus)

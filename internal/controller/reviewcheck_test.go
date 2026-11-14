@@ -316,3 +316,169 @@ func TestStalePredecessorKeepsTheTransferredPullRequestOpen(t *testing.T) {
 		t.Fatalf("a stale predecessor closed the transferred pull request: state=%s, error=%v", got.State, err)
 	}
 }
+
+// passedWorld is a plain request waiting for review whose check run passed on its head through the approval
+// (review 90) of reviewer 3003, who wrote no hint, while user 2002 wrote a hint that was declined. It returns
+// the reconciler, the fake Git, the request as stored, the pull request number and the head.
+func passedWorld(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest, int64, string) {
+	t.Helper()
+	r, g, p, _, cr, head := gateWorld(t)
+	ctx := context.Background()
+	plainWaiting(t, r, p, head)
+	p.Status.Hints = []api.Hint{{Source: api.HintSourceGitHub, CommentID: 8, Digest: "sha256:" + strings.Repeat("b", 64),
+		State: api.HintDeclined, Reason: "NoChange", Author: api.HintAuthor{ID: 2002, Login: "steerer"}}}
+	if err := r.Status().Update(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	approve(g, cr.Number, 90, 3003, head)
+	for range 2 {
+		if err := r.reviewCheck(ctx, p, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckPassed {
+		t.Fatalf("the check did not pass: %+v", rc)
+	}
+	return r, g, p, cr.Number, head
+}
+
+// lastCheckRun returns the status of the latest check run on head, or "" when there is none.
+func lastCheckRun(g *fakegit.Git, head string) providers.CheckRunStatus {
+	runs := g.CheckRuns(head)
+	if len(runs) == 0 {
+		return ""
+	}
+	return runs[len(runs)-1].Status
+}
+
+// A check that passed is evaluated again on each look while the request waits for approval: it stays passed while
+// the approval it rested on stands, and once that approval is gone, an approval by a hint author does not keep it
+// passed (#748). It goes back to in progress on
+// the Git host and in status, and passes again when someone who wrote no hint approves the head again.
+func TestReviewCheckGoesBackWhenTheApprovalIsGone(t *testing.T) {
+	r, g, p, number, head := passedWorld(t)
+	ctx := context.Background()
+	// While the approval stands, a look writes nothing: no check run, no status.
+	approve(g, number, 91, 2002, head)
+	runs, rv := len(g.CheckRuns(head)), p.ResourceVersion
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed || p.ResourceVersion != rv ||
+		len(g.CheckRuns(head)) != runs {
+		t.Fatalf("a standing approval changed the check: %+v, %+v", p.Status.PullRequest.ReviewCheck, g.CheckRuns(head))
+	}
+	g.SetReviewState(number, 90, "DISMISSED")
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	want := api.ReviewCheck{Head: head, State: api.ReviewCheckInProgress}
+	if rc := p.Status.PullRequest.ReviewCheck; rc == nil || *rc != want {
+		t.Fatalf("the check stayed passed without the approval it rested on: %+v", rc)
+	}
+	if got := lastCheckRun(g, head); got != providers.CheckRunInProgress {
+		t.Fatalf("the check run on the Git host is %q, want in progress", got)
+	}
+	approve(g, number, 92, 3003, head)
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed {
+		t.Fatalf("a new approval by someone who wrote no hint did not pass the check again: %+v", rc)
+	}
+	if got := lastCheckRun(g, head); got != providers.CheckRunSuccess {
+		t.Fatalf("the check run on the Git host is %q, want success", got)
+	}
+}
+
+// A failed read of the reviews of a passed check is returned for a retry on a later look and changes nothing:
+// the check is neither passed again nor put back on a read that did not happen.
+func TestReviewCheckPassedKeepsItsStateOnAFailedRead(t *testing.T) {
+	r, g, p, number, head := passedWorld(t)
+	ctx := context.Background()
+	g.SetReviewState(number, 90, "DISMISSED")
+	g.SetFail(func(op string) error {
+		if op == "ListReviews" {
+			return fmt.Errorf("status 502: %w", providers.ErrRetryable)
+		}
+		return nil
+	})
+	runs := len(g.CheckRuns(head))
+	if err := r.reviewCheck(ctx, p, true); err == nil {
+		t.Fatal("a failed read of the reviews was not returned for a retry")
+	}
+	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed || len(g.CheckRuns(head)) != runs {
+		t.Fatalf("a failed read changed the check: %+v, %+v", p.Status.PullRequest.ReviewCheck, g.CheckRuns(head))
+	}
+	g.SetFail(nil)
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckInProgress {
+		t.Fatalf("the retry did not put the check back: %+v", p.Status.PullRequest.ReviewCheck)
+	}
+}
+
+// A list of reviews too long to read on a passed check never keeps the pass: the check goes back to in progress
+// and then fails on that head, as it does on a check that never passed.
+func TestReviewCheckPassedFailsOnAListTooLong(t *testing.T) {
+	r, g, p, _, head := passedWorld(t)
+	ctx := context.Background()
+	r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
+		return pagedReviews{g}, nil
+	}
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckFailed || rc.Head != head {
+		t.Fatalf("review check %+v", rc)
+	}
+	if got := lastCheckRun(g, head); got != providers.CheckRunFailure {
+		t.Fatalf("the check run on the Git host is %q, want failure", got)
+	}
+	if c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved); c == nil || c.Reason != ReasonReviewListTooLong {
+		t.Fatalf("Approved: %+v", c)
+	}
+}
+
+// A final refusal to put a passed check back in progress cannot be recorded as a state (on one head a pass moves
+// only back to in progress), so condition Approved False and one Warning Event say that the pass on the Git host
+// no longer rests on an approval; the next looks ask again without another Event.
+func TestReviewCheckRefusedToGoBackSaysWhy(t *testing.T) {
+	r, g, p, number, head := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	g.SetReviewState(number, 90, "DISMISSED")
+	g.SetFail(func(op string) error {
+		if op == opCreateCheckRun {
+			return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+		}
+		return nil
+	})
+	for range 2 {
+		if err := r.reviewCheck(ctx, p, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed || rc.Head != head {
+		t.Fatalf("review check %+v", rc)
+	}
+	c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved)
+	if c == nil || c.Reason != ReasonReviewCheckRefused {
+		t.Fatalf("condition Approved does not say why: %+v", c)
+	}
+	if len(events.Events) != 1 || !strings.Contains(<-events.Events, "Warning "+ReasonReviewCheckRefused) {
+		t.Fatal("not one Warning Event")
+	}
+	g.SetFail(nil)
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckInProgress {
+		t.Fatalf("the check did not go back once the Git host allowed it: %+v", p.Status.PullRequest.ReviewCheck)
+	}
+	if c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved); c.Reason != ReasonWaitingForReview {
+		t.Fatalf("Approved still says the Git host refused: %+v", c)
+	}
+}

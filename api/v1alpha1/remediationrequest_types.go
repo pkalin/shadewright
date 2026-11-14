@@ -435,7 +435,8 @@ type PullRequestStatus struct {
 	// reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
 	// gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed
 	// once it completed it with success after an approval of that head by someone who wrote no hint in the
-	// chain, Failed when the executor could not read every review of the pull request and completed it with
+	// chain (back to InProgress, on the Git host too, once no such approval of that head stands any more),
+	// Failed when the executor could not read every review of the pull request and completed it with
 	// failure (it fails closed; condition Approved False with reason ReviewListTooLong), Refused when the Git host
 	// refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new
 	// head starts without it, so a state never outlives its head.

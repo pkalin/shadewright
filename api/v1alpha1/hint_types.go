@@ -297,7 +297,8 @@ const (
 
 // ReviewCheckState is how far the check run shadewright/review of a head has come (ADR-0028 section 5).
 // InProgress: created, in progress, waiting for an approval of the head by someone who wrote no hint in the
-// chain. Passed: completed with conclusion success after such an approval. Failed: completed with conclusion
+// chain. Passed: completed with conclusion success after such an approval; it goes back to InProgress when no
+// such approval of the head stands any more. Failed: completed with conclusion
 // failure because the merge gate could not read every review of the pull request, so it fails closed on this
 // head and a person decides the merge. Refused: the Git host refused to create or complete it for good, so the
 // required check does not pass on this head and the pull request cannot merge until a person acts.
@@ -315,8 +316,9 @@ const (
 // ReviewCheck is the check run shadewright/review on one head of the pull request (ADR-0028 section 5),
 // pinned to that head: a state recorded for one head never counts for another. Every head the executor pushes
 // or adopts starts without one, and the executor creates the check in progress on it. On one head the state
-// moves only from InProgress to Passed, Failed or Refused.
-// +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Failed', 'Refused'])",message="on one head the check run moves only from InProgress to Passed, Failed or Refused"
+// moves only from InProgress to Passed, Failed or Refused, and from Passed back to InProgress when the approval
+// the pass rested on no longer stands (#748).
+// +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Failed', 'Refused']) || (oldSelf.state == 'Passed' && self.state == 'InProgress')",message="on one head the check run moves only from InProgress to Passed, Failed or Refused, or from Passed back to InProgress"
 type ReviewCheck struct {
 	// head is the commit the check run is on, always the pull request's recorded head (headSHA).
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`

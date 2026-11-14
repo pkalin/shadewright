@@ -1123,7 +1123,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report this commit, or a later commit of the target branch containing it, as applied. Empty until then, and when the host reported none. Once set it never changes.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge. |
 | `mergedAt` | [MicroTime](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#microtime-v1-meta) | No | mergedAt is when the executor first recorded the request Merged, set in the status write that sets the phase and never moved, unlike lastPhaseTransitionTime, which every later phase moves. A duplicate of the same Incident and target created before it ends Superseded (reason AnotherRequestMerged, #556). Empty on a request merged before the field existed. |
-| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed once it completed it with success after an approval of that head by someone who wrote no hint in the chain, Failed when the executor could not read every review of the pull request and completed it with failure (it fails closed; condition Approved False with reason ReviewListTooLong), Refused when the Git host refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new head starts without it, so a state never outlives its head.<br>Rule: on one head the check run moves only from InProgress to Passed, Failed or Refused |
+| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed once it completed it with success after an approval of that head by someone who wrote no hint in the chain (back to InProgress, on the Git host too, once no such approval of that head stands any more), Failed when the executor could not read every review of the pull request and completed it with failure (it fails closed; condition Approved False with reason ReviewListTooLong), Refused when the Git host refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new head starts without it, so a state never outlives its head.<br>Rule: on one head the check run moves only from InProgress to Passed, Failed or Refused, or from Passed back to InProgress |
 | `conflictSeen` | [ConflictSeen](#conflictseen) | No | conflictSeen records the first read in which the Git host reported this pull request open with a merge conflict while the plan was fresh. GitHub computes mergeability lazily and may report a stale conflict, so one read does not end the request: it ends NeedsIntervention with reason ChangeRequestConflict only on a later conflicted read, with the plan still fresh, at least two minutes after at, on the same head and target branch head. Any read that finds no conflict (an unknown answer included) removes it, and a new target branch head starts the wait again. Only the executor writes it. |
 
 ### RecordID
@@ -1435,12 +1435,13 @@ Used by: [ProposedRevert](#proposedrevert).
 ReviewCheck is the check run shadewright/review on one head of the pull request (ADR-0028 section 5),
 pinned to that head: a state recorded for one head never counts for another. Every head the executor pushes
 or adopts starts without one, and the executor creates the check in progress on it. On one head the state
-moves only from InProgress to Passed, Failed or Refused.
+moves only from InProgress to Passed, Failed or Refused, and from Passed back to InProgress when the approval
+the pass rested on no longer stands (#748).
 
 
 Validation rules:
 
-- on one head the check run moves only from InProgress to Passed, Failed or Refused: `self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Failed', 'Refused'])`
+- on one head the check run moves only from InProgress to Passed, Failed or Refused, or from Passed back to InProgress: `self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Failed', 'Refused']) || (oldSelf.state == 'Passed' && self.state == 'InProgress')`
 
 Used by: [PullRequestStatus](#pullrequeststatus).
 
@@ -1453,7 +1454,8 @@ Used by: [PullRequestStatus](#pullrequeststatus).
 
 ReviewCheckState is how far the check run shadewright/review of a head has come (ADR-0028 section 5).
 InProgress: created, in progress, waiting for an approval of the head by someone who wrote no hint in the
-chain. Passed: completed with conclusion success after such an approval. Failed: completed with conclusion
+chain. Passed: completed with conclusion success after such an approval; it goes back to InProgress when no
+such approval of the head stands any more. Failed: completed with conclusion
 failure because the merge gate could not read every review of the pull request, so it fails closed on this
 head and a person decides the merge. Refused: the Git host refused to create or complete it for good, so the
 required check does not pass on this head and the pull request cannot merge until a person acts.

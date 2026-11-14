@@ -164,7 +164,7 @@ The six questions of the first draft are all decided: five on 2026-11-13 (identi
 - **Login rule:** the exact pattern `login` takes for an Azure DevOps author (section 1): the characters a unique name can hold are not in the pages read, so the rule waits for a spike against the test organization.
 - **Pull request body length:** can the body for the largest plan pass 4000 characters (section 3, row `OpenChangeRequest`)?
 - **Settings shape:** one repository entry with organization and project repeated, or an organization level block (section 7)?
-- **Withdrawn approval after a pass (GitHub):** a dismissed review leaves `shadewright/review` at `success`, as a withdrawn vote would on Azure DevOps (section 4). Should the GitHub gate re-read the reviews after a pass, and for how long? Belongs to ADR-0028 and its code, not changed here.
+- **Withdrawn approval after a pass (GitHub):** a dismissed review leaves `shadewright/review` at `success`, as a withdrawn vote would on Azure DevOps (section 4). Should the GitHub gate re-read the reviews after a pass, and for how long? Belongs to ADR-0028 and its code, not changed here. Tracked in [#748](https://github.com/pkalin/shadewright/issues/748).
 - **Red team:** the vote reset window and the status policy bound to an authorized identity (section 4) need a red-team pass before this ADR is accepted.
 
 ## Amendments this ADR would need

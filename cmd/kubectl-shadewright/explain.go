@@ -78,6 +78,7 @@ var troubleshootingSections = map[string][]string{
 	"AmbiguousTarget":                   {secRender},
 	"AnotherRequestClosed":              {secPhases},
 	"AnotherRequestMerged":              {secPhases},
+	"AnotherRequestSucceeded":           {secPhases},
 	"BelowMinimum":                      {secPolicy},
 	"BranchDiverged":                    {secPullRequest},
 	"BranchMismatch":                    {secRepository},

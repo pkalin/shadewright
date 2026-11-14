@@ -88,7 +88,7 @@ Target
 :   The live object a request changes, pinned by UID.
 
 Target lock
-:   A limit by which a request waits while another request holds the lock on the same target (`status.holdsTarget`), from its allowed decision until its pull request is known merged, or closed with no other pull request open on its branch that may deliver its change (condition `TargetHeld` names one), also after it stopped (`TargetLocked`).
+:   A limit by which a request waits while another request holds the lock on the same target (`status.holdsTarget`), from its allowed decision until its pull request is known merged (with `--verify-outcomes` on, until the merged request ends), or closed with no other pull request open on its branch that may deliver its change (condition `TargetHeld` names one), also after it stopped (`TargetLocked`).
 
 Watched namespaces
 :   The namespaces the analyzer reads, set by `--watch-namespaces`. See [limit the namespaces it watches](how-to/limit-watched-namespaces.md).

@@ -74,6 +74,31 @@ func mergedElsewhereRequest(name string, createdAgo time.Duration) remediationv1
 	return rr
 }
 
+// succeededElsewhereRequest is request name in phase Superseded with PlanFresh False and reason
+// AnotherRequestSucceeded: it waited behind a request for the same field, holderName (holderUID), that ended
+// Succeeded (#719).
+func succeededElsewhereRequest(name string, createdAgo time.Duration) remediationv1alpha1.RemediationRequest {
+	rr := request(name, createdAgo, remediationv1alpha1.PhaseSuperseded)
+	rr.Status.Conditions = []metav1.Condition{{Type: remediationv1alpha1.ConditionPlanFresh,
+		Status: metav1.ConditionFalse, Reason: remediationv1alpha1.ReasonAnotherRequestSucceeded}}
+	rr.Status.QueuedBehind = []remediationv1alpha1.RequestRef{{Name: holderName, UID: holderUID}}
+	return rr
+}
+
+// holderName and holderUID name the request of another Incident that succeededElsewhereRequest waited behind.
+const (
+	holderName = "holder"
+	holderUID  = "33333333-3333-4333-8333-333333333333"
+)
+
+// holderRequest is the request succeededElsewhereRequest waited behind, of another Incident, in phase.
+func holderRequest(phase remediationv1alpha1.RemediationPhase) remediationv1alpha1.RemediationRequest {
+	rr := request(holderName, 3*time.Hour, phase)
+	rr.UID = holderUID
+	rr.Spec.IncidentRef.UID = "44444444-4444-4444-8444-444444444444"
+	return rr
+}
+
 func TestClosure(t *testing.T) {
 	const (
 		quiet = QuietBeforeResolved + time.Minute
@@ -195,6 +220,31 @@ func TestClosure(t *testing.T) {
 				return []remediationv1alpha1.RemediationRequest{request("a", 2*time.Hour, remediationv1alpha1.PhaseMerged), rr}
 			}(),
 			phase: escalated, reason: ReasonRequestSuperseded},
+		// #719: a request of this Incident queued behind the request of another Incident for the same field ends
+		// Superseded with AnotherRequestSucceeded when that one succeeded: the Incident follows the success.
+		{name: "proposed, superseded by the success of the request it waited behind", inc: proposed,
+			requests: []remediationv1alpha1.RemediationRequest{succeededElsewhereRequest("b", time.Hour)},
+			phase:    resolved, reason: ReasonHolderSucceeded},
+		{name: "proposed, superseded by the success of a listed holder that is Succeeded", inc: proposed,
+			requests: []remediationv1alpha1.RemediationRequest{holderRequest(remediationv1alpha1.PhaseSucceeded),
+				succeededElsewhereRequest("b", time.Hour)},
+			phase: resolved, reason: ReasonHolderSucceeded},
+		{name: "proposed, AnotherRequestSucceeded with a listed holder not Succeeded escalates", inc: proposed,
+			requests: []remediationv1alpha1.RemediationRequest{holderRequest(remediationv1alpha1.PhaseFailed),
+				succeededElsewhereRequest("c", 90*time.Minute)},
+			phase: escalated, reason: ReasonRequestSuperseded},
+		{name: "proposed, AnotherRequestSucceeded with no recorded holder escalates", inc: proposed,
+			requests: func() []remediationv1alpha1.RemediationRequest {
+				rr := succeededElsewhereRequest("b", time.Hour)
+				rr.Status.QueuedBehind = nil
+				return []remediationv1alpha1.RemediationRequest{rr}
+			}(),
+			phase: escalated, reason: ReasonRequestSuperseded},
+		{name: "resolved, superseded by a success created after the resolve stays resolved", inc: func() *remediationv1alpha1.Incident {
+			inc := closureIncident(remediationv1alpha1.IncidentResolved, 3*time.Hour)
+			inc.Status.ResolvedTime = ago(2 * time.Hour)
+			return inc
+		}, requests: []remediationv1alpha1.RemediationRequest{succeededElsewhereRequest("b", time.Hour)}},
 		{name: "proposed, superseded at the same second is the older", inc: proposed,
 			requests: []remediationv1alpha1.RemediationRequest{
 				request("z", time.Hour, remediationv1alpha1.PhaseSuperseded),

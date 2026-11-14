@@ -32,9 +32,13 @@ const (
 	gi1          = "1Gi"
 	e99          = "1e99"
 	hugeExponent = "1e2147483647"
+	e100         = "1e100"
 )
 
-var memoryField = sourcemap.Field{Steps: []sourcemap.Step{{Key: memoryKey}}, Quantity: true}
+var (
+	memoryField   = sourcemap.Field{Steps: []sourcemap.Step{{Key: memoryKey}}, Quantity: true}
+	replicasField = sourcemap.Field{Steps: []sourcemap.Step{{Key: "maxReplicaCount"}}}
+)
 
 func TestFieldEqualsComparesQuantities(t *testing.T) {
 	for _, c := range []struct {
@@ -74,7 +78,7 @@ func TestFieldEqualsRefusesUnboundedQuantities(t *testing.T) {
 		hugeExponent,
 		"1E2147483647",
 		"1e-2147483647",
-		"1e100",
+		e100,
 		"1e+100",
 		"1" + strings.Repeat("0", 64),
 		"0." + strings.Repeat("0", 64) + "1",
@@ -118,14 +122,46 @@ func TestFieldComparable(t *testing.T) {
 			t.Errorf("Comparable(%v) = false, want true", v)
 		}
 	}
-	for _, v := range []any{"1e100", 1.5, nil, true, map[string]any{}} {
+	for _, v := range []any{e100, 1.5, nil, true, map[string]any{}} {
 		if memoryField.Comparable(v) {
 			t.Errorf("Comparable(%v) = true, want false", v)
 		}
 	}
-	replicas := sourcemap.Field{Steps: []sourcemap.Step{{Key: "maxReplicaCount"}}}
-	if !replicas.Comparable("1e100") || !replicas.Comparable(int64(3)) {
+	replicas := replicasField
+	if !replicas.Comparable(e100) || !replicas.Comparable(int64(3)) {
 		t.Error("a field compared by its JSON form must read every value")
+	}
+}
+
+func TestFieldCompare(t *testing.T) {
+	replicas := replicasField
+	for _, c := range []struct {
+		field sourcemap.Field
+		a, b  any
+		want  int
+	}{
+		{memoryField, mi256, "512Mi", -1},
+		{memoryField, gi1, mi256, 1},
+		{memoryField, mi256, "268435456", 0},
+		{replicas, int64(3), int64(5), -1},
+		{replicas, int64(5), float64(3), 1},
+		{replicas, float64(4), int64(4), 0},
+	} {
+		got, ok := c.field.Compare(c.a, c.b)
+		if !ok || got != c.want {
+			t.Errorf("Compare(%v, %v) = %d, %v; want %d, true", c.a, c.b, got, ok, c.want)
+		}
+	}
+	for _, c := range []struct {
+		field sourcemap.Field
+		a, b  any
+	}{
+		{memoryField, e100, mi256}, {memoryField, mi256, nil}, {replicas, "3", int64(3)},
+		{replicas, 1.5, int64(1)}, {replicas, int64(1), true},
+	} {
+		if _, ok := c.field.Compare(c.a, c.b); ok {
+			t.Errorf("Compare(%v, %v) ordered a pair it cannot read", c.a, c.b)
+		}
 	}
 }
 

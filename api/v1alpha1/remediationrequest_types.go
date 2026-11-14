@@ -253,7 +253,9 @@ const (
 	// while this one waited, before it took the target lock or opened a pull request. With reason
 	// AnotherRequestClosed (on PlanFresh) this one waited behind the target lock of another request for the same
 	// target and field (status.queuedBehind) whose pull request was closed without a merge, before it took the
-	// lock or opened a pull request.
+	// lock or opened a pull request. With reason AnotherRequestSucceeded (on PlanFresh) this one waited behind the
+	// target lock of another request that changed the same field from the same previous value, was merged and
+	// ended Succeeded (#719).
 	// Terminal.
 	PhaseSuperseded RemediationPhase = "Superseded"
 	// PhaseNeedsIntervention means the controller cannot continue on its own, for example because the target
@@ -292,7 +294,11 @@ const (
 	// container status does not show).
 	ConditionCleared = "Cleared"
 	// ConditionPlanFresh is False, with the reason, when an input of the plan digest changed, the ScaledObject
-	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed). It is also False, with the
+	// is no longer ready or the action's module was disabled, and the request was superseded (or stopped because its change request could not be closed).
+	// It is also False when an undecided request ended Superseded because of another request for the same
+	// target: AnotherRequestMerged (a request of the same Incident was merged), AnotherRequestClosed (the request
+	// it waited behind had its pull request closed without a merge) or AnotherRequestSucceeded (the request it
+	// waited behind changed the same field the same way and ended Succeeded). It is also False, with the
 	// stale reason and the phase unchanged, once the cleanup of a stale plan has started: it is written before
 	// the change request is closed, so a close whose answer was lost is known on the next reconcile to be
 	// Shadewright's own, and the request ends Superseded rather than NeedsIntervention. When the Git host refuses
@@ -699,7 +705,10 @@ type RemediationRequestStatus struct {
 	// holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
 	// write of the allowed decision and cleared only once the request's pull request is known merged or closed and
 	// no other pull request that may deliver its change is open on its branch (condition TargetHeld says when one
-	// is), or a look-up by its branch and marker found none of its own open. While it is true no other request on the
+	// is), or a look-up by its branch and marker found none of its own open. With the executor's --verify-outcomes
+	// on, a merged request keeps it until it ends (Succeeded, Failed, Inconclusive), not only until its merge, so a
+	// request queued for the same target does not meet the merged change on its way to the cluster (#719).
+	// While it is true no other request on the
 	// same target goes through the policy check. Unset on a request not yet decided, and on one written before the
 	// field existed; the executor then derives it once from the request's phase and pull request, keeping the
 	// lock when in doubt.
@@ -733,7 +742,9 @@ type RemediationRequestStatus struct {
 	// holders, the executor first reads the recorded ones from the API server and only then replaces them. Until
 	// the request is decided, it ends Superseded (PlanFresh False, reason AnotherRequestClosed) when a recorded
 	// request ended NeedsIntervention because its pull request for the same target and field was closed without a
-	// merge. A request that never waited behind that one has no record of it and is decided as usual. Only the
+	// merge, or (reason AnotherRequestSucceeded, #719) a recorded request ended Succeeded with a change of the same
+	// field from the same previous value to another one. A request that never waited behind that one has no
+	// record of it and is decided as usual. Only the
 	// executor writes it; once set it is never removed or emptied (a validation rule refuses that). At most four
 	// holders are recorded, those for the same field first: a request behind more holders than that may have no
 	// record of one, and is then decided as usual when that one's pull request is closed.

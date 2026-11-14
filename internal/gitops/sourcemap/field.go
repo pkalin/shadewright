@@ -17,6 +17,7 @@ package sourcemap
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -170,6 +171,42 @@ func (f Field) Comparable(v any) bool {
 	}
 	_, ok := toQuantity(v)
 	return ok
+}
+
+// Compare orders two decoded values of this field: -1, 0 or 1 as a is below, equal to or above b. A Quantity
+// field compares as quantities (only Comparable values); any other field compares integer numbers (int64, or a
+// whole float64 within 2^53, the forms PreviousValue and JSON decoding give). It reports false for a pair it
+// cannot order, which a caller treats as not known, never as equal.
+func (f Field) Compare(a, b any) (int, bool) {
+	if f.Quantity {
+		qa, okA := toQuantity(a)
+		qb, okB := toQuantity(b)
+		if !okA || !okB {
+			return 0, false
+		}
+		return qa.Cmp(qb), true
+	}
+	ia, okA := toInteger(a)
+	ib, okB := toInteger(b)
+	if !okA || !okB {
+		return 0, false
+	}
+	return cmp.Compare(ia, ib), true
+}
+
+// toInteger reads an integer number: an int64, or a whole float64 within 2^53.
+func toInteger(v any) (int64, bool) {
+	switch x := v.(type) {
+	case int64:
+		return x, true
+	case float64:
+		if x != math.Trunc(x) || math.Abs(x) > 1<<53 {
+			return 0, false
+		}
+		return int64(x), true
+	default:
+		return 0, false
+	}
 }
 
 // equal reports whether two field values are the same. Without Quantity they must have the same JSON form,

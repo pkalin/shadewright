@@ -68,13 +68,22 @@ import (
 // field (lab run of 2026-11-10).
 //
 // The decision reads only recorded state, never a clock (invariant 5): the record, and each recorded holder read
-// from the API server (closedHolderOf), since the cache may not show the close yet while the limits, which read
+// from the API server (recordedHolderOf), since the cache may not show the close yet while the limits, which read
 // the API server, already saw the lock it released in the same write; checkHeld records a close without a phase
 // change. A holder that ended NeedsIntervention with reason ChangeRequestClosed (closedUnmerged), on the same
 // target UID and field (sameField), ends the request. A request that never waited behind it (created, or first
 // checked, after the lock was released) has no record of it and is decided as usual, and so is one for another
 // field. When a later check finds other holders (a handoff, or another request took the lock first), the
 // recorded ones are checked before the record is replaced (holdBack). The same call sites as for a merge apply.
+//
+// Requests queued behind a change that succeeded (#719). With verification on (--verify-outcomes) a merged holder
+// keeps the lock until it ends (heldForVerification), so a request queued behind it for the same field does not
+// meet the holder's change on its way to the cluster (the merged value in Git and the old one live, ValueMismatch,
+// lab run of 2026-11-14). When the holder ends Succeeded, a recorded holder whose change of the same field went
+// from the same previous value as the waiter's to another value in the same direction (succeededInstead) ends the
+// waiter Superseded with reason AnotherRequestSucceeded: its baseline is gone because of a change that was merged
+// and verified. When the holder ends Failed or Inconclusive the waiter is decided as usual, against the live
+// value. The decision reads the record and the holder's phase and spec, never a clock.
 
 // supersedable reports whether rr may end Superseded as the duplicate of a merged request: it is undecided (no
 // phase or Pending), holds no lock, recorded no pull request, and is in no supersede chain.
@@ -125,8 +134,15 @@ func mergesBefore(ctx context.Context, w, rr *remediationv1alpha1.RemediationReq
 // merge supersedes nothing. A field that cannot be located is never the same; that is logged, since the action
 // of a request the policy check accepts always names a field.
 func sameField(ctx context.Context, w, rr *remediationv1alpha1.RemediationRequest) bool {
+	_, ok := commonField(ctx, w, rr)
+	return ok
+}
+
+// commonField returns the field w and rr both change, located once for each (sameField), or false when they
+// change different fields or one cannot be located.
+func commonField(ctx context.Context, w, rr *remediationv1alpha1.RemediationRequest) (sourcemap.Field, bool) {
 	if w.Spec.Action.Type != rr.Spec.Action.Type {
-		return false
+		return sourcemap.Field{}, false
 	}
 	locate := func(o *remediationv1alpha1.RemediationRequest) (sourcemap.Field, bool) {
 		f, err := sourcemap.FieldFor(o.Spec.Action, o.Spec.TargetRef)
@@ -138,10 +154,13 @@ func sameField(ctx context.Context, w, rr *remediationv1alpha1.RemediationReques
 	}
 	wf, ok := locate(w)
 	if !ok {
-		return false
+		return sourcemap.Field{}, false
 	}
 	rf, ok := locate(rr)
-	return ok && wf.Quantity == rf.Quantity && slices.Equal(wf.Steps, rf.Steps)
+	if !ok || wf.Quantity != rf.Quantity || !slices.Equal(wf.Steps, rf.Steps) {
+		return sourcemap.Field{}, false
+	}
+	return rf, true
 }
 
 // closedUnmerged reports whether w ended because its pull request was closed without a merge: NeedsIntervention
@@ -160,13 +179,75 @@ func closedUnmerged(w *remediationv1alpha1.RemediationRequest) bool {
 	return false
 }
 
-// closedHolderOf returns a request rr waited behind (status.queuedBehind) that ended with its pull request for
-// rr's target and field closed without a merge (closedUnmerged, sameField), or nil. Each recorded request is
-// read from the API server, never the cache, which may not show the close yet; one that no longer exists, or
-// exists under a new UID, ends nothing. Any other failed read is returned, never taken as a reason to end rr or
-// to let it through.
-func (r *RemediationRequestReconciler) closedHolderOf(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	*remediationv1alpha1.RemediationRequest, error) {
+// succeededInstead reports whether w, a holder rr waited behind, ended Succeeded with a change of the same field
+// (sameField) planned from the same previous value as rr's, to another value in the same direction as rr's (both
+// above or both below that previous value) (#719): w's change took rr's baseline away, went the way rr would have
+// gone, and was merged and verified, so rr is not needed. A holder whose change went from another previous value,
+// to rr's previous value, or the other way (256Mi to 128Mi for a waiter planned 256Mi to 512Mi), does not stand
+// for rr's change, so rr is decided as usual, and so is rr when any of its values or the holder's cannot be
+// compared (Field.Comparable, Field.Compare): a value that cannot be read never ends a request. A Succeeded holder
+// of the same field that does not end rr is logged with the check that failed. It reads the recorded spec and
+// phase only.
+func succeededInstead(ctx context.Context, w, rr *remediationv1alpha1.RemediationRequest) bool {
+	if w.Status.Phase != remediationv1alpha1.PhaseSucceeded {
+		return false
+	}
+	field, ok := commonField(ctx, w, rr)
+	if !ok {
+		return false
+	}
+	failed := succeededInsteadCheck(field, w, rr)
+	if failed != "" {
+		logf.FromContext(ctx).Info("Kept RemediationRequest: the request it waited behind ended Succeeded but does not end it",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "holder", w.Name, "check", failed)
+		return false
+	}
+	return true
+}
+
+// succeededInsteadCheck returns the check of succeededInstead that w's change of field fails for rr, or "" when
+// it passes them all.
+func succeededInsteadCheck(field sourcemap.Field, w, rr *remediationv1alpha1.RemediationRequest) string {
+	ours, ok1 := sourcemap.PreviousValue(rr.Spec.Action)
+	want, ok2 := sourcemap.DesiredValue(rr.Spec.Action)
+	theirs, ok3 := sourcemap.PreviousValue(w.Spec.Action)
+	set, ok4 := sourcemap.DesiredValue(w.Spec.Action)
+	switch {
+	case !ok1 || !ok2 || !ok3 || !ok4:
+		return "an action has no previous or desired value"
+	case !field.Comparable(ours):
+		return "the waiting request's previous value cannot be compared"
+	case !field.Comparable(want):
+		return "the waiting request's desired value cannot be compared"
+	case !field.Comparable(theirs):
+		return "the holder's previous value cannot be compared"
+	case !field.Comparable(set):
+		return "the holder's desired value cannot be compared"
+	case !field.Equals(ours, theirs):
+		return "the holder changed the field from another previous value"
+	case field.Equals(ours, set):
+		return "the holder set the waiting request's previous value"
+	}
+	ourWay, okA := field.Compare(want, ours)
+	theirWay, okB := field.Compare(set, ours)
+	switch {
+	case !okA || !okB:
+		return "the direction of a change cannot be compared"
+	case ourWay != theirWay:
+		return "the holder changed the field the other way"
+	}
+	return ""
+}
+
+// recordedHolderOf returns a request rr waited behind (status.queuedBehind) on rr's target that ends rr, with the
+// PlanFresh reason to end it with, or nil: one that ended with its pull request for rr's field closed without a
+// merge (closedUnmerged, sameField), reason AnotherRequestClosed (#643), or one that ended Succeeded with a change
+// that took rr's baseline away (succeededInstead), reason AnotherRequestSucceeded (#719). Each recorded request is
+// read from the API server, never the cache, which may not show the end yet; one that no longer exists, or exists
+// under a new UID, ends nothing. Any other failed read is returned, never taken as a reason to end rr or to let it
+// through.
+func (r *RemediationRequestReconciler) recordedHolderOf(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	*remediationv1alpha1.RemediationRequest, string, error) {
 	for _, ref := range rr.Status.QueuedBehind {
 		if types.UID(ref.UID) == rr.UID {
 			continue
@@ -175,17 +256,24 @@ func (r *RemediationRequestReconciler) closedHolderOf(ctx context.Context, rr *r
 		key := client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}
 		if err := r.reader().Get(ctx, key, w); err != nil {
 			if apierrors.IsNotFound(err) {
+				// Deleted by hand (its finalizer released the lock): it ends nothing, and rr is decided as usual.
+				logf.FromContext(ctx).Info("Found no RemediationRequest this one waited behind; it ends nothing",
+					"remediationRequest", client.ObjectKeyFromObject(rr), "holder", ref.Name)
 				continue
 			}
-			return nil, fmt.Errorf("get RemediationRequest %s: %w", key, err)
+			return nil, "", fmt.Errorf("get RemediationRequest %s: %w", key, err)
 		}
-		if w.UID != types.UID(ref.UID) || w.Spec.TargetRef.UID != rr.Spec.TargetRef.UID || !closedUnmerged(w) ||
-			!sameField(ctx, w, rr) {
+		if w.UID != types.UID(ref.UID) || w.Spec.TargetRef.UID != rr.Spec.TargetRef.UID {
 			continue
 		}
-		return w, nil
+		switch {
+		case closedUnmerged(w) && sameField(ctx, w, rr):
+			return w, remediationv1alpha1.ReasonAnotherRequestClosed, nil
+		case succeededInstead(ctx, w, rr):
+			return w, remediationv1alpha1.ReasonAnotherRequestSucceeded, nil
+		}
 	}
-	return nil, nil
+	return nil, "", nil
 }
 
 // changeInEffect reports whether the change of the merged request w still holds: the live target, read from the
@@ -221,8 +309,9 @@ func (r *RemediationRequestReconciler) changeInEffect(ctx context.Context, w *re
 // endingRequestOf returns the request that ends rr, with the PlanFresh reason to end it with, or nil: a request
 // merged before rr (mergesBefore) whose change is still in effect (changeInEffect), reason AnotherRequestMerged,
 // or else a holder rr waited behind whose pull request for the same field was closed without a merge
-// (closedHolderOf), reason AnotherRequestClosed. The candidates for a merge are the other requests of rr's
-// Incident and target in the cache. One the cache shows merged is taken as it is, since its phase never goes
+// (recordedHolderOf), reason AnotherRequestClosed, or one that ended Succeeded with a change that took its baseline
+// away, reason AnotherRequestSucceeded (#719). The candidates for a merge are the other requests of rr's Incident
+// and target in the cache. One the cache shows merged is taken as it is, since its phase never goes
 // back to before the merge (the phases after Merged are merges too; a revert is read from the live target); one
 // the cache shows in a phase that has not ended is read again from the API server, since the cache may not show
 // its merge yet, while the limits, which read the API server, already saw the lock it released in the same
@@ -267,29 +356,35 @@ func (r *RemediationRequestReconciler) endingRequestOf(ctx context.Context, rr *
 			return w.DeepCopy(), remediationv1alpha1.ReasonAnotherRequestMerged, nil
 		}
 	}
-	closed, err := r.closedHolderOf(ctx, rr)
-	if err != nil || closed == nil {
-		return nil, "", err
-	}
-	return closed, remediationv1alpha1.ReasonAnotherRequestClosed, nil
+	return r.recordedHolderOf(ctx, rr)
 }
 
-// supersedeDuplicate ends rr Superseded because of w: PlanFresh False with reason (AnotherRequestMerged or
-// AnotherRequestClosed) and a message naming w and its pull request, Queued removed, no lock. The status write
-// uses rr's resourceVersion, so a conflict (another write meanwhile) is returned and the request is looked at
-// again.
+// supersedeDuplicate ends rr Superseded because of w: PlanFresh False with reason (AnotherRequestMerged,
+// AnotherRequestClosed or AnotherRequestSucceeded) and a message naming w and its pull request, Queued removed, no
+// lock. Any other reason gets a message that names w only. The status write uses rr's resourceVersion, so a
+// conflict (another write meanwhile) is returned and the request is looked at again.
 func (r *RemediationRequestReconciler) supersedeDuplicate(ctx context.Context, rr, w *remediationv1alpha1.RemediationRequest,
 	reason string) error {
 	pr := "its pull request"
 	if w.Status.PullRequest != nil {
 		pr = fmt.Sprintf("pull request #%d", w.Status.PullRequest.Number)
 	}
-	message := fmt.Sprintf("RemediationRequest %s of the same Incident and target was merged (%s) "+
-		"after this one was created; this one is not needed", w.Name, pr)
-	if reason == remediationv1alpha1.ReasonAnotherRequestClosed {
+	var message string
+	switch reason {
+	case remediationv1alpha1.ReasonAnotherRequestMerged:
+		message = fmt.Sprintf("RemediationRequest %s of the same Incident and target was merged (%s) "+
+			"after this one was created; this one is not needed", w.Name, pr)
+	case remediationv1alpha1.ReasonAnotherRequestClosed:
 		message = fmt.Sprintf("This one waited behind RemediationRequest %s for the same target and field, whose %s "+
 			"was closed without a merge; this one opens no pull request for that field. A new analysis of the "+
 			"Incident proposes again if the symptom continues", w.Name, pr)
+	case remediationv1alpha1.ReasonAnotherRequestSucceeded:
+		message = fmt.Sprintf("This one waited behind RemediationRequest %s, which changed the same field from the "+
+			"same previous value in the same direction; its %s was merged and the request ended Succeeded, so this "+
+			"one's previous value is gone and its change is not needed. Its Incident follows that request's outcome",
+			w.Name, pr)
+	default:
+		message = fmt.Sprintf("RemediationRequest %s for the same target ended this one", w.Name)
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseSuperseded)
 	rr.Status.ObservedGeneration = rr.Generation
@@ -312,8 +407,8 @@ func (r *RemediationRequestReconciler) supersedeDuplicate(ctx context.Context, r
 }
 
 // endIfDuplicate ends rr Superseded when a request of its Incident and target was merged after rr was created,
-// or a request rr waited behind had its pull request for the same target and field closed without a merge, and
-// reports whether it did (or the error of the look-up or the write, with ended false).
+// or a request rr waited behind had its pull request for the same target and field closed without a merge or
+// ended Succeeded with rr's change (succeededInstead), and reports whether it did (or the error of the look-up or the write, with ended false).
 func (r *RemediationRequestReconciler) endIfDuplicate(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	bool, error) {
 	lookCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)

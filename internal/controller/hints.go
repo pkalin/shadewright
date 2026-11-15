@@ -37,6 +37,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
 )
@@ -155,17 +156,36 @@ type hintLook struct {
 
 // watchHints runs pollHints after each look at the pull request of a request that may still be reviewed, with
 // the reconcile's context (pollHints bounds its steps itself). A failure is logged and changes nothing: the
-// watch of the pull request goes on, and the next look tries again from the stored cursor. It returns pollHints'
-// caughtUp, false on a failure.
+// watch of the pull request goes on, and the next look tries again from the stored cursor. It returns what the
+// look at the comments found (commentLook): caught up when pollHints' caughtUp is true, and otherwise none when
+// the request has no comments to read, paused when writes are paused or the kill switch could not be read
+// (whether or not the look got as far as a status write), or behind.
 func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hintLook,
-	rr *remediationv1alpha1.RemediationRequest) bool {
+	rr *remediationv1alpha1.RemediationRequest) commentLook {
+	_, _, reads := r.feedbackFor(look, rr)
 	caughtUp, err := r.pollHints(ctx, look, rr)
 	if err != nil {
 		logf.FromContext(ctx).Info("Could not handle the reviewer hints of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return false
 	}
-	return caughtUp
+	switch {
+	case err == nil && caughtUp:
+		return commentsCaughtUp
+	case !reads:
+		return commentsNone
+	case errors.Is(err, freshness.ErrPaused), errors.Is(err, freshness.ErrWriteBlocked):
+		return commentsPaused
+	}
+	// pollHints asks the kill switch only before a status write, so a look that changed nothing in status (a
+	// failed read of the comments, say) does not say whether writes are paused. A paused look neither counts nor
+	// resets the looks behind (watchReviewCheck), so ask here. A failed read of the kill switch cannot tell
+	// either, here or in pollHints' own ask, so it is treated as paused: it neither counts nor resets.
+	pauseCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	defer cancel()
+	if r.writeAllowed(pauseCtx) != nil {
+		return commentsPaused
+	}
+	return commentsBehind
 }
 
 // pollHints is one look at the comments of rr's pull request, when look has a provider and reviewer hints are

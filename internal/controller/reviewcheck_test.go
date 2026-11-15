@@ -336,7 +336,7 @@ func passedWorld(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *ap
 	}
 	approve(g, cr.Number, 90, 3003, head)
 	for range 2 {
-		if err := r.reviewCheck(ctx, p, true); err != nil {
+		if err := r.reviewCheck(ctx, p); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -365,7 +365,7 @@ func TestReviewCheckGoesBackWhenTheApprovalIsGone(t *testing.T) {
 	// While the approval stands, a look writes nothing: no check run, no status.
 	approve(g, number, 91, 2002, head)
 	runs, rv := len(g.CheckRuns(head)), p.ResourceVersion
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed || p.ResourceVersion != rv ||
@@ -373,7 +373,7 @@ func TestReviewCheckGoesBackWhenTheApprovalIsGone(t *testing.T) {
 		t.Fatalf("a standing approval changed the check: %+v, %+v", p.Status.PullRequest.ReviewCheck, g.CheckRuns(head))
 	}
 	g.SetReviewState(number, 90, "DISMISSED")
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	want := api.ReviewCheck{Head: head, State: api.ReviewCheckInProgress}
@@ -384,7 +384,7 @@ func TestReviewCheckGoesBackWhenTheApprovalIsGone(t *testing.T) {
 		t.Fatalf("the check run on the Git host is %q, want in progress", got)
 	}
 	approve(g, number, 92, 3003, head)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed {
@@ -408,14 +408,14 @@ func TestReviewCheckPassedKeepsItsStateOnAFailedRead(t *testing.T) {
 		return nil
 	})
 	runs := len(g.CheckRuns(head))
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a failed read of the reviews was not returned for a retry")
 	}
 	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed || len(g.CheckRuns(head)) != runs {
 		t.Fatalf("a failed read changed the check: %+v, %+v", p.Status.PullRequest.ReviewCheck, g.CheckRuns(head))
 	}
 	g.SetFail(nil)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckInProgress {
@@ -431,7 +431,7 @@ func TestReviewCheckPassedFailsOnAListTooLong(t *testing.T) {
 	r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
 		return pagedReviews{g}, nil
 	}
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckFailed || rc.Head != head {
@@ -478,7 +478,7 @@ func TestReviewCheckPassesAgainAfterALostStatusWrite(t *testing.T) {
 	ctx := context.Background()
 	g.SetReviewState(number, 90, "DISMISSED")
 	reread := staleCopy(t, r, p)
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a status write that failed was not returned")
 	}
 	reread()
@@ -486,7 +486,7 @@ func TestReviewCheckPassesAgainAfterALostStatusWrite(t *testing.T) {
 		t.Fatalf("setup: host %q, status %+v", got, p.Status.PullRequest.ReviewCheck)
 	}
 	approve(g, number, 92, 3003, head)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if got := lastCheckRun(g, head); got != providers.CheckRunSuccess {
@@ -503,12 +503,12 @@ func TestReviewCheckGoesBackAfterALostPassWrite(t *testing.T) {
 	r, g, p, _, cr, head := gateWorld(t)
 	ctx := context.Background()
 	plainWaiting(t, r, p, head)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	approve(g, cr.Number, 90, 3003, head)
 	reread := staleCopy(t, r, p)
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a status write that failed was not returned")
 	}
 	reread()
@@ -516,7 +516,7 @@ func TestReviewCheckGoesBackAfterALostPassWrite(t *testing.T) {
 		t.Fatalf("setup: host %q, status %+v", got, p.Status.PullRequest.ReviewCheck)
 	}
 	g.SetReviewState(cr.Number, 90, "DISMISSED")
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if got := lastCheckRun(g, head); got != providers.CheckRunInProgress {
@@ -533,12 +533,12 @@ func TestReviewCheckRecordsWhatTheHostAlreadyShows(t *testing.T) {
 	ctx := context.Background()
 	g.SetReviewState(number, 90, "DISMISSED")
 	reread := staleCopy(t, r, p)
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a status write that failed was not returned")
 	}
 	reread()
 	runs := len(g.CheckRuns(head))
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress || len(g.CheckRuns(head)) != runs {
@@ -554,7 +554,7 @@ func TestReviewCheckCommentAfterThePassKeepsIt(t *testing.T) {
 	g.AddReview(number, providers.Feedback{ID: 93, Author: providers.FeedbackAuthor{ID: 3003, Login: "reviewer-3003",
 		Kind: providers.AuthorPerson}, ReviewState: reviewCommented, CommitID: head, CreatedAt: hostClock.Add(time.Minute)})
 	runs := len(g.CheckRuns(head))
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed || len(g.CheckRuns(head)) != runs {
@@ -580,7 +580,7 @@ func TestReviewCheckWritesNothingWhilePaused(t *testing.T) {
 		return r.Update(ctx, s)
 	})
 	runs := len(g.CheckRuns(head))
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a paused look was not returned for a retry")
 	}
 	if len(g.CheckRuns(head)) != runs || p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed {
@@ -610,7 +610,7 @@ func TestReviewCheckRefusedToGoBack(t *testing.T) {
 	})
 	look := func() {
 		t.Helper()
-		if err := r.reviewCheck(ctx, p, true); err != nil {
+		if err := r.reviewCheck(ctx, p); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -661,7 +661,7 @@ func TestReviewCheckRefusedAtCreateHeals(t *testing.T) {
 		}
 		return nil
 	})
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved)
@@ -671,7 +671,7 @@ func TestReviewCheckRefusedAtCreateHeals(t *testing.T) {
 	}
 	g.SetFail(nil)
 	now = now.Add(refusalRetryBase + time.Second)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress || lastCheckRun(g, head) != providers.CheckRunInProgress {
@@ -716,7 +716,7 @@ func TestReviewCheckStuckWarnsOnce(t *testing.T) {
 		return nil
 	})
 	for i := range 2 * reviewCheckStuckLooks {
-		r.watchReviewCheck(ctx, p, true)
+		r.watchReviewCheck(ctx, p, commentsCaughtUp)
 		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
 			t.Fatalf("after %d failed looks: %d Events, want %d", i+1, len(events.Events), want)
 		}
@@ -725,8 +725,272 @@ func TestReviewCheckStuckWarnsOnce(t *testing.T) {
 		t.Fatalf("event %q", ev)
 	}
 	g.SetFail(nil)
-	r.watchReviewCheck(ctx, p, true)
+	r.watchReviewCheck(ctx, p, commentsCaughtUp)
 	if _, ok := r.reviewCheckFailures.Load(client.ObjectKeyFromObject(p)); ok {
 		t.Fatal("a look that went through kept the count")
+	}
+}
+
+// Looks that do not read the comments to the end while the merge gate is due keep the check as it is with no
+// failure; reviewCheckStuckLooks of them on one head with no look in between that caught up raise one Warning
+// Event, not one per look (#755). A look that could not tell (paused, or one with no comments to read) neither
+// counts nor starts the count again, and a look that caught up starts it again.
+func TestReviewCommentsUnreadWarnsOnce(t *testing.T) {
+	r, _, p, _, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	key := client.ObjectKeyFromObject(p)
+	for i := range 2 * reviewCheckStuckLooks {
+		r.watchReviewCheck(ctx, p, commentsBehind)
+		switch i {
+		case 0:
+			r.watchReviewCheck(ctx, p, commentsPaused)
+		case 1:
+			r.watchReviewCheck(ctx, p, commentsNone)
+		}
+		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
+			t.Fatalf("after %d looks behind: %d Events, want %d", i+1, len(events.Events), want)
+		}
+	}
+	if ev := <-events.Events; !strings.Contains(ev, "Warning "+ReasonReviewCommentsUnread) {
+		t.Fatalf("event %q", ev)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed {
+		t.Fatalf("looks behind changed the check: %+v", rc)
+	}
+	if _, ok := r.reviewCheckFailures.Load(key); ok {
+		t.Fatal("looks behind counted as failed looks")
+	}
+	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	if _, ok := r.reviewCommentsBehind.Load(key); ok {
+		t.Fatal("a look that caught up kept the count")
+	}
+}
+
+// A look whose comments are behind while the gate is not due (here the check is Failed on the head, which is
+// final) is not counted: the comments did not keep the gate from running.
+func TestReviewCommentsUnreadOnlyWhileTheGateIsDue(t *testing.T) {
+	r, _, p, _, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	p.Status.PullRequest.ReviewCheck.State = api.ReviewCheckFailed
+	for range 2 * reviewCheckStuckLooks {
+		r.watchReviewCheck(ctx, p, commentsBehind)
+	}
+	if len(events.Events) != 0 {
+		t.Fatalf("%d Events for a gate that was not due", len(events.Events))
+	}
+}
+
+// A check run write the Git host answers with a conflict records nothing and is not a failure; a conflict that
+// persists on reviewCheckStuckLooks looks on one head with no write in between that went through raises one
+// Warning Event, not one per look (#755). A write that goes through without a conflict starts the count again.
+func TestReviewCheckConflictWarnsOnce(t *testing.T) {
+	r, g, p, number, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	key := client.ObjectKeyFromObject(p)
+	g.SetReviewState(number, 90, "DISMISSED")
+	g.SetFail(func(op string) error {
+		if op == opCreateCheckRun {
+			return fmt.Errorf("status 409: %w", providers.ErrConflict)
+		}
+		return nil
+	})
+	for i := range 2 * reviewCheckStuckLooks {
+		r.watchReviewCheck(ctx, p, commentsCaughtUp)
+		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
+			t.Fatalf("after %d conflicts: %d Events, want %d", i+1, len(events.Events), want)
+		}
+	}
+	if ev := <-events.Events; !strings.Contains(ev, "Warning "+ReasonReviewCheckConflict) {
+		t.Fatalf("event %q", ev)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed {
+		t.Fatalf("a conflict recorded a state: %+v", rc)
+	}
+	if _, ok := r.reviewCheckFailures.Load(key); ok {
+		t.Fatal("conflicts counted as failed looks")
+	}
+	g.SetFail(nil)
+	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	if _, ok := r.reviewCheckConflicts.Load(key); ok {
+		t.Fatal("a look that went through kept the count")
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress {
+		t.Fatalf("the check after the conflicts ended: %+v", rc)
+	}
+}
+
+// eventsOf drains the Events recorded so far and counts them by reason.
+func eventsOf(events *record.FakeRecorder) map[string]int {
+	out := map[string]int{}
+	for {
+		select {
+		case ev := <-events.Events:
+			for _, reason := range []string{ReasonReviewCommentsUnread, ReasonReviewCheckConflict, ReasonReviewCheckStuck} {
+				if strings.Contains(ev, " "+reason+" ") {
+					out[reason]++
+				}
+			}
+		default:
+			return out
+		}
+	}
+}
+
+// conflictOnWrite makes every check run write of g answer with a conflict.
+func conflictOnWrite(op string) error {
+	if op == opCreateCheckRun {
+		return fmt.Errorf("status 409: %w", providers.ErrConflict)
+	}
+	return nil
+}
+
+// A look whose comments were behind writes no check run, so it says nothing about a conflict: with a conflict
+// that persists on every look that writes, looks behind in between do not reset the count of conflicts, and the
+// Event fires at the tenth conflict (#755). The look that got the conflict had caught up, which shows the comments
+// read, so it starts the count of looks behind again and that Event does not fire.
+func TestReviewCheckSignalsDoNotResetEachOther(t *testing.T) {
+	r, g, p, number, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(100)
+	r.Recorder = events
+	g.SetReviewState(number, 90, "DISMISSED")
+	g.SetFail(conflictOnWrite)
+	for i := range 5 * reviewCheckStuckLooks {
+		r.watchReviewCheck(ctx, p, commentsBehind)
+		r.watchReviewCheck(ctx, p, commentsCaughtUp)
+		got := eventsOf(events)
+		if i+1 == reviewCheckStuckLooks {
+			if got[ReasonReviewCheckConflict] != 1 || len(got) != 1 {
+				t.Fatalf("after %d pairs of looks: Events %v, want one %s", i+1, got, ReasonReviewCheckConflict)
+			}
+			continue
+		}
+		if len(got) != 0 {
+			t.Fatalf("after %d pairs of looks: Events %v, want none", i+1, got)
+		}
+	}
+}
+
+// Looks that could not tell whether the write would get a conflict (here a failed read of the check run, and a
+// look that wrote nothing) neither count nor reset: five conflicts, a failed read, a look with no write and five
+// conflicts raise the Event at the tenth conflict. A check run write that went through without a conflict resets
+// the count (#755).
+func TestReviewCheckConflictCountsAcrossFailedReads(t *testing.T) {
+	r, g, p, number, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(100)
+	r.Recorder = events
+	g.SetReviewState(number, 90, "DISMISSED")
+	conflicts := func(n int) {
+		t.Helper()
+		g.SetFail(conflictOnWrite)
+		for range n {
+			r.watchReviewCheck(ctx, p, commentsCaughtUp)
+		}
+	}
+	conflicts(5)
+	g.SetFail(func(op string) error {
+		if op == opReviewCheckRun {
+			return fmt.Errorf("status 502: %w", providers.ErrRetryable)
+		}
+		return nil
+	})
+	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	g.SetFail(nil)
+	r.watchReviewCheck(ctx, p, commentsNone) // the gate does not run on this look, so nothing is written
+	conflicts(4)
+	if got := eventsOf(events); len(got) != 0 {
+		t.Fatalf("after nine conflicts and a failed read: Events %v", got)
+	}
+	conflicts(1)
+	if got := eventsOf(events); got[ReasonReviewCheckConflict] != 1 || len(got) != 1 {
+		t.Fatalf("after ten conflicts and a failed read: Events %v, want one %s", got, ReasonReviewCheckConflict)
+	}
+
+	// A new world: five conflicts, a write that goes through, then nine conflicts raise nothing.
+	r, g, p, number, _ = passedWorld(t)
+	events = record.NewFakeRecorder(100)
+	r.Recorder = events
+	g.SetReviewState(number, 90, "DISMISSED")
+	conflicts(5)
+	g.SetFail(nil)
+	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress {
+		t.Fatalf("the write between the conflicts did not go through: %+v", rc)
+	}
+	g.SetReviewState(number, 90, reviewApproved) // the gate wants success again, so the next looks write
+	conflicts(reviewCheckStuckLooks - 1)
+	if got := eventsOf(events); len(got) != 0 {
+		t.Fatalf("a write that went through did not reset the count: Events %v", got)
+	}
+	conflicts(1)
+	if got := eventsOf(events); got[ReasonReviewCheckConflict] != 1 {
+		t.Fatalf("after ten conflicts since the write: Events %v", got)
+	}
+}
+
+// watchHints tells the review check what the look at the comments found (#755): a look while writes are paused is
+// paused, whether its read of the comments failed or it could not store what it judged, so it neither counts nor
+// resets the looks behind, and the same holds when the kill switch cannot be read, as the look cannot tell; a
+// failed read or a look that did not reach the end while writes go on is behind; a look that read to the end and
+// stored it caught up.
+func TestWatchHintsClassifiesTheLook(t *testing.T) {
+	failList := func(op string) error {
+		if op == "ListComments" {
+			return fmt.Errorf("status 502: %w", providers.ErrRetryable)
+		}
+		return nil
+	}
+	for _, tc := range []struct {
+		name   string
+		paused bool
+		blind  bool // the kill switch cannot be read
+		fail   func(string) error
+		more   bool // more comments than one look reads
+		want   commentLook
+	}{
+		{name: "paused, failed list", paused: true, fail: failList, want: commentsPaused},
+		{name: "kill switch unreadable, failed list", blind: true, fail: failList, want: commentsPaused},
+		{name: "kill switch unreadable, comments to store", blind: true, want: commentsPaused},
+		{name: "paused, comments to store", paused: true, want: commentsPaused},
+		{name: "failed list", fail: failList, want: commentsBehind},
+		{name: "behind without error", more: true, want: commentsBehind},
+		{name: "caught up", want: commentsCaughtUp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, p, number, _ := passedWorld(t)
+			ctx := context.Background()
+			for id := range int64(2) {
+				g.AddComment(number, providers.Feedback{ID: 600 + id, Body: "looks fine", CreatedAt: hostClock,
+					Author: providers.FeedbackAuthor{ID: 4004, Login: "reader", Kind: providers.AuthorPerson}})
+			}
+			if tc.more {
+				g.SetFeedbackPerLook(1)
+			}
+			if tc.paused {
+				s := &api.RemediationSettings{}
+				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, s); err != nil {
+					t.Fatal(err)
+				}
+				s.Spec.Paused = new(true)
+				if err := r.Update(ctx, s); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.blind {
+				r.APIReader = nil
+			}
+			g.SetFail(tc.fail)
+			look := hintLook{git: &gatedGit{git: g, allow: r.writeAllowed}, host: api.GitProviderGitHub}
+			if got := r.watchHints(ctx, look, p); got != tc.want {
+				t.Fatalf("look classified %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

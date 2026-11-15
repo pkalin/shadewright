@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -69,6 +70,12 @@ import (
 //     the check of that request again. Recording Stale sets condition Approved back to WaitingForReview as above.
 //   - A failed read of the reviews or of the check run changes nothing and is retried on a later look; looks that
 //     fail reviewCheckStuckLooks times in a row on one head record one Warning Event (watchReviewCheck).
+//   - Two cases leave the check as it is without a failure, and each has a Warning Event (#755): looks that did
+//     not read the comments to the end while the gate was due (ReviewCommentsUnread), and check run writes the
+//     Git host answered with a conflict while the pull request was seen open (ReviewCheckConflict). Each Event
+//     fires once per head after 10 looks that showed its condition with no look in between that showed the
+//     condition gone. Looks that could not tell (a failed read, a paused look, a look that returned early for
+//     another reason) neither count nor reset (watchReviewCheck).
 //
 // A restart, or a failed status write, between a write to the Git host and the status write leaves the record
 // behind the host in either direction; the next look compares the host with the reviews again and writes only
@@ -113,8 +120,43 @@ const (
 const ReasonReviewCheckRefused = "ReviewCheckRefused"
 
 // reviewCheckStuckLooks is how many looks in a row whose review check failed raise the one Warning Event with
-// reason ReviewCheckStuck.
+// reason ReviewCheckStuck, and how many looks that showed their condition, with no look in between that showed it
+// gone, raise ReviewCommentsUnread and ReviewCheckConflict.
 const reviewCheckStuckLooks = 10
+
+// ReasonReviewCommentsUnread is the reason of the Warning Event about looks that, while the merge gate was due
+// (gateDue), did not read the comments of the pull request to the end: the gate runs only after a look that did,
+// so the check keeps what the Git host shows (#755). It fires once per head after 10 looks that showed its
+// condition with no look in between that showed the condition gone; looks that could not tell (a failed read, a
+// paused look, a look that returned early for another reason) neither count nor reset.
+const ReasonReviewCommentsUnread = "ReviewCommentsUnread"
+
+// ReasonReviewCheckConflict is the reason of the Warning Event about check run writes the Git host answered with a
+// conflict. A conflict is read as a pull request closed or merged meanwhile and records nothing, but each of these
+// looks had just seen it open, so the check keeps what the Git host shows (#755). It fires once per head after 10
+// looks that showed its condition with no look in between that showed the condition gone; looks that could not
+// tell (a failed read, a paused look, a look that returned early for another reason) neither count nor reset.
+const ReasonReviewCheckConflict = "ReviewCheckConflict"
+
+// errCheckRunConflict is syncReviewCheck's answer when the Git host answered the check run write with a
+// conflict. It is not a failure: nothing is recorded, the next look decides, and watchReviewCheck only counts it.
+var errCheckRunConflict = errors.New("the Git host answered the check run write with a conflict")
+
+// commentLook is what the look at the comments before the review check found (watchHints).
+type commentLook int
+
+const (
+	// commentsNone: no look at the comments, as the request has none to read (reviewer hints off, no pull
+	// request waiting for review, or a provider that reads no feedback).
+	commentsNone commentLook = iota
+	// commentsCaughtUp: the look read the comments to the end and stored what it judged.
+	commentsCaughtUp
+	// commentsBehind: the look did not read the comments to the end, or could not store what it judged.
+	commentsBehind
+	// commentsPaused: the look could not store what it judged because writes are paused, or it could not tell
+	// whether they are (a failed read of the kill switch).
+	commentsPaused
+)
 
 // ReasonReviewCheckStuck is the reason of the Warning Event recorded once when the review check of a head failed
 // on reviewCheckStuckLooks looks in a row: a read or write of the Git host, or a status write, that keeps failing
@@ -129,19 +171,58 @@ type stuckLooks struct {
 }
 
 // watchReviewCheck runs reviewCheck after a look at the pull request found it open with the recorded head;
-// caughtUp says whether that look read the comments to the end and stored them. A failure is logged and
-// changes nothing: the next look tries again. A cancelled reconcile is not logged. After reviewCheckStuckLooks
-// failed looks in a row on one head, not counting looks while writes are paused, it records one Warning Event
-// with reason ReviewCheckStuck; a look that goes through starts the count again. The count is in memory only:
-// after a restart it starts again, so the Event may come once more.
+// comments says what the look at the comments before it found, and the gate runs only when it caught up. A
+// failure is logged and changes nothing: the next look tries again. A cancelled reconcile is neither logged nor
+// counted. Three counts on one head each record one Warning Event:
+//
+//   - failed looks, not counting looks while writes are paused (ReviewCheckStuck): reviewCheckStuckLooks failed
+//     looks in a row; a look that goes through starts the count again;
+//   - looks whose comments were behind while the gate was due (ReviewCommentsUnread, #755), and looks whose check
+//     run write got a conflict (ReviewCheckConflict, #755). For these two, each Event fires once per head after
+//     10 looks that showed its condition with no look in between that showed the condition gone. Looks that could
+//     not tell (a failed read, a paused look, a look that returned early for another reason) neither count nor
+//     reset. The comments are shown read only by a look that caught up (commentsCaughtUp), so only such a look
+//     starts their count again; the conflict is shown gone only by a check run write that went through without
+//     one, so only such a write starts its count again. A look that shows one condition says nothing about the
+//     other, so the two counts never reset each other. A conflict also starts the count of failed looks again,
+//     as before.
+//
+// The counts are in memory only and no status write comes between a count and its Event: after a restart they
+// start again, so each Event may come once more per process.
 func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	caughtUp bool) {
-	err := r.reviewCheck(ctx, rr, caughtUp)
+	comments commentLook) {
+	behind := comments == commentsBehind && r.gateDue(rr)
+	written, err := r.reviewCheckLook(ctx, rr, comments == commentsCaughtUp)
 	if ctx.Err() != nil {
 		return
 	}
 	key := client.ObjectKeyFromObject(rr)
-	if err == nil || errors.Is(err, freshness.ErrPaused) || rr.Status.PullRequest == nil {
+	pr := rr.Status.PullRequest
+	switch {
+	case behind:
+		if countLook(&r.reviewCommentsBehind, key, rr.UID, pr.HeadSHA) == reviewCheckStuckLooks {
+			r.warn(rr, ReasonReviewCommentsUnread, fmt.Sprintf("The comments of the pull request were not read "+
+				"to the end on %d looks with no look in between that read them, so the merge gate did not run: "+
+				"the review check shadewright/review keeps what the Git host shows, which may be a pass that no "+
+				"longer rests on an approval", reviewCheckStuckLooks))
+		}
+	case comments == commentsCaughtUp:
+		r.reviewCommentsBehind.Delete(key)
+	}
+	conflict := errors.Is(err, errCheckRunConflict)
+	switch {
+	case conflict:
+		if countLook(&r.reviewCheckConflicts, key, rr.UID, pr.HeadSHA) == reviewCheckStuckLooks {
+			r.warn(rr, ReasonReviewCheckConflict, fmt.Sprintf("The Git host answered the write of the review "+
+				"check shadewright/review with a conflict on %d looks with no write in between that went "+
+				"through, while the pull request was seen open; the check keeps what the Git host shows, which "+
+				"may be a pass that no longer rests on an approval", reviewCheckStuckLooks))
+		}
+		err = nil
+	case written:
+		r.reviewCheckConflicts.Delete(key)
+	}
+	if err == nil || errors.Is(err, freshness.ErrPaused) || pr == nil {
 		if err == nil {
 			r.reviewCheckFailures.Delete(key)
 		}
@@ -149,54 +230,98 @@ func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr 
 	}
 	logf.FromContext(ctx).Info("Could not update the review check of RemediationRequest",
 		"remediationRequest", key, "error", err.Error())
-	head := rr.Status.PullRequest.HeadSHA
-	n := stuckLooks{uid: rr.UID, head: head, looks: 1}
-	if v, ok := r.reviewCheckFailures.Load(key); ok {
-		if old, ok := v.(stuckLooks); ok && old.uid == rr.UID && old.head == head {
-			n.looks = old.looks + 1
-		}
-	}
-	r.reviewCheckFailures.Store(key, n)
-	if n.looks == reviewCheckStuckLooks && r.Recorder != nil {
-		r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonReviewCheckStuck, fmt.Sprintf("The review check "+
+	if countLook(&r.reviewCheckFailures, key, rr.UID, pr.HeadSHA) == reviewCheckStuckLooks {
+		r.warn(rr, ReasonReviewCheckStuck, fmt.Sprintf("The review check "+
 			"shadewright/review on the pull request's head could not be brought in line with the reviews on %d "+
 			"looks in a row; it keeps what the Git host shows, which may be a pass that no longer rests on an "+
 			"approval. The executor's log says why", reviewCheckStuckLooks))
 	}
 }
 
+// warn records a Warning Event about rr with reason and a fixed message, when the reconciler has a recorder.
+func (r *RemediationRequestReconciler) warn(rr *remediationv1alpha1.RemediationRequest, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, reason, message)
+	}
+}
+
+// countLook adds one look to the count in m of looks of the request key with uid on head, and returns the new
+// count: a count kept for another UID or head starts again at one. The caller decides which looks reset it.
+func countLook(m *sync.Map, key types.NamespacedName, uid types.UID, head string) int {
+	n := stuckLooks{uid: uid, head: head, looks: 1}
+	if v, ok := m.Load(key); ok {
+		if old, ok := v.(stuckLooks); ok && old.uid == uid && old.head == head {
+			n.looks = old.looks + 1
+		}
+	}
+	m.Store(key, n)
+	return n.looks
+}
+
+// gateDue reports whether reviewCheck runs the merge gate on rr after a look that caught up: reviewer hints on, a
+// pull request this request still owns (no handoff intent), a request that progresses and waits for approval, and
+// a check neither recorded Stale nor recorded Failed on the recorded head. It decides nothing itself; it only
+// tells watchReviewCheck whether a look whose comments were behind kept the gate from running.
+func (r *RemediationRequestReconciler) gateDue(rr *remediationv1alpha1.RemediationRequest) bool {
+	pr := rr.Status.PullRequest
+	if !r.ReviewerHints || pr == nil || intent(rr) != nil || !progresses(rr) ||
+		rr.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval {
+		return false
+	}
+	rc := pr.ReviewCheck
+	if rc == nil {
+		return true
+	}
+	if rc.State == remediationv1alpha1.ReviewCheckStale {
+		return false
+	}
+	return rc.Head != pr.HeadSHA || rc.State != remediationv1alpha1.ReviewCheckFailed
+}
+
 // reviewCheck makes the check run on the recorded head show the state it should have, and records that state.
 // On a head with no state for it, the state is InProgress. While the request waits for review and the look caught
 // up (caughtUp), the merge gate decides it from the reviews (reviewGate) on every look, whatever is recorded,
 // unless the head's check Failed, which is final. A request whose handoff intent stands leaves both to its
-// replacement. A request that records the check Stale (failStaleCheck) never writes it again, on any head. rr is updated in place by each status write that went through.
-func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	caughtUp bool) error {
+// replacement. A request that records the check Stale (failStaleCheck) never writes it again, on any head. rr is
+// updated in place by each status write that went through. A check run write answered with a conflict returns
+// errCheckRunConflict, which is not a failure (watchReviewCheck).
+//
+// reviewCheck is the look after comments that caught up; reviewCheckLook takes caughtUp and also reports whether a
+// check run write went through on this look (written), which watchReviewCheck needs to start the count of
+// conflicts again.
+func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	_, err := r.reviewCheckLook(ctx, rr, true)
+	return err
+}
+
+// reviewCheckLook is reviewCheck after a look at the comments that caught up or not (caughtUp).
+func (r *RemediationRequestReconciler) reviewCheckLook(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, caughtUp bool) (written bool, err error) {
 	pr := rr.Status.PullRequest
 	if !r.ReviewerHints || pr == nil || intent(rr) != nil || !progresses(rr) ||
 		(rr.Status.Phase != remediationv1alpha1.PhasePRCreated && rr.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval) {
-		return nil
+		return false, nil
 	}
 	rc := pr.ReviewCheck
 	if rc != nil && rc.State == remediationv1alpha1.ReviewCheckStale {
 		// The plan was found stale and its check failed (failStaleCheck, #713): this request never writes it again.
-		return nil
+		return false, nil
 	}
 	current := rc != nil && rc.Head == pr.HeadSHA
 	gate := caughtUp && rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval
 	if current && (!gate || rc.State == remediationv1alpha1.ReviewCheckFailed) {
-		return nil
+		return false, nil
 	}
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	git, err := r.openPlanRepository(stepCtx, rr)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !gate {
 		return r.syncReviewCheck(stepCtx, git, rr, providers.CheckRunInProgress)
 	}
-	return r.reviewGate(stepCtx, git, rr)
+	return r.reviewGateLook(stepCtx, git, rr)
 }
 
 // recordReviewCheck records state for the recorded head in rr's status, through the kill switch, without a
@@ -261,9 +386,16 @@ func setApprovedFalse(rr *remediationv1alpha1.RemediationRequest, reason, messag
 // read returns an error and changes nothing; the next look reads again.
 func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest) error {
+	_, err := r.reviewGateLook(ctx, git, rr)
+	return err
+}
+
+// reviewGateLook is reviewGate that also reports whether its check run write went through (written).
+func (r *RemediationRequestReconciler) reviewGateLook(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest) (written bool, err error) {
 	fs, ok := feedbackOf(git)
 	if !ok {
-		return nil
+		return false, nil
 	}
 	pr := rr.Status.PullRequest
 	latest := map[int64]providers.Feedback{}
@@ -273,7 +405,7 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 	for range maxReviewLooks {
 		page, err := fs.ListReviews(ctx, pr.Number, cur)
 		if err != nil {
-			return freshness.WrapProvider("list the reviews of the pull request", err)
+			return false, freshness.WrapProvider("list the reviews of the pull request", err)
 		}
 		for _, it := range page.Items {
 			if it.Kind != providers.FeedbackReview || it.Author.Kind != providers.AuthorPerson ||
@@ -313,7 +445,7 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 		passed = true
 	}
 	if err := r.commentSteered(ctx, git, rr, steered); err != nil {
-		return err
+		return false, err
 	}
 	if passed {
 		return r.syncReviewCheck(ctx, git, rr, providers.CheckRunSuccess)
@@ -327,37 +459,40 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 // the host and then records the state: the order on a restart between the two does not matter, as the next look
 // compares again. A Refused check whose backoff has not run out is not written again (refusalBackoff); a final
 // refusal is recorded Refused (recordRefusal). A failed read or write changes nothing and is returned for a retry;
-// a pull request closed or merged meanwhile (a conflict) records nothing. The provider passes the kill switch
-// right before the host write, so nothing is written to the host while writes are not allowed.
+// a pull request closed or merged meanwhile (a conflict) records nothing and returns errCheckRunConflict. The
+// provider passes the kill switch right before the host write, so nothing is written to the host while writes
+// are not allowed.
 func (r *RemediationRequestReconciler) syncReviewCheck(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, want providers.CheckRunStatus) error {
+	rr *remediationv1alpha1.RemediationRequest, want providers.CheckRunStatus) (written bool, err error) {
 	pr := rr.Status.PullRequest
 	state := reviewCheckStateOf(want)
 	shows, found, err := git.ReviewCheckRun(ctx, pr.HeadSHA)
 	if err != nil {
-		return freshness.WrapProvider("read the check run", err)
+		return false, freshness.WrapProvider("read the check run", err)
 	}
 	if found && shows == want {
-		return r.mirrorReviewCheck(ctx, rr, state)
+		return false, r.mirrorReviewCheck(ctx, rr, state)
 	}
 	rc := pr.ReviewCheck
 	if rc != nil && rc.Head == pr.HeadSHA && rc.State == remediationv1alpha1.ReviewCheckRefused {
 		if wait := refusalBackoff(rc, r.now()); wait > 0 {
-			return nil
+			return false, nil
 		}
 	}
 	err = git.CreateCheckRun(ctx, pr.HeadSHA, checkRunFor(want))
 	_, _, final := refusal(err)
 	switch {
 	case err == nil:
-		return r.recordReviewCheck(ctx, rr, state)
+		// The host write went through, whatever the status write after it does.
+		return true, r.recordReviewCheck(ctx, rr, state)
 	case providers.IsConflict(err):
-		// Closed or merged meanwhile: the next look at the pull request decides.
-		return nil
+		// Closed or merged meanwhile: the next look at the pull request decides. watchReviewCheck counts it, so a
+		// conflict that persists on a pull request seen open gets a Warning Event (#755).
+		return false, errCheckRunConflict
 	case final:
-		return r.recordRefusal(ctx, rr, want, shows, found)
+		return false, r.recordRefusal(ctx, rr, want, shows, found)
 	}
-	return freshness.WrapProvider("write the check run", err)
+	return false, freshness.WrapProvider("write the check run", err)
 }
 
 // mirrorReviewCheck records state when rr does not record it for the recorded head yet, or records it Refused.

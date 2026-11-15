@@ -45,7 +45,7 @@ ${pre}| Artifact | Reference |
 | Verifier image | \`ghcr.io/${owner}/shadewright-verifier@${verifier}\` |
 | Helm chart | \`oci://ghcr.io/${owner}/charts/shadewright\` version \`${version}\`, \`${chart}\` |
 
-The release workflow checked the keyless cosign signature of all three images and the signed SPDX SBOM of each platform image (linux/amd64 and linux/arm64), and the chart runs exactly those images by digest. The Images workflow also records a GitHub build provenance attestation, and the chart is signed keyless. Verify by digest, never by tag; the commands below check all of it again. You need [Docker](https://docs.docker.com/engine/install/), jq, [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x or later (the signatures are stored as Sigstore bundles, which cosign 2.x does not find) and the [GitHub CLI](https://cli.github.com/). Details: [verify a release](https://shadewright.io/upgrade-uninstall/#verify-a-release).
+The release workflow checked the keyless cosign signature of all three images and the signed SPDX SBOM of each platform image (linux/amd64 and linux/arm64), and the chart runs exactly those images by digest. The Images workflow also records a GitHub build provenance attestation, and the chart is signed keyless and has one too. Verify by digest, never by tag; the commands below check all of it again. You need [Docker](https://docs.docker.com/engine/install/), jq, [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x or later (the signatures are stored as Sigstore bundles, which cosign 2.x does not find) and the [GitHub CLI](https://cli.github.com/). Details: [verify a release](https://shadewright.io/upgrade-uninstall/#verify-a-release).
 
 \`\`\`bash
 ISSUER=https://token.actions.githubusercontent.com
@@ -70,6 +70,8 @@ done
 
 cosign verify --certificate-identity-regexp "\$CHART_IDENTITY" --certificate-oidc-issuer "\$ISSUER" \\
   ghcr.io/${owner}/charts/shadewright@${chart}
+gh attestation verify "oci://ghcr.io/${owner}/charts/shadewright@${chart}" --repo ${repo} \\
+  --signer-workflow ${repo}/.github/workflows/chart.yml
 
 # Install the chart you verified: Helm accepts the digest in the reference, so nothing can move in between.
 helm install shadewright oci://ghcr.io/${owner}/charts/shadewright@${chart} \\

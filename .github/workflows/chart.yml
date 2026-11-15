@@ -7,9 +7,9 @@ name: Chart
 # those digests (the other chart tests start at once) and the publish job only pins that same pair into
 # values.yaml, so the published chart runs the tested images by digest even if a tag moves meanwhile. Only a v* tag
 # publishes it to ghcr.io/<owner>/charts/shadewright, and only the publish job has packages: write and
-# id-token: write. After the push it signs the chart by digest with cosign keyless (GitHub
-# OIDC, no key to store) and verifies the signature against the identity of this workflow, so a mismatch fails
-# the run.
+# id-token: write and attestations: write. After the push it signs the chart by digest with cosign keyless (GitHub
+# OIDC, no key to store), records a GitHub build provenance attestation on the digest, and verifies both against
+# the identity of this workflow, so a mismatch fails the run.
 #
 # A tag must point at a commit on main (hack/require-on-main.sh, before anything is pushed). Two kinds of tag
 # publish. vX.Y.Z (cut by release-please) must equal version and appVersion of Chart.yaml. A
@@ -113,7 +113,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write # cosign keyless signing, this job only
+      id-token: write # cosign keyless signing and the provenance attestation, this job only
+      attestations: write # the build provenance attestation, this job only
     steps:
       # A release tag must point at a commit on main: the signature identity only says "this workflow on a v*
       # tag", so the history of main is fetched for the check below.
@@ -189,6 +190,7 @@ jobs:
             exit 1
           fi
           echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "repository=ghcr.io/${owner}/charts/shadewright" >> "${GITHUB_OUTPUT}"
           echo "CHART_REF=ghcr.io/${owner}/charts/shadewright@${digest}" >> "${GITHUB_ENV}"
           echo "oci://ghcr.io/${owner}/charts/shadewright:${VERSION} (${digest})" >> "${GITHUB_STEP_SUMMARY}"
 
@@ -208,6 +210,27 @@ jobs:
             --certificate-identity-regexp "${identity}" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${CHART_REF}" > /dev/null
+
+      # The GitHub build provenance attestation of the chart, by digest, pushed to the registry next to the chart
+      # (it uses the docker login above). Verified in the next step, before the release is published.
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # The provenance must name this repository and have been made by this workflow file. gh reads the
+      # attestation from the registry, logging in with the job token like the other steps.
+      - name: Verify the provenance
+        env:
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://${CHART_REF}" \
+            --repo "${REPOSITORY}" \
+            --signer-workflow "${REPOSITORY}/.github/workflows/chart.yml"
 
       # Artifact Hub reads its repository metadata (dist/artifacthub-repo.yml, the Verified Publisher label) from
       # the tag `artifacthub.io` next to the chart, once per repository. Pushed on every release tag so that a

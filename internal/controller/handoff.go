@@ -950,7 +950,8 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 // (isHandoffCommit, which does not depend on the target branch), the update happened before a restart or a lost
 // write, and the request goes on to the read after the update (afterUpdate) instead of the freshness check, so a
 // merge of the new commit, or a target branch that moved since, is the replacement's and never taken for a
-// stale plan. done is false when there is nothing to recover; the caller then goes on as before.
+// stale plan. done is false when there is nothing to recover; the caller then goes on as before. With spec.cancel
+// set, a failure of the recovery is the cancel's (cancelRecoveryFailed), never an end of the request (#289).
 func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	res reconcile.Result, done bool, err error) {
 	ho := rr.Status.Handoff
@@ -966,6 +967,11 @@ func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *r
 	switch {
 	case errors.Is(err, errStopped):
 		return reconcile.Result{}, true, nil
+	case err != nil && cancelRequested(rr):
+		// A cancel that cannot finish, never an end (#289): watched, so a merge of this request's commit is still
+		// recorded once the recovery can read again.
+		res, err = r.cancelRecoveryFailed(ctx, rr, err)
+		return res, true, err
 	case err != nil:
 		res, err = r.retryRecovery(ctx, rr, err)
 		return res, true, err

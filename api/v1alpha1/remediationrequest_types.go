@@ -395,14 +395,16 @@ const (
 	// its phase, before the merge, and its pull request is still watched, so a merge ends it Merged and a close ends
 	// it Cancelled. The reason says why: HandoffInFlight while a handoff of its pull request to a replacement stands,
 	// CancelFailing while a step of the close fails in a way worth a retry (a failed read of the pull request, a 5xx,
-	// a failed write of the review check), GitForbidden or GitRejected when the Git host refuses a step of the close
-	// for good, RepositoryUnavailable, TargetBranchChanged or RepositoryUnusable when the settings no longer let the
+	// a failed write of the review check), GitForbidden or GitRejected when the Git host refuses for good a step of
+	// the close, or a read of the recovery of a replacement's handoff, RepositoryUnavailable, TargetBranchChanged or RepositoryUnusable when the settings no longer let the
 	// executor reach the pull request, ForeignChangeRequest when the recorded pull request cannot be confirmed as the
 	// request's, and CancelNotFinished once a wait or a failure worth a retry has lasted 24 hours. The message names
 	// the step, never the Git host's answer. lastTransitionTime is the first time the cancel could not finish, on the
 	// executor's clock, kept while the condition stays True. A refusal, and the end of the 24 hours, stop the retries
-	// with backoff: the close is then tried again on every look. One Warning Event, CancelPending, is recorded when
-	// the condition is set or its reason changes. The write that ends the request removes it.
+	// with backoff: the close is then tried again on every look, and a refusal stays the reason while failures worth
+	// a retry come in between, which write nothing. One Warning Event, CancelPending, is recorded when the condition
+	// is set or its reason changes. A pull request known closed never keeps it: the request ends Cancelled, also when
+	// the failed review check cannot be written. The write that ends the request removes it.
 	ConditionCancelPending = "CancelPending"
 )
 

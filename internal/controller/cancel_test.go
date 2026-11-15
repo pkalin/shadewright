@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -267,5 +268,94 @@ func TestCancelWaitsForAHandoffVisibly(t *testing.T) {
 	}
 	if e := <-rec.Events; !strings.HasPrefix(e, "Warning "+EventCancelPending+" ") {
 		t.Errorf("Event = %q", e)
+	}
+}
+
+// A replacement whose recovery of a handoff the Git host refuses (403 on the read of the branch head) while
+// spec.cancel is set is a cancel that cannot finish, never an end: it keeps its phase with CancelPending and the
+// refusal's reason, is watched, and once access is back a merge of its own commit ends it Merged (#289).
+func TestCancelWatchesARefusedRecovery(t *testing.T) {
+	r, g, _, rr, cr, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	rr.Spec.Cancel = true
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	g.SetFail(func(op string) error {
+		if op == opBranchHead {
+			return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+		}
+		return nil
+	})
+	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RequeueAfter != DefaultPullRequestPollInterval {
+		t.Errorf("RequeueAfter = %v, want the poll interval", res.RequeueAfter)
+	}
+	got := &remediationv1alpha1.RemediationRequest{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != remediationv1alpha1.PhasePolicyChecked {
+		t.Fatalf("phase = %q, want PolicyChecked: the replacement's commit may still be merged", got.Status.Phase)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionCancelPending)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != ReasonGitForbidden {
+		t.Fatalf("CancelPending = %+v", c)
+	}
+	if e := <-rec.Events; !strings.HasPrefix(e, "Warning "+EventCancelPending+" ") {
+		t.Errorf("Event = %q", e)
+	}
+
+	g.SetFail(nil)
+	if _, err := g.Merge(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+		if err := r.Get(ctx, client.ObjectKeyFromObject(rr), got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.Phase != remediationv1alpha1.PhasePolicyChecked {
+			break
+		}
+	}
+	if got.Status.Phase != remediationv1alpha1.PhaseMerged {
+		t.Fatalf("phase = %q, want Merged: the replacement's own commit was merged", got.Status.Phase)
+	}
+}
+
+// The end of a cancelled request read from a stale cache (the request changed since) records no Event Cancelled:
+// its status write would be refused as a conflict, and the retry may end it otherwise (#289).
+func TestCancelRecordsNoEventForAStaleCopy(t *testing.T) {
+	c, rr, r, _, rec := cancelWorld(t, remediationv1alpha1.RemediationRequestStatus{
+		Phase: remediationv1alpha1.PhasePending})
+	ctx := context.Background()
+	stale := rr.DeepCopy()
+	if rr.Annotations == nil {
+		rr.Annotations = map[string]string{}
+	}
+	rr.Annotations["example.com/touched"] = "true"
+	if err := c.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.cancelUndecided(ctx, stale); err == nil {
+		t.Fatal("the end of a stale copy was not handed back for a retry")
+	}
+	select {
+	case e := <-rec.Events:
+		t.Errorf("an Event for a request that did not end: %q", e)
+	default:
+	}
+	got := &remediationv1alpha1.RemediationRequest{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(rr), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != remediationv1alpha1.PhasePending {
+		t.Fatalf("phase = %q, want Pending", got.Status.Phase)
 	}
 }

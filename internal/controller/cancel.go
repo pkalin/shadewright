@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,6 +50,9 @@ const (
 	EventCancelled = "Cancelled"
 	// EventCancelPending is the Warning Event recorded when condition CancelPending is set, or its reason changes.
 	EventCancelPending = "CancelPending"
+	// EventCancelCheckNotFailed is the Warning Event recorded, next to EventCancelled, when a request ends
+	// Cancelled on a closed pull request whose review check could not be failed.
+	EventCancelCheckNotFailed = "CancelCheckNotFailed"
 
 	// ReasonHandoffInFlight is the reason of CancelPending while a handoff intent of the request stands.
 	ReasonHandoffInFlight = "HandoffInFlight"
@@ -70,6 +74,10 @@ const (
 		"Shadewright closed its pull request, if one was open; the branch is left as it is"
 	messageCancelledFoundClosed = "spec.cancel is set: the request was cancelled before its change was merged; " +
 		"its pull request was found closed; the branch is left as it is"
+	// messageCheckNotFailed ends the message of a request that ended Cancelled although its review check could not
+	// be failed, and is the text of EventCancelCheckNotFailed.
+	messageCheckNotFailed = "the failed review check " + providers.CheckRunName + " could not be written on " +
+		"the pull request's head, so a check on it that passed is not to be trusted if the pull request is reopened"
 )
 
 // cancelRequested reports whether spec.cancel asks to cancel rr.
@@ -89,7 +97,7 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 	}
 	rr.Status.ObservedGeneration = rr.Generation
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
-	return r.endCancelled(ctx, rr, messageCancelledUndecided)
+	return r.endCancelled(ctx, rr, messageCancelledUndecided, false)
 }
 
 // cancelOpen is recheck's step for a request decided by the policy check and not merged whose spec.cancel is set.
@@ -101,7 +109,9 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 // Cancelled is final only when the pull request cannot merge any more: it is known closed, or known never opened.
 // Before each close, and before the end on a pull request found closed, the check run shadewright/review of the
 // recorded head is failed (failCancelCheck, as for a stale plan, #713), so a pull request reopened later cannot be
-// merged on a check that is still green; the request does not end while that check is pending.
+// merged on a check that is still green. A closed pull request ends the request even when that check cannot be
+// written: at once on a refusal, after cleanupFailingBound on a failure worth a retry, with a Warning Event that
+// says so (endCancelClosed).
 //
 //   - The recorded pull request is closed already (by a person, or by an earlier close of this cancel whose status
 //     write was lost): the request ends Cancelled.
@@ -115,16 +125,15 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 //     is not ended. It keeps its phase with CancelPending (cancelWatch): every look reads the pull request, so a
 //     merge ends it Merged and a close Cancelled, and tries the close again.
 //   - A failed read of a pull request, whatever its class, and any other failure are retried with backoff, with
-//     CancelPending (cancelFailed), for cleanupFailingBound; then the request is watched as for a refusal.
+//     CancelPending (cancelFailed), for cleanupFailingBound; then the request is watched as for a refusal. While a
+//     refusal is the reason of CancelPending, such a failure writes nothing and records no Event.
 //   - A pause of writes waits (waitWhilePaused) and starts no bound.
 func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	outcome prOutcome) (reconcile.Result, error) {
 	if outcome == prClosed {
-		if err := r.failCancelCheck(ctx, rr); err != nil {
-			return r.cancelCheckFailed(ctx, rr, err)
-		}
-		markClosed(rr, ReasonPullRequestClosed, "is closed; the request was cancelled (spec.cancel)")
-		return r.endCancelled(ctx, rr, messageCancelledFoundClosed)
+		return r.endCancelClosed(ctx, rr, r.failCancelCheck(ctx, rr), func() {
+			markClosed(rr, ReasonPullRequestClosed, "is closed; the request was cancelled (spec.cancel)")
+		}, messageCancelledFoundClosed)
 	}
 	if intent(rr) != nil {
 		return r.cancelHandoffWait(ctx, rr)
@@ -146,13 +155,10 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 		return reconcile.Result{}, nil
 	}
 	switch {
-	case err == nil && checkErr != nil:
-		// Closed, but the check may still be green: the end waits for the failed check, tried again on the next
-		// look, which finds the pull request closed.
-		return r.cancelCheckFailed(ctx, rr, checkErr)
 	case err == nil:
-		closedByUs(rr, "the request was cancelled (spec.cancel)")
-		return r.endCancelled(ctx, rr, messageCancelledClosed)
+		return r.endCancelClosed(ctx, rr, checkErr, func() {
+			closedByUs(rr, "the request was cancelled (spec.cancel)")
+		}, messageCancelledClosed)
 	case errors.Is(err, freshness.ErrPaused):
 		return r.waitWhilePaused(ctx, rr)
 	case ctx.Err() != nil:
@@ -179,18 +185,68 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	return r.cancelFailed(ctx, rr, err, stepText(rr, stepOf(err))+" failed")
 }
 
-// cancelCheckFailed handles err, a failed write of the review check of a cancelled request whose pull request is
-// closed or was just closed: a pause waits, the caller's cancellation is returned, anything else is a failure of
-// the cancel (cancelFailed) and the check is tried again on the next look.
-func (r *RemediationRequestReconciler) cancelCheckFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	err error) (reconcile.Result, error) {
+// endCancelClosed ends rr, whose pull request is known closed (found closed, or just closed by the cancel),
+// Cancelled with message; mark records how it was closed. checkErr is the result of the write of the failed review
+// check (failCancelCheck):
+//   - nil: the check is failed, or was not pending; the request ends.
+//   - A pause waits (waitWhilePaused); the caller's cancellation is returned.
+//   - A final refusal of the Git host (403, 422): the check cannot be written. The request ends Cancelled all the
+//     same, as the closed pull request cannot merge, with the Warning Event EventCancelCheckNotFailed and the same
+//     words in its message, so a person who reopens the pull request knows that its check is not to be trusted;
+//     the target is not kept locked for a check that cannot be written.
+//   - Anything else is a failure of the cancel (cancelFailed), and the check is tried again on the next look,
+//     which finds the pull request closed. Once cleanupFailingBound has passed, the request ends as for a refusal.
+func (r *RemediationRequestReconciler) endCancelClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	checkErr error, mark func(), message string) (reconcile.Result, error) {
+	if checkErr != nil {
+		switch {
+		case errors.Is(checkErr, freshness.ErrPaused):
+			return r.waitWhilePaused(ctx, rr)
+		case ctx.Err() != nil:
+			return reconcile.Result{}, checkErr
+		}
+		if _, _, final := refusal(checkErr); !final {
+			if _, past := r.cancelBound(rr); !past {
+				return r.cancelFailed(ctx, rr, checkErr, "the failed review check "+providers.CheckRunName+
+					" could not be written")
+			}
+		}
+		logf.FromContext(ctx).Info("Could not fail the review check of a cancelled RemediationRequest; ending it, "+
+			"as its pull request is closed", "remediationRequest", client.ObjectKeyFromObject(rr),
+			"error", checkErr.Error())
+	}
+	mark()
+	return r.endCancelled(ctx, rr, message, checkErr != nil)
+}
+
+// cancelRecoveryFailed handles err, a failure of the recovery of a handoff (recoverHandoff) of a request whose
+// spec.cancel is set: the cancel cannot finish while it is not known whether the replacement's own commit is on the
+// pull request, and the request is never ended on it, so a merge of that commit is still recorded once the
+// recovery can read again. A pause waits and the caller's cancellation is returned. A final refusal of the Git
+// host, a repository that is not configured or usable any more and a changed target branch are watched
+// (cancelWatch), as for a refused close; anything else, a failed read of a pull request included, is retried
+// (cancelFailed) within cleanupFailingBound, then watched. The recovery's own deadline grace does not apply.
+func (r *RemediationRequestReconciler) cancelRecoveryFailed(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, err error) (reconcile.Result, error) {
+	const what = "the recovery of its handoff, which learns whether its own commit is on the pull request it replaces"
 	switch {
 	case errors.Is(err, freshness.ErrPaused):
 		return r.waitWhilePaused(ctx, rr)
 	case ctx.Err() != nil:
 		return reconcile.Result{}, err
+	case errors.Is(err, errRepositoryGone):
+		return r.cancelWatch(ctx, rr, reasonRepositoryUnavailable, "the repository it was made for is not configured any more")
+	case errors.Is(err, errTargetBranchChanged):
+		return r.cancelWatch(ctx, rr, reasonTargetBranchChanged, "its repository now targets another branch")
+	case errors.Is(err, freshness.ErrRepositoryUnusable):
+		return r.cancelWatch(ctx, rr, reasonRepositoryUnusable, "the settings of its repository cannot be used")
+	case isUnknownChange(err):
+		return r.cancelFailed(ctx, rr, err, what+", failed")
 	}
-	return r.cancelFailed(ctx, rr, err, "the failed review check "+providers.CheckRunName+" could not be written")
+	if reason, _, ok := refusal(err); ok {
+		return r.cancelWatch(ctx, rr, reason, "the Git host refused ("+reason+") "+what)
+	}
+	return r.cancelFailed(ctx, rr, err, what+", failed")
 }
 
 // cancelHandoffWait is the wait of a cancel while the request's handoff intent stands: nothing is closed,
@@ -213,12 +269,21 @@ func (r *RemediationRequestReconciler) cancelHandoffWait(ctx context.Context, rr
 // cancelFailed handles err, a failure worth a retry of a cancel (why says which step, never the Git host's
 // answer). Within cleanupFailingBound after CancelPending was first set, it records CancelPending (CancelFailing)
 // and retries as waitOrFail says (the error backoff, or the delay the host asked for), never later than the end of
-// the bound. After it, the request is watched (CancelNotFinished). The caller's cancellation records nothing and is
-// returned.
+// the bound. After it, the request is watched (CancelNotFinished). While a refusal is the reason of CancelPending
+// (cancelRefused), the reason does not change: nothing is written, no Event is recorded, and the request is looked
+// at again after the poll interval (or the delay the host asked for, when longer), as the refusal's watch does. The
+// caller's cancellation records nothing and is returned.
 func (r *RemediationRequestReconciler) cancelFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error, why string) (reconcile.Result, error) {
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err
+	}
+	if c := cancelRefused(rr); c != nil {
+		// A refusal stays the reason until the cancel finishes or the refusal is gone: a failure in between writes
+		// nothing and records no Event, and the request stays watched.
+		logf.FromContext(ctx).Info("Could not finish the cancel of RemediationRequest; still watching it",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "refusal", c.Reason, "error", err.Error())
+		return reconcile.Result{RequeueAfter: max(r.pullRequestPollInterval(), retryAfterOf(err))}, nil
 	}
 	left, past := r.cancelBound(rr)
 	if past {
@@ -246,6 +311,21 @@ func (r *RemediationRequestReconciler) cancelWatch(ctx context.Context, rr *reme
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
+}
+
+// cancelRefused returns condition CancelPending of rr when it is True with the reason of a refusal (a refused
+// step, a repository gone or unusable, a changed target branch, a pull request not this request's), nil otherwise
+// (no condition, a wait for a handoff, a failure worth a retry, the end of the bound).
+func cancelRefused(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCancelPending)
+	if c == nil || c.Status != metav1.ConditionTrue {
+		return nil
+	}
+	switch c.Reason {
+	case ReasonHandoffInFlight, ReasonCancelFailing, ReasonCancelNotFinished:
+		return nil
+	}
+	return c
 }
 
 // cancelBound reports what is left of cleanupFailingBound since CancelPending was set, and whether it has passed.
@@ -319,15 +399,37 @@ func (r *RemediationRequestReconciler) failCancelCheck(ctx context.Context, rr *
 }
 
 // endCancelled ends rr Cancelled with reason CancelRequested and message, in one status write (stop). The request
-// ends only once its pull request is known closed or known never opened, so the Event is Normal. The Event is
-// recorded before the write, as the finalizer reports a release before its patch: a restart right after the write
-// would lose an Event recorded after it, and the ended request is never looked at again. A failed write is
-// returned for a retry, and the retry records the Event again: at least once, maybe twice. The end requeues
-// nothing: a request that ended is woken only by a change.
+// ends only once its pull request is known closed or known never opened, so the Event is Normal. checkNotFailed
+// says that the review check of the closed pull request could not be failed (endCancelClosed): the message says so
+// too, and a Warning Event EventCancelCheckNotFailed goes with it.
+//
+// The Events are recorded before the write, as the finalizer reports a release before its patch: a restart right
+// after the write would lose an Event recorded after it, and the ended request is never looked at again. So that
+// no Event is recorded for an end that cannot be written, the request is read from the API server first (not the
+// cache): a request changed since rr was read (a stale cache, a merge or a handoff recorded meanwhile) is returned
+// as a conflict for a retry, and so is a failed read. A failed write is returned for a retry too, and the retry
+// records the Events again: at least once, maybe twice. The end requeues nothing: a request that ended is woken
+// only by a change.
 func (r *RemediationRequestReconciler) endCancelled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	message string) (reconcile.Result, error) {
+	message string, checkNotFailed bool) (reconcile.Result, error) {
+	live := &remediationv1alpha1.RemediationRequest{}
+	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+		return reconcile.Result{}, fmt.Errorf("read RemediationRequest %s/%s before ending it Cancelled: %w",
+			rr.Namespace, rr.Name, err)
+	}
+	if live.UID != rr.UID || live.ResourceVersion != rr.ResourceVersion {
+		return reconcile.Result{}, fmt.Errorf("end RemediationRequest %s/%s Cancelled: %w", rr.Namespace, rr.Name,
+			apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource("remediationrequests").GroupResource(),
+				rr.Name, errors.New("it changed since it was read")))
+	}
+	if checkNotFailed {
+		message += "; " + messageCheckNotFailed
+	}
 	if r.Recorder != nil {
 		r.Recorder.Event(rr, corev1.EventTypeNormal, EventCancelled, message)
+		if checkNotFailed {
+			r.Recorder.Event(rr, corev1.EventTypeWarning, EventCancelCheckNotFailed, messageCheckNotFailed)
+		}
 	}
 	err := r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, ReasonCancelRequested, message)
 	if !errors.Is(err, errStopped) {

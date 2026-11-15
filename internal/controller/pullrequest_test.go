@@ -1969,6 +1969,88 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(status).To(Equal(providers.CheckRunFailure))
 	})
 
+	DescribeTable("ends a cancelled request whose pull request is closed Cancelled when its failed check cannot be written, and says so (#289)",
+		func(personCloses bool, fault error, pastBound bool) {
+			recorder = record.NewFakeRecorder(50)
+			hints = true
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			n := got.Status.PullRequest.Number
+			if personCloses {
+				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+			}
+			cancelIt()
+			git.SetFail(func(op string) error {
+				if op == opCreateCheckRun {
+					return fault
+				}
+				return nil
+			})
+			if pastBound {
+				// A failure worth a retry is retried within the bound, with CancelPending.
+				_, _ = reconcileResult()
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				Expect(cancelPending().Reason).To(Equal(ReasonCancelFailing))
+				Expect(warnings(EventCancelPending)).To(Equal(1))
+				clock = clock.Add(cleanupFailingBound + 2*time.Second)
+			}
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeZero(), "an ended request is not requeued")
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionCancelPending)).To(BeNil())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Message).
+				To(HaveSuffix(messageCheckNotFailed))
+			cr, err := git.GetChangeRequest(ctx, n)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cr.State).To(Equal(providers.ChangeRequestClosed))
+			Expect(warnings(EventCancelCheckNotFailed)).To(Equal(1))
+
+			// The target is not kept locked, and the ended request writes to Git no more.
+			git.SetFail(nil)
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(ptr.Deref(fetch().Status.HoldsTarget, true)).To(BeFalse())
+			runs := len(git.CheckRuns(got.Status.PullRequest.HeadSHA))
+			for range 3 {
+				Expect(reconcileOnce()).To(Succeed())
+			}
+			Expect(git.CheckRuns(got.Status.PullRequest.HeadSHA)).To(HaveLen(runs))
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		},
+		Entry("closed by a person, check refused", true, fmt.Errorf("status 403: %w", providers.ErrForbidden), false),
+		Entry("closed by the cancel, check refused", false, fmt.Errorf("status 422: %w", providers.ErrRejected), false),
+		Entry("closed by a person, check failing past the bound", true,
+			&providers.RetryableError{Err: errors.New("server error")}, true),
+	)
+
+	It("keeps the refusal as the reason of CancelPending while transient failures come in between (#289)", func() {
+		recorder = record.NewFakeRecorder(50)
+		faulty = newFaultyGit(git)
+		drive(remediationv1alpha1.PhaseAwaitingApproval)
+		cancelIt()
+		faulty.failOn(opClose, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+		_, _ = reconcileResult()
+		Expect(cancelPending().Reason).To(Equal(ReasonGitForbidden))
+		Expect(warnings(EventCancelPending)).To(Equal(1))
+		before := fetch().ResourceVersion
+		for i := range 6 {
+			if i%2 == 0 {
+				faulty.failOn(opClose, &providers.RetryableError{Err: errors.New("server error")})
+			} else {
+				faulty.failOn(opClose, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+			}
+			_, _ = reconcileResult()
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		}
+		Expect(fetch().ResourceVersion).To(Equal(before), "a transient failure after a refusal writes nothing")
+		Expect(cancelPending().Reason).To(Equal(ReasonGitForbidden))
+		Expect(warnings(EventCancelPending)).To(BeZero(), "and emits nothing")
+
+		faulty.failOn("", nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+	})
+
 	// conflictSeen returns the recorded first report of a merge conflict, or nil.
 	conflictSeen := func(rr *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.ConflictSeen {
 		return rr.Status.PullRequest.ConflictSeen

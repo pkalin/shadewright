@@ -86,36 +86,8 @@ const (
 // refuses it.
 func (r *RemediationRequestReconciler) readIncidentCount(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, side incidentCountSide) *remediationv1alpha1.IncidentCountReading {
-	ref := rr.Spec.IncidentRef
-	if ref.Name == "" {
-		return nil
-	}
-	timeout, ok := countReadTimeout(ctx, r.IncidentReadTimeout)
+	inc, before, ok := r.readIncident(ctx, rr)
 	if !ok {
-		logf.FromContext(ctx).Info("Too little of the step's deadline is left to read the Incident of "+
-			"RemediationRequest and still leave the status write its full allowance; the reading of its count "+
-			"stays absent", "remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name)
-		return nil
-	}
-	before := r.now()
-	readCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	inc := &remediationv1alpha1.Incident{}
-	if err := r.reader().Get(readCtx, client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}, inc); err != nil {
-		logf.FromContext(ctx).Info("Could not read the Incident of RemediationRequest to record its count; the "+
-			"reading stays absent", "remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name,
-			"error", err.Error())
-		return nil
-	}
-	if inc.UID == "" {
-		logf.FromContext(ctx).Info("The Incident of RemediationRequest has no UID; the reading of its count stays "+
-			"absent", "remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name)
-		return nil
-	}
-	if inc.Status.Count < 0 || inc.Status.Count > remediationv1alpha1.MaxIncidentCount {
-		logf.FromContext(ctx).Info("The count of the Incident of RemediationRequest is outside the accepted range; "+
-			"the reading stays absent", "remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name,
-			"count", inc.Status.Count)
 		return nil
 	}
 	at := before.Truncate(time.Second)
@@ -128,6 +100,48 @@ func (r *RemediationRequestReconciler) readIncidentCount(ctx context.Context,
 	}
 	return &remediationv1alpha1.IncidentCountReading{UID: string(inc.UID), Count: inc.Status.Count,
 		ReadAt: metav1.NewTime(at)}
+}
+
+// readIncident reads the request's Incident (spec.incidentRef.name in the request's namespace) with the
+// executor's get, through the API reader and within the Incident read's own deadline (countReadTimeout), and
+// returns it with the executor's time right before the read. ok is false when no count can be used: no name, too
+// little of the step's deadline left, a failed read (a missing Incident included), an Incident without a UID, or
+// a count outside what the schema accepts. Each but the first is logged; none is retried here: the callers
+// decide nothing on it, and a later reconcile reads again where they read again.
+func (r *RemediationRequestReconciler) readIncident(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	*remediationv1alpha1.Incident, time.Time, bool) {
+	ref := rr.Spec.IncidentRef
+	if ref.Name == "" {
+		return nil, time.Time{}, false
+	}
+	timeout, ok := countReadTimeout(ctx, r.IncidentReadTimeout)
+	if !ok {
+		logf.FromContext(ctx).Info("Too little of the step's deadline is left to read the Incident of "+
+			"RemediationRequest and still leave the status write its full allowance; its count is not used",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name)
+		return nil, time.Time{}, false
+	}
+	before := r.now()
+	readCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	inc := &remediationv1alpha1.Incident{}
+	if err := r.reader().Get(readCtx, client.ObjectKey{Namespace: rr.Namespace, Name: ref.Name}, inc); err != nil {
+		logf.FromContext(ctx).Info("Could not read the Incident of RemediationRequest; its count is not used",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name, "error", err.Error())
+		return nil, time.Time{}, false
+	}
+	if inc.UID == "" {
+		logf.FromContext(ctx).Info("The Incident of RemediationRequest has no UID; its count is not used",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name)
+		return nil, time.Time{}, false
+	}
+	if inc.Status.Count < 0 || inc.Status.Count > remediationv1alpha1.MaxIncidentCount {
+		logf.FromContext(ctx).Info("The count of the Incident of RemediationRequest is outside the accepted range; "+
+			"it is not used", "remediationRequest", client.ObjectKeyFromObject(rr), "incident", ref.Name,
+			"count", inc.Status.Count)
+		return nil, time.Time{}, false
+	}
+	return inc, before, true
 }
 
 // recordCountAtMerge records the reading at the merge in rr for the status write that sets Merged with the merge

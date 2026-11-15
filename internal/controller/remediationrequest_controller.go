@@ -230,6 +230,10 @@ type RemediationRequestReconciler struct {
 	// only: after a restart or a change of leader no reading at the applied time is taken. Dropped like
 	// reportCounters.
 	mergeReadings mergeReadings
+	// incidentWatch holds, per request waiting for review, the Incident's count this process last read and when it
+	// first read it (incidentstopped.go, #715). Memory only: after a restart or a change of leader the wait for
+	// IncidentStopped starts again. Dropped when the request leaves AwaitingApproval, is being deleted or is gone.
+	incidentWatch incidentWatch
 	// goneLooks holds, per request, the first look of this process that found a pull request number of the
 	// request missing from the Git host (change.go, #688). Memory only: after a restart or a change of leader
 	// the confirmation wait starts again. Dropped by any other outcome of a read, when the request ends
@@ -478,6 +482,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 			r.reportCounters.forget(req.NamespacedName)
 			r.unwrittenResets.forget(req.NamespacedName)
 			r.mergeReadings.forget(req.NamespacedName)
+			r.incidentWatch.forget(req.NamespacedName)
 			r.looks().forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -487,6 +492,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		r.reportCounters.forget(req.NamespacedName)
 		r.unwrittenResets.forget(req.NamespacedName)
 		r.mergeReadings.forget(req.NamespacedName)
+		r.incidentWatch.forget(req.NamespacedName)
 		return r.finalize(ctx, rr)
 	}
 	if err := r.backfill(ctx, rr); err != nil {
@@ -1241,7 +1247,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		if err := r.clearWaits(ctx, rr); err != nil {
 			return ctrl.Result{}, err
 		}
-		return r.advance(ctx, rr, fresh)
+		return r.advanceAndWatch(ctx, rr, fresh, outcome)
 	}
 }
 
@@ -1267,6 +1273,18 @@ func (r *RemediationRequestReconciler) endBeforeFresh(ctx context.Context, rr *r
 		return res, true, err
 	}
 	return ctrl.Result{}, false, nil
+}
+
+// advanceAndWatch is the end of recheck on a fresh plan: the next step (advance), then, when the look read the
+// pull request open and that step went through, the look at the Incident (watchIncidentStopped, #715). It rides
+// this full recheck, after the step's own writes, so its write wakes only a look at the pull request (pollOnly).
+func (r *RemediationRequestReconciler) advanceAndWatch(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	fresh freshness.Result, outcome prOutcome) (ctrl.Result, error) {
+	res, err := r.advance(ctx, rr, fresh)
+	if err != nil || outcome != prOpen {
+		return res, err
+	}
+	return res, r.watchIncidentStopped(ctx, rr)
 }
 
 // endStaleClosed ends a request whose stale plan's cleanup started (the mark) and whose pull request is closed:

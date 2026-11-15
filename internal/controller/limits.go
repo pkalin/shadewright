@@ -751,6 +751,10 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 		// later read of the ended request, by the lock or the finalizer, waits again.
 		r.looks().forget(client.ObjectKeyFromObject(rr))
 	}
+	if rr.Status.Phase != phase && phase != remediationv1alpha1.PhaseAwaitingApproval {
+		// The wait for IncidentStopped (#715) belongs to a request that waits for review.
+		r.incidentWatch.forget(client.ObjectKeyFromObject(rr))
+	}
 	if rr.Status.Phase == phase && rr.Status.LastPhaseTransitionTime != nil {
 		return
 	}

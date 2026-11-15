@@ -18,7 +18,6 @@ package incidents
 
 import (
 	"slices"
-	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -26,6 +25,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
+	"github.com/pkalin/shadewright/internal/incidents/quiet"
 )
 
 // ConditionAnalysisDue is [analysisdue.ConditionAnalysisDue], the Incident condition that says whether the
@@ -309,7 +309,7 @@ func waitsForData(reason string) bool {
 
 // occurrenceCondition is the prefix of the occurrence ID of a symptom state read from an object's status by a
 // module's symptom source (design 3.1).
-const occurrenceCondition = "condition:"
+const occurrenceCondition = quiet.StatePrefix
 
 // DueMark returns the incident's AnalysisDue condition when it was written for the incident's current
 // generation, and nil otherwise: a condition written for another generation is no mark. The trigger reads its
@@ -350,17 +350,9 @@ func markedDue(inc *remediationv1alpha1.Incident) bool {
 // it lasts (design 3.1), so lastSeen does not move while the problem is still present, and the status records
 // no end of it: an ongoing state cannot be told from one that ended, so every such incident is taken as
 // recent.
+// The rule is shared with the executor ([quiet.LastingState]).
 func lastingState(st *remediationv1alpha1.IncidentStatus) bool {
-	if len(st.Occurrences) == 0 {
-		return false
-	}
-	newest := st.Occurrences[0]
-	for _, r := range st.Occurrences[1:] {
-		if r.Began != nil && (newest.Began == nil || r.Began.After(newest.Began.Time)) {
-			newest = r
-		}
-	}
-	return strings.HasPrefix(newest.ID, occurrenceCondition)
+	return quiet.LastingState(st)
 }
 
 // recentWindow is the recent window [Due] applies: RecentWindow, but never shorter than Debounce. It is the

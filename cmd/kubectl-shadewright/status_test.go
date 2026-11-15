@@ -40,7 +40,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 )
 
 const (
@@ -89,7 +89,7 @@ func testIncident(name, uid, subject, symptom string) *remediationv1alpha1.Incid
 			LastSeen:         &metav1.Time{Time: testNow.Add(-2 * time.Minute)},
 			LastAnalysisTime: &metav1.Time{Time: testNow.Add(-time.Minute)},
 			Conditions: []metav1.Condition{
-				{Type: incidents.ConditionAnalysisDue, Status: metav1.ConditionFalse, Reason: incidents.ReasonProposed,
+				{Type: analysisdue.ConditionAnalysisDue, Status: metav1.ConditionFalse, Reason: analysisdue.ReasonProposed,
 					Message: "The last analysis made a proposal", LastTransitionTime: metav1.Time{Time: testNow.Add(-time.Minute)}},
 				{Type: conditionAnalyzed, Status: metav1.ConditionTrue, Reason: "Proposed",
 					Message: "The analysis proposed a change", LastTransitionTime: metav1.Time{Time: testNow.Add(-time.Minute)}},
@@ -123,8 +123,8 @@ func testRequest(name, uid string, pr int64, prURL string) *remediationv1alpha1.
 
 func budgetMap(day, used string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: incidents.BudgetName, Namespace: testNS},
-		Data:       map[string]string{incidents.BudgetDayKey: day, incidents.BudgetUsedKey: used},
+		ObjectMeta: metav1.ObjectMeta{Name: analysisdue.BudgetName, Namespace: testNS},
+		Data:       map[string]string{analysisdue.BudgetDayKey: day, analysisdue.BudgetUsedKey: used},
 	}
 }
 
@@ -269,25 +269,25 @@ func TestBudgetAndSettingsStates(t *testing.T) {
 		stopped  string
 		text     string
 	}{
-		"settings not found": {nil, nil, stateNotFound, stateNotFound, incidents.ReasonSettingsNotFound,
+		"settings not found": {nil, nil, stateNotFound, stateNotFound, analysisdue.ReasonSettingsNotFound,
 			"analysis stopped: the RemediationSettings object default does not exist (SettingsNotFound)"},
 		"limit unset": {[]client.Object{noLimit, budgetMap("2026-11-06", "1")}, nil, stateOK, stateOK,
-			incidents.ReasonSettingsIncomplete, "analysis stopped: RemediationSettings sets no"},
+			analysisdue.ReasonSettingsIncomplete, "analysis stopped: RemediationSettings sets no"},
 		"budget not found": {[]client.Object{testSettings()}, nil, stateNotFound, stateOK,
-			incidents.ReasonBudgetNotFound, "analysis stopped: the ConfigMap shadewright-analysis-budget does not exist"},
+			analysisdue.ReasonBudgetNotFound, "analysis stopped: the ConfigMap shadewright-analysis-budget does not exist"},
 		"limit 0": {[]client.Object{zero, budgetMap("2026-11-06", "0")}, nil, stateOK, stateOK,
-			incidents.ReasonAnalysisDisabled, "0 of 0, analysis stopped: the daily limit is 0 (AnalysisDisabled)"},
+			analysisdue.ReasonAnalysisDisabled, "0 of 0, analysis stopped: the daily limit is 0 (AnalysisDisabled)"},
 		"limit reached": {[]client.Object{testSettings(), budgetMap("2026-11-06", "20")}, nil, stateOK, stateOK,
-			incidents.ReasonDailyBudgetReached, "20 of 20, analysis stopped: the daily limit is reached"},
+			analysisdue.ReasonDailyBudgetReached, "20 of 20, analysis stopped: the daily limit is reached"},
 		"forbidden is not a stop": {nil, &forbidden, stateForbidden, stateForbidden, "",
 			"unknown (RemediationSettings not readable with your permissions (see the viewer role); ConfigMap"},
 		"read error is not a stop": {nil, &failing, stateError, stateError, "", "could not be read: connection refused"},
 		"earlier day": {[]client.Object{testSettings(), budgetMap("2026-11-05", "9")}, nil,
 			stateOK, stateOK, "", "Analyses today (UTC): 0 of 20\n"},
 		"future day": {[]client.Object{testSettings(), budgetMap("2026-11-07", "1")}, nil,
-			stateUnreadable, stateOK, incidents.ReasonBudgetUnreadable, "taken as spent"},
+			stateUnreadable, stateOK, analysisdue.ReasonBudgetUnreadable, "taken as spent"},
 		"garbage is refused": {[]client.Object{testSettings(), budgetMap("2026-11-06", "\x1b[31m1")}, nil,
-			stateUnreadable, stateOK, incidents.ReasonBudgetUnreadable, "taken as spent"},
+			stateUnreadable, stateOK, analysisdue.ReasonBudgetUnreadable, "taken as spent"},
 	}
 	for name, tc := range cases {
 		b := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tc.objs...)

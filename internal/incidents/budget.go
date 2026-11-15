@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -32,30 +31,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 )
 
-// BudgetName is the name of the ConfigMap in the operator namespace that counts the analyses of the current
-// UTC day. It is shipped empty with the analyzer (config/manager/analysis_budget.yaml, before the kustomize
-// name prefix), and the analyzer may get and update this one ConfigMap and no other: its Role names it in
-// resourceNames, which the name prefix does not rewrite, so it carries the full name.
-const BudgetName = "shadewright-analysis-budget"
-
-// The keys of the budget ConfigMap. Both are set or both are absent; no other key is allowed.
+// Read side of the analysis budget, kept here as aliases of [analysisdue], which kubectl-shadewright imports
+// without this package's controller-runtime dependencies.
 const (
-	// BudgetDayKey holds the UTC day the count belongs to, as YYYY-MM-DD.
-	BudgetDayKey = "day"
-	// BudgetUsedKey holds the analyses started on that day, a decimal number from 0 to 10,000.
-	BudgetUsedKey = "used"
+	// BudgetName is [analysisdue.BudgetName].
+	BudgetName = analysisdue.BudgetName
+	// BudgetDayKey is [analysisdue.BudgetDayKey].
+	BudgetDayKey = analysisdue.BudgetDayKey
+	// BudgetUsedKey is [analysisdue.BudgetUsedKey].
+	BudgetUsedKey = analysisdue.BudgetUsedKey
 )
 
-// budgetDayLayout is the layout of the day in the budget ConfigMap.
-const budgetDayLayout = "2006-01-02"
+// UsedToday is [analysisdue.UsedToday].
+func UsedToday(cm *corev1.ConfigMap, now time.Time) (used int, ok bool) {
+	return analysisdue.UsedToday(cm, now)
+}
 
-// maxBudgetUsed is the largest count the budget holds, the largest spec.analysis.maxAnalysesPerDay.
-const maxBudgetUsed = 10000
-
-// budgetUsedPattern is the form of the count: plain decimal digits, no sign, space or leading plus.
-var budgetUsedPattern = regexp.MustCompile(`^[0-9]{1,5}$`)
+// MaxAnalysesPerDay is [analysisdue.MaxAnalysesPerDay].
+func MaxAnalysesPerDay(settings *remediationv1alpha1.RemediationSettings) (limit int, ok bool) {
+	return analysisdue.MaxAnalysesPerDay(settings)
+}
 
 // reserveBackoff spaces the retries of [ReserveAnalysis] on conflict: jittered, so callers that collided
 // do not collide again, and enough of them for each to see the count once the budget is spent.
@@ -76,92 +74,6 @@ var (
 	// limit is unknown.
 	ErrSettingsIncomplete = errors.New("the RemediationSettings sets no spec.analysis.maxAnalysesPerDay")
 )
-
-// analysisBudget is the parsed content of the budget ConfigMap. The zero value is an empty ConfigMap: none
-// used yet.
-type analysisBudget struct {
-	day  time.Time // midnight UTC of the day counted; zero when the ConfigMap is empty
-	used int
-}
-
-// parseBudget reads the budget ConfigMap. It accepts an empty ConfigMap, or exactly the keys day (a valid
-// YYYY-MM-DD date) and used (0 to 10,000 in decimal digits), and nothing else: no binary data, no other key,
-// not one key without the other.
-func parseBudget(cm *corev1.ConfigMap) (analysisBudget, error) {
-	if len(cm.BinaryData) > 0 {
-		return analysisBudget{}, errors.New("binaryData is not allowed")
-	}
-	for k := range cm.Data {
-		if k != BudgetDayKey && k != BudgetUsedKey {
-			return analysisBudget{}, fmt.Errorf("unexpected key %q", k)
-		}
-	}
-	day, hasDay := cm.Data[BudgetDayKey]
-	used, hasUsed := cm.Data[BudgetUsedKey]
-	switch {
-	case !hasDay && !hasUsed:
-		return analysisBudget{}, nil
-	case hasDay != hasUsed:
-		return analysisBudget{}, errors.New("day and used must be set together")
-	}
-	d, err := time.Parse(budgetDayLayout, day)
-	if err != nil || d.Format(budgetDayLayout) != day {
-		return analysisBudget{}, errors.New("day is not a YYYY-MM-DD date")
-	}
-	if !budgetUsedPattern.MatchString(used) {
-		return analysisBudget{}, errors.New("used is not a count")
-	}
-	n, err := strconv.Atoi(used)
-	if err != nil || n > maxBudgetUsed {
-		return analysisBudget{}, fmt.Errorf("used is above %d", maxBudgetUsed)
-	}
-	return analysisBudget{day: d, used: n}, nil
-}
-
-// budgetDay returns the UTC day of t, at midnight UTC.
-func budgetDay(t time.Time) time.Time {
-	y, m, d := t.UTC().Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-}
-
-// UsedToday returns the analyses counted against the UTC day of now in the budget ConfigMap (nil when it does
-// not exist). ok is false when that count cannot be trusted: no ConfigMap, content [parseBudget] refuses, or a
-// day after today (a clock ahead, or a forged value). The caller then takes the budget as spent (fail closed).
-// An empty ConfigMap, or a count of an earlier day, means none used today.
-func UsedToday(cm *corev1.ConfigMap, now time.Time) (used int, ok bool) {
-	if cm == nil {
-		return 0, false
-	}
-	b, err := parseBudget(cm)
-	if err != nil {
-		return 0, false
-	}
-	today := budgetDay(now)
-	switch {
-	case b.day.IsZero(), b.day.Before(today):
-		return 0, true
-	case b.day.After(today):
-		return 0, false
-	}
-	return b.used, true
-}
-
-// MaxAnalysesPerDay returns the analyses the settings allow per UTC day: spec.analysis.maxAnalysesPerDay, or
-// the deprecated spec.maxAnalysesPerDay when that is set and lower, so a 0 stored before the field moved keeps
-// analysis off. ok is false when spec.analysis or its maxAnalysesPerDay is unset, which the API server's
-// defaults never leave; the caller then takes the budget as unknown and allows no analysis, rather than
-// guessing a limit.
-func MaxAnalysesPerDay(settings *remediationv1alpha1.RemediationSettings) (limit int, ok bool) {
-	a := settings.Spec.Analysis
-	if a == nil || a.MaxAnalysesPerDay == nil {
-		return 0, false
-	}
-	limit = int(*a.MaxAnalysesPerDay)
-	if old := settings.Spec.MaxAnalysesPerDay; old != nil {
-		limit = min(limit, int(*old))
-	}
-	return limit, true
-}
 
 // ReserveAnalysis takes one unit of the daily analysis budget, before a model-backed analysis (#16). It reads
 // the RemediationSettings (spec.analysis.maxAnalysesPerDay) and the budget ConfigMap in namespace fresh with reader, adds one
@@ -200,7 +112,7 @@ func ReserveAnalysis(ctx context.Context, reader client.Reader, writer client.Wr
 			return ErrBudgetSpent
 		}
 		cm.Data = map[string]string{
-			BudgetDayKey:  budgetDay(now).Format(budgetDayLayout),
+			BudgetDayKey:  analysisdue.BudgetDayValue(now),
 			BudgetUsedKey: strconv.Itoa(used + 1),
 		}
 		return writer.Update(ctx, cm, client.FieldOwner(triggerFieldOwner))

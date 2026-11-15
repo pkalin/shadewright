@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 )
 
 // conditionAnalyzed is the Incident condition the analysis writes with its outcome (analysis.ConditionAnalyzed;
@@ -277,7 +277,7 @@ func incidentReport(inc *remediationv1alpha1.Incident) IncidentReport {
 		Phase:            clean(string(inc.Status.Phase), maxName),
 		Count:            inc.Status.Count,
 		LastSeen:         inc.Status.LastSeen,
-		Due:              conditionReport(inc.Status.Conditions, incidents.ConditionAnalysisDue),
+		Due:              conditionReport(inc.Status.Conditions, analysisdue.ConditionAnalysisDue),
 		LastAnalysisTime: inc.Status.LastAnalysisTime,
 		Outcome:          conditionReport(inc.Status.Conditions, conditionAnalyzed),
 	}
@@ -375,7 +375,7 @@ func readSettings(ctx context.Context, c client.Reader, r *SettingsReport) *reme
 	r.State = stateOK
 	paused := s.Spec.Paused != nil && *s.Spec.Paused
 	r.Paused = &paused
-	if limit, ok := incidents.MaxAnalysesPerDay(s); ok {
+	if limit, ok := analysisdue.MaxAnalysesPerDay(s); ok {
 		r.MaxAnalysesPerDay = &limit
 	}
 	return s
@@ -388,21 +388,21 @@ func readSettings(ctx context.Context, c client.Reader, r *SettingsReport) *reme
 func analysisStopped(s SettingsReport, b BudgetReport) string {
 	switch {
 	case s.State == stateNotFound:
-		return incidents.ReasonSettingsNotFound
+		return analysisdue.ReasonSettingsNotFound
 	case s.State != stateOK:
 		return ""
 	case s.MaxAnalysesPerDay == nil:
-		return incidents.ReasonSettingsIncomplete
+		return analysisdue.ReasonSettingsIncomplete
 	case b.State == stateNotFound:
-		return incidents.ReasonBudgetNotFound
+		return analysisdue.ReasonBudgetNotFound
 	case b.State == stateUnreadable:
-		return incidents.ReasonBudgetUnreadable
+		return analysisdue.ReasonBudgetUnreadable
 	case b.State != stateOK:
 		return ""
 	case *s.MaxAnalysesPerDay == 0:
-		return incidents.ReasonAnalysisDisabled
+		return analysisdue.ReasonAnalysisDisabled
 	case b.UsedToday != nil && *b.UsedToday >= *s.MaxAnalysesPerDay:
-		return incidents.ReasonDailyBudgetReached
+		return analysisdue.ReasonDailyBudgetReached
 	}
 	return ""
 }
@@ -410,11 +410,11 @@ func analysisStopped(s SettingsReport, b BudgetReport) string {
 // readBudget reads the analysis budget ConfigMap of namespace with the analyzer's own parser.
 func readBudget(ctx context.Context, c client.Reader, namespace string, now time.Time) BudgetReport {
 	cm := &corev1.ConfigMap{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: incidents.BudgetName}, cm); err != nil {
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: analysisdue.BudgetName}, cm); err != nil {
 		state, msg := readState(err)
 		return BudgetReport{State: state, Error: msg}
 	}
-	used, ok := incidents.UsedToday(cm, now)
+	used, ok := analysisdue.UsedToday(cm, now)
 	if !ok {
 		return BudgetReport{State: stateUnreadable}
 	}

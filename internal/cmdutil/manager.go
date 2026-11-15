@@ -21,17 +21,15 @@ package cmdutil
 import (
 	"crypto/tls"
 	"flag"
-	"fmt"
-	"slices"
-	"strings"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	"github.com/pkalin/shadewright/internal/cmdutil/sharedflags"
 )
 
 // Leader election Lease names. The manifests create the three Leases (config/rbac/<id>/leader_election.yaml,
@@ -120,23 +118,7 @@ func NewLogger(o *Options) logr.Logger {
 	return zap.New(zap.UseFlagOptions(&o.Zap))
 }
 
-// ParseNamespaces reads a --watch-namespaces flag: a comma-separated list of namespace names. It trims spaces,
-// drops duplicates and returns the names sorted. An empty list means no namespace at all, never "all
-// namespaces". A name that is not a valid namespace name, such as "*", is an error.
+// ParseNamespaces reads a --watch-namespaces flag; see [sharedflags.ParseNamespaces].
 func ParseNamespaces(value string) ([]string, error) {
-	var out []string
-	for part := range strings.SplitSeq(value, ",") {
-		ns := strings.TrimSpace(part)
-		if ns == "" {
-			continue
-		}
-		if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
-			return nil, fmt.Errorf("watch namespace %q is not a valid namespace name: %s", ns, strings.Join(errs, "; "))
-		}
-		if !slices.Contains(out, ns) {
-			out = append(out, ns)
-		}
-	}
-	slices.Sort(out)
-	return out, nil
+	return sharedflags.ParseNamespaces(value)
 }

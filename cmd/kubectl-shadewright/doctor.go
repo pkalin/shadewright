@@ -38,7 +38,7 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/fluxstatus"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -246,7 +246,7 @@ func checkSettings(ctx context.Context, c client.Reader, d *Diagnosis) (*remedia
 	strict := json.NewDecoder(bytes.NewReader(raw))
 	strict.DisallowUnknownFields()
 	var level, detail string
-	limit, hasLimit := incidents.MaxAnalysesPerDay(s)
+	limit, hasLimit := analysisdue.MaxAnalysesPerDay(s)
 	switch {
 	case !hasLimit:
 		level, detail = levelFail, "spec.analysis.maxAnalysesPerDay is not set: the analyzer refuses every analysis"

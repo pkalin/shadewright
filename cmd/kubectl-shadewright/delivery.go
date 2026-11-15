@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"maps"
 	"net/url"
@@ -36,8 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer"
-	"github.com/pkalin/shadewright/internal/cmdutil"
+	"github.com/pkalin/shadewright/internal/cmdutil/sharedflags"
 	"github.com/pkalin/shadewright/internal/fluxstatus"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -196,7 +194,7 @@ func checkDelivery(ctx context.Context, c client.Reader, flux *fluxLists, d *Dia
 }
 
 // watchedNamespaces reads --watch-namespaces from the containers of the analyzer Deployments, as the analyzer
-// parses it (analyzer.ParseNamespaces). The last occurrence in a container wins, as with Go flags; several
+// parses it (sharedflags.ParseNamespaces, which internal/analyzer forwards to). The last occurrence in a container wins, as with Go flags; several
 // Deployments give the union. The raw value is never printed: it is cluster data.
 func watchedNamespaces(analyzers []appsv1.Deployment) ([]string, error) {
 	var all []string
@@ -208,7 +206,7 @@ func watchedNamespaces(analyzers []appsv1.Deployment) ([]string, error) {
 				continue
 			}
 			found = true
-			names, err := analyzer.ParseNamespaces(value)
+			names, err := sharedflags.ParseNamespaces(value)
 			if err != nil {
 				return nil, fmt.Errorf("--%s of the analyzer Deployment %s is not a list of namespace names",
 					watchNamespacesFlag, clean(analyzers[i].Name, maxName))
@@ -233,17 +231,13 @@ func containerArgs(ctr corev1.Container) []string {
 }
 
 // analyzerBoolFlags are the boolean flags of the analyzer, which take no separate value: the shared flags of
-// internal/cmdutil, read from their definitions, and the analyzer's own (cmd/analyzer).
+// internal/cmdutil (sharedflags.BoolFlags, which a test ties to their definitions) and the analyzer's own
+// (cmd/analyzer).
 var analyzerBoolFlags = func() map[string]bool {
-	fs := flag.NewFlagSet("analyzer", flag.ContinueOnError)
-	var opts cmdutil.Options
-	opts.BindFlags(fs)
 	bools := map[string]bool{"pod-logs": true}
-	fs.VisitAll(func(f *flag.Flag) {
-		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
-			bools[f.Name] = true
-		}
-	})
+	for _, name := range sharedflags.BoolFlags() {
+		bools[name] = true
+	}
 	return bools
 }()
 

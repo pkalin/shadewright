@@ -37,6 +37,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
 )
@@ -155,17 +156,26 @@ type hintLook struct {
 
 // watchHints runs pollHints after each look at the pull request of a request that may still be reviewed, with
 // the reconcile's context (pollHints bounds its steps itself). A failure is logged and changes nothing: the
-// watch of the pull request goes on, and the next look tries again from the stored cursor. It returns pollHints'
-// caughtUp, false on a failure.
+// watch of the pull request goes on, and the next look tries again from the stored cursor. It returns what the
+// look at the comments found (commentLook): caught up when pollHints' caughtUp is true, and otherwise behind,
+// paused when writes were paused, or none when the request has no comments to read.
 func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hintLook,
-	rr *remediationv1alpha1.RemediationRequest) bool {
+	rr *remediationv1alpha1.RemediationRequest) commentLook {
+	_, _, reads := r.feedbackFor(look, rr)
 	caughtUp, err := r.pollHints(ctx, look, rr)
 	if err != nil {
 		logf.FromContext(ctx).Info("Could not handle the reviewer hints of RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return false
 	}
-	return caughtUp
+	switch {
+	case err == nil && caughtUp:
+		return commentsCaughtUp
+	case !reads:
+		return commentsNone
+	case errors.Is(err, freshness.ErrPaused):
+		return commentsPaused
+	}
+	return commentsBehind
 }
 
 // pollHints is one look at the comments of rr's pull request, when look has a provider and reviewer hints are

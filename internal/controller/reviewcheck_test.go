@@ -716,7 +716,7 @@ func TestReviewCheckStuckWarnsOnce(t *testing.T) {
 		return nil
 	})
 	for i := range 2 * reviewCheckStuckLooks {
-		r.watchReviewCheck(ctx, p, true)
+		r.watchReviewCheck(ctx, p, commentsCaughtUp)
 		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
 			t.Fatalf("after %d failed looks: %d Events, want %d", i+1, len(events.Events), want)
 		}
@@ -725,8 +725,99 @@ func TestReviewCheckStuckWarnsOnce(t *testing.T) {
 		t.Fatalf("event %q", ev)
 	}
 	g.SetFail(nil)
-	r.watchReviewCheck(ctx, p, true)
+	r.watchReviewCheck(ctx, p, commentsCaughtUp)
 	if _, ok := r.reviewCheckFailures.Load(client.ObjectKeyFromObject(p)); ok {
 		t.Fatal("a look that went through kept the count")
+	}
+}
+
+// Looks that do not read the comments to the end while the merge gate is due keep the check as it is with no
+// failure; reviewCheckStuckLooks of them in a row on one head raise one Warning Event, not one per look (#755). A
+// look whose comments could not be stored while writes are paused neither counts nor starts the count again, and
+// a look that caught up starts it again.
+func TestReviewCommentsUnreadWarnsOnce(t *testing.T) {
+	r, _, p, _, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	key := client.ObjectKeyFromObject(p)
+	for i := range 2 * reviewCheckStuckLooks {
+		r.watchReviewCheck(ctx, p, commentsBehind)
+		if i == 0 {
+			r.watchReviewCheck(ctx, p, commentsPaused)
+		}
+		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
+			t.Fatalf("after %d looks behind: %d Events, want %d", i+1, len(events.Events), want)
+		}
+	}
+	if ev := <-events.Events; !strings.Contains(ev, "Warning "+ReasonReviewCommentsUnread) {
+		t.Fatalf("event %q", ev)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed {
+		t.Fatalf("looks behind changed the check: %+v", rc)
+	}
+	if _, ok := r.reviewCheckFailures.Load(key); ok {
+		t.Fatal("looks behind counted as failed looks")
+	}
+	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	if _, ok := r.reviewCommentsBehind.Load(key); ok {
+		t.Fatal("a look that caught up kept the count")
+	}
+}
+
+// A look whose comments are behind while the gate is not due (here the check is Failed on the head, which is
+// final) is not counted: the comments did not keep the gate from running.
+func TestReviewCommentsUnreadOnlyWhileTheGateIsDue(t *testing.T) {
+	r, _, p, _, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	p.Status.PullRequest.ReviewCheck.State = api.ReviewCheckFailed
+	for range 2 * reviewCheckStuckLooks {
+		r.watchReviewCheck(ctx, p, commentsBehind)
+	}
+	if len(events.Events) != 0 {
+		t.Fatalf("%d Events for a gate that was not due", len(events.Events))
+	}
+}
+
+// A check run write the Git host answers with a conflict records nothing and is not a failure; a conflict that
+// persists on reviewCheckStuckLooks looks in a row on one head raises one Warning Event, not one per look (#755).
+// A look that goes through without a conflict starts the count again.
+func TestReviewCheckConflictWarnsOnce(t *testing.T) {
+	r, g, p, number, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	key := client.ObjectKeyFromObject(p)
+	g.SetReviewState(number, 90, "DISMISSED")
+	g.SetFail(func(op string) error {
+		if op == opCreateCheckRun {
+			return fmt.Errorf("status 409: %w", providers.ErrConflict)
+		}
+		return nil
+	})
+	for i := range 2 * reviewCheckStuckLooks {
+		r.watchReviewCheck(ctx, p, commentsCaughtUp)
+		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
+			t.Fatalf("after %d conflicts: %d Events, want %d", i+1, len(events.Events), want)
+		}
+	}
+	if ev := <-events.Events; !strings.Contains(ev, "Warning "+ReasonReviewCheckConflict) {
+		t.Fatalf("event %q", ev)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed {
+		t.Fatalf("a conflict recorded a state: %+v", rc)
+	}
+	if _, ok := r.reviewCheckFailures.Load(key); ok {
+		t.Fatal("conflicts counted as failed looks")
+	}
+	g.SetFail(nil)
+	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	if _, ok := r.reviewCheckConflicts.Load(key); ok {
+		t.Fatal("a look that went through kept the count")
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress {
+		t.Fatalf("the check after the conflicts ended: %+v", rc)
 	}
 }

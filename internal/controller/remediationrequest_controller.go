@@ -193,6 +193,11 @@ type RemediationRequestReconciler struct {
 	// (watchReviewCheck), so a gate that cannot make progress raises one Warning Event. Memory only, dropped with
 	// checked.
 	reviewCheckFailures sync.Map
+	// reviewCommentsBehind and reviewCheckConflicts hold, per request name, the looks in a row on one head whose
+	// comments were behind while the merge gate was due, and whose check run write got a conflict
+	// (watchReviewCheck, #755), so each case raises one Warning Event. Memory only, dropped with checked.
+	reviewCommentsBehind sync.Map
+	reviewCheckConflicts sync.Map
 	// rewritten holds, per request name, the answer of the Git host to the rewrite after a handoff whose status
 	// write has not gone through (followHandoff), so a retry records it without sending the rewrite again.
 	// Memory only, dropped with checked: after a restart the rewrite is sent again, which is idempotent.
@@ -245,6 +250,8 @@ func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 	r.permissionWarned.Delete(key)
 	r.steeredCommented.Delete(key)
 	r.reviewCheckFailures.Delete(key)
+	r.reviewCommentsBehind.Delete(key)
+	r.reviewCheckConflicts.Delete(key)
 	r.rewritten.Delete(key)
 	r.replyAttempts.Delete(key)
 	r.renderEnds.forget(key)

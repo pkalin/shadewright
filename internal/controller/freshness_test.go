@@ -1649,6 +1649,121 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		stillOpen()
 	})
 
+	// unreadable returns condition PullRequestUnreadable of the request as stored.
+	unreadable := func() *metav1.Condition {
+		return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	}
+
+	// A read that keeps failing after the target branch changed is retried without an end, so a person must see it:
+	// condition PullRequestUnreadable on every failed read, one Warning Event, an Info log line, and the condition
+	// removed by the read that works.
+	It("shows a pull request it cannot read after the target branch changed, and clears it once read (#754)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		var fail atomic.Bool
+		fail.Store(true)
+		git.SetFail(func(op string) error {
+			if fail.Load() && (op == opGet || op == opList || op == opFind) {
+				return &providers.RetryableError{Err: errors.New("bad gateway")}
+			}
+			return nil
+		})
+		recorder := record.NewFakeRecorder(10)
+		r := reconciler()
+		r.Recorder = recorder
+		logCtx, out := infoLog()
+		for range 2 {
+			_, err := r.Reconcile(logCtx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).To(HaveOccurred())
+			c := unreadable()
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionTrue))
+			Expect(c.Reason).To(Equal(reasonTargetBranchChanged))
+			Expect(c.Message).To(ContainSubstring("could not be read on the branch the plan was made for"))
+			Expect(c.Message).NotTo(ContainSubstring("bad gateway"), "no text of the Git host")
+		}
+		Expect(recorder.Events).To(HaveLen(1), "one Warning Event per transition, not per retry")
+		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+		Expect(out.String()).To(ContainSubstring("Could not read the pull request of RemediationRequest on its "+
+			"recorded target branch"), "logged at Info")
+
+		fail.Store(false)
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(unreadable()).To(BeNil(), "removed by the read that works")
+		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeNormal + " " + EventPullRequestReadable))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+	})
+
+	It("shows a recorded repository it cannot open after the target branch changed, and retries (#754)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return nil, &providers.RetryableError{Err: errors.New("token expired")}
+		}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		c := unreadable()
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal(reasonTargetBranchChanged))
+		Expect(c.Message).NotTo(ContainSubstring("token expired"))
+	})
+
+	It("waits at most the full recheck's period when the host asks for a longer delay after the target branch "+
+		"changed (#754)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		git.SetFail(func(op string) error {
+			if op == opGet || op == opList || op == opFind {
+				return &providers.RetryableError{Err: errors.New("rate limited"), RetryAfter: time.Hour}
+			}
+			return nil
+		})
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(freshRecheckInterval))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+	})
+
+	It("removes WritesPaused once writes are allowed while the pull request cannot be read after the target "+
+		"branch changed (#754)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		got := fetch()
+		meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+			Type: remediationv1alpha1.ConditionWritesPaused, Status: metav1.ConditionTrue,
+			Reason: ReasonWritesPaused, Message: messageWritesPaused, ObservedGeneration: got.Generation,
+		})
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		git.SetFail(func(op string) error {
+			if op == opGet || op == opList || op == opFind {
+				return &providers.RetryableError{Err: errors.New("bad gateway")}
+			}
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).To(BeNil())
+	})
+
+	It("logs that a merge was not looked up when the recorded repository can never be opened after the target "+
+		"branch changed (#754)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			return nil, fmt.Errorf("no signer: %w", providers.ErrInvalidConfig)
+		}
+		logCtx, out := infoLog()
+		_, err := r.Reconcile(logCtx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(out.String()).To(ContainSubstring("a merge of its pull request, if any, was not looked up"))
+	})
+
 	It("ends in NeedsIntervention, without closing or retrying, when a stale plan's repository settings cannot be used", func() {
 		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
 		r := reconciler()

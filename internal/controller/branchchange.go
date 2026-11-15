@@ -21,7 +21,10 @@ import (
 	"errors"
 	"fmt"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
@@ -39,7 +42,10 @@ import (
 //     receipt; the check at the merge finds the plan stale (SettingsChanged), so the request ends Inconclusive
 //     with StalePlanMerged, neutral for the circuit breaker, like any merged stale plan;
 //   - a read that fails, or a provider that fails to open: retried (errBranchChangedUnread), never an end, since
-//     the pull request may be merged;
+//     the pull request may be merged. Condition PullRequestUnreadable says so on every such failure (reason
+//     TargetBranchChanged, or the refusal's reason when the Git host refuses for good), and the next read that
+//     works removes it. As on the look at any recorded pull request, nothing bounds the retries in time: only the
+//     error backoff, or the delay the host asked for, capped at freshRecheckInterval, paces them;
 //   - anything else (open, closed, gone, another head): errTargetBranchChanged, handled as before.
 
 // errBranchChangedUnread marks a look at the pull request of a plan whose target branch changed that could not
@@ -60,12 +66,24 @@ func (r *RemediationRequestReconciler) watchBranchChanged(ctx context.Context,
 	switch {
 	case providers.IsInvalidConfig(err):
 		// Settings that can never open the repository read nothing, now or later: as before.
+		logf.FromContext(ctx).Info("Could not open the recorded repository of RemediationRequest after its target "+
+			"branch changed, so a merge of its pull request, if any, was not looked up", "remediationRequest",
+			client.ObjectKeyFromObject(rr), "pullRequest", pr.Number)
 		return errTargetBranchChanged
 	case err != nil:
-		return fmt.Errorf("%w: %w", errBranchChangedUnread, freshness.WrapProvider("open the repository", err))
+		err = freshness.WrapProvider("open the repository", err)
+		want := branchChangedRead(rr)
+		if reason, _, refused := refusal(err); refused {
+			want = refusedRead(rr, reason, err, pr.Number)
+		}
+		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
+			err = errors.Join(err, werr)
+		}
+		return fmt.Errorf("%w: %w", errBranchChangedUnread, err)
 	}
-	// By its number, on the recorded target branch (changeOf reads status.source).
-	v := r.changeOf(ctx, git, rr, changeQuery{})
+	// By its number, on the recorded target branch (changeOf reads status.source); a failed read sets condition
+	// PullRequestUnreadable (noteRead, recordedBranch).
+	v := r.changeOf(ctx, git, rr, changeQuery{recordedBranch: true})
 	switch {
 	case v.state == changeUnknown:
 		return fmt.Errorf("%w: %w", errBranchChangedUnread, v.err)
@@ -73,6 +91,21 @@ func (r *RemediationRequestReconciler) watchBranchChanged(ctx context.Context,
 		return r.recordMergeSeen(ctx, rr, v.pr)
 	}
 	return errTargetBranchChanged
+}
+
+// branchChangedRead is condition PullRequestUnreadable for a pull request that could not be read on the recorded
+// target branch after the repository entry of the plan changed it (watchBranchChanged). The message is fixed and
+// holds no text of the Git host.
+func branchChangedRead(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
+	return &metav1.Condition{
+		Type:   remediationv1alpha1.ConditionPullRequestUnreadable,
+		Status: metav1.ConditionTrue,
+		Reason: reasonTargetBranchChanged,
+		Message: "The repository of the plan names another target branch in RemediationSettings now, and the " +
+			"request's pull request could not be read on the branch the plan was made for, so it is not known " +
+			"whether it was merged; it is read again, and nothing is decided on it until a read works",
+		ObservedGeneration: rr.Generation,
+	}
 }
 
 // openRecordedBranch opens repo, the plan's repository entry, for the recorded target branch instead of the one
@@ -100,6 +133,16 @@ func (r *RemediationRequestReconciler) lookUnsettled(ctx context.Context, rr *re
 		return res, true, err
 	}
 	if outcome == prBranchUnread {
+		// Writes allowed again end WritesPaused here too: this path returns before the freshness check, which
+		// removes it otherwise, and the reads may keep failing long after the pause.
+		if err := r.resumeIfAllowed(ctx, rr); err != nil {
+			return ctrl.Result{}, true, errors.Join(lookErr, err)
+		}
+		// The delay the host asked for never passes the full recheck's period, as on the look at an open one.
+		if d := retryAfterOf(lookErr); d > freshRecheckInterval {
+			lookErr = errors.Join(&freshness.ProviderError{Op: "wait for the delay the Git host asked for, capped",
+				RetryAfter: freshRecheckInterval}, lookErr)
+		}
 		res, err := r.waitOrFail(ctx, rr, lookErr)
 		return res, true, err
 	}

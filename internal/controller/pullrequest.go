@@ -1143,7 +1143,7 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	cancel()
 	if branchUnread {
 		// boundErr may replace the error, as for a merge seen: the pull request is still unread.
-		logf.FromContext(ctx).V(1).Info("Could not read the pull request of RemediationRequest on its recorded "+
+		logf.FromContext(ctx).Info("Could not read the pull request of RemediationRequest on its recorded "+
 			"target branch", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 		return prBranchUnread, err
 	}

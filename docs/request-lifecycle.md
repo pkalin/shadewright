@@ -84,7 +84,7 @@ Shadewright never approves its own pull request and does not check reviews itsel
 What happens depends on the cause. Only these cases close the pull request, and Shadewright never reopens one:
 
 - A stale plan (a changed policy, settings, target or source file) ends `Superseded` and the executor closes its pull request.
-- A render refusal while the pull request waits (`TargetFileDiverged`, `PatchRefused`, `BranchDiverged`, an unplanned difference in the rendered output) closes it and ends `NeedsIntervention`.
+- A render refusal while the pull request waits (`TargetFileDiverged`, `PatchRefused`, `BranchDiverged`, an unplanned difference in the rendered output, or `RenderNeverFinished` after three renders in a row that the executor did not survive) closes it and ends `NeedsIntervention`. In a handoff the same refusals end the replacement `Cancelled` with `HandoffAborted`, with the render's reason in the message, and the pull request stays as it was.
 - A branch that does not hold exactly the planned change when the pull request is opened or found before it was recorded (`BranchDiverged`, for example a push to the branch during the open) closes it and ends `NeedsIntervention`.
 - A push to a recorded pull request that leaves more than the planned change on the branch (`BranchDiverged`) ends `NeedsIntervention` with one comment on the pull request that hands it to a person; it stays open. Merged by then, the request ends `MergedWithForeignChange`.
 

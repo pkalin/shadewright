@@ -1518,6 +1518,47 @@ spec:
                 - repositoryRef
                 - targetBranch
                 type: object
+              unfinishedRenders:
+                description: |-
+                  unfinishedRenders marks render checks of the plan that started and did not finish: written before the
+                  render process starts, removed when the render check returns. At MaxUnfinishedRenders for the current plan
+                  digest the executor starts no further render and ends the request in NeedsIntervention with reason
+                  RenderNeverFinished (#714, ADR-0035). Only the executor writes it. Unset when no render is running, unless
+                  a removal was lost, which the next render of the same executor process clears without counting it.
+                properties:
+                  count:
+                    description: count is how many render checks of that plan started
+                      in a row and did not finish.
+                    format: int32
+                    maximum: 3
+                    minimum: 1
+                    type: integer
+                  planDigest:
+                    description: planDigest is the plan digest of the renders counted.
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  process:
+                    description: |-
+                      process is the identity of the executor process that wrote the mark: 32 lowercase hexadecimal characters
+                      the process draws at random when it starts. A mark of the process that reads it is of a render that
+                      returned, so it is not counted; only a mark of a process that is gone is.
+                    pattern: ^[0-9a-f]{32}$
+                    type: string
+                required:
+                - count
+                - planDigest
+                - process
+                type: object
+                x-kubernetes-validations:
+                - message: a new status.unfinishedRenders, or one for another planDigest,
+                    starts at count 1
+                  optionalOldSelf: true
+                  rule: (oldSelf.hasValue() && oldSelf.value().planDigest == self.planDigest)
+                    || self.count == 1
+                - message: status.unfinishedRenders.count rises by exactly 1 per write
+                    for the same planDigest; it is only removed
+                  rule: self.planDigest != oldSelf.planDigest || self == oldSelf ||
+                    self.count == oldSelf.count + 1
               verification:
                 description: |-
                   verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4), and

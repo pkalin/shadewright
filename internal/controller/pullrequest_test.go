@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -89,6 +90,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// process is the memory of first looks at a missing pull request (goneLooks) that every reconciler of a
 		// spec shares, as one executor process would; the other memory of a reconciler starts empty.
 		process *goneLooks
+		// renderHook, when set, is the reconciler's render check instead of semdiff.Check.
+		renderHook func(context.Context, semdiff.Input) (semdiff.Result, error)
 	)
 
 	manifest := func(limit string) []byte {
@@ -120,6 +123,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			IncidentReadTimeout: incidentReadTimeout,
 		}
 		r.goneLooks = process
+		r.process = newProcessID() // each reconciler is another executor process, as after a restart
+		r.renderCheck = renderHook
 		if apiReader != nil {
 			r.APIReader = apiReader
 		}
@@ -201,7 +206,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		seq++
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
-		faulty, openErr, writeTimeout, recorder = nil, nil, 0, nil
+		faulty, openErr, writeTimeout, recorder, renderHook = nil, nil, 0, nil, nil
 		process = &goneLooks{}
 		opens.Store(0)
 		apiReader, incidentReadTimeout = nil, 0
@@ -3899,6 +3904,100 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(faulty.count(opCommit)).To(BeZero())
 			Expect(openRequests()).To(BeEmpty())
 		}
+
+		// Issue #714: a render can take the executor's Pod down with it (a container OOM kills every process in
+		// it), and a count in memory starts again with every restart. diesInRender runs one reconcile with a new
+		// reconciler, as after a restart, whose render check ends the goroutine the way the process would end: no
+		// code after the render runs. It returns once that reconcile is over.
+		renders := 0
+		diesInRender := func() {
+			GinkgoHelper()
+			renderHook = func(context.Context, semdiff.Input) (semdiff.Result, error) {
+				renders++
+				runtime.Goexit()
+				return semdiff.Result{}, nil
+			}
+			defer func() { renderHook = nil }()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = reconcileOnce()
+			}()
+			<-done
+		}
+		// marked returns the count of status.unfinishedRenders for the request's plan digest, 0 without a mark.
+		marked := func() int32 {
+			GinkgoHelper()
+			got := fetch()
+			if got.Status.UnfinishedRenders == nil {
+				return 0
+			}
+			Expect(got.Status.UnfinishedRenders.PlanDigest).To(Equal(got.Status.PlanDigest))
+			return got.Status.UnfinishedRenders.Count
+		}
+		// waitingAfterDeaths drives the request to a waiting pull request, moves the target branch and lets n
+		// renders of the moved head take the executor down, and returns the moved head.
+		waitingAfterDeaths := func(n int) string {
+			GinkgoHelper()
+			drive(remediationv1alpha1.PhaseAwaitingApproval)
+			moved, err := git.Push(mainBranch, readmePath, []byte("a: 2\n"))
+			Expect(err).NotTo(HaveOccurred())
+			renders = 0
+			for i := range n {
+				diesInRender()
+				Expect(renders).To(Equal(i+1), "the render started")
+				Expect(marked()).To(BeEquivalentTo(i+1), "the start is recorded before the render")
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			}
+			return moved
+		}
+
+		It("ends a waiting request whose render took the executor down three times in a row", func() {
+			recorder = record.NewFakeRecorder(20)
+			waitingAfterDeaths(remediationv1alpha1.MaxUnfinishedRenders)
+			renderHook = func(context.Context, semdiff.Input) (semdiff.Result, error) {
+				Fail("a render started after three unfinished ones")
+				return semdiff.Result{}, nil
+			}
+			Expect(reconcileOnce()).To(Succeed())
+			stoppedWaiting(ReasonRenderNeverFinished)
+			Expect(recorder.Events).To(Receive(Equal("Warning " + ReasonRenderNeverFinished + " " +
+				messageRenderNeverFinished)))
+			Expect(reconcileOnce()).To(Succeed(), "a stopped request takes no further step")
+			stoppedWaiting(ReasonRenderNeverFinished)
+		})
+
+		It("does not end a waiting request after two unfinished renders, and an answer clears the mark", func() {
+			moved := waitingAfterDeaths(remediationv1alpha1.MaxUnfinishedRenders - 1)
+			// An ordinary restart (a rollout of the executor) in between: the render answers this time.
+			Expect(reconcileOnce()).To(Succeed())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(got.Status.PullRequest.RenderedTargetHead).To(Equal(moved))
+			Expect(got.Status.UnfinishedRenders).To(BeNil(), "the answer removes the mark")
+
+			// The count starts again: two more deaths do not end the request either.
+			_, err := git.Push(mainBranch, readmePath, []byte("a: 3\n"))
+			Expect(err).NotTo(HaveOccurred())
+			for i := range remediationv1alpha1.MaxUnfinishedRenders - 1 {
+				diesInRender()
+				Expect(marked()).To(BeEquivalentTo(i + 1))
+			}
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		})
+
+		It("stops before the commit when the render took the executor down three times in a row", func() {
+			branch, cut := cutBranch()
+			renders = 0
+			for i := range remediationv1alpha1.MaxUnfinishedRenders {
+				diesInRender()
+				Expect(renders).To(Equal(i + 1))
+				Expect(marked()).To(BeEquivalentTo(i + 1))
+			}
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(renders).To(Equal(remediationv1alpha1.MaxUnfinishedRenders), "no further render")
+			stoppedBeforeCommit(branch, cut, ReasonRenderNeverFinished)
+		})
 
 		It("commits and opens the pull request when an unrelated merge moved the target branch after the cut", func() {
 			branch, cut := cutBranch()

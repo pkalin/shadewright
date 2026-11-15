@@ -449,7 +449,7 @@ func (r *RemediationRequestReconciler) checkHandoff(ctx context.Context, git pro
 		return &renderRefusal{reason: ReasonTargetFileDiverged, message: "The target file changed on the target " +
 			"branch while the pull request waited, so the new plan was not rendered as it would merge"}, nil
 	}
-	if err := r.checkRender(ctx, git, fresh.Head, changed, rr); err != nil {
+	if err := r.checkRender(ctx, git, fresh.Head, changed, rr, nil); err != nil {
 		if ref, ok := errors.AsType[*renderRefusal](err); ok {
 			return ref, nil
 		}

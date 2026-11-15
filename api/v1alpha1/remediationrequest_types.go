@@ -686,6 +686,40 @@ type MergeReceipt struct {
 	MergedAt metav1.MicroTime `json:"mergedAt"`
 }
 
+// MaxUnfinishedRenders is how many render checks of one request and plan may start in a row without finishing
+// (status.unfinishedRenders.count) before the executor ends the request in NeedsIntervention with reason
+// RenderNeverFinished instead of starting another (#714, ADR-0035). It is the schema's maximum of that count; a
+// test compares it with the generated CRD.
+const MaxUnfinishedRenders = 3
+
+// UnfinishedRenders is the executor's durable mark of render checks that started and did not finish (#714,
+// ADR-0035). A render process can take the executor's Pod down with it (a container OOM kills every process in
+// it), so a count in memory would start again with every restart. The executor writes the mark before it starts
+// the render process and removes it once the render check returns, whatever it returns. A mark for another
+// plan digest counts as zero, and so does a mark the running executor process wrote itself: that render
+// returned, and only the removal was lost.
+// +kubebuilder:validation:XValidation:rule="(oldSelf.hasValue() && oldSelf.value().planDigest == self.planDigest) || self.count == 1",message="a new status.unfinishedRenders, or one for another planDigest, starts at count 1",optionalOldSelf=true
+// +kubebuilder:validation:XValidation:rule="self.planDigest != oldSelf.planDigest || self == oldSelf || self.count == oldSelf.count + 1",message="status.unfinishedRenders.count rises by exactly 1 per write for the same planDigest; it is only removed"
+type UnfinishedRenders struct {
+	// planDigest is the plan digest of the renders counted.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +required
+	PlanDigest string `json:"planDigest"`
+
+	// count is how many render checks of that plan started in a row and did not finish.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3
+	// +required
+	Count int32 `json:"count"`
+
+	// process is the identity of the executor process that wrote the mark: 32 lowercase hexadecimal characters
+	// the process draws at random when it starts. A mark of the process that reads it is of a render that
+	// returned, so it is not counted; only a mark of a process that is gone is.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	// +required
+	Process string `json:"process"`
+}
+
 // RemediationRequestStatus is written only by the remediation controller.
 type RemediationRequestStatus struct {
 	// observedGeneration is the generation the status describes.
@@ -793,6 +827,14 @@ type RemediationRequestStatus struct {
 	// pullRequest is set once the pull request exists.
 	// +optional
 	PullRequest *PullRequestStatus `json:"pullRequest,omitempty"`
+
+	// unfinishedRenders marks render checks of the plan that started and did not finish: written before the
+	// render process starts, removed when the render check returns. At MaxUnfinishedRenders for the current plan
+	// digest the executor starts no further render and ends the request in NeedsIntervention with reason
+	// RenderNeverFinished (#714, ADR-0035). Only the executor writes it. Unset when no render is running, unless
+	// a removal was lost, which the next render of the same executor process clears without counting it.
+	// +optional
+	UnfinishedRenders *UnfinishedRenders `json:"unfinishedRenders,omitempty"`
 
 	// mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit
 	// (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed

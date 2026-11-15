@@ -26,10 +26,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
 func renderEndsRequest(name, uid, digest string) *remediationv1alpha1.RemediationRequest {
@@ -154,23 +154,21 @@ func TestRenderEndsForgotten(t *testing.T) {
 func checkRenderEnds(t *testing.T, rr *remediationv1alpha1.RemediationRequest, outcomes ...error) []error {
 	t.Helper()
 	ctx := context.Background()
-	git := fakegit.NewGit("main", map[string][]byte{
-		"deploy/kustomization.yaml": []byte("resources:\n- app.yaml\n"),
-		"deploy/app.yaml":           []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n"),
-	})
+	git := newRenderTestGit()
 	head, err := git.BranchHead(ctx, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: "deploy/app.yaml", BuildPath: "deploy"}
+	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: renderTestFile, BuildPath: renderTestBuild}
 	calls := 0
-	r := &RemediationRequestReconciler{renderCheck: func(context.Context, semdiff.Input) (semdiff.Result, error) {
+	c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithStatusSubresource(rr).WithObjects(rr).Build()
+	r := &RemediationRequestReconciler{Client: c, renderCheck: func(context.Context, semdiff.Input) (semdiff.Result, error) {
 		calls++
 		return semdiff.Result{}, outcomes[calls-1]
 	}}
 	got := make([]error, 0, len(outcomes))
 	for range outcomes {
-		got = append(got, r.checkRender(ctx, git, head, []byte("changed"), rr))
+		got = append(got, r.checkRender(ctx, git, head, []byte("changed"), rr, nil))
 	}
 	if calls != len(outcomes) {
 		t.Fatalf("the render check ran %d times, want %d", calls, len(outcomes))

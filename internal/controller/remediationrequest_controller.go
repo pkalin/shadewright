@@ -206,6 +206,9 @@ type RemediationRequestReconciler struct {
 	// (renderends.go), so a build that ends it that way on every retry is refused. Memory only, dropped with
 	// checked.
 	renderEnds renderEnds
+	// process is the identity of this executor process in status.unfinishedRenders (markRender); empty is
+	// executorProcess, drawn once when the process starts. Tests set it to stand for another process.
+	process string
 	// renderCheck is the render check of checkRender; nil is semdiff.Check. Tests replace it.
 	renderCheck func(context.Context, semdiff.Input) (semdiff.Result, error)
 	// reportCounters holds, per request in Verifying, the executor's memory of its VerificationReport's sample
@@ -1103,6 +1106,9 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		For(&remediationv1alpha1.RemediationRequest{}).
 		// A change of a request wakes the requests queued behind its lock on the same target.
 		Watches(&remediationv1alpha1.RemediationRequest{}, handler.EnqueueRequestsFromMapFunc(r.lockWaiters)).
+		// The executor's writes of the render mark alone wake nothing: they would cut short the delay the
+		// reconcile that wrote them returned (#714).
+		WithEventFilter(skipRenderMarks).
 		Named("remediationrequest").
 		Complete(countErrors{r})
 }

@@ -42,7 +42,8 @@ const maxRenderEndEntries = 1024
 // renderEnds counts, per request and plan digest, the ends of the render process in a row that are neither an
 // answer nor a limit refusal (#614, ADR-0035). It is the one place that counts them (checkRender). Memory only:
 // after a restart or a change of leader the count starts again, and a Pod that the render process takes down
-// with it never counts (#714). Entries are dropped when the request ends, is being deleted or is gone (forget).
+// with it never counts here; status.unfinishedRenders counts those renders instead (markRender, #714).
+// Entries are dropped when the request ends, is being deleted or is gone (forget).
 type renderEnds struct {
 	mu sync.Mutex
 	m  map[types.NamespacedName]renderEndCount

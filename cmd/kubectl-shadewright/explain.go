@@ -177,6 +177,7 @@ var troubleshootingSections = map[string][]string{
 	"PullRequestRewriteRefused":         {secPullRequest},
 	"RemoteCluster":                     {secFlux},
 	"RenderFailed":                      {secRender},
+	"RenderNeverFinished":               {secRender},
 	"ReportMismatch":                    {secAfterMerge},
 	"RepositoryNotAllowed":              {secRepository},
 	"RepositoryNotConfigured":           {secRepository},

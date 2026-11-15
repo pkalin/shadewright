@@ -98,6 +98,8 @@ func newHarness(t *testing.T, handler http.HandlerFunc, mod func(*Config)) *harn
 	// example.com.
 	tr := h.srv.Client().Transport.(*http.Transport).Clone()
 	addr := h.srv.Listener.Addr().String()
+	// The certificate is checked against example.com whatever host the endpoint names, so a test may use any.
+	tr.TLSClientConfig.ServerName = "example.com"
 	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
@@ -525,9 +527,10 @@ func TestCompleteRetryBound(t *testing.T) {
 	}
 }
 
-// A call whose every attempt the service answered with 429 is marked as refused before processing, which
-// Microsoft documents as not billed (#725). A call with any other attempt, before or after the 429s, keeps
-// the mark off: a timeout, a cut connection, 408 and 5xx may come after the model ran, and a 200 was billed.
+// A call to a Microsoft host whose every attempt the service answered with 429 is marked as refused before
+// processing, which Microsoft documents as not billed (#725). A call with any other attempt, before or after the
+// 429s, keeps the mark off: a timeout, a cut connection, 408 and 5xx may come after the model ran, and a 200 was
+// billed. A 429 asking for a wait longer than MaxDelay ends the call at once, marked too.
 func TestCompleteThrottledCallIsNotProcessed(t *testing.T) {
 	status := func(code int) http.HandlerFunc {
 		return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) }
@@ -548,10 +551,13 @@ func TestCompleteThrottledCallIsNotProcessed(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		attempts []http.HandlerFunc
+		// requests is the number of requests sent when the call ends early; zero means one per attempt.
+		requests int
 		marked   bool
 	}{
-		"429 on every attempt":         {attempts: []http.HandlerFunc{throttle, throttle, throttle}, marked: true},
-		"429 asking for a long wait":   {attempts: []http.HandlerFunc{longThrottle}, marked: true},
+		"429 on every attempt": {attempts: []http.HandlerFunc{throttle, throttle, throttle}, marked: true},
+		"429 asking for a long wait": {attempts: []http.HandlerFunc{longThrottle, throttle, throttle}, requests: 1,
+			marked: true},
 		"408":                          {attempts: []http.HandlerFunc{status(408), status(408), status(408)}},
 		"500":                          {attempts: []http.HandlerFunc{status(500), status(500), status(500)}},
 		"503":                          {attempts: []http.HandlerFunc{status(503), status(503), status(503)}},
@@ -565,10 +571,16 @@ func TestCompleteThrottledCallIsNotProcessed(t *testing.T) {
 			var n atomic.Int32
 			h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 				tc.attempts[min(int(n.Add(1))-1, len(tc.attempts)-1)](w, r)
-			}, func(c *Config) { c.MaxAttempts = len(tc.attempts) })
+			}, func(c *Config) { c.Endpoint = azureEndpoint; c.MaxAttempts = len(tc.attempts) })
+			want := cmpOr(tc.requests, len(tc.attempts))
 			c, err := h.p.Complete(context.Background(), structuredRequest())
-			if !providers.IsRetryable(err) || int(h.requests.Load()) != len(tc.attempts) {
-				t.Fatalf("err = %v after %d requests, want retryable after %d", err, h.requests.Load(), len(tc.attempts))
+			if !providers.IsRetryable(err) || int(h.requests.Load()) != want {
+				t.Fatalf("err = %v after %d requests, want retryable after %d", err, h.requests.Load(), want)
+			}
+			if tc.requests != 0 {
+				if d, ok := providers.RetryAfter(err); !ok || d != 120*time.Second || len(h.sleeps) != 0 {
+					t.Errorf("RetryAfter = %v, %v, sleeps %v: want the long wait returned at once", d, ok, h.sleeps)
+				}
 			}
 			if got := providers.IsNotProcessed(err); got != tc.marked {
 				t.Errorf("err = %v: not processed %v, want %v", err, got, tc.marked)
@@ -580,6 +592,64 @@ func TestCompleteThrottledCallIsNotProcessed(t *testing.T) {
 				t.Errorf("completion %+v of a refused call", c)
 			}
 		})
+	}
+}
+
+// Only a host Microsoft operates for Azure OpenAI and Foundry Models marks a throttled call: a gateway, proxy or
+// custom domain may bill a request and still answer 429, so its calls keep their upper bound (#725). The suffix
+// is matched exactly on the lower-cased host, never as a substring.
+func TestCompleteThrottledCallIsMarkedOnlyOnMicrosoftHosts(t *testing.T) {
+	for endpoint, marked := range map[string]bool{
+		"https://r.openai.azure.com/":                   true,
+		"https://r.cognitiveservices.azure.com/":        true,
+		"https://r.services.ai.azure.com/":              true,
+		"https://R.OpenAI.Azure.COM/openai/v1":          true,
+		"https://models.example.com/":                   false,
+		"https://gateway.contoso.net/openai/v1":         false,
+		"https://r.openai.azure.com.example.org/":       false,
+		"https://evilopenai.azure.com/":                 false,
+		"https://evilcognitiveservices.azure.com/":      false,
+		"https://evilservices.ai.azure.com/":            false,
+		"https://r.openai-azure.com/":                   false,
+		"https://r.services.ai.azure.com.evil.example/": false,
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusTooManyRequests)
+			}, func(c *Config) { c.Endpoint = endpoint })
+			_, err := h.p.Complete(context.Background(), structuredRequest())
+			if !providers.IsRetryable(err) || int(h.requests.Load()) != DefaultMaxAttempts {
+				t.Fatalf("err = %v after %d requests", err, h.requests.Load())
+			}
+			if got := providers.IsNotProcessed(err); got != marked {
+				t.Errorf("err = %v: not processed %v, want %v", err, got, marked)
+			}
+		})
+	}
+}
+
+// A call whose wait before a retry is cancelled after 429s is still charged nothing, but its error says that the
+// wait was cancelled, after the refusal, and keeps context.Canceled in its chain (#725).
+func TestCompleteThrottledThenCancelledSaysSo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}, func(c *Config) { c.Endpoint = azureEndpoint })
+	h.p.sleep = func(sctx context.Context, _ time.Duration) error {
+		cancel()
+		<-sctx.Done()
+		return sctx.Err()
+	}
+	_, err := h.p.Complete(ctx, structuredRequest())
+	if !errors.Is(err, context.Canceled) || h.requests.Load() != 1 {
+		t.Fatalf("err = %v after %d requests, want cancelled after 1", err, h.requests.Load())
+	}
+	if !providers.IsNotProcessed(err) {
+		t.Errorf("err = %v is not marked as refused before processing", err)
+	}
+	if !strings.Contains(err.Error(), "wait to retry was cancelled after the service refused the call with status 429") {
+		t.Errorf("err = %q does not say the wait was cancelled after the refusal", err)
 	}
 }
 

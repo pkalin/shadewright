@@ -190,7 +190,8 @@ How the numbers read:
   tokens are output tokens, so `max_tokens` is the run's 2048 output tokens per call plus
   `EVAL_ANTHROPIC_THINKING_ALLOWANCE`: thinking up to the allowance does not cut off an answer that fits in 2048
   tokens. `output` counts every output token, thinking included, and so do the loop's token budgets: a call with
-  unknown usage, or one that failed, is charged (`charged`) the allowance too, and the input estimate counts the
+  unknown usage, or one that failed, is charged (`charged`) the allowance too (the Anthropic adapter never
+  marks a 429 as refused before processing, so a throttled call keeps its upper bound, design 12.3), and the input estimate counts the
   thinking blocks sent back. A reply that
   still reaches `max_tokens` is malformed output. In a tool round the adapter sends the thinking blocks of the turn that made
   the tool calls back unchanged, as the API expects; the loop carries them without reading them, and they never
@@ -291,7 +292,7 @@ fix any rubric the harness then refuses.
 | `mode` | `fake` (recorded replies), `foundry` or `anthropic` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
 | `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reply` and `error` (set when the run could not start; it fails) |
-| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out) |
+| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out) |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |

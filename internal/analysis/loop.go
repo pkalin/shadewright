@@ -946,7 +946,7 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 	charge := upper
 	billed := (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown
 	switch {
-	case notSent, err != nil && providers.IsNotProcessed(err) && !c.UsageUnknown:
+	case notSent, providers.RefusedUnbilled(c, err):
 		charge = 0
 	case billed:
 		charge = c.Usage.InputTokens + c.Usage.OutputTokens

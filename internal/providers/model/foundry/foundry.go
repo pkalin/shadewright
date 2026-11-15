@@ -173,6 +173,10 @@ type Provider struct {
 	sleep          func(context.Context, time.Duration) error
 	jitter         func(time.Duration) time.Duration
 	now            func() time.Time
+
+	// refusalUnbilled is set when the endpoint's host is one Microsoft operates for Azure OpenAI and Foundry
+	// Models ([unbilledRefusalHost]), the only hosts whose 429 is taken as not billed.
+	refusalUnbilled bool
 }
 
 var _ providers.ModelProvider = (*Provider)(nil)
@@ -235,6 +239,8 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 		sleep:          h.sleep,
 		jitter:         h.jitter,
 		now:            h.now,
+
+		refusalUnbilled: unbilledRefusalHost(cfg.Endpoint),
 	}
 	if p.sleep == nil {
 		p.sleep = sleep
@@ -254,6 +260,32 @@ func cmpOr[T int | int64 | time.Duration](v, def T) T {
 		return def
 	}
 	return v
+}
+
+// unbilledRefusalSuffixes are the host suffixes of the endpoints Microsoft operates for Azure OpenAI and
+// Foundry Models. Microsoft documents that a request it refuses for exceeding the rate limit is not billed; its
+// source (the Azure OpenAI FAQ) covers Azure OpenAI models only, and for other Foundry Models (partner models,
+// which ADR-0016 notes may be billed through Marketplace) it is unverified. The rule is applied to every
+// deployment on these hosts. A gateway, proxy or custom domain in front of a model may bill a request and still
+// answer 429, so a call to any other host keeps its upper bound (#725).
+var unbilledRefusalSuffixes = []string{".openai.azure.com", ".cognitiveservices.azure.com", ".services.ai.azure.com"}
+
+// unbilledRefusalHost reports whether the host of endpoint, lower-cased, ends with one of
+// unbilledRefusalSuffixes after at least one label of its own. It matches suffixes exactly, never substrings:
+// openai.azure.com.example.org and evilopenai.azure.com do not match. An endpoint that does not parse does not
+// match.
+func unbilledRefusalHost(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, s := range unbilledRefusalSuffixes {
+		if len(host) > len(s) && strings.HasSuffix(host, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // chatURL builds the chat completions URL from typed parts. The returned error text is fixed.
@@ -431,13 +463,17 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 	// unknown stays set once an attempt was billed without a usage that reaches the caller.
 	unknown := false
 	// throttled counts the attempts the service answered with 429 before their deadline. Microsoft documents
-	// that a call refused for exceeding the rate limit is not billed (Azure OpenAI FAQ, #725), so a call whose
-	// every attempt ended so cost nothing.
+	// that a request refused for exceeding the rate limit is not billed (Azure OpenAI FAQ, #725). That source
+	// covers Azure OpenAI models; for other Foundry Models it is unverified. A call whose every attempt ended so
+	// is marked as refused before processing, but only on a Microsoft host (p.refusalUnbilled): a gateway or
+	// custom domain in front of a model may bill and still answer 429.
 	throttled := 0
 	done := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
 		c.UsageUnknown = c.UsageUnknown || unknown
-		if err != nil && attempts > 0 && throttled == attempts && !c.UsageUnknown {
-			err = providers.NotProcessed(err)
+		if p.refusalUnbilled && attempts > 0 && throttled == attempts {
+			if marked := providers.NotProcessed(err); providers.RefusedUnbilled(c, marked) {
+				err = marked
+			}
 		}
 		return c, attempts, err
 	}
@@ -470,7 +506,12 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 			return done(c, attempt+1, err)
 		}
 		if serr := p.sleep(ctx, d); serr != nil {
-			return done(providers.Completion{}, attempt+1, ctxError(ctx))
+			cerr := ctxError(ctx)
+			if throttled == attempt+1 {
+				// The call ended with the wait, not with the refusal: say so, and keep the cause in the chain.
+				cerr = fmt.Errorf("foundry: the wait to retry was cancelled after the service refused the call with status 429: %w", cerr)
+			}
+			return done(providers.Completion{}, attempt+1, cerr)
 		}
 	}
 }

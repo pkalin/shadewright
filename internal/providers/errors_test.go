@@ -161,3 +161,23 @@ func TestNotProcessedKeepsTheChain(t *testing.T) {
 		t.Errorf("text %q, want %q", err.Error(), inner.Error())
 	}
 }
+
+// A refused call is free only when its error is marked and no attempt was billed without a usage.
+func TestRefusedUnbilled(t *testing.T) {
+	marked := providers.NotProcessed(errors.New("status 429"))
+	for _, tc := range []struct {
+		c    providers.Completion
+		err  error
+		want bool
+	}{
+		{err: marked, want: true},
+		{c: providers.Completion{UsageUnknown: true}, err: marked},
+		{err: errors.New("status 429")},
+		{err: providers.NotSent(errors.New("no token"))},
+		{},
+	} {
+		if got := providers.RefusedUnbilled(tc.c, tc.err); got != tc.want {
+			t.Errorf("RefusedUnbilled(%+v, %v) = %v, want %v", tc.c, tc.err, got, tc.want)
+		}
+	}
+}

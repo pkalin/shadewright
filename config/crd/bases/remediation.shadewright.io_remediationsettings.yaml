@@ -162,7 +162,8 @@ spec:
                             description: |-
                               maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
                               plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
-                              estimate plus maxOutputTokens). Required, with no default, so the admin chooses the cap of each
+                              estimate plus maxOutputTokens), except a call the adapter marks as refused by its host before processing
+                              (a 429 on every attempt from a Microsoft-operated Azure OpenAI or Foundry host), counted as 0. Required, with no default, so the admin chooses the cap of each
                               deployment. It is a count of tokens, not an amount of money, because tokens are what the provider
                               reports and bills, they are whole numbers, and a money cap would need a price list in this object that
                               goes stale. It is per deployment because the triage and escalation models differ in price. The spend
@@ -249,7 +250,8 @@ spec:
                             description: |-
                               maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
                               plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
-                              estimate plus maxOutputTokens). Required, with no default, so the admin chooses the cap of each
+                              estimate plus maxOutputTokens), except a call the adapter marks as refused by its host before processing
+                              (a 429 on every attempt from a Microsoft-operated Azure OpenAI or Foundry host), counted as 0. Required, with no default, so the admin chooses the cap of each
                               deployment. It is a count of tokens, not an amount of money, because tokens are what the provider
                               reports and bills, they are whole numbers, and a money cap would need a price list in this object that
                               goes stale. It is per deployment because the triage and escalation models differ in price. The spend

@@ -277,8 +277,16 @@ func TestThrottledCallIsChargedNothing(t *testing.T) {
 			if out.Reason != ReasonModelUnavailable || out.Calls != 1 {
 				t.Fatalf("reason %s, calls %d", out.Reason, out.Calls)
 			}
-			if got := out.Tokens > int64(l.MaxOutputTokens); got != tc.charge || !tc.charge && out.Tokens != 0 {
-				t.Errorf("tokens %d, want the upper bound: %v", out.Tokens, tc.charge)
+			want := int64(0)
+			if tc.charge {
+				reqs := f.triage.reqs()
+				if len(reqs) != 1 {
+					t.Fatalf("%d requests, want 1", len(reqs))
+				}
+				want = estimateInput(reqs[0]) + outputBound(f.triage, l.MaxOutputTokens)
+			}
+			if out.Tokens != want {
+				t.Errorf("tokens %d, want %d (the upper bound: %v)", out.Tokens, want, tc.charge)
 			}
 		})
 	}

@@ -121,7 +121,7 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 	// As the loop charges it (run.attempt): a call that failed, other than with a malformed reply, or whose
 	// usage is unknown, has no usage the cost can rest on; the loop charges its upper bound. A call the adapter
 	// marks as refused before processing (a Foundry 429, #725) was not billed: its usage is known, 0.
-	notProcessed := err != nil && providers.IsNotProcessed(err) && !c.UsageUnknown
+	notProcessed := providers.RefusedUnbilled(c, err)
 	if (err != nil && !providers.IsMalformedOutput(err) && !notProcessed) || c.UsageUnknown {
 		u.usageUnknown++
 	}

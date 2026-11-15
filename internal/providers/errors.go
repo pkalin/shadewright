@@ -186,6 +186,12 @@ func IsNotSent(err error) bool { return errors.Is(err, ErrNotSent) }
 // IsNotProcessed reports whether err is marked as the error of a call the host refused before processing it.
 func IsNotProcessed(err error) bool { return errors.Is(err, ErrNotProcessed) }
 
+// RefusedUnbilled reports whether a call that ended with err and the Completion c cost nothing because its host
+// refused it before processing: err is marked [ErrNotProcessed] and no attempt was billed without a usage
+// (c.UsageUnknown). It is the one place that rule is written; the adapter that marks, the analysis loop that
+// charges and the evaluation harness that counts all ask it.
+func RefusedUnbilled(c Completion, err error) bool { return IsNotProcessed(err) && !c.UsageUnknown }
+
 // RetryAfter returns the delay requested by the remote system, if err carries one.
 func RetryAfter(err error) (time.Duration, bool) {
 	var r *RetryableError

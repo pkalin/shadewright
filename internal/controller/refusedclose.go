@@ -209,6 +209,37 @@ func notClosedCondition(rr *remediationv1alpha1.RemediationRequest, cf *closeFai
 	}
 }
 
+// refusedReinstalled returns the refused step in err when err is a failure of a cleanup through a new installation
+// of the plan's repository (reinstalledError, #290) that the Git host refused for good at the token, the read of the
+// recorded pull request or the listing of the branch. A refused close is refusedClose's; any other failure is not
+// a refusal and is retried.
+func refusedReinstalled(err error) (refusedStep, bool) {
+	if _, ok := errors.AsType[*reinstalledError](err); !ok {
+		return refusedStep{}, false
+	}
+	s, ok := refusedCleanup(err)
+	if !ok || s.step == stepClose {
+		return refusedStep{}, false
+	}
+	return s, true
+}
+
+// notReachedCondition is condition PullRequestNotClosed for the stale plan of rr whose recorded pull request could
+// not be closed because the Git host refused step s through the repository's new installation (#290).
+func notReachedCondition(rr *remediationv1alpha1.RemediationRequest, s refusedStep) metav1.Condition {
+	pr := rr.Status.PullRequest
+	return metav1.Condition{
+		Type:   remediationv1alpha1.ConditionPullRequestNotClosed,
+		Status: metav1.ConditionTrue,
+		Reason: s.reason,
+		Message: fmt.Sprintf("The plan is stale and the settings now reach its repository through another installation "+
+			"of the GitHub App, which the Git host refused (%s) %s, so pull request %s was not closed; Shadewright "+
+			"tries again on every look and records a merge or a close by a person", s.reason, stepText(rr, s),
+			pullRequestName(pr.Number, pr.URL)),
+		ObservedGeneration: rr.Generation,
+	}
+}
+
 // stepText says which step s was, for a message.
 func stepText(rr *remediationv1alpha1.RemediationRequest, s refusedStep) string {
 	switch s.step {

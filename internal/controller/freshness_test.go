@@ -330,16 +330,6 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(closes.Load()).To(Equal(int32(1)))
 	})
 
-	It("supersedes when the repository installation changes in the settings", func() {
-		settings.Spec.Repositories[0].GitHub.InstallationID = 2
-		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
-		_, err := reconcileOnce()
-		Expect(err).NotTo(HaveOccurred())
-		// The installation is part of the repository identity: the old one is not configured any more.
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
-		Expect(closes.Load()).To(BeZero())
-	})
-
 	It("supersedes when the target file changed on the target branch", func() {
 		_, err := git.Push(mainBranch, sourcePath, manifest("512Mi"))
 		Expect(err).NotTo(HaveOccurred())
@@ -515,6 +505,143 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(other.State).To(Equal(providers.ChangeRequestOpen))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
 		stillOpen()
+	})
+
+	// #290: a new installation of the GitHub App for the same repository URL makes the plan stale (the digest covers
+	// the installation). The cleanup reaches the pull request through the new installation, checks its marker and
+	// closes it, as for any stale plan.
+	reinstall := func() {
+		GinkgoHelper()
+		live := &remediationv1alpha1.RemediationSettings{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), live)).To(Succeed())
+		live.Spec.Repositories[0].GitHub.InstallationID = 2
+		Expect(k8sClient.Update(ctx, live)).To(Succeed())
+	}
+
+	It("supersedes and closes the pull request when the repository installation changes in the settings (#290)", func() {
+		reinstall()
+		supersedes(freshness.ReasonPlanChanged)
+		Expect(closes.Load()).To(Equal(int32(1)))
+		Expect(fetch().Status.PlanRepository.InstallationID).To(Equal(int64(1)), "the plan's record is not rewritten")
+	})
+
+	It("fails the review check through the new installation before it closes the pull request (#290)", func() {
+		reinstall()
+		r := reconciler()
+		r.ReviewerHints = true
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+		runs := git.CheckRuns(cr.HeadSHA)
+		Expect(runs).NotTo(BeEmpty())
+		Expect(runs[len(runs)-1].Status).To(Equal(providers.CheckRunFailure))
+	})
+
+	It("keeps watching, and reports it, while the new installation is refused the pull request (#290)", func() {
+		reinstall()
+		recorder := record.NewFakeRecorder(10)
+		forbidden := atomic.Bool{}
+		forbidden.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opClose:
+				closes.Add(1)
+			case forbidden.Load() && (op == opGet || op == opList):
+				return fmt.Errorf("installation not granted the repository: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		look := func() reconcile.Result {
+			GinkgoHelper()
+			r := reconciler()
+			r.Recorder = recorder
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred())
+			return res
+		}
+		for range 2 {
+			res := look()
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0), "watched, not dropped")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not a final phase")
+			Expect(planFresh().Reason).To(Equal(freshness.ReasonPlanChanged), "the mark stays")
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionTrue))
+			Expect(c.Reason).To(Equal(ReasonGitForbidden))
+			Expect(c.Message).To(ContainSubstring("another installation of the GitHub App"))
+			Expect(closes.Load()).To(BeZero())
+			Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		}
+		notClosedEvents := 0
+		for len(recorder.Events) > 0 {
+			if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+EventPullRequestNotClosed) {
+				notClosedEvents++
+			}
+		}
+		Expect(notClosedEvents).To(Equal(1), "one Event while the refusal lasts")
+
+		// Once the installation is granted the repository, the next look closes the pull request.
+		forbidden.Store(false)
+		look()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+		Expect(closes.Load()).To(Equal(int32(1)))
+	})
+
+	It("closes nothing through the new installation when the pull request lacks this request's marker (#290)", func() {
+		reinstall()
+		Expect(git.SetBody(cr.Number, "Someone else's pull request")).To(Succeed())
+		r := reconciler()
+		r.ReviewerHints = true
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(planFresh().Reason).To(Equal(ReasonForeignChangeRequest))
+		Expect(closes.Load()).To(BeZero())
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		Expect(git.CheckRuns(cr.HeadSHA)).To(BeEmpty(), "no check run on a pull request that is not this request's")
+		stillOpen()
+	})
+
+	It("records the merge of a pull request merged before the new installation's cleanup closed it (#290)", func() {
+		reinstall()
+		sha, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		// The first look cannot read the pull request through the old installation; the cleanup through the new
+		// one finds it merged and is refused the close (a conflict), which is retried.
+		_, err = reconcileOnce()
+		Expect(err).To(MatchError(providers.ErrConflict))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		// The retry looks through the new installation, as the mark allows, and records the merge as a stale plan's.
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonPlanChanged))
+		Expect(stalePlanMerged(got)).To(BeTrue())
+		Expect(closes.Load()).To(Equal(int32(1)), "the one close the host refused as a conflict")
+	})
+
+	It("closes nothing when the entry names another URL and another installation (#290)", func() {
+		const moved = "https://github.com/example/moved"
+		byURL[moved] = git
+		live := &remediationv1alpha1.RemediationSettings{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), live)).To(Succeed())
+		live.Spec.Repositories[0].URL = moved
+		live.Spec.Repositories[0].GitHub.InstallationID = 2
+		Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(planFresh().Reason).To(Equal(reasonRepositoryUnavailable))
+		Expect(closes.Load()).To(BeZero())
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
 	})
 
 	It("keeps the mark when the pull request merges before the cleanup closes it, so the outcome is capped (#199)", func() {

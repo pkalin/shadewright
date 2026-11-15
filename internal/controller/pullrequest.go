@@ -184,45 +184,77 @@ func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, r
 // errStalePlanWrite.
 func (r *RemediationRequestReconciler) openPlanRepositoryOf(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
-	repo, err := r.planRepository(ctx, rr)
-	if err != nil {
-		return nil, "", err
-	}
-	return r.openPlanEntry(ctx, rr, repo)
+	git, host, _, err := r.openPlanRepositoryFor(ctx, rr)
+	return git, host, err
 }
 
-// planRepository returns the entry of the plan's repository in RemediationSettings, read live, or the same errors
-// as openPlanRepositoryOf but for the provider's. With errTargetBranchChanged it also returns the entry, which then
+// openPlanRepositoryFor is openPlanRepositoryOf that also says whether the repository was reached through a new
+// installation of the same URL (reinstalled, see planEntry), so the caller checks the pull request's marker first.
+func (r *RemediationRequestReconciler) openPlanRepositoryFor(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (providers.GitProvider, remediationv1alpha1.GitProviderType, bool, error) {
+	repo, reinstalled, err := r.planEntry(ctx, rr)
+	if err != nil {
+		return nil, "", false, err
+	}
+	git, host, err := r.openPlanEntry(ctx, rr, repo, reinstalled)
+	return git, host, reinstalled, err
+}
+
+// planEntry returns the entry of the plan's repository in RemediationSettings, read live, or the same errors as
+// openPlanRepositoryOf but for the provider's. With errTargetBranchChanged it also returns the entry, which then
 // names another target branch than the recorded one (status.source), for the look at a merge (watchBranchChanged).
-func (r *RemediationRequestReconciler) planRepository(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest) (remediationv1alpha1.GitRepository, error) {
+// reinstalled says that the entry is the plan's URL under a new installation of the GitHub App (#290): only while rr
+// carries the stale mark, so only for the cleanup of a stale plan (cleanupRepository).
+func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (remediationv1alpha1.GitRepository, bool, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
-		return remediationv1alpha1.GitRepository{}, errRepositoryGone
+		return remediationv1alpha1.GitRepository{}, false, errRepositoryGone
 	case err != nil:
-		return remediationv1alpha1.GitRepository{}, fmt.Errorf("get RemediationSettings %s: %w",
+		return remediationv1alpha1.GitRepository{}, false, fmt.Errorf("get RemediationSettings %s: %w",
 			remediationv1alpha1.SettingsName, err)
 	}
 	if freshness.Paused(settings) {
-		return remediationv1alpha1.GitRepository{}, freshness.ErrPaused
+		return remediationv1alpha1.GitRepository{}, false, freshness.ErrPaused
 	}
-	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
+	repo, reinstalled, ok := cleanupRepository(settings, rr, staleMark(rr) != nil)
 	if !ok {
-		return remediationv1alpha1.GitRepository{}, errRepositoryGone
+		return remediationv1alpha1.GitRepository{}, false, errRepositoryGone
 	}
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {
-		return repo, errTargetBranchChanged
+		return repo, reinstalled, errTargetBranchChanged
 	}
-	return repo, nil
+	return repo, reinstalled, nil
 }
 
-// openPlanEntry opens repo, the entry planRepository returned without an error, for rr (see openPlanRepositoryOf).
+// cleanupRepository returns the settings entry of the repository rr's plan was made for (freshness.FindRepository).
+// When there is none and stale is true (the cleanup of a stale plan), it also accepts the entry with the same URL
+// under a new installation of the GitHub App (freshness.FindReinstalled, #290), and reports reinstalled. A changed
+// installation makes the plan stale (the digest covers it), and the same URL is the same repository, so its pull
+// request can still be closed there; but every caller reads the pull request through that entry with this request's
+// marker (request UID and plan digest, invariant 5) before it fails the review check or closes it, and the provider
+// opened for it writes nothing else (openPlanEntry). Another URL is never accepted: closing a number elsewhere could
+// close someone else's pull request.
+func cleanupRepository(settings *remediationv1alpha1.RemediationSettings, rr *remediationv1alpha1.RemediationRequest,
+	stale bool) (repo remediationv1alpha1.GitRepository, reinstalled, ok bool) {
+	if repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository); ok {
+		return repo, false, true
+	}
+	if !stale {
+		return remediationv1alpha1.GitRepository{}, false, false
+	}
+	repo, ok = freshness.FindReinstalled(settings, rr.Status.PlanRepository)
+	return repo, ok, ok
+}
+
+// openPlanEntry opens repo, the entry planEntry returned without an error, for rr (see openPlanRepositoryOf).
+// reinstalled is planEntry's: such a provider writes nothing but the close and a failed check run, whatever the mark.
 func (r *RemediationRequestReconciler) openPlanEntry(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	repo remediationv1alpha1.GitRepository) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
+	repo remediationv1alpha1.GitRepository, reinstalled bool) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
 	// While the plan is stale (staleMark, read at each write) the provider writes nothing but the close and a failed
 	// check run (#713): the one guard every step that writes to the plan's pull request passes (#199).
-	git, err := r.openGated(ctx, repo, func() bool { return staleMark(rr) != nil })
+	git, err := r.openGated(ctx, repo, func() bool { return reinstalled || staleMark(rr) != nil })
 	if providers.IsInvalidConfig(err) {
 		return nil, "", freshness.ErrRepositoryUnusable
 	}
@@ -1329,7 +1361,7 @@ func (r *RemediationRequestReconciler) clearConflictSeen(ctx context.Context,
 // AwaitingApproval; otherwise the zero hintLook.
 func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	hintLook, error) {
-	repo, err := r.planRepository(ctx, rr)
+	repo, reinstalled, err := r.planEntry(ctx, rr)
 	switch {
 	case errors.Is(err, errTargetBranchChanged):
 		// A merge is recorded from the recorded branch, the stale plan's (#754); anything else is as before.
@@ -1337,13 +1369,14 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	case err != nil:
 		return hintLook{}, err
 	}
-	git, host, err := r.openPlanEntry(ctx, rr, repo)
+	git, host, err := r.openPlanEntry(ctx, rr, repo, reinstalled)
 	if err != nil {
 		return hintLook{}, err
 	}
 	// By its number, not its branch: the branch may carry a newer pull request (ADR-0030 section 1).
-	// Unknown is returned for a retry and ends nothing; gone is confirmed (changeOf).
-	v := r.changeOf(ctx, git, rr, changeQuery{})
+	// Unknown is returned for a retry and ends nothing; gone is confirmed (changeOf). Through a new installation
+	// (#290) only a pull request with this request's marker is taken for the recorded one.
+	v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled})
 	switch v.state {
 	case changeUnknown:
 		return hintLook{}, v.err

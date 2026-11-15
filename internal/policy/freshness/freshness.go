@@ -133,6 +133,25 @@ func FindRepository(settings *v1alpha1.RemediationSettings, want *v1alpha1.PlanR
 	return v1alpha1.GitRepository{}, false
 }
 
+// FindReinstalled returns the settings entry that has the URL of the repository a plan was made for and a GitHub
+// App installation other than the one the plan recorded: the same repository, reached through a new installation
+// (#290). URLs are unique in the settings, so there is at most one. It reports false when the plan recorded no
+// installation, when the entry is not a GitHub one, or when the installation is unchanged (FindRepository finds
+// that entry). It is for the cleanup of a stale plan only: the plan is stale (its digest covers the installation),
+// and the caller still checks the pull request's marker before it writes anything to it.
+func FindReinstalled(settings *v1alpha1.RemediationSettings, want *v1alpha1.PlanRepository) (v1alpha1.GitRepository, bool) {
+	if want == nil || want.InstallationID == 0 {
+		return v1alpha1.GitRepository{}, false
+	}
+	for _, r := range settings.Spec.Repositories {
+		if r.URL == want.URL && r.Provider == v1alpha1.GitProviderGitHub && r.GitHub != nil &&
+			r.GitHub.InstallationID != 0 && r.GitHub.InstallationID != want.InstallationID {
+			return r, true
+		}
+	}
+	return v1alpha1.GitRepository{}, false
+}
+
 // ProviderError is a failed call to the Git provider. It deliberately wraps nothing: the text of a provider
 // or transport error may hold a repository URL with credentials. It keeps only the class of the failure and
 // the delay the remote system asked for.

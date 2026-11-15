@@ -193,9 +193,10 @@ type RemediationRequestReconciler struct {
 	// (watchReviewCheck), so a gate that cannot make progress raises one Warning Event. Memory only, dropped with
 	// checked.
 	reviewCheckFailures sync.Map
-	// reviewCommentsBehind and reviewCheckConflicts hold, per request name, the looks in a row on one head whose
-	// comments were behind while the merge gate was due, and whose check run write got a conflict
-	// (watchReviewCheck, #755), so each case raises one Warning Event. Memory only, dropped with checked.
+	// reviewCommentsBehind and reviewCheckConflicts hold, per request name, the looks on one head whose comments
+	// were behind while the merge gate was due, and whose check run write got a conflict, since the last look that
+	// showed the condition gone (watchReviewCheck, #755), so each case raises one Warning Event. Memory only,
+	// dropped with checked.
 	reviewCommentsBehind sync.Map
 	reviewCheckConflicts sync.Map
 	// rewritten holds, per request name, the answer of the Git host to the rewrite after a handoff whose status

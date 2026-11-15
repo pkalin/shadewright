@@ -157,8 +157,9 @@ type hintLook struct {
 // watchHints runs pollHints after each look at the pull request of a request that may still be reviewed, with
 // the reconcile's context (pollHints bounds its steps itself). A failure is logged and changes nothing: the
 // watch of the pull request goes on, and the next look tries again from the stored cursor. It returns what the
-// look at the comments found (commentLook): caught up when pollHints' caughtUp is true, and otherwise behind,
-// paused when writes were paused, or none when the request has no comments to read.
+// look at the comments found (commentLook): caught up when pollHints' caughtUp is true, and otherwise none when
+// the request has no comments to read, paused when writes are paused (whether or not the look got as far as a
+// status write), or behind.
 func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hintLook,
 	rr *remediationv1alpha1.RemediationRequest) commentLook {
 	_, _, reads := r.feedbackFor(look, rr)
@@ -173,6 +174,15 @@ func (r *RemediationRequestReconciler) watchHints(ctx context.Context, look hint
 	case !reads:
 		return commentsNone
 	case errors.Is(err, freshness.ErrPaused):
+		return commentsPaused
+	}
+	// pollHints asks the kill switch only before a status write, so a look that changed nothing in status (a
+	// failed read of the comments, say) does not say whether writes are paused. A paused look neither counts nor
+	// resets the looks behind (watchReviewCheck), so ask here; a failed read of the kill switch leaves it behind,
+	// as when pollHints' own ask fails.
+	pauseCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	defer cancel()
+	if errors.Is(r.writeAllowed(pauseCtx), freshness.ErrPaused) {
 		return commentsPaused
 	}
 	return commentsBehind

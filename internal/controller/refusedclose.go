@@ -202,7 +202,8 @@ func notClosedCondition(rr *remediationv1alpha1.RemediationRequest, cf *closeFai
 		Status: metav1.ConditionTrue,
 		Reason: reason,
 		Message: fmt.Sprintf("The plan is stale and the Git host refused (%s) to close pull request %s; Shadewright "+
-			"writes nothing else to it, tries the close again on every look and records a merge or a close by a person",
+			"writes nothing else to it but a failed check run when reviewer hints are on, tries the close again on every look and "+
+			"records a merge or a close by a person",
 			reason, pullRequestName(cf.number, cf.url)),
 		ObservedGeneration: rr.Generation,
 	}

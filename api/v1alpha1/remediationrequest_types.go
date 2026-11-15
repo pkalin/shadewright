@@ -438,10 +438,12 @@ type PullRequestStatus struct {
 	// another state than the reviews call for, then records that state here (#748): InProgress while no approval
 	// of that head by someone who wrote no hint in the chain stands, Passed while one does, Failed when the
 	// executor could not read every review of the pull request and completed it with failure (it fails closed;
-	// condition Approved False with reason ReviewListTooLong; final on that head), Refused when the Git host
-	// refused for good to write it (condition Approved then says so and what the host shows; asked again after a
-	// backoff). It always names headSHA: a new head starts without it, so a state never outlives its head. Once a
-	// merge receipt exists it never changes.
+	// condition Approved False with reason ReviewListTooLong; final on that head but for Stale), Refused when the
+	// Git host refused for good to write it (condition Approved then says so and what the host shows; asked again
+	// after a backoff), Stale when the freshness check found the plan stale and the executor completed it with
+	// failure, whether or not the close of the pull request went through (#713); the request then never writes
+	// the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
+	// starts without it, so a state never outlives its head. Once a merge receipt exists it never changes.
 	// +optional
 	ReviewCheck *ReviewCheck `json:"reviewCheck,omitempty"`
 

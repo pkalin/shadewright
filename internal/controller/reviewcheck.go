@@ -56,7 +56,7 @@ import (
 //   - A list of reviews too long to read in one gate (maxReviewLooks) completes the check with failure and is
 //     recorded as Failed, with condition Approved False and a Warning Event, both with reason
 //     ReviewListTooLong: the gate fails closed on that head, never passes on a list it did not read whole, and
-//     does not read the list again on that head.
+//     does not read the list again on that head. Only the stale failure below may follow it there.
 //   - A final refusal of the Git host is recorded as Refused, with the count of refusals in a row and the time of
 //     the latest on the executor's clock, condition Approved False and a Warning Event per refusal, both with
 //     reason ReviewCheckRefused and a message that says what the host shows. The host is asked again after a
@@ -64,6 +64,9 @@ import (
 //     reviews call for records that state without a write.
 //   - Recording InProgress or Passed sets condition Approved back to WaitingForReview when it still carries one
 //     of those two reasons. Only a merge sets Approved True.
+//   - A stale plan's cleanup completes the check with failure and the text of a stale plan, and records Stale
+//     (failStaleCheck, stalecheck.go, #713), also on a head recorded Failed; from then on this file never writes
+//     the check of that request again. Recording Stale sets condition Approved back to WaitingForReview as above.
 //   - A failed read of the reviews or of the check run changes nothing and is retried on a later look; looks that
 //     fail reviewCheckStuckLooks times in a row on one head record one Warning Event (watchReviewCheck).
 //
@@ -166,7 +169,7 @@ func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr 
 // On a head with no state for it, the state is InProgress. While the request waits for review and the look caught
 // up (caughtUp), the merge gate decides it from the reviews (reviewGate) on every look, whatever is recorded,
 // unless the head's check Failed, which is final. A request whose handoff intent stands leaves both to its
-// replacement. rr is updated in place by each status write that went through.
+// replacement. A request that records the check Stale (failStaleCheck) never writes it again, on any head. rr is updated in place by each status write that went through.
 func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	caughtUp bool) error {
 	pr := rr.Status.PullRequest
@@ -175,6 +178,10 @@ func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *reme
 		return nil
 	}
 	rc := pr.ReviewCheck
+	if rc != nil && rc.State == remediationv1alpha1.ReviewCheckStale {
+		// The plan was found stale and its check failed (failStaleCheck, #713): this request never writes it again.
+		return nil
+	}
 	current := rc != nil && rc.Head == pr.HeadSHA
 	gate := caughtUp && rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval
 	if current && (!gate || rc.State == remediationv1alpha1.ReviewCheckFailed) {
@@ -524,7 +531,7 @@ func reviewCheckWarning(state remediationv1alpha1.ReviewCheckState) (reason, mes
 
 // staleReviewCheckWarning reports whether condition Approved of rr carries ReasonReviewCheckRefused or
 // ReasonReviewListTooLong. Called when a state that needs neither (InProgress, Passed) is recorded: the reason was
-// set on an earlier head (Failed is final on its head), or by a refusal on this head that the Git host's answer
+// set on an earlier head (Failed changes only to Stale on its head), or by a refusal on this head that the Git host's answer
 // now ends (#748). Either way it no longer says why this head is blocked.
 func staleReviewCheckWarning(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)

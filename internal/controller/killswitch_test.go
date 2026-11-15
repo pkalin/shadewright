@@ -34,7 +34,7 @@ import (
 // write method added to the interface is gated by this test's rule until it is listed here on purpose.
 var gitReads = map[string]bool{"Capabilities": true, "ReadFile": true, "ListDir": true, "BranchHead": true,
 	"CheckBranch": true, "CheckMerged": true, opFind: true, "GetChangeRequest": true, "CheckChain": true, "Parents": true,
-	"CheckCommit": true, "ListChangeRequests": true, "ReviewCheckRun": true}
+	"CheckCommit": true, "ListChangeRequests": true, opReviewCheckRun: true}
 
 // TestGatedGitGatesEveryWrite calls every GitProvider method of a gated provider whose gate refuses, and checks
 // that each write asked the gate and never reached the host, and that no read asked it.
@@ -243,7 +243,7 @@ var staleWrites = map[string]bool{
 	"EnableAutoMerge":      false,
 	"CommentChangeRequest": false,
 	"UpdateChangeRequest":  false,
-	"CreateCheckRun":       false,
+	opCreateCheckRun:       false, // but a failed review check (TestGatedGitStalePlanFailsTheReviewCheck, #713)
 	"CloseChangeRequest":   true,
 }
 
@@ -304,6 +304,43 @@ func TestGatedGitStalePlanWritesOnlyTheClose(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestGatedGitStalePlanFailsTheReviewCheck checks that a provider opened for a stale plan lets a failed check run
+// shadewright/review through the gate (#713), and refuses every other check run: one in progress, a success, or a
+// failure under another name.
+func TestGatedGitStalePlanFailsTheReviewCheck(t *testing.T) {
+	for name, tc := range map[string]struct {
+		run    providers.CheckRun
+		passes bool
+	}{
+		"failed review check": {providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure}, true},
+		"successful review check": {providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunSuccess},
+			false},
+		"review check in progress": {providers.CheckRun{Name: providers.CheckRunName,
+			Status: providers.CheckRunInProgress}, false},
+		"failed check of another name": {providers.CheckRun{Name: "another/check", Status: providers.CheckRunFailure}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inner := &checkpointProbe{asked: map[string]error{}}
+			asked := 0
+			gated := &gatedGit{git: inner, closeOnly: func() bool { return true }, allow: func(context.Context) error {
+				asked++
+				return nil
+			}}
+			err := gated.CreateCheckRun(context.Background(), "", tc.run)
+			_, reached := inner.asked["CreateCheckRun"]
+			if tc.passes {
+				if err != nil || asked == 0 || !reached {
+					t.Fatalf("got %v, asked the gate %d times, reached %v; want it asked and reached", err, asked, reached)
+				}
+				return
+			}
+			if !errors.Is(err, errStalePlanWrite) || asked != 0 || reached {
+				t.Fatalf("got %v, asked the gate %d times, reached %v; want errStalePlanWrite", err, asked, reached)
+			}
+		})
 	}
 }
 

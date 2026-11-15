@@ -100,8 +100,9 @@ func (r *RemediationRequestReconciler) openRepository(ctx context.Context, repo 
 	return r.openGated(ctx, repo, nil)
 }
 
-// openGated is openRepository whose provider also refuses every write but CloseChangeRequest, with
-// errStalePlanWrite, while closeOnly reports true at the time of the write (nil: never).
+// openGated is openRepository whose provider also refuses every write but CloseChangeRequest and a failed check
+// run shadewright/review, with errStalePlanWrite, while closeOnly reports true at the time of the write (nil:
+// never).
 func (r *RemediationRequestReconciler) openGated(ctx context.Context, repo remediationv1alpha1.GitRepository,
 	closeOnly func() bool) (providers.GitProvider, error) {
 	if r.OpenRepository == nil {
@@ -115,8 +116,9 @@ func (r *RemediationRequestReconciler) openGated(ctx context.Context, repo remed
 }
 
 // errStalePlanWrite is what a provider opened for a stale plan (openPlanRepositoryOf) returns for any write but the
-// close of a change request, instead of calling the host: nothing but the close is written to a stale plan's pull
-// request (#199). It is final for that write, never retried.
+// close of a change request and a failed check run shadewright/review, instead of calling the host: nothing but the
+// close and that failed check (#713) is written to a stale plan's pull request (#199). It is final for that write,
+// never retried.
 var errStalePlanWrite = errors.New("the plan is stale: nothing but the close is written to its pull request")
 
 // GatedRepository is openRepository for providers the reconciler does not open itself: cmd/main.go gives it
@@ -131,9 +133,9 @@ func (r *RemediationRequestReconciler) GatedRepository(ctx context.Context, repo
 // CommentChangeRequest, CloseChangeRequest) call allow immediately before the wrapped provider, and return its
 // error instead of writing when it refuses; the wrapped provider gets allow as its write checkpoint too (gate).
 // Reads pass straight through, without a checkpoint. When closeOnly is set and reports true, every write but
-// CloseChangeRequest returns errStalePlanWrite before allow is asked (gateWrite). It implements every method
-// itself rather than embedding the interface, so a write method added to GitProvider cannot pass ungated: the
-// build fails until it is added here.
+// CloseChangeRequest and a failed check run shadewright/review returns errStalePlanWrite before allow is asked
+// (gateWrite). It implements every method itself rather than embedding the interface, so a write method added to
+// GitProvider cannot pass ungated: the build fails until it is added here.
 type gatedGit struct {
 	git       providers.GitProvider
 	allow     func(context.Context) error
@@ -211,8 +213,9 @@ func (g *gatedGit) gate(ctx context.Context) (context.Context, error) {
 	return providers.WithWriteCheckpoint(ctx, g.allow, freshness.ErrPaused, freshness.ErrWriteBlocked), nil
 }
 
-// gateWrite is gate for every write but CloseChangeRequest: while closeOnly reports true it refuses with
-// errStalePlanWrite, so a stale plan's pull request gets no write but its close, whichever step reaches it.
+// gateWrite is gate for every write but CloseChangeRequest and a failed check run shadewright/review: while
+// closeOnly reports true it refuses with errStalePlanWrite, so a stale plan's pull request gets no write but its
+// close and that failed check, whichever step reaches it.
 func (g *gatedGit) gateWrite(ctx context.Context) (context.Context, error) {
 	if g.closeOnly != nil && g.closeOnly() {
 		return ctx, errStalePlanWrite
@@ -292,8 +295,14 @@ func (g *gatedGit) UpdateChangeRequest(ctx context.Context, number int64, title,
 	return g.git.UpdateChangeRequest(ctx, number, title, body)
 }
 
+// CreateCheckRun is gated like every write. On a stale plan it lets through a failed check run shadewright/review,
+// the one write besides the close that a stale plan's pull request gets (#713): it can only block a merge.
 func (g *gatedGit) CreateCheckRun(ctx context.Context, head string, run providers.CheckRun) error {
-	ctx, err := g.gateWrite(ctx)
+	gate := g.gateWrite
+	if run.Name == providers.CheckRunName && run.Status == providers.CheckRunFailure {
+		gate = g.gate
+	}
+	ctx, err := gate(ctx)
 	if err != nil {
 		return err
 	}

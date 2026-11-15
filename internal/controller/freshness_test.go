@@ -970,10 +970,13 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		var (
 			events *record.FakeRecorder
 			refuse error // the error of every close; nil lets it through
+			hints  bool  // the executor flag --reviewer-hints
 		)
+		BeforeEach(func() { hints = false })
 		watcher := func() (reconcile.Result, error) {
 			r := reconciler()
 			r.Recorder = events
+			r.ReviewerHints = hints
 			return r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 		}
 		notClosedEvents := func() int {
@@ -1042,10 +1045,247 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				Expect(notClosedEvents()).To(BeZero())
 				Expect(changeRequest().HeadSHA).To(Equal(cr.HeadSHA), "nothing is pushed to the pull request")
 				Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+				Expect(git.CheckRuns(cr.HeadSHA)).To(BeEmpty(), "reviewer hints off: no check run is written")
 			},
 			Entry("403", providers.ErrForbidden, ReasonGitForbidden),
 			Entry("422", providers.ErrRejected, ReasonGitRejected),
 		)
+
+		// The check run shadewright/review of a stale plan (#713): with reviewer hints on it ends failed once, whatever
+		// becomes of the close, and a refused write of it changes nothing else and is tried again with the close.
+		Context("with reviewer hints on (#713)", func() {
+			// green turns reviewer hints on and lets the merge gate pass the check on the head, on an approval by
+			// someone who wrote no hint, while the plan is still fresh.
+			green := func() {
+				GinkgoHelper()
+				hints = true
+				approve(git, cr.Number, 1, 4242, cr.HeadSHA)
+				_, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				status, found, err := git.ReviewCheckRun(ctx, cr.HeadSHA)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue())
+				Expect(status).To(Equal(providers.CheckRunSuccess), "the check is green before the plan goes stale")
+				Expect(fetch().Status.PullRequest.ReviewCheck.State).To(Equal(remediationv1alpha1.ReviewCheckPassed))
+			}
+			// expectStaleCheck checks that the latest run on the head is the failed check of a stale plan, that n
+			// runs were written by the executor in all, and that Stale is recorded.
+			expectStaleCheck := func(n int) {
+				GinkgoHelper()
+				runs := git.CheckRuns(cr.HeadSHA)
+				Expect(runs).To(HaveLen(n))
+				last := runs[len(runs)-1]
+				Expect(last.Name).To(Equal(providers.CheckRunName))
+				Expect(last.Status).To(Equal(providers.CheckRunFailure))
+				Expect(last.Title).To(Equal(staleCheckTitle))
+				Expect(last.Summary).To(ContainSubstring("stale (" + freshness.ReasonPolicyChanged + ")"))
+				status, found, err := git.ReviewCheckRun(ctx, cr.HeadSHA)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue())
+				Expect(status).To(Equal(providers.CheckRunFailure))
+				rc := fetch().Status.PullRequest.ReviewCheck
+				Expect(rc).NotTo(BeNil())
+				Expect(rc.Head).To(Equal(cr.HeadSHA))
+				Expect(rc.State).To(Equal(remediationv1alpha1.ReviewCheckStale))
+			}
+
+			It("fails a green check once when the close is refused, and never writes it again", func() {
+				green()
+				runs := len(git.CheckRuns(cr.HeadSHA))
+				refused(providers.ErrForbidden)
+				// The look before the freshness check left the green check as it was; the cleanup failed it.
+				runs++
+				expectStaleCheck(runs)
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				expectStale(got)
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+					NotTo(BeNil())
+				stillOpen()
+
+				// Each later look tries the close again and nothing else: no check run, no status write.
+				before := got.ResourceVersion
+				for i := range 3 {
+					_, err := watcher()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(closes.Load()).To(Equal(int32(2 + i)))
+				}
+				expectStaleCheck(runs)
+				Expect(fetch().ResourceVersion).To(Equal(before))
+			})
+
+			It("fails the check when the close goes through", func() {
+				green()
+				policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+				Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+				runs := len(git.CheckRuns(cr.HeadSHA))
+				_, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+				Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+				expectStaleCheck(runs + 1)
+			})
+
+			It("changes nothing else when the check write is refused, and tries it again with the close", func() {
+				green()
+				checkRefused := fmt.Errorf("status 403: %w", providers.ErrForbidden)
+				checkWrites := 0
+				events = record.NewFakeRecorder(20)
+				refuse = fmt.Errorf("status 403: %w", providers.ErrForbidden)
+				git.SetFail(func(op string) error {
+					switch op {
+					case opClose:
+						closes.Add(1)
+						return refuse
+					case opCreateCheckRun:
+						checkWrites++
+						return checkRefused
+					}
+					return nil
+				})
+				policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+				Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+				res, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+				Expect(checkWrites).To(BeNumerically(">=", 1))
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				expectStale(got)
+				c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+				Expect(c).NotTo(BeNil())
+				Expect(c.Reason).To(Equal(ReasonGitForbidden))
+				if rc := got.Status.PullRequest.ReviewCheck; rc != nil {
+					Expect(rc.State).NotTo(Equal(remediationv1alpha1.ReviewCheckStale))
+				}
+				Expect(closes.Load()).To(Equal(int32(1)))
+
+				// The next look tries the check again with the close; once the host takes it, it is recorded.
+				written := checkWrites
+				_, err = watcher()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(checkWrites).To(Equal(written + 1))
+				Expect(closes.Load()).To(Equal(int32(2)))
+				checkRefused = nil
+				_, err = watcher()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(closes.Load()).To(Equal(int32(3)))
+				expectStaleCheck(len(git.CheckRuns(cr.HeadSHA)))
+			})
+
+			It("fails the check though the Git host never answers a read of it", func() {
+				green()
+				runs := len(git.CheckRuns(cr.HeadSHA))
+				events = record.NewFakeRecorder(20)
+				git.SetFail(func(op string) error {
+					switch {
+					case op == opClose:
+						closes.Add(1)
+						return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+					case op == opReviewCheckRun && staleMark(fetch()) != nil:
+						// A list of more runs than the provider reads, say: every read of the stale plan's check fails.
+						return fmt.Errorf("check runs: %w", providers.ErrTooLarge)
+					}
+					return nil
+				})
+				policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+				Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+				_, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				git.SetFail(nil)
+				expectStaleCheck(runs + 1)
+			})
+
+			It("writes the stale check over a failed run the request does not record as its own", func() {
+				green()
+				runs := len(git.CheckRuns(cr.HeadSHA))
+				// Once the mark is written, and before the cleanup reaches the Git host, a failed run of the App
+				// appears on the head that rr does not record (it records Passed): another executor's gate, say.
+				injected := false
+				git.SetFail(func(op string) error {
+					if !injected && staleMark(fetch()) != nil {
+						injected = true
+						Expect(git.CreateCheckRun(ctx, cr.HeadSHA, providers.CheckRun{Name: providers.CheckRunName,
+							Status: providers.CheckRunFailure, Title: "Too many reviews"})).To(Succeed())
+					}
+					if op == opClose {
+						closes.Add(1)
+						return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+					}
+					return nil
+				})
+				events = record.NewFakeRecorder(20)
+				policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+				Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+				_, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(injected).To(BeTrue())
+				expectStaleCheck(runs + 2)
+			})
+
+			It("does not end Superseded while the check of a closed pull request is not failed yet", func() {
+				green()
+				checkRefused := fmt.Errorf("status 403: %w", providers.ErrForbidden)
+				git.SetFail(func(op string) error {
+					if op == opCreateCheckRun {
+						return checkRefused
+					}
+					return nil
+				})
+				policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+				Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+				for range 2 {
+					res, err := watcher()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval), "the check is tried again")
+					Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+					got := fetch()
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not Superseded yet")
+					expectStale(got)
+					Expect(got.Status.PullRequest.ReviewCheck.State).To(Equal(remediationv1alpha1.ReviewCheckPassed))
+				}
+
+				// Once the Git host takes the failed check, the request records it and ends.
+				checkRefused = nil
+				runs := len(git.CheckRuns(cr.HeadSHA))
+				_, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				expectStaleCheck(runs + 1)
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			})
+
+			It("clears a reason of Approved about the check once it records Stale", func() {
+				green()
+				checkRefused := fmt.Errorf("status 403: %w", providers.ErrForbidden)
+				git.SetFail(func(op string) error {
+					switch op {
+					case opClose:
+						closes.Add(1)
+						return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+					case opCreateCheckRun:
+						return checkRefused
+					}
+					return nil
+				})
+				events = record.NewFakeRecorder(20)
+				policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+				Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+				_, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				// An earlier refusal of the check left its reason on Approved.
+				got := fetch()
+				setApprovedFalse(got, ReasonReviewCheckRefused, "The Git host refused the check run")
+				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+				checkRefused = nil
+				_, err = watcher()
+				Expect(err).NotTo(HaveOccurred())
+				expectStaleCheck(len(git.CheckRuns(cr.HeadSHA)))
+				c := meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionApproved)
+				Expect(c).NotTo(BeNil())
+				Expect(c.Reason).To(Equal(ReasonWaitingForReview))
+			})
+		})
 
 		It("records a merge by a person as Merged and keeps the stale reason", func() {
 			refused(providers.ErrForbidden)

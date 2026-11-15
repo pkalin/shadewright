@@ -138,6 +138,7 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if err := r.reader.Get(ctx, req.NamespacedName, &ev); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.c.series.forget(req.NamespacedName)
+			r.c.probes.done(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -159,13 +160,32 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	case subjectRetired:
 		// About a pod whose template its workload has retired (#724): handled, counted once.
 		dropRetired(ctx, obs.Subject.Kind, "Event", 1)
+		r.c.probes.done(req.NamespacedName)
 		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 		return ctrl.Result{}, nil
 	case subjectUnusable:
 		// Not a usable symptom; remembering it keeps updates of the same event cheap.
 		logf.FromContext(ctx).V(1).Info("Ignored Event that cannot be correlated")
+		r.c.probes.done(req.NamespacedName)
 		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 		return ctrl.Result{}, nil
+	}
+	if probe, ok := probeOf(&ev); ok {
+		// A readiness or startup probe failure of a pod that starts (#726): decided once the pod had time to
+		// become Ready.
+		pv, wait, err := r.c.settleProbe(ctx, &ev)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		switch pv {
+		case probeWait:
+			return ctrl.Result{RequeueAfter: wait}, nil
+		case probeSettled:
+			skipSettled(ctx, probe)
+			r.c.probes.done(req.NamespacedName)
+			r.c.series.commit(req.NamespacedName, ev.UID, created, n)
+			return ctrl.Result{}, nil
+		}
 	}
 	obs.Occurrence, obs.Began = "event:"+string(ev.UID), r.c.notFuture(created)
 	obs.Total, obs.Count, obs.MayRepeat = n, capCount(delta), mayRepeat
@@ -176,6 +196,7 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if !sent {
 		return ctrl.Result{RequeueAfter: retryAfter}, nil
 	}
+	r.c.probes.done(req.NamespacedName)
 	r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 	return ctrl.Result{}, nil
 }

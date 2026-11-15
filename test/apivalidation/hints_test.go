@@ -850,29 +850,43 @@ var _ = Describe("RemediationRequest status.pullRequest.reviewCheck", func() {
 		expectStatusRefused(rr, "status.pullRequest.reviewCheck.head")
 	})
 
-	It("moves from Passed back to InProgress on one head, and passes again", func() {
+	It("moves between InProgress, Passed and Refused on one head as the reviews and the Git host change", func() {
 		rr := waiting(testHeadSHA, v1alpha1.ReviewCheckPassed)
-		rr.Status.PullRequest.ReviewCheck.State = v1alpha1.ReviewCheckInProgress
-		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "a pass whose approval is gone goes back")
-		rr.Status.PullRequest.ReviewCheck.State = v1alpha1.ReviewCheckPassed
-		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		at := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+		for _, rc := range []v1alpha1.ReviewCheck{
+			{State: v1alpha1.ReviewCheckInProgress},
+			{State: v1alpha1.ReviewCheckPassed},
+			{State: v1alpha1.ReviewCheckRefused, Refusals: 1, RefusedAt: &at},
+			{State: v1alpha1.ReviewCheckRefused, Refusals: 2, RefusedAt: &at},
+			{State: v1alpha1.ReviewCheckInProgress},
+			{State: v1alpha1.ReviewCheckRefused, Refusals: 1, RefusedAt: &at},
+			{State: v1alpha1.ReviewCheckPassed},
+			{State: v1alpha1.ReviewCheckFailed},
+		} {
+			rc.Head = testHeadSHA
+			rr.Status.PullRequest.ReviewCheck = &rc
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "to %s", rc.State)
+		}
 	})
 
-	It("never moves otherwise on one head", func() {
-		const msg = "on one head the check run moves only from InProgress to Passed, Failed or Refused, or from Passed back to InProgress"
-		for _, from := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckPassed, v1alpha1.ReviewCheckFailed,
+	It("never changes a Failed check on one head", func() {
+		rr := waiting(testHeadSHA, v1alpha1.ReviewCheckFailed)
+		for _, to := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckInProgress, v1alpha1.ReviewCheckPassed,
 			v1alpha1.ReviewCheckRefused} {
-			rr := waiting(testHeadSHA, from)
-			for _, to := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckInProgress, v1alpha1.ReviewCheckPassed,
-				v1alpha1.ReviewCheckFailed, v1alpha1.ReviewCheckRefused} {
-				if to == from || (from == v1alpha1.ReviewCheckPassed && to == v1alpha1.ReviewCheckInProgress) {
-					continue
-				}
-				got := reread(rr)
-				got.Status.PullRequest.ReviewCheck.State = to
-				expectStatusRefused(got, msg)
+			got := reread(rr)
+			got.Status.PullRequest.ReviewCheck.State = to
+			if to == v1alpha1.ReviewCheckRefused {
+				got.Status.PullRequest.ReviewCheck.Refusals = 1
 			}
+			expectStatusRefused(got, "on one head a Failed check run never changes")
 		}
+	})
+
+	It("records refusals only on a Refused check", func() {
+		rr := createdRequest(false)
+		rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+			ReviewCheck: &v1alpha1.ReviewCheck{Head: testHeadSHA, State: v1alpha1.ReviewCheckPassed, Refusals: 1}}
+		expectStatusRefused(rr, "refusals and refusedAt are recorded only on a Refused check run")
 	})
 })
 

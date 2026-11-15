@@ -55,6 +55,9 @@ type Git struct {
 	comments map[int64][]string
 	// checkRuns are the check runs created per commit, guarded by mu.
 	checkRuns map[string][]providers.CheckRun
+	// foreignRuns counts, per commit, the check runs of the same name that another source created (AddForeignCheckRun),
+	// guarded by mu. ReviewCheckRun never counts them.
+	foreignRuns map[string][]providers.CheckRun
 	// fb is the feedback of the change requests (feedback.go), guarded by mu.
 	fb feedbackStore
 }

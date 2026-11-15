@@ -1329,7 +1329,7 @@ func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, marke
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
-	app, err := p.ownApp(ctx)
+	app, err := p.ownApp(ctx, opCommentCR)
 	if err != nil {
 		return err
 	}
@@ -1360,17 +1360,17 @@ func (p *Provider) CommentChangeRequest(ctx context.Context, number int64, marke
 	return nil
 }
 
-// ownApp returns the ID of the App whose installation tokens the provider uses.
-func (p *Provider) ownApp(ctx context.Context) (int64, error) {
+// ownApp returns the ID of the App whose installation tokens the provider uses; op labels its errors.
+func (p *Provider) ownApp(ctx context.Context, op string) (int64, error) {
 	if p.appID == nil {
-		return 0, errors.New(opCommentCR + ": the App's identity is unknown")
+		return 0, errors.New(op + ": the App's identity is unknown")
 	}
 	id, err := p.appID(ctx)
 	if err != nil {
-		return 0, appIDError(opCommentCR, err)
+		return 0, appIDError(op, err)
 	}
 	if id < 1 {
-		return 0, errors.New(opCommentCR + ": the App's identity is unknown")
+		return 0, errors.New(op + ": the App's identity is unknown")
 	}
 	return id, nil
 }

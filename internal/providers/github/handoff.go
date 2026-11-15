@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -35,6 +36,17 @@ const (
 	opAppendCommit = "GitHub append commit"
 	opUpdateCR     = "GitHub update pull request"
 	opCheckRun     = "GitHub create check run"
+	opReadCheckRun = "GitHub read check run"
+)
+
+// checkRunsPerPage and maxCheckRunPages bound the read of the check runs of one name on one commit. The executor
+// creates one run per change it makes on the host, so a head carries a handful; more than it reads is ErrTooLarge.
+const (
+	checkRunsPerPage = 100
+	maxCheckRunPages = 3
+	checkRunsLimit   = 1 << 20
+	// checkRunCompleted is GitHub's status of a completed check run.
+	checkRunCompleted = "completed"
 )
 
 // CheckChain reports what commit carries over the target branch when the branch may carry up to commits
@@ -203,8 +215,8 @@ func (p *Provider) UpdateChangeRequest(ctx context.Context, number int64, title,
 // completed one.
 var (
 	checkRunStatus = map[providers.CheckRunStatus]string{
-		providers.CheckRunInProgress: "in_progress", providers.CheckRunSuccess: "completed",
-		providers.CheckRunFailure: "completed"}
+		providers.CheckRunInProgress: "in_progress", providers.CheckRunSuccess: checkRunCompleted,
+		providers.CheckRunFailure: checkRunCompleted}
 	checkRunConclusion = map[providers.CheckRunStatus]string{providers.CheckRunSuccess: "success",
 		providers.CheckRunFailure: "failure"}
 )
@@ -240,6 +252,88 @@ func (p *Provider) CreateCheckRun(ctx context.Context, head string, run provider
 		return statusError(opCheckRun, r.status)
 	}
 	return nil
+}
+
+// checkRunJSON is the part of a GitHub check run that ReviewCheckRun reads.
+type checkRunJSON struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	HeadSHA    string `json:"head_sha"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	App        *struct {
+		ID int64 `json:"id"`
+	} `json:"app"`
+}
+
+// ReviewCheckRun returns the status of the latest check run shadewright/review on head that the provider's own
+// App created (providers.GitProvider.ReviewCheckRun). It asks GitHub for the runs of that name and App on the
+// commit (filter all) and checks each one it gets: a run of another name, commit or App is never counted, so a
+// run another App posts under the same name cannot stand in for the App's own. The latest is the one with the
+// highest ID, as GitHub gives each new run a higher one. It needs the App permission checks: read, which the
+// checks: write of every token request includes.
+func (p *Provider) ReviewCheckRun(ctx context.Context, head string) (providers.CheckRunStatus, bool, error) {
+	if !validSHA(head) {
+		return "", false, errors.New(opReadCheckRun + ": commit is not a full SHA")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	app, err := p.ownApp(ctx, opReadCheckRun)
+	if err != nil {
+		return "", false, err
+	}
+	var latest *checkRunJSON
+	read := 0
+	for page := 1; ; page++ {
+		if page > maxCheckRunPages {
+			return "", false, fmt.Errorf("%s: more check runs than are read: %w", opReadCheckRun, providers.ErrTooLarge)
+		}
+		q := url.Values{"check_name": {providers.CheckRunName}, "app_id": {strconv.FormatInt(app, 10)},
+			"filter": {"all"}, paramPerPage: {strconv.Itoa(checkRunsPerPage)}, paramPage: {strconv.Itoa(page)}}
+		r, err := p.do(ctx, call{op: opReadCheckRun, method: http.MethodGet, path: "/commits/" + head + "/check-runs",
+			query: q, limit: checkRunsLimit})
+		if err != nil {
+			return "", false, err
+		}
+		if !r.ok() {
+			return "", false, statusError(opReadCheckRun, r.status)
+		}
+		var body struct {
+			TotalCount *int           `json:"total_count"`
+			CheckRuns  []checkRunJSON `json:"check_runs"`
+		}
+		if err := decode(opReadCheckRun, r, &body); err != nil {
+			return "", false, err
+		}
+		if body.TotalCount == nil {
+			// An empty or null body decodes to no count: a broken answer, retried like any unclassified failure.
+			return "", false, errors.New(opReadCheckRun + ": GitHub answered without a count of check runs")
+		}
+		for i := range body.CheckRuns {
+			run := &body.CheckRuns[i]
+			if run.Name != providers.CheckRunName || run.HeadSHA != head || run.App == nil || run.App.ID != app {
+				continue
+			}
+			if latest == nil || run.ID > latest.ID {
+				latest = run
+			}
+		}
+		read += len(body.CheckRuns)
+		if len(body.CheckRuns) == 0 || read >= *body.TotalCount {
+			break
+		}
+	}
+	if latest == nil {
+		return "", false, nil
+	}
+	if latest.Status != checkRunCompleted {
+		return providers.CheckRunInProgress, true, nil
+	}
+	switch latest.Conclusion {
+	case "success", "neutral", "skipped":
+		return providers.CheckRunSuccess, true, nil
+	}
+	return providers.CheckRunFailure, true, nil
 }
 
 func checkRunText(s string) bool {

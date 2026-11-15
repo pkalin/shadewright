@@ -300,6 +300,11 @@ func (g *gatedGit) CreateCheckRun(ctx context.Context, head string, run provider
 	return g.git.CreateCheckRun(ctx, head, run)
 }
 
+// ReviewCheckRun is a read and passes straight through, without a checkpoint.
+func (g *gatedGit) ReviewCheckRun(ctx context.Context, head string) (providers.CheckRunStatus, bool, error) {
+	return g.git.ReviewCheckRun(ctx, head)
+}
+
 // waitWhilePaused records that the kill switch holds the request back and checks again after
 // freshRecheckDelay. It sets WritesPaused True, and on the change also records an Event; the phase and the rest
 // of the status are kept, so the request goes on from where it stopped once the pause ends.

@@ -25,6 +25,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -38,6 +39,8 @@ import (
 const (
 	// opCreateCheckRun is the fake Git's name of CreateCheckRun, for SetFail.
 	opCreateCheckRun = "CreateCheckRun"
+	// opListReviews is the fake Git's name of ListReviews, for SetFail.
+	opListReviews = "ListReviews"
 	// opUpdateChangeRequest is the fake's name of UpdateChangeRequest, for SetFail.
 	opUpdateChangeRequest = "UpdateChangeRequest"
 	// oldName and newName name gateWorld's predecessor and replacement, and their commits.
@@ -398,7 +401,7 @@ func TestReviewCheckPassedKeepsItsStateOnAFailedRead(t *testing.T) {
 	ctx := context.Background()
 	g.SetReviewState(number, 90, "DISMISSED")
 	g.SetFail(func(op string) error {
-		if op == "ListReviews" {
+		if op == opListReviews {
 			return fmt.Errorf("status 502: %w", providers.ErrRetryable)
 		}
 		return nil
@@ -441,44 +444,288 @@ func TestReviewCheckPassedFailsOnAListTooLong(t *testing.T) {
 	}
 }
 
-// A final refusal to put a passed check back in progress cannot be recorded as a state (on one head a pass moves
-// only back to in progress), so condition Approved False and one Warning Event say that the pass on the Git host
-// no longer rests on an approval; the next looks ask again without another Event.
-func TestReviewCheckRefusedToGoBackSaysWhy(t *testing.T) {
+// staleCopy makes p's next status write fail with a conflict, as when another writer changed the request in
+// between: it writes the stored request once more, so p's resourceVersion is old. It returns a function that reads
+// the request again into p.
+func staleCopy(t *testing.T, r *RemediationRequestReconciler, p *api.RemediationRequest) func() {
+	t.Helper()
+	ctx := context.Background()
+	live := &api.RemediationRequest{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(p), live); err != nil {
+		t.Fatal(err)
+	}
+	if live.Annotations == nil {
+		live.Annotations = map[string]string{}
+	}
+	live.Annotations["test.shadewright.io/touched"] = "yes"
+	if err := r.Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		t.Helper()
+		if err := r.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The check is level-based on what the Git host shows (#748): the host was put back in progress after the
+// approval was dismissed, the status write after it failed, so status still says Passed; then the approval came
+// back. The next look writes success to the host again, though status already says Passed.
+func TestReviewCheckPassesAgainAfterALostStatusWrite(t *testing.T) {
+	r, g, p, number, head := passedWorld(t)
+	ctx := context.Background()
+	g.SetReviewState(number, 90, "DISMISSED")
+	reread := staleCopy(t, r, p)
+	if err := r.reviewCheck(ctx, p, true); err == nil {
+		t.Fatal("a status write that failed was not returned")
+	}
+	reread()
+	if got := lastCheckRun(g, head); got != providers.CheckRunInProgress || p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed {
+		t.Fatalf("setup: host %q, status %+v", got, p.Status.PullRequest.ReviewCheck)
+	}
+	approve(g, number, 92, 3003, head)
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastCheckRun(g, head); got != providers.CheckRunSuccess {
+		t.Fatalf("the Git host still shows %q on a head with an approval that counts", got)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed {
+		t.Fatalf("review check %+v", rc)
+	}
+}
+
+// The other direction: the host accepted success, recording Passed failed, so status says InProgress; then every
+// approval was dismissed. The next look puts the host back in progress, though status already says InProgress.
+func TestReviewCheckGoesBackAfterALostPassWrite(t *testing.T) {
+	r, g, p, _, cr, head := gateWorld(t)
+	ctx := context.Background()
+	plainWaiting(t, r, p, head)
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	approve(g, cr.Number, 90, 3003, head)
+	reread := staleCopy(t, r, p)
+	if err := r.reviewCheck(ctx, p, true); err == nil {
+		t.Fatal("a status write that failed was not returned")
+	}
+	reread()
+	if got := lastCheckRun(g, head); got != providers.CheckRunSuccess || p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckInProgress {
+		t.Fatalf("setup: host %q, status %+v", got, p.Status.PullRequest.ReviewCheck)
+	}
+	g.SetReviewState(cr.Number, 90, "DISMISSED")
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastCheckRun(g, head); got != providers.CheckRunInProgress {
+		t.Fatalf("the Git host still shows %q with no approval standing", got)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress {
+		t.Fatalf("review check %+v", rc)
+	}
+}
+
+// A look that finds the host already showing what the reviews call for only records it: no second write.
+func TestReviewCheckRecordsWhatTheHostAlreadyShows(t *testing.T) {
+	r, g, p, number, head := passedWorld(t)
+	ctx := context.Background()
+	g.SetReviewState(number, 90, "DISMISSED")
+	reread := staleCopy(t, r, p)
+	if err := r.reviewCheck(ctx, p, true); err == nil {
+		t.Fatal("a status write that failed was not returned")
+	}
+	reread()
+	runs := len(g.CheckRuns(head))
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress || len(g.CheckRuns(head)) != runs {
+		t.Fatalf("review check %+v, runs %d, want %d", rc, len(g.CheckRuns(head)), runs)
+	}
+}
+
+// A review that only comments (a reply in a review thread) after the approval does not take it back, as on
+// GitHub, whose count of approvals skips it.
+func TestReviewCheckCommentAfterThePassKeepsIt(t *testing.T) {
+	r, g, p, number, head := passedWorld(t)
+	ctx := context.Background()
+	g.AddReview(number, providers.Feedback{ID: 93, Author: providers.FeedbackAuthor{ID: 3003, Login: "reviewer-3003",
+		Kind: providers.AuthorPerson}, ReviewState: reviewCommented, CommitID: head, CreatedAt: hostClock.Add(time.Minute)})
+	runs := len(g.CheckRuns(head))
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed || len(g.CheckRuns(head)) != runs {
+		t.Fatalf("a comment after the approval changed the check: %+v, %+v", rc, g.CheckRuns(head))
+	}
+}
+
+// Writes paused after the look began, between the read of the Git host and the write it calls for, stop that
+// write: the kill switch is asked right before the host call, and nothing changes.
+func TestReviewCheckWritesNothingWhilePaused(t *testing.T) {
+	r, g, p, number, head := passedWorld(t)
+	ctx := context.Background()
+	g.SetReviewState(number, 90, "DISMISSED")
+	g.SetFail(func(op string) error {
+		if op != "ReviewCheckRun" {
+			return nil
+		}
+		s := &api.RemediationSettings{}
+		if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, s); err != nil {
+			return err
+		}
+		s.Spec.Paused = new(true)
+		return r.Update(ctx, s)
+	})
+	runs := len(g.CheckRuns(head))
+	if err := r.reviewCheck(ctx, p, true); err == nil {
+		t.Fatal("a paused look was not returned for a retry")
+	}
+	if len(g.CheckRuns(head)) != runs || p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed {
+		t.Fatalf("a paused look changed the check: %+v, %+v", p.Status.PullRequest.ReviewCheck, g.CheckRuns(head))
+	}
+}
+
+// A final refusal to write the check run is recorded Refused with the time and count of refusals; condition
+// Approved and one Warning Event per refusal say what the Git host shows. The host is not asked again before the
+// backoff from the recorded refusal runs out, and once host and reviews agree again the refusal is cleared
+// without a write.
+func TestReviewCheckRefusedToGoBack(t *testing.T) {
 	r, g, p, number, head := passedWorld(t)
 	ctx := context.Background()
 	events := record.NewFakeRecorder(10)
 	r.Recorder = events
+	now := reconcilerClock
+	r.Now = func() time.Time { return now }
 	g.SetReviewState(number, 90, "DISMISSED")
+	asks := 0
+	g.SetFail(func(op string) error {
+		if op == opCreateCheckRun {
+			asks++
+			return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+		}
+		return nil
+	})
+	look := func() {
+		t.Helper()
+		if err := r.reviewCheck(ctx, p, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	look()
+	rc := p.Status.PullRequest.ReviewCheck
+	if rc.State != api.ReviewCheckRefused || rc.Refusals != 1 || rc.RefusedAt == nil || !rc.RefusedAt.Time.Equal(now) {
+		t.Fatalf("review check %+v", rc)
+	}
+	c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved)
+	if c == nil || c.Reason != ReasonReviewCheckRefused || !strings.Contains(c.Message, "shows the check run shadewright/review as success") {
+		t.Fatalf("condition Approved does not say what the host shows: %+v", c)
+	}
+	look()
+	if asks != 1 || len(events.Events) != 1 {
+		t.Fatalf("asked the Git host %d times, %d Events, before the backoff ran out", asks, len(events.Events))
+	}
+	<-events.Events
+	now = now.Add(refusalRetryBase + time.Second)
+	look()
+	if rc := p.Status.PullRequest.ReviewCheck; asks != 2 || rc.Refusals != 2 || len(events.Events) != 1 {
+		t.Fatalf("after the backoff: asks %d, review check %+v, %d Events", asks, rc, len(events.Events))
+	}
+	if ev := <-events.Events; !strings.Contains(ev, "Warning "+ReasonReviewCheckRefused) {
+		t.Fatalf("event %q", ev)
+	}
+	// The approval comes back: the host's success is what the reviews call for, so the refusal ends unwritten.
+	approve(g, number, 92, 3003, head)
+	look()
+	if rc := p.Status.PullRequest.ReviewCheck; asks != 2 || rc.State != api.ReviewCheckPassed || rc.Refusals != 0 || rc.RefusedAt != nil {
+		t.Fatalf("asks %d, review check %+v", asks, rc)
+	}
+	if c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved); c.Reason != ReasonWaitingForReview {
+		t.Fatalf("Approved still says the Git host refused: %+v", c)
+	}
+}
+
+// A refusal recorded when the check is created on a head is asked again after the backoff, so a fixed App
+// permission heals without a new head.
+func TestReviewCheckRefusedAtCreateHeals(t *testing.T) {
+	r, g, p, _, _, head := gateWorld(t)
+	ctx := context.Background()
+	plainWaiting(t, r, p, head)
+	now := reconcilerClock
+	r.Now = func() time.Time { return now }
 	g.SetFail(func(op string) error {
 		if op == opCreateCheckRun {
 			return fmt.Errorf("status 403: %w", providers.ErrForbidden)
 		}
 		return nil
 	})
-	for range 2 {
-		if err := r.reviewCheck(ctx, p, true); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed || rc.Head != head {
-		t.Fatalf("review check %+v", rc)
-	}
-	c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved)
-	if c == nil || c.Reason != ReasonReviewCheckRefused {
-		t.Fatalf("condition Approved does not say why: %+v", c)
-	}
-	if len(events.Events) != 1 || !strings.Contains(<-events.Events, "Warning "+ReasonReviewCheckRefused) {
-		t.Fatal("not one Warning Event")
-	}
-	g.SetFail(nil)
 	if err := r.reviewCheck(ctx, p, true); err != nil {
 		t.Fatal(err)
 	}
-	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckInProgress {
-		t.Fatalf("the check did not go back once the Git host allowed it: %+v", p.Status.PullRequest.ReviewCheck)
+	c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved)
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckRefused || c == nil ||
+		!strings.Contains(c.Message, "no check run shadewright/review from Shadewright") {
+		t.Fatalf("review check %+v, Approved %+v", rc, c)
+	}
+	g.SetFail(nil)
+	now = now.Add(refusalRetryBase + time.Second)
+	if err := r.reviewCheck(ctx, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress || lastCheckRun(g, head) != providers.CheckRunInProgress {
+		t.Fatalf("the refusal did not heal: %+v, %+v", rc, g.CheckRuns(head))
 	}
 	if c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved); c.Reason != ReasonWaitingForReview {
-		t.Fatalf("Approved still says the Git host refused: %+v", c)
+		t.Fatalf("Approved: %+v", c)
+	}
+}
+
+func TestRefusalBackoff(t *testing.T) {
+	at := metav1.NewTime(reconcilerClock)
+	for _, tc := range []struct {
+		refusals int32
+		after    time.Duration
+		want     time.Duration
+	}{
+		{1, 0, time.Minute}, {1, time.Minute, 0}, {2, 30 * time.Second, 90 * time.Second}, {7, 0, time.Hour},
+		{1000, 0, time.Hour}, {3, -time.Minute, 0},
+	} {
+		rc := &api.ReviewCheck{State: api.ReviewCheckRefused, Refusals: tc.refusals, RefusedAt: &at}
+		if got := refusalBackoff(rc, reconcilerClock.Add(tc.after)); got != tc.want {
+			t.Errorf("%d refusals, %s after: %s, want %s", tc.refusals, tc.after, got, tc.want)
+		}
+	}
+	if got := refusalBackoff(&api.ReviewCheck{State: api.ReviewCheckRefused}, reconcilerClock); got != 0 {
+		t.Errorf("a refusal recorded without a time waits %s", got)
+	}
+}
+
+// A gate whose look keeps failing raises one Warning Event after reviewCheckStuckLooks looks in a row, not one
+// per look; a look that goes through starts the count again.
+func TestReviewCheckStuckWarnsOnce(t *testing.T) {
+	r, g, p, _, _ := passedWorld(t)
+	ctx := context.Background()
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+	g.SetFail(func(op string) error {
+		if op == opListReviews {
+			return fmt.Errorf("status 502: %w", providers.ErrRetryable)
+		}
+		return nil
+	})
+	for i := range 2 * reviewCheckStuckLooks {
+		r.watchReviewCheck(ctx, p, true)
+		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
+			t.Fatalf("after %d failed looks: %d Events, want %d", i+1, len(events.Events), want)
+		}
+	}
+	if ev := <-events.Events; !strings.Contains(ev, "Warning "+ReasonReviewCheckStuck) {
+		t.Fatalf("event %q", ev)
+	}
+	g.SetFail(nil)
+	r.watchReviewCheck(ctx, p, true)
+	if _, ok := r.reviewCheckFailures.Load(client.ObjectKeyFromObject(p)); ok {
+		t.Fatal("a look that went through kept the count")
 	}
 }

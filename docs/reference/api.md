@@ -75,6 +75,7 @@ Validation rules:
 - status.mergeReceipt is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || (has(self.status) && has(self.status.mergeReceipt) && self.status.mergeReceipt == oldSelf.status.mergeReceipt)`
 - status.mergeReceipt.mergeCommitSHA must equal status.pullRequest.mergeCommitSHA: `!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.mergeReceipt.mergeCommitSHA == self.status.pullRequest.mergeCommitSHA)`
 - status.mergeReceipt.pullRequest, headSHA and mergedAt must equal status.pullRequest.number, headSHA and mergedAt: `!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && self.status.mergeReceipt.pullRequest == self.status.pullRequest.number && self.status.mergeReceipt.headSHA == self.status.pullRequest.headSHA && has(self.status.pullRequest.mergedAt) && self.status.mergeReceipt.mergedAt == self.status.pullRequest.mergedAt)`
+- status.pullRequest.reviewCheck does not change once status.mergeReceipt exists: `!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck) == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck) || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))`
 - status.mergeCommitAwaitedSince is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)`
 - status.mergeReceipt is set only in Merged or a phase after it: `!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))`
 - status.phase WaitingForDelivery and Verifying require status.mergeReceipt: `!has(self.status) || !has(self.status.phase) || !(self.status.phase in ['WaitingForDelivery', 'Verifying']) || has(self.status.mergeReceipt)`
@@ -1123,7 +1124,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report this commit, or a later commit of the target branch containing it, as applied. Empty until then, and when the host reported none. Once set it never changes.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge. |
 | `mergedAt` | [MicroTime](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#microtime-v1-meta) | No | mergedAt is when the executor first recorded the request Merged, set in the status write that sets the phase and never moved, unlike lastPhaseTransitionTime, which every later phase moves. A duplicate of the same Incident and target created before it ends Superseded (reason AnotherRequestMerged, #556). Empty on a request merged before the field existed. |
-| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed once it completed it with success after an approval of that head by someone who wrote no hint in the chain (back to InProgress, on the Git host too, once no such approval of that head stands any more), Failed when the executor could not read every review of the pull request and completed it with failure (it fails closed; condition Approved False with reason ReviewListTooLong), Refused when the Git host refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new head starts without it, so a state never outlives its head.<br>Rule: on one head the check run moves only from InProgress to Passed, Failed or Refused, or from Passed back to InProgress |
+| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on. On each caught-up look while the request waits for approval the executor reads the reviews and the App's own check run on headSHA, writes the Git host when it shows another state than the reviews call for, then records that state here (#748): InProgress while no approval of that head by someone who wrote no hint in the chain stands, Passed while one does, Failed when the executor could not read every review of the pull request and completed it with failure (it fails closed; condition Approved False with reason ReviewListTooLong; final on that head), Refused when the Git host refused for good to write it (condition Approved then says so and what the host shows; asked again after a backoff). It always names headSHA: a new head starts without it, so a state never outlives its head. Once a merge receipt exists it never changes.<br>Rule: on one head a Failed check run never changes<br>Rule: refusals and refusedAt are recorded only on a Refused check run |
 | `conflictSeen` | [ConflictSeen](#conflictseen) | No | conflictSeen records the first read in which the Git host reported this pull request open with a merge conflict while the plan was fresh. GitHub computes mergeability lazily and may report a stale conflict, so one read does not end the request: it ends NeedsIntervention with reason ChangeRequestConflict only on a later conflicted read, with the plan still fresh, at least two minutes after at, on the same head and target branch head. Any read that finds no conflict (an unknown answer included) removes it, and a new target branch head starts the wait again. Only the executor writes it. |
 
 ### RecordID
@@ -1434,31 +1435,36 @@ Used by: [ProposedRevert](#proposedrevert).
 
 ReviewCheck is the check run shadewright/review on one head of the pull request (ADR-0028 section 5),
 pinned to that head: a state recorded for one head never counts for another. Every head the executor pushes
-or adopts starts without one, and the executor creates the check in progress on it. On one head the state
-moves only from InProgress to Passed, Failed or Refused, and from Passed back to InProgress when the approval
-the pass rested on no longer stands (#748).
+or adopts starts without one, and the executor creates the check in progress on it. On one head a Failed check
+never changes; every other state may follow any other, as the reviews and the Git host's answers change (#748).
 
 
 Validation rules:
 
-- on one head the check run moves only from InProgress to Passed, Failed or Refused, or from Passed back to InProgress: `self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Failed', 'Refused']) || (oldSelf.state == 'Passed' && self.state == 'InProgress')`
+- on one head a Failed check run never changes: `self.head != oldSelf.head || self.state == oldSelf.state || oldSelf.state != 'Failed'`
+- refusals and refusedAt are recorded only on a Refused check run: `self.state == 'Refused' || (!has(self.refusals) && !has(self.refusedAt))`
 
 Used by: [PullRequestStatus](#pullrequeststatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `head` | string | Yes | head is the commit the check run is on, always the pull request's recorded head (headSHA).<br>Pattern: `^[0-9a-f]{40}$` |
-| `state` | [ReviewCheckState](#reviewcheckstate) | Yes | state is how far the check run on head has come.<br>One of `InProgress`, `Passed`, `Failed`, `Refused` |
+| `state` | [ReviewCheckState](#reviewcheckstate) | Yes | state is the state of the check run on head.<br>One of `InProgress`, `Passed`, `Failed`, `Refused` |
+| `refusals` | integer | No | refusals counts the final refusals in a row of the Git host to write the check run on head, while the state is Refused, up to 1000. The executor asks again after a backoff that doubles with each one, up to a bound.<br>Maximum: 1000<br>Minimum: 1 |
+| `refusedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | refusedAt is when the executor recorded the latest of those refusals, on its own clock; the backoff runs from it. A time after the executor's now is not trusted and the write is asked again. |
 
 ### ReviewCheckState
 
-ReviewCheckState is how far the check run shadewright/review of a head has come (ADR-0028 section 5).
-InProgress: created, in progress, waiting for an approval of the head by someone who wrote no hint in the
-chain. Passed: completed with conclusion success after such an approval; it goes back to InProgress when no
-such approval of the head stands any more. Failed: completed with conclusion
-failure because the merge gate could not read every review of the pull request, so it fails closed on this
-head and a person decides the merge. Refused: the Git host refused to create or complete it for good, so the
-required check does not pass on this head and the pull request cannot merge until a person acts.
+ReviewCheckState is the state of the check run shadewright/review of a head (ADR-0028 section 5), as the
+executor last made the Git host show it. The merge gate decides the state the check should have from the
+reviews and compares it with the run the Git host shows on each caught-up look while the request waits for
+approval (#748), so a state is never a reason to skip that comparison. InProgress: in progress, waiting for an
+approval of the head by someone who wrote no hint in the chain. Passed: completed with conclusion success while
+such an approval stands; it goes back to InProgress when none stands any more. Failed: completed with conclusion
+failure because the merge gate could not read every review of the pull request, so it fails closed on this head
+and a person decides the merge; it is final on that head. Refused: the Git host refused for good to write the
+check run the gate wanted (a missing App permission, a rule); the executor asks again after a backoff, so a fixed
+permission heals without a new head.
 
 - Underlying type: string
 - One of `InProgress`, `Passed`, `Failed`, `Refused`

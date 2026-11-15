@@ -297,6 +297,27 @@ var _ = Describe("RemediationRequest", func() {
 				func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} })
 		})
 
+		It("pins the check run shadewright/review", func() {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			rr.Status.Phase = v1alpha1.PhaseMerged
+			rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+				MergeCommitSHA: merge, MergedAt: &mergedAt,
+				ReviewCheck: &v1alpha1.ReviewCheck{Head: testHeadSHA, State: v1alpha1.ReviewCheckPassed}}
+			rr.Status.MergeReceipt = receipt()
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed())
+			const msg = "status.pullRequest.reviewCheck does not change once status.mergeReceipt exists"
+			refused(rr, "check changed", msg, func(r *v1alpha1.RemediationRequest) {
+				r.Status.PullRequest.ReviewCheck.State = v1alpha1.ReviewCheckInProgress
+			})
+			refused(rr, "check removed", msg, func(r *v1alpha1.RemediationRequest) { r.Status.PullRequest.ReviewCheck = nil })
+			plain := merged()
+			refused(plain, "check added", msg, func(r *v1alpha1.RemediationRequest) {
+				r.Status.PullRequest.ReviewCheck = &v1alpha1.ReviewCheck{Head: testHeadSHA, State: v1alpha1.ReviewCheckPassed}
+			})
+		})
+
 		It("names the merge commit status.pullRequest records", func() {
 			rr := fx.RemediationRequest("default", unique("rr"))
 			Expect(k8sClient.Create(ctx, rr)).To(Succeed())

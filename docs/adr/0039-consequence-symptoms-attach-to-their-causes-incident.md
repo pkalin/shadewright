@@ -203,3 +203,4 @@ What becomes harder: a symptom of the same container no longer has an Incident o
 ## Amendments
 
 - 2026-11-15: the decision of 2026-11-14 on one general container rule (Context) and the class `consequence` of point 1.2 note that the collector drops a readiness or startup probe failure of a pod that became Ready at start without a restart, or of a terminating pod, before this rule ([#726](https://github.com/pkalin/shadewright/issues/726), design 3.1). It narrows the input of the rule and changes none of its decisions.
+- 2026-11-15: [#289](https://github.com/pkalin/shadewright/issues/289) is built (`spec.cancel`, design 6), so `IncidentFolded` can use the `Cancelled` phase; the open question of point 21 is settled by it.

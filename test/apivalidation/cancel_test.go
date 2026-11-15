@@ -17,6 +17,9 @@ limitations under the License.
 package apivalidation
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -24,9 +27,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
@@ -95,6 +100,31 @@ func setCancel(rr *v1alpha1.RemediationRequest, cancel bool) error {
 	return patchSpec(rr, func(s *v1alpha1.RemediationRequestSpec) { s.Cancel = cancel })
 }
 
+// cancelPhases says, for no phase and every phase of the schema, whether spec.cancel may be set in it. A phase the
+// schema has and this map lacks fails the test that reads the schema's enum.
+var cancelPhases = map[v1alpha1.RemediationPhase]bool{
+	"":                               true,
+	v1alpha1.PhasePending:            true,
+	v1alpha1.PhasePolicyChecked:      true,
+	v1alpha1.PhasePRCreated:          true,
+	v1alpha1.PhaseAwaitingApproval:   true,
+	v1alpha1.PhaseAutoMergeQueued:    true,
+	v1alpha1.PhaseMerged:             false,
+	v1alpha1.PhaseWaitingForDelivery: false,
+	v1alpha1.PhaseVerifying:          false,
+	v1alpha1.PhaseSucceeded:          false,
+	v1alpha1.PhaseDenied:             false,
+	v1alpha1.PhaseFailed:             false,
+	v1alpha1.PhaseExpired:            false,
+	v1alpha1.PhaseCancelled:          false,
+	v1alpha1.PhaseSuperseded:         false,
+	v1alpha1.PhaseNeedsIntervention:  false,
+	v1alpha1.PhaseInconclusive:       false,
+}
+
+// receiptBranch is the target branch of the merge receipt createdWithPhase writes.
+const receiptBranch = "main"
+
 // createdWithPhase creates the fixture request and writes phase into its status.
 func createdWithPhase(phase v1alpha1.RemediationPhase) *v1alpha1.RemediationRequest {
 	rr := plainRequest()
@@ -102,7 +132,19 @@ func createdWithPhase(phase v1alpha1.RemediationPhase) *v1alpha1.RemediationRequ
 	deleteAfterSpec(rr)
 	if phase != "" {
 		rr.Status.Phase = phase
-		ExpectWithOffset(1, k8sClient.Status().Update(ctx, rr)).To(Succeed())
+		if phase == v1alpha1.PhaseWaitingForDelivery || phase == v1alpha1.PhaseVerifying {
+			// The schema wants the merge receipt in these phases, and an applied time in Verifying.
+			const merge = "89abcdef0123456789abcdef0123456789abcdef"
+			mergedAt := metav1.NewMicroTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+			applied := metav1.NewTime(mergedAt.Add(time.Minute).Truncate(time.Second))
+			rr.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: testHeadSHA,
+				MergeCommitSHA: merge, MergedAt: &mergedAt, AppliedObservedAt: &applied}
+			rr.Status.MergeReceipt = &v1alpha1.MergeReceipt{
+				Repository:   v1alpha1.PlanRepository{URL: "https://github.com/example/fleet", InstallationID: 7},
+				TargetBranch: receiptBranch, PullRequest: 1, HeadSHA: testHeadSHA, MergeCommitSHA: merge, MergedAt: mergedAt,
+			}
+		}
+		ExpectWithOffset(1, k8sClient.Status().Update(ctx, rr)).To(Succeed(), "phase %q", phase)
 	}
 	return rr
 }
@@ -157,34 +199,46 @@ var _ = Describe("RemediationRequest spec.cancel", func() {
 		Expect(err.Error()).To(ContainSubstring("spec.cancel can be set, never unset"))
 	})
 
-	DescribeTable("is accepted only before the merge and before a final phase",
-		func(phase v1alpha1.RemediationPhase, ok bool) {
+	It("classifies every phase of the schema as one the cancel is accepted in or refused in", func() {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases",
+			"remediation.shadewright.io_remediationrequests.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		Expect(yaml.Unmarshal(raw, crd)).To(Succeed())
+		Expect(crd.Spec.Versions).NotTo(BeEmpty())
+		for _, v := range crd.Spec.Versions {
+			phase := v.Schema.OpenAPIV3Schema.Properties["status"].Properties["phase"]
+			Expect(phase.Enum).NotTo(BeEmpty(), "version %s", v.Name)
+			enum := make([]v1alpha1.RemediationPhase, 0, len(phase.Enum))
+			for _, e := range phase.Enum {
+				var p v1alpha1.RemediationPhase
+				Expect(json.Unmarshal(e.Raw, &p)).To(Succeed())
+				enum = append(enum, p)
+			}
+			classified := make([]v1alpha1.RemediationPhase, 0, len(cancelPhases))
+			for p := range cancelPhases {
+				if p != "" {
+					classified = append(classified, p)
+				}
+			}
+			Expect(classified).To(ConsistOf(enum), "a new phase needs an entry in cancelPhases and a decision in "+
+				"the cancel rule of RemediationRequest (api/v1alpha1/remediationrequest_types.go)")
+		}
+	})
+
+	It("is accepted only before the merge and before a final phase", func() {
+		for phase, ok := range cancelPhases {
 			rr := createdWithPhase(phase)
 			err := setCancel(rr, true)
 			if ok {
-				Expect(err).NotTo(HaveOccurred())
-				return
+				Expect(err).NotTo(HaveOccurred(), "phase %q", phase)
+				continue
 			}
-			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "phase %q: unexpected error: %v", phase, err)
 			Expect(err.Error()).To(ContainSubstring("spec.cancel can be set only before the merge and before a final phase"))
-			Expect(reread(rr).Spec.Cancel).To(BeFalse())
-		},
-		Entry("no phase", v1alpha1.RemediationPhase(""), true),
-		Entry("Pending", v1alpha1.PhasePending, true),
-		Entry("PolicyChecked", v1alpha1.PhasePolicyChecked, true),
-		Entry("PRCreated", v1alpha1.PhasePRCreated, true),
-		Entry("AwaitingApproval", v1alpha1.PhaseAwaitingApproval, true),
-		Entry("AutoMergeQueued", v1alpha1.PhaseAutoMergeQueued, true),
-		Entry("Merged", v1alpha1.PhaseMerged, false),
-		Entry("Succeeded", v1alpha1.PhaseSucceeded, false),
-		Entry("Denied", v1alpha1.PhaseDenied, false),
-		Entry("Failed", v1alpha1.PhaseFailed, false),
-		Entry("Expired", v1alpha1.PhaseExpired, false),
-		Entry("Cancelled", v1alpha1.PhaseCancelled, false),
-		Entry("Superseded", v1alpha1.PhaseSuperseded, false),
-		Entry("NeedsIntervention", v1alpha1.PhaseNeedsIntervention, false),
-		Entry("Inconclusive", v1alpha1.PhaseInconclusive, false),
-	)
+			Expect(reread(rr).Spec.Cancel).To(BeFalse(), "phase %q", phase)
+		}
+	})
 
 	It("keeps a cancel set before a final phase, and lets the status reach any phase", func() {
 		for _, end := range []v1alpha1.RemediationPhase{v1alpha1.PhaseCancelled, v1alpha1.PhaseMerged} {

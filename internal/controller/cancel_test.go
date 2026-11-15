@@ -19,14 +19,17 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -149,5 +152,120 @@ func TestCancelLeavesAFinalPhase(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+// A replacement pushed its commit and lost the status write that records the takeover, its commit was merged, and
+// then a person cancelled it: the recovery of the handoff runs before the cancel, so the request ends Merged, never
+// Cancelled (#289).
+func TestCancelRecoversTheHandoffFirst(t *testing.T) {
+	r, g, _, rr, cr, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	if _, err := g.Merge(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	rr.Spec.Cancel = true
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	got := &remediationv1alpha1.RemediationRequest{}
+	for range 3 {
+		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+		if err := r.Get(ctx, client.ObjectKeyFromObject(rr), got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.Phase != remediationv1alpha1.PhasePolicyChecked {
+			break
+		}
+	}
+	if got.Status.Phase != remediationv1alpha1.PhaseMerged {
+		t.Fatalf("phase = %q, want Merged: the replacement's own commit was merged", got.Status.Phase)
+	}
+}
+
+// A request created with spec.cancel already set ends Cancelled at its first reconcile, without opening a
+// repository (#289).
+func TestCancelSetOnCreate(t *testing.T) {
+	_, rr := deadlineWorld(t)
+	rr = rr.DeepCopy()
+	rr.ResourceVersion = ""
+	rr.Spec.Cancel = true
+	c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithObjects(rr).
+		WithStatusSubresource(&remediationv1alpha1.RemediationRequest{}).Build()
+	var opens atomic.Int32
+	src := &countingResolver{}
+	rec := record.NewFakeRecorder(10)
+	r := &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(), Source: src, Recorder: rec,
+		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			opens.Add(1)
+			return nil, errors.New("no Git call is expected")
+		}}
+	got := reconcileCancel(t, c, r, rr)
+	if got.Status.Phase != remediationv1alpha1.PhaseCancelled {
+		t.Fatalf("phase = %q, want Cancelled", got.Status.Phase)
+	}
+	if n := opens.Load(); n != 0 {
+		t.Errorf("a repository was opened %d times", n)
+	}
+	if n := src.calls.Load(); n != 0 {
+		t.Errorf("the policy check ran %d times", n)
+	}
+	if e := <-rec.Events; e != "Normal "+EventCancelled+" "+messageCancelledUndecided {
+		t.Errorf("Event = %q", e)
+	}
+}
+
+// A cancel while the request's handoff intent stands closes nothing and says so on CancelPending (HandoffInFlight),
+// looks again after the poll interval, and after 24 hours says that the cancel did not finish (#289).
+func TestCancelWaitsForAHandoffVisibly(t *testing.T) {
+	r, g, p, _, cr, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	p.Spec.Cancel = true
+	if err := r.Update(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	reconcileP := func() (reconcile.Result, *remediationv1alpha1.RemediationRequest) {
+		t.Helper()
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(p)})
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		got := &remediationv1alpha1.RemediationRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(p), got); err != nil {
+			t.Fatal(err)
+		}
+		return res, got
+	}
+	res, got := reconcileP()
+	if res.RequeueAfter != DefaultPullRequestPollInterval {
+		t.Errorf("RequeueAfter = %v, want the poll interval", res.RequeueAfter)
+	}
+	if got.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval {
+		t.Fatalf("phase = %q, want AwaitingApproval", got.Status.Phase)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionCancelPending)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != ReasonHandoffInFlight {
+		t.Fatalf("CancelPending = %+v", c)
+	}
+	if e := <-rec.Events; !strings.HasPrefix(e, "Warning "+EventCancelPending+" ") {
+		t.Errorf("Event = %q", e)
+	}
+	if now, _ := g.GetChangeRequest(ctx, cr.Number); now.State != providers.ChangeRequestOpen {
+		t.Fatalf("the pull request was closed while the handoff stands: %s", now.State)
+	}
+	later := reconcilerClock.Add(cleanupFailingBound + 2*time.Second)
+	r.Now = func() time.Time { return later }
+	res, got = reconcileP()
+	if res.RequeueAfter != DefaultPullRequestPollInterval {
+		t.Errorf("RequeueAfter = %v after the bound, want the poll interval", res.RequeueAfter)
+	}
+	c = meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionCancelPending)
+	if c == nil || c.Reason != ReasonCancelNotFinished || got.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval {
+		t.Fatalf("after the bound: phase %q, CancelPending = %+v", got.Status.Phase, c)
+	}
+	if e := <-rec.Events; !strings.HasPrefix(e, "Warning "+EventCancelPending+" ") {
+		t.Errorf("Event = %q", e)
 	}
 }

@@ -93,6 +93,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		process *goneLooks
 		// renderHook, when set, is the reconciler's render check instead of semdiff.Check.
 		renderHook func(context.Context, semdiff.Input) (semdiff.Result, error)
+		// hints is the executor flag --reviewer-hints.
+		hints bool
 	)
 
 	manifest := func(limit string) []byte {
@@ -122,6 +124,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Now:                 func() time.Time { return clock },
 			WriteTimeout:        writeTimeout,
 			IncidentReadTimeout: incidentReadTimeout,
+			ReviewerHints:       hints,
 		}
 		r.goneLooks = process
 		r.process = newProcessID() // each reconciler is another executor process, as after a restart
@@ -207,7 +210,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		seq++
 		clock = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 		build = buildPath
-		faulty, openErr, writeTimeout, recorder, renderHook = nil, nil, 0, nil, nil
+		faulty, openErr, writeTimeout, recorder, renderHook, hints = nil, nil, 0, nil, nil, false
 		process = &goneLooks{}
 		opens.Store(0)
 		apiReader, incidentReadTimeout = nil, 0
@@ -1744,23 +1747,226 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(cr.State).To(Equal(providers.ChangeRequestClosed))
 	})
 
-	It("ends a cancelled request whose close the Git host refuses Cancelled, with a Warning, and keeps the lock (#289)", func() {
-		recorder = record.NewFakeRecorder(20)
+	// cancelPending returns condition CancelPending, or nil.
+	cancelPending := func() *metav1.Condition {
+		return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionCancelPending)
+	}
+	// warnings counts the Warning Events with reason the recorder holds, and drops the others.
+	warnings := func(reason string) int {
+		n := 0
+		for len(recorder.Events) > 0 {
+			if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+reason+" ") {
+				n++
+			}
+		}
+		return n
+	}
+
+	DescribeTable("keeps a cancelled request whose close the Git host refuses in its phase and watches it, so a later merge ends it Merged (#289)",
+		func(phase remediationv1alpha1.RemediationPhase, class error, reason string) {
+			recorder = record.NewFakeRecorder(50)
+			faulty = newFaultyGit(git)
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			n := got.Status.PullRequest.Number
+			if phase == remediationv1alpha1.PhaseAutoMergeQueued {
+				Expect(git.EnableAutoMerge(ctx, n, got.Status.PullRequest.HeadSHA)).To(Succeed())
+				base := got.DeepCopy()
+				got.Status.Phase = phase
+				Expect(k8sClient.Status().Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+			}
+			cancelIt()
+			faulty.failOn(opClose, fmt.Errorf("status 403 with token ghs_leaked: %w", class))
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred(), "a refusal is not handed back for a retry with backoff")
+			Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval), "the pull request is watched")
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(phase), "not final while the pull request may still merge")
+			c := cancelPending()
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionTrue))
+			Expect(c.Reason).To(Equal(reason))
+			Expect(c.Message).To(ContainSubstring(fmt.Sprintf("#%d", n)))
+			Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
+			Expect(warnings(EventCancelPending)).To(Equal(1))
+			cr, err := git.GetChangeRequest(ctx, n)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cr.State).To(Equal(providers.ChangeRequestOpen))
+
+			// Each look tries the close again and writes nothing else.
+			before := fetch().ResourceVersion
+			for range 3 {
+				res, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+			}
+			Expect(fetch().ResourceVersion).To(Equal(before))
+			Expect(warnings(EventCancelPending)).To(BeZero())
+
+			// The pull request is merged after all (a person, or the auto-merge): the request ends Merged with its
+			// receipt, the start of the checks after the merge.
+			_, err = git.Merge(n)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileOnce()).To(Succeed())
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+			Expect(got.Status.MergeReceipt).NotTo(BeNil())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionCancelPending)).To(BeNil(),
+				"the write that ends the request removes CancelPending")
+		},
+		Entry("403 while waiting for review", remediationv1alpha1.PhaseAwaitingApproval, providers.ErrForbidden, ReasonGitForbidden),
+		Entry("422 while waiting for review", remediationv1alpha1.PhaseAwaitingApproval, providers.ErrRejected, ReasonGitRejected),
+		Entry("403 with the auto-merge queued", remediationv1alpha1.PhaseAutoMergeQueued, providers.ErrForbidden, ReasonGitForbidden),
+	)
+
+	It("ends a cancelled request whose close was refused Cancelled once a person closes the pull request (#289)", func() {
+		recorder = record.NewFakeRecorder(50)
 		faulty = newFaultyGit(git)
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 		n := got.Status.PullRequest.Number
 		cancelIt()
 		faulty.failOn(opClose, fmt.Errorf("status 403: %w", providers.ErrForbidden))
 		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
-		msg := notClosedMessage("the Git host refused (" + ReasonGitForbidden + ") to close it")
-		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Message).To(Equal(msg))
-		Expect(ptr.Deref(got.Status.HoldsTarget, false)).To(BeTrue(), "its pull request may be open")
-		Expect(cancelEvent()).To(Equal("Warning " + EventCancelled + " " + msg))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionCancelPending)).To(BeNil())
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Message).
+			To(Equal(messageCancelledFoundClosed))
+	})
+
+	It("keeps a cancelled request whose repository is not configured any more in its phase, and ends it once it can close (#289)", func() {
+		recorder = record.NewFakeRecorder(50)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		cancelIt()
+		url := settings.Spec.Repositories[0].URL
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), settings)).To(Succeed())
+		settings.Spec.Repositories[0].URL = "https://github.com/example/other"
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		_, _ = reconcileResult()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(cancelPending()).NotTo(BeNil())
+		Expect(cancelPending().Reason).To(Equal(reasonRepositoryUnavailable))
+		Expect(warnings(EventCancelPending)).To(Equal(1))
 		cr, err := git.GetChangeRequest(ctx, n)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cr.State).To(Equal(providers.ChangeRequestOpen))
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), settings)).To(Succeed())
+		settings.Spec.Repositories[0].URL = url
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		cr, err = git.GetChangeRequest(ctx, n)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cr.State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("says why a cancel keeps failing, retries it with backoff and, after 24 hours, watches the pull request (#289)", func() {
+		recorder = record.NewFakeRecorder(50)
+		faulty = newFaultyGit(git)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		cancelIt()
+		faulty.failOn(opClose, &providers.RetryableError{Err: errors.New("server error")})
+		res, err := reconcileResult()
+		Expect(err).To(HaveOccurred(), "retried with backoff")
+		Expect(res.RequeueAfter).To(BeZero())
+		c := cancelPending()
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal(ReasonCancelFailing))
+		Expect(c.Message).To(ContainSubstring(fmt.Sprintf("the close of pull request #%d", n)))
+		Expect(c.Message).NotTo(ContainSubstring("server error"))
+		Expect(warnings(EventCancelPending)).To(Equal(1))
+		start := c.LastTransitionTime
+
+		// A failed read of the pull request is a failure worth a retry too, never a refusal; the condition and its
+		// start are kept.
+		faulty.failOn(opGet, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+		_, err = reconcileResult()
+		Expect(err).To(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(cancelPending().Reason).To(Equal(ReasonCancelFailing))
+		Expect(cancelPending().LastTransitionTime).To(Equal(start))
+		Expect(warnings(EventCancelPending)).To(BeZero())
+
+		faulty.failOn(opClose, &providers.RetryableError{Err: errors.New("server error")})
+		clock = clock.Add(cleanupFailingBound + 2*time.Second)
+		res, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred(), "past the bound: watched, not retried with backoff")
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(cancelPending().Reason).To(Equal(ReasonCancelNotFinished))
+		Expect(warnings(EventCancelPending)).To(Equal(1))
+		before := fetch().ResourceVersion
+		res, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+		Expect(fetch().ResourceVersion).To(Equal(before))
+
+		faulty.failOn("", nil)
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionCancelPending)).To(BeNil())
+	})
+
+	It("fails the review check before the close, so a pull request reopened after Cancelled cannot merge on it (#289)", func() {
+		recorder = record.NewFakeRecorder(50)
+		hints = true
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n, head := got.Status.PullRequest.Number, got.Status.PullRequest.HeadSHA
+		approve(git, n, 1, 4242, head)
+		Expect(reconcileOnce()).To(Succeed())
+		status, found, err := git.ReviewCheckRun(ctx, head)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(status).To(Equal(providers.CheckRunSuccess), "the check is green before the cancel")
+
+		cancelIt()
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(got.Status.PullRequest.ReviewCheck.State).To(Equal(remediationv1alpha1.ReviewCheckStale))
+		runs := git.CheckRuns(head)
+		Expect(runs[len(runs)-1].Title).To(Equal(cancelCheckTitle))
+
+		// A person reopens the pull request: the check stays failed, and the ended request writes nothing.
+		Expect(git.Reopen(n)).To(Succeed())
+		for range 3 {
+			_ = reconcileOnce()
+		}
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		status, _, err = git.ReviewCheckRun(ctx, head)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).To(Equal(providers.CheckRunFailure))
+		Expect(git.CheckRuns(head)).To(HaveLen(len(runs)))
+	})
+
+	It("does not end a cancelled request whose pull request was closed while its failed check is not written (#289)", func() {
+		recorder = record.NewFakeRecorder(50)
+		hints = true
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		head := got.Status.PullRequest.HeadSHA
+		cancelIt()
+		git.SetFail(func(op string) error {
+			if op == opCreateCheckRun {
+				return &providers.RetryableError{Err: errors.New("server error")}
+			}
+			return nil
+		})
+		_, _ = reconcileResult()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the check may still be green")
+		Expect(cancelPending()).NotTo(BeNil())
+		git.SetFail(nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		status, _, err := git.ReviewCheckRun(ctx, head)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).To(Equal(providers.CheckRunFailure))
 	})
 
 	// conflictSeen returns the recorded first report of a merge conflict, or nil.

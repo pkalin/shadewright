@@ -1645,6 +1645,39 @@ func argumentEnd(s string, m []int) int {
 	if s[pos] == q {
 		return 0
 	}
+	return stringCloseFrom(s, pos, q, level)
+}
+
+// enclosingStringEnd returns, for a key that opens right after a quote (enclosingQuote: a JSON or YAML
+// quoted string such as an argument "--client-secret=..."), the index of the quote that closes that string,
+// read from the key, on the same line and within maxValueExtent bytes of the key; -1 when the key opens after
+// no quote, the string does not close there, or it closes before the value at pos (a quoted JSON or YAML key
+// such as "password": the value is outside the key's string). The extent of a value read from inside such a
+// string never crosses that quote, whatever shell syntax is open inside the string (clampToString).
+func enclosingStringEnd(s string, keyStart, pos int) int {
+	level, ok := enclosingQuote(s, keyStart)
+	if !ok {
+		return -1
+	}
+	if end := stringCloseFrom(s, keyStart, s[keyStart-1], level); end >= pos {
+		return end
+	}
+	return -1
+}
+
+// clampToString cuts the extent xe of a value back to the closing quote at se of the string the key sits in
+// (enclosingStringEnd), so an unclosed "$(", backtick, bracket or escape inside the string ends at the
+// string's end and the arguments after it stay (["--client-secret=$(echo", "x)", "--region"]).
+func clampToString(xs, xe, se int) (int, int) {
+	if se < 0 {
+		return xs, xe
+	}
+	return min(xs, se), min(xe, se)
+}
+
+// stringCloseFrom returns the index of the first quote q from pos that closes a string opened at escape
+// level level (a single quote has no escapes), on the same line and within maxValueExtent bytes, or 0.
+func stringCloseFrom(s string, pos int, q byte, level int) int {
 	run := 0
 	for i := pos; i < extentLimit(s, pos); i++ {
 		switch c := s[i]; {
@@ -1759,6 +1792,7 @@ func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd in
 				start, end = min(start, ms), max(end, me)
 			}
 			xs, xe := extendedValueSpan(s, m[1], b, m[2]-m[0], keyQuoteLevel(s, m[2]), m[2])
+			xs, xe = clampToString(xs, xe, enclosingStringEnd(s, m[2], m[1]))
 			start, end = min(start, xs), max(end, xe, argumentEnd(s, m))
 		}
 		if bare {
@@ -1813,6 +1847,7 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 func flagExtent(s string, m []int, closed bool) (int, int) {
 	start, end := keyNameValue(s, m[1], m[0], closed, extNone)
 	xs, xe := flagExtendedValue(s, m, closed)
+	xs, xe = clampToString(xs, xe, enclosingStringEnd(s, m[0], m[1]))
 	if xe > xs {
 		start, end = min(start, xs), max(end, xe)
 	}

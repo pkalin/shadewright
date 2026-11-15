@@ -376,6 +376,13 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		"comma glued to a quoted value": `TOKEN="abc",` + k + ` next=x`,
 		// After a compound name and a blank, only an opaque token goes.
 		"comma inside a blank-form value": "set aws_secret_access_key abc," + k + " now",
+		// "--name=value" in a JSON argument whose value opens with a backslash takes one token only
+		// (argumentEnd).
+		"argument value after a backslash": `["--client-secret=\\horse ` + k + `", "--region"]`,
+		// A quoted scalar behind a YAML tag inside an array ends at its first "]".
+		"tagged quoted scalar in an array": `{password: [!!str "horse]` + k + `", staple], u: x}`,
+		// An escaped character other than a blank glued to a quoted piece after a flag ends the shell word.
+		"escape glued to a quoted piece": `--client-secret "horse"\!` + k + ` --region west`,
 	} {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",
@@ -772,6 +779,32 @@ func TestValueExtentShellOnlyInShellWords(t *testing.T) {
 	} {
 		if got := String(in); got != want {
 			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// A value read from inside a JSON or YAML quoted string never crosses that string's closing quote, whatever
+// shell syntax is open inside it; an unclosed "$(", backtick, "${" or bracket inside the string ends at the
+// string's end (#708). Each input except "${" lost the arguments after the secret before this change.
+func TestValueExtentStopsAtTheEnclosingString(t *testing.T) {
+	const subst = "$(echo"
+	for in, secret := range map[string]string{
+		`["--client-secret=$(echo", "EVIDENCE)", "--region"]`:                 subst,
+		"[\"--client-secret=`echo\", \"EVIDENCE`\", \"--region\"]":            "`echo",
+		`["--client-secret=${echo", "EVIDENCE}", "--region"]`:                 "${echo",
+		`["--client-secret=[echo", "EVIDENCE]", "--region"]`:                  "[echo",
+		`['--client-secret=$(echo', 'EVIDENCE)', '--region']`:                 subst,
+		`["--token=Wqabc $(echo Wqdef", "EVIDENCE)", "--region"]`:             "Wqdef",
+		`"args": "[\"--client-secret=$(echo\", \"EVIDENCE)\", \"--region\"]"`: subst,
+	} {
+		out := String(in)
+		if strings.Contains(out, secret) {
+			t.Errorf("String(%q) = %q: secret %q kept", in, out, secret)
+		}
+		for _, kept := range []string{"EVIDENCE", "--region"} {
+			if !strings.Contains(out, kept) {
+				t.Errorf("String(%q) = %q: %q lost", in, out, kept)
+			}
 		}
 	}
 }

@@ -407,3 +407,68 @@ func TestExtentTakesTheKnownValue(t *testing.T) {
 		t.Errorf("%d inputs failed", failed)
 	}
 }
+
+// A value read from inside a JSON or YAML quoted string never crosses that string's closing quote (#708):
+// for generated argument lists whose secret argument holds an unclosed "$(", backtick, "${", bracket, brace,
+// blank or escape, the items after the secret argument survive byte for byte and no word of the secret stays.
+// The lists are JSON, YAML single-quoted, and JSON escaped inside a JSON string. "--password=" is left out: the
+// connection string rule (older than #708) takes "Password=" to the line end.
+func TestExtentKeepsTheArgumentsAfterAQuotedSecret(t *testing.T) {
+	rng := rand.New(rand.NewPCG(708, 4)) //nolint:gosec // a fixed seed keeps the corpus the same on every run
+	openers := []string{"$(", "`", "${", "[", "{", "(", " ", ")", "]", "}", "$("}
+	tails := []string{"EVIDENCE)", "EV`", "EV}", "EV]", "--region", "west", "a b)", "$(x)", "x'y"}
+	failed := 0
+	for i := range 3000 {
+		k := &knownValue{rng: rng}
+		q, open, sep := `"`, `["`, `", "`
+		switch i % 3 {
+		case 1:
+			q, open, sep = `'`, `['`, `', '`
+		case 2:
+			q, open, sep = `\"`, `"args": "[\"`, `\", \"`
+		}
+		k.b.WriteString(open)
+		k.pick("--client-secret=", "--token=", "-secret=")
+		k.word()
+		for range 1 + rng.IntN(3) {
+			k.pick(openers...)
+			k.word()
+		}
+		k.b.WriteString(sep)
+		tail := k.b.Len() - len(q)
+		for j := range 1 + rng.IntN(3) {
+			if j > 0 {
+				k.b.WriteString(sep)
+			}
+			item := tails[rng.IntN(len(tails))]
+			if q == `'` {
+				item = strings.ReplaceAll(item, "'", "''")
+			}
+			k.b.WriteString(item)
+		}
+		k.b.WriteString(q + "]")
+		if q == `\"` {
+			k.b.WriteString(`"`)
+		}
+		in := k.b.String()
+		out := String(in)
+		bad := ""
+		if !strings.HasSuffix(out, in[tail:]) {
+			bad = "items after the secret lost"
+		}
+		for _, w := range k.secret {
+			if strings.Contains(out, in[w[0]:w[1]]) {
+				bad = "secret word kept"
+			}
+		}
+		if bad != "" {
+			failed++
+			if failed <= 30 {
+				t.Errorf("%s:\n in: %q\nout: %q", bad, in, out)
+			}
+		}
+	}
+	if failed > 0 {
+		t.Errorf("%d inputs failed", failed)
+	}
+}

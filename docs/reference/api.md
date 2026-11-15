@@ -1288,6 +1288,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `policyRevision` | string | No | policyRevision is the policy name and generation the decision used, as name/generation. The policy UID is recorded next to it, because a deleted and recreated policy can reach the same generation again.<br>Maximum length: 128 |
 | `policyUID` | [UID](#uid) | No | policyUID is the UID of the policy the decision used. It is part of the plan digest.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `pullRequest` | [PullRequestStatus](#pullrequeststatus) | No | pullRequest is set once the pull request exists.<br>Rule: appliedObservedAt needs mergeCommitSHA<br>Rule: reviewCheck names the recorded head<br>Rule: conflictSeen names the recorded head |
+| `unfinishedRenders` | [UnfinishedRenders](#unfinishedrenders) | No | unfinishedRenders marks render checks of the plan that started and did not finish: written before the render process starts, removed when the render check returns. At MaxUnfinishedRenders for the current plan digest the executor starts no further render and ends the request in NeedsIntervention with reason RenderNeverFinished (#714, ADR-0035). Only the executor writes it. Unset when no render is running.<br>Rule: status.unfinishedRenders.count never decreases for the same planDigest; it is only removed |
 | `mergeReceipt` | [MergeReceipt](#mergereceipt) | No | mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed after (validation rules on the object). A request merged without a full merge commit ID gets none and ends Inconclusive with reason NoMergeReceipt; a merge with a foreign change (MergedWithForeignChange) gets none either. Unset on a request merged before the field existed (condition Verified Unknown, reason MergedBeforeVerification). |
 | `mergeCommitAwaitedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot read what it needs, the executor records the start here if it is unset, retries until the wait is over, and then records the merge with a plan not shown fresh (PlanFresh False, reason PlanChanged). Set once and never changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset when the commit was reported at once and the check at the merge answered. |
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
@@ -1575,6 +1576,26 @@ already holds, so the API server can bound the cost of CEL rules that read the f
 - Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 
 Used by: [IncidentRef](#incidentref), [IncomingHandoff](#incominghandoff), [OOMKill](#oomkill), [ObjectRef](#objectref), [OutgoingHandoff](#outgoinghandoff), [PodBaseline](#podbaseline), [ProposedRevert](#proposedrevert), [RemediationRequestSpec](#remediationrequestspec), [RemediationRequestStatus](#remediationrequeststatus), [RequestRef](#requestref), [RequestReplacement](#requestreplacement), [VerificationReportSpec](#verificationreportspec).
+
+### UnfinishedRenders
+
+UnfinishedRenders is the executor's durable mark of render checks that started and did not finish (#714,
+ADR-0035). A render process can take the executor's Pod down with it (a container OOM kills every process in
+it), so a count in memory would start again with every restart. The executor writes the mark before it starts
+the render process and removes it once the render check returns, whatever it returns. A mark for another
+plan digest counts as zero.
+
+
+Validation rules:
+
+- status.unfinishedRenders.count never decreases for the same planDigest; it is only removed: `self.planDigest != oldSelf.planDigest || self.count >= oldSelf.count`
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `planDigest` | string | Yes | planDigest is the plan digest of the renders counted.<br>Pattern: `^sha256:[0-9a-f]{64}$` |
+| `count` | integer | Yes | count is how many render checks of that plan started in a row and did not finish.<br>Maximum: 3<br>Minimum: 1 |
 
 ### Verification
 

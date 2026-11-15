@@ -409,14 +409,10 @@ func (r *RemediationRequestReconciler) renderWaitingStep(ctx context.Context, rr
 		return &renderRefusal{reason: ReasonBranchDiverged,
 			message: "The pull request's branch holds more than the planned change on top of the target branch"}
 	}
-	if err := r.checkRender(ctx, git, fresh.Head, file.Data, rr); err != nil {
-		return err
-	}
-	rr.Status.PullRequest.RenderedTargetHead = fresh.Head
-	if err := r.Status().Update(ctx, rr); err != nil {
-		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
-	}
-	return nil
+	// A pass records the head in the status write that removes the render's mark (checkRender).
+	return r.checkRender(ctx, git, fresh.Head, file.Data, rr, func(rr *remediationv1alpha1.RemediationRequest) {
+		rr.Status.PullRequest.RenderedTargetHead = fresh.Head
+	})
 }
 
 // refuseWaiting ends a waiting request whose change no longer renders as planned at the head of the target
@@ -580,7 +576,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 				"The target file on the target branch is not the file the branch was cut from, so the change was "+
 					"not rendered as it would merge; nothing was committed")
 		}
-		if err := r.checkRender(ctx, git, fresh.Head, changed, rr); err != nil {
+		if err := r.checkRender(ctx, git, fresh.Head, changed, rr, nil); err != nil {
 			if ref, ok := errors.AsType[*renderRefusal](err); ok {
 				return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ref.reason,
 					ref.message+"; nothing was committed")
@@ -1059,8 +1055,13 @@ func (e *renderRefusal) Error() string { return e.reason + ": " + e.message }
 // with and without the change, and the one difference must be the planned field of the target. A refusal is
 // returned as a [*renderRefusal]; Git that cannot be read, and a render process that ended without an answer
 // fewer than maxRenderEnds times in a row (renderEnds), are returned for a retry.
+//
+// The render is marked in status before the render process starts and unmarked when the check returns (#714,
+// markRender and unmarkRender), so a render that takes the executor down with it is counted across restarts: at
+// MaxUnfinishedRenders unfinished renders of the plan in a row it is refused with RenderNeverFinished and no
+// render starts. passed, when not nil, records a pass in rr's status in the write that removes the mark.
 func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git providers.GitProvider, head string,
-	changed []byte, rr *remediationv1alpha1.RemediationRequest) error {
+	changed []byte, rr *remediationv1alpha1.RemediationRequest, passed func(*remediationv1alpha1.RemediationRequest)) error {
 	src := rr.Status.Source
 	// Defence in depth: the freshness check already supersedes a plan without a build directory, because the
 	// mapping now always returns one.
@@ -1068,8 +1069,17 @@ func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git prov
 		return &renderRefusal{reason: ReasonPlanIncomplete,
 			message: "The plan does not record the directory Flux builds; the request has to be decided again"}
 	}
+	// Defence in depth too: the decision records the digest. A render without it could not be marked (markRender).
+	if rr.Status.PlanDigest == "" {
+		return &renderRefusal{reason: ReasonPlanIncomplete,
+			message: "The plan does not record its digest; the request has to be decided again"}
+	}
 	files, err := semdiff.Load(ctx, git, head, string(src.BuildPath))
 	if err == nil {
+		err = r.markRender(ctx, rr)
+		if err != nil {
+			return err
+		}
 		check := semdiff.Check
 		if r.renderCheck != nil {
 			check = r.renderCheck
@@ -1078,6 +1088,15 @@ func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git prov
 			Files: files, Path: string(src.BuildPath), File: string(src.Path), Patched: changed,
 			Target: rr.Spec.TargetRef, Action: rr.Spec.Action,
 		})
+		// The executor is still here, so the render finished, whatever its outcome. A failed write of that is
+		// retried before the outcome is used or counted, so the mark never stays on a render that answered.
+		onPass := passed
+		if err != nil {
+			onPass = nil
+		}
+		if uerr := r.unmarkRender(ctx, rr, onPass); uerr != nil {
+			return uerr
+		}
 		// A render process that keeps ending without an answer is refused after a few ends in a row (ADR-0035).
 		err = r.renderEnds.note(rr, err)
 	}

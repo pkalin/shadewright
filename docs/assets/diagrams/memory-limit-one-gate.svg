@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1380 560" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
 <title id="t">Shadewright memory limit: one gate, one size rule</title>
-<desc id="d">Overview of ADR-0042, proposed and not built. The collector reads a container termination from pod status and marks it seen live when it finished after the collector started; the Incident controller records it with its own clock when it first counts it, only for a kill marked seen live, so a kill found after a restart is never recorded as one. An Event with the reason OOMKilled is never a kill. The context builder matches the current container status of the subject's pods to those records inside the analysis window, keeps only OOMKilled terminations, and passes the killed containers, their pods and each pod's memory limit to the analysis loop. The loop accepts a SetContainerMemoryLimit only for a killed container whose pod limit equals the template limit, otherwise the Incident is handed off as NoMemoryPressure. Code sets the size: the limit times one plus the headroom percent, rounded up to 8Mi, then limited by the policy range, which gives Step, Max or Min when a bound applies, or SizeNotAnIncrease when there is no room. The request carries typed evidence, including the killed pod, and the executor prints it in the pull request body. A measured peak under 90% of the limit can close the gate, never open it. The policy engine decides as before. The model chooses the action and the container only.</desc>
+<desc id="d">Overview of ADR-0042, proposed and not built. The collector reads a container termination from pod status and marks it seen live when it finished after the collector started; the Incident controller records it with its own clock when it first counts it, only for a kill marked seen live, so a kill found after a restart is never recorded as one. An Event with the reason OOMKilled is never a kill. The context builder matches the current container status of the subject's pods to those records inside the analysis window, keeps only OOMKilled terminations, and passes the killed containers, their pods and each pod's memory limit to the analysis loop. The loop accepts a SetContainerMemoryLimit only for a killed container whose pod limit equals the template limit, otherwise the Incident is handed off as NoMemoryPressure. Code sets the size: the limit times one plus the headroom percent, rounded up to 8Mi, then limited by the policy range, which gives Step, Max or Min when a bound applies, or SizeNotAnIncrease when there is no room. The request carries typed evidence, including the killed pod, and the executor prints it in the pull request body. The measured peak is evidence only and decides nothing. The policy engine decides as before. The model chooses the action and the container only.</desc>
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
 <style>
 .bt{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4}
@@ -38,7 +38,7 @@
 <text class="s" x="374" y="137">matched to the records inside the</text>
 <text class="s" x="374" y="156">analysis window, own clock only</text>
 <text class="s" x="374" y="175">passes killed containers, pod, limit</text>
-<text class="s" x="374" y="194">a failed read is a retry, not "none"</text>
+<text class="s" x="374" y="194">a failed pod read is a hand-off, not "none"</text>
 <rect class="bt" x="360" y="270" width="300" height="126" rx="10"/>
 <text class="h" x="374" y="296">Not a killed container</text>
 <text class="s" x="374" y="318">handed off: NoMemoryPressure</text>
@@ -52,10 +52,10 @@
 <text class="s" x="714" y="118">need = ceil(limit x (1 + headroom/100))</text>
 <text class="s" x="714" y="137">headroom: policy field, 30, 10 to 100</text>
 <text class="s" x="714" y="156">round up to 8Mi, then the policy range:</text>
-<text class="s" x="714" y="175">above the step limit or max: that bound,</text>
-<text class="s" x="714" y="194">limitedBy Step, Max or Min</text>
+<text class="s" x="714" y="175">above the step limit or max: that bound</text>
+<text class="s" x="714" y="194">limitedBy Step or Max; below min: Min</text>
 <text class="s" x="714" y="213">the model's size is not read</text>
-<text class="s" x="714" y="232">a low peak can close the gate, never open it</text>
+<text class="s" x="714" y="232">the peak is evidence only, it sets no size</text>
 <rect class="bt" x="700" y="290" width="300" height="106" rx="10"/>
 <text class="h" x="714" y="316">No proposal, with a reason</text>
 <text class="s" x="714" y="338">no room under the policy:</text>
@@ -67,8 +67,8 @@
 <rect class="ext" x="1040" y="70" width="320" height="186" rx="10"/>
 <text class="h" x="1054" y="96">Request and pull request body</text>
 <text class="s" x="1054" y="118">spec.sizing: headroom, limitedBy,</text>
-<text class="s" x="1054" y="137">peak, window, samples (peak absent,</text>
-<text class="s" x="1054" y="156">not zero, when not measured)</text>
+<text class="s" x="1054" y="137">killedPod (name, UID, created), peak</text>
+<text class="s" x="1054" y="156">(absent, not zero, when not measured)</text>
 <text class="s" x="1054" y="175">body: from 48Mi to 64Mi, killed,</text>
 <text class="s" x="1054" y="194">headroom 30%, limited by nothing,</text>
 <text class="s" x="1054" y="213">peak or "no peak was measured"</text>

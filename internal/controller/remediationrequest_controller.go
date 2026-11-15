@@ -1160,7 +1160,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		if err := r.clearConflictSeen(ctx, rr, outcome); err != nil {
 			return ctrl.Result{}, err
 		}
-		if res, merged, err := r.mergeNotRecorded(rr, outcome, lookErr); merged {
+		if res, unsettled, err := r.lookUnsettled(ctx, rr, outcome, lookErr); unsettled {
 			return res, err
 		}
 		if pe, ok := errors.AsType[*freshness.ProviderError](lookErr); ok && pe.RetryAfter > 0 && lookOnly(rr) {

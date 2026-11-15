@@ -86,6 +86,9 @@ type changeQuery struct {
 	// openOnBranch also lists the open pull requests of the branch when a number is read (the lock and the
 	// finalizer need them). The listing of the branch has them anyway.
 	openOnBranch bool
+	// recordedBranch is the read of the recorded pull request after the target branch of the plan's repository
+	// changed (watchBranchChanged): every failed read sets condition PullRequestUnreadable (noteRead).
+	recordedBranch bool
 }
 
 // changeVerdict is changeOf's answer.
@@ -206,7 +209,7 @@ func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git provide
 	}
 	defer looks.unlock(key)
 	v, n := r.readChange(ctx, git, rr, q)
-	return r.noteRead(ctx, rr, n, v)
+	return r.noteRead(ctx, rr, n, q, v)
 }
 
 // readChange is changeOf without the condition; it also returns the number it read (0 for the listing).
@@ -694,13 +697,15 @@ const (
 //   - a read that worked (any verdict but unknown, or unknown from answers the host gave: a 404 the branch does
 //     not confirm, contradicting reads, a first look that finds the number missing, an answer about another pull
 //     request) removes it;
+//   - on the read after the target branch changed (q.recordedBranch), any other unknown verdict, an answered one
+//     included, sets it with reason TargetBranchChanged (branchChangedRead): the request waits on that read alone;
 //   - any other failure (a server error, a timeout) leaves it, except a reason about the repository of the plan
 //     (repositoryReasons), which the repository just opened disproves.
 //
 // Retrying is the caller's as before; noteRead changes no verdict except that a write of the condition that fails
 // answers unknown, so nothing is decided on a status that may not be there.
 func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	n int64, v changeVerdict) changeVerdict {
+	n int64, q changeQuery, v changeVerdict) changeVerdict {
 	cur := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 	var want *metav1.Condition
 	ownListed, isOwnListed := errors.AsType[*ownListedError](v.err)
@@ -709,6 +714,8 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 		want = refusedRead(rr, reason, v.err, n)
 	case v.state == changeUnknown && isOwnListed:
 		want = ownListedRead(rr, ownListed)
+	case v.state == changeUnknown && q.recordedBranch:
+		want = branchChangedRead(rr)
 	case v.state != changeUnknown, errors.Is(v.err, errUnconfirmedNotFound), errors.Is(v.err, errConflictingReads),
 		errors.Is(v.err, errGoneUnconfirmed), providers.IsUntrustedAnswer(v.err):
 	case cur != nil && repositoryReasons[cur.Reason]:

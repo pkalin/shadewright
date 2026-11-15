@@ -141,11 +141,14 @@ type Verification struct {
 	Checks []VerificationCheck `json:"checks,omitempty"`
 }
 
-// RemediationRequestSpec is one concrete plan. It is immutable: a different plan is a new request, so an
-// approval can never carry over to a changed plan. It names what to change, not where: the repository, branch
-// and file are resolved by the controller (ADR-0012), so the author cannot point a change at another file.
-// Each action type fixes the kinds it may target.
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; a changed plan is a new RemediationRequest"
+// RemediationRequestSpec is one concrete plan. It is immutable but for cancel, which only ends the request: a
+// different plan is a new request, so an approval can never carry over to a changed plan. It names what to
+// change, not where: the repository, branch and file are resolved by the controller (ADR-0012), so the author
+// cannot point a change at another file. Each action type fixes the kinds it may target.
+// The immutability rule compares every field but cancel on its own; a new field must be added to it, and
+// test/apivalidation fails until it is.
+// +kubebuilder:validation:XValidation:rule="self.incidentRef == oldSelf.incidentRef && self.targetRef == oldSelf.targetRef && has(self.mode) == has(oldSelf.mode) && (!has(self.mode) || self.mode == oldSelf.mode) && has(self.approvalRequired) == has(oldSelf.approvalRequired) && (!has(self.approvalRequired) || self.approvalRequired == oldSelf.approvalRequired) && self.policyRef == oldSelf.policyRef && self.action == oldSelf.action && has(self.verification) == has(oldSelf.verification) && (!has(self.verification) || self.verification == oldSelf.verification) && has(self.replaces) == has(oldSelf.replaces) && (!has(self.replaces) || self.replaces == oldSelf.replaces) && has(self.chainRoot) == has(oldSelf.chainRoot) && (!has(self.chainRoot) || self.chainRoot == oldSelf.chainRoot) && has(self.reverts) == has(oldSelf.reverts) && (!has(self.reverts) || self.reverts == oldSelf.reverts)",message="spec is immutable but for spec.cancel; a changed plan is a new RemediationRequest"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cancel) || !oldSelf.cancel || (has(self.cancel) && self.cancel)",message="spec.cancel can be set, never unset"
 // +kubebuilder:validation:XValidation:rule="self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/') && self.targetRef.kind == 'ScaledObject')",message="AdjustKedaMaxReplicas can only target a keda.sh ScaledObject"
 // +kubebuilder:validation:XValidation:rule="self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])",message="SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet"
 // +kubebuilder:validation:XValidation:rule="has(self.replaces) == has(self.chainRoot)",message="replaces and chainRoot are set together or not at all"
@@ -212,6 +215,16 @@ type RemediationRequestSpec struct {
 	// Inconclusive with reason RevertApplied, never Succeeded.
 	// +optional
 	Reverts *RequestRef `json:"reverts,omitempty"`
+
+	// cancel, set to true by a person, cancels the request before its change is merged (#289). The executor closes
+	// the request's pull request, if one is open, and ends the request Cancelled with reason CancelRequested; the
+	// branch is left as it is, and the request stays as the record of what was cancelled and when. It is the one
+	// field of the spec that can change after create: it can be set, never unset, and only while the request has no
+	// phase or is in Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued (CEL). A request that
+	// reaches the merge, or another final phase, before the executor acts on it keeps that phase. Deleting a request
+	// also closes its pull request, but removes the record.
+	// +optional
+	Cancel bool `json:"cancel,omitempty"`
 }
 
 // RemediationPhase summarizes where a request is. Conditions carry the reasons.
@@ -378,6 +391,21 @@ const (
 	// request is not known and that it may be open. Paused writes (RemediationSettings spec.paused) hold the
 	// deletion and never set it. One Warning Event, CleanupFailing, is recorded when it is set.
 	ConditionCleanupFailing = "CleanupFailing"
+	// ConditionCancelPending is True while spec.cancel is set and the cancel cannot finish (#289): the request keeps
+	// its phase, before the merge, and its pull request is still watched, so a merge ends it Merged and a close ends
+	// it Cancelled. The reason says why: HandoffInFlight while a handoff of its pull request to a replacement stands,
+	// CancelFailing while a step of the close fails in a way worth a retry (a failed read of the pull request, a 5xx,
+	// a failed write of the review check), GitForbidden or GitRejected when the Git host refuses for good a step of
+	// the close, or a read of the recovery of a replacement's handoff, RepositoryUnavailable, TargetBranchChanged or RepositoryUnusable when the settings no longer let the
+	// executor reach the pull request, ForeignChangeRequest when the recorded pull request cannot be confirmed as the
+	// request's, and CancelNotFinished once a wait or a failure worth a retry has lasted 24 hours. The message names
+	// the step, never the Git host's answer. lastTransitionTime is the first time the cancel could not finish, on the
+	// executor's clock, kept while the condition stays True. A refusal, and the end of the 24 hours, stop the retries
+	// with backoff: the close is then tried again on every look, and a refusal stays the reason while failures worth
+	// a retry come in between, which write nothing. One Warning Event, CancelPending, is recorded when the condition
+	// is set or its reason changes. A pull request known closed never keeps it: the request ends Cancelled, also when
+	// the failed review check cannot be written. The write that ends the request removes it.
+	ConditionCancelPending = "CancelPending"
 )
 
 // PullRequestStatus records the pull request that carries the plan.
@@ -998,6 +1026,9 @@ type RemediationRequestStatus struct {
 // status.queuedBehind is kept once set: its entries may be replaced, but the field is never removed or emptied,
 // so a write cannot drop the record that ends a request queued behind a pull request closed unmerged (#643).
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind) == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind) > 0)",message="status.queuedBehind is kept once set"
+// spec.cancel is accepted only before the merge and before a final phase: when it is set in this write, the stored
+// phase is none or one before the merge. A status write never changes the spec, so it never meets this rule.
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.cancel) || !self.spec.cancel || (has(oldSelf.spec.cancel) && oldSelf.spec.cancel) || !has(self.status) || !has(self.status.phase) || self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']",message="spec.cancel can be set only before the merge and before a final phase"
 
 // RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
 // after deterministic policy allows it.

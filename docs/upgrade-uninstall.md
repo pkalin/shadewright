@@ -25,9 +25,15 @@ A request that never reached the Git step has no finalizer and is simply deleted
 
 ## Deleting a request and `Cancelled`
 
-Deleting a request before merge is today the only way to cancel it, and what it does is the list above: close the pull request, remove the object.
+Deleting a request before merge closes its pull request and removes the object, as the list above says. To cancel a request and keep it as the record of what was cancelled and when, set `spec.cancel` instead (#289):
 
-`Cancelled` is a phase in the API ("cancelled before the change was merged") and in the [design](design.md), but **nothing sets it yet**: there is no field or action that cancels a request and keeps it as a record, and no issue for it yet. If you need the record, copy the object before deleting it. `Cancelled` and `Superseded` differ: `Superseded` is set by the executor when the plan went stale (policy, settings or target changed) and the pull request was closed; see [troubleshooting](troubleshooting.md#freshness).
+```bash
+kubectl -n shadewright-system patch remediationrequest <name> --type merge -p '{"spec":{"cancel":true}}'
+```
+
+The executor closes the request's pull request, if one is open, leaves its branch, and ends the request `Cancelled` with reason `CancelRequested` and an Event `Cancelled`. The API accepts the field only before the merge (no phase, `Pending`, `PolicyChecked`, `PRCreated`, `AwaitingApproval`, `AutoMergeQueued`), and never takes it back: it can be set, never unset. A request that is merged, or reaches another final phase, before the executor acts on it keeps that phase. With reviewer hints on, the check `shadewright/review` is failed before the close, so a pull request reopened later cannot be merged on it. If the close cannot be made (the Git host refuses it, the repository left the settings, a read keeps failing), the request does not end: it keeps its phase, condition `CancelPending` and a Warning Event say why, and the executor watches the pull request, so a merge still ends the request `Merged`. Close the pull request by hand, and the request ends `Cancelled`. Setting it needs `patch` on `remediationrequests`, which the `remediationrequest-editor-role` grants.
+
+`Cancelled` and `Superseded` differ: `Superseded` is set by the executor when the plan went stale (policy, settings or target changed) and the pull request was closed; see [troubleshooting](troubleshooting.md#freshness).
 
 ## Release publication
 

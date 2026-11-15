@@ -29,7 +29,9 @@ import (
 // server's defaults, so the name computed from a request read back from the API server is the one the analyzer
 // computed before it created it. The analyzer names its requests with it, so a retried create finds the request
 // already made (invariant 5); the executor shows a request's name unredacted in a pull request body only when
-// it is this derivation of the request's own spec, never a name its creator chose.
+// it is this derivation of the request's own spec, never a name its creator chose. spec.cancel is part of the
+// plan's part, so a cancelled request's name no longer matches; the cancel step writes nothing to its pull request
+// but a failed check run and the close (#289), so no body shows it.
 func RequestName(spec RemediationRequestSpec) (Name, error) {
 	plan := spec
 	plan.Verification = Verification{Checks: spec.Verification.Checks}

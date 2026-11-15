@@ -134,7 +134,8 @@ func other(git providers.GitProvider) {
 // lockWriters are the functions that may assign status.holdsTarget, and releasers those that may call release.
 // release is the one place that writes it false; the release on a pull request's account goes through the lock
 // rule only (settleLock, checkHeld with openHolding). The others release a lock that no pull request of the
-// request holds: a refusal or a queued duplicate never took it, and the two ends of a handoff (endHandoff,
+// request holds: a refusal, a queued duplicate or a request cancelled before the policy check (cancelUndecided)
+// never took it, and the two ends of a handoff (endHandoff,
 // supersedePredecessor) leave the pull request to the replacement, which holds it.
 const releaseFunc = "release"
 
@@ -142,7 +143,7 @@ var (
 	lockWriters = map[string]bool{releaseFunc: true, "reconcile": true, "backfill": true}
 	releasers   = map[string]bool{
 		"settleLock": true, "checkHeld": true, "reconcile": true, "supersedeDuplicate": true,
-		"endHandoff": true, "supersedePredecessor": true,
+		"endHandoff": true, "supersedePredecessor": true, "cancelUndecided": true,
 	}
 )
 

@@ -307,7 +307,9 @@ const (
 // permission heals without a new head. Stale: completed with conclusion failure because the freshness check found
 // the plan stale (#713, ADR-0028 amendment of 2026-11-15); the executor writes it, whether or not the close of the
 // pull request goes through, until it is recorded, and never changes it, so the request never sets the check green
-// again. A Failed check may still become Stale on its head, so the run says why the plan must not be merged.
+// again. A Failed check may still become Stale on its head, so the run says why the plan must not be merged. The
+// executor writes the same failed state, with a run that says so, for a request cancelled with spec.cancel (#289),
+// before it closes the pull request.
 // +kubebuilder:validation:Enum=InProgress;Passed;Failed;Refused;Stale
 type ReviewCheckState string
 

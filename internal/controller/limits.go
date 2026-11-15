@@ -737,11 +737,15 @@ func (r *RemediationRequestReconciler) waitForLimits(ctx context.Context, rr *re
 // setPhase sets the request's phase and, when it changes, lastPhaseTransitionTime to now (and, for Merged with a
 // recorded pull request, status.pullRequest.mergedAt once) and, when the request ended, status.breakerCounts
 // (classifyBreaker). That reads the plan digest and status.breakerProbe, so a caller sets those first. A phase
-// that ends the request also declines its Pending reviewer hints (declineOnEnd): every path that ends a request
-// comes through here.
+// that ends the request also declines its Pending reviewer hints (declineOnEnd) and removes CancelPending: every
+// path that ends a request comes through here.
 func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase) {
 	declineOnEnd(rr, phase)
+	if !beforeMerge(phase) {
+		// A request that ends has no cancel left to finish (#289): a merge or a close ended it.
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionCancelPending)
+	}
 	if rr.Status.Phase != phase && !beforeMerge(phase) {
 		// A first look at a missing pull request belongs to the request that was still moving on (#688): a
 		// later read of the ended request, by the lock or the finalizer, waits again.

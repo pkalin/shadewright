@@ -171,6 +171,16 @@ spec:
                   approvalRequired asks for human review. false is a request for automation that policy may refuse;
                   it never lowers policy or repository rules.
                 type: boolean
+              cancel:
+                description: |-
+                  cancel, set to true by a person, cancels the request before its change is merged (#289). The executor closes
+                  the request's pull request, if one is open, and ends the request Cancelled with reason CancelRequested; the
+                  branch is left as it is, and the request stays as the record of what was cancelled and when. It is the one
+                  field of the spec that can change after create: it can be set, never unset, and only while the request has no
+                  phase or is in Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued (CEL). A request that
+                  reaches the merge, or another final phase, before the executor acts on it keeps that phase. Deleting a request
+                  also closes its pull request, but removes the record.
+                type: boolean
               chainRoot:
                 description: |-
                   chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or
@@ -381,8 +391,23 @@ spec:
             - targetRef
             type: object
             x-kubernetes-validations:
-            - message: spec is immutable; a changed plan is a new RemediationRequest
-              rule: self == oldSelf
+            - message: spec is immutable but for spec.cancel; a changed plan is a
+                new RemediationRequest
+              rule: self.incidentRef == oldSelf.incidentRef && self.targetRef == oldSelf.targetRef
+                && has(self.mode) == has(oldSelf.mode) && (!has(self.mode) || self.mode
+                == oldSelf.mode) && has(self.approvalRequired) == has(oldSelf.approvalRequired)
+                && (!has(self.approvalRequired) || self.approvalRequired == oldSelf.approvalRequired)
+                && self.policyRef == oldSelf.policyRef && self.action == oldSelf.action
+                && has(self.verification) == has(oldSelf.verification) && (!has(self.verification)
+                || self.verification == oldSelf.verification) && has(self.replaces)
+                == has(oldSelf.replaces) && (!has(self.replaces) || self.replaces
+                == oldSelf.replaces) && has(self.chainRoot) == has(oldSelf.chainRoot)
+                && (!has(self.chainRoot) || self.chainRoot == oldSelf.chainRoot) &&
+                has(self.reverts) == has(oldSelf.reverts) && (!has(self.reverts) ||
+                self.reverts == oldSelf.reverts)
+            - message: spec.cancel can be set, never unset
+              rule: '!has(oldSelf.cancel) || !oldSelf.cancel || (has(self.cancel)
+                && self.cancel)'
             - message: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject
               rule: self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/')
                 && self.targetRef.kind == 'ScaledObject')
@@ -1835,6 +1860,12 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind)
             == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind)
             > 0)'
+        - message: spec.cancel can be set only before the merge and before a final
+            phase
+          rule: '!has(self.spec.cancel) || !self.spec.cancel || (has(oldSelf.spec.cancel)
+            && oldSelf.spec.cancel) || !has(self.status) || !has(self.status.phase)
+            || self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',
+            ''AwaitingApproval'', ''AutoMergeQueued'']'
     selectableFields:
     - jsonPath: .status.phase
     - jsonPath: .status.breakerProbe

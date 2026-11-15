@@ -331,14 +331,14 @@ func (r *RemediationRequestReconciler) waited(rr *remediationv1alpha1.Remediatio
 
 // lookOnly reports whether a request whose pull request was looked at may skip the full recheck now: it waits
 // for review, and carries nothing the full recheck must settle at once, neither the mark of a stale plan's
-// cleanup (staleMark) nor WritesPaused, which resumeIfAllowed removes with the WritesResumed Event at the first
-// reconcile after the pause lifts. A PlanFresh Unknown of a refusal is left to the next full recheck, as before
+// cleanup (staleMark), nor spec.cancel (#289), nor WritesPaused, which resumeIfAllowed removes with the
+// WritesResumed Event at the first reconcile after the pause lifts. A PlanFresh Unknown of a refusal is left to the next full recheck, as before
 // the looks: asking a host that refused again every look would only cost calls.
 func lookOnly(rr *remediationv1alpha1.RemediationRequest) bool {
 	if p := rr.Status.Phase; p != remediationv1alpha1.PhasePRCreated && p != remediationv1alpha1.PhaseAwaitingApproval {
 		return false
 	}
-	return staleMark(rr) == nil &&
+	return staleMark(rr) == nil && !cancelRequested(rr) &&
 		meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused) == nil
 }
 
@@ -1196,9 +1196,10 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 		return prUnchecked, err
 	}
-	if staleMark(rr) != nil {
+	if staleMark(rr) != nil || cancelRequested(rr) {
 		// A stale plan whose close is pending or refused (#199): nothing but the close and the failed check run of
-		// cleanUpStale (#713) is written to its pull request, so no reply and no merge gate either.
+		// cleanUpStale (#713) is written to its pull request, so no reply and no merge gate either. The same holds
+		// for a cancelled request (#289), whose close follows this look.
 		return prOpen, nil
 	}
 	if ctx.Err() == nil {

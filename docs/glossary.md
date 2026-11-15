@@ -73,7 +73,7 @@ RemediationPolicy
 :   The cluster-scoped, admin-owned bounds a request must stay within. See [write or tighten a policy](how-to/write-a-policy.md).
 
 RemediationRequest
-:   One plan, its policy decision and its execution state. Its spec is immutable.
+:   One plan, its policy decision and its execution state. Its spec is immutable, but for `spec.cancel`, which a person sets to cancel it before the merge.
 
 RemediationSettings
 :   The single cluster-scoped object `default`: kill switch, limits, repositories, modules.

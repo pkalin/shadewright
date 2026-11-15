@@ -433,7 +433,8 @@ func TestPermissionBoundary(t *testing.T) {
 		{"executor", "list", group, "remediationrequests", "", otherNS, false},
 		{"executor", "create", group, "remediationrequests", "", operatorNS, false},
 		{"executor", "update", group, "remediationrequests", "", operatorNS, false},
-		// patch only for the finalizer that closes the pull request on deletion; the spec is immutable (CEL).
+		// patch only for the finalizer that closes the pull request on deletion; the spec is immutable (CEL) but for
+		// spec.cancel (#289).
 		{"executor", "patch", group, "remediationrequests", "", operatorNS, true},
 		{"executor", "patch", group, "remediationrequests", "", otherNS, false},
 		{"executor", "delete", group, "remediationrequests", "", operatorNS, false},

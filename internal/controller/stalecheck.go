@@ -75,36 +75,44 @@ func (r *RemediationRequestReconciler) staleCheckPending(rr *remediationv1alpha1
 }
 
 // failStaleCheck completes the check run shadewright/review on the recorded head of a stale plan's pull request as
-// failed and records state Stale (see above). It does nothing and returns nil when the check is not pending
-// (staleCheckPending). A failure is logged and returned, but for a cancelled reconcile and a pause, which are only
-// returned. The step has a deadline of its own, so it never eats the close's.
+// failed and records state Stale (see above), with failCheck.
 func (r *RemediationRequestReconciler) failStaleCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason string) error {
+	return r.failCheck(ctx, rr, staleCheckRun(reason))
+}
+
+// failCheck writes run, a failed check run shadewright/review, on the recorded head of rr's pull request and records
+// state Stale, which no later write changes: for a stale plan (failStaleCheck) and a cancelled request
+// (failCancelCheck, #289). It does nothing and returns nil when the check is not pending (staleCheckPending). A
+// failure is logged and returned, but for a cancelled reconcile and a pause, which are only returned. The step has a
+// deadline of its own, so it never eats the close's.
+func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	run providers.CheckRun) error {
 	if !r.staleCheckPending(rr) {
 		return nil
 	}
 	pr := rr.Status.PullRequest
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
-	err := r.failStaleCheckStep(stepCtx, rr, reason)
+	err := r.failCheckStep(stepCtx, rr, run)
 	if err == nil || ctx.Err() != nil || errors.Is(err, freshness.ErrPaused) {
 		// A pause is the close's to report (waitWhilePaused).
 		return err
 	}
-	logf.FromContext(ctx).Info("Could not fail the review check of a stale RemediationRequest; tried again with "+
-		"the close", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number,
-		"head", pr.HeadSHA, "error", err.Error())
+	logf.FromContext(ctx).Info("Could not fail the review check of RemediationRequest; tried again with the close",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA,
+		"title", run.Title, "error", err.Error())
 	return err
 }
 
-// failStaleCheckStep is failStaleCheck's work: it writes the failed check, then records Stale.
-func (r *RemediationRequestReconciler) failStaleCheckStep(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, reason string) error {
+// failCheckStep is failCheck's work: it writes the failed check, then records Stale.
+func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, run providers.CheckRun) error {
 	git, err := r.openPlanRepository(ctx, rr)
 	if err != nil {
 		return err
 	}
-	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, staleCheckRun(reason)); err != nil {
+	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run); err != nil {
 		return freshness.WrapProvider("write the check run", err)
 	}
 	return r.recordStaleCheck(ctx, rr)
@@ -128,7 +136,7 @@ func (r *RemediationRequestReconciler) recordStaleCheck(ctx context.Context, rr 
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	upd.DeepCopyInto(rr)
-	logf.FromContext(ctx).Info("Failed the review check of a stale RemediationRequest", "remediationRequest",
+	logf.FromContext(ctx).Info("Failed the review check of RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA)
 	return nil
 }

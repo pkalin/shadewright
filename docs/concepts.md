@@ -45,7 +45,7 @@ One problem on one workload, kept as a namespaced object in the operator namespa
 
 ## RemediationRequest <span class="sw-status sw-built">built</span>
 
-One concrete plan: which action, on which target (pinned by UID), the previous and the desired value. It says what to change, never where: the executor finds the repository, branch and file from the Flux objects that deliver the target. The whole spec is immutable, so a different plan is a new request and an approval never carries over. Only the executor writes its `status` (phase and conditions). See [design 5.1](design/5-api.md#51-remediationrequest) and [the life of a request](request-lifecycle.md).
+One concrete plan: which action, on which target (pinned by UID), the previous and the desired value. It says what to change, never where: the executor finds the repository, branch and file from the Flux objects that deliver the target. The spec is immutable but for `spec.cancel`, which a person sets to cancel the request before the merge, so a different plan is a new request and an approval never carries over. Only the executor writes its `status` (phase and conditions). See [design 5.1](design/5-api.md#51-remediationrequest) and [the life of a request](request-lifecycle.md).
 
 ## RemediationPolicy <span class="sw-status sw-built">built</span>
 

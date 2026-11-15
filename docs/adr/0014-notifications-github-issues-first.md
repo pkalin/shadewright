@@ -22,3 +22,7 @@ Some incidents end without a PR: no evidence, a refused action, or an unsupporte
 
 - Teams first: blocked on account type.
 - Events only: easy to miss.
+
+## Amendments
+
+- 2026-11-15: [ADR-0043](0043-the-notifier-as-its-own-component.md), proposed, would supersede this ADR: the Notifier becomes its own component, the sinks start with a signed webhook and the issue comes third, opened by a second GitHub App instead of the executor's. Nothing here was built. This is a supersession and not an amendment under [ADR-0021](0021-amending-accepted-adrs.md), because three decisions change; the status becomes `Superseded by ADR-0043` when that ADR is accepted, and this decision stands until then.

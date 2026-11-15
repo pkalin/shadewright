@@ -129,6 +129,7 @@ nav = [
       { "0039 Cause rule" = "adr/0039-consequence-symptoms-attach-to-their-causes-incident.md" },
       { "0040 Sizing from metrics" = "adr/0040-code-sizes-a-memory-proposal-from-the-metrics.md" },
       { "0041 Merge-time freshness check" = "adr/0041-a-freshness-check-at-the-merge-of-a-pull-request.md" },
+      { "0043 Notifier component" = "adr/0043-the-notifier-as-its-own-component.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

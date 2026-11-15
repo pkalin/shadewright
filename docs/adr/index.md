@@ -15,7 +15,7 @@
 | [0011](0011-policy-as-cluster-scoped-crd.md) | Policy as a cluster-scoped CRD | Accepted, amended |
 | [0012](0012-object-to-source-mapping.md) | Mapping an object to its source in Git | Accepted, amended |
 | [0013](0013-adapters-for-every-external-system.md) | An interface and adapters for every external system | Accepted |
-| [0014](0014-notifications-github-issues-first.md) | Notifications through GitHub issues first | Accepted |
+| [0014](0014-notifications-github-issues-first.md) | Notifications through GitHub issues first | Accepted, amended |
 | [0015](0015-analysis-records-outlive-the-lab.md) | Analysis records are kept and outlive the lab | Accepted, amended |
 | [0016](0016-lab-region-sweden-central.md) | Lab region Sweden Central | Accepted, amended |
 | [0017](0017-prometheus-in-the-lab.md) | Prometheus in the lab | Accepted, amended |
@@ -43,5 +43,6 @@
 | [0039](0039-consequence-symptoms-attach-to-their-causes-incident.md) | Consequence symptoms attach to their cause's Incident | Accepted, amended |
 | [0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) | Code sizes a memory proposal from the metrics, and the pull request shows the evidence | Accepted |
 | [0041](0041-a-freshness-check-at-the-merge-of-a-pull-request.md) | A freshness check at the merge of a pull request | Proposed |
+| [0043](0043-the-notifier-as-its-own-component.md) | The Notifier as its own component | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

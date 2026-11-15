@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 560" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Shadewright components and the Notifier</title>
+  <desc id="d">Overview of ADR-0043, proposed and not built. Four components, each with its own identity. The analyzer reads the cluster and the model and writes Incidents and the requests it proposes. The executor writes request status and the pull requests in the code host through the GitHub App. The verifier reads pods and writes verification reports. The Notifier, a fourth Deployment, only reads request and Incident status in the operator namespace and writes delivery records, then sends fixed messages built from status fields to three sinks in order: a signed webhook, Microsoft Teams and a GitHub issue in the fleet repository. The issue is opened by a second GitHub App with issues write only, not by the executor's App. The Notifier has no model access, no pull request permission and no Secrets through RBAC, and nothing else waits for it. It is off by default.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="560" rx="18" fill="#0e0e16"/>
+
+  <rect class="lane" x="24" y="24" width="1072" height="330" rx="14"/>
+  <text class="lanet" x="44" y="54">FOUR COMPONENTS, FOUR IDENTITIES, OPERATOR NAMESPACE</text>
+
+  <rect class="box" x="44" y="78" width="240" height="252" rx="12"/>
+  <text class="h" x="62" y="106">Analyzer</text>
+  <text class="s" x="62" y="132">reads the cluster, calls the model</text>
+  <text class="s" x="62" y="156">writes Incidents and the</text>
+  <text class="s" x="62" y="176">requests it proposes</text>
+  <text class="no" x="62" y="214">No Git, no request status</text>
+
+  <rect class="box" x="300" y="78" width="240" height="252" rx="12"/>
+  <text class="h" x="318" y="106">Executor</text>
+  <text class="s" x="318" y="132">writes request status</text>
+  <text class="s" x="318" y="156">pull requests through the</text>
+  <text class="s" x="318" y="176">GitHub App, no issues write</text>
+  <text class="no" x="318" y="214">No model, no integrations</text>
+
+  <rect class="box" x="556" y="78" width="240" height="252" rx="12"/>
+  <text class="h" x="574" y="106">Verifier</text>
+  <text class="s" x="574" y="132">reads pods in watched</text>
+  <text class="s" x="574" y="156">namespaces, writes</text>
+  <text class="s" x="574" y="176">verification reports</text>
+  <text class="no" x="574" y="214">No model, no Git, no Secrets</text>
+
+  <rect class="key" x="812" y="78" width="264" height="252" rx="12"/>
+  <text class="h" x="830" y="106">Notifier (new, off by default)</text>
+  <text class="s" x="830" y="132">reads request and Incident status</text>
+  <text class="s" x="830" y="156">writes delivery records only</text>
+  <text class="s" x="830" y="180">sends fixed templates: enums and</text>
+  <text class="s" x="830" y="200">names, never cluster text</text>
+  <text class="no" x="830" y="238">No model, no pull requests</text>
+  <text class="no" x="830" y="258">No Secrets through RBAC</text>
+  <text class="no" x="830" y="278">Nothing waits for it</text>
+
+  <path class="f" d="M944 330V398" marker-end="url(#a)"/>
+
+  <rect class="ext" x="812" y="400" width="264" height="132" rx="12"/>
+  <text class="h" x="830" y="428">Sinks, in order</text>
+  <text class="s" x="830" y="452">1 signed webhook (HMAC, delivery ID)</text>
+  <text class="s" x="830" y="472">2 Microsoft Teams (Workflows URL)</text>
+  <text class="s" x="830" y="492">3 GitHub issue in the fleet repo,</text>
+  <text class="s" x="830" y="512">opened by a second App</text>
+
+  <rect class="box" x="44" y="400" width="740" height="132" rx="12"/>
+  <text class="h" x="62" y="428">Why a fourth component</text>
+  <text class="s" x="62" y="454">The executor keeps to pull requests and holds no sink credential.</text>
+  <text class="s" x="62" y="474">A sink outage is retried or dropped by the Notifier and cannot hold up a remediation.</text>
+  <text class="s" x="62" y="494">The record per request and trigger keeps a restart or a second replica from sending twice.</text>
+  <text class="s" x="62" y="514">Failures and escalations only, never a pull request waiting for review.</text>
+</svg>

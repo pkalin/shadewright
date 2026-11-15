@@ -210,8 +210,9 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	// /healthz is a ping; /readyz passes once the caches have synced, on the leader and on a standby.
-	if err := cmdutil.AddHealthChecks(mgr); err != nil {
+	// /healthz is a ping; /readyz passes once the informers of the required kinds have synced, on the leader
+	// and on a standby, and keeps passing.
+	if err := cmdutil.AddHealthChecks(mgr, controller.ReadinessKinds()...); err != nil {
 		setupLog.Error(err, "Failed to set up the health checks")
 		os.Exit(1)
 	}

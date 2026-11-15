@@ -67,3 +67,11 @@ func CacheOptions(namespace string) cache.Options {
 		},
 	}
 }
+
+// ReadinessKinds are the kinds whose informers must have synced before the executor reports ready
+// (cmdutil.AddHealthChecks): the RemediationRequests it reconciles, the one kind it may list and watch. Every
+// other kind it reads (Incidents, VerificationReports, settings, policies, targets, Flux objects) it may only
+// get, through the API reader, so none of them has an informer.
+func ReadinessKinds() []client.Object {
+	return []client.Object{&remediationv1alpha1.RemediationRequest{}}
+}

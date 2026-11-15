@@ -189,6 +189,10 @@ type RemediationRequestReconciler struct {
 	// count is on the pull request (reviewGate), so it is asked for once per review, not on every look. Memory
 	// only, dropped with checked: after a restart the marker finds the comment already posted.
 	steeredCommented sync.Map
+	// reviewCheckFailures holds, per request name, the looks in a row whose review check failed on one head
+	// (watchReviewCheck), so a gate that cannot make progress raises one Warning Event. Memory only, dropped with
+	// checked.
+	reviewCheckFailures sync.Map
 	// rewritten holds, per request name, the answer of the Git host to the rewrite after a handoff whose status
 	// write has not gone through (followHandoff), so a retry records it without sending the rewrite again.
 	// Memory only, dropped with checked: after a restart the rewrite is sent again, which is idempotent.
@@ -237,6 +241,7 @@ func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 	r.checked.Delete(key)
 	r.permissionWarned.Delete(key)
 	r.steeredCommented.Delete(key)
+	r.reviewCheckFailures.Delete(key)
 	r.rewritten.Delete(key)
 	r.replyAttempts.Delete(key)
 	r.renderEnds.forget(key)

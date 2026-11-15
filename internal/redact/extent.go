@@ -31,6 +31,12 @@ import "strings"
 // string goes on over a line end only to a line indented deeper than the key, as a YAML scalar does, or to a
 // blank line; any other line ends it, the group does not close, and the fields on the next lines stay. A
 // shell quote after a flag spans lines as in a shell.
+//
+// Shell syntax ("$(", backticks, backslash escapes, glued words) applies only where the value is a shell word:
+// in free text and after a flag on a command line. Inside a JSON or YAML quoted string, an array, an object, or
+// an item of an argument list or sequence, the text is literal: a quoted string ends at its closing quote, and
+// a quote opens a string only at the start of a scalar. Every caller takes the union of the value it gave
+// before the extent rule and the extent, so a value is never shorter than before #708.
 const (
 	// maxValueExtent is how far past its start the extent rule reads a value.
 	maxValueExtent = 4096
@@ -114,8 +120,14 @@ func quoteLevel(run int) int {
 // then crosses a line end only to a line that is blank or indented deeper than the key's column. ok is false
 // when the group does not close before limit, nests deeper than maxExtentNesting, meets a closer that does not
 // match, or a quoted string meets a line it may not cross to.
-func groupEnd(s string, pos, limit, ctx, keyPos int) (int, bool) {
-	g := groupScan{s: s, limit: limit, ctx: ctx}
+//
+// shell is true when the group is a shell word (free text, a flag's value on a command line). Shell syntax
+// applies only there and inside "$(" and backticks: "$(" and a backtick inside a double-quoted string, and a
+// backslash before "(", ")", "$" or a backtick. Elsewhere (a JSON or YAML quoted string, an array, an object)
+// the text is literal, a quoted string ends at its closing quote, and inside an array or object a quote opens
+// a string only at the start of a scalar (after "[", "{", "," or ":"), so "horse'battery" is plain text.
+func groupEnd(s string, pos, limit, ctx, keyPos int, shell bool) (int, bool) {
+	g := groupScan{s: s, limit: limit, ctx: ctx, shell: shell}
 	keyCol := -1
 	for i := pos; i < limit; i++ {
 		if s[i] == '\n' && g.quote != 0 && keyPos != noKey {
@@ -163,6 +175,22 @@ type groupScan struct {
 	depth       int
 	quote       byte
 	qLevel, run int
+	// shell is whether the group itself is a shell word; qShell whether the open quoted string is read as
+	// a shell string; prev the last byte read outside quoted strings that is no blank and no backslash.
+	shell, qShell bool
+	prev          byte
+}
+
+// shellText reports whether the byte read now is shell text: inside "$(" or backticks, or in a group that
+// is a shell word and holds no array or object.
+func (g *groupScan) shellText() bool {
+	return g.inShell() || g.depth == 0 && g.shell
+}
+
+// scalarStart reports whether a quote read now inside an array or object opens a string: it does at the
+// start of a scalar only, after "[", "{", "," or ":" and blanks.
+func (g *groupScan) scalarStart() bool {
+	return g.shellText() || strings.IndexByte("[{,:", g.prev) >= 0
 }
 
 // push opens a nested group whose closer is c, and reports false when that nests too deep.
@@ -196,6 +224,7 @@ func (g *groupScan) top() byte {
 // closeQuote ends the open quoted string; the group is closed when no bracket is open.
 func (g *groupScan) closeQuote() scanStep {
 	g.quote = 0
+	g.prev = '"'
 	if g.depth == 0 {
 		return scanClosed
 	}
@@ -220,14 +249,14 @@ func (g *groupScan) doubleQuoted(i int) (int, scanStep) {
 	case c == '\\':
 		g.run++
 		return i, scanGoOn
-	case c == '$' && g.run == 0 && g.qLevel == 0 && i+1 < g.limit && g.s[i+1] == '(':
+	case c == '$' && g.qShell && g.run%2 == 0 && g.qLevel == 0 && i+1 < g.limit && g.s[i+1] == '(':
 		// A command substitution inside double quotes: its text is read afresh, its own quotes included,
 		// and the string goes on after its ")".
-		g.quote = 0
+		g.quote, g.run = 0, 0
 		return i + 1, g.push(substInQuotes)
-	case c == '`' && g.run == 0 && g.qLevel == 0:
+	case c == '`' && g.qShell && g.run%2 == 0 && g.qLevel == 0:
 		// A backtick substitution inside double quotes, read as "$(" above.
-		g.quote = 0
+		g.quote, g.run = 0, 0
 		return i, g.push(backtickInQuotes)
 	case c == '"':
 		j := quoteLevel(g.run)
@@ -243,46 +272,87 @@ func (g *groupScan) doubleQuoted(i int) (int, scanStep) {
 	return i, scanGoOn
 }
 
-// unquoted reads the byte at i outside any quoted string.
+// unquoted reads the byte at i outside any quoted string, and records it as prev when it is no blank or
+// backslash and opens no string.
 func (g *groupScan) unquoted(i int) (int, scanStep) {
+	c := g.s[i]
+	j, st := g.unquotedByte(i)
+	if g.quote == 0 && c != '\\' && !isSpace(c) {
+		g.prev = c
+	}
+	return j, st
+}
+
+// unquotedByte is unquoted without the record of prev.
+func (g *groupScan) unquotedByte(i int) (int, scanStep) {
 	c := g.s[i]
 	run := g.run
 	g.run = 0
 	switch {
 	case c == '\\':
 		g.run = run + 1
-	case c == '"':
-		j := quoteLevel(run)
-		if j < g.ctx {
-			return i, scanFailed
-		}
-		g.quote, g.qLevel = '"', j
-	case c == '\'' && run == 0:
-		g.quote = '\''
+	case run%2 == 1 && g.shellText() && strings.IndexByte("()$`", c) >= 0:
+		// Escaped in a shell: plain text ("\)" does not close "$(").
+	case c == '"' || c == '\'' && run == 0:
+		return i, g.openQuote(c, run)
 	case (c == '[' || c == '{' || c == ']' || c == '}') && g.inShell():
 		// Plain text in a shell: "${x}", "a[1".
 	case c == '[':
 		return i, g.push(']')
 	case c == '{':
 		return i, g.push('}')
-	case c == '$' && i+1 < g.limit && g.s[i+1] == '(':
-		return i + 1, g.push(')')
-	case c == ')' && g.top() == substInQuotes, c == '`' && g.top() == backtickInQuotes:
-		g.depth--
-		g.quote, g.qLevel = '"', 0
-	case c == '(' && g.inShell():
-		return i, g.push(')')
-	case c == '`' && g.top() != '`':
-		return i, g.push('`')
+	case c == '$' || c == '(' || c == '`' && g.top() != '`' || c == ')' && g.top() == substInQuotes:
+		// Shell groups; outside a shell these bytes are plain text.
+		if j, st, ok := g.shellByte(i); ok {
+			return j, st
+		}
 	case g.depth > 0 && c == g.top():
 		g.depth--
 		if g.depth == 0 {
 			return i, scanClosed
 		}
-	case c == ']' || c == '}' || c == ')':
+	case c == ']' || c == '}' || c == ')' && g.shellText():
+		// A closer that does not match; outside a shell, "(" and ")" are plain text.
 		return i, scanFailed
 	}
 	return i, scanGoOn
+}
+
+// shellByte reads "$(", "(", ")" or a backtick at i that opens or closes a shell group: "$(" and a backtick in
+// shell text, "(" inside "$(", and the ")" or backtick that ends a substitution inside a double-quoted
+// string, which goes on. ok is false when the byte does none of these.
+func (g *groupScan) shellByte(i int) (int, scanStep, bool) {
+	switch c := g.s[i]; {
+	case c == '$' && i+1 < g.limit && g.s[i+1] == '(' && g.shellText():
+		return i + 1, g.push(')'), true
+	case c == ')' && g.top() == substInQuotes, c == '`' && g.top() == backtickInQuotes:
+		g.depth--
+		g.quote, g.qLevel, g.qShell = '"', 0, true
+		return i, scanGoOn, true
+	case c == '(' && g.inShell():
+		return i, g.push(')'), true
+	case c == '`' && g.top() != '`' && g.shellText():
+		return i, g.push('`'), true
+	}
+	return i, scanGoOn, false
+}
+
+// openQuote reads a quote outside any quoted string, preceded by run backslashes: a double quote escaped
+// less than the context ends an enclosing string, so the group fails; inside an array or object a quote
+// opens a string only at the start of a scalar; otherwise it opens one.
+func (g *groupScan) openQuote(c byte, run int) scanStep {
+	j := 0
+	if c == '"' {
+		j = quoteLevel(run)
+		if j < g.ctx {
+			return scanFailed
+		}
+	}
+	if g.depth > 0 && !g.scalarStart() {
+		return scanGoOn
+	}
+	g.quote, g.qLevel, g.qShell = c, j, g.shellText()
+	return scanGoOn
 }
 
 // opensGroup reports whether a quoted group of groupEnd opens at pos: a plain quote, "$(" or a backtick.
@@ -303,11 +373,12 @@ func opensGroup(s string, pos int) bool {
 // shellWordEnd returns the end of the shell word that starts with the group at pos: the group, then any
 // further groups, escaped blanks ("\\ ") and unquoted characters glued to it ("horse"'battery'staple,
 // "$(echo a b)"x, "a"\\ b), up to whitespace, one of ",;|&<>(){}[]", another backslash, or a group that does not
-// close. A run of ")", "]" and "}" belongs to the word when more of the word follows it ("$(cat pw)}x"), and
+// close; after a flag (flag is true) a comma does not end it ("$(echo),abc" is one argument). A run of
+// ")", "]" and "}" belongs to the word when more of the word follows it ("$(cat pw)}x"), and
 // ends it otherwise ("[\"abc\"], next"). last is true when the word ends with a quoted group, so its closing
 // quote is at end-1. ok is false when the first group does not close. keyPos is as in groupEnd.
-func shellWordEnd(s string, pos, limit, keyPos int) (end int, last bool, ok bool) {
-	end, ok = groupEnd(s, pos, limit, 0, keyPos)
+func shellWordEnd(s string, pos, limit, keyPos int, flag bool) (end int, last bool, ok bool) {
+	end, ok = groupEnd(s, pos, limit, 0, keyPos, true)
 	if !ok {
 		return 0, false, false
 	}
@@ -315,7 +386,7 @@ func shellWordEnd(s string, pos, limit, keyPos int) (end int, last bool, ok bool
 	for end < limit {
 		c := s[end]
 		if opensGroup(s, end) {
-			e, closed := groupEnd(s, end, limit, 0, keyPos)
+			e, closed := groupEnd(s, end, limit, 0, keyPos, true)
 			if !closed {
 				break
 			}
@@ -340,13 +411,51 @@ func shellWordEnd(s string, pos, limit, keyPos int) (end int, last bool, ok bool
 			}
 			break
 		}
-		if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 {
+		if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 && (c != ',' || !flag) {
 			break
 		}
 		last = false
 		end++
 	}
 	return end, last, true
+}
+
+// plainWordEnd returns the end of a shell word that starts with plain text at pos (no quote, "$(" or
+// backtick), when a "$(" or backtick group or an escaped blank is glued to that text ("abc$(cat pw)",
+// "a,b\\ c"): the word runs on through those groups, plain text and backslash escapes, and ends at
+// whitespace, one of ";|&<>()", a quote, or a group that does not close. A quote ends it because an unquoted
+// value in free text that meets a quote is often inside a JSON or logfmt string, whose fields after it stay
+// (tokenEnd). It returns pos when no group or escaped blank is glued to the text.
+func plainWordEnd(s string, pos, limit, keyPos int) int {
+	end, glued := pos, false
+	for end < limit {
+		c := s[end]
+		switch {
+		case c == '$' && end+1 < limit && s[end+1] == '(', c == '`':
+			e, ok := groupEnd(s, end, limit, 0, keyPos, true)
+			if !ok {
+				return wordEnd(pos, end, glued)
+			}
+			end, glued = e, true
+		case c == '\\' && end+1 < limit && (s[end+1] == ' ' || s[end+1] == '\t'):
+			end, glued = end+2, true
+		case c == '\\' && end+1 < limit && !isSpace(s[end+1]) && s[end+1] != '"' && s[end+1] != '\'':
+			end += 2
+		case isSpace(c), c == '"', c == '\'', c == '\\', strings.IndexByte(";|&<>()", c) >= 0:
+			return wordEnd(pos, end, glued)
+		default:
+			end++
+		}
+	}
+	return wordEnd(pos, end, glued)
+}
+
+// wordEnd returns end when glued, else pos.
+func wordEnd(pos, end int, glued bool) int {
+	if glued {
+		return end
+	}
+	return pos
 }
 
 // wordStops are the bytes that end a shell word of shellWordEnd, besides whitespace.
@@ -377,9 +486,10 @@ func unclosedQuoteEnd(s string, pos int) int {
 // quotedWordSpan returns the value of a shell word that opens with a group at pos, for a value after a key
 // name: for a word that opens with a quote, the text after that quote up to the closing quote of the last
 // quoted piece, or the word's end; for one that opens with "$(" or a backtick, the whole word. ok is false
-// when the first group does not close within maxValueExtent. keyPos is as in groupEnd.
-func quotedWordSpan(s string, pos, keyPos int) (int, int, bool) {
-	end, last, ok := shellWordEnd(s, pos, extentLimit(s, pos), keyPos)
+// when the first group does not close within maxValueExtent. keyPos is as in groupEnd, flag as in
+// shellWordEnd.
+func quotedWordSpan(s string, pos, keyPos int, flag bool) (int, int, bool) {
+	end, last, ok := shellWordEnd(s, pos, extentLimit(s, pos), keyPos, flag)
 	if !ok {
 		return 0, 0, false
 	}
@@ -400,7 +510,7 @@ func bracketSpan(s string, pos, ctx int) (int, int, bool) {
 	if pos >= len(s) || s[pos] != '[' && s[pos] != '{' {
 		return 0, 0, false
 	}
-	end, ok := groupEnd(s, pos, extentLimit(s, pos), ctx, noKey)
+	end, ok := groupEnd(s, pos, extentLimit(s, pos), ctx, noKey, false)
 	return pos, end, ok
 }
 

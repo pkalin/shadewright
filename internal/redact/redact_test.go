@@ -650,6 +650,16 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"extent unclosed flag quote": "--password \"a b ",
 		"extent anchored scalars":    "- --password\n- &a |\n  a\n",
 		"extent go assignments":      "password := \"a ",
+		// Issue #708, third round: plain words with glued substitutions, literal JSON items, quoted arguments
+		// with other quotes inside, apostrophes in flow scalars, escaped parentheses, glued commas and the
+		// value main read after ":=".
+		"extent plain glued words":    "--password a$(b TOKEN=a\\ b$(c ",
+		"extent literal json items":   `["--password", "$(a `,
+		"extent argument quotes":      `["--password='a b `,
+		"extent flow apostrophes":     "{password: [a'b, ",
+		"extent escaped parentheses":  `--password $(a \) `,
+		"extent glued commas":         "--password $(a),b,",
+		"extent go assignment values": "PASSWORD := =a ",
 	} {
 		tail := tails[name]
 		small := timeString(t, name, rep(unit, size/8/len(unit))+tail)

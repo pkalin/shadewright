@@ -368,6 +368,12 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 			strings.Repeat("  "+strings.Repeat("a", 60)+"\n", 2*maxValueExtent/62) + "  " + k + "\n",
 		// An unquoted value ends at a quote, also one that belongs to the value.
 		"quote inside a value": "run --password ab'" + k + " --region x",
+		// A closed quote glued to an unquoted value ends it too: the value may sit inside a JSON or logfmt
+		// string whose fields follow the quote (plainWordEnd).
+		"quote glued to a value": `run --password ab"cd ` + k + `" --region x`,
+		// After a key name (not a flag), a comma glued to a quoted piece ends the shell word, as in
+		// "password=\"abc\",user=bob" the fields after the comma stay.
+		"comma glued to a quoted value": `TOKEN="abc",` + k + ` next=x`,
 		// After a compound name and a blank, only an opaque token goes.
 		"comma inside a blank-form value": "set aws_secret_access_key abc," + k + " now",
 	} {
@@ -608,6 +614,7 @@ const (
 	dquoteFlagTail = `" --region x`
 	squoteFlagTail = `' --region x`
 	jsonFieldTail  = `, "u": "x"}`
+	flowRegionTail = ", --region]"
 )
 
 // The extent rule (#708): after a secret key name or flag, a value of more than one token goes whole, through
@@ -620,7 +627,7 @@ func TestValueExtentAfterAKeyName(t *testing.T) {
 		`args: ["--client-secret=horse battery ` + k + `"]`:                                 `"]`,
 		`{"args":"[\"--client-secret=horse battery ` + k + `\",\"--x\"]"}`:                  `\",\"--x\"]"}`,
 		`args: ['--client-secret=horse battery ` + k + `', '--x']`:                          `', '--x']`,
-		"args: [--client-secret, horse battery " + k + ", --region]":                        ", --region]",
+		"args: [--client-secret, horse battery " + k + flowRegionTail:                       flowRegionTail,
 		"args: [--a, --client-secret, horse battery " + k + "]\nnext: x":                    "]\nnext: x",
 		"args:\n- --client-secret\n- |-\n  horse\n  battery " + k + "\n- --region":          listItemTail,
 		"args:\n  - --client-secret\n  - >\n    horse battery\n    " + k + "\n  - --region": "\n  - --region",
@@ -647,7 +654,7 @@ func TestValueExtentAfterAKeyName(t *testing.T) {
 		"{\"password\": // rotated\n  \"horse battery " + k + "\", \"u\": \"x\"}":           jsonFieldTail,
 		"{\"password\": /* old\n */ \"horse battery " + k + "\", \"u\": \"x\"}":             jsonFieldTail,
 	} {
-		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:], "battery"}, []string{kept})
+		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:], passphraseWords[1]}, []string{kept})
 	}
 }
 
@@ -737,6 +744,31 @@ func TestValueExtentKeepsEvidence(t *testing.T) {
 		"password: 'abc\nreason: EVIDENCE it's broken":                           "password: ***\nreason: EVIDENCE it's broken",
 		"  password: \"abc\n  reason: \"EVIDENCE\"":                              "  password: ***\n  reason: \"EVIDENCE\"",
 		"msg=password=\"abc\nreason: \"EVIDENCE\" next":                          "msg=password=***\nreason: \"EVIDENCE\" next",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// Shell syntax ("$(", backticks, backslash escapes, glued words) applies only where the value is a shell word;
+// inside a JSON or YAML quoted string, or a YAML plain scalar, the text is literal (#708). And the value is
+// never shorter than main's (TestExtentStillRedactsWhatMainRedacted). Each input lost or leaked part of its
+// value before this change.
+func TestValueExtentShellOnlyInShellWords(t *testing.T) {
+	for in, want := range map[string]string{
+		// main redacted the whole token: a comma glued to a substitution stays in the value.
+		"--password $(echo),hunter2 --region west": "--password [credential] --region west",
+		// A JSON string is literal: its closing quote ends the value, and the next argument stays.
+		`["--password", "$(", "EVIDENCE"]`: `["--password", "**", "EVIDENCE"]`,
+		// An escaped parenthesis does not close the substitution.
+		`--password $(printf %s \) horse battery) --region west`: "--password [REDACTED:credential] --region west",
+		// One JSON argument: its single quotes are literal, and the value runs to the argument's end.
+		`["--password='horse battery' staple", "--region"]`: `["--password='[connection-string]", "--region"]`,
+		// An apostrophe inside a YAML plain scalar opens no quote.
+		"{password: [horse'battery, staple], u: x}": "{password: [REDACTED:credential], u: x}",
+		// Outside a shell, parentheses are plain text.
+		"{password: [horse), battery staple], u: x}": "{password: [REDACTED:credential], u: x}",
 	} {
 		if got := String(in); got != want {
 			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)

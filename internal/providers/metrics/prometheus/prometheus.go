@@ -341,6 +341,11 @@ func (s *Source) do(ctx context.Context, path string, form url.Values, win windo
 		return providers.MetricsResult{}, transportError(ctx, "prometheus request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if ctx.Err() != nil {
+		// net/http can return an answer that raced the end of the query's context (#767, #779). The context
+		// ended first: the query reports that, whatever the answer was.
+		return providers.MetricsResult{}, transportError(ctx, "prometheus request failed")
+	}
 	if err := statusError(resp, s.now()); err != nil {
 		return providers.MetricsResult{}, err
 	}
@@ -359,6 +364,10 @@ func (s *Source) do(ctx context.Context, path string, form url.Values, win windo
 			return providers.MetricsResult{}, transportError(ctx, "prometheus response was not read")
 		}
 		return providers.MetricsResult{}, err
+	}
+	if ctx.Err() != nil {
+		// A body read whole after the context ended is not taken either.
+		return providers.MetricsResult{}, transportError(ctx, "prometheus response was not read")
 	}
 	return res, nil
 }

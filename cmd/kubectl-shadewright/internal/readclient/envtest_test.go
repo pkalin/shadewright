@@ -34,6 +34,14 @@ import (
 	"github.com/pkalin/shadewright/internal/fluxstatus"
 )
 
+// Names shared by the cases of TestErrorsFromAPIServer.
+const (
+	envNS                   = "default"
+	unservedGroupNamespaced = "unserved group, namespaced"
+	unservedNamespaced      = "unserved version of a served group, namespaced"
+	unservedClusterScoped   = "unserved version of a served group, cluster-scoped"
+)
+
 // envtestBinaryDir returns the first envtest binary directory under bin/k8s, or "" to let envtest use
 // KUBEBUILDER_ASSETS.
 func envtestBinaryDir() string {
@@ -103,13 +111,13 @@ func TestErrorsFromAPIServer(t *testing.T) {
 		ns   string
 		want func(*testing.T, error)
 	}{
-		{"unserved group, namespaced", gitRepos, "default", noKind},
+		{unservedGroupNamespaced, gitRepos, envNS, noKind},
 		{"unserved group, no namespace", gitRepos, "", noKind},
-		{"unserved version of a served group, namespaced", unservedIncidents, "default", noKind},
-		{"unserved version of a served group, cluster-scoped", unservedSettings, "", noKind},
-		{"missing built-in object, namespaced", configMaps, "default", notFound},
+		{unservedNamespaced, unservedIncidents, envNS, noKind},
+		{unservedClusterScoped, unservedSettings, "", noKind},
+		{"missing built-in object, namespaced", configMaps, envNS, notFound},
 		{"missing built-in object, cluster-scoped", crds, "", notFound},
-		{"missing custom object, namespaced", incidentsV1, "default", notFound},
+		{"missing custom object, namespaced", incidentsV1, envNS, notFound},
 		{"missing custom object, cluster-scoped", settingsV1, "", notFound},
 	} {
 		key := ObjectKey{Namespace: tc.ns, Name: "absent"}
@@ -131,10 +139,10 @@ func TestErrorsFromAPIServer(t *testing.T) {
 		gvk  schema.GroupVersionKind
 		ns   string
 	}{
-		{"unserved group, namespaced", gitRepos, "default"},
+		{unservedGroupNamespaced, gitRepos, envNS},
 		{"unserved group, all namespaces", gitRepos, ""},
-		{"unserved version of a served group, namespaced", unservedIncidents, "default"},
-		{"unserved version of a served group, cluster-scoped", unservedSettings, ""},
+		{unservedNamespaced, unservedIncidents, envNS},
+		{unservedClusterScoped, unservedSettings, ""},
 	} {
 		listGVK := tc.gvk.GroupVersion().WithKind(tc.gvk.Kind + "List")
 		var opts []ListOption
@@ -191,13 +199,13 @@ func TestErrorsFromAPIServer(t *testing.T) {
 		ns   string
 		want func(*testing.T, error)
 	}{
-		{"unserved group, namespaced", gitRepos, "default", noKind},
+		{unservedGroupNamespaced, gitRepos, envNS, noKind},
 		{"unserved group, no namespace", gitRepos, "", noKind},
-		{"unserved version of a served group, namespaced", unservedIncidents, "default", noKind},
-		{"unserved version of a served group, cluster-scoped", unservedSettings, "", noKind},
-		{"served built-in kind, namespaced", configMaps, "default", forbidden},
+		{unservedNamespaced, unservedIncidents, envNS, noKind},
+		{unservedClusterScoped, unservedSettings, "", noKind},
+		{"served built-in kind, namespaced", configMaps, envNS, forbidden},
 		{"served built-in kind, cluster-scoped", crds, "", forbidden},
-		{"served custom kind, namespaced", incidentsV1, "default", forbidden},
+		{"served custom kind, namespaced", incidentsV1, envNS, forbidden},
 		{"served custom kind, cluster-scoped", settingsV1, "", forbidden},
 	} {
 		key := ObjectKey{Namespace: tc.ns, Name: "absent"}

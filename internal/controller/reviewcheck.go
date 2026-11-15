@@ -153,7 +153,8 @@ const (
 	commentsCaughtUp
 	// commentsBehind: the look did not read the comments to the end, or could not store what it judged.
 	commentsBehind
-	// commentsPaused: the look could not store what it judged because writes are paused.
+	// commentsPaused: the look could not store what it judged because writes are paused, or it could not tell
+	// whether they are (a failed read of the kill switch).
 	commentsPaused
 )
 

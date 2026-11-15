@@ -937,8 +937,9 @@ func TestReviewCheckConflictCountsAcrossFailedReads(t *testing.T) {
 
 // watchHints tells the review check what the look at the comments found (#755): a look while writes are paused is
 // paused, whether its read of the comments failed or it could not store what it judged, so it neither counts nor
-// resets the looks behind; a failed read or a look that did not reach the end while writes go on is behind; a
-// look that read to the end and stored it caught up.
+// resets the looks behind, and the same holds when the kill switch cannot be read, as the look cannot tell; a
+// failed read or a look that did not reach the end while writes go on is behind; a look that read to the end and
+// stored it caught up.
 func TestWatchHintsClassifiesTheLook(t *testing.T) {
 	failList := func(op string) error {
 		if op == "ListComments" {
@@ -949,11 +950,14 @@ func TestWatchHintsClassifiesTheLook(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		paused bool
+		blind  bool // the kill switch cannot be read
 		fail   func(string) error
 		more   bool // more comments than one look reads
 		want   commentLook
 	}{
 		{name: "paused, failed list", paused: true, fail: failList, want: commentsPaused},
+		{name: "kill switch unreadable, failed list", blind: true, fail: failList, want: commentsPaused},
+		{name: "kill switch unreadable, comments to store", blind: true, want: commentsPaused},
 		{name: "paused, comments to store", paused: true, want: commentsPaused},
 		{name: "failed list", fail: failList, want: commentsBehind},
 		{name: "behind without error", more: true, want: commentsBehind},
@@ -978,6 +982,9 @@ func TestWatchHintsClassifiesTheLook(t *testing.T) {
 				if err := r.Update(ctx, s); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if tc.blind {
+				r.APIReader = nil
 			}
 			g.SetFail(tc.fail)
 			look := hintLook{git: &gatedGit{git: g, allow: r.writeAllowed}, host: api.GitProviderGitHub}

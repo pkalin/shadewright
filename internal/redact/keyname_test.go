@@ -175,7 +175,7 @@ func TestSasKeyOnlyBeforeItsSeparator(t *testing.T) {
 // the line end or a quote and nothing else, so a ",", "]" or "}" of the surrounding text may go with it
 // (#585). What follows the value stays.
 func TestQuotedValueAfterAKeyName(t *testing.T) {
-	words := []string{"horse", "battery", "staple"}
+	words := passphraseWords
 	for name, c := range map[string]struct{ in, kept string }{
 		"double quotes":        {`run --password "horse battery staple" --region x`, `" --region x`},
 		"single quotes":        {`run --password 'horse battery staple' --region x`, `' --region x`},
@@ -337,43 +337,52 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 	}
 }
 
-// Known leaks after a key name, kept by decision and documented in design 10.3 and threat model G4.4 (#585):
-// after a key name only the first token of a value goes, or the text between its quotes on one line. Taking
-// more needs a tokenizer per format (#708). The test fails when one no longer leaks,
-// so the list and the docs are updated with the change that closes it.
+// Known leaks after a key name, kept by decision and documented in design 10.3 and threat model G4.4 (#585,
+// #708): names the rules do not read (Unicode escapes, here-documents, short flags, one-word names), separators
+// they do not take, and values the extent rule does not reach. The test fails when one no longer leaks, so the
+// list and the docs are updated with the change that closes it.
 func TestKeyNameKnownLeaks(t *testing.T) {
 	k := leakKey()
 	for name, in := range map[string]string{
-		"unicode-escaped key":        `{"\u0070assword": "` + k + `"}`,
-		"unicode-escaped flag":       `["--\u0070assword", "` + k + `"]`,
-		"here-doc":                   "app login <<EOF\n" + k + "\nEOF",
-		"here-doc after stdin flag":  "docker login -u bob --password-stdin <<EOF\n" + k + "\nEOF",
-		"here-string":                `docker login -u bob --password-stdin <<< "` + k + `"`,
-		"short flag":                 "mysql -u root -p " + k,
-		"one-word name and a blank":  "vault write auth/x secret " + k,
-		"one-word token name":        "app set token " + k,
-		"blanks inside the argument": `args: ["--client-secret=horse battery ` + k + `"]`,
-		"flow sequence scalar":       "args: [--client-secret, horse battery " + k + ", --region]",
-		"block scalar":               "args:\n- --client-secret\n- |-\n  " + k + "\n- --region",
-		"anchor":                     "args:\n- --client-secret\n- &pw " + k,
-		"tag":                        "args:\n- --client-secret\n- !!str " + k,
-		"multi-line quoted scalar":   "--password \"horse\n" + k + "\" --region x",
-		"shell concatenated quotes":  `--client-secret="horse"'` + k + `' --region x`,
-		"command substitution":       "--password $(echo " + k + ") --region x",
-		"array value":                `{"password": ["horse", "` + k + `"], "u": "x"}`,
-		"object value":               `{"token": {"a": "horse", "b": "` + k + `"}, "u": "x"}`,
-		"escaped array value":        `{\"apiKey\":[\"horse\",\"` + k + `\"],\"u\":1}`,
-		"json comment":               "{\"password\": // rotated\n  \"" + k + "\"}",
+		"unicode-escaped key":       `{"\u0070assword": "` + k + `"}`,
+		"unicode-escaped flag":      `["--\u0070assword", "` + k + `"]`,
+		"here-doc":                  "app login <<EOF\n" + k + "\nEOF",
+		"here-doc after stdin flag": "docker login -u bob --password-stdin <<EOF\n" + k + "\nEOF",
+		"here-string":               `docker login -u bob --password-stdin <<< "` + k + `"`,
+		"short flag":                "mysql -u root -p " + k,
+		"one-word name and a blank": "vault write auth/x secret " + k,
+		"one-word token name":       "app set token " + k,
 		// The separator after a flag takes no JSON escape for whitespace ("\n"): such an escape is the start
 		// of the value.
 		"escaped json lines": `"args":"[\n  \"--client-secret\",\n  \"` + k + `\"\n]"`,
 		// Only a double quote escaped as JSON inside a string opens a quoted value: after "\'" the value is
 		// the quote and one token.
 		"escaped single quote": `--password \'horse battery ` + k + `\' --region x`,
+		// A plain item of a YAML block sequence after a flag item loses only its first token, as the same
+		// line form ("- hunter2abc --region west") is pinned by TestKeyNameRulesHoldAtTheirEdges; after an
+		// anchor or a tag the rest of the line goes (TestValueExtentAfterAKeyName).
+		"block sequence item with blanks": "args:\n- --client-secret\n- horse battery " + k + "\n- --region",
+		// The extent rule reads at most maxValueExtent bytes past the start of a value: the part of a longer
+		// value after that bound stays.
+		"part of a value past the bound": "args:\n- --password\n- |\n" +
+			strings.Repeat("  "+strings.Repeat("a", 60)+"\n", 2*maxValueExtent/62) + "  " + k + "\n",
 		// An unquoted value ends at a quote, also one that belongs to the value.
 		"quote inside a value": "run --password ab'" + k + " --region x",
+		// A closed quote glued to an unquoted value ends it too: the value may sit inside a JSON or logfmt
+		// string whose fields follow the quote (plainWordEnd).
+		"quote glued to a value": `run --password ab"cd ` + k + `" --region x`,
+		// After a key name (not a flag), a comma glued to a quoted piece ends the shell word, as in
+		// "password=\"abc\",user=bob" the fields after the comma stay.
+		"comma glued to a quoted value": `TOKEN="abc",` + k + ` next=x`,
 		// After a compound name and a blank, only an opaque token goes.
 		"comma inside a blank-form value": "set aws_secret_access_key abc," + k + " now",
+		// "--name=value" in a JSON argument whose value opens with a backslash takes one token only
+		// (argumentEnd).
+		"argument value after a backslash": `["--client-secret=\\horse ` + k + `", "--region"]`,
+		// A quoted scalar behind a YAML tag inside an array ends at its first "]".
+		"tagged quoted scalar in an array": `{password: [!!str "horse]` + k + `", staple], u: x}`,
+		// An escaped character other than a blank glued to a quoted piece after a flag ends the shell word.
+		"escape glued to a quoted piece": `--client-secret "horse"\!` + k + ` --region west`,
 	} {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",
@@ -593,11 +602,209 @@ func TestKeyNameRulesHoldAtTheirEdges(t *testing.T) {
 // own; and a double-quoted value goes on past a backslash before its line end, as in YAML.
 func TestKeyNameAcceptedOverRedaction(t *testing.T) {
 	for in, want := range map[string]string{
+		// An escaped array whose string ends before it closes: the enclosing string's quote ends the group.
+		`{"log":"{\"apiKey\":[\"abc\"","x":"]"}`:                             `{"log":"{\"apiKey\":***,"x":"]"}`,
+		`{"log":"{\"apiKey\":[\"abc","x":"\"]"}`:                             `{"log":"{\"apiKey\":***,"x":"\"]"}`,
 		"--password,client_secret 20261114T100000Z0 reason=FailedMount":      "--password,[credential] [credential] reason=FailedMount",
 		"--password \"abc\\\nreason=FailedMount node=worker\" --region west": "--password \"[REDACTED:credential]\" --region west",
 	} {
 		if got := String(in); got != want {
 			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// Text after a value that TestValueExtentAfterAKeyName checks is kept.
+const (
+	listItemTail   = "\n- --region"
+	quotedItemTail = "\"\n- --region"
+	dquoteFlagTail = `" --region x`
+	squoteFlagTail = `' --region x`
+	jsonFieldTail  = `, "u": "x"}`
+	flowRegionTail = ", --region]"
+)
+
+// The extent rule (#708): after a secret key name or flag, a value of more than one token goes whole, through
+// the end of its group (quotes over line ends, brackets, braces, "$(" with quotes inside), its YAML list or
+// flow item, its block scalar lines, or its quoted argument, with glued shell pieces, anchors, tags and JSON
+// comments before it; and what follows the value stays. Each input leaked on main and before this change.
+func TestValueExtentAfterAKeyName(t *testing.T) {
+	k := leakKey()
+	for in, kept := range map[string]string{
+		`args: ["--client-secret=horse battery ` + k + `"]`:                                 `"]`,
+		`{"args":"[\"--client-secret=horse battery ` + k + `\",\"--x\"]"}`:                  `\",\"--x\"]"}`,
+		`args: ['--client-secret=horse battery ` + k + `', '--x']`:                          `', '--x']`,
+		"args: [--client-secret, horse battery " + k + flowRegionTail:                       flowRegionTail,
+		"args: [--a, --client-secret, horse battery " + k + "]\nnext: x":                    "]\nnext: x",
+		"args:\n- --client-secret\n- |-\n  horse\n  battery " + k + "\n- --region":          listItemTail,
+		"args:\n  - --client-secret\n  - >\n    horse battery\n    " + k + "\n  - --region": "\n  - --region",
+		"args:\n- --client-secret\n- &pw horse battery " + k + "\n- --region":               listItemTail,
+		"args:\n- --client-secret\n- !!str horse battery " + k + "\n- --region":             listItemTail,
+		"args:\n- --password\n- &pw !!str \"horse\n  battery " + k + "\"\n- --region":       quotedItemTail,
+		"args:\n- --client-secret\n- &pw !!str " + k + "\n- --region":                       listItemTail,
+		"args: [--client-secret, !!str horse battery " + k + ", --region]":                  ", --region]",
+		"--password \"horse\nbattery " + k + "\" --region x":                                dquoteFlagTail,
+		"--password 'horse\nbattery ''" + k + "' --region x":                                squoteFlagTail,
+		"args:\n- --password\n- \"horse\n  battery " + k + "\"\n- --region":                 quotedItemTail,
+		`--client-secret="horse"'battery ` + k + `' --region x`:                             squoteFlagTail,
+		`--password "horse"'battery '` + k + ` --region x`:                                  flagAfter,
+		`PASSWORD="horse"battery'` + k + `' next=x`:                                         `' next=x`,
+		"--password $(echo horse battery " + k + ") --region x":                             flagAfter,
+		`--password "$(vault read -field=v "secret/horse battery ` + k + `")" --region x`:   dquoteFlagTail,
+		"--password `cat horse battery " + k + "` --region x":                               flagAfter,
+		"TOKEN=$(printf '%s' \"horse battery " + k + "\") next=x":                           " next=x",
+		`{"password": ["horse", "battery ` + k + `"], "u": "x"}`:                            jsonFieldTail,
+		`{"token": {"a": "horse", "b": {"c": "battery ` + k + `"}}, "u": "x"}`:              jsonFieldTail,
+		"{\"password\": [\n  \"horse\",\n  \"battery " + k + "\"\n],\n\"u\": \"x\"}":        ",\n\"u\": \"x\"}",
+		`{\"apiKey\":[\"horse\",\"battery ` + k + `\"],\"u\":1}`:                            `,\"u\":1}`,
+		`{\"apiKey\":{\"a\":[\"horse ]\",\"` + k + `\"]},\"u\":1}`:                          `,\"u\":1}`,
+		"{\"password\": // rotated\n  \"horse battery " + k + "\", \"u\": \"x\"}":           jsonFieldTail,
+		"{\"password\": /* old\n */ \"horse battery " + k + "\", \"u\": \"x\"}":             jsonFieldTail,
+	} {
+		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:], passphraseWords[1]}, []string{kept})
+	}
+}
+
+// The bounds of the extent rule (#708): a group that does not close within maxValueExtent bytes, or that
+// meets a closer that does not match, gives no extent, and the value is the one it was before (one token, or
+// the text to its format's boundary), so a stray quote or bracket does not take the text after it. A flow
+// item is only a flag after "[" or ",", so "--password, --token" in prose loses only the next token.
+func TestValueExtentBounds(t *testing.T) {
+	far := strings.Repeat("x", maxValueExtent)
+	for in, want := range map[string]string{
+		"--password \"hunter2abc\n" + far + "\" --region x": "--password [REDACTED]\n" + far + "\" --region x",
+		"--password $(hunter2abc ] next --region x":         "--password [credential] ] next --region x",
+		`{"password": [abc, ` + far + `]}`:                  `{"password": ***, ` + far + `]}`,
+		"use --password, now --region west":                 "use --password, *** --region west",
+		// An escaped array whose string ends before it closes: the enclosing string's quote ends the group.
+		`{"log":"{\"apiKey\":[\"abc\"","x":"]"}`:                        `{"log":"{\"apiKey\":***,"x":"]"}`,
+		`{"log":"{\"apiKey\":[\"abc","x":"\"]"}`:                        `{"log":"{\"apiKey\":***,"x":"\"]"}`,
+		"--password,client_secret 20261114T100000Z0 reason=FailedMount": "--password,[credential] [credential] reason=FailedMount",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%.80q)\n got %.120q\nwant %.120q", in, got, want)
+		}
+	}
+	// A block scalar longer than the bound loses its first maxValueExtent bytes or so; the rest stays, a known
+	// leak documented in design 10.3.
+	long := "args:\n- --password\n- |\n" + strings.Repeat("  "+strings.Repeat("a", 60)+"\n", 2*maxValueExtent/62) + "  TAILSECRET\n"
+	if out := String(long); !strings.Contains(out, "TAILSECRET") || strings.Contains(out, "\n  aaaa") && strings.Index(out, "\n  aaaa") < 40 {
+		t.Errorf("block scalar past the bound:\nout: %.200q", out)
+	}
+}
+
+// Text after a value that TestValueExtentReachesTheWholeValue checks is kept, and the words of its values.
+const (
+	regionWest = " --region west"
+	nextX      = " next=x"
+)
+
+var passphraseWords = []string{"horse", "battery", "staple"}
+
+// The extent rule at its edges (#708): a flow scalar on an indented next line, a block scalar behind an anchor,
+// an escaped blank and a backtick substitution inside double quotes in a shell word, a literal bracket inside
+// "$(", closers glued to a word with text after them, an unclosed quote after a flag at the end of the input,
+// and ":=". Each input kept part of its value before this change.
+func TestValueExtentReachesTheWholeValue(t *testing.T) {
+	for in, kept := range map[string]string{
+		"args: [--password, horse\n  battery staple, --region, west]":            ", --region, west]",
+		"args: [--password, !!str horse\n  battery staple, --region, west]":      ", --region, west]",
+		"args:\n- --password\n- &pw |-\n  horse\n  battery\n- --region\n- west":  "\n- --region\n- west",
+		"args:\n- --password\n- !!str >\n  horse\n  battery\n- --region\n- west": "\n- --region\n- west",
+		`--password "horse"\ battery --region west`:                              regionWest,
+		"--password \"`printf \"%s\" \"horse battery\"`\" --region west":         regionWest,
+		"--password $(printf '%s' horse[battery) --region west":                  regionWest,
+		"--password $(echo ${X} {horse battery) --region west":                   regionWest,
+		"--password $(cat horse)}battery --region west":                          regionWest,
+		"--password $(cat horse)]}battery --region west":                         regionWest,
+		"--password $()}horsebattery --region west":                              regionWest,
+		"--password \"horse battery staple --region west":                        regionWest,
+		`--password "horse battery staple`:                                       "--password ",
+		"--password \"horse battery staple\nreason: FailedMount":                 "\nreason: FailedMount",
+		`password := "horse battery staple" next=x`:                              nextX,
+		"password := horse;battery next=x":                                       nextX,
+		"password: \"horse\n  battery staple\"\nnext: x":                         "\nnext: x",
+		"  password: \"horse\n\n    battery staple\"\n  next: x":                 "\n  next: x",
+	} {
+		checkRedacted(t, in, passphraseWords, []string{kept})
+	}
+	// Closers at the end of a word stay with the text after them.
+	for in, want := range map[string]string{
+		`args: ["--password", "abc"], next: x`:  `args: ["--password", "***"], next: x`,
+		"--password $(cat pw)} --region west":   "--password ***} --region west",
+		"--password $()}Wc3":                    "--password ***",
+		"--password $(cat pw)}Hunter2Secret9 x": "--password [REDACTED:credential] x",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// What the extent rule must not take (#708): an unclosed block comment does not extend a value, and a quote
+// that does not close on its line continues only on lines indented deeper than its key, so the fields after
+// a stray quote stay. Each input lost these parts before this change, and main kept them.
+func TestValueExtentKeepsEvidence(t *testing.T) {
+	for in, want := range map[string]string{
+		"{\"password\": /* x\n\"u\": \"EVIDENCE\", \"reason\": \"FailedMount\"}": "{\"password\": ***\n\"u\": \"EVIDENCE\", \"reason\": \"FailedMount\"}",
+		"apiKey: \"abc\ntwo: \"def\"\nthree: ghi":                                "apiKey: ***\ntwo: \"def\"\nthree: ghi",
+		"password: 'abc\nreason: EVIDENCE it's broken":                           "password: ***\nreason: EVIDENCE it's broken",
+		"  password: \"abc\n  reason: \"EVIDENCE\"":                              "  password: ***\n  reason: \"EVIDENCE\"",
+		"msg=password=\"abc\nreason: \"EVIDENCE\" next":                          "msg=password=***\nreason: \"EVIDENCE\" next",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// Shell syntax ("$(", backticks, backslash escapes, glued words) applies only where the value is a shell word;
+// inside a JSON or YAML quoted string, or a YAML plain scalar, the text is literal (#708). And the value is
+// never shorter than main's (TestExtentStillRedactsWhatMainRedacted). Each input lost or leaked part of its
+// value before this change.
+func TestValueExtentShellOnlyInShellWords(t *testing.T) {
+	for in, want := range map[string]string{
+		// main redacted the whole token: a comma glued to a substitution stays in the value.
+		"--password $(echo),hunter2 --region west": "--password [credential] --region west",
+		// A JSON string is literal: its closing quote ends the value, and the next argument stays.
+		`["--password", "$(", "EVIDENCE"]`: `["--password", "**", "EVIDENCE"]`,
+		// An escaped parenthesis does not close the substitution.
+		`--password $(printf %s \) horse battery) --region west`: "--password [REDACTED:credential] --region west",
+		// One JSON argument: its single quotes are literal, and the value runs to the argument's end.
+		`["--password='horse battery' staple", "--region"]`: `["--password='[connection-string]", "--region"]`,
+		// An apostrophe inside a YAML plain scalar opens no quote.
+		"{password: [horse'battery, staple], u: x}": "{password: [REDACTED:credential], u: x}",
+		// Outside a shell, parentheses are plain text.
+		"{password: [horse), battery staple], u: x}": "{password: [REDACTED:credential], u: x}",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// A value read from inside a JSON or YAML quoted string never crosses that string's closing quote, whatever
+// shell syntax is open inside it; an unclosed "$(", backtick, "${" or bracket inside the string ends at the
+// string's end (#708). Each input except "${" lost the arguments after the secret before this change.
+func TestValueExtentStopsAtTheEnclosingString(t *testing.T) {
+	const subst = "$(echo"
+	for in, secret := range map[string]string{
+		`["--client-secret=$(echo", "EVIDENCE)", "--region"]`:                 subst,
+		"[\"--client-secret=`echo\", \"EVIDENCE`\", \"--region\"]":            "`echo",
+		`["--client-secret=${echo", "EVIDENCE}", "--region"]`:                 "${echo",
+		`["--client-secret=[echo", "EVIDENCE]", "--region"]`:                  "[echo",
+		`['--client-secret=$(echo', 'EVIDENCE)', '--region']`:                 subst,
+		`["--token=Wqabc $(echo Wqdef", "EVIDENCE)", "--region"]`:             "Wqdef",
+		`"args": "[\"--client-secret=$(echo\", \"EVIDENCE)\", \"--region\"]"`: subst,
+	} {
+		out := String(in)
+		if strings.Contains(out, secret) {
+			t.Errorf("String(%q) = %q: secret %q kept", in, out, secret)
+		}
+		for _, kept := range []string{"EVIDENCE", "--region"} {
+			if !strings.Contains(out, kept) {
+				t.Errorf("String(%q) = %q: %q lost", in, out, kept)
+			}
 		}
 	}
 }

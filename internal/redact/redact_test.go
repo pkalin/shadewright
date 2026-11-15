@@ -621,6 +621,45 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"upper compound keys":       "ClientSecret Ab1 ",
 		"upper compound word chain": "ClientSecret ClientSecret ",
 		"compound values to blanks": "a_token a1]b,c}d\"e ",
+		// Issue #708: the extent rule. Groups that do not close or nest too deep, quotes over lines, glued shell
+		// pieces, substitutions inside quotes, arrays and objects (also escaped), JSON comments, quoted
+		// arguments, flow and block sequence items, anchors and tags.
+		"extent open substitutions": "--password $(a ",
+		"extent open quotes":        "--password \"a\n--token 'b\n",
+		"extent glued pieces":       `--password "a"'b'c`,
+		"extent quoted subst":       `--password "$(a "b" `,
+		"extent open arrays":        `{"password": [a, `,
+		"extent open objects":       `{"token": {"a": "b", `,
+		"extent escaped arrays":     `{\"apiKey\":[\"a\",`,
+		"extent comments":           "{\"password\": // c\n",
+		"extent block comments":     `{"password": /* c `,
+		"extent key-value words":    `TOKEN="a"'b' `,
+		"extent quoted arguments":   `["--password=a b `,
+		"extent flow items":         "[--password, a b ",
+		"extent anchors and tags":   "- --password\n- &a !b c\n",
+		"extent flow properties":    "[--password, &a ",
+		"extent block scalars":      "- --password\n- |\n  a\n",
+		// Issue #708, second round: flow items and quoted values over indented lines, substitutions in
+		// backticks inside quotes, escaped blanks, closers glued to a word, unclosed quotes to the line end,
+		// anchored block scalars and ":=".
+		"extent flow continuations":  "[--password, a\n  b ",
+		"extent indented quotes":     "password: \"a\n  b ",
+		"extent backticks in quotes": "--password \"`a \"b\" ",
+		"extent escaped blanks":      `--password "a"\ b\ `,
+		"extent closer runs":         "--password $(a)}])x",
+		"extent unclosed flag quote": "--password \"a b ",
+		"extent anchored scalars":    "- --password\n- &a |\n  a\n",
+		"extent go assignments":      "password := \"a ",
+		// Issue #708, third round: plain words with glued substitutions, literal JSON items, quoted arguments
+		// with other quotes inside, apostrophes in flow scalars, escaped parentheses, glued commas and the
+		// value main read after ":=".
+		"extent plain glued words":    "--password a$(b TOKEN=a\\ b$(c ",
+		"extent literal json items":   `["--password", "$(a `,
+		"extent argument quotes":      `["--password='a b `,
+		"extent flow apostrophes":     "{password: [a'b, ",
+		"extent escaped parentheses":  `--password $(a \) `,
+		"extent glued commas":         "--password $(a),b,",
+		"extent go assignment values": "PASSWORD := =a ",
 	} {
 		tail := tails[name]
 		small := timeString(t, name, rep(unit, size/8/len(unit))+tail)
@@ -653,6 +692,8 @@ func TestNestedBlocksStayLinear(t *testing.T) {
 		// Each secret header sits below a reference child of the one before.
 		"headers below references": func(in string) string { return in + in + "token:\n" + in + in + " secretRef:\n" },
 		"comment headers":          func(in string) string { return in + "token: # c\n" },
+		// Issue #708: block scalars after a flag item, each below the one before.
+		"flag block scalars": func(in string) string { return in + "- --password\n" + in + "- |\n" },
 	} {
 		var b strings.Builder
 		for i := 0; b.Len() < 1<<20; i++ {

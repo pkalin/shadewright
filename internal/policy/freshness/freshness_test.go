@@ -50,9 +50,11 @@ const (
 	sourcePath  = "apps/orders/deployment.yaml"
 	otherPath   = "docs/readme.yaml"
 	otherBranch = "release"
-	tierLabel   = "tier"
-	targetUID   = "33333333-3333-4333-8333-333333333333"
-	policyUID   = "44444444-4444-4444-8444-444444444444"
+	// targetKind is the kind of the target in every world.
+	targetKind = "Deployment"
+	tierLabel  = "tier"
+	targetUID  = "33333333-3333-4333-8333-333333333333"
+	policyUID  = "44444444-4444-4444-8444-444444444444"
 	// otherTargetUID and otherPolicyUID stand for a target or a policy made again under the same name.
 	otherTargetUID = "66666666-6666-4666-8666-666666666666"
 	otherPolicyUID = "77777777-7777-4777-8777-777777777777"
@@ -422,7 +424,7 @@ func TestFailClosed(t *testing.T) {
 		}},
 		{"target read fails", func(w *world) {
 			w.getErr = func(k client.ObjectKey, o client.Object) error {
-				if o.GetObjectKind().GroupVersionKind() == (schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}) {
+				if o.GetObjectKind().GroupVersionKind() == (schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: targetKind}) {
 					return boom
 				}
 				return nil

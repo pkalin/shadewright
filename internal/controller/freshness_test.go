@@ -613,8 +613,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(planFresh().Reason).To(Equal(freshness.ReasonPolicyChanged))
 	})
 
-	// The check at the merge runs within the look's deadline: when it runs out of time, or the reconcile is
-	// cancelled, boundErr replaces its error, and the merge must still not reach the full check, which calls a
+	// The check at the merge runs within half of the look's deadline (mergeCheckContext): when it runs out of time,
+	// the look still writes the start of the wait, and the merge must not reach the full check, which calls a
 	// merged change stale (TargetFileChanged) and would cap a fresh plan.
 	It("never hands a merge to the full check when the check at the merge runs out of time (#737)", func() {
 		_, err := git.Merge(cr.Number)
@@ -625,7 +625,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		r.APIReader = blockingPolicyReader{Reader: k8sClient, block: func() bool { return blocked.CompareAndSwap(false, true) }}
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 		Expect(err).To(MatchError(errMergeCheck))
-		Expect(err).To(MatchError(ErrTimeout))
+		Expect(err).To(MatchError(context.DeadlineExceeded))
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(planFresh()).To(BeNil(), "a fresh plan is never marked stale by the full check after a merge")
@@ -747,6 +747,38 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 		Expect(planFresh().Reason).To(Equal(freshness.ReasonPolicyChanged))
 		Expect(stalePlanMerged(got)).To(BeTrue())
+	})
+
+	// A pull request never recorded (#524), found merged, whose check at the merge fails: the pull request is
+	// recorded, so the next reconcile looks at it and checks at the merge again, never runs the full check, which
+	// calls the merged change stale (TargetFileChanged) and would end a fresh plan capped.
+	It("records a merged pull request never recorded when its check at the merge fails, and checks it again (#737)", func() {
+		got := fetch()
+		got.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+		got.Status.PullRequest = nil
+		meta.RemoveStatusCondition(&got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		merged := changeRequest()
+		r := reconciler()
+		r.APIReader = failingPolicyReader{Reader: k8sClient, fail: func() bool { return true }}
+		err = r.endMerged(ctx, git, fetch(), merged)
+		Expect(err).To(MatchError(errMergeCheck))
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePRCreated))
+		Expect(got.Status.PullRequest).NotTo(BeNil(), "the pull request is recorded for the next look")
+		Expect(got.Status.PullRequest.Number).To(Equal(merged.Number))
+		Expect(got.Status.MergeReceipt).To(BeNil())
+		Expect(planFresh()).To(BeNil())
+
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.MergeReceipt).NotTo(BeNil())
+		Expect(planFresh()).To(BeNil(), "an unchanged plan is not marked by the full check after the merge")
+		Expect(stalePlanMerged(got)).To(BeFalse(), "a fresh plan is never capped")
 	})
 
 	// forgetPullRequest stands for a request whose pull request open lost its status write (#524): no pull

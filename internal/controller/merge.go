@@ -104,12 +104,16 @@ var errMergeCheck = errors.New("the pull request was merged, and its merge is no
 // wait is over it returns the error wrapped in errMergeCheck with nothing set in rr; once it is over, the plan
 // was not shown fresh, and it gets the mark with reason PlanChanged and a Warning Event, so the merge is recorded,
 // the target lock goes, and the outcome is capped. A failed write of the start is returned wrapped the same way.
-// It is never taken as fresh. The decision reads only the recorded start and the executor's own clock.
+// It is never taken as fresh. The decision reads only the recorded start and the executor's own clock. The reads
+// run within half of what is left of ctx (mergeCheckContext), so a check that runs out of time still records
+// the start and lets the caller write, in every path.
 func (r *RemediationRequestReconciler) checkAtMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	if staleMark(rr) != nil {
 		return nil
 	}
-	err := freshness.Checker{Reader: r.reader()}.CheckAtMerge(ctx, rr)
+	checkCtx, cancel := r.mergeCheckContext(ctx)
+	err := freshness.Checker{Reader: r.reader()}.CheckAtMerge(checkCtx, rr)
+	cancel()
 	if err == nil {
 		return nil
 	}
@@ -121,6 +125,19 @@ func (r *RemediationRequestReconciler) checkAtMerge(ctx context.Context, rr *rem
 	logf.FromContext(ctx).Info("Found the plan of RemediationRequest stale at the merge",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "reason", staleErr.Reason)
 	return nil
+}
+
+// mergeCheckContext is the context of the reads of the check at the merge: it ends halfway to the deadline of ctx
+// (or after WriteTimeout when ctx has none), so a check that runs out of time leaves ctx the other half for the
+// writes that follow in every caller: the start of the wait (mergeCheckFailed), and the status write that records
+// the pull request or the merge. A check that always runs out of time is so bounded by the wait like any other
+// failure. A cancelled ctx cancels it too, and then nothing is written.
+func (r *RemediationRequestReconciler) mergeCheckContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	}
+	return context.WithTimeout(ctx, time.Until(deadline)/2)
 }
 
 // mergeCheckFailed handles a check at the merge that did not answer (checkAtMerge): it records the start of the

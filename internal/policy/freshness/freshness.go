@@ -580,7 +580,7 @@ func (c Checker) CheckAtMerge(ctx context.Context, rr *v1alpha1.RemediationReque
 	if err != nil {
 		return err
 	}
-	live, err := c.readTarget(ctx, ref)
+	live, err := c.readTargetOf(ctx, ref, false)
 	if err != nil {
 		return err
 	}
@@ -602,8 +602,17 @@ func (c Checker) CheckAtMerge(ctx context.Context, rr *v1alpha1.RemediationReque
 	return nil
 }
 
-// readTarget reads the live target straight from the API server.
+// readTarget reads the live target straight from the API server, for the periodic check: a kind the API server
+// does not serve (a NoMatchError, its CRD deleted) counts as a target that no longer exists.
 func (c Checker) readTarget(ctx context.Context, ref v1alpha1.ObjectRef) (*unstructured.Unstructured, error) {
+	return c.readTargetOf(ctx, ref, true)
+}
+
+// readTargetOf is readTarget; with noMatchStale false, for the check at the merge, a NoMatchError is no verdict
+// and is returned for a retry, which the wait for the merge bounds (ADR-0041): only a clean NotFound says the
+// target is gone.
+func (c Checker) readTargetOf(ctx context.Context, ref v1alpha1.ObjectRef, noMatchStale bool) (
+	*unstructured.Unstructured, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target apiVersion: %w", err)
@@ -611,11 +620,9 @@ func (c Checker) readTarget(ctx context.Context, ref v1alpha1.ObjectRef) (*unstr
 	live := &unstructured.Unstructured{}
 	live.SetGroupVersionKind(gv.WithKind(ref.Kind))
 	switch err := c.Reader.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, live); {
-	case apierrors.IsNotFound(err):
+	case apierrors.IsNotFound(err) || noMatchStale && meta.IsNoMatchError(err):
 		return nil, stale(ReasonTargetChanged, "%s %s/%s no longer exists", ref.Kind, ref.Namespace, ref.Name)
 	case err != nil:
-		// A NoMatchError (discovery or the REST mapper did not answer for the kind) is not a verdict: only a clean
-		// NotFound says the target is gone, and anything else is retried.
 		return nil, fmt.Errorf("get %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)
 	}
 	return live, nil

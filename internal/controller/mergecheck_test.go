@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -127,5 +128,31 @@ func TestRecordHandoffMergedRetriesAFailedCheck(t *testing.T) {
 	}
 	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPlanFresh); c != nil {
 		t.Fatalf("PlanFresh = %+v after a failed read, want none", c)
+	}
+}
+
+// A check at the merge that runs out of time right after a handoff still leaves time for the writes: the start
+// of the wait is recorded, so the wait bounds a check that always runs out of time, and the takeover is recorded.
+func TestRecordHandoffMergedBoundsACheckThatRunsOutOfTime(t *testing.T) {
+	r, g, p, rr, cr, head := handoffAppendedWorld(t, nil)
+	r.APIReader = blockingPolicyReader{Reader: r.APIReader, block: func() bool { return true }}
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := g.FindChangeRequest(context.Background(), cr.HeadBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := r.recordHandoff(ctx, rr, p, merged, head); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.MergeCommitAwaitedSince == nil {
+		t.Fatal("the start of the wait was not recorded: a check that always runs out of time is not bounded")
+	}
+	if rr.Status.Phase != api.PhasePRCreated || rr.Status.MergeReceipt != nil {
+		t.Fatalf("phase %s, receipt %v, want the takeover recorded without the merge", rr.Status.Phase,
+			rr.Status.MergeReceipt)
 	}
 }

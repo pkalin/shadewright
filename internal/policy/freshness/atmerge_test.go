@@ -126,7 +126,7 @@ func TestCheckAtMergeFailClosed(t *testing.T) {
 			}
 		}
 	}
-	isTarget := func(o client.Object) bool { return o.GetObjectKind().GroupVersionKind().Kind == "Deployment" }
+	isTarget := func(o client.Object) bool { return o.GetObjectKind().GroupVersionKind().Kind == targetKind }
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	cases := map[string]func(w *world){
@@ -160,4 +160,28 @@ func TestCheckAtMergeFailClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A target kind the API server does not serve (its CRD deleted) is retried at the merge, bounded by the wait for
+// the merge, and stays a stale target in the periodic check, which runs as long as the pull request is open and
+// would otherwise retry with no end.
+func TestTargetKindNotServed(t *testing.T) {
+	noMatch := func(w *world) {
+		w.getErr = func(_ client.ObjectKey, o client.Object) error {
+			if gvk := o.GetObjectKind().GroupVersionKind(); gvk.Kind == targetKind {
+				return &meta.NoKindMatchError{GroupKind: gvk.GroupKind(), SearchedVersions: []string{gvk.Version}}
+			}
+			return nil
+		}
+	}
+	t.Run("periodic check", func(t *testing.T) {
+		w := newWorld(t)
+		noMatch(w)
+		wantStale(t, w.fresh(t), freshness.ReasonTargetChanged)
+	})
+	t.Run("check at the merge", func(t *testing.T) {
+		w := mergedWorld(t)
+		noMatch(w)
+		wantRetry(t, w.atMerge(t))
+	})
 }

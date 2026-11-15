@@ -190,6 +190,38 @@ func (g *Git) CreateCheckRun(ctx context.Context, head string, run providers.Che
 	return g.after("CreateCheckRun")
 }
 
+// ReviewCheckRun returns the status of the latest check run named providers.CheckRunName created on head through
+// CreateCheckRun; runs added with AddForeignCheckRun are never counted.
+func (g *Git) ReviewCheckRun(ctx context.Context, head string) (providers.CheckRunStatus, bool, error) {
+	if err := g.before("ReviewCheckRun"); err != nil {
+		return "", false, err
+	}
+	if !providers.IsObjectID(head) {
+		return "", false, fmt.Errorf("commit is not a full object ID: %w", providers.ErrInvalidCommit)
+	}
+	g.mu.Lock()
+	var status providers.CheckRunStatus
+	found := false
+	for _, run := range g.checkRuns[head] {
+		if run.Name == providers.CheckRunName {
+			status, found = run.Status, true
+		}
+	}
+	g.mu.Unlock()
+	return status, found, g.after("ReviewCheckRun")
+}
+
+// AddForeignCheckRun adds a check run on head that another source created, such as another App posting a run of
+// the same name. ReviewCheckRun never counts it.
+func (g *Git) AddForeignCheckRun(head string, run providers.CheckRun) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.foreignRuns == nil {
+		g.foreignRuns = map[string][]providers.CheckRun{}
+	}
+	g.foreignRuns[head] = append(g.foreignRuns[head], run)
+}
+
 // CheckRuns returns a copy of the check runs created on a commit, oldest first.
 func (g *Git) CheckRuns(head string) []providers.CheckRun {
 	g.mu.Lock()

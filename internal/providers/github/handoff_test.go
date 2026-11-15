@@ -18,8 +18,10 @@ package github
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -409,5 +411,99 @@ func TestCreateCheckRunRefusesBadInput(t *testing.T) {
 		if err := h.p.CreateCheckRun(ctx, c.head, c.run); err == nil {
 			t.Errorf("%s was allowed", name)
 		}
+	}
+}
+
+// checkRunsQuery is the query of ReviewCheckRun's read of page page: the App's own runs of the one name.
+func checkRunsQuery(page int) string {
+	return "app_id=4242&check_name=shadewright%2Freview&filter=all&page=" + strconv.Itoa(page) + "&per_page=100"
+}
+
+// checkRunsPage is one answer of the check runs of a commit.
+func checkRunsPage(page, total int, runs ...string) step {
+	s := get("/commits/"+shaCommit+"/check-runs", "")
+	s.query = checkRunsQuery(page)
+	s.raw = `{"total_count":` + strconv.Itoa(total) + `,"check_runs":[` + strings.Join(runs, ",") + `]}`
+	return s
+}
+
+// checkRunJSONOf is a check run of the App app on shaCommit.
+func checkRunJSONOf(id, app int64, name, status, conclusion string) string {
+	c := jsonNull
+	if conclusion != "" {
+		c = `"` + conclusion + `"`
+	}
+	return fmt.Sprintf(`{"id":%d,"name":%q,"head_sha":%q,"status":%q,"conclusion":%s,"app":{"id":%d}}`,
+		id, name, shaCommit, status, c, app)
+}
+
+// The latest run is the App's own run of the name with the highest ID, whatever order GitHub lists them in; a run
+// of the same name another App posted, with a higher ID, is never counted (#748).
+func TestReviewCheckRunReadsTheAppsOwnLatestRun(t *testing.T) {
+	h := newHarness(t, checkRunsPage(1, 4,
+		checkRunJSONOf(7, testAppID, providers.CheckRunName, "completed", "success"),
+		checkRunJSONOf(9, testAppID, providers.CheckRunName, "in_progress", ""),
+		checkRunJSONOf(11, 99, providers.CheckRunName, "completed", "success"),
+		checkRunJSONOf(12, testAppID, "ci/test", "completed", "success")))
+	status, found, err := h.p.ReviewCheckRun(ctx, shaCommit)
+	if err != nil || !found || status != providers.CheckRunInProgress {
+		t.Fatalf("got %q, %v, %v; want the App's run 9 in progress", status, found, err)
+	}
+}
+
+func TestReviewCheckRunConclusions(t *testing.T) {
+	for conclusion, want := range map[string]providers.CheckRunStatus{"success": providers.CheckRunSuccess,
+		"neutral": providers.CheckRunSuccess, "skipped": providers.CheckRunSuccess, "failure": providers.CheckRunFailure,
+		"cancelled": providers.CheckRunFailure, "timed_out": providers.CheckRunFailure} {
+		h := newHarness(t, checkRunsPage(1, 1, checkRunJSONOf(3, testAppID, providers.CheckRunName, "completed", conclusion)))
+		status, found, err := h.p.ReviewCheckRun(ctx, shaCommit)
+		if err != nil || !found || status != want {
+			t.Errorf("%s: got %q, %v, %v; want %q", conclusion, status, found, err, want)
+		}
+	}
+}
+
+// No run of the App on the commit is not found, also when another App posted one of the same name.
+func TestReviewCheckRunNone(t *testing.T) {
+	h := newHarness(t, checkRunsPage(1, 1, checkRunJSONOf(3, 99, providers.CheckRunName, "completed", "success")))
+	status, found, err := h.p.ReviewCheckRun(ctx, shaCommit)
+	if err != nil || found {
+		t.Fatalf("got %q, %v, %v; want none", status, found, err)
+	}
+}
+
+// A second page is read when the first does not hold all runs; more runs than the pages read is ErrTooLarge.
+func TestReviewCheckRunPages(t *testing.T) {
+	h := newHarness(t, checkRunsPage(1, 2, checkRunJSONOf(3, testAppID, providers.CheckRunName, "in_progress", "")),
+		checkRunsPage(2, 2, checkRunJSONOf(4, testAppID, providers.CheckRunName, "completed", "success")))
+	if status, _, err := h.p.ReviewCheckRun(ctx, shaCommit); err != nil || status != providers.CheckRunSuccess {
+		t.Fatalf("got %q, %v", status, err)
+	}
+	run := checkRunJSONOf(3, testAppID, providers.CheckRunName, "in_progress", "")
+	h = newHarness(t, checkRunsPage(1, 1000, run), checkRunsPage(2, 1000, run), checkRunsPage(3, 1000, run))
+	if _, _, err := h.p.ReviewCheckRun(ctx, shaCommit); !providers.IsTooLarge(err) {
+		t.Fatalf("got %v, want ErrTooLarge", err)
+	}
+}
+
+// A failed read is an error, never "no run": a refusal, a broken answer and bad input.
+func TestReviewCheckRunFailures(t *testing.T) {
+	forbidden := get("/commits/"+shaCommit+"/check-runs", fxForbidden)
+	forbidden.status, forbidden.query = http.StatusForbidden, checkRunsQuery(1)
+	h := newHarness(t, forbidden)
+	if _, found, err := h.p.ReviewCheckRun(ctx, shaCommit); !providers.IsForbidden(err) || found {
+		t.Fatalf("got %v, %v", found, err)
+	} else {
+		assertSafe(t, err)
+	}
+	empty := get("/commits/"+shaCommit+"/check-runs", "")
+	empty.query, empty.raw = checkRunsQuery(1), `{}`
+	h = newHarness(t, empty)
+	if _, found, err := h.p.ReviewCheckRun(ctx, shaCommit); err == nil || found {
+		t.Fatalf("an answer without a count was taken as no run: %v, %v", found, err)
+	}
+	h = newHarness(t)
+	if _, _, err := h.p.ReviewCheckRun(ctx, "main"); err == nil {
+		t.Fatal("a commit that is not a full SHA was read")
 	}
 }

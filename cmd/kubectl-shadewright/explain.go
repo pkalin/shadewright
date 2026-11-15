@@ -187,6 +187,7 @@ var troubleshootingSections = map[string][]string{
 	"ResolvedBeforeRollout":             {secAfterMerge},
 	"Restarted":                         {secAfterMerge},
 	"ReviewCheckRefused":                {secPullRequest},
+	"ReviewCheckStuck":                  {secPullRequest},
 	"ReviewListTooLong":                 {secPullRequest},
 	"RevisionMismatch":                  {secFlux},
 	"RolloutComplete":                   {secRollout},

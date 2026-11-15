@@ -352,4 +352,12 @@ type GitProvider interface {
 	// the caller records that it did; the latest run of a name on a commit is the one the host counts. It is a
 	// write.
 	CreateCheckRun(ctx context.Context, head string, run CheckRun) error
+
+	// ReviewCheckRun returns the status of the latest check run named CheckRunName on commit head, a full object
+	// ID, that this provider's own App created, and false when that App created none there. A run of that name
+	// from any other source (another App, a commit status) is never counted. A run the host shows completed with
+	// a conclusion the host counts as passing a required check (success, neutral, skipped) is CheckRunSuccess,
+	// any other completed one CheckRunFailure, and one not completed CheckRunInProgress. More runs than the
+	// implementation reads is ErrTooLarge. It is a read.
+	ReviewCheckRun(ctx context.Context, head string) (CheckRunStatus, bool, error)
 }

@@ -34,7 +34,7 @@ import (
 // write method added to the interface is gated by this test's rule until it is listed here on purpose.
 var gitReads = map[string]bool{"Capabilities": true, "ReadFile": true, "ListDir": true, "BranchHead": true,
 	"CheckBranch": true, "CheckMerged": true, opFind: true, "GetChangeRequest": true, "CheckChain": true, "Parents": true,
-	"CheckCommit": true, "ListChangeRequests": true}
+	"CheckCommit": true, "ListChangeRequests": true, "ReviewCheckRun": true}
 
 // TestGatedGitGatesEveryWrite calls every GitProvider method of a gated provider whose gate refuses, and checks
 // that each write asked the gate and never reached the host, and that no read asked it.
@@ -182,6 +182,10 @@ func (p *checkpointProbe) UpdateChangeRequest(ctx context.Context, _ int64, _, _
 
 func (p *checkpointProbe) CreateCheckRun(ctx context.Context, _ string, _ providers.CheckRun) error {
 	return p.probe(ctx, "CreateCheckRun")
+}
+
+func (p *checkpointProbe) ReviewCheckRun(ctx context.Context, _ string) (providers.CheckRunStatus, bool, error) {
+	return "", false, p.probe(ctx, "ReviewCheckRun")
 }
 
 // TestGatedGitPassesTheGateAsCheckpoint checks that every write of a gated provider gives the wrapped provider

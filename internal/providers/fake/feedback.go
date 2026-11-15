@@ -182,6 +182,18 @@ func (g *Git) AddReview(n int64, r providers.Feedback) {
 	g.fb.reviews[n] = append(g.fb.reviews[n], r)
 }
 
+// SetReviewState changes the state of review id of change request n, as the code host does when a review is
+// dismissed ("DISMISSED").
+func (g *Git) SetReviewState(n, id int64, state string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := range g.fb.reviews[n] {
+		if g.fb.reviews[n][i].ID == id {
+			g.fb.reviews[n][i].ReviewState = state
+		}
+	}
+}
+
 // ListReviews returns the reviews of change request n submitted at or after cur.Since, in the order they were
 // added, as one complete look.
 func (g *Git) ListReviews(ctx context.Context, n int64, cur providers.FeedbackCursor) (providers.FeedbackPage, error) {

@@ -433,12 +433,15 @@ type PullRequestStatus struct {
 	MergedAt *metav1.MicroTime `json:"mergedAt,omitempty"`
 
 	// reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
-	// gate), written only with reviewer hints on: InProgress once the executor created it on that head, Passed
-	// once it completed it with success after an approval of that head by someone who wrote no hint in the
-	// chain, Failed when the executor could not read every review of the pull request and completed it with
-	// failure (it fails closed; condition Approved False with reason ReviewListTooLong), Refused when the Git host
-	// refused to create or complete it for good (condition Approved then says so). It always names headSHA: a new
-	// head starts without it, so a state never outlives its head.
+	// gate), written only with reviewer hints on. On each caught-up look while the request waits for approval the
+	// executor reads the reviews and the App's own check run on headSHA, writes the Git host when it shows
+	// another state than the reviews call for, then records that state here (#748): InProgress while no approval
+	// of that head by someone who wrote no hint in the chain stands, Passed while one does, Failed when the
+	// executor could not read every review of the pull request and completed it with failure (it fails closed;
+	// condition Approved False with reason ReviewListTooLong; final on that head), Refused when the Git host
+	// refused for good to write it (condition Approved then says so and what the host shows; asked again after a
+	// backoff). It always names headSHA: a new head starts without it, so a state never outlives its head. Once a
+	// merge receipt exists it never changes.
 	// +optional
 	ReviewCheck *ReviewCheck `json:"reviewCheck,omitempty"`
 
@@ -896,6 +899,9 @@ type RemediationRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || (has(self.status) && has(self.status.mergeReceipt) && self.status.mergeReceipt == oldSelf.status.mergeReceipt)",message="status.mergeReceipt is set once and never changed"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA) && self.status.mergeReceipt.mergeCommitSHA == self.status.pullRequest.mergeCommitSHA)",message="status.mergeReceipt.mergeCommitSHA must equal status.pullRequest.mergeCommitSHA"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && self.status.mergeReceipt.pullRequest == self.status.pullRequest.number && self.status.mergeReceipt.headSHA == self.status.pullRequest.headSHA && has(self.status.pullRequest.mergedAt) && self.status.mergeReceipt.mergedAt == self.status.pullRequest.mergedAt)",message="status.mergeReceipt.pullRequest, headSHA and mergedAt must equal status.pullRequest.number, headSHA and mergedAt"
+// The check run shadewright/review is pinned with the merge: once a receipt exists, status.pullRequest.reviewCheck
+// is neither added, removed nor changed (#748).
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck) == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck) || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))",message="status.pullRequest.reviewCheck does not change once status.mergeReceipt exists"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)",message="status.mergeCommitAwaitedSince is set once and never changed"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))",message="status.mergeReceipt is set only in Merged or a phase after it"
 // WaitingForDelivery and Verifying are measured from the receipt (ADR-0030 section 2), and Verifying from the

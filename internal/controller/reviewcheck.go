@@ -48,18 +48,29 @@ import (
 //     what it accepted (pollHints), so an approver whose hint is already on the pull request is never counted.
 //     It completes the check with success once the latest review of someone who wrote no hint in the chain
 //     (every hint in status.hints, whatever became of it, compared by user ID) approves the recorded head.
+//   - The check follows what the Git host shows, not what was recorded (#748). On each caught-up look while the
+//     request waits for approval the gate decides what the check should show from the reviews (success while an
+//     approval it counts stands, in progress otherwise, failure on a list too long to read), reads the App's own
+//     latest run on the recorded head, writes the run when the host shows something else, and then records the
+//     state. The record is never a reason to skip that comparison.
 //   - A list of reviews too long to read in one gate (maxReviewLooks) completes the check with failure and is
 //     recorded as Failed, with condition Approved False and a Warning Event, both with reason
 //     ReviewListTooLong: the gate fails closed on that head, never passes on a list it did not read whole, and
 //     does not read the list again on that head.
-//   - A final refusal (InProgress, Passed or Failed) is recorded as Refused, with condition Approved False and a
-//     Warning Event, both with reason ReviewCheckRefused, so a pull request the required check blocks says why.
-//   - Recording InProgress or Passed on a later head sets condition Approved back to WaitingForReview when it
-//     still carries one of those two reasons, which were about an earlier head. Only a merge sets Approved True.
+//   - A final refusal of the Git host is recorded as Refused, with the count of refusals in a row and the time of
+//     the latest on the executor's clock, condition Approved False and a Warning Event per refusal, both with
+//     reason ReviewCheckRefused and a message that says what the host shows. The host is asked again after a
+//     backoff from that record (refusalBackoff), and a look that finds the host already showing what the
+//     reviews call for records that state without a write.
+//   - Recording InProgress or Passed sets condition Approved back to WaitingForReview when it still carries one
+//     of those two reasons. Only a merge sets Approved True.
+//   - A failed read of the reviews or of the check run changes nothing and is retried on a later look; looks that
+//     fail reviewCheckStuckLooks times in a row on one head record one Warning Event (watchReviewCheck).
 //
-// A restart between a write to the Git host and the status write creates the check again on the same head: a
-// check created in progress after one that passed makes the head wait again until the gate passes it again,
-// which it does on the same look. The check never passes more than the gate decided.
+// A restart, or a failed status write, between a write to the Git host and the status write leaves the record
+// behind the host in either direction; the next look compares the host with the reviews again and writes only
+// what differs. Reconciles of one request do not overlap, and a status write that lost a race to another writer
+// is a conflict retried on the next look. The check never passes more than the gate decided.
 
 // The text of the check run while it waits.
 const (
@@ -76,6 +87,8 @@ const (
 	maxReviewLooks = 4
 	// reviewApproved is the state of an approving review.
 	reviewApproved = "APPROVED"
+	// reviewCommented is the state of a review that only comments, such as a reply in a review thread.
+	reviewCommented = "COMMENTED"
 	// checkRunPassedTitle and checkRunPassedSummary are the text of the completed check.
 	checkRunPassedTitle   = "Approved"
 	checkRunPassedSummary = "Someone who wrote no hint in this pull request approved its latest head."
@@ -96,20 +109,64 @@ const (
 // requires the check blocks the merge until a person acts.
 const ReasonReviewCheckRefused = "ReviewCheckRefused"
 
+// reviewCheckStuckLooks is how many looks in a row whose review check failed raise the one Warning Event with
+// reason ReviewCheckStuck.
+const reviewCheckStuckLooks = 10
+
+// ReasonReviewCheckStuck is the reason of the Warning Event recorded once when the review check of a head failed
+// on reviewCheckStuckLooks looks in a row: a read or write of the Git host, or a status write, that keeps failing
+// leaves the check as it was, which may be a pass that no longer rests on an approval.
+const ReasonReviewCheckStuck = "ReviewCheckStuck"
+
+// stuckLooks counts, for one request and head, the looks in a row whose review check failed.
+type stuckLooks struct {
+	uid   types.UID
+	head  string
+	looks int
+}
+
 // watchReviewCheck runs reviewCheck after a look at the pull request found it open with the recorded head;
 // caughtUp says whether that look read the comments to the end and stored them. A failure is logged and
-// changes nothing: the next look tries again. A cancelled reconcile is not logged.
+// changes nothing: the next look tries again. A cancelled reconcile is not logged. After reviewCheckStuckLooks
+// failed looks in a row on one head, not counting looks while writes are paused, it records one Warning Event
+// with reason ReviewCheckStuck; a look that goes through starts the count again. The count is in memory only:
+// after a restart it starts again, so the Event may come once more.
 func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	caughtUp bool) {
-	if err := r.reviewCheck(ctx, rr, caughtUp); err != nil && ctx.Err() == nil {
-		logf.FromContext(ctx).Info("Could not update the review check of RemediationRequest",
-			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+	err := r.reviewCheck(ctx, rr, caughtUp)
+	if ctx.Err() != nil {
+		return
+	}
+	key := client.ObjectKeyFromObject(rr)
+	if err == nil || errors.Is(err, freshness.ErrPaused) || rr.Status.PullRequest == nil {
+		if err == nil {
+			r.reviewCheckFailures.Delete(key)
+		}
+		return
+	}
+	logf.FromContext(ctx).Info("Could not update the review check of RemediationRequest",
+		"remediationRequest", key, "error", err.Error())
+	head := rr.Status.PullRequest.HeadSHA
+	n := stuckLooks{uid: rr.UID, head: head, looks: 1}
+	if v, ok := r.reviewCheckFailures.Load(key); ok {
+		if old, ok := v.(stuckLooks); ok && old.uid == rr.UID && old.head == head {
+			n.looks = old.looks + 1
+		}
+	}
+	r.reviewCheckFailures.Store(key, n)
+	if n.looks == reviewCheckStuckLooks && r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonReviewCheckStuck, fmt.Sprintf("The review check "+
+			"shadewright/review on the pull request's head could not be brought in line with the reviews on %d "+
+			"looks in a row; it keeps what the Git host shows, which may be a pass that no longer rests on an "+
+			"approval. The executor's log says why", reviewCheckStuckLooks))
 	}
 }
 
-// reviewCheck creates the check run in progress on a recorded head that has no state for it, and runs the merge
-// gate on one in progress while the request waits for review, only when caughtUp. A request whose handoff
-// intent stands leaves both to its replacement. rr is updated in place by each status write that went through.
+// reviewCheck makes the check run on the recorded head show the state it should have, and records that state.
+// On a head with no state for it, the state is InProgress. While the request waits for review and the look caught
+// up (caughtUp), the merge gate decides it from the reviews (reviewGate) on every look, whatever is recorded,
+// unless the head's check Failed, which is final. A request whose handoff intent stands leaves both to its
+// replacement. rr is updated in place by each status write that went through.
 func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	caughtUp bool) error {
 	pr := rr.Status.PullRequest
@@ -120,7 +177,7 @@ func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *reme
 	rc := pr.ReviewCheck
 	current := rc != nil && rc.Head == pr.HeadSHA
 	gate := caughtUp && rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval
-	if current && (rc.State != remediationv1alpha1.ReviewCheckInProgress || !gate) {
+	if current && (!gate || rc.State == remediationv1alpha1.ReviewCheckFailed) {
 		return nil
 	}
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
@@ -129,35 +186,16 @@ func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *reme
 	if err != nil {
 		return err
 	}
-	if !current {
-		err := git.CreateCheckRun(stepCtx, pr.HeadSHA, providers.CheckRun{Name: providers.CheckRunName,
-			Status: providers.CheckRunInProgress, Title: checkRunTitle, Summary: checkRunSummary})
-		step, err := stepOutcome(logf.FromContext(ctx), err, "create the check run")
-		switch {
-		case err != nil:
-			return freshness.WrapProvider("create the check run", err)
-		case step == "":
-			// Closed or merged meanwhile: the next look at the pull request decides.
-			return nil
-		}
-		state := remediationv1alpha1.ReviewCheckInProgress
-		if step == remediationv1alpha1.HandoffStepRefused {
-			state = remediationv1alpha1.ReviewCheckRefused
-		}
-		if err := r.recordReviewCheck(stepCtx, rr, state); err != nil {
-			return err
-		}
-		if state != remediationv1alpha1.ReviewCheckInProgress || !gate {
-			return nil
-		}
+	if !gate {
+		return r.syncReviewCheck(stepCtx, git, rr, providers.CheckRunInProgress)
 	}
 	return r.reviewGate(stepCtx, git, rr)
 }
 
-// recordReviewCheck records state for the recorded head in rr's status, through the kill switch; Refused and
-// Failed also set condition Approved False with their reason (reviewCheckWarning) and, once written, record a
-// Warning Event; the other states set it back to WaitingForReview when it still has such a reason from an
-// earlier head. rr is changed only when the write went through.
+// recordReviewCheck records state for the recorded head in rr's status, through the kill switch, without a
+// refusal; Failed also sets condition Approved False with reason ReviewListTooLong and, once written, records a
+// Warning Event; InProgress and Passed set it back to WaitingForReview when it still carries a reason of a check
+// that did not pass (staleReviewCheckWarning). rr is changed only when the write went through.
 func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	state remediationv1alpha1.ReviewCheckState) error {
 	if err := r.writeAllowed(ctx); err != nil {
@@ -169,15 +207,9 @@ func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr
 	reason, message := reviewCheckWarning(state)
 	switch {
 	case reason != "":
-		meta.SetStatusCondition(&upd.Status.Conditions, metav1.Condition{
-			Type:               remediationv1alpha1.ConditionApproved,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: upd.Generation,
-		})
+		setApprovedFalse(upd, reason, message)
 	case staleReviewCheckWarning(upd):
-		// The reason is about an earlier head: this one waits for review again (#606).
+		// The reason was about an earlier head or a refusal that the Git host's answer now ends (#606, #748).
 		setWaitingForReview(upd)
 	}
 	if err := r.Status().Update(ctx, upd); err != nil {
@@ -198,15 +230,28 @@ func (r *RemediationRequestReconciler) recordReviewCheck(ctx context.Context, rr
 	return nil
 }
 
-// reviewGate is the merge gate of a request waiting for review whose check run on the recorded head is in
-// progress: it reads every review of the pull request and, when the latest review of a person who wrote no hint
-// in the chain (compared by user ID) approves the recorded head, completes the check run with success and
-// records it Passed. An approval of an earlier head never counts. An approval of the head by a hint author does
-// not count either, and gets a comment saying why, once per review (by its marker); this process asks for it
-// once per review, not on every look, as each ask reads the comments for the marker, and not again after a
-// final refusal. The comments get half of the time left, so one that runs out of time never keeps a passing
-// gate from completing the check; the rest are asked on a later look. A list it cannot read whole completes
-// the check with failure and records it Failed (fail closed), so that head is not read again.
+// setApprovedFalse sets condition Approved of rr False with reason and message.
+func setApprovedFalse(rr *remediationv1alpha1.RemediationRequest, reason, message string) {
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionApproved,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: rr.Generation,
+	})
+}
+
+// reviewGate is the merge gate of a request waiting for review. It reads every review of the pull request and
+// decides the state the check run on the recorded head should have: success when the latest review that is not a
+// plain comment of a person who wrote no hint in the chain (compared by user ID) approves the recorded head, in
+// progress otherwise, and failure when it cannot read the list whole (fail closed). A comment review is skipped
+// as GitHub's own count of approvals skips it, so a reply in a review thread never takes an approval back. An
+// approval of an earlier head never counts. An approval of the head by a hint author does not count either, and
+// gets a comment saying why, once per review (by its marker); this process asks for it once per review, not on
+// every look, as each ask reads the comments for the marker, and not again after a final refusal. The comments get
+// half of the time left, so one that runs out of time never keeps a passing gate from writing the check; the
+// rest are asked on a later look. syncReviewCheck then makes the Git host show that state and records it. A failed
+// read returns an error and changes nothing; the next look reads again.
 func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	fs, ok := feedbackOf(git)
@@ -224,7 +269,8 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 			return freshness.WrapProvider("list the reviews of the pull request", err)
 		}
 		for _, it := range page.Items {
-			if it.Kind != providers.FeedbackReview || it.Author.Kind != providers.AuthorPerson {
+			if it.Kind != providers.FeedbackReview || it.Author.Kind != providers.AuthorPerson ||
+				it.ReviewState == reviewCommented {
 				continue
 			}
 			if _, seen := latest[it.Author.ID]; !seen {
@@ -240,7 +286,7 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 		cur = page.Next
 	}
 	if !complete {
-		return r.completeReviewCheck(ctx, git, rr, remediationv1alpha1.ReviewCheckFailed)
+		return r.syncReviewCheck(ctx, git, rr, providers.CheckRunFailure)
 	}
 	authors := map[int64]bool{}
 	for _, h := range rr.Status.Hints {
@@ -262,10 +308,157 @@ func (r *RemediationRequestReconciler) reviewGate(ctx context.Context, git provi
 	if err := r.commentSteered(ctx, git, rr, steered); err != nil {
 		return err
 	}
-	if !passed {
+	if passed {
+		return r.syncReviewCheck(ctx, git, rr, providers.CheckRunSuccess)
+	}
+	return r.syncReviewCheck(ctx, git, rr, providers.CheckRunInProgress)
+}
+
+// syncReviewCheck makes the Git host show want for the check run on the recorded head and records the matching
+// state (#748). It reads the App's own run there first. When the host already shows want, it only records the
+// state, so a status write lost after an earlier host write is made good without another one. Otherwise it writes
+// the host and then records the state: the order on a restart between the two does not matter, as the next look
+// compares again. A Refused check whose backoff has not run out is not written again (refusalBackoff); a final
+// refusal is recorded Refused (recordRefusal). A failed read or write changes nothing and is returned for a retry;
+// a pull request closed or merged meanwhile (a conflict) records nothing. The provider passes the kill switch
+// right before the host write, so nothing is written to the host while writes are not allowed.
+func (r *RemediationRequestReconciler) syncReviewCheck(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, want providers.CheckRunStatus) error {
+	pr := rr.Status.PullRequest
+	state := reviewCheckStateOf(want)
+	shows, found, err := git.ReviewCheckRun(ctx, pr.HeadSHA)
+	if err != nil {
+		return freshness.WrapProvider("read the check run", err)
+	}
+	if found && shows == want {
+		return r.mirrorReviewCheck(ctx, rr, state)
+	}
+	rc := pr.ReviewCheck
+	if rc != nil && rc.Head == pr.HeadSHA && rc.State == remediationv1alpha1.ReviewCheckRefused {
+		if wait := refusalBackoff(rc, r.now()); wait > 0 {
+			return nil
+		}
+	}
+	err = git.CreateCheckRun(ctx, pr.HeadSHA, checkRunFor(want))
+	_, _, final := refusal(err)
+	switch {
+	case err == nil:
+		return r.recordReviewCheck(ctx, rr, state)
+	case providers.IsConflict(err):
+		// Closed or merged meanwhile: the next look at the pull request decides.
+		return nil
+	case final:
+		return r.recordRefusal(ctx, rr, want, shows, found)
+	}
+	return freshness.WrapProvider("write the check run", err)
+}
+
+// mirrorReviewCheck records state when rr does not record it for the recorded head yet, or records it Refused.
+func (r *RemediationRequestReconciler) mirrorReviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	state remediationv1alpha1.ReviewCheckState) error {
+	pr := rr.Status.PullRequest
+	if rc := pr.ReviewCheck; rc != nil && rc.Head == pr.HeadSHA && rc.State == state {
 		return nil
 	}
-	return r.completeReviewCheck(ctx, git, rr, remediationv1alpha1.ReviewCheckPassed)
+	return r.recordReviewCheck(ctx, rr, state)
+}
+
+// reviewCheckStateOf is the state recorded for a check run the Git host shows with status s.
+func reviewCheckStateOf(s providers.CheckRunStatus) remediationv1alpha1.ReviewCheckState {
+	switch s {
+	case providers.CheckRunSuccess:
+		return remediationv1alpha1.ReviewCheckPassed
+	case providers.CheckRunFailure:
+		return remediationv1alpha1.ReviewCheckFailed
+	}
+	return remediationv1alpha1.ReviewCheckInProgress
+}
+
+// checkRunFor is the check run with status s and its fixed text.
+func checkRunFor(s providers.CheckRunStatus) providers.CheckRun {
+	switch s {
+	case providers.CheckRunSuccess:
+		return providers.CheckRun{Name: providers.CheckRunName, Status: s, Title: checkRunPassedTitle,
+			Summary: checkRunPassedSummary}
+	case providers.CheckRunFailure:
+		return providers.CheckRun{Name: providers.CheckRunName, Status: s, Title: checkRunFailedTitle,
+			Summary: checkRunFailedSummary}
+	}
+	return providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunInProgress,
+		Title: checkRunTitle, Summary: checkRunSummary}
+}
+
+const (
+	// refusalRetryBase is the wait after the first final refusal of the check run on a head before the executor
+	// asks the Git host again; each further refusal in a row doubles it, up to refusalRetryMax.
+	refusalRetryBase = time.Minute
+	refusalRetryMax  = time.Hour
+	// maxRecordedRefusals bounds ReviewCheck.Refusals (its schema maximum).
+	maxRecordedRefusals = 1000
+)
+
+// refusalBackoff returns how long a Refused check run rc still waits before the Git host is asked again, from
+// the recorded refusals and refusedAt, both written by the executor on its own clock, and now on that clock. A
+// check without them (recorded before they existed) or with a refusedAt after now (a clock that went back, a
+// status written by hand) waits no more.
+func refusalBackoff(rc *remediationv1alpha1.ReviewCheck, now time.Time) time.Duration {
+	if rc.RefusedAt == nil || rc.Refusals < 1 || rc.RefusedAt.After(now) {
+		return 0
+	}
+	wait := refusalRetryMax
+	if n := rc.Refusals - 1; n < 6 {
+		wait = min(refusalRetryBase<<n, refusalRetryMax)
+	}
+	return max(rc.RefusedAt.Add(wait).Sub(now), 0)
+}
+
+// recordRefusal records that the Git host refused for good to make the check run on the recorded head show want:
+// state Refused with one more refusal and refusedAt now, condition Approved False with reason ReviewCheckRefused
+// whose message says what the host shows, and, once written, one Warning Event per refusal. The backoff of
+// refusalBackoff runs from it. rr is changed only when the write went through.
+func (r *RemediationRequestReconciler) recordRefusal(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	want, shows providers.CheckRunStatus, found bool) error {
+	if err := r.writeAllowed(ctx); err != nil {
+		return err
+	}
+	upd := rr.DeepCopy()
+	pr := upd.Status.PullRequest
+	refusals := int32(1)
+	if rc := pr.ReviewCheck; rc != nil && rc.Head == pr.HeadSHA && rc.State == remediationv1alpha1.ReviewCheckRefused {
+		refusals = min(rc.Refusals+1, maxRecordedRefusals)
+	}
+	pr.ReviewCheck = &remediationv1alpha1.ReviewCheck{Head: pr.HeadSHA, State: remediationv1alpha1.ReviewCheckRefused,
+		Refusals: refusals, RefusedAt: &metav1.Time{Time: r.now()}}
+	message := refusalMessage(want, shows, found)
+	setApprovedFalse(upd, ReasonReviewCheckRefused, message)
+	if err := r.Status().Update(ctx, upd); err != nil {
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	upd.DeepCopyInto(rr)
+	logf.FromContext(ctx).Info("Recorded the review check of RemediationRequest as refused by the Git host",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA,
+		"want", want, "refusals", refusals, "reason", ReasonReviewCheckRefused)
+	if r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonReviewCheckRefused, message)
+	}
+	return nil
+}
+
+// refusalMessage is the fixed text of a refusal to make the check run show want while the Git host shows shows
+// (found false: no run of the App).
+func refusalMessage(want, shows providers.CheckRunStatus, found bool) string {
+	words := map[providers.CheckRunStatus]string{providers.CheckRunInProgress: "in progress",
+		providers.CheckRunSuccess: "success", providers.CheckRunFailure: "failure"}
+	now := "no check run shadewright/review from Shadewright"
+	if found {
+		now = "the check run shadewright/review as " + words[shows]
+	}
+	m := "The Git host refused for good to set the check run shadewright/review on the pull request's head to " +
+		words[want] + "; it shows " + now + " there. "
+	if found && shows == providers.CheckRunSuccess {
+		m += "It no longer rests on an approval the merge gate counts, so a person must not merge on it. "
+	}
+	return m + "Shadewright asks again after a backoff; check the App's checks permission and the rules"
 }
 
 // commentSteered posts the comment saying why an approval does not count on each review in steered that this
@@ -313,53 +506,26 @@ func (r *RemediationRequestReconciler) commentSteered(ctx context.Context, git p
 	return nil
 }
 
-// completeReviewCheck completes the check run on the recorded head as state (Passed with success, Failed with
-// failure) and records it; a final refusal is recorded Refused, and a pull request closed or merged meanwhile
-// (a conflict) records nothing.
-func (r *RemediationRequestReconciler) completeReviewCheck(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, state remediationv1alpha1.ReviewCheckState) error {
-	run := providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunSuccess,
-		Title: checkRunPassedTitle, Summary: checkRunPassedSummary}
-	if state == remediationv1alpha1.ReviewCheckFailed {
-		run = providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure,
-			Title: checkRunFailedTitle, Summary: checkRunFailedSummary}
-	}
-	err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run)
-	step, err := stepOutcome(logf.FromContext(ctx), err, "complete the check run")
-	switch {
-	case err != nil:
-		return freshness.WrapProvider("complete the check run", err)
-	case step == "":
-		return nil
-	case step == remediationv1alpha1.HandoffStepRefused:
-		state = remediationv1alpha1.ReviewCheckRefused
-	}
-	return r.recordReviewCheck(ctx, rr, state)
-}
-
 // ReasonReviewListTooLong is the reason of condition Approved (False) and of the Warning Event when the reviews
 // of a pull request were too many for the merge gate to read: it failed the check run on the head, so a ruleset
 // that requires it blocks the merge until a person acts.
 const ReasonReviewListTooLong = "ReviewListTooLong"
 
 // reviewCheckWarning returns the reason and fixed message of condition Approved (False) and of the Warning Event
-// for a state of the check run that does not pass, or "" for one that needs neither.
+// for a recorded state of the check run that does not pass, or "" for one that needs neither. Refused has its
+// own, which says what the Git host shows (recordRefusal).
 func reviewCheckWarning(state remediationv1alpha1.ReviewCheckState) (reason, message string) {
-	switch state {
-	case remediationv1alpha1.ReviewCheckRefused:
-		return ReasonReviewCheckRefused, "The Git host refused the check run shadewright/review on the pull " +
-			"request's head for good; a ruleset that requires it blocks the merge until a person acts (the App's " +
-			"checks permission, a rule)"
-	case remediationv1alpha1.ReviewCheckFailed:
+	if state == remediationv1alpha1.ReviewCheckFailed {
 		return ReasonReviewListTooLong, "The pull request has more reviews than the merge gate reads, so the " +
 			"check run shadewright/review failed on this head; a person decides the merge"
 	}
 	return "", ""
 }
 
-// staleReviewCheckWarning reports whether condition Approved of rr carries a reason of reviewCheckWarning. Called
-// when a state that needs none (InProgress, Passed) is recorded: the reason was set on an earlier head, as a
-// state on one head moves only from InProgress, so it no longer says why this head is blocked.
+// staleReviewCheckWarning reports whether condition Approved of rr carries ReasonReviewCheckRefused or
+// ReasonReviewListTooLong. Called when a state that needs neither (InProgress, Passed) is recorded: the reason was
+// set on an earlier head (Failed is final on its head), or by a refusal on this head that the Git host's answer
+// now ends (#748). Either way it no longer says why this head is blocked.
 func staleReviewCheckWarning(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
 	return c != nil && (c.Reason == ReasonReviewCheckRefused || c.Reason == ReasonReviewListTooLong)

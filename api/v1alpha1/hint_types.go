@@ -295,12 +295,16 @@ const (
 	HandoffStepRefused HandoffStep = "Refused"
 )
 
-// ReviewCheckState is how far the check run shadewright/review of a head has come (ADR-0028 section 5).
-// InProgress: created, in progress, waiting for an approval of the head by someone who wrote no hint in the
-// chain. Passed: completed with conclusion success after such an approval. Failed: completed with conclusion
-// failure because the merge gate could not read every review of the pull request, so it fails closed on this
-// head and a person decides the merge. Refused: the Git host refused to create or complete it for good, so the
-// required check does not pass on this head and the pull request cannot merge until a person acts.
+// ReviewCheckState is the state of the check run shadewright/review of a head (ADR-0028 section 5), as the
+// executor last made the Git host show it. The merge gate decides the state the check should have from the
+// reviews and compares it with the run the Git host shows on each caught-up look while the request waits for
+// approval (#748), so a state is never a reason to skip that comparison. InProgress: in progress, waiting for an
+// approval of the head by someone who wrote no hint in the chain. Passed: completed with conclusion success while
+// such an approval stands; it goes back to InProgress when none stands any more. Failed: completed with conclusion
+// failure because the merge gate could not read every review of the pull request, so it fails closed on this head
+// and a person decides the merge; it is final on that head. Refused: the Git host refused for good to write the
+// check run the gate wanted (a missing App permission, a rule); the executor asks again after a backoff, so a fixed
+// permission heals without a new head.
 // +kubebuilder:validation:Enum=InProgress;Passed;Failed;Refused
 type ReviewCheckState string
 
@@ -314,18 +318,31 @@ const (
 
 // ReviewCheck is the check run shadewright/review on one head of the pull request (ADR-0028 section 5),
 // pinned to that head: a state recorded for one head never counts for another. Every head the executor pushes
-// or adopts starts without one, and the executor creates the check in progress on it. On one head the state
-// moves only from InProgress to Passed, Failed or Refused.
-// +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || (oldSelf.state == 'InProgress' && self.state in ['Passed', 'Failed', 'Refused'])",message="on one head the check run moves only from InProgress to Passed, Failed or Refused"
+// or adopts starts without one, and the executor creates the check in progress on it. On one head a Failed check
+// never changes; every other state may follow any other, as the reviews and the Git host's answers change (#748).
+// +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || oldSelf.state != 'Failed'",message="on one head a Failed check run never changes"
+// +kubebuilder:validation:XValidation:rule="self.state == 'Refused' || (!has(self.refusals) && !has(self.refusedAt))",message="refusals and refusedAt are recorded only on a Refused check run"
 type ReviewCheck struct {
 	// head is the commit the check run is on, always the pull request's recorded head (headSHA).
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	// +required
 	Head string `json:"head"`
 
-	// state is how far the check run on head has come.
+	// state is the state of the check run on head.
 	// +required
 	State ReviewCheckState `json:"state"`
+
+	// refusals counts the final refusals in a row of the Git host to write the check run on head, while the state
+	// is Refused, up to 1000. The executor asks again after a backoff that doubles with each one, up to a bound.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +optional
+	Refusals int32 `json:"refusals,omitempty"`
+
+	// refusedAt is when the executor recorded the latest of those refusals, on its own clock; the backoff runs
+	// from it. A time after the executor's now is not trusted and the write is asked again.
+	// +optional
+	RefusedAt *metav1.Time `json:"refusedAt,omitempty"`
 }
 
 // IncomingHandoff is the replacement's side of a handoff: the predecessor it takes over and the hint it

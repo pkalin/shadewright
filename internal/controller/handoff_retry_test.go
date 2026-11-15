@@ -296,7 +296,7 @@ func TestReviewGateFailsTheCheckOnAListTooLong(t *testing.T) {
 	approve(g, cr.Number, 90, 3003, head)
 	var lists atomic.Int32
 	g.SetFail(func(op string) error {
-		if op == "ListReviews" {
+		if op == opListReviews {
 			lists.Add(1)
 		}
 		return nil

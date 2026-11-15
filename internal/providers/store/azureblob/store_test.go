@@ -301,8 +301,48 @@ func TestPutTimeout(t *testing.T) {
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("Put took %s, want it to end at the caller's deadline", d)
 	}
-	if n := len(s.requests()); n != 1 {
-		t.Errorf("%d requests, want 1", n)
+	// On a loaded runner the deadline can pass before the request reaches the server (#767): at most one.
+	if n := len(s.requests()); n > 1 {
+		t.Errorf("%d requests, want at most 1: no try after the deadline", n)
+	}
+}
+
+// lateAnswer is a transport whose answer arrives only once the request's context has ended, as net/http can
+// deliver one that raced the end of the context: over TLS the client's close_notify reaches the server before
+// the connection closes, and the server sends the empty 200 of a handler that gave up (#767).
+// The caller's context is ended by end, from inside the try, so the test needs no clock.
+type lateAnswer struct {
+	code int
+	end  context.CancelFunc
+}
+
+func (a lateAnswer) RoundTrip(r *http.Request) (*http.Response, error) {
+	a.end()
+	<-r.Context().Done()
+	return &http.Response{StatusCode: a.code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+}
+
+// A write whose context ended reports that end, whatever answer arrived after it.
+func TestPutAnswerAfterContextEnd(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusCreated, http.StatusConflict, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			u, err := url.Parse("https://account.blob.core.windows.net")
+			if err != nil {
+				t.Fatal(err)
+			}
+			red, err := redact.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			st := newStore(u.JoinPath(testContainer), &staticCredential{}, red, lateAnswer{code: code, end: cancel})
+			st.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+			_, err = st.Put(ctx, testRecord())
+			if !errors.Is(err, context.Canceled) || !errors.Is(err, errCanceled) {
+				t.Fatalf("Put = %v, want the caller's cancellation", err)
+			}
+		})
 	}
 }
 

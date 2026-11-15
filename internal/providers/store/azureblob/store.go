@@ -346,6 +346,12 @@ func (s *Store) try(ctx context.Context, blob *url.URL, data []byte) (time.Durat
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
 		_ = resp.Body.Close()
 	}()
+	if err := ctx.Err(); err != nil {
+		// net/http can return an answer that raced the end of the write's context, such as the empty 200 a
+		// server sends when its handler gives up on a client going away (#767). The context ended first: the
+		// write reports that, whatever the answer was.
+		return 0, ctxError(err)
+	}
 	return classify(resp, s.now())
 }
 

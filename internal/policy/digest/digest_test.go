@@ -20,6 +20,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"runtime"
 	"testing"
 	"time"
 
@@ -264,15 +265,29 @@ func TestNoFieldBoundaryCollision(t *testing.T) {
 }
 
 // TestRefusesUnboundedQuantities is part of #593: a request whose memory value has a huge decimal exponent is
-// refused, instead of being written as a plain decimal number of billions of digits.
+// refused, instead of being written as a plain decimal number of billions of digits (gigabytes): the refusal
+// allocates at most 1 MiB. The time limit only kills a child process that hangs, and is generous because the
+// child of a test binary built with -race can take seconds to start on a loaded machine (#780).
 func TestRefusesUnboundedQuantities(t *testing.T) {
 	for name, in := range map[string]Input{
 		"previous": memoryInput("1e2147483647", "1Ti"),
 		"desired":  memoryInput("1Mi", "1e2147483647"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			deadline.Within(t, 5*time.Second, func(t *testing.T) {
-				if d, err := Compute(in); !errors.Is(err, ErrUnboundedQuantity) {
+			deadline.Within(t, time.Minute, func(t *testing.T) {
+				var (
+					d   string
+					err error
+					m   runtime.MemStats
+				)
+				runtime.ReadMemStats(&m)
+				before := m.TotalAlloc
+				d, err = Compute(in)
+				runtime.ReadMemStats(&m)
+				if n := m.TotalAlloc - before; n > 1<<20 {
+					t.Errorf("the refusal allocated %d bytes, want at most %d", n, 1<<20)
+				}
+				if !errors.Is(err, ErrUnboundedQuantity) {
 					t.Fatalf("Compute = %q, %v, want %v", d, err, ErrUnboundedQuantity)
 				}
 			})

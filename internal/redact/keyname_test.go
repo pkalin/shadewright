@@ -175,7 +175,7 @@ func TestSasKeyOnlyBeforeItsSeparator(t *testing.T) {
 // the line end or a quote and nothing else, so a ",", "]" or "}" of the surrounding text may go with it
 // (#585). What follows the value stays.
 func TestQuotedValueAfterAKeyName(t *testing.T) {
-	words := []string{"horse", "battery", "staple"}
+	words := passphraseWords
 	for name, c := range map[string]struct{ in, kept string }{
 		"double quotes":        {`run --password "horse battery staple" --region x`, `" --region x`},
 		"single quotes":        {`run --password 'horse battery staple' --region x`, `' --region x`},
@@ -362,6 +362,10 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		// line form ("- hunter2abc --region west") is pinned by TestKeyNameRulesHoldAtTheirEdges; after an
 		// anchor or a tag the rest of the line goes (TestValueExtentAfterAKeyName).
 		"block sequence item with blanks": "args:\n- --client-secret\n- horse battery " + k + "\n- --region",
+		// The extent rule reads at most maxValueExtent bytes past the start of a value: the part of a longer
+		// value after that bound stays.
+		"part of a value past the bound": "args:\n- --password\n- |\n" +
+			strings.Repeat("  "+strings.Repeat("a", 60)+"\n", 2*maxValueExtent/62) + "  " + k + "\n",
 		// An unquoted value ends at a quote, also one that belongs to the value.
 		"quote inside a value": "run --password ab'" + k + " --region x",
 		// After a compound name and a blank, only an opaque token goes.
@@ -672,5 +676,70 @@ func TestValueExtentBounds(t *testing.T) {
 	long := "args:\n- --password\n- |\n" + strings.Repeat("  "+strings.Repeat("a", 60)+"\n", 2*maxValueExtent/62) + "  TAILSECRET\n"
 	if out := String(long); !strings.Contains(out, "TAILSECRET") || strings.Contains(out, "\n  aaaa") && strings.Index(out, "\n  aaaa") < 40 {
 		t.Errorf("block scalar past the bound:\nout: %.200q", out)
+	}
+}
+
+// Text after a value that TestValueExtentReachesTheWholeValue checks is kept, and the words of its values.
+const (
+	regionWest = " --region west"
+	nextX      = " next=x"
+)
+
+var passphraseWords = []string{"horse", "battery", "staple"}
+
+// The extent rule at its edges (#708): a flow scalar on an indented next line, a block scalar behind an anchor,
+// an escaped blank and a backtick substitution inside double quotes in a shell word, a literal bracket inside
+// "$(", closers glued to a word with text after them, an unclosed quote after a flag at the end of the input,
+// and ":=". Each input kept part of its value before this change.
+func TestValueExtentReachesTheWholeValue(t *testing.T) {
+	for in, kept := range map[string]string{
+		"args: [--password, horse\n  battery staple, --region, west]":            ", --region, west]",
+		"args: [--password, !!str horse\n  battery staple, --region, west]":      ", --region, west]",
+		"args:\n- --password\n- &pw |-\n  horse\n  battery\n- --region\n- west":  "\n- --region\n- west",
+		"args:\n- --password\n- !!str >\n  horse\n  battery\n- --region\n- west": "\n- --region\n- west",
+		`--password "horse"\ battery --region west`:                              regionWest,
+		"--password \"`printf \"%s\" \"horse battery\"`\" --region west":         regionWest,
+		"--password $(printf '%s' horse[battery) --region west":                  regionWest,
+		"--password $(echo ${X} {horse battery) --region west":                   regionWest,
+		"--password $(cat horse)}battery --region west":                          regionWest,
+		"--password $(cat horse)]}battery --region west":                         regionWest,
+		"--password $()}horsebattery --region west":                              regionWest,
+		"--password \"horse battery staple --region west":                        regionWest,
+		`--password "horse battery staple`:                                       "--password ",
+		"--password \"horse battery staple\nreason: FailedMount":                 "\nreason: FailedMount",
+		`password := "horse battery staple" next=x`:                              nextX,
+		"password := horse;battery next=x":                                       nextX,
+		"password: \"horse\n  battery staple\"\nnext: x":                         "\nnext: x",
+		"  password: \"horse\n\n    battery staple\"\n  next: x":                 "\n  next: x",
+	} {
+		checkRedacted(t, in, passphraseWords, []string{kept})
+	}
+	// Closers at the end of a word stay with the text after them.
+	for in, want := range map[string]string{
+		`args: ["--password", "abc"], next: x`:  `args: ["--password", "***"], next: x`,
+		"--password $(cat pw)} --region west":   "--password ***} --region west",
+		"--password $()}Wc3":                    "--password ***",
+		"--password $(cat pw)}Hunter2Secret9 x": "--password [REDACTED:credential] x",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// What the extent rule must not take (#708): an unclosed block comment does not extend a value, and a quote
+// that does not close on its line continues only on lines indented deeper than its key, so the fields after
+// a stray quote stay. Each input lost these parts before this change, and main kept them.
+func TestValueExtentKeepsEvidence(t *testing.T) {
+	for in, want := range map[string]string{
+		"{\"password\": /* x\n\"u\": \"EVIDENCE\", \"reason\": \"FailedMount\"}": "{\"password\": ***\n\"u\": \"EVIDENCE\", \"reason\": \"FailedMount\"}",
+		"apiKey: \"abc\ntwo: \"def\"\nthree: ghi":                                "apiKey: ***\ntwo: \"def\"\nthree: ghi",
+		"password: 'abc\nreason: EVIDENCE it's broken":                           "password: ***\nreason: EVIDENCE it's broken",
+		"  password: \"abc\n  reason: \"EVIDENCE\"":                              "  password: ***\n  reason: \"EVIDENCE\"",
+		"msg=password=\"abc\nreason: \"EVIDENCE\" next":                          "msg=password=***\nreason: \"EVIDENCE\" next",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
 	}
 }

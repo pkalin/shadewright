@@ -639,6 +639,17 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"extent anchors and tags":   "- --password\n- &a !b c\n",
 		"extent flow properties":    "[--password, &a ",
 		"extent block scalars":      "- --password\n- |\n  a\n",
+		// Issue #708, second round: flow items and quoted values over indented lines, substitutions in
+		// backticks inside quotes, escaped blanks, closers glued to a word, unclosed quotes to the line end,
+		// anchored block scalars and ":=".
+		"extent flow continuations":  "[--password, a\n  b ",
+		"extent indented quotes":     "password: \"a\n  b ",
+		"extent backticks in quotes": "--password \"`a \"b\" ",
+		"extent escaped blanks":      `--password "a"\ b\ `,
+		"extent closer runs":         "--password $(a)}])x",
+		"extent unclosed flag quote": "--password \"a b ",
+		"extent anchored scalars":    "- --password\n- &a |\n  a\n",
+		"extent go assignments":      "password := \"a ",
 	} {
 		tail := tails[name]
 		small := timeString(t, name, rep(unit, size/8/len(unit))+tail)

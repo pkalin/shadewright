@@ -1577,14 +1577,15 @@ func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
 // comments in flow form the value that follows them goes with them; an array or object goes through its
 // closing bracket (ctx is the escape level of the key's quotes); a quoted value may run over line ends; and
 // in free text (boundaryWhitespace) a value is the whole shell word, glued quoted pieces and "$(" included.
-// Where the extent rule gives no extent, the value is valueSpan's.
-func extendedValueSpan(s string, pos, boundary, keyCol, ctx int) (int, int) {
+// A quoted string crosses a line end only to a line indented deeper than the key that starts at keyPos
+// (groupEnd). Where the extent rule gives no extent, the value is valueSpan's.
+func extendedValueSpan(s string, pos, boundary, keyCol, ctx, keyPos int) (int, int) {
 	if pos >= len(s) {
 		return pos, pos
 	}
 	if boundary == boundaryFlow {
 		if v := commentEnd(s, pos); v > pos {
-			_, end := extendedValueSpan(s, v, boundary, keyCol, ctx)
+			_, end := extendedValueSpan(s, v, boundary, keyCol, ctx, keyPos)
 			return pos, max(end, v)
 		}
 	}
@@ -1593,12 +1594,12 @@ func extendedValueSpan(s string, pos, boundary, keyCol, ctx int) (int, int) {
 	}
 	if escapeLevel(s, pos) == 0 && opensGroup(s, pos) {
 		if boundary == boundaryWhitespace {
-			if start, end, ok := quotedWordSpan(s, pos); ok {
+			if start, end, ok := quotedWordSpan(s, pos, keyPos); ok {
 				return start, end
 			}
 		} else if c := s[pos]; c == '"' || c == '\'' {
 			if quotedEnd(s, pos) < 0 {
-				if end, ok := groupEnd(s, pos, extentLimit(s, pos), 0); ok {
+				if end, ok := groupEnd(s, pos, extentLimit(s, pos), 0, keyPos); ok {
 					return pos + 1, end - 1
 				}
 			}
@@ -1742,7 +1743,7 @@ func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd in
 		}
 		start, end := valueSpan(s, m[1], b, m[2]-m[0])
 		if !bare {
-			xs, xe := extendedValueSpan(s, m[1], b, m[2]-m[0], keyQuoteLevel(s, m[2]))
+			xs, xe := extendedValueSpan(s, m[1], b, m[2]-m[0], keyQuoteLevel(s, m[2]), m[2])
 			start, end = min(start, xs), max(end, xe, argumentEnd(s, m))
 		}
 		if bare {
@@ -1784,7 +1785,8 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 }
 
 // flagExtent returns the value after the secret flag of m by the extent rule (#708): in a YAML block sequence
-// ("- --password" then "- |" on the next line) a block scalar is its indented lines; in a block or flow
+// ("- --password" then "- |" on the next line) a block scalar is its indented lines, with an anchor or tag
+// before its indicator ("- &pw |-") going with them; in a block or flow
 // sequence an anchor or tag before the value goes with it, and the value after them is the rest of its item
 // (the line, in a block sequence); in a flow sequence ("[--password, a b]") a plain
 // value runs to the end of its item; otherwise the value is keyNameValue's, a quoted or "$(" group with the
@@ -1794,9 +1796,15 @@ func flagExtent(s string, m []int, closed bool) (int, int) {
 	pos := m[1]
 	list := strings.IndexByte(sep, '-') >= 0
 	flow := strings.IndexByte(sep, ',') >= 0 && inFlowSequence(s, m[0])
-	if list && isBlockHeader(s, pos) {
-		nl := m[3] + strings.LastIndexAny(sep, "\r\n") + 1
-		return listBlockScalarSpan(s, pos, strings.IndexByte(s[nl:pos], '-'))
+	if list {
+		if v := nodeProperties(s, pos); isBlockHeader(s, v) {
+			nl := m[3] + strings.LastIndexAny(sep, "\r\n") + 1
+			start, end := listBlockScalarSpan(s, v, strings.IndexByte(s[nl:pos], '-'))
+			if v > pos {
+				start = pos
+			}
+			return start, end
+		}
 	}
 	if list || flow {
 		if v := nodeProperties(s, pos); v > pos {
@@ -1951,7 +1959,8 @@ func flagWord(v string) bool {
 //
 // With ext (a flag's value, #708), a value that opens a quote, "$(" or a backtick is the whole shell word by
 // the extent rule (quotedWordSpan), over line ends and with glued pieces; when that group does not close
-// within maxValueExtent, the rules above apply. The compound rule passes no ext: an opaque token holds no
+// within maxValueExtent, a value that opens a quote takes the rest of its line (unclosedQuoteEnd), and any
+// other the rules above. The compound rule passes no ext: an opaque token holds no
 // quote or blank, so a longer extent could not change what it redacts.
 func keyNameValue(s string, pos, keyStart int, closed, ext bool) (int, int) {
 	if pos >= len(s) {
@@ -1964,8 +1973,13 @@ func keyNameValue(s string, pos, keyStart int, closed, ext bool) (int, int) {
 		}
 	}
 	if ext && level == 0 && opensGroup(s, pos) {
-		if start, end, ok := quotedWordSpan(s, pos); ok {
+		if start, end, ok := quotedWordSpan(s, pos, noKey); ok {
 			return start, end
+		}
+		if c := s[pos]; c == '"' || c == '\'' {
+			if end := unclosedQuoteEnd(s, pos); end > pos {
+				return pos, end
+			}
 		}
 	}
 	if level > 0 {
@@ -2176,8 +2190,9 @@ func builtinRules() []rule {
 			`(?i)[?&](?:sig|signature|token|access_token|refresh_token|id_token|api_key|apikey|key|code|password|secret|client_secret|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature)=([^&\s#"'<>]+)`)},
 		// Key-value pairs whose key names a secret, one rule per format so each value ends at its own
 		// format's boundary. Env files, logfmt and free text: the value runs to the next whitespace.
+		// Go's ":=" is one separator.
 		{kind: KindCredential, span: keyValueSpan(boundaryWhitespace, false), re: regexp.MustCompile(
-			`(?i)(` + bareKeyExpr + `)[ \t]*[:=][ \t]*`)},
+			`(?i)(` + bareKeyExpr + `)[ \t]*(?::=|[:=])[ \t]*`)},
 		// Command-line flags whose name holds a secret, with the value after blanks or line ends, in an
 		// argument list (JSON, escaped JSON or a YAML list) or after a shell line continuation:
 		// "--client-secret <value>", "\"--password\", \"<value>\"", "- --password\n- <value>"

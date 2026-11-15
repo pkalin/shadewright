@@ -878,8 +878,41 @@ var _ = Describe("RemediationRequest status.pullRequest.reviewCheck", func() {
 			if to == v1alpha1.ReviewCheckRefused {
 				got.Status.PullRequest.ReviewCheck.Refusals = 1
 			}
-			expectStatusRefused(got, "on one head a Failed check run never changes")
+			expectStatusRefused(got, "on one head a Failed check run changes only to Stale")
 		}
+		got := reread(rr)
+		got.Status.PullRequest.ReviewCheck.State = v1alpha1.ReviewCheckStale
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a stale plan fails its check with its own text (#713)")
+	})
+
+	It("moves to Stale from every state on one head and never changes a Stale check there (#713)", func() {
+		for _, from := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckInProgress, v1alpha1.ReviewCheckPassed,
+			v1alpha1.ReviewCheckRefused} {
+			rr := waiting(newHead, from)
+			rr.Status.PullRequest.ReviewCheck = &v1alpha1.ReviewCheck{Head: newHead, State: v1alpha1.ReviewCheckStale}
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "from %s", from)
+		}
+		rr := waiting(testHeadSHA, v1alpha1.ReviewCheckStale)
+		for _, to := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckInProgress, v1alpha1.ReviewCheckPassed,
+			v1alpha1.ReviewCheckFailed} {
+			got := reread(rr)
+			got.Status.PullRequest.ReviewCheck.State = to
+			expectStatusRefused(got, "a Stale check run never changes")
+		}
+	})
+
+	It("never moves a Stale check to another head, in any state (#713)", func() {
+		rr := waiting(testHeadSHA, v1alpha1.ReviewCheckStale)
+		for _, to := range []v1alpha1.ReviewCheckState{v1alpha1.ReviewCheckInProgress, v1alpha1.ReviewCheckPassed,
+			v1alpha1.ReviewCheckStale} {
+			got := reread(rr)
+			got.Status.PullRequest.HeadSHA = newHead
+			got.Status.PullRequest.ReviewCheck = &v1alpha1.ReviewCheck{Head: newHead, State: to}
+			expectStatusRefused(got, "a Stale check run never changes")
+		}
+		got := reread(rr)
+		got.Status.PullRequest = &v1alpha1.PullRequestStatus{Number: 1, URL: testPRURL, HeadSHA: newHead}
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a new head record starts without a check")
 	})
 
 	It("records refusals only on a Refused check", func() {

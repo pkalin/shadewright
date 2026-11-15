@@ -1231,8 +1231,22 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 // (PullRequestNotClosed, #199) the executor kept trying it, and a retried close whose answer was lost (a timeout, a
 // 5xx, a failed status write) may be the one that closed it, so PROpened says that it is not known whether that
 // close or a person closed it. Either way it is no failure for the circuit breaker.
+//
+// With reviewer hints on, the check run shadewright/review is failed first (failStaleCheck, #713): a closed pull
+// request can be reopened and merged on a check that is still green, so the request does not end while the check is
+// pending. It keeps its phase and the mark and tries again after the poll interval, with no other bound, as for a
+// refused close; a pause waits as for any write.
 func (r *RemediationRequestReconciler) endStaleClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	mark *metav1.Condition) (ctrl.Result, error) {
+	switch err := r.failStaleCheck(ctx, rr, mark.Reason); {
+	case err == nil:
+	case errors.Is(err, freshness.ErrPaused):
+		return r.waitWhilePaused(ctx, rr)
+	case ctx.Err() != nil:
+		return ctrl.Result{}, err
+	default:
+		return ctrl.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
+	}
 	if notClosed(rr) != nil {
 		markClosed(rr, ReasonPullRequestClosed, "is closed ("+staleClosed(mark.Reason)+"); Shadewright kept trying "+
 			"to close it, and it is not known whether its retried close or a person closed it")
@@ -1392,10 +1406,16 @@ func staleMark(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
 // with the stale reason, or NeedsIntervention when the change request cannot be closed for good and no pull
 // request is recorded. A close of the recorded pull request that the Git host refuses for good keeps the request
 // in its phase, watching the pull request (keepWatchingStale, errStaleNotClosed). A failure worth a retry, and any
-// failed read of a change request, is returned as it is and leaves the mark, so the retry closes again.
+// failed read of a change request, is returned as it is and leaves the mark, so the retry closes again. Before each
+// close, with reviewer hints on, the check run shadewright/review of the recorded head is failed once
+// (failStaleCheck, #713); a close that goes through while that check is still pending ends nothing but returns
+// errStaleCheckPending, so the check is tried again (endStaleClosed) before the request ends Superseded.
 func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	staleErr *freshness.StaleError) error {
 	phase, reason, message := remediationv1alpha1.PhaseSuperseded, staleErr.Reason, staleErr.Message
+	// With reviewer hints on, the check run shadewright/review fails first, whatever becomes of the close (#713);
+	// its failure does not stop the close, and it is tried again with the next try.
+	checkErr := r.failStaleCheck(ctx, rr, staleErr.Reason)
 	// The whole cleanup shares one deadline: reading the settings, opening the repository, finding and
 	// closing the change request.
 	cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
@@ -1405,6 +1425,14 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 	closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
 	cleanCancel()
 	switch err := closeErr; {
+	case err == nil && checkErr != nil:
+		// Closed, but the check may still be green: a person could reopen the pull request and merge on it. The end
+		// waits for the failed check, tried again on the next look, which finds the pull request closed
+		// (endStaleClosed). A pause is reported as one.
+		if errors.Is(checkErr, freshness.ErrPaused) {
+			return checkErr
+		}
+		return errStaleCheckPending
 	case err == nil:
 		closedByUs(rr, staleClosed(staleErr.Reason))
 	case errors.Is(err, freshness.ErrRepositoryUnusable):

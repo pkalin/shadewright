@@ -180,7 +180,8 @@ func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, r
 }
 
 // openPlanRepositoryOf is openPlanRepository that also returns the type of the provider that hosts it. While rr
-// carries the stale mark, every write of the provider but the close returns errStalePlanWrite.
+// carries the stale mark, every write of the provider but the close and a failed check run returns
+// errStalePlanWrite.
 func (r *RemediationRequestReconciler) openPlanRepositoryOf(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
@@ -200,8 +201,8 @@ func (r *RemediationRequestReconciler) openPlanRepositoryOf(ctx context.Context,
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {
 		return nil, "", errTargetBranchChanged
 	}
-	// While the plan is stale (staleMark, read at each write) the provider writes nothing but the close: the one
-	// guard every step that writes to the plan's pull request passes (#199).
+	// While the plan is stale (staleMark, read at each write) the provider writes nothing but the close and a failed
+	// check run (#713): the one guard every step that writes to the plan's pull request passes (#199).
 	git, err := r.openGated(ctx, repo, func() bool { return staleMark(rr) != nil })
 	if providers.IsInvalidConfig(err) {
 		return nil, "", freshness.ErrRepositoryUnusable
@@ -1142,8 +1143,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prUnchecked, err
 	}
 	if staleMark(rr) != nil {
-		// A stale plan whose close is pending or refused (#199): nothing but the close is written to its pull
-		// request, so no reply and no check run (the merge gate) either.
+		// A stale plan whose close is pending or refused (#199): nothing but the close and the failed check run of
+		// cleanUpStale (#713) is written to its pull request, so no reply and no merge gate either.
 		return prOpen, nil
 	}
 	if ctx.Err() == nil {
@@ -1602,9 +1603,9 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 // its class: a read refused with 403 or 422 is retried, never taken for a refused write.
 func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
-	if errors.Is(err, errStaleNotClosed) {
-		// The close of the stale plan's pull request is refused (#199): looked at, and the close tried, again
-		// after the poll interval.
+	if errors.Is(err, errStaleNotClosed) || errors.Is(err, errStaleCheckPending) {
+		// The close of the stale plan's pull request is refused (#199), or it went through while its failed check
+		// is still pending (#713): looked at, and the close or the check tried, again after the poll interval.
 		return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
 	}
 	if isUnknownChange(err) {

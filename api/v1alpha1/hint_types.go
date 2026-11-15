@@ -304,8 +304,11 @@ const (
 // failure because the merge gate could not read every review of the pull request, so it fails closed on this head
 // and a person decides the merge; it is final on that head. Refused: the Git host refused for good to write the
 // check run the gate wanted (a missing App permission, a rule); the executor asks again after a backoff, so a fixed
-// permission heals without a new head.
-// +kubebuilder:validation:Enum=InProgress;Passed;Failed;Refused
+// permission heals without a new head. Stale: completed with conclusion failure because the freshness check found
+// the plan stale (#713, ADR-0028 amendment of 2026-11-15); the executor writes it, whether or not the close of the
+// pull request goes through, until it is recorded, and never changes it, so the request never sets the check green
+// again. A Failed check may still become Stale on its head, so the run says why the plan must not be merged.
+// +kubebuilder:validation:Enum=InProgress;Passed;Failed;Refused;Stale
 type ReviewCheckState string
 
 // The states of the check run shadewright/review.
@@ -314,13 +317,18 @@ const (
 	ReviewCheckPassed     ReviewCheckState = "Passed"
 	ReviewCheckFailed     ReviewCheckState = "Failed"
 	ReviewCheckRefused    ReviewCheckState = "Refused"
+	ReviewCheckStale      ReviewCheckState = "Stale"
 )
 
 // ReviewCheck is the check run shadewright/review on one head of the pull request (ADR-0028 section 5),
 // pinned to that head: a state recorded for one head never counts for another. Every head the executor pushes
 // or adopts starts without one, and the executor creates the check in progress on it. On one head a Failed check
-// never changes; every other state may follow any other, as the reviews and the Git host's answers change (#748).
-// +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || oldSelf.state != 'Failed'",message="on one head a Failed check run never changes"
+// changes only to Stale; every other state may follow any other, as the reviews and the Git host's answers change
+// (#748), or become Stale (#713). A Stale check never changes, neither its state nor its head: the request records
+// it only while the plan's cleanup runs, nothing pushes to the pull request then, and the request never writes the
+// check again on any head (#713).
+// +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || oldSelf.state != 'Failed' || self.state == 'Stale'",message="on one head a Failed check run changes only to Stale"
+// +kubebuilder:validation:XValidation:rule="oldSelf.state != 'Stale' || (self.state == 'Stale' && self.head == oldSelf.head)",message="a Stale check run never changes"
 // +kubebuilder:validation:XValidation:rule="self.state == 'Refused' || (!has(self.refusals) && !has(self.refusedAt))",message="refusals and refusedAt are recorded only on a Refused check run"
 type ReviewCheck struct {
 	// head is the commit the check run is on, always the pull request's recorded head (headSHA).

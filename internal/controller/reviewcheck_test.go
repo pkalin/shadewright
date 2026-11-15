@@ -39,6 +39,7 @@ import (
 const (
 	// opCreateCheckRun is the fake Git's name of CreateCheckRun, for SetFail.
 	opCreateCheckRun = "CreateCheckRun"
+	opReviewCheckRun = "ReviewCheckRun"
 	// opListReviews is the fake Git's name of ListReviews, for SetFail.
 	opListReviews = "ListReviews"
 	// opUpdateChangeRequest is the fake's name of UpdateChangeRequest, for SetFail.
@@ -568,7 +569,7 @@ func TestReviewCheckWritesNothingWhilePaused(t *testing.T) {
 	ctx := context.Background()
 	g.SetReviewState(number, 90, "DISMISSED")
 	g.SetFail(func(op string) error {
-		if op != "ReviewCheckRun" {
+		if op != opReviewCheckRun {
 			return nil
 		}
 		s := &api.RemediationSettings{}

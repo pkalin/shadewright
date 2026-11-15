@@ -1217,6 +1217,29 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(condition(p, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(ReasonChangeRequestClosed))
 	})
 
+	It("aborts the handoff, naming the render, when the new plan's render never finished three times (#714)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		// Three renders of the replacement's plan that took other executor processes down with them.
+		r := get(repl)
+		gone := newProcessID()
+		for n := int32(1); n <= remediationv1alpha1.MaxUnfinishedRenders; n++ {
+			r.Status.UnfinishedRenders = &remediationv1alpha1.UnfinishedRenders{PlanDigest: r.Status.PlanDigest,
+				Count: n, Process: gone}
+			Expect(k8sClient.Status().Update(ctx, r)).To(Succeed())
+		}
+		drive(2)
+		r = get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		c := condition(r, remediationv1alpha1.ConditionPROpened)
+		Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonHandoffAborted))
+		Expect(c.Message).To(ContainSubstring("The render check of this plan started 3 times in a row and never finished"))
+		Expect(c.Message).To(ContainSubstring("(" + ReasonRenderNeverFinished + ")"))
+		Expect(head()).To(Equal(oldHead), "no update of the branch without a render")
+		p := get(pred)
+		Expect(p.Status.Handoff.To.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+	})
+
 	Context("the merge gate", func() {
 		const otherID = int64(2002)
 		review := func(id, author int64, state, commit string) {

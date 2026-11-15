@@ -410,8 +410,12 @@ func (r *RemediationRequestReconciler) renderWaitingStep(ctx context.Context, rr
 			message: "The pull request's branch holds more than the planned change on top of the target branch"}
 	}
 	// A pass records the head in the status write that removes the render's mark (checkRender).
-	return r.checkRender(ctx, git, fresh.Head, file.Data, rr, func(rr *remediationv1alpha1.RemediationRequest) {
+	return r.checkRender(ctx, git, fresh.Head, file.Data, rr, func(rr *remediationv1alpha1.RemediationRequest) bool {
+		if rr.Status.PullRequest == nil { // only in a request read again after a conflict (unmarkRender)
+			return false
+		}
 		rr.Status.PullRequest.RenderedTargetHead = fresh.Head
+		return true
 	})
 }
 
@@ -1059,9 +1063,10 @@ func (e *renderRefusal) Error() string { return e.reason + ": " + e.message }
 // The render is marked in status before the render process starts and unmarked when the check returns (#714,
 // markRender and unmarkRender), so a render that takes the executor down with it is counted across restarts: at
 // MaxUnfinishedRenders unfinished renders of the plan in a row it is refused with RenderNeverFinished and no
-// render starts. passed, when not nil, records a pass in rr's status in the write that removes the mark.
+// render starts. passed, when not nil, records a pass in rr's status in the write that removes the mark, and
+// returns false when rr has no place for it.
 func (r *RemediationRequestReconciler) checkRender(ctx context.Context, git providers.GitProvider, head string,
-	changed []byte, rr *remediationv1alpha1.RemediationRequest, passed func(*remediationv1alpha1.RemediationRequest)) error {
+	changed []byte, rr *remediationv1alpha1.RemediationRequest, passed func(*remediationv1alpha1.RemediationRequest) bool) error {
 	src := rr.Status.Source
 	// Defence in depth: the freshness check already supersedes a plan without a build directory, because the
 	// mapping now always returns one.

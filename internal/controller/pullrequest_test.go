@@ -123,6 +123,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			IncidentReadTimeout: incidentReadTimeout,
 		}
 		r.goneLooks = process
+		r.process = newProcessID() // each reconciler is another executor process, as after a restart
 		r.renderCheck = renderHook
 		if apiReader != nil {
 			r.APIReader = apiReader

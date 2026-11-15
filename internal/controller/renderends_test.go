@@ -30,7 +30,6 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
 func renderEndsRequest(name, uid, digest string) *remediationv1alpha1.RemediationRequest {
@@ -155,15 +154,12 @@ func TestRenderEndsForgotten(t *testing.T) {
 func checkRenderEnds(t *testing.T, rr *remediationv1alpha1.RemediationRequest, outcomes ...error) []error {
 	t.Helper()
 	ctx := context.Background()
-	git := fakegit.NewGit("main", map[string][]byte{
-		"deploy/kustomization.yaml": []byte("resources:\n- app.yaml\n"),
-		renderTestFile:              []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n"),
-	})
+	git := newRenderTestGit()
 	head, err := git.BranchHead(ctx, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: renderTestFile, BuildPath: "deploy"}
+	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: renderTestFile, BuildPath: renderTestBuild}
 	calls := 0
 	c := clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).WithStatusSubresource(rr).WithObjects(rr).Build()
 	r := &RemediationRequestReconciler{Client: c, renderCheck: func(context.Context, semdiff.Input) (semdiff.Result, error) {

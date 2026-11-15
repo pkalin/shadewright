@@ -64,6 +64,9 @@ type renderWorld struct {
 	renders int
 	// failStatus, when set, fails status writes it returns true for.
 	failStatus func(*remediationv1alpha1.RemediationRequest) bool
+	// dropMark, when set, makes the API server drop status.unfinishedRenders from every status write, as one
+	// whose CustomResourceDefinition predates the field does: the write succeeds without it.
+	dropMark bool
 	// process, when set, is the executor process of every run: the same live process. Unset, each run is
 	// another process, as after a restart.
 	process string
@@ -88,6 +91,9 @@ func newRenderWorld(t *testing.T) *renderWorld {
 			}
 			if w.failStatus != nil && w.failStatus(obj.(*remediationv1alpha1.RemediationRequest)) {
 				return errors.New("etcdserver: request timed out")
+			}
+			if w.dropMark {
+				obj.(*remediationv1alpha1.RemediationRequest).Status.UnfinishedRenders = nil
 			}
 			return c.SubResource(sub).Update(ctx, obj, opts...)
 		}}).Build()
@@ -241,6 +247,24 @@ func TestUnfinishedRendersLostMarkStartsNoRender(t *testing.T) {
 	err := w.answers()
 	if err == nil || !strings.Contains(err.Error(), "record the start of the render check") {
 		t.Fatalf("got %v, want the failed write for a retry", err)
+	}
+	if _, refused := errors.AsType[*renderRefusal](err); refused {
+		t.Fatalf("got the refusal %v, want an error for a retry", err)
+	}
+	if w.renders != 0 {
+		t.Fatalf("%d renders started, want none", w.renders)
+	}
+}
+
+// TestUnfinishedRendersDroppedMarkStartsNoRender checks that a status write the API server accepts while it
+// drops the mark (a CustomResourceDefinition older than the executor) starts no render: without the stored
+// mark a render that ends the process would never be counted.
+func TestUnfinishedRendersDroppedMarkStartsNoRender(t *testing.T) {
+	w := newRenderWorld(t)
+	w.dropMark = true
+	err := w.answers()
+	if !errors.Is(err, errMarkNotStored) {
+		t.Fatalf("got %v, want errMarkNotStored for a retry", err)
 	}
 	if _, refused := errors.AsType[*renderRefusal](err); refused {
 		t.Fatalf("got the refusal %v, want an error for a retry", err)

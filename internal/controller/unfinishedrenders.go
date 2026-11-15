@@ -111,15 +111,27 @@ func (r *RemediationRequestReconciler) markRender(ctx context.Context, rr *remed
 		}
 		before = nil
 	}
-	rr.Status.UnfinishedRenders = &remediationv1alpha1.UnfinishedRenders{PlanDigest: rr.Status.PlanDigest,
-		Count: n + 1, Process: self}
+	want := remediationv1alpha1.UnfinishedRenders{PlanDigest: rr.Status.PlanDigest, Count: n + 1, Process: self}
+	mark := want
+	rr.Status.UnfinishedRenders = &mark
 	if err := r.Status().Update(ctx, rr); err != nil {
 		rr.Status.UnfinishedRenders = before
 		return fmt.Errorf("record the start of the render check of RemediationRequest %s/%s: %w",
 			rr.Namespace, rr.Name, err)
 	}
+	// The write answers with the object as stored. A CustomResourceDefinition older than this executor does
+	// not know the field: the API server drops it and the write still succeeds, so success alone proves nothing.
+	if got := rr.Status.UnfinishedRenders; got == nil || *got != want {
+		return fmt.Errorf("record the start of the render check of RemediationRequest %s/%s: %w",
+			rr.Namespace, rr.Name, errMarkNotStored)
+	}
 	return nil
 }
+
+// errMarkNotStored is markRender's error when the status write went through and the stored request does not
+// hold the mark: the render does not start, and the reconcile is tried again.
+var errMarkNotStored = errors.New("the API server did not store status.unfinishedRenders " +
+	"(apply the CustomResourceDefinitions of this release)")
 
 // unmarkRender removes status.unfinishedRenders once the render check returned, whatever it returned, after
 // applying passed (when not nil) to rr, so a caller that records the pass in status needs no write of its own;

@@ -112,6 +112,7 @@ type ModelProvider interface {
 	// ErrMalformedOutput; the Completion returned
 	// with it carries the Usage and Model of that reply (the call was billed) and nothing else. With any
 	// other error the Completion carries at most UsageUnknown, set when an answer was billed but not
-	// counted.
+	// counted. An adapter marks an error with ErrNotSent or ErrNotProcessed only when it knows for certain
+	// that nothing of the call was billed.
 	Complete(ctx context.Context, req CompletionRequest) (Completion, error)
 }

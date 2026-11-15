@@ -75,7 +75,32 @@ var (
 	// ErrNotSent marks the error of a call that sent no request at all, on any attempt, so nothing of it can
 	// have been billed. Only an adapter that can tell this for certain marks an error with it ([NotSent]).
 	ErrNotSent = errors.New("no request was sent")
+	// ErrNotProcessed marks the error of a call whose every attempt the host refused before processing it, a
+	// refusal the host documents as not billed, so nothing of it was billed. It is a fact about one host, read
+	// from the status of the HTTP response the adapter received, never from a body or model output: only an
+	// adapter whose host documents the refusal as free marks an error with it ([NotProcessed]).
+	ErrNotProcessed = errors.New("the host refused the request before processing it")
 )
+
+// notProcessedError keeps the text and the chain of err and adds ErrNotProcessed to it.
+type notProcessedError struct{ err error }
+
+func (e *notProcessedError) Error() string { return e.err.Error() }
+
+// Unwrap returns the underlying error.
+func (e *notProcessedError) Unwrap() error { return e.err }
+
+// Is reports whether target is ErrNotProcessed.
+func (e *notProcessedError) Is(target error) bool { return target == ErrNotProcessed }
+
+// NotProcessed marks err as the error of a call that the host refused before processing it on every attempt,
+// keeping its text and its chain. Nil stays nil.
+func NotProcessed(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &notProcessedError{err: err}
+}
 
 // notSentError keeps the text and the chain of err and adds ErrNotSent to it.
 type notSentError struct{ err error }
@@ -157,6 +182,9 @@ func IsCredentialUnavailable(err error) bool { return errors.Is(err, ErrCredenti
 
 // IsNotSent reports whether err is marked as the error of a call that sent no request.
 func IsNotSent(err error) bool { return errors.Is(err, ErrNotSent) }
+
+// IsNotProcessed reports whether err is marked as the error of a call the host refused before processing it.
+func IsNotProcessed(err error) bool { return errors.Is(err, ErrNotProcessed) }
 
 // RetryAfter returns the delay requested by the remote system, if err carries one.
 func RetryAfter(err error) (time.Duration, bool) {

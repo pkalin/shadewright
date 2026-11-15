@@ -351,7 +351,8 @@ type Outcome struct {
 	// ToolCalls is the number of tool calls run.
 	ToolCalls int
 	// Tokens is what the analysis was charged: reported usage, or the upper bound of a call whose usage is
-	// unknown or that failed.
+	// unknown or that failed, and nothing for a call that sent nothing or that its host refused before
+	// processing.
 	Tokens int64
 	// Models are the model IDs that answered, as the replies named them.
 	Models []string
@@ -937,11 +938,15 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 	// how much the service billed it cannot be told (a timeout may come after the reply was generated), so
 	// the analysis and deployment bounds count the most it could have cost. A malformed reply was billed
 	// and reports its usage, which is charged as reported. A call the adapter marks as having sent no request
-	// on any attempt (providers.ErrNotSent) cannot have been billed and is charged nothing.
+	// on any attempt (providers.ErrNotSent) cannot have been billed and is charged nothing, as is a call the
+	// adapter marks as refused by its host before processing on every attempt (providers.ErrNotProcessed, a
+	// Foundry 429, #725). Which refusals are free is the adapter's fact about its host, not decided here. Such a
+	// call still took the analysis's unit of the daily count, so a throttled host cannot be retried for free
+	// without an end.
 	charge := upper
 	billed := (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown
 	switch {
-	case notSent:
+	case notSent, err != nil && providers.IsNotProcessed(err) && !c.UsageUnknown:
 		charge = 0
 	case billed:
 		charge = c.Usage.InputTokens + c.Usage.OutputTokens

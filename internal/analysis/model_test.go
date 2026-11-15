@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/tools/record"
 
@@ -241,6 +242,76 @@ func TestSentThenFailedCallIsChargedItsUpperBound(t *testing.T) {
 				t.Errorf("not sent: calls %d, tokens %d, want 0", out.Calls, out.Tokens)
 			}
 		})
+	}
+}
+
+// throttledErr is what the Foundry adapter returns for a call whose every attempt was answered with 429:
+// retryable, and marked as refused before processing when notProcessed is set.
+func throttledErr(notProcessed bool) error {
+	err := error(&providers.RetryableError{Err: errors.New("foundry: the model endpoint returned status 429")})
+	if notProcessed {
+		err = providers.NotProcessed(err)
+	}
+	return err
+}
+
+// A call the adapter marks as refused before processing (a Foundry 429, #725) is charged nothing. The same
+// error without the mark (the Anthropic adapter's 429, a 5xx), or with a usage the adapter could not read, is
+// charged its upper bound.
+func TestThrottledCallIsChargedNothing(t *testing.T) {
+	l := testLimits()
+	for name, tc := range map[string]struct {
+		c      providers.Completion
+		err    error
+		charge bool
+	}{
+		"not processed":                   {err: throttledErr(true)},
+		"429 without the mark":            {err: throttledErr(false), charge: true},
+		"5xx":                             {err: &providers.RetryableError{Err: errors.New("status 503")}, charge: true},
+		"not processed but usage unknown": {c: providers.Completion{UsageUnknown: true}, err: throttledErr(true), charge: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture()
+			f.triage.steps = []step{{c: tc.c, err: tc.err}}
+			out := f.analyze(t, l)
+			if out.Reason != ReasonModelUnavailable || out.Calls != 1 {
+				t.Fatalf("reason %s, calls %d", out.Reason, out.Calls)
+			}
+			if got := out.Tokens > int64(l.MaxOutputTokens); got != tc.charge || !tc.charge && out.Tokens != 0 {
+				t.Errorf("tokens %d, want the upper bound: %v", out.Tokens, tc.charge)
+			}
+		})
+	}
+}
+
+// A throttled call is free in tokens but still takes its analysis's unit of the daily count, so a host that
+// throttles every call (whatever a model input does to make it so) cannot be retried without an end: the
+// analyses stop at maxAnalysesPerDay with nothing charged.
+func TestThrottledCallsStopAtTheAnalysesPerDayLimit(t *testing.T) {
+	const limit, tries = 3, 6
+	f := newFixture()
+	f.cfg.Reserve = func(context.Context, time.Time) error {
+		if f.reserved >= limit {
+			return incidents.ErrBudgetSpent
+		}
+		f.reserved++
+		return nil
+	}
+	for range tries {
+		f.triage.steps = append(f.triage.steps, step{err: throttledErr(true)})
+	}
+	var tokens int64
+	spent := 0
+	for range tries {
+		out := f.analyze(t, testLimits())
+		tokens += out.Tokens
+		if out.Reason == ReasonBudgetSpent {
+			spent++
+		}
+	}
+	if f.triage.calls() != limit || f.reserved != limit || spent != tries-limit || tokens != 0 {
+		t.Errorf("calls %d, reserved %d, refused as spent %d, tokens %d; want %d calls and units, %d refused, 0 tokens",
+			f.triage.calls(), f.reserved, spent, tokens, limit, tries-limit)
 	}
 }
 

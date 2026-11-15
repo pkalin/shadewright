@@ -119,8 +119,10 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 	u.usage.CachedInputTokens += c.Usage.CachedInputTokens
 	u.usage.OutputTokens += c.Usage.OutputTokens
 	// As the loop charges it (run.attempt): a call that failed, other than with a malformed reply, or whose
-	// usage is unknown, has no usage the cost can rest on; the loop charges its upper bound.
-	if (err != nil && !providers.IsMalformedOutput(err)) || c.UsageUnknown {
+	// usage is unknown, has no usage the cost can rest on; the loop charges its upper bound. A call the adapter
+	// marks as refused before processing (a Foundry 429, #725) was not billed: its usage is known, 0.
+	notProcessed := err != nil && providers.IsNotProcessed(err) && !c.UsageUnknown
+	if (err != nil && !providers.IsMalformedOutput(err) && !notProcessed) || c.UsageUnknown {
 		u.usageUnknown++
 	}
 	if err == nil && c.Content != "" {

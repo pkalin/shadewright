@@ -525,6 +525,64 @@ func TestCompleteRetryBound(t *testing.T) {
 	}
 }
 
+// A call whose every attempt the service answered with 429 is marked as refused before processing, which
+// Microsoft documents as not billed (#725). A call with any other attempt, before or after the 429s, keeps
+// the mark off: a timeout, a cut connection, 408 and 5xx may come after the model ran, and a 200 was billed.
+func TestCompleteThrottledCallIsNotProcessed(t *testing.T) {
+	status := func(code int) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) }
+	}
+	throttle := status(http.StatusTooManyRequests)
+	cut := func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		panic(http.ErrAbortHandler)
+	}
+	billedUnread := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "4096")
+		_, _ = io.WriteString(w, `{"id":`) // the connection closes short of Content-Length
+	}
+	longThrottle := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}
+	for name, tc := range map[string]struct {
+		attempts []http.HandlerFunc
+		marked   bool
+	}{
+		"429 on every attempt":         {attempts: []http.HandlerFunc{throttle, throttle, throttle}, marked: true},
+		"429 asking for a long wait":   {attempts: []http.HandlerFunc{longThrottle}, marked: true},
+		"408":                          {attempts: []http.HandlerFunc{status(408), status(408), status(408)}},
+		"500":                          {attempts: []http.HandlerFunc{status(500), status(500), status(500)}},
+		"503":                          {attempts: []http.HandlerFunc{status(503), status(503), status(503)}},
+		"cut connection":               {attempts: []http.HandlerFunc{cut, cut, cut}},
+		"500 then 429":                 {attempts: []http.HandlerFunc{status(500), throttle, throttle}},
+		"429 then 503":                 {attempts: []http.HandlerFunc{throttle, throttle, status(503)}},
+		"429 then a cut connection":    {attempts: []http.HandlerFunc{throttle, throttle, cut}},
+		"billed 200 unread, then 429s": {attempts: []http.HandlerFunc{billedUnread, throttle, throttle}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var n atomic.Int32
+			h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				tc.attempts[min(int(n.Add(1))-1, len(tc.attempts)-1)](w, r)
+			}, func(c *Config) { c.MaxAttempts = len(tc.attempts) })
+			c, err := h.p.Complete(context.Background(), structuredRequest())
+			if !providers.IsRetryable(err) || int(h.requests.Load()) != len(tc.attempts) {
+				t.Fatalf("err = %v after %d requests, want retryable after %d", err, h.requests.Load(), len(tc.attempts))
+			}
+			if got := providers.IsNotProcessed(err); got != tc.marked {
+				t.Errorf("err = %v: not processed %v, want %v", err, got, tc.marked)
+			}
+			if r := h.lastReport(t); providers.IsNotProcessed(r.Err) != tc.marked {
+				t.Errorf("report error %v: not processed %v, want %v", r.Err, !tc.marked, tc.marked)
+			}
+			if tc.marked && (c.UsageUnknown || c.Usage != (providers.Usage{})) {
+				t.Errorf("completion %+v of a refused call", c)
+			}
+		})
+	}
+}
+
 // A delay asked for that is longer than MaxDelay is not waited for: it goes back to the caller at once.
 func TestCompleteReturnsLongRetryAfter(t *testing.T) {
 	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
@@ -703,6 +761,11 @@ func TestCompleteReplyRacingDeadline(t *testing.T) {
 		"400": func() *http.Response {
 			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{}, Body: http.NoBody}
 		},
+		// A 429 after the deadline is the timeout too: the model may have run before it, so it is not marked
+		// as refused before processing (#725).
+		"429": func() *http.Response {
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: http.NoBody}
+		},
 	}
 	// newLate returns a provider whose first attempt waits for the end of its context and then returns
 	// racing; later attempts get a complete reply.
@@ -739,7 +802,8 @@ func TestCompleteReplyRacingDeadline(t *testing.T) {
 			p, sent := newLate(t, racing, func(c *Config) { c.Timeout = 50 * time.Millisecond })
 			c, err := p.Complete(context.Background(), structuredRequest())
 			if !errors.Is(err, context.DeadlineExceeded) || !providers.IsRetryable(err) ||
-				errors.Is(err, providers.ErrMalformedOutput) || errors.Is(err, providers.ErrRejected) {
+				errors.Is(err, providers.ErrMalformedOutput) || errors.Is(err, providers.ErrRejected) ||
+				providers.IsNotProcessed(err) {
 				t.Fatalf("err = %v, want deadline exceeded, retryable", err)
 			}
 			if c.UsageUnknown {

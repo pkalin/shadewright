@@ -430,12 +430,22 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 	defer cancel()
 	// unknown stays set once an attempt was billed without a usage that reaches the caller.
 	unknown := false
+	// throttled counts the attempts the service answered with 429 before their deadline. Microsoft documents
+	// that a call refused for exceeding the rate limit is not billed (Azure OpenAI FAQ, #725), so a call whose
+	// every attempt ended so cost nothing.
+	throttled := 0
 	done := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
 		c.UsageUnknown = c.UsageUnknown || unknown
+		if err != nil && attempts > 0 && throttled == attempts && !c.UsageUnknown {
+			err = providers.NotProcessed(err)
+		}
 		return c, attempts, err
 	}
 	for attempt := 0; ; attempt++ {
 		data, billed, err := p.once(ctx, body)
+		if _, ok := errors.AsType[*throttledError](err); ok {
+			throttled++
+		}
 		if err == nil {
 			c, perr := parseResponse(data, offered, len(req.ResponseSchema) > 0)
 			return done(c, attempt+1, perr)
@@ -535,7 +545,9 @@ func (p *Provider) statusError(resp *http.Response) error {
 	code := resp.StatusCode
 	msg := fmt.Errorf("foundry: the model endpoint returned status %d", code)
 	switch {
-	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500 && code <= 599:
+	case code == http.StatusTooManyRequests:
+		return &providers.RetryableError{RetryAfter: p.retryAfter(resp.Header), Err: &throttledError{err: msg}}
+	case code == http.StatusRequestTimeout || code >= 500 && code <= 599:
 		return &providers.RetryableError{RetryAfter: p.retryAfter(resp.Header), Err: msg}
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
 		return fmt.Errorf("%w: %w", msg, providers.ErrForbidden)
@@ -547,6 +559,16 @@ func (p *Provider) statusError(resp *http.Response) error {
 	}
 	return fmt.Errorf("%w: %w", msg, providers.ErrRejected)
 }
+
+// throttledError is the error of one attempt the service answered with 429 before the attempt's deadline: a
+// refusal before processing, which the service does not bill. Only statusError makes one, from the status of
+// the response; its text is that of the error it holds.
+type throttledError struct{ err error }
+
+func (e *throttledError) Error() string { return e.err.Error() }
+
+// Unwrap returns the underlying error.
+func (e *throttledError) Unwrap() error { return e.err }
 
 // retryAfter reads the delay Azure asks for: retry-after-ms first, then Retry-After.
 func (p *Provider) retryAfter(h http.Header) time.Duration {

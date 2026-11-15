@@ -58,7 +58,8 @@ limitations under the License.
 // tool reads), get_delivery_status is not offered, and an answer about a pod the context builder did not
 // attribute to the subject is labelled so. Each call is charged its reported usage, or its upper bound (the
 // input estimate plus maxOutputTokens) when the usage is unknown or the call failed, and nothing when the
-// adapter marks its error as sent on no attempt (providers.ErrNotSent); a call that could take
+// adapter marks its error as sent on no attempt (providers.ErrNotSent) or as refused by its host before
+// processing on every attempt (providers.ErrNotProcessed, a Foundry 429); a call that could take
 // the analysis past its token bound, or a deployment past its maxTokensPerDay within this analysis, is not
 // made. The analysis has a deadline under the trigger's analysis timeout. A retryable model error that asks
 // for a short delay is waited out once, within the deadline and within the bound of 3 + maxToolSteps model

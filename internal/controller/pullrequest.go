@@ -1699,9 +1699,10 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 // its class: a read refused with 403 or 422 is retried, never taken for a refused write.
 func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
-	if errors.Is(err, errStaleNotClosed) || errors.Is(err, errStaleCheckPending) {
+	if errors.Is(err, errStaleNotClosed) || errors.Is(err, errStaleCheckPending) || errors.Is(err, errStaleLockPending) {
 		// The close of the stale plan's pull request is refused (#199), or it went through while its failed check
-		// is still pending (#713): looked at, and the close or the check tried, again after the poll interval.
+		// is still pending (#713) or its target lock is not settled through a new installation (#290): looked at,
+		// and the close, the check or the look tried, again after the poll interval.
 		return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
 	}
 	if isUnknownChange(err) {

@@ -1278,10 +1278,21 @@ func (r *RemediationRequestReconciler) endBeforeFresh(ctx context.Context, rr *r
 // With reviewer hints on, the check run shadewright/review is failed first (failStaleCheck, #713): a closed pull
 // request can be reopened and merged on a check that is still green, so the request does not end while the check is
 // pending. It keeps its phase and the mark and tries again after the poll interval, with no other bound, as for a
-// refused close; a pause waits as for any write.
+// refused close; a pause waits as for any write. A request whose repository the settings reach only through a new
+// installation of the GitHub App (#290) settles its target lock first (releaseReinstalled) and waits the same way
+// while it cannot.
 func (r *RemediationRequestReconciler) endStaleClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	mark *metav1.Condition) (ctrl.Result, error) {
 	switch err := r.failStaleCheck(ctx, rr, mark.Reason); {
+	case err == nil:
+	case errors.Is(err, freshness.ErrPaused):
+		return r.waitWhilePaused(ctx, rr)
+	case ctx.Err() != nil:
+		return ctrl.Result{}, err
+	default:
+		return ctrl.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
+	}
+	switch err := r.releaseReinstalled(ctx, rr); {
 	case err == nil:
 	case errors.Is(err, freshness.ErrPaused):
 		return r.waitWhilePaused(ctx, rr)
@@ -1477,6 +1488,10 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		}
 		return errStaleCheckPending
 	case err == nil:
+		// Closed through a new installation (#290): the lock is settled before the end, which reads nothing more.
+		if err := r.releaseReinstalled(ctx, rr); err != nil {
+			return err
+		}
 		closedByUs(rr, staleClosed(staleErr.Reason))
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		// The settings of the repository cannot be used, so the change request cannot be closed either.
@@ -1571,6 +1586,90 @@ func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr
 		"watching it", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", number,
 		"reason", refused)
 	return errStaleNotClosed
+}
+
+// errStaleLockPending is the answer of a stale plan's cleanup that closed its pull request through a new
+// installation of the GitHub App (#290) but could not settle the lock on its target yet (releaseReinstalled): the
+// request keeps its phase and the mark, and the look and the end are tried again after the poll interval
+// (refuseOrWait, endStaleClosed). It is not a final phase.
+var errStaleLockPending = errors.New("the target lock of the stale plan's closed pull request is not settled yet")
+
+// releaseReinstalled settles, before the end of a stale plan whose pull request is closed, the lock on the target
+// of a request whose plan's repository the settings now reach only through a new installation of the GitHub App
+// (cleanupRepository, #290). Once the request ends, the look of the lock (checkHeld) does not reach that installation
+// (no final phase or finalizer uses it), so it is made now, while the mark still allows it: the same read as
+// checkHeld's (lookHeld, through the provider that writes nothing but the close and a failed check run). A verdict
+// that frees the target releases the lock in rr, for the status write that ends the request. It returns nil, and
+// changes nothing, for a request that holds no lock or whose repository is reached through its own installation:
+// checkHeld settles that one after the end, as for any stale plan.
+//
+// Otherwise the request does not end: a pause is returned as freshness.ErrPaused and a cancelled reconcile as its
+// error; anything else (a failed or refused read, which changeOf reports with PullRequestUnreadable, another open
+// pull request of the branch, which is recorded in condition TargetHeld, or a failed write of that condition) is
+// logged and returned as errStaleLockPending, and the next look closes nothing more and tries again.
+func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	if !ptr.Deref(rr.Status.HoldsTarget, false) || staleMark(rr) == nil {
+		return nil
+	}
+	_, reinstalled, err := r.planEntry(ctx, rr)
+	switch {
+	case errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged):
+		// Not reached through a new installation as the settings stand: checkHeld's look after the end says so.
+		return nil
+	case errors.Is(err, freshness.ErrPaused):
+		return err
+	case err != nil:
+		return r.lockPending(ctx, rr, err)
+	case !reinstalled:
+		return nil
+	}
+	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	v, holding, err := r.lookHeld(lookCtx, rr)
+	err = boundErr(ctx, lookCtx, "look-up of the change request", err)
+	cancel()
+	switch {
+	case ctx.Err() != nil:
+		return err
+	case errors.Is(err, freshness.ErrPaused):
+		return err
+	case err != nil:
+		return r.lockPending(ctx, rr, err)
+	case v.state == changeUnknown:
+		return r.lockPending(ctx, rr, v.err)
+	}
+	if frees(v, holding) {
+		release(rr)
+		return nil
+	}
+	if holding == nil {
+		// The request's own pull request reads open after its close: looked at again.
+		return r.lockPending(ctx, rr, fmt.Errorf("pull request #%d still reads open", v.pr.Number))
+	}
+	want := metav1.Condition{
+		Type:   remediationv1alpha1.ConditionTargetHeld,
+		Status: metav1.ConditionTrue,
+		Reason: ReasonOpenOnBranch,
+		Message: fmt.Sprintf("Pull request #%d is open on the request's branch and may still deliver its change; "+
+			"the target stays locked until it is closed or merged", holding.Number),
+		ObservedGeneration: rr.Generation,
+	}
+	if meta.SetStatusCondition(&rr.Status.Conditions, want) {
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return r.lockPending(ctx, rr, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
+				rr.Namespace, rr.Name, err))
+		}
+	}
+	return r.lockPending(ctx, rr, fmt.Errorf("pull request #%d is open on the request's branch", holding.Number))
+}
+
+// lockPending logs why releaseReinstalled could not settle the lock of rr yet and returns errStaleLockPending.
+func (r *RemediationRequestReconciler) lockPending(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cause error) error {
+	logf.FromContext(ctx).Info("Kept a stale RemediationRequest in its phase: the target lock could not be settled "+
+		"through the new installation of its repository yet; tried again", "remediationRequest",
+		client.ObjectKeyFromObject(rr), "error", cause.Error())
+	return fmt.Errorf("%w: %w", errStaleLockPending, cause)
 }
 
 // endUnrecordedMerge handles the answer of closeChangeRequest for a request with no recorded pull request whose

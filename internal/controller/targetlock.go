@@ -184,7 +184,8 @@ func closedOnly(rr *remediationv1alpha1.RemediationRequest) bool {
 
 // release clears the lock in the status about to be written, with the condition that said why it was kept. It is
 // the one place that writes status.holdsTarget false (TestLockClearedInOnePlace): the release on a pull request's
-// account is made by settleLock (the status rule) and checkHeld (the read of the branch, openHolding) only; the
+// account is made by settleLock (the status rule) and checkHeld (the read of the branch, openHolding) only, and by
+// releaseReinstalled, the same read made before a stale plan closed through a new installation ends (#290); the
 // other callers are a request that never took the lock (a refusal, a queued duplicate) and the two ends of a
 // handoff, whose pull request the replacement holds.
 func release(rr *remediationv1alpha1.RemediationRequest) {
@@ -235,7 +236,6 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err
 	}
-	rule := lockRule[v.state]
 	if c := repositoryRead(rr, err); c != nil {
 		// No read can be made: the lock is kept, and condition PullRequestUnreadable says why as the settings stand
 		// now (once per reason), until the repository can be opened again (changeOf removes it then) or the
@@ -256,7 +256,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if v.state != changeGone {
 		recordFound(rr, v.pr)
 	}
-	free := rule == lockRelease || rule == lockReleaseUnlessOpen && holding == nil
+	free := frees(v, holding)
 	switch {
 	case free:
 		release(rr)
@@ -309,7 +309,14 @@ var lockRule = map[changeState]lockOutcome{
 	changeGone: lockReleaseUnlessOpen, changeUnknown: lockKeep,
 }
 
-// lookHeld is checkHeld's read: the verdict on the request's pull requests, in the repository the plan was made
+// frees reports whether lockRule releases the lock for verdict v, with holding the open pull request of the branch
+// that may still deliver the change (openHolding), nil when none may.
+func frees(v changeVerdict, holding *providers.ChangeRequest) bool {
+	rule := lockRule[v.state]
+	return rule == lockRelease || rule == lockReleaseUnlessOpen && holding == nil
+}
+
+// lookHeld is checkHeld's read (also releaseReinstalled's): the verdict on the request's pull requests, in the repository the plan was made
 // for and nowhere else, and for a closed or gone one the open pull request that holds the lock (openHolding).
 // A status that says the recorded pull request is closed (closedOnly) was written from a read of it, or from
 // Shadewright's own close by its number: the read by number then needs no marker, which a person may have edited

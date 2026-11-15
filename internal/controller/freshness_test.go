@@ -525,6 +525,79 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(fetch().Status.PlanRepository.InstallationID).To(Equal(int64(1)), "the plan's record is not rewritten")
 	})
 
+	It("releases the target lock of a request superseded through the new installation (#290)", func() {
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()), "the approved plan holds the lock")
+		reinstall()
+		supersedes(freshness.ReasonPlanChanged)
+		got := fetch()
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "released with the end, not left to a later look")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			To(BeNil())
+		// A later look of the final phase needs no new-installation lookup and writes nothing.
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().ResourceVersion).To(Equal(got.ResourceVersion))
+	})
+
+	It("ends a request closed through the new installation only once its target lock is settled (#290)", func() {
+		reinstall()
+		listFails := atomic.Bool{}
+		listFails.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opClose:
+				closes.Add(1)
+			case op == opList && listFails.Load() && closes.Load() > 0:
+				return fmt.Errorf("listing: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		waits := func() {
+			GinkgoHelper()
+			res, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0), "looked at again, without a hot requeue")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not ended yet")
+			Expect(planFresh().Reason).To(Equal(freshness.ReasonPlanChanged), "the mark stays")
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+		}
+		// The close goes through, but the listing of the branch fails: the request does not end with the lock
+		// it could no longer settle.
+		waits()
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+		Expect(closes.Load()).To(Equal(int32(1)))
+
+		// Meanwhile someone opens another pull request from the branch: it keeps the target locked, and says so.
+		listFails.Store(false)
+		other, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
+			HeadBranch: freshness.BranchName(fetch()), BaseBranch: mainBranch, Title: "o", Body: "reopened by hand",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		waits()
+		held := meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
+		Expect(held).NotTo(BeNil())
+		Expect(held.Message).To(ContainSubstring(fmt.Sprintf("#%d", other.Number)))
+		Expect(closes.Load()).To(Equal(int32(1)), "the other pull request is not closed")
+
+		// Once it is closed, the next look releases the lock in the write that ends the request.
+		Expect(git.CloseChangeRequest(ctx, other.Number)).To(Succeed())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)).To(BeNil())
+	})
+
+	It("releases the target lock of a request superseded with an unchanged installation", func() {
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+		Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+		supersedes(freshness.ReasonPolicyChanged)
+		Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()))
+	})
+
 	It("fails the review check through the new installation before it closes the pull request (#290)", func() {
 		reinstall()
 		r := reconciler()

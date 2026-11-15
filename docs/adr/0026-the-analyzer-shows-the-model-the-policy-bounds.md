@@ -33,7 +33,7 @@ Risk: the model aims at the maximum. In the evaluation a reply was first written
 
 ## Alternatives considered
 
-- Deterministic sizing, the strongest alternative: code derives the desired value from the metrics (for a memory limit, the peak working set plus headroom, clamped to the policy's range), and the model picks only the action and the container. The model then cannot steer the size at all. Deferred to [#508](https://github.com/pkalin/shadewright/issues/508), now accepted in [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md): it needs a sizing rule per action and metrics the analyzer may not have.
+- Deterministic sizing, the strongest alternative: code derives the desired value from the metrics (for a memory limit, the peak working set plus headroom, clamped to the policy's range), and the model picks only the action and the container. The model then cannot steer the size at all. Deferred to [#508](https://github.com/pkalin/shadewright/issues/508), now proposed in [ADR-0042](0042-a-memory-limit-is-proposed-only-for-a-killed-container.md), which supersedes [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md): it needs a sizing rule per action and metrics the analyzer may not have.
 - A preflight in the analyzer: run the policy check before creating the request and hand off when it would Deny, without showing the bounds. It needs the same read, the model still guesses, and it is a second decision point to keep in step with the executor.
 - Both the bounds and the preflight: the preflight adds the second decision point for little, since the executor decides anyway.
 - Nothing: every guess outside the bounds goes to a person, as in the lab run.
@@ -41,3 +41,4 @@ Risk: the model aims at the maximum. In the evaluation a reply was first written
 ## Amendments
 
 - 2026-11-14: <span class="sw-status sw-planned">planned</span> [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) (Accepted 2026-11-14) amends this ADR: code computes the size of a memory limit from the metrics, so the bounds block is no longer needed for the size and the pull request body shows the evidence instead of pointing at the model's reason. Nothing here changes until the code of that ADR is built.
+- 2026-11-15: <span class="sw-status sw-planned">planned</span> [ADR-0042](0042-a-memory-limit-is-proposed-only-for-a-killed-container.md) (Proposed) supersedes ADR-0040 and replaces the amendment above: a memory limit is proposed only for a container whose own status shows an `OOMKilled` termination, and code sets the size as the limit times one plus a policy headroom, so the bounds block and the "smallest change" prompt rule are no longer needed for memory limits. Nothing here changes until the code of that ADR is built.

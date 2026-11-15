@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1380 560" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<title id="t">Shadewright memory limit: one gate, one size rule</title>
+<desc id="d">Overview of ADR-0042, proposed and not built. The collector reads a container termination from pod status and the Incident records it with the time it arrived, unless the collector could only replay it after a restart. An Event with the reason OOMKilled is never a kill. The context builder matches the current container status of the subject's pods to those records inside the analysis window and passes the names of the killed containers to the analysis loop. The loop accepts a SetContainerMemoryLimit only for a killed container, otherwise the Incident is handed off as NoMemoryPressure. Code sets the size: the limit times one plus the headroom percent, rounded up to 8Mi, then limited by the policy range, which gives Step or Max when a bound applies, or SizeNotAnIncrease when there is no room. The request carries typed evidence and the executor prints it in the pull request body. The policy engine decides as before. The model chooses the action and the container only.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+<style>
+.bt{fill:#1d1b2b;stroke:#7c24fc;stroke-width:1.4}
+.ext{fill:#1d1b2b;stroke:#4fd1c5;stroke-width:1.4}
+.mdl{fill:#1d1b2b;stroke:#ffb86b;stroke-width:1.4}
+.lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.12em}
+.h{fill:#f1edff;font-size:15px;font-weight:650}
+.s{fill:#a9a4c4;font-size:12.5px}
+.no{fill:#ff8fa3;font-size:12.5px;font-weight:600}
+.fb{stroke:#a879ff;stroke-width:1.8;fill:none}
+</style></defs>
+<rect width="1380" height="560" rx="18" fill="#0e0e16"/>
+<text class="lanet" x="20" y="52">1  RECORDED</text>
+<text class="lanet" x="360" y="52">2  THE GATE</text>
+<text class="lanet" x="700" y="52">3  THE SIZE</text>
+<text class="lanet" x="1040" y="52">4  SHOWN TO A PERSON</text>
+
+<rect class="ext" x="20" y="70" width="300" height="146" rx="10"/>
+<text class="h" x="34" y="96">Pod status (kubelet)</text>
+<text class="s" x="34" y="118">container terminated: OOMKilled</text>
+<text class="s" x="34" y="137">collector: termination occurrence</text>
+<text class="s" x="34" y="156">Incident records it with its arrival</text>
+<text class="s" x="34" y="175">time; a replay after a restart gets</text>
+<text class="s" x="34" y="194">none and does not count</text>
+<rect class="bt" x="20" y="250" width="300" height="126" rx="10"/>
+<text class="h" x="34" y="276">An Event with reason OOMKilled</text>
+<text class="no" x="34" y="298">never a kill: anyone can write it</text>
+<text class="s" x="34" y="318">occurrence event:, not termination:</text>
+<text class="s" x="34" y="337">spec.reason and the symptom text</text>
+<text class="s" x="34" y="356">are not read by the gate</text>
+
+<rect class="bt" x="360" y="70" width="300" height="166" rx="10"/>
+<text class="h" x="374" y="96">Context builder</text>
+<text class="s" x="374" y="118">current status of the subject's pods,</text>
+<text class="s" x="374" y="137">matched to the records inside the</text>
+<text class="s" x="374" y="156">analysis window (arrival times only)</text>
+<text class="s" x="374" y="175">passes the killed container names</text>
+<text class="s" x="374" y="194">a failed read is a retry, not "none"</text>
+<rect class="bt" x="360" y="270" width="300" height="126" rx="10"/>
+<text class="h" x="374" y="296">Not a killed container</text>
+<text class="s" x="374" y="318">handed off: NoMemoryPressure</text>
+<text class="s" x="374" y="337">a killed sidecar does not pass the</text>
+<text class="s" x="374" y="356">main container</text>
+<path class="fb" d="M320 140 L356 140" marker-end="url(#a)"/>
+<path class="fb" d="M510 236 L510 266" marker-end="url(#a)"/>
+
+<rect class="bt" x="700" y="70" width="300" height="186" rx="10"/>
+<text class="h" x="714" y="96">Size, by code</text>
+<text class="s" x="714" y="118">need = ceil(limit x (1 + headroom/100))</text>
+<text class="s" x="714" y="137">headroom: policy field, 30, 10 to 100</text>
+<text class="s" x="714" y="156">round up to 8Mi, then the policy range:</text>
+<text class="s" x="714" y="175">above the step limit or max: that bound,</text>
+<text class="s" x="714" y="194">limitedBy Step or Max</text>
+<text class="s" x="714" y="213">the model's size is not read</text>
+<text class="s" x="714" y="232">the peak decides nothing</text>
+<rect class="bt" x="700" y="290" width="300" height="106" rx="10"/>
+<text class="h" x="714" y="316">No proposal, with a reason</text>
+<text class="s" x="714" y="338">no room under the policy:</text>
+<text class="s" x="714" y="357">SizeNotAnIncrease; headroom outside</text>
+<text class="s" x="714" y="376">10 to 100: HeadroomInvalid</text>
+<path class="fb" d="M660 140 L696 140" marker-end="url(#a)"/>
+<path class="fb" d="M850 256 L850 286" marker-end="url(#a)"/>
+
+<rect class="ext" x="1040" y="70" width="320" height="186" rx="10"/>
+<text class="h" x="1054" y="96">Request and pull request body</text>
+<text class="s" x="1054" y="118">spec.sizing: headroom, limitedBy,</text>
+<text class="s" x="1054" y="137">peak, window, samples (peak absent,</text>
+<text class="s" x="1054" y="156">not zero, when not measured)</text>
+<text class="s" x="1054" y="175">body: from 48Mi to 64Mi, killed,</text>
+<text class="s" x="1054" y="194">headroom 30%, limited by nothing,</text>
+<text class="s" x="1054" y="213">peak or "no peak was measured"</text>
+<text class="s" x="1054" y="232">typed fields only, never model prose</text>
+<rect class="ext" x="1040" y="290" width="320" height="106" rx="10"/>
+<text class="h" x="1054" y="316">Policy engine (unchanged)</text>
+<text class="s" x="1054" y="338">decides every request in the executor</text>
+<text class="s" x="1054" y="357">does not read the evidence</text>
+<text class="s" x="1054" y="376">invariants 1 and 2 stand</text>
+<path class="fb" d="M1000 140 L1036 140" marker-end="url(#a)"/>
+
+<rect class="mdl" x="360" y="430" width="640" height="100" rx="10"/>
+<text class="h" x="374" y="456">The model, beside the path</text>
+<text class="s" x="374" y="478">chooses the action and the container; says what is wrong and quotes the evidence</text>
+<text class="s" x="374" y="497">no size argument in the output schema; a size in a reply is ignored</text>
+<text class="s" x="374" y="516">planned, nothing built; supersedes ADR-0040</text>
+</svg>

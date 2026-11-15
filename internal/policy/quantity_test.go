@@ -17,6 +17,7 @@ limitations under the License.
 package policy_test
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -31,22 +32,44 @@ import (
 // accepts and Quantity.Cmp turns into a power of ten of billions of digits (#593).
 const hugeQuantity = "1e2147483647"
 
+// guardLimit kills a child process that hangs on a huge quantity. It is generous: the child process of a test
+// binary built with -race can take seconds to start on a loaded machine (#780), while the computation it guards
+// against takes far longer. The work itself is bounded by maxGuardAlloc.
+const guardLimit = time.Minute
+
+// maxGuardAlloc bounds the heap bytes a refusal of a huge quantity may allocate. Comparing 1e2147483647 with
+// another quantity builds a number of about 900 MB, and a refusal takes about a kilobyte.
+const maxGuardAlloc = 1 << 20
+
+// heapAllocated returns the heap bytes fn allocated.
+func heapAllocated(fn func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
 // TestCheckActionRefusesUnboundedQuantities is part of #593: a RemediationRequest whose previous or desired
 // value has a huge decimal exponent is refused as invalid parameters before it is compared with the catalog's
-// bounds.
+// bounds, with at most maxGuardAlloc bytes allocated.
 func TestCheckActionRefusesUnboundedQuantities(t *testing.T) {
 	for name, set := range map[string]func(*v1alpha1.SetContainerMemoryLimit){
 		"previous": func(p *v1alpha1.SetContainerMemoryLimit) { p.Previous = resource.MustParse(hugeQuantity) },
 		"desired":  func(p *v1alpha1.SetContainerMemoryLimit) { p.Desired = resource.MustParse(hugeQuantity) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			deadline.Within(t, 5*time.Second, func(t *testing.T) {
+			deadline.Within(t, guardLimit, func(t *testing.T) {
 				p := &v1alpha1.SetContainerMemoryLimit{
 					Container: "web", Previous: resource.MustParse("256Mi"), Desired: resource.MustParse("512Mi"),
 				}
 				set(p)
 				a := v1alpha1.Action{Type: v1alpha1.ActionSetContainerMemoryLimit, SetContainerMemoryLimit: p}
-				if reason, _ := policy.CheckAction(a); reason != policy.ReasonInvalidParameters {
+				var reason policy.Reason
+				if n := heapAllocated(func() { reason, _ = policy.CheckAction(a) }); n > maxGuardAlloc {
+					t.Errorf("the refusal allocated %d bytes, want at most %d", n, maxGuardAlloc)
+				}
+				if reason != policy.ReasonInvalidParameters {
 					t.Fatalf("reason %q, want %s", reason, policy.ReasonInvalidParameters)
 				}
 			})
@@ -55,16 +78,23 @@ func TestCheckActionRefusesUnboundedQuantities(t *testing.T) {
 }
 
 // TestAllowedMemoryRefusesUnboundedQuantities is part of #593: neither a previous value nor policy bounds
-// with a huge decimal exponent give a range.
+// with a huge decimal exponent give a range, and neither allocates more than maxGuardAlloc bytes.
 func TestAllowedMemoryRefusesUnboundedQuantities(t *testing.T) {
-	deadline.Within(t, 5*time.Second, func(t *testing.T) {
+	deadline.Within(t, guardLimit, func(t *testing.T) {
 		ok := &v1alpha1.MemoryLimitBounds{Min: resource.MustParse("1Mi"), Max: resource.MustParse("1Gi"), MaxIncreasePercent: 100}
 		huge := &v1alpha1.MemoryLimitBounds{Min: resource.MustParse("1Mi"), Max: resource.MustParse(hugeQuantity), MaxIncreasePercent: 100}
-		if got := policy.AllowedMemory(ok, resource.MustParse(hugeQuantity)); got != nil {
-			t.Errorf("AllowedMemory from a huge previous value = %v, want none", got)
+		hugePrevious, previous := resource.MustParse(hugeQuantity), resource.MustParse("256Mi")
+		var fromHuge, underHuge []policy.MemoryRange
+		if n := heapAllocated(func() {
+			fromHuge, underHuge = policy.AllowedMemory(ok, hugePrevious), policy.AllowedMemory(huge, previous)
+		}); n > maxGuardAlloc {
+			t.Errorf("the refusals allocated %d bytes, want at most %d", n, maxGuardAlloc)
 		}
-		if got := policy.AllowedMemory(huge, resource.MustParse("256Mi")); got != nil {
-			t.Errorf("AllowedMemory under a huge max = %v, want none", got)
+		if fromHuge != nil {
+			t.Errorf("AllowedMemory from a huge previous value = %v, want none", fromHuge)
+		}
+		if underHuge != nil {
+			t.Errorf("AllowedMemory under a huge max = %v, want none", underHuge)
 		}
 	})
 }

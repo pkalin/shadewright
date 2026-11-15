@@ -28,6 +28,9 @@ grep -qF "shadewright-executor@${d1}" "${tmp}/one.md" && grep -qF "shadewright-a
   grep -qF "charts/shadewright@${d3}" "${tmp}/one.md" && ok "digests" || bad "digests"
 grep -qF 'images\.yml@refs/tags/v0\.2\.0$' "${tmp}/one.md" && grep -qF 'chart\.yml@refs/tags/v0\.2\.0$' "${tmp}/one.md" &&
   ok "identities pinned to the tag" || bad "identities pinned to the tag"
+grep -qF "gh attestation verify \"oci://ghcr.io/pkalin/charts/shadewright@${d3}\"" "${tmp}/one.md" &&
+  grep -qF -- '--signer-workflow pkalin/shadewright/.github/workflows/chart.yml' "${tmp}/one.md" &&
+  ok "chart provenance command" || bad "chart provenance command"
 grep -qF 'pre-release' "${tmp}/one.md" && bad "plain release says pre-release" || ok "plain release"
 
 # A rerun replaces the section: the same output, one copy.

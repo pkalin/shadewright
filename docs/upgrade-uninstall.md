@@ -87,6 +87,16 @@ done
 gh attestation verify "oci://$IMAGE@$DIGEST" \
   --repo pkalin/shadewright \
   --signer-workflow pkalin/shadewright/.github/workflows/images.yml
+
+# The chart: signature and provenance, by the chart workflow on a release tag.
+CHART=ghcr.io/pkalin/charts/shadewright@sha256:<chart digest from the release page>
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/pkalin/shadewright/\.github/workflows/chart\.yml@refs/tags/v[0-9].*$' \
+  --certificate-oidc-issuer "$ISSUER" \
+  "$CHART"
+gh attestation verify "oci://$CHART" \
+  --repo pkalin/shadewright \
+  --signer-workflow pkalin/shadewright/.github/workflows/chart.yml
 ```
 
 Releases after v0.1.0 list the digests of its images and its chart, with these commands filled in for that tag (the identity pinned to it), once the images and the chart are published. A pre-release tag such as `v0.2.0-rc.1` is built, signed and verified the same way: the identity regexp above accepts it, it is tagged `0.2.0-rc.1` only (no `latest`, no `X.Y`), and its chart has that version and `appVersion`.

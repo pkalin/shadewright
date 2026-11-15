@@ -59,13 +59,18 @@ Each component also takes the standard Pod values, bounded by the schema: `nodeS
 
 Every value, with its default, its allowed values and its security effect, is in the [chart README](https://github.com/pkalin/shadewright/blob/main/dist/chart/README.md). It is generated from the comments in `dist/chart/values.yaml` with helm-docs (`make chart-docs`), and CI fails if the two differ or a value has no description, so there is one source. `values.schema.json` is the authority on which values are required.
 
-The chart is signed with cosign keyless (GitHub OIDC) by digest in the publish job, like the images. Verify it before installing; the identity is the chart workflow on a release tag of this repository:
+The chart is signed with cosign keyless (GitHub OIDC) by digest in the publish job, like the images, and has a GitHub build provenance attestation. Verify it before installing; the identity is the chart workflow on a release tag of this repository:
 
 ```bash
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/pkalin/shadewright/\.github/workflows/chart\.yml@refs/tags/v[0-9].*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>
+
+# Build provenance: built by this repository's chart workflow.
+gh attestation verify oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest> \
+  --repo pkalin/shadewright \
+  --signer-workflow pkalin/shadewright/.github/workflows/chart.yml
 ```
 
 The digest is in the run summary of the Chart workflow, or from `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` (it prints `Digest:`). Image signatures are verified the same way, with the image name and the `images\.yml` workflow in the identity. Releases after v0.1.0 list the chart and image digests on their GitHub release, with these commands filled in. Install the chart you verified by digest, `helm install shadewright oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>` (Helm accepts a digest in an OCI chart reference: `ValidateReference` in `pkg/registry` and the "oci ref with sha256" cases of `pkg/downloader/chart_downloader_test.go`, present in Helm 3.17 and in 4.3, the version CI pins), so the chart cannot change between the check and the install. A pre-release (`v0.2.0-rc.1`) publishes the chart as version `0.2.0-rc.1` (also its `appVersion`), signed by the same workflow; installed by digest it needs no `--version`, otherwise pass `--version 0.2.0-rc.1`, as Helm does not pick pre-releases by itself.

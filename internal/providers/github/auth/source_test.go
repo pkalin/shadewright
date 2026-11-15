@@ -1046,3 +1046,104 @@ func TestAppIDFailures(t *testing.T) {
 		})
 	}
 }
+
+// lateAnswer is a transport whose answer arrives only once the request's context has ended, as net/http can
+// deliver one that raced the end of the context (#767). It ends the caller's context itself, so the test needs
+// no clock. With inBody set, the context ends instead while the answer's body is read, which then reads whole.
+type lateAnswer struct {
+	code   int
+	body   string
+	end    context.CancelFunc
+	inBody bool
+}
+
+func (a lateAnswer) RoundTrip(r *http.Request) (*http.Response, error) {
+	var body io.Reader = strings.NewReader(a.body)
+	if a.inBody {
+		body = io.MultiReader(endingReader{a.end}, body)
+	} else {
+		a.end()
+		<-r.Context().Done()
+	}
+	return &http.Response{StatusCode: a.code, Header: http.Header{}, Body: io.NopCloser(body), Request: r}, nil
+}
+
+// endingReader ends a context on its first read and then reports EOF, so a MultiReader goes on to the body.
+type endingReader struct{ end context.CancelFunc }
+
+func (e endingReader) Read([]byte) (int, error) {
+	e.end()
+	return 0, io.EOF
+}
+
+func lateSource(t *testing.T, a lateAnswer) *Source {
+	t.Helper()
+	signer, err := fake.NewSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := newSource(Config{
+		ClientID: testClientID, InstallationID: 4242, RepositoryURL: testRepoURL, Signer: signer,
+	}, testHooks{transport: a, now: func() time.Time { return t0 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return src
+}
+
+// A call whose context ended reports that end, whatever answer arrived after it, and caches no token of it (#779).
+func TestTokenAnswerAfterContextEnd(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		code   int
+		inBody bool
+	}{
+		{"created", http.StatusCreated, false},
+		{"created, body read after the end", http.StatusCreated, true},
+		{"not found", http.StatusNotFound, false},
+		{"unauthorized", http.StatusUnauthorized, false},
+		{"server error", http.StatusBadGateway, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			src := lateSource(t, lateAnswer{
+				code: c.code, body: okBody(t0.Add(time.Hour)), end: cancel, inBody: c.inBody,
+			})
+			tok, err := src.Token(ctx)
+			if !errors.Is(err, context.Canceled) || errors.Is(err, providers.ErrNotFound) || providers.IsRetryable(err) {
+				t.Fatalf("Token = %v, want the caller's cancellation", err)
+			}
+			if tok.Reveal() != "" {
+				t.Fatal("Token returned a token taken after the context ended")
+			}
+			src.mu.Lock()
+			cached := src.tok.Reveal()
+			src.mu.Unlock()
+			if cached != "" {
+				t.Fatal("a token taken after the context ended was cached")
+			}
+		})
+	}
+}
+
+// The App ID of an answer that raced the end of the context is neither returned nor kept (#779).
+func TestAppIDAnswerAfterContextEnd(t *testing.T) {
+	for _, inBody := range []bool{false, true} {
+		t.Run(strconv.FormatBool(inBody), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			src := lateSource(t, lateAnswer{code: http.StatusOK, body: `{"id":31337}`, end: cancel, inBody: inBody})
+			id, err := src.AppID(ctx)
+			if !errors.Is(err, context.Canceled) || id != 0 {
+				t.Fatalf("AppID = %d, %v, want the caller's cancellation", id, err)
+			}
+			src.mu.Lock()
+			kept := src.appID
+			src.mu.Unlock()
+			if kept != 0 {
+				t.Fatalf("App ID %d taken after the context ended was kept", kept)
+			}
+		})
+	}
+}

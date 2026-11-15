@@ -226,6 +226,8 @@ type Collector struct {
 	// conditions remembers the handled symptom states of objects read by module symptom sources, keyed by
 	// kind and name.
 	conditions *stateTracker
+	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go).
+	probes *probeDeferrals
 
 	// watches is the watch state of each kind of SourceKinds that is not built in (lazy.go).
 	watchMu sync.Mutex
@@ -266,6 +268,7 @@ func New(cfg Config) (*Collector, error) {
 		// A tracker of its own, keyed by kind and name, so a pod and a watched object of the same name, or two
 		// watched kinds, keep apart.
 		conditions: newStateTracker(cfg.MaxObjects),
+		probes:     newProbeDeferrals(cfg.MaxEvents),
 		watches:    map[schema.GroupVersionKind]WatchState{},
 	}, nil
 }

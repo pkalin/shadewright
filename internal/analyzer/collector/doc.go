@@ -47,6 +47,11 @@ limitations under the License.
 // Deployment or StatefulSet has retired its template (scaled to 0 and superseded, or terminating at an old
 // StatefulSet revision) becomes no observation (revision.go, #724), is recorded as handled and is counted in
 // shadewright_analyzer_replaced_template_evidence_dropped_total; when that cannot be decided it is kept.
+// A readiness or startup probe failure (reason Unhealthy) that is part of a pod's start (no restart, within
+// StartupWindow of its container's start, and the pod became Ready after it) or of its shutdown (at or after
+// its deletion) becomes no observation either (probe.go, #726), is recorded as handled and is counted in
+// shadewright_analyzer_settled_probe_failures_skipped_total. A starting pod not Ready yet is looked at again
+// ProbeSettleGrace after the failure; anything else counts as before, and a pod that cannot be read is retried.
 //
 // Untrusted input: notes go through package fingerprint, which redacts before it normalizes, and only the
 // fingerprint and the normalized symptom leave the collector; termination messages are never read.

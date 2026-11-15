@@ -175,6 +175,15 @@ func newOwnerResolver(pods, api client.Reader, cfg Config) *ownerResolver {
 // fit the Incident schema, and subjectRetired for a pod of a retired template (podSubject).
 func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev1.ObjectReference) (
 	remediationv1alpha1.ObjectRef, string, subjectVerdict, error) {
+	subject, owner, v, _, err := r.subjectAndPod(ctx, eventNS, reg)
+	return subject, owner, v, err
+}
+
+// subjectAndPod is subjectOf that also returns the pod the reference names, as the one read of it found it:
+// nil when the reference is not to a pod, or the pod is gone or replaced by another of the same name. A
+// caller that decides more about the pod uses this pod, so both decisions rest on one read (#726).
+func (r *ownerResolver) subjectAndPod(ctx context.Context, eventNS string, reg corev1.ObjectReference) (
+	remediationv1alpha1.ObjectRef, string, subjectVerdict, *corev1.Pod, error) {
 	self := remediationv1alpha1.ObjectRef{
 		APIVersion: reg.APIVersion, Kind: reg.Kind, Namespace: reg.Namespace, Name: reg.Name,
 		UID: remediationv1alpha1.UID(reg.UID),
@@ -183,7 +192,7 @@ func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev
 		self.Namespace = eventNS
 	}
 	if !validRef(self) {
-		return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, nil
+		return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, nil, nil
 	}
 	switch {
 	case self.Kind == kindPod && self.APIVersion == apiCore:
@@ -192,25 +201,28 @@ func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev
 		if apierrors.IsNotFound(err) || (err == nil && pod.UID != reg.UID) {
 			// The pod is gone, or replaced by another of the same name: follow the owner it had when it was
 			// last looked up, if it was.
-			return r.formerPodSubject(ctx, self)
+			subject, owner, v, err := r.formerPodSubject(ctx, self)
+			return subject, owner, v, nil, err
 		}
 		if err != nil {
-			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, fmt.Errorf("reading the Pod of an event: %w", err)
+			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, nil,
+				fmt.Errorf("reading the Pod of an event: %w", err)
 		}
-		return r.podSubject(ctx, &pod)
+		subject, owner, v, err := r.podSubject(ctx, &pod)
+		return subject, owner, v, &pod, err
 	case self.Kind == kindReplicaSet && self.APIVersion == apiApps:
 		facts, err := r.facts(ctx, self.Namespace, metav1.OwnerReference{
 			APIVersion: apiApps, Kind: kindReplicaSet, Name: self.Name, UID: reg.UID,
 		})
 		if err != nil {
-			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, err
+			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, nil, err
 		}
 		if !facts.found || facts.parent == nil {
 			// A ReplicaSet without a verified Deployment is its own subject, with no owner.
-			return self, "", subjectUsable, nil
+			return self, "", subjectUsable, nil, nil
 		}
 		subject, owner, ok, err := r.ownedSubject(ctx, self, *facts.parent, facts.labels)
-		return subject, owner, verdict(ok), err
+		return subject, owner, verdict(ok), nil, err
 	case (self.Kind == kindDeployment || self.Kind == kindStatefulSet) && self.APIVersion == apiApps:
 		// A workload the analyzer can read is the subject only as it exists: the UID in the event is
 		// whatever its writer put there.
@@ -218,13 +230,13 @@ func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev
 			APIVersion: apiApps, Kind: self.Kind, Name: self.Name, UID: reg.UID,
 		})
 		if err != nil || !facts.found {
-			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, err
+			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, nil, err
 		}
-		return self, "", subjectUsable, nil
+		return self, "", subjectUsable, nil, nil
 	}
 	// Other kinds the analyzer cannot read, so it cannot check their UID; such a subject is only ever the
 	// object the event itself names.
-	return self, "", subjectUsable, nil
+	return self, "", subjectUsable, nil, nil
 }
 
 // podSubject returns the verified owning workload of pod, or the pod itself, and remembers the pod's

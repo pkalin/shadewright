@@ -260,7 +260,7 @@ of the metrics block verbatim as evidence.
 
 **The HPA metric of `keda-at-ceiling`.** Its subject, a `ScaledObject`, resolves no pods, so the builder asks only
 the two HPA templates, for the HPA the ScaledObject's `status.hpaName` names (design 3.3,
-[#480](https://github.com/pkalin/shadewright/issues/480)). Its `metrics.yaml` (synthetic) holds the external metric
+[#480](https://github.com/pkalin/shadewright/issues/480)). Its `metrics.yaml` (synthetic, as no recording of a cluster with these series exists yet) holds the external metric
 `s0-prometheus` at 6.5 per replica, about 13 requests per second over the 2 replicas of the ceiling, against an average
 target of 5, and the backlog fact is scored from it: the current value (per replica or in all) and the target with its
 value. The Incident's own symptom evidence would carry the values too, but the analyzer's symptom normalization turns

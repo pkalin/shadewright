@@ -370,8 +370,8 @@ func cancelPendingCondition(rr *remediationv1alpha1.RemediationRequest, reason, 
 		"failure, it stops the retries and watches the pull request"
 	if watching {
 		what = "the request keeps its phase: Shadewright watches the pull request, so a merge ends the request " +
-			"Merged and a close ends it Cancelled, and tries the close again on every look; close the pull " +
-			"request by hand"
+			"Merged and a close ends it Cancelled, and tries again on every look; give the App its access back, or " +
+			"close the pull request by hand where the close is what was refused"
 	}
 	return metav1.Condition{
 		Type:   remediationv1alpha1.ConditionCancelPending,

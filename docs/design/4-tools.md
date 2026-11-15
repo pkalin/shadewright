@@ -12,7 +12,7 @@ The analyzer exposes tools to the model through its own adapters.
 | --- | --- | --- | --- |
 | `get_resource`, `list_events` | Object state and symptom history: a Pod, Deployment, StatefulSet or ReplicaSet | Read, redacted | <span class="sw-status sw-built">built</span>, offered on escalation ([#76](https://github.com/pkalin/shadewright/issues/76)) |
 | `get_pod_logs` | Bounded time range and byte count | Read, redacted | tool <span class="sw-status sw-built">built</span>; adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)) |
-| `query_metrics` | Approved query templates only, for one pod or one Deployment the tool reads first | Read, redacted | tool <span class="sw-status sw-built">built</span>; adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)) |
+| `query_metrics` | Approved query templates only, for one pod or one Deployment the tool reads first (the HPA templates are the context builder's only) | Read, redacted | tool <span class="sw-status sw-built">built</span>; adapter <span class="sw-status sw-built">built</span>, given to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)) |
 | `get_delivery_status` | Flux Kustomization / HelmRelease delivery state (suspended, failed, applied or pending), revision and readiness, in a delivery namespace | Read, redacted | tool <span class="sw-status sw-built">built</span>, on the Flux adapter of [#92](https://github.com/pkalin/shadewright/issues/92) when the Flux module's grant is rendered or `--module-grants` is not set ([#562](https://github.com/pkalin/shadewright/issues/562)); not offered by the loop |
 | `read_git_file`, `get_recent_changes` | Map an object to its source in Git | Read, redacted | arguments checked, then always "not available" and never offered: the analyzer has no Git identity ([#373](https://github.com/pkalin/shadewright/issues/373)) |
 | `check_missing_reference` | Whether a Secret or ConfigMap a pod references is missing (4.3) | Read | <span class="sw-status sw-built">built</span>, offered on escalation ([#76](https://github.com/pkalin/shadewright/issues/76)) |
@@ -31,7 +31,7 @@ The analyzer exposes tools to the model through its own adapters.
 
 ## 4.1. `query_metrics`
 
-<span class="sw-status sw-built">built</span> The Prometheus adapter is `internal/providers/metrics/prometheus`. The analyzer creates it from `--prometheus-url` and gives it to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)), which the analysis loop calls (3.3), and to `query_metrics`. The evaluation harness replays recorded series through the same `MetricsSource` interface, checked against these templates ([#472](https://github.com/pkalin/shadewright/issues/472), [Evaluate the model](../evaluation.md#the-scenario-files)). No template reads HPA or external metrics (KEDA's backlog against its target), so the context of a `ScaledObject` Incident has none.
+<span class="sw-status sw-built">built</span> The Prometheus adapter is `internal/providers/metrics/prometheus`. The analyzer creates it from `--prometheus-url` and gives it to the context builder ([#371](https://github.com/pkalin/shadewright/issues/371)), which the analysis loop calls (3.3), and to `query_metrics`. The evaluation harness replays recorded series through the same `MetricsSource` interface, checked against these templates ([#472](https://github.com/pkalin/shadewright/issues/472), [Evaluate the model](../evaluation.md#the-scenario-files)). Two templates read the metrics of one HPA, such as the external metric KEDA's HPA scales on against its target ([#480](https://github.com/pkalin/shadewright/issues/480)); the context builder asks them for a `ScaledObject` Incident (3.3), and `query_metrics` does not offer them.
 
 ### Query templates and parameters
 
@@ -39,6 +39,7 @@ The analyzer exposes tools to the model through its own adapters.
 
 - Every template takes the parameter `namespace` (a DNS-1123 label).
 - `deployment_replicas_unavailable` also takes `workload` (a DNS-1123 subdomain). It matches the Deployment by its label and takes any valid name.
+- `hpa_metric_current` and `hpa_metric_target` also take `hpa` (a DNS-1123 subdomain, the HPA's name). They match the HPA by kube-state-metrics' `horizontalpodautoscaler` label with one exact matcher, so an HPA whose name only starts like it is never selected. The context builder takes the name from the `ScaledObject`'s `status.hpaName` (3.3).
 - The other templates, the pod templates, take the exact pods of the target instead.
 - Any other value or parameter is refused before a request is made.
 
@@ -52,6 +53,8 @@ The analyzer exposes tools to the model through its own adapters.
 | `container_last_terminated_oomkilled` | 1 when the container's last termination was OOMKilled | kube-state-metrics |
 | `container_waiting_reason` | 1 per waiting container, with the reason (CrashLoopBackOff, ImagePullBackOff, ...) | kube-state-metrics |
 | `deployment_replicas_unavailable` | unavailable replicas of the Deployment named `workload` | kube-state-metrics |
+| `hpa_metric_current` | current value of each metric of the HPA named `hpa`, from its status, per `metric_name` and `metric_target_type` (`value`, `average` per pod, or `utilization` in percent of the request) | kube-state-metrics (`kube_horizontalpodautoscaler_status_target_metric`) |
+| `hpa_metric_target` | target of each metric of the HPA named `hpa`, from its spec, in the same units | kube-state-metrics (`kube_horizontalpodautoscaler_spec_target_metric`) |
 
 ### Namespace scope
 
@@ -105,7 +108,7 @@ Source profile ([#333](https://github.com/pkalin/shadewright/issues/333), [confi
 
 **Where the namespace scope holds.** It holds only if the `namespace`, `pod`, `container` and `cluster` labels of cAdvisor and kube-state-metrics series are the scrape's. A job that scrapes tenant pods must not honour their labels (`honor_labels: false`), or must drop the `container_*` and `kube_*` metric names from what it keeps. Otherwise a pod can expose a series named like a template's metric with another namespace's labels. Metric values stay evidence a tenant can influence.
 
-**A measurement counts once.** Within that profile, two scrape jobs that collect the same cAdvisor or kube-state-metrics series differ only in `job` or `instance`, and every template reduces the series of one container (namespace, pod, container, cluster) before it aggregates.
+**A measurement counts once.** Within that profile, two scrape jobs that collect the same cAdvisor or kube-state-metrics series differ only in `job` or `instance`, and every template reduces the series of one container (namespace, pod, container, cluster) before it aggregates. The HPA templates reduce the series of one HPA metric (namespace, HPA, metric name, target type, cluster) to their max.
 
 - Gauges and states take the max over the container, so after a restart a memory value is the larger of the old and the new instance while both have series, never their sum.
 - The CPU templates take the max over each container instance (cAdvisor's `id`, its cgroup) and sum the instances, which ran one after the other within the 5-minute window.

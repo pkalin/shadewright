@@ -26,6 +26,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -39,13 +40,17 @@ const MaxMetricPods = 16
 const (
 	paramNamespace = "namespace"
 	paramWorkload  = "workload"
+	paramHPA       = "hpa"
 )
 
 // metricPlan is one approved template the builder asks for.
 type metricPlan struct {
 	template string
-	// pods: the template selects the target's pods; otherwise it takes the workload parameter.
+	// pods: the template selects the target's pods; otherwise it takes the workload parameter, or the hpa
+	// parameter when hpa is set.
 	pods bool
+	// hpa: the template reads the HorizontalPodAutoscaler of a ScaledObject target, named by its status.
+	hpa bool
 	// overWindow: a range query over the window, shown as last, minimum and maximum; otherwise an instant
 	// query at the end of the window.
 	overWindow bool
@@ -70,6 +75,8 @@ var metricPlans = []metricPlan{
 	{template: "container_cpu_usage_cores", pods: true, overWindow: true},
 	{template: "container_cpu_throttled_ratio", pods: true},
 	{template: "deployment_replicas_unavailable"},
+	{template: "hpa_metric_current", hpa: true, overWindow: true},
+	{template: "hpa_metric_target", hpa: true},
 }
 
 // rangeStep is the step of a range query: about 60 points over the window, at least one minute.
@@ -91,6 +98,10 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 		pods = append(pods, t.pods[i].Name)
 	}
 	_, deployment := t.workload.(*appsv1.Deployment)
+	hpa := hpaOf(t)
+	if t.scaledObject != nil && hpa == "" {
+		return notAvailable(SectionMetrics, ProvenanceMetric, "not available: the ScaledObject reports no HPA name\n"), false, nil
+	}
 	blk := Block{Section: SectionMetrics, Provenance: ProvenanceMetric, Availability: Available}
 	b.podLabels(&blk, t)
 	if len(t.pods) > MaxMetricPods {
@@ -101,6 +112,11 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 	for _, plan := range metricPlans {
 		q := providers.MetricsQuery{Template: plan.template, Params: map[string]string{paramNamespace: t.ref.Namespace}, End: w.end}
 		switch {
+		case plan.hpa:
+			if hpa == "" {
+				continue
+			}
+			q.Params[paramHPA] = hpa
 		case plan.pods && len(pods) > 0:
 			q.Pods = pods
 		case !plan.pods && deployment:
@@ -146,6 +162,22 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 	}
 	b.finish(&blk, &l, b.limits.Metrics)
 	return blk, failed > 0, nil
+}
+
+// hpaOf returns the name of the HorizontalPodAutoscaler a ScaledObject target reports in status.hpaName, the
+// HPA KEDA created for it, or "" when the target is not a ScaledObject or the name is missing or not a DNS-1123
+// subdomain. The HPA itself is not read (ADR-0036 decision 2): the name only selects the HPA's series of
+// kube-state-metrics in the target's namespace.
+func hpaOf(t *target) string {
+	if t.scaledObject == nil {
+		return ""
+	}
+	status, _ := t.scaledObject.Object["status"].(map[string]any)
+	name, _ := status["hpaName"].(string)
+	if len(validation.IsDNS1123Subdomain(name)) > 0 {
+		return ""
+	}
+	return name
 }
 
 // seriesLines writes one line per series, sorted by labels.

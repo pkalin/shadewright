@@ -234,10 +234,16 @@ func TestMetricQueriesUseResolvedPods(t *testing.T) {
 		if !ok || info.Pods != p.pods {
 			t.Errorf("plan %q: approved %t, pods %t", p.template, ok, info.Pods)
 		}
-		if !p.pods && !slices.Contains(info.Params, paramWorkload) {
-			t.Errorf("plan %q takes no workload", p.template)
+		param := paramWorkload
+		if p.hpa {
+			param = paramHPA
+		}
+		if !p.pods && !slices.Contains(info.Params, param) {
+			t.Errorf("plan %q takes no %s", p.template, param)
 		}
 	}
+	// A Deployment target asks every plan but the HPA ones.
+	deploymentPlans := slices.DeleteFunc(slices.Clone(metricPlans), func(p metricPlan) bool { return p.hpa })
 	src := webSources()
 	src.metrics.PodTemplates = podTemplates
 	var mu sync.Mutex
@@ -255,7 +261,7 @@ func TestMetricQueriesUseResolvedPods(t *testing.T) {
 	if m := one(t, c, SectionMetrics); m.Availability != Available || hasLabel(m, LabelIncomplete) {
 		t.Fatalf("metrics %q %v:\n%s", m.Availability, m.Labels, m.Text)
 	}
-	if len(queries) != len(metricPlans) {
+	if len(queries) != len(deploymentPlans) {
 		t.Fatalf("%d queries", len(queries))
 	}
 	for _, q := range queries {
@@ -274,7 +280,7 @@ func TestMetricQueriesUseResolvedPods(t *testing.T) {
 	}
 }
 
-// A StatefulSet target asks no Deployment template.
+// A StatefulSet target asks no Deployment or HPA template.
 func TestMetricsOfAStatefulSet(t *testing.T) {
 	s := statefulSet()
 	ref := controllerRef(kindStatefulSet, s.Name, s.UID)
@@ -288,7 +294,8 @@ func TestMetricsOfAStatefulSet(t *testing.T) {
 		})
 	})
 	build(t, b, incident(target))
-	if slices.Contains(asked, "deployment_replicas_unavailable") || len(asked) != len(metricPlans)-1 {
+	podPlans := slices.DeleteFunc(slices.Clone(metricPlans), func(p metricPlan) bool { return !p.pods })
+	if slices.Contains(asked, "deployment_replicas_unavailable") || len(asked) != len(podPlans) {
 		t.Fatalf("asked %v", asked)
 	}
 }

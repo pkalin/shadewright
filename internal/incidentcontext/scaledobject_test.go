@@ -33,6 +33,8 @@ import (
 
 const (
 	soUID = "uid-so"
+	// soHPA is the HPA the ScaledObject fixture reports in status.hpaName.
+	soHPA = "keda-hpa-app"
 	// keyName is the name key of a JSON object.
 	keyName = "name"
 )
@@ -72,7 +74,8 @@ func scaledObject(uid string, conds []any) *unstructured.Unstructured {
 				"metadata":          map[string]any{"serverAddress": soServerAddress, "query": soQuery, "threshold": "5"},
 				"authenticationRef": map[string]any{keyName: soAuthRef}}},
 		},
-		"status": map[string]any{"externalMetricNames": []any{"s0-prometheus"}, "conditions": conds},
+		"status": map[string]any{"externalMetricNames": []any{"s0-prometheus"}, "conditions": conds,
+			"hpaName": soHPA},
 	}}
 	return so
 }

@@ -45,6 +45,39 @@ func TestLimitFactAcceptsAnySourceOfTheValue(t *testing.T) {
 	}
 }
 
+// keda-at-ceiling's backlog fact needs the current value of the HPA's metric and its target with its value,
+// from the metric lines or in words; a reply that names the metric without its values fails it.
+func TestKedaBacklogNeedsTheCurrentValueAndTheTarget(t *testing.T) {
+	_, s := mustScenario(t, scnKedaCeiling)
+	var fact *rubricFact
+	for i := range s.rubric.Facts {
+		if strings.Contains(s.rubric.Facts[i].Fact, "backlog") {
+			fact = &s.rubric.Facts[i]
+		}
+	}
+	if fact == nil || fact.Unscored != "" {
+		t.Fatalf("keda-at-ceiling's backlog fact is missing or unscored: %+v", fact)
+	}
+	one := rubric{Facts: []rubricFact{*fact}}
+	subject := subjectText(s.incident)
+	for name, tc := range map[string]struct {
+		text string
+		pass bool
+	}{
+		"metric lines":          {"hpa_metric_current{...} last 6.5 and hpa_metric_target{...} 5", true},
+		"in words, per replica": {"The metric is at 6.5 per replica against a target of 5.", true},
+		"in words, in all":      {"About 13 requests per second in all; the target is 5 per replica.", true},
+		"no target":             {"The metric is at 6.5 per replica.", false},
+		"no current value":      {"The metric is above its target of 5.", false},
+		"metric names only":     {"hpa_metric_current is above hpa_metric_target.", false},
+	} {
+		got := scoreDiagnosis(one, tc.text, subject)
+		if got.Pass != tc.pass {
+			t.Errorf("%s: pass %t, want %t: %+v", name, got.Pass, tc.pass, got.Facts)
+		}
+	}
+}
+
 // A subject fact is scored from the Incident: the reply need not repeat the subject, and a rubric whose
 // subject terms are not in the Incident fails.
 func TestSubjectFactIsScoredFromTheIncident(t *testing.T) {

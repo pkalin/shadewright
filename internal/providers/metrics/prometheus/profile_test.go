@@ -39,6 +39,8 @@ const (
 	tOOMKilled   = "container_last_terminated_oomkilled"
 	tWaiting     = "container_waiting_reason"
 	tUnavailable = "deployment_replicas_unavailable"
+	tHPACurrent  = "hpa_metric_current"
+	tHPATarget   = "hpa_metric_target"
 
 	jobLabel      = "job"
 	kubeletJob    = "kubelet"
@@ -52,13 +54,14 @@ type truth struct {
 	throttled, periods        float64 // CFS periods per second
 	restarts, oomKilled       float64
 	crashLoop, unavailableDep float64
+	hpaCurrent, hpaTarget     float64 // the HPA's external metric, average per pod
 }
 
 var labA = truth{workingSet: 200, limit: 400, cpu: 0.25, throttled: 2, periods: 10, restarts: 3, oomKilled: 1,
-	crashLoop: 1, unavailableDep: 1}
+	crashLoop: 1, unavailableDep: 1, hpaCurrent: 6.5, hpaTarget: 5}
 
 var labB = truth{workingSet: 600, limit: 800, cpu: 0.75, throttled: 6, periods: 10, restarts: 5, oomKilled: 0,
-	crashLoop: 0, unavailableDep: 2}
+	crashLoop: 0, unavailableDep: 2, hpaCurrent: 1.5, hpaTarget: 3}
 
 // scrape is where series come from: the cluster label a shared backend adds (empty for none), the jobs that
 // collected them and the cgroup of the container instance.
@@ -98,7 +101,8 @@ func cadvisor(sc scrape, m truth) []storedSeries {
 	return out
 }
 
-// ksm is the kube-state-metrics series of the container, its pod and its Deployment, as one job scraped them.
+// ksm is the kube-state-metrics series of the container, its pod, its Deployment and the HPA, as one job
+// scraped them.
 func ksm(sc scrape, m truth) []storedSeries {
 	k := func(metric string, v float64, labels ...string) storedSeries {
 		return series(sc, sc.ksmJob, metric, v, append([]string{"pod", testStatefulPod, "container", testContainer},
@@ -113,6 +117,10 @@ func ksm(sc scrape, m truth) []storedSeries {
 		k("kube_pod_container_status_waiting_reason", 0, "reason", "ImagePullBackOff"),
 		series(sc, sc.ksmJob, "kube_deployment_status_replicas_unavailable", m.unavailableDep,
 			"deployment", testWorkload),
+		series(sc, sc.ksmJob, "kube_horizontalpodautoscaler_status_target_metric", m.hpaCurrent,
+			"horizontalpodautoscaler", testHPA, "metric_name", "s0-prometheus", "metric_target_type", "average"),
+		series(sc, sc.ksmJob, "kube_horizontalpodautoscaler_spec_target_metric", m.hpaTarget,
+			"horizontalpodautoscaler", testHPA, "metric_name", "s0-prometheus", "metric_target_type", "average"),
 	}
 }
 
@@ -129,7 +137,8 @@ var (
 
 // measure runs every template against the stored series, with the source scoped to cluster (empty for none),
 // and returns, per template, the value of the container app of testStatefulPod (CrashLoopBackOff for
-// container_waiting_reason, the Deployment for deployment_replicas_unavailable), failing when a template gives
+// container_waiting_reason, the Deployment for deployment_replicas_unavailable, the HPA's one metric for the HPA
+// templates), failing when a template gives
 // another number of series than one or returns the cluster label.
 func measure(t *testing.T, cluster string, stored []storedSeries) map[string]float64 {
 	t.Helper()
@@ -162,6 +171,8 @@ func want(m truth) map[string]float64 {
 		tOOMKilled:   m.oomKilled,
 		tWaiting:     m.crashLoop,
 		tUnavailable: m.unavailableDep,
+		tHPACurrent:  m.hpaCurrent,
+		tHPATarget:   m.hpaTarget,
 	}
 }
 

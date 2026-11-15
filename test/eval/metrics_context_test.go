@@ -142,10 +142,50 @@ func TestRecordedMetricsReachTheContext(t *testing.T) {
 	}
 }
 
+// keda-at-ceiling's recorded HPA metric reaches the context through the HPA templates, for the HPA its
+// ScaledObject reports, and its recorded reply quotes the current value and the target from the metrics block.
+func TestKedaAtCeilingMetricsReachTheContext(t *testing.T) {
+	s := mustLoad(t, scnKedaCeiling)
+	if s.metrics == nil {
+		t.Fatal("no metrics.yaml")
+	}
+	c := buildContext(t, s, s.metricsSource(), nil)
+	blk, id := metricsBlock(t, c)
+	if blk.Availability != incidentcontext.Available || c.Escalate() {
+		t.Fatalf("metrics %s, escalate %v:\n%s", blk.Availability, c.Escalate(), blk.Text)
+	}
+	const labels = "{horizontalpodautoscaler=keda-hpa-worker,metric_name=s0-prometheus,metric_target_type=average}"
+	for _, want := range []string{
+		"hpa_metric_current" + labels + " last 6.5, min 4, max 6.5",
+		"hpa_metric_target" + labels + " 5",
+	} {
+		if !quotableIn(blk, want) {
+			t.Errorf("metrics block has no quotable %q:\n%s", want, blk.Text)
+		}
+	}
+	res, _, err := analysis.DecodeResult(s.recording.Replies[len(s.recording.Replies)-1].Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var quoted []string
+	for _, e := range res.Evidence {
+		if !strings.HasPrefix(e.Quote, "hpa_metric_") {
+			continue
+		}
+		quoted = append(quoted, e.Quote[:strings.Index(e.Quote, "{")])
+		if e.Source != id || !quotableIn(blk, e.Quote) {
+			t.Errorf("quote %q of %s is not quotable in the metrics block %s", e.Quote, e.Source, id)
+		}
+	}
+	if !slices.Contains(quoted, "hpa_metric_current") || !slices.Contains(quoted, "hpa_metric_target") {
+		t.Errorf("the recorded reply quotes %v, want the current value and the target", quoted)
+	}
+}
+
 // A scenario without metrics.yaml has no metrics source, as an analyzer without --prometheus-url: the
 // section says so and is no escalation signal.
 func TestNoMetricsRecordingIsNotConfigured(t *testing.T) {
-	for _, name := range []string{"keda-at-ceiling", "bad-image"} {
+	for _, name := range []string{scnBadImage} {
 		s := mustLoad(t, name)
 		if s.metrics != nil || s.metricsSource() != nil {
 			t.Fatalf("%s: has a metrics source", name)

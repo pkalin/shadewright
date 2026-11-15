@@ -7,8 +7,17 @@ facts:
     # The ScaledObject is the Incident's subject: scored from the Incident, not from the reply.
     subject: ["ScaledObject", "worker"]
   - fact: the backlog, the current external metric value (about 13 requests per second) against its target (5 per replica)
-    unscored: no approved metric template reads HPA or external metrics, and a ScaledObject subject resolves no pods, so the metrics section has nothing to query; the Incident's symptom evidence would carry the values, but recorded milli quantities (such as 6500m) are normalized away, so this recorded Incident does not hold them
+    # metrics.yaml records the HPA's metric through hpa_metric_current and hpa_metric_target (#480): 6.5 per
+    # replica against an average target of 5. The current value counts per replica (6.5) or in all (13), and the
+    # target must be cited with its value or by its metric line ("5 per replica" alone would match "6.5 per
+    # replica").
+    any: ["6.5", "13"]
+    anyOf:
+      - ["hpa_metric_target"]
+      - ["target of 5"]
+      - ["target 5"]
+      - ["target is 5"]
   - fact: the ScaledObject is Ready, not paused, not on fallback, and its HPA can read its metrics
     unscored: checked by the policy gate for AdjustKedaMaxReplicas at the policy step, not diagnosis input
   - fact: request rate and replica history over time
-    unscored: no approved metric template reads request rates or replica history, so the scenario records no metrics.yaml
+    unscored: no approved metric template reads the trigger's request rate or the replica history; hpa_metric_current shows only the HPA's metric per replica over the window

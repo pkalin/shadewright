@@ -308,6 +308,11 @@ func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
 		return Token{}, time.Time{}, s.requestError(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := ctx.Err(); err != nil {
+		// net/http can return an answer that raced the end of the call's context (#767, #779). The context
+		// ended first: the call reports that, whatever the answer was, and no token of it is cached.
+		return Token{}, time.Time{}, s.requestError(ctx, err)
+	}
 
 	// A fixed label: the repository name comes from configuration, and a misplaced credential there must not
 	// reach an error.
@@ -322,6 +327,10 @@ func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
 	}
 	if err != nil {
 		// A stall, truncation or reset while reading is transient, like a failure to connect.
+		return Token{}, time.Time{}, s.requestError(ctx, err)
+	}
+	if err := ctx.Err(); err != nil {
+		// A body read whole after the context ended is not taken either (#779).
 		return Token{}, time.Time{}, s.requestError(ctx, err)
 	}
 	return s.parse(op, data)
@@ -368,6 +377,10 @@ func (s *Source) fetchAppID(ctx context.Context) (int64, error) {
 		return 0, s.requestError(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := ctx.Err(); err != nil {
+		// An answer that raced the end of the call's context is neither classified nor kept (#779).
+		return 0, s.requestError(ctx, err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return 0, s.statusError(op, resp)
 	}
@@ -376,6 +389,9 @@ func (s *Source) fetchAppID(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("%s: %w", op, err)
 	}
 	if err != nil {
+		return 0, s.requestError(ctx, err)
+	}
+	if err := ctx.Err(); err != nil {
 		return 0, s.requestError(ctx, err)
 	}
 	var v struct {

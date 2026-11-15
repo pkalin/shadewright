@@ -1186,10 +1186,10 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	case errors.Is(err, errMergeCommitPending):
 		return prMergeCommitPending, nil
 	}
-	caughtUp := false
+	comments := commentsNone
 	if ctx.Err() == nil {
 		// Deadlines of their own (pollHints): a slow check of the pull request does not leave them its remainder.
-		caughtUp = r.watchHints(ctx, look, rr)
+		comments = r.watchHints(ctx, look, rr)
 	}
 	if err != nil {
 		logf.FromContext(ctx).V(1).Info("Could not check the pull request of RemediationRequest",
@@ -1210,7 +1210,7 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	if ctx.Err() == nil {
 		// Open with the recorded head: the check run on it, and the merge gate only after the comments of this
 		// look are stored (reviewcheck.go).
-		r.watchReviewCheck(ctx, rr, caughtUp)
+		r.watchReviewCheck(ctx, rr, comments)
 	}
 	return prOpen, nil
 }

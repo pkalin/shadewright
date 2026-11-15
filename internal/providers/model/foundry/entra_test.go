@@ -335,3 +335,55 @@ func TestWorkloadIdentityCachesShortLivedTokens(t *testing.T) {
 		})
 	}
 }
+
+// lateEntra answers only once the exchange's context has ended, as net/http can return an answer that raced
+// the end of the context (#767). It ends the caller's context itself, so the only waiter leaves and the
+// exchange is canceled; the test needs no clock. call is the exchange it served.
+type lateEntra struct {
+	w    **WorkloadIdentity
+	end  context.CancelFunc
+	code int
+	call chan *exchangeCall
+}
+
+func (l lateEntra) RoundTrip(r *http.Request) (*http.Response, error) {
+	w := *l.w
+	w.mu.Lock()
+	l.call <- w.inflight
+	w.mu.Unlock()
+	l.end()
+	<-r.Context().Done()
+	body := fmt.Sprintf(`{"token_type":"Bearer","expires_in":3600,"access_token":%q}`, goodToken)
+	return &http.Response{StatusCode: l.code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+}
+
+// An exchange whose context ended classifies nothing of the answer that raced that end, and caches no token
+// of it (#779).
+func TestWorkloadIdentityAnswerAfterContextEnd(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusUnauthorized} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var w *WorkloadIdentity
+			calls := make(chan *exchangeCall, 1)
+			w, err := newWorkloadIdentity(envOf(goodEnv(t)), lateEntra{w: &w, end: cancel, code: code, call: calls})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Token(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Token = %v, want the caller's cancellation", err)
+			}
+			call := <-calls
+			<-call.done
+			if !errors.Is(call.err, context.Canceled) || errors.Is(call.err, providers.ErrForbidden) {
+				t.Errorf("exchange err = %v, want its cancellation", call.err)
+			}
+			w.mu.Lock()
+			cached := w.token
+			w.mu.Unlock()
+			if cached != "" {
+				t.Error("a token taken after the context ended was cached")
+			}
+		})
+	}
+}

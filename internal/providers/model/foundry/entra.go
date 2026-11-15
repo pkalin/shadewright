@@ -269,6 +269,12 @@ func (w *WorkloadIdentity) exchange(ctx context.Context) (string, time.Time, err
 		return "", time.Time{}, &providers.RetryableError{Err: errors.New("foundry: no answer from Entra ID")}
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if ctx.Err() != nil {
+		// net/http can return an answer that raced the end of the exchange's context (#767, #779): every
+		// waiter left, or tokenRequestTimeout passed. The end came first: no status of it is classified and no
+		// token of it is cached.
+		return "", time.Time{}, tokenCtxError(ctx)
+	}
 	switch code := resp.StatusCode; {
 	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500,
 		code == http.StatusBadRequest && retryableEntraRefusal(resp.Body):
@@ -286,6 +292,10 @@ func (w *WorkloadIdentity) exchange(ctx context.Context) (string, time.Time, err
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponse+1))
 	if err != nil || len(data) > maxTokenResponse {
 		return "", time.Time{}, &providers.RetryableError{Err: errors.New("foundry: the answer of Entra ID could not be read")}
+	}
+	if ctx.Err() != nil {
+		// A body read whole after the end is not taken either.
+		return "", time.Time{}, tokenCtxError(ctx)
 	}
 	var body struct {
 		AccessToken string `json:"access_token"`

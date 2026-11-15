@@ -367,6 +367,11 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 		return response{}, p.transportError(ctx, c.op, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if ctx.Err() != nil {
+		// net/http can return an answer that raced the end of the call's context (#767, #779). The context
+		// ended first: the call reports that, whatever the answer was, and nothing of it is classified.
+		return response{}, ctxError(c.op, ctx)
+	}
 
 	code := resp.StatusCode
 	switch {
@@ -376,7 +381,12 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 			limit = maxJSONBody
 		}
 		if c.stream != nil {
-			return p.readStream(ctx, c, resp, limit)
+			r, err := p.readStream(ctx, c, resp, limit)
+			if err == nil && ctx.Err() != nil {
+				// A body read whole after the context ended is not taken either.
+				return response{}, ctxError(c.op, ctx)
+			}
+			return r, err
 		}
 		data, err := readBounded(resp, limit)
 		if errors.Is(err, errBodyTooLarge) {
@@ -384,6 +394,9 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 		}
 		if err != nil {
 			return response{}, p.transportError(ctx, c.op, err)
+		}
+		if ctx.Err() != nil {
+			return response{}, ctxError(c.op, ctx)
 		}
 		return response{status: code, header: resp.Header, body: data}, nil
 	case code == http.StatusForbidden || code == http.StatusTooManyRequests:

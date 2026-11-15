@@ -34,7 +34,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -211,12 +210,10 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up ready check")
+	// /healthz is a ping; /readyz passes once the informers of the required kinds have synced, on the leader
+	// and on a standby, and keeps passing.
+	if err := cmdutil.AddHealthChecks(mgr, controller.ReadinessKinds()...); err != nil {
+		setupLog.Error(err, "Failed to set up the health checks")
 		os.Exit(1)
 	}
 

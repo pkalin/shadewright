@@ -15,7 +15,8 @@ limitations under the License.
 */
 
 // Package cmdutil holds the manager setup shared by the executor, the analyzer and the verifier binaries: flags
-// for metrics, health probes and leader election, the TLS defaults, and the parser of --watch-namespaces.
+// for metrics, health probes and leader election, the TLS defaults, the health checks ([AddHealthChecks]), and the
+// parser of --watch-namespaces.
 package cmdutil
 
 import (

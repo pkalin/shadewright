@@ -443,3 +443,31 @@ For an enabled module, the analyzer must also be allowed to read the add-on's ki
 - `kubectl get remediationsettings default -o jsonpath='{.status.conditions[?(@.type=="SymptomSourcesNotWatched")]}'` shows `True` with reason `SourcesNotWatched` and names each kind with `NotGranted` (turn on the module's value under `analyzer.modules` in the chart), `NotServed` (the add-on's CRD is not installed) or `Failed` (the check or the watch failed, for example `list` is granted but not `watch`; the analyzer's log has the error, and a failed watch is started again after a backoff of one minute, doubled after each failure in a row up to 30 minutes). `Unknown` with reason `SourcesNotChecked` means a kind has not been checked yet: it changes within 30 seconds.
 - The gauge `shadewright_analyzer_symptom_source_watched` is `0` for that kind, and the analyzer logs `Not watching a symptom source kind` once per change (`Watch of a symptom source kind failed` for each failed watch).
 - With the Kyverno module enabled and `analyzer.modules.kyverno.clusterWide.enabled` off (the least-privilege default), `ClusterPolicy` and `ClusterPolicyReport` are left out on purpose: they are not named in the condition, the gauge has no series for them, and the log says `the chart leaves its optional grant out` once. Turn the value on to read them. The chart tells the analyzer which grants it rendered (`--module-grants`); a kustomize install passes no such flag, so there every module kind is checked and one without its role is reported as `NotGranted`.
+
+## A component Pod stays not Ready
+
+A Pod of the executor, the analyzer or the verifier turns Ready once the informers of the kinds it cannot work without have synced ([health probes](operate.md#health-probes) lists them). Until then `kubectl -n shadewright-system get pods` shows it `0/1`, and `kubectl describe pod` shows one of two startup probe failures:
+
+- `connect: connection refused`: the manager has not started its probe server yet. That takes a moment after each start. If the restart count rises with it, the process exits before it serves: `kubectl logs --previous` says why, for example an API server it could not reach to map the kinds it caches.
+- `HTTP probe failed with statuscode: 500`: the manager runs, and the check `cache-sync` is waiting for an informer.
+
+Ask the Pod itself:
+
+```bash
+kubectl -n shadewright-system port-forward deploy/shadewright-analyzer 8081:8081 &
+curl -s 'localhost:8081/readyz?verbose'   # [-]cache-sync failed: reason withheld, until the informers sync
+```
+
+The check never says which kind it waits for. The log does:
+
+```bash
+kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep -i -E 'forbidden|failed to list|failed to watch|informer of a required kind'
+```
+
+- `forbidden`: the component may not list or watch one of the kinds it waits for. For the analyzer this is usually a watched namespace without its RoleBinding (`analyzer.watchNamespaces`, or `config/watch` with kustomize); for any component, a Role or ClusterRole changed by hand. The component keeps retrying, and turns Ready without a restart once the grant is back, if that happens within the startup budget.
+- `failed to list` with a timeout or a refused connection, or `Failed to get the informer of a required kind`: the API server is slow or not reachable from the Pod, or a CRD of the project is missing (`kubectl get crd | grep shadewright`).
+- No such line: the informers are still filling. A large watched namespace takes longer; the startup probe allows five minutes.
+
+A missing add-on CRD (Flux, KEDA, Kyverno) or a module grant that is off never keeps a Pod not Ready: see [No Incident appears](#no-incident-appears) for how those show.
+
+After five minutes without a sync the kubelet restarts the container: the restart count rises, and `kubectl logs --previous` shows the run before. Once a Pod has been Ready, it stays Ready until the container stops, also through a later API server outage; such an outage shows in the log and the metrics, not in readiness. A standby replica is Ready like the leader once it has synced; one that is not Ready has one of the causes above, not a missing Lease.

@@ -93,6 +93,8 @@ The analyzer, executor and verifier Deployments of the namespace, found by the l
 | warn: only N of M replicas ready | Available, but fewer replicas are ready than `spec.replicas` | `kubectl -n <ns> get pods -l control-plane=<component>` and the events of the pods that are not ready |
 | warn: scaled to 0 replicas | Stopped on purpose | Scale it up when it should run |
 
+A replica counts as available once it is Ready, and a Pod turns Ready only once its informers have synced ([health probes](../operate.md#health-probes)). For `not available` or `only N of M replicas ready` with pods that run but stay `0/1`, see [a component Pod stays not Ready](../troubleshooting.md#a-component-pod-stays-not-ready).
+
 ## Repositories
 
 Each entry of `spec.repositories` must be complete for the executor to open a pull request: `url`, and for GitHub `github.appClientID`, `github.installationID` and `github.signer.azureKeyVault.keyID`. The check reads only the settings object: it calls neither GitHub nor Key Vault, so a wrong installation ID or a key the executor may not use shows only in the conditions of the first request (see [troubleshooting](../troubleshooting.md#pull-request-step)).

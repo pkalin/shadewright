@@ -17,6 +17,8 @@ limitations under the License.
 package analyzer
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -59,4 +61,23 @@ func CacheOptions(operatorNamespace string, watched []string) cache.Options {
 			&remediationv1alpha1.RemediationRequest{}: {Namespaces: operator},
 		},
 	}
+}
+
+// ReadinessKinds are the kinds whose informers must have synced before the analyzer reports ready
+// (cmdutil.AddHealthChecks): the Incidents and RemediationRequests of the operator namespace, the
+// RemediationSettings, and, with at least one watched namespace, the events.k8s.io Events and the Pods the
+// collector reads there. The add-on kinds of the modules (Flux, KEDA, Kyverno and the rest) are never in the
+// list: they may not be installed or granted, and the collector watches them on a cache of its own. Neither are
+// the HorizontalPodAutoscalers, a symptom source only for the KEDA module, nor the Nodes, which the analyzer may
+// list but not watch.
+func ReadinessKinds(watched []string) []client.Object {
+	kinds := []client.Object{
+		&remediationv1alpha1.Incident{},
+		&remediationv1alpha1.RemediationRequest{},
+		&remediationv1alpha1.RemediationSettings{},
+	}
+	if len(watched) > 0 {
+		kinds = append(kinds, &eventsv1.Event{}, &corev1.Pod{})
+	}
+	return kinds
 }

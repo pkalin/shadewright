@@ -60,8 +60,10 @@ executor:
 
 ```bash
 helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
-  --namespace shadewright-system -f my-values.yaml --wait --timeout 5m
+  --namespace shadewright-system -f my-values.yaml --wait --timeout 10m
 ```
+
+The timeout is twice the five minutes a new Pod may take to turn Ready ([health probes](../operate.md#health-probes)), so a slow start is not reported as a failed upgrade.
 
 The chart renders `--reviewer-hints` on the executor only, and refuses the flag in `executor.extraArgs`. With the kustomize manifests, add `--reviewer-hints` to the args of the executor's container.
 

@@ -554,3 +554,10 @@ func trimTermination(t *corev1.ContainerStateTerminated) *corev1.ContainerStateT
 	}
 	return &corev1.ContainerStateTerminated{Reason: t.Reason, FinishedAt: t.FinishedAt}
 }
+
+// ReadinessKinds are the kinds whose informers must have synced before the verifier reports ready
+// (cmdutil.AddHealthChecks): the RemediationRequests it samples. Pods it may only list, through the API reader,
+// and the owners only get, so neither has an informer.
+func ReadinessKinds() []client.Object {
+	return []client.Object{&v1alpha1.RemediationRequest{}}
+}

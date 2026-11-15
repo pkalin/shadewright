@@ -138,8 +138,10 @@ Steps 1 to 4 above (release notes, Kubernetes 1.32 or later, which the chart's `
 
 ```bash
 helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <new version> \
-  --namespace shadewright-system -f my-values.yaml --wait --timeout 5m
+  --namespace shadewright-system -f my-values.yaml --wait --timeout 10m
 ```
+
+`--timeout 10m` is twice the five minutes each new Pod may take to turn Ready ([health probes](operate.md#health-probes)).
 
 - Pin `--version`, or better install the digest you verified (`oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>` in place of the reference and `--version`; Helm accepts it). Verify the chart and the images first (the chart's cosign identity is in the [configuration reference](reference/configuration.md#helm-chart), the images are in [verify a release](#verify-a-release)).
 - Prefer `-f my-values.yaml` to `--reuse-values`, which reuses the values of the last release instead of the new chart's: the digests of the new release may not reach the Deployments. After any upgrade check the images that run (`kubectl -n shadewright-system get deploy -o wide`). `--reset-then-reuse-values` starts from the new chart's values and applies yours.
@@ -157,7 +159,7 @@ Then, from v0.1.0, the patch of step 3, and steps 7 and 8 (check, unpause). `hel
 What to do instead:
 
 1. Pause writes (`spec.paused: true` on `RemediationSettings`) and let the pull requests you care about finish or close, as in [upgrade](#upgrade) step 4.
-2. Roll back the whole release, CRDs included, so the old schema and the old images arrive together. With Helm, the CRDs are templates of the chart, so `helm rollback shadewright <revision> --namespace shadewright-system --wait --timeout 5m` (or `helm upgrade` with the older `--version` and your values file) applies the old CRDs with the old Deployments. With the manifests, apply the older release's `config/default` (`kubectl apply -k` with the `?ref=` and the digests of that release). Do not set `crd.enabled=false` for this: that leaves the v0.5.0 CRDs in place, which is the case this section warns about.
+2. Roll back the whole release, CRDs included, so the old schema and the old images arrive together. With Helm, the CRDs are templates of the chart, so `helm rollback shadewright <revision> --namespace shadewright-system --wait --timeout 10m` (or `helm upgrade` with the older `--version` and your values file) applies the old CRDs with the old Deployments. With the manifests, apply the older release's `config/default` (`kubectl apply -k` with the `?ref=` and the digests of that release). Do not set `crd.enabled=false` for this: that leaves the v0.5.0 CRDs in place, which is the case this section warns about.
 3. Check as in [upgrade](#upgrade) step 7, then unpause.
 
 What the old CRD does to requests that are in flight. The fields that v0.4.0 does not have are `spec.reverts`, `status.mergeReceipt`, `status.mergeCommitAwaitedSince`, `status.verification`, `status.queuedBehind` and `status.conflictSeen`. The API server prunes them from the stored objects, at the latest on the next write of each object. The conditions `Cleared` and `Configured` are items of the conditions list, not fields of the schema, so they stay on the objects; v0.4.x neither reads nor removes them. A request that was `Merged` or `Verifying` loses its receipt and its verification window, and one that waited behind another loses `queuedBehind`. A revert request loses `spec.reverts`, and so its link to the request it reverts. An Incident loses `status.revertsProposed`, so after an upgrade back to v0.5.0 a failed request whose `Verified` condition moved at most 24 hours before can get its revert proposed again.

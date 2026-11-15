@@ -43,7 +43,9 @@ limitations under the License.
 // below it, or the chain stops at the last verified object. Kinds the analyzer cannot read (DaemonSets,
 // Jobs) are not followed. Results are kept in a bounded cache, verified owners for OwnerTTL and the others
 // for 5 seconds, and the owner reference of each pod looked up is remembered (up to MaxPods), so an event
-// that arrives after its pod was deleted still reaches the workload.
+// that arrives after its pod was deleted still reaches the workload. Evidence from a pod whose verified
+// Deployment or StatefulSet has replaced its template becomes no observation (revision.go, #724), counted in
+// shadewright_analyzer_replaced_template_evidence_dropped_total; when that cannot be decided it is kept.
 //
 // Untrusted input: notes go through package fingerprint, which redacts before it normalizes, and only the
 // fingerprint and the normalized symptom leave the collector; termination messages are never read.

@@ -77,12 +77,12 @@ func TestStatefulSetPod(t *testing.T) {
 		Spec:       appsv1.StatefulSetSpec{Selector: &metav1.LabelSelector{MatchLabels: dbLabels}},
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "db-0", Namespace: testNS, UID: podUID, Labels: dbLabels,
+		Name: dbPod, Namespace: testNS, UID: podUID, Labels: dbLabels,
 		OwnerReferences: controllerRef(apiApps, kindStatefulSet, "db", stsUID),
 	}}
 	h := newHarness(t, Config{}, sts, pod)
 	ev := warning("db", 0)
-	ev.Regarding.Name = "db-0"
+	ev.Regarding.Name = dbPod
 	h.create(ev)
 	h.reconcileEvent(ev.Name)
 	subjectIs(t, h.one().Subject, kindStatefulSet, "db", stsUID)
@@ -218,15 +218,17 @@ func TestOwnersAreCachedAndBounded(t *testing.T) {
 		h.create(ev)
 		h.reconcileEvent(ev.Name)
 	}
-	if n := h.gets.Load(); n != 2 {
-		t.Fatalf("owner reads for three events = %d, want 2 (ReplicaSet and Deployment once)", n)
+	// The chain reads the ReplicaSet and the Deployment once; the check of the current revision reads both
+	// again for each event, never from the cache (replacedTemplate).
+	if n := h.gets.Load(); n != 2+3*2 {
+		t.Fatalf("owner reads for three events = %d, want 8 (chain once, revision check per event)", n)
 	}
 	h.clock.add(2 * time.Minute)
 	ev := warning("late", 0)
 	h.create(ev)
 	h.reconcileEvent(ev.Name)
-	if n := h.gets.Load(); n != 4 {
-		t.Fatalf("owner reads after the TTL = %d, want 4", n)
+	if n := h.gets.Load(); n != 8+2+2 {
+		t.Fatalf("owner reads after the TTL = %d, want 12", n)
 	}
 	for i := range 20 {
 		_, _, err := h.c.owners.chain(t.Context(), testNS, metav1.OwnerReference{

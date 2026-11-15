@@ -245,7 +245,7 @@ func (r *ownerResolver) podSubject(ctx context.Context, pod *corev1.Pod) (
 		namespace: pod.Namespace, name: pod.Name, ref: *ref, labels: labels.Set(maps.Clone(pod.Labels)),
 	})
 	r.mu.Unlock()
-	return r.ownedSubject(ctx, self, *ref, pod.Labels)
+	return r.podOwnedSubject(ctx, self, *ref, pod.Labels)
 }
 
 // formerPodSubject is podSubject for a pod that is no longer in the cache, from what was remembered about
@@ -258,7 +258,23 @@ func (r *ownerResolver) formerPodSubject(ctx context.Context, self remediationv1
 	if !ok || known.namespace != self.Namespace || known.name != self.Name {
 		return self, "", true, nil
 	}
-	return r.ownedSubject(ctx, self, known.ref, known.labels)
+	return r.podOwnedSubject(ctx, self, known.ref, known.labels)
+}
+
+// podOwnedSubject is ownedSubject for a pod, which it refuses (false, as for a reference outside the schema)
+// when the verified workload has replaced the pod's template (replacedTemplate, #724): its evidence is about a
+// template that no longer runs, and a change planned from the current one would be verified by the pod going
+// away.
+func (r *ownerResolver) podOwnedSubject(ctx context.Context, self remediationv1alpha1.ObjectRef,
+	ref metav1.OwnerReference, podLabels labels.Set) (remediationv1alpha1.ObjectRef, string, bool, error) {
+	subject, owner, ok, err := r.ownedSubject(ctx, self, ref, podLabels)
+	if err != nil || !ok || owner == "" {
+		return subject, owner, ok, err
+	}
+	if r.replacedTemplate(ctx, subject, ref, podLabels) {
+		return remediationv1alpha1.ObjectRef{}, "", false, nil
+	}
+	return subject, owner, true, nil
 }
 
 // ownedSubject returns the top of the verified chain that starts at ref with its UID as the owner, or self

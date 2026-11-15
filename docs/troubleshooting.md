@@ -443,3 +443,25 @@ For an enabled module, the analyzer must also be allowed to read the add-on's ki
 - `kubectl get remediationsettings default -o jsonpath='{.status.conditions[?(@.type=="SymptomSourcesNotWatched")]}'` shows `True` with reason `SourcesNotWatched` and names each kind with `NotGranted` (turn on the module's value under `analyzer.modules` in the chart), `NotServed` (the add-on's CRD is not installed) or `Failed` (the check or the watch failed, for example `list` is granted but not `watch`; the analyzer's log has the error, and a failed watch is started again after a backoff of one minute, doubled after each failure in a row up to 30 minutes). `Unknown` with reason `SourcesNotChecked` means a kind has not been checked yet: it changes within 30 seconds.
 - The gauge `shadewright_analyzer_symptom_source_watched` is `0` for that kind, and the analyzer logs `Not watching a symptom source kind` once per change (`Watch of a symptom source kind failed` for each failed watch).
 - With the Kyverno module enabled and `analyzer.modules.kyverno.clusterWide.enabled` off (the least-privilege default), `ClusterPolicy` and `ClusterPolicyReport` are left out on purpose: they are not named in the condition, the gauge has no series for them, and the log says `the chart leaves its optional grant out` once. Turn the value on to read them. The chart tells the analyzer which grants it rendered (`--module-grants`); a kustomize install passes no such flag, so there every module kind is checked and one without its role is reported as `NotGranted`.
+
+## A component Pod stays not Ready
+
+A Pod of the executor, the analyzer or the verifier is Ready only once its caches have synced ([health probes](operate.md#health-probes)). Until then `kubectl -n shadewright-system get pods` shows it `0/1` and `kubectl describe pod` shows `Startup probe failed: HTTP probe failed with statuscode: 500`. Ask the Pod itself:
+
+```bash
+kubectl -n shadewright-system port-forward deploy/shadewright-analyzer 8081:8081 &
+curl -s 'localhost:8081/readyz?verbose'   # [-]cache-sync failed: reason withheld, until the caches sync
+```
+
+The check never says which list failed. The log does:
+
+```bash
+kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep -i -E 'forbidden|failed to list|failed to watch'
+```
+
+- `forbidden`: the component may not list or watch a kind its cache holds. For the analyzer and the verifier this is usually a watched namespace without its RoleBinding (`analyzer.watchNamespaces`, `verifier.watchNamespaces`, or `config/watch` with kustomize).
+- `failed to list` with a timeout or a refused connection: the API server is slow or not reachable from the Pod.
+- No such line: the caches are still filling. A large cluster takes longer; the startup probe allows five minutes.
+
+After five minutes without a sync the kubelet restarts the container: the restart count rises, and `kubectl logs --previous` shows the run before. A standby replica is Ready like the leader once its caches have synced; one that is not Ready has the same cause as above, not a missing Lease.
+

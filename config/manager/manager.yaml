@@ -93,18 +93,29 @@ spec:
           capabilities:
             drop:
             - "ALL"
+        # The startup probe asks /readyz, which passes once the caches have synced: up to 150 x 2 s (5 minutes)
+        # for a slow API server or a large cache. Liveness and readiness start only after it has passed.
+        startupProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 150
         livenessProbe:
           httpGet:
             path: /healthz
             port: 8081
-          initialDelaySeconds: 15
           periodSeconds: 20
+          timeoutSeconds: 2
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /readyz
             port: 8081
-          initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
         # TODO(user): Configure the resources accordingly based on the project requirements.
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:

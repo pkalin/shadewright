@@ -190,6 +190,56 @@ func TestExplainTerminalPhases(t *testing.T) {
 	}
 }
 
+// TestExplainCancel: a request with spec.cancel shows it, and whether the executor acted on it (Cancelled with
+// reason CancelRequested, linked to the phases table), has not yet, or came second to another phase (#289).
+func TestExplainCancel(t *testing.T) {
+	for _, tc := range []struct {
+		phase remediationv1alpha1.RemediationPhase
+		conds []metav1.Condition
+		want  string
+	}{
+		{phase: remediationv1alpha1.PhaseCancelled,
+			conds: []metav1.Condition{cond(remediationv1alpha1.ConditionApproved, metav1.ConditionFalse,
+				"CancelRequested", "spec.cancel is set", time.Minute)},
+			want: "Cancel:       requested (spec.cancel), done"},
+		{phase: remediationv1alpha1.PhaseAwaitingApproval, want: "Cancel:       requested (spec.cancel), not done yet"},
+		{phase: remediationv1alpha1.PhaseMerged,
+			want: "Cancel:       requested (spec.cancel), too late: the request reached Merged first"},
+	} {
+		t.Run(string(tc.phase), func(t *testing.T) {
+			rr := explainRequestObj(testRR, tc.phase, time.Hour, tc.conds...)
+			rr.Spec.Cancel = true
+			c := explainClient(t, rr, testIncident("incident-a", "a", testSubject, "OOM"), testSettings())
+			e, err := explain(context.Background(), c, testNS, testRR)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text, js := explainOut(t, e)
+			if !strings.Contains(text, tc.want) {
+				t.Errorf("text lacks %q:\n%s", tc.want, text)
+			}
+			if !strings.Contains(js, `"cancelRequested": true`) {
+				t.Errorf("JSON lacks cancelRequested:\n%s", js)
+			}
+			if tc.phase == remediationv1alpha1.PhaseCancelled {
+				if s := e.Requests[0].Stop; s == nil || s.Reason != "CancelRequested" || !s.Listed ||
+					s.Link != troubleshootingURL+"#how-to-read-the-result" {
+					t.Errorf("stop = %+v, want CancelRequested listed in the phases table", s)
+				}
+			}
+		})
+	}
+	rr := explainRequestObj(testRR, remediationv1alpha1.PhaseAwaitingApproval, time.Hour)
+	c := explainClient(t, rr, testIncident("incident-a", "a", testSubject, "OOM"), testSettings())
+	e, err := explain(context.Background(), c, testNS, testRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := explainOut(t, e); strings.Contains(text, "Cancel:") {
+		t.Errorf("a request without spec.cancel shows a cancel line:\n%s", text)
+	}
+}
+
 // TestExplainMidFlight explains a request waiting for review after a handoff: no stop, the pull request with
 // its link, head and merge commit, and both sides of the handoff.
 func TestExplainMidFlight(t *testing.T) {

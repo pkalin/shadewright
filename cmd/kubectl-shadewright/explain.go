@@ -84,6 +84,7 @@ var troubleshootingSections = map[string][]string{
 	"BranchMismatch":                    {secRepository},
 	"BranchNotAllowed":                  {secRepository},
 	"BranchNotFound":                    {secRepository},
+	"CancelRequested":                   {secPhases},
 	"ChainLinkInvalid":                  {secPhases},
 	"ChangeRequestClosed":               {secPullRequest},
 	"ChangeRequestConflict":             {secPullRequest},
@@ -343,6 +344,9 @@ type RequestExplanation struct {
 	PullRequest *PullRequestReport `json:"pullRequest,omitempty"`
 	// ChainRoot is spec.chainRoot, the UID of the first request of a supersede chain.
 	ChainRoot string `json:"chainRoot,omitempty"`
+	// CancelRequested is spec.cancel: a person asked to cancel the request before the merge (#289). The phase says
+	// whether the executor has acted on it: Cancelled when it has, or a phase the request reached first.
+	CancelRequested bool `json:"cancelRequested,omitempty"`
 	// Replaces is the name in spec.replaces: the request this one replaces.
 	Replaces string `json:"replaces,omitempty"`
 	// Reverts is the name in spec.reverts: the failed request whose change this revert undoes (ADR-0030
@@ -582,9 +586,10 @@ func explainRequest(rr *remediationv1alpha1.RemediationRequest,
 			Decision:         conditionReport(st.Conditions, remediationv1alpha1.ConditionPolicyAllowed),
 			ApprovalRequired: st.EffectiveApprovalRequired,
 		},
-		PlanDigest: clean(st.PlanDigest, maxName),
-		ChainRoot:  clean(string(rr.Spec.ChainRoot), maxName),
-		Conditions: timeline(st.Conditions),
+		PlanDigest:      clean(st.PlanDigest, maxName),
+		ChainRoot:       clean(string(rr.Spec.ChainRoot), maxName),
+		CancelRequested: rr.Spec.Cancel,
+		Conditions:      timeline(st.Conditions),
 	}
 	if o := (OutcomeReport{RolledOut: conditionReport(st.Conditions, conditionRolledOut),
 		Configured: conditionReport(st.Conditions, remediationv1alpha1.ConditionConfigured),
@@ -763,6 +768,19 @@ func incidentLines(p *printer, inc *IncidentReport, now time.Time) {
 	p.line("  Analysis:     %s", analysisLine(*inc, now))
 }
 
+// cancelLine says what became of spec.cancel in phase: done in Cancelled, not yet in a phase before the merge, and
+// too late in any other, which the request reached before the executor acted on the cancel.
+func cancelLine(phase string) string {
+	switch remediationv1alpha1.RemediationPhase(phase) {
+	case remediationv1alpha1.PhaseCancelled:
+		return "requested (spec.cancel), done"
+	case "", remediationv1alpha1.PhasePending, remediationv1alpha1.PhasePolicyChecked, remediationv1alpha1.PhasePRCreated,
+		remediationv1alpha1.PhaseAwaitingApproval, remediationv1alpha1.PhaseAutoMergeQueued:
+		return "requested (spec.cancel), not done yet"
+	}
+	return "requested (spec.cancel), too late: the request reached " + phase + " first"
+}
+
 func requestLines(p *printer, e *Explanation, r *RequestExplanation, now time.Time) {
 	p.line("Request %s in namespace %s", r.Name, e.Namespace)
 	phase := orNone(r.Phase)
@@ -770,6 +788,9 @@ func requestLines(p *printer, e *Explanation, r *RequestExplanation, now time.Ti
 		phase += ", since " + ago(r.PhaseSince, now)
 	}
 	p.line("  Phase:        %s", phase)
+	if r.CancelRequested {
+		p.line("  Cancel:       %s", cancelLine(r.Phase))
+	}
 	if s := r.Stop; s != nil {
 		line := s.Condition + " " + s.Status + ", " + s.Reason
 		if s.Message != "" {

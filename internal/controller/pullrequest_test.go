@@ -41,6 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -1600,6 +1601,166 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(opened.Reason).To(Equal(ReasonChangeRequestClosed))
 		Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d was closed without a merge",
 			got.Status.PullRequest.Number)), "the condition no longer says the pull request is open")
+	})
+
+	// cancelIt sets spec.cancel on the request with a merge patch, as `kubectl patch --type merge` does (#289).
+	cancelIt := func() {
+		got := fetch()
+		base := got.DeepCopy()
+		got.Spec.Cancel = true
+		Expect(k8sClient.Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+	}
+	// cancelEvent returns the next Event the recorder holds, or "" when it holds none.
+	cancelEvent := func() string {
+		select {
+		case e := <-recorder.Events:
+			return e
+		default:
+			return ""
+		}
+	}
+
+	It("closes the pull request of a cancelled request, ends it Cancelled and keeps the record and the branch (#289)", func() {
+		recorder = record.NewFakeRecorder(20)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		branch := freshness.BranchName(got)
+		cancelIt()
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeZero(), "an ended request is not requeued")
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(got.Status.LastPhaseTransitionTime).NotTo(BeNil())
+		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(approved.Status).To(Equal(metav1.ConditionFalse))
+		Expect(approved.Reason).To(Equal(ReasonCancelRequested))
+		Expect(approved.Message).To(Equal(messageCancelledClosed))
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+		Expect(opened.Message).To(Equal(fmt.Sprintf("Pull request #%d is closed: the request was cancelled (spec.cancel)", n)))
+		cr, err := git.GetChangeRequest(ctx, n)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cr.State).To(Equal(providers.ChangeRequestClosed))
+		_, err = git.BranchHead(ctx, branch)
+		Expect(err).NotTo(HaveOccurred(), "the branch is left as it is")
+		Expect(cancelEvent()).To(Equal("Normal " + EventCancelled + " " + messageCancelledClosed))
+
+		// The lock is released once the read of the branch finds none open; then nothing changes any more.
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(ptr.Deref(fetch().Status.HoldsTarget, true)).To(BeFalse())
+		before := fetch().ResourceVersion
+		for range 3 {
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeZero())
+		}
+		Expect(fetch().ResourceVersion).To(Equal(before))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled), "a final phase stays final")
+		Expect(cancelEvent()).To(BeEmpty(), "one Event, on the way into Cancelled")
+	})
+
+	It("cancels a decided request before its pull request is opened, and opens none (#289)", func() {
+		recorder = record.NewFakeRecorder(20)
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		cancelIt()
+		Expect(reconcileOnce()).To(Succeed())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(got.Status.PullRequest).To(BeNil())
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Status).To(Equal(metav1.ConditionFalse))
+		Expect(opened.Reason).To(Equal(ReasonCancelRequested))
+		for range 3 {
+			Expect(reconcileOnce()).To(Succeed())
+		}
+		Expect(git.ChangeRequests()).To(BeEmpty())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(cancelEvent()).To(HavePrefix("Normal " + EventCancelled + " "))
+	})
+
+	It("closes a pull request opened while its status write was lost when the request is cancelled (#289)", func() {
+		faulty = newFaultyGit(git)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(got.Status.PullRequest).NotTo(BeNil())
+		n := got.Status.PullRequest.Number
+		// The status as it was before the pull request was recorded.
+		base := got.DeepCopy()
+		got.Status.PullRequest = nil
+		got.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+		Expect(k8sClient.Status().Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+		cancelIt()
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		cr, err := git.GetChangeRequest(ctx, n)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cr.State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("records a merge seen before the cancel as Merged, never Cancelled (#289)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		cancelIt()
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+	})
+
+	It("ends a cancelled request whose pull request a person closed Cancelled, not as a rejection (#289)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		Expect(git.CloseChangeRequest(ctx, got.Status.PullRequest.Number)).To(Succeed())
+		cancelIt()
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Message).
+			To(Equal(messageCancelledFoundClosed))
+	})
+
+	It("retries a close that failed, or whose read failed, and never ends the request on it (#289)", func() {
+		faulty = newFaultyGit(git)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		cancelIt()
+		for _, fault := range []error{
+			&providers.RetryableError{Err: errors.New("server error")},
+			fmt.Errorf("status 409: %w", providers.ErrConflict),
+		} {
+			faulty.failOn(opClose, fault)
+			Expect(reconcileOnce()).NotTo(Succeed())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "%v", fault)
+		}
+		faulty.failOn(opGet, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+		_ = reconcileOnce()
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval),
+			"a refused read is not a refused close")
+		faulty.failOn("", nil)
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		cr, err := git.GetChangeRequest(ctx, n)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cr.State).To(Equal(providers.ChangeRequestClosed))
+	})
+
+	It("ends a cancelled request whose close the Git host refuses Cancelled, with a Warning, and keeps the lock (#289)", func() {
+		recorder = record.NewFakeRecorder(20)
+		faulty = newFaultyGit(git)
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		n := got.Status.PullRequest.Number
+		cancelIt()
+		faulty.failOn(opClose, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+		Expect(reconcileOnce()).To(Succeed())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		msg := notClosedMessage("the Git host refused (" + ReasonGitForbidden + ") to close it")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Message).To(Equal(msg))
+		Expect(ptr.Deref(got.Status.HoldsTarget, false)).To(BeTrue(), "its pull request may be open")
+		Expect(cancelEvent()).To(Equal("Warning " + EventCancelled + " " + msg))
+		cr, err := git.GetChangeRequest(ctx, n)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cr.State).To(Equal(providers.ChangeRequestOpen))
 	})
 
 	// conflictSeen returns the recorded first report of a merge conflict, or nil.

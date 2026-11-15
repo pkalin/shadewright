@@ -518,6 +518,10 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		return orStepErr(res, err, stepErr)
 	}
+	if cancelRequested(rr) {
+		// A person cancelled the request before the policy check decided it (#289): nothing was written to Git.
+		return r.cancelUndecided(ctx, rr)
+	}
 	if res, stop, err := r.beforeCheck(ctx, rr); stop {
 		return res, err
 	}
@@ -1149,7 +1153,8 @@ func beforeMerge(p remediationv1alpha1.RemediationPhase) bool {
 // A recorded pull request is looked at first, so a merge or a rejection is seen before the freshness check
 // (a merged change makes the plan look stale), and a request past its deadline expires even while the
 // freshness check cannot finish. A recorded pull request found closed while the cleanup of a stale plan has
-// started (staleMark) ends Superseded: the close was ours. It then makes a stale plan visible (and closes its
+// started (staleMark) ends Superseded: the close was ours. A request with spec.cancel ends Cancelled right after the
+// look (cancelOpen, #289). It then makes a stale plan visible (and closes its
 // change request) without waiting for the next write, and on a fresh plan runs the pull request step, which
 // makes at most one Git write right after this check.
 func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
@@ -1186,8 +1191,8 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 	}
-	if mark := staleMark(rr); mark != nil && outcome == prClosed {
-		return r.endStaleClosed(ctx, rr, mark)
+	if res, done, err := r.endBeforeFresh(ctx, rr, outcome); done {
+		return res, err
 	}
 	if intent(rr) != nil {
 		return r.waitHandedOver(ctx, rr, outcome)
@@ -1230,6 +1235,26 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		}
 		return r.advance(ctx, rr, fresh)
 	}
+}
+
+// endBeforeFresh is recheck's step after the look at a recorded pull request (outcome, prOpen when none is
+// recorded) and before anything else: it reports done when it ended the request or will on a later reconcile.
+//   - A person cancelled the request (#289), and the look found no merge (lookOnly is false for it, so the
+//     recheck does not stop at the look): cancelOpen closes the pull request, or with none recorded every open
+//     one of the branch with this request's marker, and ends the request Cancelled, without the freshness check
+//     or any other write.
+//   - A stale plan's cleanup has started (the mark) and the pull request is closed: endStaleClosed.
+func (r *RemediationRequestReconciler) endBeforeFresh(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	outcome prOutcome) (ctrl.Result, bool, error) {
+	if cancelRequested(rr) {
+		res, err := r.cancelOpen(ctx, rr, outcome)
+		return res, true, err
+	}
+	if mark := staleMark(rr); mark != nil && outcome == prClosed {
+		res, err := r.endStaleClosed(ctx, rr, mark)
+		return res, true, err
+	}
+	return ctrl.Result{}, false, nil
 }
 
 // endStaleClosed ends a request whose stale plan's cleanup started (the mark) and whose pull request is closed:

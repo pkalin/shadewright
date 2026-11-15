@@ -309,6 +309,18 @@ These stop automation with `NeedsIntervention`:
 
 Nothing is force-pushed or rebuilt.
 
+### When a person cancels the request
+
+<span class="sw-status sw-built">built</span> (#289) A person sets `spec.cancel` (the API accepts it only before the merge and never takes it back, 5.1). The request stays as the record; deleting it (6.7) also closes the pull request but removes the record.
+
+- An undecided request (no phase, or `Pending`) ends `Cancelled` before the policy check, with nothing read from or written to Git and no lock taken.
+- A decided request first gets its usual look at the recorded pull request, so a merge seen there is recorded and the request ends `Merged`, never `Cancelled`. Then nothing else is written to the pull request (no reply, no review check, no freshness check, no render): the executor closes it (the recorded one by its number; with none recorded, every open one of the branch with the request's marker), leaves the branch, and ends the request `Cancelled` with reason `CancelRequested` on `PullRequestOpened` (no pull request recorded) or `Approved`, in one status write, followed by an Event `Cancelled`. A pull request found closed ends it the same way. A pull request of the branch found merged before any status recorded it ends it `Merged`.
+- No status mark comes before the close: `spec.cancel` is the record that the close is Shadewright's, so a close whose answer or status write is lost is made again on the next reconcile.
+- A pause of writes waits. A failed read of a pull request, a close that fails for a reason worth a retry and a conflict (the pull request may have been merged since the look) are retried and end nothing.
+- A close the Git host refuses for good, a repository that left the settings or now targets another branch, settings that cannot be used, or a recorded pull request that is not the request's still end the request `Cancelled`, with a message that the pull request, if one is open, was not closed and a Warning Event; the lock stays until a read of the branch finds none open (10.7).
+- While the request's handoff intent stands (ADR-0028 section 4), nothing is closed and it is looked at again after the poll interval; the handoff then ends it `Superseded` (`HandedOff`) or is aborted and the cancel goes on.
+- With reviewer hints on, the check `shadewright/review` is not failed before the close, unlike a stale plan's (#713).
+
 ### When the deadline passes
 
 A request that has not opened its pull request by its deadline closes what it opened and becomes `Expired` (`PullRequestDeadline`). This also holds while the freshness check keeps failing.

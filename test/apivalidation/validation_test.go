@@ -598,10 +598,10 @@ var _ = Describe("RemediationRequest", func() {
 	})
 
 	It("has no field that chooses the repository, branch or file", func() {
-		Expect(reflect.TypeFor[v1alpha1.RemediationRequestSpec]().NumField()).To(Equal(10),
+		Expect(reflect.TypeFor[v1alpha1.RemediationRequestSpec]().NumField()).To(Equal(11),
 			"a new spec field must not let the author choose where a change is made; see ADR-0012 (replaces and "+
 				"chainRoot name requests, not places: the branch derives from chainRoot, ADR-0028; reverts names "+
-				"a failed request, ADR-0030 section 8)")
+				"a failed request, ADR-0030 section 8; cancel only ends the request, #289)")
 		for _, f := range []string{"GitOps", "RepositoryRef", "TargetBranch", "Path", "BaseCommit"} {
 			_, found := reflect.TypeFor[v1alpha1.RemediationRequestSpec]().FieldByName(f)
 			Expect(found).To(BeFalse(), f)

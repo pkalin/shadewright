@@ -23,6 +23,7 @@ Rejecting is closing the pull request without merging it. Nothing in the cluster
 
 | Way | Effect |
 | --- | --- |
+| Set `spec.cancel` (`kubectl -n shadewright-system patch remediationrequest <name> --type merge -p '{"spec":{"cancel":true}}'`) | Before the merge only. The executor closes the open pull request and ends the request `Cancelled` with reason `CancelRequested`; the request stays as the record and its branch is left. `Cancelled` does not count against the circuit breaker, unlike a rejection. It cannot be undone ([upgrade and uninstall](../upgrade-uninstall.md#deleting-a-request-and-cancelled)) |
 | Delete the `RemediationRequest` | The executor closes its open pull request first (finalizer `remediation.shadewright.io/close-pull-request`), and any other open pull request of its branch that carries the request's marker; one without the marker is left alone. This holds also for a stopped request that still holds the lock on its target. While writes are [paused](pause-and-resume.md) the deletion waits |
 | Leave the pull request open | An unmerged pull request stays open and the request waits. A stopped request that holds the lock on its target keeps other requests for that target waiting until its pull request is known closed or merged (looked up every 10 minutes). A waiting request does not expire once the pull request exists; the 30 minute limit is only for opening it. A plan that goes stale is closed by Shadewright (`Superseded`) |
 

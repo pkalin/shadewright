@@ -105,11 +105,12 @@ Validation rules:
 - status.verification.incidentCount.atMerge is never changed once set; it may only be removed: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount) || !has(oldSelf.status.verification.incidentCount.atMerge) || !has(self.status) || !has(self.status.verification) || !has(self.status.verification.incidentCount) || !has(self.status.verification.incidentCount.atMerge) || self.status.verification.incidentCount.atMerge == oldSelf.status.verification.incidentCount.atMerge`
 - status.verification.incidentCount.atApplied is never changed once set; it may only be removed: `!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount) || !has(oldSelf.status.verification.incidentCount.atApplied) || !has(self.status) || !has(self.status.verification) || !has(self.status.verification.incidentCount) || !has(self.status.verification.incidentCount.atApplied) || self.status.verification.incidentCount.atApplied == oldSelf.status.verification.incidentCount.atApplied`
 - status.queuedBehind is kept once set: `!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind) == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind) > 0)`
+- spec.cancel can be set only before the merge and before a final phase: `!has(self.spec.cancel) || !self.spec.cancel || (has(oldSelf.spec.cancel) && oldSelf.spec.cancel) || !has(self.status) || !has(self.status.phase) || self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']`
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
-| `spec` | [RemediationRequestSpec](#remediationrequestspec) | Yes | spec is the plan.<br>Rule: spec is immutable; a changed plan is a new RemediationRequest<br>Rule: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject<br>Rule: SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet<br>Rule: replaces and chainRoot are set together or not at all<br>Rule: a revert (spec.reverts) requires approvalRequired: true<br>Rule: a revert (spec.reverts) never replaces another request |
+| `spec` | [RemediationRequestSpec](#remediationrequestspec) | Yes | spec is the plan.<br>Rule: spec is immutable but for spec.cancel; a changed plan is a new RemediationRequest<br>Rule: spec.cancel can be set, never unset<br>Rule: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject<br>Rule: SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet<br>Rule: replaces and chainRoot are set together or not at all<br>Rule: a revert (spec.reverts) requires approvalRequired: true<br>Rule: a revert (spec.reverts) never replaces another request |
 | `status` | [RemediationRequestStatus](#remediationrequeststatus) | No | status is the progress, written by the controller. |
 
 ## RemediationSettings
@@ -1234,15 +1235,18 @@ Used by: [RemediationPolicy](#remediationpolicy).
 
 ### RemediationRequestSpec
 
-RemediationRequestSpec is one concrete plan. It is immutable: a different plan is a new request, so an
-approval can never carry over to a changed plan. It names what to change, not where: the repository, branch
-and file are resolved by the controller (ADR-0012), so the author cannot point a change at another file.
-Each action type fixes the kinds it may target.
+RemediationRequestSpec is one concrete plan. It is immutable but for cancel, which only ends the request: a
+different plan is a new request, so an approval can never carry over to a changed plan. It names what to
+change, not where: the repository, branch and file are resolved by the controller (ADR-0012), so the author
+cannot point a change at another file. Each action type fixes the kinds it may target.
+The immutability rule compares every field but cancel on its own; a new field must be added to it, and
+test/apivalidation fails until it is.
 
 
 Validation rules:
 
-- spec is immutable; a changed plan is a new RemediationRequest: `self == oldSelf`
+- spec is immutable but for spec.cancel; a changed plan is a new RemediationRequest: `self.incidentRef == oldSelf.incidentRef && self.targetRef == oldSelf.targetRef && has(self.mode) == has(oldSelf.mode) && (!has(self.mode) || self.mode == oldSelf.mode) && has(self.approvalRequired) == has(oldSelf.approvalRequired) && (!has(self.approvalRequired) || self.approvalRequired == oldSelf.approvalRequired) && self.policyRef == oldSelf.policyRef && self.action == oldSelf.action && has(self.verification) == has(oldSelf.verification) && (!has(self.verification) || self.verification == oldSelf.verification) && has(self.replaces) == has(oldSelf.replaces) && (!has(self.replaces) || self.replaces == oldSelf.replaces) && has(self.chainRoot) == has(oldSelf.chainRoot) && (!has(self.chainRoot) || self.chainRoot == oldSelf.chainRoot) && has(self.reverts) == has(oldSelf.reverts) && (!has(self.reverts) || self.reverts == oldSelf.reverts)`
+- spec.cancel can be set, never unset: `!has(oldSelf.cancel) || !oldSelf.cancel || (has(self.cancel) && self.cancel)`
 - AdjustKedaMaxReplicas can only target a keda.sh ScaledObject: `self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/') && self.targetRef.kind == 'ScaledObject')`
 - SetContainerMemoryLimit can only target an apps/v1 Deployment or StatefulSet: `self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])`
 - replaces and chainRoot are set together or not at all: `has(self.replaces) == has(self.chainRoot)`
@@ -1263,6 +1267,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `replaces` | [RequestReplacement](#requestreplacement) | No | replaces names the request this one replaces and the reviewer hint of that request it answers (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of the plan, so it is part of the request's name: the same plan answering another hint is another request. The executor checks the link once, at the policy check, and then takes the pull request over (the handoff). |
 | `chainRoot` | [UID](#uid) | No | chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or its own UID when it has none. Set together with replaces. The branch of the pull request derives from it (shadewright/&lt;chainRoot>), so every request of a chain works on the same branch and pull request.<br>Maximum length: 36<br>Pattern: `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
 | `reverts` | [RequestRef](#requestref) | No | reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a revert, which the analyzer's deterministic revert proposer creates, with no model call, for a request that ended Failed with Verified False. A model proposal has no such field. A revert requires approvalRequired: true, never replaces another request, and is never changed after create (the spec is immutable). The executor checks the link before the policy check: the named request exists with this UID, ended Failed with Verified False, is not a revert itself, has the same Incident, target and action type (and container), and this request's previous and desired values are its desired and previous values; this request's name is RevertName of that UID, so a failed request has at most one revert at a time (the proposer also records it in the Incident's status.revertsProposed and never makes a second one). Otherwise the request ends Denied with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier writes no report for it, and once rolled out, configured and available for stableFor it ends Inconclusive with reason RevertApplied, never Succeeded. |
+| `cancel` | boolean | No | cancel, set to true by a person, cancels the request before its change is merged (#289). The executor closes the request's pull request, if one is open, and ends the request Cancelled with reason CancelRequested; the branch is left as it is, and the request stays as the record of what was cancelled and when. It is the one field of the spec that can change after create: it can be set, never unset, and only while the request has no phase or is in Pending, PolicyChecked, PRCreated, AwaitingApproval or AutoMergeQueued (CEL). A request that reaches the merge, or another final phase, before the executor acts on it keeps that phase. Deleting a request also closes its pull request, but removes the record. |
 
 ### RemediationRequestStatus
 

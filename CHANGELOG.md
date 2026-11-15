@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/pkalin/shadewright/compare/v0.5.0...v0.5.1) (2026-11-15)
+
+
+### Performance
+
+* link only client-go and the API types into kubectl-shadewright ([#757](https://github.com/pkalin/shadewright/issues/757)) ([3f9a47e](https://github.com/pkalin/shadewright/commit/3f9a47ec7f6307125aeb26d6db46c29000f3a7e6))
+
 ## [0.5.0](https://github.com/pkalin/shadewright/compare/v0.4.0...v0.5.0) (2026-11-15)
 
 

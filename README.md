@@ -7,9 +7,13 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/pkalin/shadewright/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/pkalin/shadewright/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status on main"></a>
+  <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/pkalin/shadewright" alt="Go version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/pkalin/shadewright" alt="License: Apache-2.0"></a>
   <a href="https://artifacthub.io/packages/search?repo=shadewright"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/shadewright" alt="Artifact Hub"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/pkalin/shadewright"><img src="https://api.scorecard.dev/projects/github.com/pkalin/shadewright/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://www.bestpractices.dev/projects/16344"><img src="https://www.bestpractices.dev/projects/16344/badge" alt="OpenSSF Best Practices"></a>
+  <a href="https://github.com/pkalin/shadewright/blob/main/docs/upgrade-uninstall.md#verify-a-release"><img src="https://slsa.dev/images/gh-badge-level2.svg" alt="SLSA Build Level 2"></a>
 </p>
 
 > [!WARNING]

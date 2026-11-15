@@ -60,6 +60,8 @@ func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 	}
 	replacedTemplateDropped.WithLabelValues(kindDeployment).Add(0)
 	replacedTemplateDropped.WithLabelValues(kindStatefulSet).Add(0)
+	replacedTemplateCheckErrors.WithLabelValues(kindDeployment).Add(0)
+	replacedTemplateCheckErrors.WithLabelValues(kindStatefulSet).Add(0)
 	byKind := func(groups, kinds []string) metricguard.Labels {
 		return metricguard.Labels{kindLabels[0]: groups, kindLabels[1]: kinds}
 	}
@@ -67,6 +69,9 @@ func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 		"shadewright_analyzer_symptom_source_watched":        byKind(groups, kinds),
 		"shadewright_analyzer_subject_owner_forbidden_total": byKind(ownerGroups, ownerKinds),
 		"shadewright_analyzer_replaced_template_evidence_dropped_total": {
+			"kind": {kindDeployment, kindStatefulSet},
+		},
+		"shadewright_analyzer_replaced_template_check_errors_total": {
 			"kind": {kindDeployment, kindStatefulSet},
 		},
 	}

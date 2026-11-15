@@ -400,9 +400,19 @@ func (r *sourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if len(pending) == 0 {
 		return ctrl.Result{RequeueAfter: settle}, nil
 	}
-	subject, owner, wait, err := r.subject(ctx, obj, src.Subject)
+	subject, owner, retired, wait, err := r.subject(ctx, obj, src.Subject)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if retired {
+		// A Pod whose template its workload has retired (#724): each state is handled without an observation
+		// and counted once.
+		r.c.conditions.claimDone(key)
+		for _, p := range pending {
+			r.c.conditions.commit(key, obj.GetUID(), p)
+		}
+		dropRetired(ctx, subject.Kind, "symptom state", len(pending))
+		return ctrl.Result{RequeueAfter: settle}, nil
 	}
 	if wait {
 		// The owner exists but has not claimed the object yet: commit nothing, so the state is not settled
@@ -498,31 +508,32 @@ func claimBackoff(n int) time.Duration {
 // deadline. The ownerResolver is not used for those: it verifies apps/v1 owners by their label selectors and
 // caches what it found, while this check is a claim in the owner's status, which must be read again while it
 // is pending. An owner the analyzer may not read (Forbidden) leaves the object itself as the subject. A subject
-// outside the Incident schema comes back as the zero ObjectRef, which the caller drops.
+// outside the Incident schema comes back as the zero ObjectRef, which the caller drops. retired is true, with
+// the workload as ref, for a Pod whose template its workload has retired (ownerResolver.podSubject).
 func (r *sourceReconciler) subject(ctx context.Context, o client.Object, want modules.SubjectOwner) (
-	ref remediationv1alpha1.ObjectRef, owner string, wait bool, err error) {
+	ref remediationv1alpha1.ObjectRef, owner string, retired, wait bool, err error) {
 	if pod, ok := o.(*corev1.Pod); ok {
-		ref, owner, ok, err := r.c.owners.podSubject(ctx, pod)
-		if err != nil || !ok {
-			return remediationv1alpha1.ObjectRef{}, "", false, err
+		ref, owner, v, err := r.c.owners.podSubject(ctx, pod)
+		if err != nil || v == subjectUnusable {
+			return remediationv1alpha1.ObjectRef{}, "", false, false, err
 		}
-		return ref, owner, false, nil
+		return ref, owner, v == subjectRetired, false, nil
 	}
 	obj, ok := o.(*unstructured.Unstructured)
 	if !ok {
-		return remediationv1alpha1.ObjectRef{}, "", false, nil
+		return remediationv1alpha1.ObjectRef{}, "", false, false, nil
 	}
 	self := remediationv1alpha1.ObjectRef{
 		APIVersion: r.gvk.GroupVersion().String(), Kind: r.gvk.Kind,
 		Namespace: obj.GetNamespace(), Name: obj.GetName(), UID: remediationv1alpha1.UID(obj.GetUID()),
 	}
 	if !want.IsSet() {
-		return self, "", false, nil
+		return self, "", false, false, nil
 	}
 	cref := metav1.GetControllerOfNoCopy(obj)
 	if cref == nil || cref.APIVersion != want.APIVersion() || cref.Kind != want.Kind || cref.UID == "" ||
 		len(validation.IsDNS1123Subdomain(cref.Name)) > 0 {
-		return self, "", false, nil
+		return self, "", false, false, nil
 	}
 	gvk := schema.GroupVersionKind{Group: want.Group, Version: want.Version, Kind: want.Kind}
 	ownerObj := &unstructured.Unstructured{}
@@ -531,7 +542,7 @@ func (r *sourceReconciler) subject(ctx context.Context, o client.Object, want mo
 	err = r.api.Get(lctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: cref.Name}, ownerObj)
 	cancel()
 	if apierrors.IsNotFound(err) {
-		return self, "", false, nil
+		return self, "", false, false, nil
 	}
 	if apierrors.IsForbidden(err) {
 		// The owner kind is not granted (its module's value is off in the chart, analyzer.modules): it cannot
@@ -541,29 +552,29 @@ func (r *sourceReconciler) subject(ctx context.Context, o client.Object, want mo
 		logf.FromContext(ctx).Info("Not allowed to read the declared owner, used the object as the subject",
 			"kind", r.gvk.Kind, "namespace", obj.GetNamespace(), "name", obj.GetName(),
 			"ownerGroup", want.Group, "ownerKind", want.Kind)
-		return self, "", false, nil
+		return self, "", false, false, nil
 	}
 	if err != nil {
-		return self, "", false, fmt.Errorf("reading the %s that controls %s %s: %w", want.Kind, r.gvk.Kind,
+		return self, "", false, false, fmt.Errorf("reading the %s that controls %s %s: %w", want.Kind, r.gvk.Kind,
 			obj.GetName(), err)
 	}
 	ownerObj.SetGroupVersionKind(gvk)
 	if ownerObj.GetUID() != cref.UID {
-		return self, "", false, nil
+		return self, "", false, false, nil
 	}
 	if want.Claims != nil {
 		switch safeClaims(want.Claims, ownerObj.Object, obj.GetName()) {
 		case modules.ClaimOwned:
 		case modules.ClaimPending:
-			return self, "", true, nil
+			return self, "", false, true, nil
 		default:
-			return self, "", false, nil
+			return self, "", false, false, nil
 		}
 	}
 	return remediationv1alpha1.ObjectRef{
 		APIVersion: want.APIVersion(), Kind: want.Kind,
 		Namespace: obj.GetNamespace(), Name: ownerObj.GetName(), UID: remediationv1alpha1.UID(ownerObj.GetUID()),
-	}, string(ownerObj.GetUID()), false, nil
+	}, string(ownerObj.GetUID()), false, false, nil
 }
 
 // safeClaims calls a module's Claims and treats a panic as no claim.

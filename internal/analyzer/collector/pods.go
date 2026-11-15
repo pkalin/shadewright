@@ -31,7 +31,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 )
 
@@ -216,22 +215,28 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// MayRepeat once this pod's state is dropped.
 		ts[i].finished = r.c.notFuture(ts[i].finished)
 	}
-	var (
-		resolved bool
-		subject  remediationv1alpha1.ObjectRef
-		owner    string
-	)
-	for _, t := range r.c.pods.pending(req.NamespacedName, pod.UID, ts, start) {
-		if !resolved {
-			ref, ownerUID, ok, err := r.c.owners.podSubject(ctx, &pod)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !ok {
-				return ctrl.Result{}, nil
-			}
-			subject, owner, resolved = ref, ownerUID, true
+	pending := r.c.pods.pending(req.NamespacedName, pod.UID, ts, start)
+	if len(pending) == 0 {
+		return ctrl.Result{}, nil
+	}
+	subject, owner, v, err := r.c.owners.podSubject(ctx, &pod)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	switch v {
+	case subjectUnusable:
+		return ctrl.Result{}, nil
+	case subjectRetired:
+		// The pod's template is retired (#724): each termination is handled without an observation and
+		// counted once, so later updates of the pod do not read and count it again, and a rollback does not
+		// bring the backlog back.
+		for _, t := range pending {
+			r.c.pods.commit(req.NamespacedName, pod.UID, t.termination)
 		}
+		dropRetired(ctx, subject.Kind, "container termination", len(pending))
+		return ctrl.Result{}, nil
+	}
+	for _, t := range pending {
 		fo := fingerprint.Observation{
 			ClusterID:           r.c.cfg.ClusterID,
 			Namespace:           pod.Namespace,

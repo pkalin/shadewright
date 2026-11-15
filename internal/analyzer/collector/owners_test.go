@@ -218,17 +218,18 @@ func TestOwnersAreCachedAndBounded(t *testing.T) {
 		h.create(ev)
 		h.reconcileEvent(ev.Name)
 	}
-	// The chain reads the ReplicaSet and the Deployment once; the check of the current revision reads both
-	// again for each event, never from the cache (replacedTemplate).
-	if n := h.gets.Load(); n != 2+3*2 {
-		t.Fatalf("owner reads for three events = %d, want 8 (chain once, revision check per event)", n)
+	// The chain reads the ReplicaSet and the Deployment once; the template check reads the ReplicaSet once
+	// more, which serves the three events within templateCheckTTL, and not the Deployment of a ReplicaSet
+	// that has replicas (retiredTemplate).
+	if n := h.gets.Load(); n != 2+1 {
+		t.Fatalf("owner reads for three events = %d, want 3 (chain once, template check once)", n)
 	}
 	h.clock.add(2 * time.Minute)
 	ev := warning("late", 0)
 	h.create(ev)
 	h.reconcileEvent(ev.Name)
-	if n := h.gets.Load(); n != 8+2+2 {
-		t.Fatalf("owner reads after the TTL = %d, want 12", n)
+	if n := h.gets.Load(); n != 3+2+1 {
+		t.Fatalf("owner reads after the TTL = %d, want 6", n)
 	}
 	for i := range 20 {
 		_, _, err := h.c.owners.chain(t.Context(), testNS, metav1.OwnerReference{
@@ -368,9 +369,9 @@ func TestStandaloneReplicaSetHasNoOwner(t *testing.T) {
 	rs.OwnerReferences = nil
 	h := newHarness(t, Config{}, rs)
 	reg := corev1.ObjectReference{APIVersion: apiApps, Kind: kindReplicaSet, Name: webRS, UID: rsUID}
-	subject, owner, ok, err := h.c.owners.subjectOf(t.Context(), testNS, reg)
-	if err != nil || !ok {
-		t.Fatalf("subjectOf: %v, %v", ok, err)
+	subject, owner, v, err := h.c.owners.subjectOf(t.Context(), testNS, reg)
+	if err != nil || v != subjectUsable {
+		t.Fatalf("subjectOf: %v, %v", v, err)
 	}
 	subjectIs(t, subject, kindReplicaSet, webRS, rsUID)
 	if owner != "" {

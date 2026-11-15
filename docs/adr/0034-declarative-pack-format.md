@@ -252,3 +252,4 @@ Not in the plan: the OCI loader, signatures, a registry, a hub, a pack linter fo
 ## Amendments
 
 - 2026-11-14: open question 2 ("revisit when sizing by code exists") now has its trigger: [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) (Accepted) computes memory sizes in code, and its text points back here. Nothing in this ADR changes.
+- 2026-11-15: [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) is superseded by [ADR-0042](0042-a-memory-limit-is-proposed-only-for-a-killed-container.md) (Proposed), which is now the sizing by code that open question 2 waits for. Nothing in this ADR changes.

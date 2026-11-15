@@ -71,8 +71,10 @@ func TestKedaBacklogNeedsTheCurrentValueAndTheTarget(t *testing.T) {
 		"no current value":      {"The metric is above its target of 5.", false},
 		"metric names only":     {"hpa_metric_current is above hpa_metric_target.", false},
 		"16.5 and 50":           {"The metric is at 16.5 per replica against a target of 50 per replica.", false},
-		"130 and 50 in a line":  {"hpa_metric_current{...} last 16.5 and hpa_metric_target{...} 50\nmore; about 130 in all", false},
-		"target line, no value": {"hpa_metric_target{horizontalpodautoscaler=keda-hpa-worker} is what it scales on, at 6.5 per replica", false},
+		"130 and 50 in a line": {"hpa_metric_current{...} last 16.5 and hpa_metric_target{...} 50\n" +
+			"more; about 130 in all", false},
+		"target line, no value": {"hpa_metric_target{horizontalpodautoscaler=keda-hpa-worker} is what it scales on, " +
+			"at 6.5 per replica", false},
 	} {
 		got := scoreDiagnosis(one, tc.text, subject)
 		if got.Pass != tc.pass {

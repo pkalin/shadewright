@@ -71,8 +71,13 @@ type TemplateInfo struct {
 
 // template is an approved query, rendered from a validated [selection].
 type template struct {
-	info   TemplateInfo
-	render func(sel selection) string
+	info TemplateInfo
+	// freeText are the labels of info.Labels whose values are free text, which Kubernetes does not hold to a
+	// name syntax. A series whose value of one of them is not a plain name ([freeTextValue]) is left out of the
+	// result and counted in [providers.MetricsResult.LeftOut], where any other label value that is not a plain
+	// name refuses the whole response.
+	freeText []string
+	render   func(sel selection) string
 }
 
 // Rate windows are fixed: a query never takes a duration from its parameters.
@@ -131,6 +136,11 @@ var podContainer = []string{"pod", "container"}
 // hpaMetric are the labels of an HPA template's series: the HPA, and the metric's name and target type
 // (kube-state-metrics: value, average or utilization), which tell the metrics of one HPA apart.
 var hpaMetric = []string{"horizontalpodautoscaler", "metric_name", "metric_target_type"}
+
+// hpaFreeText is the free-text label of an HPA template's series: the metric name, which whoever defines the
+// HPA chooses (Kubernetes only refuses '/' and '%' and the names "." and ".."). The HPA name is a DNS-1123
+// subdomain and the target type is one of three words, both checked as plain names like any label value.
+var hpaFreeText = []string{"metric_name"}
 
 // hpaSeries reduces the series of one HPA metric of kube-state-metrics, one per HPA, metric and target type, to
 // one value: max drops duplicate scrapes.
@@ -274,6 +284,7 @@ var registry = buildRegistry([]template{
 			Params: []string{ParamHPA},
 			Labels: hpaMetric,
 		},
+		freeText: hpaFreeText,
 		render: func(s selection) string {
 			return hpaSeries(s, "kube_horizontalpodautoscaler_status_target_metric")
 		},
@@ -286,6 +297,7 @@ var registry = buildRegistry([]template{
 			Params: []string{ParamHPA},
 			Labels: hpaMetric,
 		},
+		freeText: hpaFreeText,
 		render: func(s selection) string {
 			return hpaSeries(s, "kube_horizontalpodautoscaler_spec_target_metric")
 		},

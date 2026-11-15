@@ -17,10 +17,12 @@ limitations under the License.
 package prometheus
 
 import (
+	"encoding/json"
 	"errors"
 	"math/rand/v2"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -192,5 +194,122 @@ func TestHPATemplatesRefusePods(t *testing.T) {
 	}
 	if n.Load() != 0 {
 		t.Errorf("%d requests reached the server", n.Load())
+	}
+}
+
+// metricNameAlphabet is the alphabet of a metric name that an HPA template returns, written out here: letters,
+// digits, '_', '-', '.', '/' and ':'.
+const metricNameAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-./:"
+
+// hpaAnswer answers an instant HPA query with a known series and one whose metric name is name.
+func hpaAnswer(name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		series := func(metric string, v string) string {
+			m, _ := json.Marshal(metric)
+			return `{"metric":{"horizontalpodautoscaler":"` + testHPA + `","metric_name":` + string(m) +
+				`,"metric_target_type":"average"},"value":[` + nowSecs + `,"` + v + `"]}`
+		}
+		writeJSON(w, `{"status":"success","data":{"resultType":"vector","result":[`+
+			series("s0-prometheus", "5")+","+series(name, "7")+`]}}`)
+	}
+}
+
+// A generated corpus of HPA metric names, with the answer known by construction: a name of 1 to 253 characters
+// of the alphabet is returned as it is, and any other name (one character outside the alphabet anywhere in it,
+// empty, or longer) leaves its series out, counted, with no part of it kept, while the other series of the
+// answer is still returned.
+func TestHPAMetricNameCorpus(t *testing.T) {
+	// Characters that could shape a context line, or pass for a plain one: label and line syntax, quotes,
+	// spaces, every control character, and non-ASCII look-alikes (full-width punctuation, curly quotes, a
+	// Cyrillic a, a zero-width space, a non-breaking space, a line separator).
+	looks := []string{",", "=", "{", "}", `"`, " ", "\n", "\r", "\t", `\`, "'", "|", "%", "#", "(", ")", "~",
+		"+", "*", "\u00a0", "\u200b", "\u2028", "\u2029", "\uff0c", "\uff1d", "\uff5b", "\uff5d", "\u201c", "\u201d",
+		"\u0430", "\u0435", "\u00e9", "\ufeff", `x,metric_target_type=average} last 1`}
+	breaking := make([]string, 0, len(looks)+0x21)
+	breaking = append(breaking, looks...)
+	for c := range 0x20 {
+		breaking = append(breaking, string(rune(c)))
+	}
+	breaking = append(breaking, "\x7f")
+	rng := rand.New(rand.NewPCG(480, 2)) // #nosec G404 -- a reproducible test corpus, not a secret
+	plain := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = metricNameAlphabet[rng.IntN(len(metricNameAlphabet))]
+		}
+		return string(b)
+	}
+	type tc struct {
+		name string
+		kept bool
+	}
+	corpus := make([]tc, 0, 607+8*len(breaking))
+	corpus = append(corpus, tc{"s0-prometheus-http_requests_total", true}, tc{"cpu", true}, tc{"a", true},
+		tc{plain(MaxFreeTextValue), true}, tc{"", false}, tc{plain(MaxFreeTextValue + 1), false}, tc{plain(4096), false})
+	for range 600 {
+		corpus = append(corpus, tc{plain(1 + rng.IntN(64)), true})
+	}
+	for _, br := range breaking {
+		for range 8 {
+			p := plain(rng.IntN(32))
+			at := rng.IntN(len(p) + 1)
+			corpus = append(corpus, tc{p[:at] + br + p[at:], false})
+		}
+	}
+	kept, leftOut := 0, 0
+	for _, c := range corpus {
+		s, _, _ := testSource(t, hpaAnswer(c.name))
+		for _, tmpl := range hpaTemplates {
+			res, err := s.Query(testCtx(t), validQuery(t, tmpl))
+			if err != nil {
+				t.Fatalf("%s %q: %v", tmpl, c.name, err)
+			}
+			names := make([]string, 0, len(res.Series))
+			for _, se := range res.Series {
+				names = append(names, se.Labels["metric_name"])
+			}
+			if c.kept {
+				if res.LeftOut != 0 || len(names) != 2 || !slices.Contains(names, c.name) {
+					t.Fatalf("%s %q: series %q, left out %d", tmpl, c.name, names, res.LeftOut)
+				}
+				kept++
+				continue
+			}
+			if res.LeftOut != 1 || len(res.Series) != 1 || names[0] != "s0-prometheus" ||
+				res.Series[0].Samples[0].Value != 5 {
+				t.Fatalf("%s %q: series %q, left out %d", tmpl, c.name, names, res.LeftOut)
+			}
+			leftOut++
+		}
+	}
+	if kept < 1000 || leftOut < 1000 {
+		t.Fatalf("corpus too one-sided: %d kept, %d left out", kept, leftOut)
+	}
+	otherLabelValuesRefuseTheAnswer(t)
+}
+
+// otherLabelValuesRefuseTheAnswer checks that the rule is the HPA templates' metric name only: a label value
+// that is not a plain name still refuses the whole answer of any other template, and the other labels of an HPA
+// series still refuse it.
+func otherLabelValuesRefuseTheAnswer(t *testing.T) {
+	t.Helper()
+	answer := func(labels string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{`+labels+
+				`},"value":[`+nowSecs+`,"1"]}]}}`)
+		}
+	}
+	for what, c := range map[string]struct{ tmpl, labels string }{
+		"deployment":  {"deployment_replicas_unavailable", `"deployment":"web x"`},
+		"target type": {tHPATarget, `"horizontalpodautoscaler":"` + testHPA + `","metric_name":"cpu","metric_target_type":"a}b"`},
+		"hpa":         {tHPACurrent, `"horizontalpodautoscaler":"a b","metric_name":"cpu","metric_target_type":"average"`},
+		"slash outside the metric name": {tHPACurrent,
+			`"horizontalpodautoscaler":"` + testHPA + `","metric_name":"cpu","metric_target_type":"a/b"`},
+	} {
+		s, _, _ := testSource(t, answer(c.labels))
+		res, err := s.Query(testCtx(t), validQuery(t, c.tmpl))
+		if !errors.Is(err, ErrInvalidResponse) || res.LeftOut != 0 {
+			t.Errorf("%s: left out %d, error %v", what, res.LeftOut, err)
+		}
 	}
 }

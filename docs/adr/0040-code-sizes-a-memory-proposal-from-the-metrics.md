@@ -166,4 +166,4 @@ What the code does today without Prometheus: `--prometheus-url` empty means no m
 
 ## Amendments
 
-None.
+- 2026-11-15 ([#480](https://github.com/pkalin/shadewright/issues/480)): decision 18 says the backlog is not a template. The HPA's current and target metric now are: `hpa_metric_current` and `hpa_metric_target` read them from kube-state-metrics for the HPA a ScaledObject's `status.hpaName` names, and the context shows them to the model ([ADR-0036](0036-the-model-sees-the-scaledobject-of-a-keda-incident.md), amendment of the same date). They are evidence in the context only: sizing `maxReplicaCount` stays undecided, and the model keeps choosing that value, as decision 18 says.

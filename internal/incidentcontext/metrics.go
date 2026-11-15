@@ -62,7 +62,10 @@ const (
 	fixedTooLarge      = ": answer too large for the pods asked"
 	fixedCouldNotFetch = ": could not fetch"
 	fixedNoSeries      = ": no series"
-	partialSuffix      = " (partial answer)"
+	// fixedLeftOut follows the count of series the source left out for a free-text label value (the metric name
+	// of an HPA) that is not a plain name; no part of the label is shown.
+	fixedLeftOut  = " series left out because of a label value that is not a plain name"
+	partialSuffix = " (partial answer)"
 )
 
 // metricPlans are in order of relevance, so that a cut keeps what explains a crash first.
@@ -186,8 +189,13 @@ func (b *Builder) seriesLines(l *lines, plan metricPlan, res providers.MetricsRe
 	if res.Partial {
 		partial = partialSuffix
 	}
+	if res.LeftOut > 0 {
+		l.add("%s: %d%s%s", plan.template, res.LeftOut, fixedLeftOut, partial)
+	}
 	if len(res.Series) == 0 {
-		l.add("%s%s%s", plan.template, fixedNoSeries, partial)
+		if res.LeftOut == 0 {
+			l.add("%s%s%s", plan.template, fixedNoSeries, partial)
+		}
 		return
 	}
 	out := make([]string, 0, len(res.Series))

@@ -61,6 +61,10 @@ type MetricsResult struct {
 	// lack samples or contributions. The warning text is not kept: it is untrusted and may quote the query.
 	// A caller that draws a conclusion from absence or from a total treats a partial result as not knowing.
 	Partial bool
+	// LeftOut counts the series the source answered that the adapter left out because a label whose value is
+	// free text (the metric name of an HPA, chosen by whoever defines the HPA) is not a plain name. Nothing of
+	// those series is kept, so a caller can say how many were left out but never show any part of them.
+	LeftOut int
 }
 
 // MetricsSource answers metric queries.

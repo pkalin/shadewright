@@ -11,7 +11,7 @@ inference cost =
   + output tokens         / 1,000,000 * output price
 ```
 
-Count every call of an analysis: tool steps, retries and escalations. Check how reasoning tokens and long context are billed for the chosen model.
+Count every call of an analysis: tool steps, retries and escalations. Check how reasoning tokens and long context are billed for the chosen model. A call with unknown usage is counted at its upper bound, except a call the host refused before processing it, such as a Foundry 429, which is counted as 0 tokens (12.3).
 
 ## 12.2. Illustration (made-up prices, not a quote)
 
@@ -46,6 +46,7 @@ An Azure budget only alerts. It does not stop usage ([budgets](https://learn.mic
 
 - Deduplication and cached diagnoses keep repeated calls down.
 - A failed or timed-out call is charged at its upper bound: the input estimate (the provider blocks sent back included) plus the most output the call can be billed, which is `MaxOutputTokens`, or for the Anthropic adapter `MaxOutputTokens` plus its thinking allowance (#728).
+- Two cases are charged 0 tokens because nothing of them was billed: a call that sent no request on any attempt, and a call whose every attempt the host refused before processing it. The second is a fact each adapter states about its host, never a status check in the budget code. Only the Foundry adapter states it, for a call answered with HTTP 429 on every attempt: Microsoft's [Azure OpenAI FAQ](https://learn.microsoft.com/azure/ai-foundry/openai/faq) says a request refused for exceeding the rate limit is not charged ([#725](https://github.com/pkalin/shadewright/issues/725)). That source covers Azure OpenAI models. The adapter applies the rule to every deployment it calls on a host Microsoft operates, one whose name ends in `.openai.azure.com`, `.cognitiveservices.azure.com` or `.services.ai.azure.com` (an exact suffix match on the lower-cased host, never a substring). For other Foundry Models (partner models, which [ADR-0016](../adr/0016-lab-region-sweden-central.md) notes may be billed through Marketplace) it is unverified. A call to any other host (a gateway, a proxy, a custom domain) keeps the upper bound: what sits in front of the model may bill a request and still answer 429. The status comes from the HTTP response the adapter received before the attempt's deadline, never from a body or from model output. Any other attempt in the same call (a timeout, a cut connection, 408, 5xx, a 200 that was billed) keeps the upper bound, since the host may have run the model. The Anthropic adapter keeps the upper bound for a 429 until the same is confirmed for its API. A throttled call still uses its analysis's unit of `maxAnalysesPerDay`, so a host that throttles every call cannot be retried for free without an end.
 
 ### The daily count of analyses
 
@@ -77,6 +78,7 @@ The lab itself (AKS node, Key Vault, storage, Foundry) is priced in `shadewright
 | Illustration volume | 100 analyses a day, 30 days, 6,000 input and 1,500 output tokens each |
 | Illustration escalation rate | 5% to variant B |
 | Failed or timed-out call | Charged at input estimate plus `MaxOutputTokens` (plus the thinking allowance with the Anthropic adapter) |
+| Throttled call (Foundry 429 on every attempt, Microsoft host suffixes only) | Charged 0 tokens, still uses its analysis's unit of `maxAnalysesPerDay` (#725); an Anthropic 429 keeps the upper bound |
 | Spend limit unit | Tokens per model deployment and UTC day (`maxTokensPerDay`), no default |
 | Budget ConfigMap | `shadewright-analysis-budget`, operator namespace, writable by the analyzer and admins only |
 | Count unreadable, unwritable or missing | Refuse |

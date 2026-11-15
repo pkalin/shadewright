@@ -64,7 +64,9 @@ limitations under the License.
 // ours) is waited for when it is at most Config.MaxDelay, and a longer one is returned as a
 // [providers.RetryableError] carrying it. 401, 402 and 403 are [providers.ErrForbidden], 404 (an unknown model,
 // or one the account cannot use) is [providers.ErrNotFound], 413 is [providers.ErrTooLarge] and any other 4xx
-// is [providers.ErrRejected]; none of them is retried.
+// is [providers.ErrRejected]; none of them is retried. A call ended by 429 is not marked
+// [providers.ErrNotProcessed], unlike in the Foundry adapter: that the API does not bill it is not confirmed,
+// so the budget keeps charging such a call its upper bound (#725).
 //
 // A reply is untrusted (invariant 4). Its body is read up to Config.MaxResponseBytes and must be one JSON
 // message with a usage block. A reply cut off at max_tokens, refused (stop_reason refusal), ended for a

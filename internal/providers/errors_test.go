@@ -141,3 +141,43 @@ func TestNotSentKeepsTheChain(t *testing.T) {
 		t.Error("errors.As does not find the wrapped RetryableError")
 	}
 }
+
+// NotProcessed adds ErrNotProcessed and keeps the text, the retryable class and the delay of the error it marks,
+// without marking it as not sent.
+func TestNotProcessedKeepsTheChain(t *testing.T) {
+	if providers.NotProcessed(nil) != nil {
+		t.Error("NotProcessed(nil) is not nil")
+	}
+	inner := &providers.RetryableError{RetryAfter: 7 * time.Second, Err: errors.New("status 429")}
+	err := providers.NotProcessed(inner)
+	if !providers.IsNotProcessed(err) || providers.IsNotProcessed(inner) || providers.IsNotSent(err) {
+		t.Errorf("marked %v, unmarked %v, not sent %v", providers.IsNotProcessed(err),
+			providers.IsNotProcessed(inner), providers.IsNotSent(err))
+	}
+	if d, ok := providers.RetryAfter(err); !providers.IsRetryable(err) || !ok || d != 7*time.Second {
+		t.Errorf("the chain is lost: retryable %v, RetryAfter %v, %v", providers.IsRetryable(err), d, ok)
+	}
+	if err.Error() != inner.Error() {
+		t.Errorf("text %q, want %q", err.Error(), inner.Error())
+	}
+}
+
+// A refused call is free only when its error is marked and no attempt was billed without a usage.
+func TestRefusedUnbilled(t *testing.T) {
+	marked := providers.NotProcessed(errors.New("status 429"))
+	for _, tc := range []struct {
+		c    providers.Completion
+		err  error
+		want bool
+	}{
+		{err: marked, want: true},
+		{c: providers.Completion{UsageUnknown: true}, err: marked},
+		{err: errors.New("status 429")},
+		{err: providers.NotSent(errors.New("no token"))},
+		{},
+	} {
+		if got := providers.RefusedUnbilled(tc.c, tc.err); got != tc.want {
+			t.Errorf("RefusedUnbilled(%+v, %v) = %v, want %v", tc.c, tc.err, got, tc.want)
+		}
+	}
+}

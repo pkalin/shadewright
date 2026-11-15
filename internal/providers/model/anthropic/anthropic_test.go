@@ -380,6 +380,21 @@ func TestCompleteReturnsLongRetryAfter(t *testing.T) {
 	}
 }
 
+// A call the API answered only with 429 is not marked as refused before processing: that the API does not bill
+// it is not confirmed, so the budget keeps charging its upper bound (#725).
+func TestThrottledCallIsNotMarkedNotProcessed(t *testing.T) {
+	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	_, err := h.p.Complete(context.Background(), structuredRequest())
+	if !providers.IsRetryable(err) || h.requests.Load() < 2 {
+		t.Fatalf("err = %v after %d requests, want retryable after the retries", err, h.requests.Load())
+	}
+	if providers.IsNotProcessed(err) || providers.IsNotSent(err) {
+		t.Errorf("err = %v is marked as not billed", err)
+	}
+}
+
 // An HTTP date in retry-after is not read: it would compare the server's clock with the local one.
 func TestRetryAfterIgnoresDates(t *testing.T) {
 	h := http.Header{}

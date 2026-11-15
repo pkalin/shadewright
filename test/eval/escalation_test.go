@@ -243,6 +243,13 @@ func (failingModel) Complete(context.Context, providers.CompletionRequest) (prov
 	return providers.Completion{}, &providers.RetryableError{Err: errors.New("timeout")}
 }
 
+// throttledModel refuses every call as the Foundry adapter does a call answered with 429 on every attempt.
+type throttledModel struct{}
+
+func (throttledModel) Complete(context.Context, providers.CompletionRequest) (providers.Completion, error) {
+	return providers.Completion{}, providers.NotProcessed(&providers.RetryableError{Err: errors.New("status 429")})
+}
+
 // malformedModel returns a billed reply that is malformed: its usage is known.
 type malformedModel struct{}
 
@@ -258,6 +265,9 @@ func TestFailedCallsMakeTheCostIncomplete(t *testing.T) {
 	_, _ = recorded{inner: failingModel{}, role: analysis.RoleEscalation, t: tl}.Complete(t.Context(),
 		providers.CompletionRequest{})
 	_, _ = recorded{inner: malformedModel{}, role: analysis.RoleEscalation, t: tl}.Complete(t.Context(),
+		providers.CompletionRequest{})
+	// A call refused before processing was not billed: it does not make the cost incomplete (#725).
+	_, _ = recorded{inner: throttledModel{}, role: analysis.RoleEscalation, t: tl}.Complete(t.Context(),
 		providers.CompletionRequest{})
 	u := tl.usage[analysis.RoleEscalation]
 	if u == nil || u.usageUnknown != 1 || u.usage.InputTokens != 100 {

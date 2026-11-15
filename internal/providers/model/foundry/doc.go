@@ -64,7 +64,17 @@ limitations under the License.
 // when it is refused: with a Content-Type other than JSON its usage is still read from the body, within the
 // bound; a body over the bound is not parsed, and a body that cannot be read or holds no usable usage block
 // leaves the usage unknown. Then Completion.UsageUnknown and CallReport.UsageUnknown are set, so the budget
-// can count the call conservatively (#208).
+// can count the call conservatively (#208). A call whose every attempt the service answered with 429 before
+// the attempt's deadline returns an error marked [providers.ErrNotProcessed]: Microsoft documents that a
+// request refused for exceeding the rate limit is not billed (Azure OpenAI FAQ, #725), so the budget charges it
+// nothing. Only that status, read from the HTTP response, marks it; a call with any other attempt (a timeout,
+// a cut connection, 408, 5xx, a token error, a 200) is not marked. The mark is set only when the endpoint's
+// host, lower-cased, ends in .openai.azure.com, .cognitiveservices.azure.com or .services.ai.azure.com (an
+// exact suffix, never a substring): a gateway, proxy or custom domain in front of a model may bill a request
+// and still answer 429, so a call to any other host keeps its upper bound. The FAQ covers Azure OpenAI models;
+// the rule is applied to every deployment on those hosts, and for other Foundry Models (partner models, which
+// ADR-0016 notes may be billed through Marketplace) it is unverified. When the wait before a retry is
+// cancelled after such 429s, the error says so and keeps the context's error in its chain, still marked.
 //
 // Errors carry fixed text, the status code and their class; never a URL, a header, the endpoint, a token, the
 // prompt or any text of the reply. Nothing is logged.

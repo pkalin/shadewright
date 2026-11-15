@@ -144,15 +144,17 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, err
 	}
 	if ev.Type != corev1.EventTypeWarning {
+		r.c.probes.done(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 	n := occurrences(&ev)
 	created := ev.CreationTimestamp.Time
 	delta, mayRepeat := r.c.series.pending(req.NamespacedName, ev.UID, created, start, n)
 	if delta == 0 && !mayRepeat {
+		r.c.probes.done(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
-	obs, v, err := r.c.fromEvent(ctx, &ev)
+	obs, pod, v, err := r.c.fromEvent(ctx, &ev)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -171,17 +173,14 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, nil
 	}
 	if probe, ok := probeOf(&ev); ok {
-		// A readiness or startup probe failure of a pod that starts (#726): decided once the pod had time to
-		// become Ready.
-		pv, wait, err := r.c.settleProbe(ctx, &ev)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+		// A readiness or startup probe failure of a pod that starts or shuts down (#726), decided from the pod
+		// as fromEvent read it.
+		pv, wait := r.c.settleProbe(ctx, &ev, pod)
 		switch pv {
 		case probeWait:
 			return ctrl.Result{RequeueAfter: wait}, nil
-		case probeSettled:
-			skipSettled(ctx, probe)
+		case probeSettled, probeTerminating:
+			skipSettled(ctx, probe, pv)
 			r.c.probes.done(req.NamespacedName)
 			r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 			return ctrl.Result{}, nil
@@ -201,24 +200,26 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	return ctrl.Result{}, nil
 }
 
-// fromEvent builds the observation of an event, without its count. It returns subjectUnusable for events
-// that are not a usable symptom: fields outside the Incident schema's bounds, or a regarding object in
-// another namespace than the event. For subjectRetired, the event is about a pod of a retired template and
-// only the Subject of the observation, its workload, is set.
-func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observation, subjectVerdict, error) {
+// fromEvent builds the observation of an event, without its count, and returns the pod the event is about as
+// the owner chain read it (nil when it names no pod, or the pod is gone or replaced). It returns
+// subjectUnusable for events that are not a usable symptom: fields outside the Incident schema's bounds, or a
+// regarding object in another namespace than the event. For subjectRetired, the event is about a pod of a
+// retired template and only the Subject of the observation, its workload, is set.
+func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observation, *corev1.Pod, subjectVerdict,
+	error) {
 	if !validReason(ev.Reason) || !validAction(ev.Action) || !validController(ev.ReportingController) {
-		return Observation{}, subjectUnusable, nil
+		return Observation{}, nil, subjectUnusable, nil
 	}
 	reg := ev.Regarding
 	if reg.Namespace != "" && reg.Namespace != ev.Namespace {
-		return Observation{}, subjectUnusable, nil
+		return Observation{}, nil, subjectUnusable, nil
 	}
-	subject, owner, v, err := c.owners.subjectOf(ctx, ev.Namespace, reg)
+	subject, owner, v, pod, err := c.owners.subjectAndPod(ctx, ev.Namespace, reg)
 	if err != nil || v == subjectUnusable {
-		return Observation{}, subjectUnusable, err
+		return Observation{}, nil, subjectUnusable, err
 	}
 	if v == subjectRetired {
-		return Observation{Subject: subject}, subjectRetired, nil
+		return Observation{Subject: subject}, pod, subjectRetired, nil
 	}
 	fo := fingerprint.Observation{
 		ClusterID:           c.cfg.ClusterID,
@@ -233,7 +234,7 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 		RegardingKind:       reg.Kind,
 		RegardingName:       reg.Name,
 	}
-	return c.observation(fo, subject, ev.Namespace, lastOccurrence(ev)), subjectUsable, nil
+	return c.observation(fo, subject, ev.Namespace, lastOccurrence(ev)), pod, subjectUsable, nil
 }
 
 // observation computes the fingerprint (from fingerprint.Normalize) and the shown symptom (fingerprint.Symptom,

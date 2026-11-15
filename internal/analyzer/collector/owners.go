@@ -148,6 +148,9 @@ type ownerResolver struct {
 	timeout time.Duration
 	ttl     time.Duration
 	cache   *cache.LRUExpireCache // ownerKey to ownerFacts; safe for concurrent use
+	// templates holds what retiredTemplate read, ownerKey of a ReplicaSet or StatefulSet to its
+	// replicaSetState or statefulSetState, for templateCheckTTL.
+	templates *cache.LRUExpireCache
 
 	mu    sync.Mutex
 	known *lru[types.UID, podOwner] // pod UID to its controller reference and labels
@@ -161,16 +164,17 @@ func (f clockFunc) Now() time.Time { return f() }
 func newOwnerResolver(pods, api client.Reader, cfg Config) *ownerResolver {
 	return &ownerResolver{
 		pods: pods, api: api, timeout: cfg.LookupTimeout, ttl: cfg.OwnerTTL,
-		cache: cache.NewLRUExpireCacheWithClock(max(cfg.MaxOwners, 1), clockFunc(cfg.Now)),
-		known: newLRU[types.UID, podOwner](cfg.MaxPods, nil),
+		cache:     cache.NewLRUExpireCacheWithClock(max(cfg.MaxOwners, 1), clockFunc(cfg.Now)),
+		templates: cache.NewLRUExpireCacheWithClock(max(cfg.MaxOwners, 1), clockFunc(cfg.Now)),
+		known:     newLRU[types.UID, podOwner](cfg.MaxPods, nil),
 	}
 }
 
 // subjectOf returns the subject of an event's regarding object and the owner UID for the fingerprint
-// (empty when the subject is the object itself). It returns false when the reference does not fit the
-// Incident schema.
+// (empty when the subject is the object itself). The verdict is subjectUnusable when the reference does not
+// fit the Incident schema, and subjectRetired for a pod of a retired template (podSubject).
 func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev1.ObjectReference) (
-	remediationv1alpha1.ObjectRef, string, bool, error) {
+	remediationv1alpha1.ObjectRef, string, subjectVerdict, error) {
 	self := remediationv1alpha1.ObjectRef{
 		APIVersion: reg.APIVersion, Kind: reg.Kind, Namespace: reg.Namespace, Name: reg.Name,
 		UID: remediationv1alpha1.UID(reg.UID),
@@ -179,7 +183,7 @@ func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev
 		self.Namespace = eventNS
 	}
 	if !validRef(self) {
-		return remediationv1alpha1.ObjectRef{}, "", false, nil
+		return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, nil
 	}
 	switch {
 	case self.Kind == kindPod && self.APIVersion == apiCore:
@@ -191,7 +195,7 @@ func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev
 			return r.formerPodSubject(ctx, self)
 		}
 		if err != nil {
-			return remediationv1alpha1.ObjectRef{}, "", false, fmt.Errorf("reading the Pod of an event: %w", err)
+			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, fmt.Errorf("reading the Pod of an event: %w", err)
 		}
 		return r.podSubject(ctx, &pod)
 	case self.Kind == kindReplicaSet && self.APIVersion == apiApps:
@@ -199,13 +203,14 @@ func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev
 			APIVersion: apiApps, Kind: kindReplicaSet, Name: self.Name, UID: reg.UID,
 		})
 		if err != nil {
-			return remediationv1alpha1.ObjectRef{}, "", false, err
+			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, err
 		}
 		if !facts.found || facts.parent == nil {
 			// A ReplicaSet without a verified Deployment is its own subject, with no owner.
-			return self, "", true, nil
+			return self, "", subjectUsable, nil
 		}
-		return r.ownedSubject(ctx, self, *facts.parent, facts.labels)
+		subject, owner, ok, err := r.ownedSubject(ctx, self, *facts.parent, facts.labels)
+		return subject, owner, verdict(ok), err
 	case (self.Kind == kindDeployment || self.Kind == kindStatefulSet) && self.APIVersion == apiApps:
 		// A workload the analyzer can read is the subject only as it exists: the UID in the event is
 		// whatever its writer put there.
@@ -213,52 +218,70 @@ func (r *ownerResolver) subjectOf(ctx context.Context, eventNS string, reg corev
 			APIVersion: apiApps, Kind: self.Kind, Name: self.Name, UID: reg.UID,
 		})
 		if err != nil || !facts.found {
-			return remediationv1alpha1.ObjectRef{}, "", false, err
+			return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, err
 		}
-		return self, "", true, nil
+		return self, "", subjectUsable, nil
 	}
 	// Other kinds the analyzer cannot read, so it cannot check their UID; such a subject is only ever the
 	// object the event itself names.
-	return self, "", true, nil
+	return self, "", subjectUsable, nil
 }
 
 // podSubject returns the verified owning workload of pod, or the pod itself, and remembers the pod's
-// controller reference for events that arrive after the pod is gone.
+// controller reference for events that arrive after the pod is gone. The verdict is subjectRetired, with the
+// workload as the subject, when the workload has retired the pod's template (retiredTemplate).
 func (r *ownerResolver) podSubject(ctx context.Context, pod *corev1.Pod) (
-	remediationv1alpha1.ObjectRef, string, bool, error) {
+	remediationv1alpha1.ObjectRef, string, subjectVerdict, error) {
 	self := remediationv1alpha1.ObjectRef{
 		APIVersion: apiCore, Kind: kindPod, Namespace: pod.Namespace, Name: pod.Name,
 		UID: remediationv1alpha1.UID(pod.UID),
 	}
 	if !validRef(self) {
-		return remediationv1alpha1.ObjectRef{}, "", false, nil
+		return remediationv1alpha1.ObjectRef{}, "", subjectUnusable, nil
 	}
 	// Only a reference marked controller is followed, and only to an apps/v1 ReplicaSet or StatefulSet: those
 	// are the controllers of pods (ownership.PodController). A Deployment is reached only as the controller of
 	// a ReplicaSet, never named by a pod directly.
 	ref := ownership.PodController(pod)
 	if ref == nil || len(pod.Labels) > maxLabels {
-		return self, "", true, nil
+		return self, "", subjectUsable, nil
 	}
 	r.mu.Lock()
 	r.known.put(pod.UID, podOwner{
 		namespace: pod.Namespace, name: pod.Name, ref: *ref, labels: labels.Set(maps.Clone(pod.Labels)),
 	})
 	r.mu.Unlock()
-	return r.ownedSubject(ctx, self, *ref, pod.Labels)
+	return r.podOwnedSubject(ctx, self, *ref, pod.Labels, pod.DeletionTimestamp != nil)
 }
 
 // formerPodSubject is podSubject for a pod that is no longer in the cache, from what was remembered about
-// it. A pod deleted before the collector looked up its owner stays its own subject.
+// it. A pod deleted before the collector looked up its owner stays its own subject. The pod is gone, so it
+// counts as terminating for retiredTemplate.
 func (r *ownerResolver) formerPodSubject(ctx context.Context, self remediationv1alpha1.ObjectRef) (
-	remediationv1alpha1.ObjectRef, string, bool, error) {
+	remediationv1alpha1.ObjectRef, string, subjectVerdict, error) {
 	r.mu.Lock()
 	known, ok := r.known.get(types.UID(self.UID))
 	r.mu.Unlock()
 	if !ok || known.namespace != self.Namespace || known.name != self.Name {
-		return self, "", true, nil
+		return self, "", subjectUsable, nil
 	}
-	return r.ownedSubject(ctx, self, known.ref, known.labels)
+	return r.podOwnedSubject(ctx, self, known.ref, known.labels, true)
+}
+
+// podOwnedSubject is ownedSubject for a pod, which it marks subjectRetired when the verified workload has
+// retired the pod's template (retiredTemplate, #724): its evidence is about a template that no longer runs,
+// and a change planned from the current one would be verified by the pod going away.
+func (r *ownerResolver) podOwnedSubject(ctx context.Context, self remediationv1alpha1.ObjectRef,
+	ref metav1.OwnerReference, podLabels labels.Set, deleting bool) (
+	remediationv1alpha1.ObjectRef, string, subjectVerdict, error) {
+	subject, owner, ok, err := r.ownedSubject(ctx, self, ref, podLabels)
+	if err != nil || !ok || owner == "" {
+		return subject, owner, verdict(ok), err
+	}
+	if r.retiredTemplate(ctx, subject, ref, podLabels, deleting) {
+		return subject, owner, subjectRetired, nil
+	}
+	return subject, owner, subjectUsable, nil
 }
 
 // ownedSubject returns the top of the verified chain that starts at ref with its UID as the owner, or self

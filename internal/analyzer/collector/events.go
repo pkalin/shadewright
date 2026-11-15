@@ -151,11 +151,17 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if delta == 0 && !mayRepeat {
 		return ctrl.Result{}, nil
 	}
-	obs, ok, err := r.c.fromEvent(ctx, &ev)
+	obs, v, err := r.c.fromEvent(ctx, &ev)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !ok {
+	switch v {
+	case subjectRetired:
+		// About a pod whose template its workload has retired (#724): handled, counted once.
+		dropRetired(ctx, obs.Subject.Kind, "Event", 1)
+		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
+		return ctrl.Result{}, nil
+	case subjectUnusable:
 		// Not a usable symptom; remembering it keeps updates of the same event cheap.
 		logf.FromContext(ctx).V(1).Info("Ignored Event that cannot be correlated")
 		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
@@ -174,20 +180,24 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	return ctrl.Result{}, nil
 }
 
-// fromEvent builds the observation of an event, without its count. It returns false for events that are
-// not a usable symptom: fields outside the Incident schema's bounds, or a regarding object in another
-// namespace than the event.
-func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observation, bool, error) {
+// fromEvent builds the observation of an event, without its count. It returns subjectUnusable for events
+// that are not a usable symptom: fields outside the Incident schema's bounds, or a regarding object in
+// another namespace than the event. For subjectRetired, the event is about a pod of a retired template and
+// only the Subject of the observation, its workload, is set.
+func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observation, subjectVerdict, error) {
 	if !validReason(ev.Reason) || !validAction(ev.Action) || !validController(ev.ReportingController) {
-		return Observation{}, false, nil
+		return Observation{}, subjectUnusable, nil
 	}
 	reg := ev.Regarding
 	if reg.Namespace != "" && reg.Namespace != ev.Namespace {
-		return Observation{}, false, nil
+		return Observation{}, subjectUnusable, nil
 	}
-	subject, owner, ok, err := c.owners.subjectOf(ctx, ev.Namespace, reg)
-	if err != nil || !ok {
-		return Observation{}, false, err
+	subject, owner, v, err := c.owners.subjectOf(ctx, ev.Namespace, reg)
+	if err != nil || v == subjectUnusable {
+		return Observation{}, subjectUnusable, err
+	}
+	if v == subjectRetired {
+		return Observation{Subject: subject}, subjectRetired, nil
 	}
 	fo := fingerprint.Observation{
 		ClusterID:           c.cfg.ClusterID,
@@ -202,7 +212,7 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 		RegardingKind:       reg.Kind,
 		RegardingName:       reg.Name,
 	}
-	return c.observation(fo, subject, ev.Namespace, lastOccurrence(ev)), true, nil
+	return c.observation(fo, subject, ev.Namespace, lastOccurrence(ev)), subjectUsable, nil
 }
 
 // observation computes the fingerprint (from fingerprint.Normalize) and the shown symptom (fingerprint.Symptom,

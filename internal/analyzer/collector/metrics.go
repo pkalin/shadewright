@@ -32,8 +32,11 @@ var symptomSourceWatched = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Help: "1 when a kind an active module reads symptoms from is watched, 0 when it is not (not served, not granted or failed).",
 }, kindLabels)
 
+// labelKind is the label of a metric that names a kind.
+const labelKind = "kind"
+
 // kindLabels are the labels of a metric about a kind: its API group and kind.
-var kindLabels = []string{"group", "kind"}
+var kindLabels = []string{"group", labelKind}
 
 func init() {
 	metrics.Registry.MustRegister(symptomSourceWatched)

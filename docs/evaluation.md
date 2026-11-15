@@ -271,8 +271,9 @@ memory increase the evidence did not support. Both expect a refusal (`NoProposal
 proposal of any value fails the case. The fixture of `replaced-pod` carries the pod's controller owner, its
 `pod-template-hash` and its deletion timestamp, but the context builder shows only the owner (as "controlled by
 ReplicaSet ...") next to the Deployment's ReplicaSets with their revision and desired replicas. It leaves out the
-deletion timestamp and the hash and does not mark which ReplicaSet is current, so the model must infer it. Whether the
-collector or the builder should drop or mark such evidence is the work of #724.
+deletion timestamp and the hash and does not mark which ReplicaSet is current, so the model must infer it. The
+collector drops such evidence before an Incident opens (design 3.1, #724); this case checks that the model, given the
+evidence anyway, still refuses.
 
 Today every context and reply is `source: synthetic`: written by hand from the scenario manifests and the
 observations in `expected.yaml`, so CI checks the harness, the loop and the scoring end to end. They hold no

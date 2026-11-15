@@ -21,12 +21,15 @@ limitations under the License.
 // typed clientset and its informers.
 //
 // It answers as controller-runtime's client did, which the plugin used before: the same errors from the API
-// server, unwrapped, and a [meta.NoKindMatchError] when the API server does not serve the kind (a 404 on a
-// list, or a 404 on a get that names no object).
+// server, unwrapped, and a [meta.NoKindMatchError] when the API server does not serve the kind. The API server
+// says so with a 404 on a list, or a 404 on a get that names no object; a 403 comes before routing, so on a
+// 403 the client asks discovery whether the resource is served, and keeps the 403 when it is, or when
+// discovery does not answer.
 package readclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -41,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/metadata"
@@ -141,14 +145,44 @@ func Scheme() (*runtime.Scheme, error) {
 	return s, nil
 }
 
-// Client is a [Reader] on client-go's dynamic and metadata clients.
-type Client struct {
-	scheme   *runtime.Scheme
-	dynamic  dynamic.Interface
-	metadata metadata.Interface
+// Discovery lists the resources the API server serves in one group version, from its discovery document
+// (/api/v1 or /apis/<group>/<version>), and returns a NotFound error when it serves none.
+type Discovery interface {
+	ServerResources(ctx context.Context, gv schema.GroupVersion) (*metav1.APIResourceList, error)
 }
 
-// New returns a Client for cfg. The dynamic and the metadata client share one HTTP client.
+// restDiscovery reads the discovery document with a REST client; client-go's discovery client would link the
+// typed clientset's scheme.
+type restDiscovery struct {
+	client rest.Interface
+}
+
+func (d restDiscovery) ServerResources(ctx context.Context, gv schema.GroupVersion) (*metav1.APIResourceList, error) {
+	path := "/apis/" + gv.Group + "/" + gv.Version
+	if gv.Group == "" {
+		path = "/api/" + gv.Version
+	}
+	body, err := d.client.Get().AbsPath(path).Do(ctx).Raw()
+	if err != nil {
+		return nil, err
+	}
+	list := &metav1.APIResourceList{}
+	if err := json.Unmarshal(body, list); err != nil {
+		return nil, fmt.Errorf("readclient: decoding the discovery document of %s: %w", gv, err)
+	}
+	return list, nil
+}
+
+// Client is a [Reader] on client-go's dynamic and metadata clients, with discovery to tell a 403 on a kind the
+// API server does not serve from one on a kind it does.
+type Client struct {
+	scheme    *runtime.Scheme
+	dynamic   dynamic.Interface
+	metadata  metadata.Interface
+	discovery Discovery
+}
+
+// New returns a Client for cfg. The dynamic, metadata and discovery clients share one HTTP client.
 func New(cfg *rest.Config) (*Client, error) {
 	httpClient, err := rest.HTTPClientFor(cfg)
 	if err != nil {
@@ -162,16 +196,29 @@ func New(cfg *rest.Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewForClients(dyn, md)
+	discCfg := rest.CopyConfig(cfg)
+	discCfg.APIPath = ""
+	discCfg.GroupVersion = nil
+	discCfg.AcceptContentTypes = "application/json"
+	discCfg.NegotiatedSerializer = serializer.NewCodecFactory(runtime.NewScheme()).WithoutConversion()
+	rc, err := rest.UnversionedRESTClientForConfigAndClient(discCfg, httpClient)
+	if err != nil {
+		return nil, err
+	}
+	return NewForClients(dyn, md, restDiscovery{client: rc})
 }
 
-// NewForClients returns a Client on the given dynamic and metadata clients, such as client-go's fakes.
-func NewForClients(dyn dynamic.Interface, md metadata.Interface) (*Client, error) {
+// NewForClients returns a Client on the given dynamic, metadata and discovery clients, such as client-go's
+// fakes.
+func NewForClients(dyn dynamic.Interface, md metadata.Interface, disc Discovery) (*Client, error) {
+	if disc == nil {
+		return nil, errors.New("readclient: no discovery client")
+	}
 	s, err := Scheme()
 	if err != nil {
 		return nil, err
 	}
-	return &Client{scheme: s, dynamic: dyn, metadata: md}, nil
+	return &Client{scheme: s, dynamic: dyn, metadata: md, discovery: disc}, nil
 }
 
 // kind returns the kind of obj: the one set on an unstructured or metadata-only object, else the one the
@@ -222,7 +269,7 @@ func (c *Client) Get(ctx context.Context, key ObjectKey, obj Object) error {
 	if m, ok := obj.(*metav1.PartialObjectMetadata); ok {
 		got, err := c.metadata.Resource(gvr).Namespace(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
 		if err != nil {
-			return getError(err, gvk)
+			return c.getError(ctx, err, gvr, gvk)
 		}
 		*m = *got
 		m.SetGroupVersionKind(gvk)
@@ -230,7 +277,7 @@ func (c *Client) Get(ctx context.Context, key ObjectKey, obj Object) error {
 	}
 	got, err := c.dynamic.Resource(gvr).Namespace(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
 	if err != nil {
-		return getError(err, gvk)
+		return c.getError(ctx, err, gvr, gvk)
 	}
 	if u, ok := obj.(*unstructured.Unstructured); ok {
 		u.Object = got.Object
@@ -261,7 +308,7 @@ func (c *Client) List(ctx context.Context, list ObjectList, opts ...ListOption) 
 	if m, ok := list.(*metav1.PartialObjectMetadataList); ok {
 		got, err := c.metadata.Resource(gvr).Namespace(o.namespace).List(ctx, o.ListOptions)
 		if err != nil {
-			return listError(err, gvk)
+			return c.listError(ctx, err, gvr, gvk)
 		}
 		*m = *got
 		m.SetGroupVersionKind(listGVK)
@@ -269,7 +316,7 @@ func (c *Client) List(ctx context.Context, list ObjectList, opts ...ListOption) 
 	}
 	got, err := c.dynamic.Resource(gvr).Namespace(o.namespace).List(ctx, o.ListOptions)
 	if err != nil {
-		return listError(err, gvk)
+		return c.listError(ctx, err, gvr, gvk)
 	}
 	if u, ok := list.(*unstructured.UnstructuredList); ok {
 		*u = *got
@@ -282,24 +329,48 @@ func (c *Client) List(ctx context.Context, list ObjectList, opts ...ListOption) 
 	return nil
 }
 
-// getError returns err, or a NoKindMatchError when it is a 404 that names no object: the API server answers
-// so for a path it does not serve, and names the object when only the object is missing.
-func getError(err error, gvk schema.GroupVersionKind) error {
+// getError returns err, or a NoKindMatchError when the API server does not serve gvr: a 404 that names no
+// object (the API server names the object when only the object is missing), or a 403 on a resource that
+// discovery does not list.
+func (c *Client) getError(ctx context.Context, err error, gvr schema.GroupVersionResource, gvk schema.GroupVersionKind) error {
 	var status apierrors.APIStatus
 	if apierrors.IsNotFound(err) && errors.As(err, &status) {
 		if d := status.Status().Details; d == nil || d.Name == "" {
 			return noKindMatch(gvk)
 		}
 	}
-	return err
+	return c.forbiddenError(ctx, err, gvr, gvk)
 }
 
-// listError returns err, or a NoKindMatchError when it is a 404: a list of a served kind never is one.
-func listError(err error, gvk schema.GroupVersionKind) error {
+// listError returns err, or a NoKindMatchError when the API server does not serve gvr: a 404 (a list of a
+// served kind never is one), or a 403 on a resource that discovery does not list.
+func (c *Client) listError(ctx context.Context, err error, gvr schema.GroupVersionResource, gvk schema.GroupVersionKind) error {
 	if apierrors.IsNotFound(err) {
 		return noKindMatch(gvk)
 	}
-	return err
+	return c.forbiddenError(ctx, err, gvr, gvk)
+}
+
+// forbiddenError returns a NoKindMatchError when err is a 403 and discovery says the API server does not serve
+// gvr, and err otherwise. The API server authorizes a request before it routes it, so a caller without a grant
+// gets a 403 for a kind it does not serve too. When discovery fails, err stands: the 403 is what is known.
+func (c *Client) forbiddenError(ctx context.Context, err error, gvr schema.GroupVersionResource, gvk schema.GroupVersionKind) error {
+	if !apierrors.IsForbidden(err) {
+		return err
+	}
+	list, derr := c.discovery.ServerResources(ctx, gvr.GroupVersion())
+	if derr != nil {
+		if apierrors.IsNotFound(derr) {
+			return noKindMatch(gvk)
+		}
+		return err
+	}
+	for _, r := range list.APIResources {
+		if r.Name == gvr.Resource {
+			return err
+		}
+	}
+	return noKindMatch(gvk)
 }
 
 func noKindMatch(gvk schema.GroupVersionKind) error {

@@ -17,11 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +48,22 @@ var testKinds = []schema.GroupVersionKind{
 	remediationv1alpha1.GroupVersion.WithKind(kindSettings),
 	{Group: fluxstatus.SourceGroup, Version: fluxstatus.SourceVersion, Kind: fluxstatus.KindGitRepository},
 	{Group: fluxstatus.KustomizeGroup, Version: fluxstatus.KustomizeVersion, Kind: fluxstatus.KindKustomization},
+}
+
+// servedKinds is the discovery of the fake cluster: it serves every kind of testKinds.
+type servedKinds struct{}
+
+func (servedKinds) ServerResources(_ context.Context, gv schema.GroupVersion) (*metav1.APIResourceList, error) {
+	list := &metav1.APIResourceList{GroupVersion: gv.String()}
+	for _, gvk := range testKinds {
+		if gvr, _ := readclient.Resource(gvk); gvr.GroupVersion() == gv {
+			list.APIResources = append(list.APIResources, metav1.APIResource{Name: gvr.Resource})
+		}
+	}
+	if len(list.APIResources) == 0 {
+		return nil, apierrors.NewNotFound(schema.GroupResource{}, "")
+	}
+	return list, nil
 }
 
 // reactors stand in for the interceptors of a fake client: each is prepended to client-go's dynamic and
@@ -126,7 +144,7 @@ func fakeReader(t *testing.T, objs []readclient.Object, r *reactors) readclient.
 			}
 		}
 	}
-	c, err := readclient.NewForClients(dyn, md)
+	c, err := readclient.NewForClients(dyn, md, servedKinds{})
 	if err != nil {
 		t.Fatal(err)
 	}

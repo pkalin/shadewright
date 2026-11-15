@@ -66,11 +66,42 @@ func fakes(t *testing.T, objs ...*unstructured.Unstructured) (*Client, *dynamicf
 		}
 	}
 	md := metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme())
-	c, err := NewForClients(dyn, md)
+	c, err := NewForClients(dyn, md, servingAll())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return c, dyn, md
+}
+
+// fakeDiscovery serves the resources it lists per group version, answers NotFound for any other group
+// version, and err for all when it is set.
+type fakeDiscovery struct {
+	served map[schema.GroupVersion][]string
+	err    error
+}
+
+func (d fakeDiscovery) ServerResources(_ context.Context, gv schema.GroupVersion) (*metav1.APIResourceList, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	names, ok := d.served[gv]
+	if !ok {
+		return nil, apierrors.NewNotFound(schema.GroupResource{}, "")
+	}
+	list := &metav1.APIResourceList{GroupVersion: gv.String()}
+	for _, n := range names {
+		list.APIResources = append(list.APIResources, metav1.APIResource{Name: n})
+	}
+	return list, nil
+}
+
+// servingAll serves every resource the plugin reads, in the versions the tests use.
+func servingAll() fakeDiscovery {
+	return fakeDiscovery{served: map[schema.GroupVersion][]string{
+		corev1.SchemeGroupVersion:        {"configmaps"},
+		appsv1.SchemeGroupVersion:        {"deployments", "statefulsets"},
+		remediationv1alpha1.GroupVersion: {"incidents", "remediationrequests", "remediationsettings"},
+	}}
 }
 
 func obj(gvk schema.GroupVersionKind, ns, name string, fields map[string]any) *unstructured.Unstructured {
@@ -145,6 +176,7 @@ func TestErrors(t *testing.T) {
 	unserved := apierrors.NewNotFound(schema.GroupResource{}, "")
 	forbidden := apierrors.NewForbidden(incidents.GroupResource(), "", errors.New("no"))
 	for name, tc := range map[string]struct {
+		disc  *fakeDiscovery
 		react func(*dynamicfake.FakeDynamicClient)
 		read  func(*Client) error
 		check func(error) bool
@@ -173,6 +205,52 @@ func TestErrors(t *testing.T) {
 			read:  func(c *Client) error { return c.List(ctx, &remediationv1alpha1.IncidentList{}) },
 			check: meta.IsNoMatchError,
 		},
+		"forbidden get of an unserved version": {
+			react: func(d *dynamicfake.FakeDynamicClient) {
+				d.PrependReactor("get", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, forbidden
+				})
+			},
+			read: func(c *Client) error {
+				u := &unstructured.Unstructured{}
+				u.SetGroupVersionKind(schema.GroupVersionKind{Group: remediationv1alpha1.GroupVersion.Group,
+					Version: "v9", Kind: "Incident"})
+				return c.Get(ctx, ObjectKey{Namespace: testNS, Name: "x"}, u)
+			},
+			check: meta.IsNoMatchError,
+		},
+		"forbidden list of a resource its group version does not list": {
+			disc: &fakeDiscovery{served: map[schema.GroupVersion][]string{remediationv1alpha1.GroupVersion: {"other"}}},
+			react: func(d *dynamicfake.FakeDynamicClient) {
+				d.PrependReactor("list", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, forbidden
+				})
+			},
+			read:  func(c *Client) error { return c.List(ctx, &remediationv1alpha1.IncidentList{}) },
+			check: meta.IsNoMatchError,
+		},
+		"forbidden list when discovery fails": {
+			disc: &fakeDiscovery{err: apierrors.NewInternalError(errors.New("boom"))},
+			react: func(d *dynamicfake.FakeDynamicClient) {
+				d.PrependReactor("list", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, forbidden
+				})
+			},
+			read:  func(c *Client) error { return c.List(ctx, &remediationv1alpha1.IncidentList{}) },
+			check: func(err error) bool { return errors.Is(err, forbidden) },
+		},
+		"forbidden get when discovery is forbidden too": {
+			disc: &fakeDiscovery{err: apierrors.NewForbidden(schema.GroupResource{}, "", errors.New("no"))},
+			react: func(d *dynamicfake.FakeDynamicClient) {
+				d.PrependReactor("get", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, forbidden
+				})
+			},
+			read: func(c *Client) error {
+				return c.Get(ctx, ObjectKey{Namespace: testNS, Name: "x"}, &remediationv1alpha1.Incident{})
+			},
+			check: func(err error) bool { return errors.Is(err, forbidden) },
+		},
 		"forbidden list": {
 			react: func(d *dynamicfake.FakeDynamicClient) {
 				d.PrependReactor("list", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
@@ -200,6 +278,9 @@ func TestErrors(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			c, dyn, _ := fakes(t)
+			if tc.disc != nil {
+				c.discovery = *tc.disc
+			}
 			if tc.react != nil {
 				tc.react(dyn)
 			}

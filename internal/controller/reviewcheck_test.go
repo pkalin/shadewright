@@ -336,7 +336,7 @@ func passedWorld(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *ap
 	}
 	approve(g, cr.Number, 90, 3003, head)
 	for range 2 {
-		if err := r.reviewCheck(ctx, p, true); err != nil {
+		if err := r.reviewCheck(ctx, p); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -365,7 +365,7 @@ func TestReviewCheckGoesBackWhenTheApprovalIsGone(t *testing.T) {
 	// While the approval stands, a look writes nothing: no check run, no status.
 	approve(g, number, 91, 2002, head)
 	runs, rv := len(g.CheckRuns(head)), p.ResourceVersion
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed || p.ResourceVersion != rv ||
@@ -373,7 +373,7 @@ func TestReviewCheckGoesBackWhenTheApprovalIsGone(t *testing.T) {
 		t.Fatalf("a standing approval changed the check: %+v, %+v", p.Status.PullRequest.ReviewCheck, g.CheckRuns(head))
 	}
 	g.SetReviewState(number, 90, "DISMISSED")
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	want := api.ReviewCheck{Head: head, State: api.ReviewCheckInProgress}
@@ -384,7 +384,7 @@ func TestReviewCheckGoesBackWhenTheApprovalIsGone(t *testing.T) {
 		t.Fatalf("the check run on the Git host is %q, want in progress", got)
 	}
 	approve(g, number, 92, 3003, head)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed {
@@ -408,14 +408,14 @@ func TestReviewCheckPassedKeepsItsStateOnAFailedRead(t *testing.T) {
 		return nil
 	})
 	runs := len(g.CheckRuns(head))
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a failed read of the reviews was not returned for a retry")
 	}
 	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed || len(g.CheckRuns(head)) != runs {
 		t.Fatalf("a failed read changed the check: %+v, %+v", p.Status.PullRequest.ReviewCheck, g.CheckRuns(head))
 	}
 	g.SetFail(nil)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckInProgress {
@@ -431,7 +431,7 @@ func TestReviewCheckPassedFailsOnAListTooLong(t *testing.T) {
 	r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
 		return pagedReviews{g}, nil
 	}
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckFailed || rc.Head != head {
@@ -478,7 +478,7 @@ func TestReviewCheckPassesAgainAfterALostStatusWrite(t *testing.T) {
 	ctx := context.Background()
 	g.SetReviewState(number, 90, "DISMISSED")
 	reread := staleCopy(t, r, p)
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a status write that failed was not returned")
 	}
 	reread()
@@ -486,7 +486,7 @@ func TestReviewCheckPassesAgainAfterALostStatusWrite(t *testing.T) {
 		t.Fatalf("setup: host %q, status %+v", got, p.Status.PullRequest.ReviewCheck)
 	}
 	approve(g, number, 92, 3003, head)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if got := lastCheckRun(g, head); got != providers.CheckRunSuccess {
@@ -503,12 +503,12 @@ func TestReviewCheckGoesBackAfterALostPassWrite(t *testing.T) {
 	r, g, p, _, cr, head := gateWorld(t)
 	ctx := context.Background()
 	plainWaiting(t, r, p, head)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	approve(g, cr.Number, 90, 3003, head)
 	reread := staleCopy(t, r, p)
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a status write that failed was not returned")
 	}
 	reread()
@@ -516,7 +516,7 @@ func TestReviewCheckGoesBackAfterALostPassWrite(t *testing.T) {
 		t.Fatalf("setup: host %q, status %+v", got, p.Status.PullRequest.ReviewCheck)
 	}
 	g.SetReviewState(cr.Number, 90, "DISMISSED")
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if got := lastCheckRun(g, head); got != providers.CheckRunInProgress {
@@ -533,12 +533,12 @@ func TestReviewCheckRecordsWhatTheHostAlreadyShows(t *testing.T) {
 	ctx := context.Background()
 	g.SetReviewState(number, 90, "DISMISSED")
 	reread := staleCopy(t, r, p)
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a status write that failed was not returned")
 	}
 	reread()
 	runs := len(g.CheckRuns(head))
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress || len(g.CheckRuns(head)) != runs {
@@ -554,7 +554,7 @@ func TestReviewCheckCommentAfterThePassKeepsIt(t *testing.T) {
 	g.AddReview(number, providers.Feedback{ID: 93, Author: providers.FeedbackAuthor{ID: 3003, Login: "reviewer-3003",
 		Kind: providers.AuthorPerson}, ReviewState: reviewCommented, CommitID: head, CreatedAt: hostClock.Add(time.Minute)})
 	runs := len(g.CheckRuns(head))
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckPassed || len(g.CheckRuns(head)) != runs {
@@ -580,7 +580,7 @@ func TestReviewCheckWritesNothingWhilePaused(t *testing.T) {
 		return r.Update(ctx, s)
 	})
 	runs := len(g.CheckRuns(head))
-	if err := r.reviewCheck(ctx, p, true); err == nil {
+	if err := r.reviewCheck(ctx, p); err == nil {
 		t.Fatal("a paused look was not returned for a retry")
 	}
 	if len(g.CheckRuns(head)) != runs || p.Status.PullRequest.ReviewCheck.State != api.ReviewCheckPassed {
@@ -610,7 +610,7 @@ func TestReviewCheckRefusedToGoBack(t *testing.T) {
 	})
 	look := func() {
 		t.Helper()
-		if err := r.reviewCheck(ctx, p, true); err != nil {
+		if err := r.reviewCheck(ctx, p); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -661,7 +661,7 @@ func TestReviewCheckRefusedAtCreateHeals(t *testing.T) {
 		}
 		return nil
 	})
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved)
@@ -671,7 +671,7 @@ func TestReviewCheckRefusedAtCreateHeals(t *testing.T) {
 	}
 	g.SetFail(nil)
 	now = now.Add(refusalRetryBase + time.Second)
-	if err := r.reviewCheck(ctx, p, true); err != nil {
+	if err := r.reviewCheck(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress || lastCheckRun(g, head) != providers.CheckRunInProgress {

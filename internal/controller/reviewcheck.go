@@ -284,14 +284,16 @@ func (r *RemediationRequestReconciler) gateDue(rr *remediationv1alpha1.Remediati
 // replacement. A request that records the check Stale (failStaleCheck) never writes it again, on any head. rr is
 // updated in place by each status write that went through. A check run write answered with a conflict returns
 // errCheckRunConflict, which is not a failure (watchReviewCheck).
-func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	caughtUp bool) error {
-	_, err := r.reviewCheckLook(ctx, rr, caughtUp)
+//
+// reviewCheck is the look after comments that caught up; reviewCheckLook takes caughtUp and also reports whether a
+// check run write went through on this look (written), which watchReviewCheck needs to start the count of
+// conflicts again.
+func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	_, err := r.reviewCheckLook(ctx, rr, true)
 	return err
 }
 
-// reviewCheckLook is reviewCheck that also reports whether a check run write went through on this look (written),
-// which watchReviewCheck needs to start the count of conflicts again.
+// reviewCheckLook is reviewCheck after a look at the comments that caught up or not (caughtUp).
 func (r *RemediationRequestReconciler) reviewCheckLook(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, caughtUp bool) (written bool, err error) {
 	pr := rr.Status.PullRequest

@@ -184,23 +184,42 @@ func (r *RemediationRequestReconciler) openPlanRepository(ctx context.Context, r
 // errStalePlanWrite.
 func (r *RemediationRequestReconciler) openPlanRepositoryOf(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
+	repo, err := r.planRepository(ctx, rr)
+	if err != nil {
+		return nil, "", err
+	}
+	return r.openPlanEntry(ctx, rr, repo)
+}
+
+// planRepository returns the entry of the plan's repository in RemediationSettings, read live, or the same errors
+// as openPlanRepositoryOf but for the provider's. With errTargetBranchChanged it also returns the entry, which then
+// names another target branch than the recorded one (status.source), for the look at a merge (watchBranchChanged).
+func (r *RemediationRequestReconciler) planRepository(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (remediationv1alpha1.GitRepository, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
-		return nil, "", errRepositoryGone
+		return remediationv1alpha1.GitRepository{}, errRepositoryGone
 	case err != nil:
-		return nil, "", fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+		return remediationv1alpha1.GitRepository{}, fmt.Errorf("get RemediationSettings %s: %w",
+			remediationv1alpha1.SettingsName, err)
 	}
 	if freshness.Paused(settings) {
-		return nil, "", freshness.ErrPaused
+		return remediationv1alpha1.GitRepository{}, freshness.ErrPaused
 	}
 	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
 	if !ok {
-		return nil, "", errRepositoryGone
+		return remediationv1alpha1.GitRepository{}, errRepositoryGone
 	}
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {
-		return nil, "", errTargetBranchChanged
+		return repo, errTargetBranchChanged
 	}
+	return repo, nil
+}
+
+// openPlanEntry opens repo, the entry planRepository returned without an error, for rr (see openPlanRepositoryOf).
+func (r *RemediationRequestReconciler) openPlanEntry(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	repo remediationv1alpha1.GitRepository) (providers.GitProvider, remediationv1alpha1.GitProviderType, error) {
 	// While the plan is stale (staleMark, read at each write) the provider writes nothing but the close and a failed
 	// check run (#713): the one guard every step that writes to the plan's pull request passes (#199).
 	git, err := r.openGated(ctx, repo, func() bool { return staleMark(rr) != nil })
@@ -1098,6 +1117,10 @@ const (
 	// needs. Nothing is recorded and nothing else is done: the error is retried, and the full freshness check is
 	// not run on a merged change, which makes the plan look stale.
 	prMergeUnchecked
+	// prBranchUnread: the target branch of the plan's repository changed, and the pull request could not be read
+	// on the recorded one (watchBranchChanged, #754). Nothing else is done: the error is retried, since the full
+	// freshness check would end the request without knowing whether it was merged.
+	prBranchUnread
 )
 
 // watchPullRequest looks at the recorded pull request: a merge ends the request (Merged), a pull request
@@ -1115,8 +1138,15 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	look, err := r.watchStep(stepCtx, rr)
 	mergeSeen, timedOut := errors.Is(err, errMergeCheck), stepCtx.Err() != nil
+	branchUnread := errors.Is(err, errBranchChangedUnread)
 	err = boundErr(ctx, stepCtx, "pull request check", err)
 	cancel()
+	if branchUnread {
+		// boundErr may replace the error, as for a merge seen: the pull request is still unread.
+		logf.FromContext(ctx).V(1).Info("Could not read the pull request of RemediationRequest on its recorded "+
+			"target branch", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return prBranchUnread, err
+	}
 	if mergeSeen {
 		// boundErr replaces the error when the step's deadline or the reconcile's cancellation ended it; the merge
 		// is still seen and not recorded, which the caller must know so it never runs the full check on it.
@@ -1274,7 +1304,15 @@ func (r *RemediationRequestReconciler) clearConflictSeen(ctx context.Context,
 // AwaitingApproval; otherwise the zero hintLook.
 func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	hintLook, error) {
-	git, host, err := r.openPlanRepositoryOf(ctx, rr)
+	repo, err := r.planRepository(ctx, rr)
+	switch {
+	case errors.Is(err, errTargetBranchChanged):
+		// A merge is recorded from the recorded branch, the stale plan's (#754); anything else is as before.
+		return hintLook{}, r.watchBranchChanged(ctx, rr, repo)
+	case err != nil:
+		return hintLook{}, err
+	}
+	git, host, err := r.openPlanEntry(ctx, rr, repo)
 	if err != nil {
 		return hintLook{}, err
 	}

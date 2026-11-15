@@ -51,9 +51,11 @@ const (
 	workerContainer = "worker"
 	mainBranch      = "main"
 	opClose         = "CloseChangeRequest"
-	opBranchHead    = "BranchHead"
-	workerImage     = "example.invalid/worker:1"
-	appsGlob        = "apps/**/*.yaml"
+	// freshOtherBranch is a target branch the settings name after the plan was made for mainBranch.
+	freshOtherBranch = "release"
+	opBranchHead     = "BranchHead"
+	workerImage      = "example.invalid/worker:1"
+	appsGlob         = "apps/**/*.yaml"
 )
 
 var _ = Describe("RemediationRequest plan freshness", func() {
@@ -1554,7 +1556,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 	})
 
 	It("closes nothing when the repository entry now names another target branch", func() {
-		settings.Spec.Repositories[0].TargetBranch = "release"
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
 		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
 		_, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
@@ -1565,6 +1567,85 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(c.Reason).To(Equal("TargetBranchChanged"))
 		Expect(closes.Load()).To(BeZero())
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+		stillOpen()
+	})
+
+	// #754: the target branch changes in the settings after the pull request was opened, and a person merges it
+	// before the executor looks. The merge is read on the recorded branch and recorded as a stale merge, with its
+	// receipt, never ended NeedsIntervention as a failure for the circuit breaker.
+	It("records a merge after the target branch changed as a merged stale plan, with its receipt (#754)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		sha, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		var opened []remediationv1alpha1.GitBranch
+		r := reconciler()
+		open := r.OpenRepository
+		r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			opened = append(opened, repo.TargetBranch)
+			return open(ctx, repo)
+		}
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(opened).To(ConsistOf(remediationv1alpha1.GitBranch(mainBranch)), "read on the recorded branch only")
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
+		Expect(got.Status.MergeReceipt).NotTo(BeNil())
+		Expect(got.Status.MergeReceipt.TargetBranch).To(Equal(remediationv1alpha1.GitBranch(mainBranch)))
+		Expect(got.Status.MergeReceipt.PullRequest).To(Equal(cr.Number))
+		Expect(got.Status.MergeReceipt.MergeCommitSHA).To(Equal(sha))
+		c := planFresh()
+		Expect(c).NotTo(BeNil())
+		Expect(c.Status).To(Equal(metav1.ConditionFalse))
+		Expect(c.Reason).To(Equal(freshness.ReasonSettingsChanged))
+		Expect(stalePlanMerged(got)).To(BeTrue())
+		Expect(breakerOutcome(got)).To(Equal(outcomeNone))
+		Expect(closes.Load()).To(BeZero())
+
+		done, err := reconciler().capStaleSuccess(ctx, got)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(done).To(BeTrue())
+		ended := fetch()
+		Expect(ended.Status.Phase).To(Equal(remediationv1alpha1.PhaseInconclusive))
+		verified := meta.FindStatusCondition(ended.Status.Conditions, remediationv1alpha1.ConditionVerified)
+		Expect(verified).NotTo(BeNil())
+		Expect(verified.Reason).To(Equal(ReasonStalePlanMerged))
+		Expect(breakerOutcome(ended)).To(Equal(outcomeNone))
+	})
+
+	// A failed read of the pull request after the target branch changed decides nothing: it may have been merged.
+	It("retries, and ends nothing, while the pull request cannot be read after the target branch changed (#754)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		var fail atomic.Bool
+		fail.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opClose:
+				closes.Add(1)
+			case fail.Load() && (op == opGet || op == opList || op == opFind):
+				return &providers.RetryableError{Err: errors.New("connection reset")}
+			}
+			return nil
+		})
+		for range 2 {
+			_, err := reconcileOnce()
+			Expect(err).To(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(planFresh()).To(BeNil(), "no full check on an unread pull request")
+		}
+		Expect(closes.Load()).To(BeZero())
+
+		// Read again, open: as before #754.
+		fail.Store(false)
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(planFresh().Reason).To(Equal("TargetBranchChanged"))
+		Expect(closes.Load()).To(BeZero())
 		stillOpen()
 	})
 

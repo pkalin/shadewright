@@ -503,6 +503,8 @@ So a close whose answer was lost is known to be Shadewright's own.
 
 The close happens only in the repository the plan was made for (same URL and installation) and against its recorded target branch. If that entry is gone or now names another target branch, nothing is closed and the request ends in `NeedsIntervention` (`RepositoryUnavailable` or `TargetBranchChanged`).
 
+A target branch that changed in the settings after the pull request was opened does not hide a merge (#754). Before that stop, the look at the pull request reads it once more by its recorded number, in the recorded repository and on the recorded target branch (`status.planRepository`, `status.source`), through a provider that writes nothing. Merged with the head Shadewright pushed, it is recorded like any merge, with its merge receipt; the check at the merge finds the plan stale (`SettingsChanged`), so the outcome is capped (`StalePlanMerged`, below) and the circuit breaker does not count a failure. A read that fails is retried and ends nothing, since the pull request may be merged. Open, closed, gone or with another head, the request stops in `NeedsIntervention` with `TargetBranchChanged`, as before.
+
 ### 6.6.2. The shared read cache
 
 The mapping keeps the files it reads at a commit, which never change, in a cache shared by the policy check and the rechecks (`sourcemap.ReadCache`). The rechecks of a branch that has not moved read none of the build's files again.

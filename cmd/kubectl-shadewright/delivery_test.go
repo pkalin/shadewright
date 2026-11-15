@@ -28,11 +28,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	k8stesting "k8s.io/client-go/testing"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap/fluxrules"
 )
 
 // testWatched is the namespace the analyzer of the healthy install watches.
@@ -58,15 +59,15 @@ func watchingAnalyzer(namespaces string) *appsv1.Deployment {
 func workload(ns, name, ksNamespace, ksName string) *appsv1.Deployment {
 	labels := map[string]string{}
 	if ksName != "" {
-		labels[sourcemap.LabelKustomizationName] = ksName
-		labels[sourcemap.LabelKustomizationNamespace] = ksNamespace
+		labels[fluxrules.LabelKustomizationName] = ksName
+		labels[fluxrules.LabelKustomizationNamespace] = ksNamespace
 	}
 	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels}}
 }
 
 // readySource is a Ready GitRepository name of url and testBranch that fetched testRevision, with extra spec
 // fields.
-func readySource(name, url string, extra map[string]any) client.Object {
+func readySource(name, url string, extra map[string]any) readclient.Object {
 	spec := gitSpec(url, testBranch)
 	maps.Copy(spec, extra)
 	u := fluxObj(fluxstatus.KindGitRepository, name, spec, "True", "Succeeded", "")
@@ -76,7 +77,7 @@ func readySource(name, url string, extra map[string]any) client.Object {
 
 // readyKustomization is a Ready Kustomization name of the GitRepository source that applied testRevision, with
 // extra spec fields.
-func readyKustomization(name, source string, extra map[string]any) client.Object {
+func readyKustomization(name, source string, extra map[string]any) readclient.Object {
 	spec := ksSpec(source)
 	maps.Copy(spec, extra)
 	u := fluxObj(fluxstatus.KindKustomization, name, spec, "True", "ReconciliationSucceeded", "")
@@ -104,7 +105,7 @@ func sourceOf(t *testing.T, d *Diagnosis, name string) DeliverySource {
 // and reason, plus workloads without Flux labels.
 func TestDoctorDelivery(t *testing.T) {
 	helm := workload(testWatched, "chart", "", "")
-	helm.Labels[sourcemap.LabelHelmReleaseName] = "podinfo"
+	helm.Labels[fluxrules.LabelHelmReleaseName] = "podinfo"
 	objs := append(healthyObjects(),
 		readyKustomization("patched", testSource, map[string]any{"images": []any{map[string]any{metaName: "x"}}}),
 		readySource("other", "https://github.com/acme/other", nil),
@@ -123,10 +124,10 @@ func TestDoctorDelivery(t *testing.T) {
 	d := runChecks(t, objs, nil)
 	for name, want := range map[string]struct{ state, reason, settings string }{
 		testKs:        {sourceOK, "", settingsNamed},
-		"patched":     {sourceRefused, string(sourcemap.ReasonKustomizationTransforms), settingsNamed},
-		"other-apps":  {sourceRefused, string(sourcemap.ReasonRepositoryNotConfigured), settingsNotNamed},
-		"frozen-apps": {sourceRefused, string(sourcemap.ReasonSourceOptions), settingsNamed},
-		"missing":     {sourceRefused, string(sourcemap.ReasonKustomizationNotFound), settingsUnknown},
+		"patched":     {sourceRefused, string(fluxrules.ReasonKustomizationTransforms), settingsNamed},
+		"other-apps":  {sourceRefused, string(fluxrules.ReasonRepositoryNotConfigured), settingsNotNamed},
+		"frozen-apps": {sourceRefused, string(fluxrules.ReasonSourceOptions), settingsNamed},
+		"missing":     {sourceRefused, string(fluxrules.ReasonKustomizationNotFound), settingsUnknown},
 	} {
 		got := sourceOf(t, d, name)
 		if got.State != want.state || got.Reason != want.reason || got.Settings != want.settings {
@@ -207,15 +208,15 @@ func TestDoctorDeliveryNotReady(t *testing.T) {
 	srcFailing := fluxObj(fluxstatus.KindGitRepository, testSource, gitSpec(testRepo, testBranch), "False",
 		"GitOperationFailed", "x")
 	for name, tc := range map[string]struct {
-		with   client.Object
-		reason sourcemap.Reason
+		with   readclient.Object
+		reason fluxrules.Reason
 	}{
-		"behind": {behind, sourcemap.ReasonRevisionMismatch},
+		"behind": {behind, fluxrules.ReasonRevisionMismatch},
 		// The executor checks Ready right after spec.suspend, before the transforms.
 		"patched": {fluxObj(fluxstatus.KindKustomization, testKs, patchedSpec, "False", "BuildFailed", "x"),
-			sourcemap.ReasonKustomizationNotReady},
-		"kustomization": {failing, sourcemap.ReasonKustomizationNotReady},
-		"gitrepository": {srcFailing, sourcemap.ReasonSourceNotReady},
+			fluxrules.ReasonKustomizationNotReady},
+		"kustomization": {failing, fluxrules.ReasonKustomizationNotReady},
+		"gitrepository": {srcFailing, fluxrules.ReasonSourceNotReady},
 	} {
 		t.Run(name, func(t *testing.T) {
 			objs := healthyObjects()
@@ -283,10 +284,9 @@ func TestDoctorDeliveryURLCredentials(t *testing.T) {
 }
 
 // metadataListOf matches a metadata list of the given list kind.
-func metadataListOf(kind string) func(client.ObjectList) bool {
-	return func(l client.ObjectList) bool {
-		m, ok := l.(*metav1.PartialObjectMetadataList)
-		return ok && m.GetObjectKind().GroupVersionKind().Kind == kind
+func metadataListOf(kind string) func(k8stesting.ListAction, bool) bool {
+	return func(a k8stesting.ListAction, metadataOnly bool) bool {
+		return metadataOnly && actionKind(a)+"List" == kind
 	}
 }
 
@@ -338,7 +338,7 @@ func TestDoctorDeliveryUnchecked(t *testing.T) {
 		}
 	})
 	t.Run("settings not read", func(t *testing.T) {
-		funcs := forbiddenGet(func(key client.ObjectKey, _ client.Object) bool {
+		funcs := forbiddenGet(func(key readclient.ObjectKey, _ string) bool {
 			return key.Name == remediationv1alpha1.SettingsName
 		})
 		d := runChecks(t, healthyObjects(), funcs)

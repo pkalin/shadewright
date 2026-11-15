@@ -29,12 +29,12 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	k8stesting "k8s.io/client-go/testing"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 // fakeClock starts at testNow and moves by the requested duration on each After, which fires at once, so the
@@ -61,16 +61,29 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	return ch
 }
 
-// watchClient is a fake client with an Incident, the settings and the budget, and funcs around its calls.
-func watchClient(t *testing.T, funcs interceptor.Funcs) client.Reader {
+// watchClient is a fake client with an Incident, the settings and the budget, and r before its own reactions.
+func watchClient(t *testing.T, r *reactors) readclient.Reader {
 	t.Helper()
-	return fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(testSettings(), testIncident("incident-a", "a", testSubject, "OOM"), budgetMap("2026-11-06", "4")).
-		WithInterceptorFuncs(funcs).Build()
+	return fakeReader(t, []readclient.Object{testSettings(), testIncident("incident-a", "a", testSubject, "OOM"),
+		budgetMap("2026-11-06", "4")}, r)
+}
+
+// hookReader runs list before each List of its Reader, and returns its error instead when there is one. It is
+// for a test that needs the context of a call, which a reactor of the fakes does not see.
+type hookReader struct {
+	readclient.Reader
+	list func(ctx context.Context, l readclient.ObjectList) error
+}
+
+func (h hookReader) List(ctx context.Context, l readclient.ObjectList, opts ...readclient.ListOption) error {
+	if err := h.list(ctx, l); err != nil {
+		return err
+	}
+	return h.Reader.List(ctx, l, opts...)
 }
 
 // runWatch runs watchStatus for refreshes refreshes and returns stdout, stderr and the clock.
-func runWatch(t *testing.T, c client.Reader, w watchOptions, refreshes int, warning <-chan string) (string, string,
+func runWatch(t *testing.T, c readclient.Reader, w watchOptions, refreshes int, warning <-chan string) (string, string,
 	*fakeClock) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -96,7 +109,7 @@ func runWatch(t *testing.T, c client.Reader, w watchOptions, refreshes int, warn
 // and wait the interval between them; the cancellation then ends the watch without an error.
 func TestWatchTextTwoRefreshes(t *testing.T) {
 	w := watchOptions{interval: 5 * time.Second, timeout: 30 * time.Second, output: outputText, redraw: true}
-	out, errOut, clk := runWatch(t, watchClient(t, interceptor.Funcs{}), w, 2, nil)
+	out, errOut, clk := runWatch(t, watchClient(t, nil), w, 2, nil)
 	if n := strings.Count(out, clearScreen); n != 2 {
 		t.Errorf("screen cleared %d times, want 2:\n%q", n, out)
 	}
@@ -120,7 +133,7 @@ func TestWatchTextTwoRefreshes(t *testing.T) {
 // after a blank line.
 func TestWatchTextNotTerminal(t *testing.T) {
 	w := watchOptions{interval: 5 * time.Second, output: outputText}
-	out, _, _ := runWatch(t, watchClient(t, interceptor.Funcs{}), w, 2, nil)
+	out, _, _ := runWatch(t, watchClient(t, nil), w, 2, nil)
 	if strings.Contains(out, "\x1b") {
 		t.Errorf("escape sequence in redirected output:\n%q", out)
 	}
@@ -132,7 +145,7 @@ func TestWatchTextNotTerminal(t *testing.T) {
 // TestWatchJSONLines: with -o json each refresh is one line holding one JSON document.
 func TestWatchJSONLines(t *testing.T) {
 	w := watchOptions{interval: 2 * time.Second, output: outputJSON}
-	out, _, _ := runWatch(t, watchClient(t, interceptor.Funcs{}), w, 3, nil)
+	out, _, _ := runWatch(t, watchClient(t, nil), w, 3, nil)
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("%d lines, want 3:\n%s", len(lines), out)
@@ -152,16 +165,12 @@ func TestWatchJSONLines(t *testing.T) {
 // time, and the next refresh runs; stdout holds only the good refreshes, so the JSON stays parseable.
 func TestWatchFailedRefreshKeepsGoing(t *testing.T) {
 	calls := 0
-	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList,
-		opts ...client.ListOption) error {
-		if _, ok := l.(*remediationv1alpha1.IncidentList); ok {
-			calls++
-			if calls == 1 {
-				return apierrors.NewServiceUnavailable("etcd \x1b]0;pwned\x07down")
-			}
+	funcs := listFails("Incident", &calls, func(call int) error {
+		if call == 1 {
+			return apierrors.NewServiceUnavailable("etcd \x1b]0;pwned\x07down")
 		}
-		return c.List(ctx, l, opts...)
-	}}
+		return nil
+	})
 	for _, output := range []string{outputJSON, outputText} {
 		calls = 0
 		w := watchOptions{interval: time.Second, output: output, redraw: output == outputText}
@@ -189,16 +198,12 @@ func TestWatchFailedRefreshKeepsGoing(t *testing.T) {
 // the output, with no blank line before it.
 func TestWatchFailedFirstRefreshNoBlankLine(t *testing.T) {
 	calls := 0
-	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList,
-		opts ...client.ListOption) error {
-		if _, ok := l.(*remediationv1alpha1.IncidentList); ok {
-			calls++
-			if calls == 1 {
-				return apierrors.NewServiceUnavailable("down")
-			}
+	funcs := listFails("Incident", &calls, func(call int) error {
+		if call == 1 {
+			return apierrors.NewServiceUnavailable("down")
 		}
-		return c.List(ctx, l, opts...)
-	}}
+		return nil
+	})
 	out, _, _ := runWatch(t, watchClient(t, funcs), watchOptions{interval: time.Second, output: outputText}, 2, nil)
 	if !strings.HasPrefix(out, "Every 1s, last read 2026-11-06T12:00:01Z") {
 		t.Errorf("output does not start with the good refresh:\n%q", out)
@@ -209,8 +214,7 @@ func TestWatchFailedFirstRefreshNoBlankLine(t *testing.T) {
 // limit for the whole watch, and a refresh that runs out of time is an error like any other.
 func TestWatchEachRefreshHasItsTimeout(t *testing.T) {
 	var deadlines []time.Duration
-	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList,
-		opts ...client.ListOption) error {
+	c := hookReader{Reader: watchClient(t, nil), list: func(ctx context.Context, l readclient.ObjectList) error {
 		if _, ok := l.(*remediationv1alpha1.IncidentList); ok {
 			d, ok := ctx.Deadline()
 			if !ok {
@@ -221,10 +225,10 @@ func TestWatchEachRefreshHasItsTimeout(t *testing.T) {
 				return context.DeadlineExceeded
 			}
 		}
-		return c.List(ctx, l, opts...)
+		return nil
 	}}
 	w := watchOptions{interval: time.Second, timeout: time.Minute, output: outputJSON}
-	out, errOut, _ := runWatch(t, watchClient(t, funcs), w, 2, nil)
+	out, errOut, _ := runWatch(t, c, w, 2, nil)
 	if len(deadlines) != 2 {
 		t.Fatalf("%d refreshes, want 2", len(deadlines))
 	}
@@ -243,10 +247,9 @@ func TestWatchEachRefreshHasItsTimeout(t *testing.T) {
 func TestWatchCancelDuringRefresh(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	funcs := interceptor.Funcs{List: func(ctx context.Context, _ client.WithWatch, _ client.ObjectList,
-		_ ...client.ListOption) error {
+	funcs := &reactors{list: func(k8stesting.ListAction, bool) (bool, runtime.Object, error) {
 		cancel()
-		return ctx.Err()
+		return true, nil, ctx.Err()
 	}}
 	clk := &fakeClock{now: testNow, refreshes: 100, cancel: cancel}
 	var stdout, stderr bytes.Buffer
@@ -279,7 +282,7 @@ func TestWatchCancelBeforeWarning(t *testing.T) {
 	never := make(chan string)
 	done := make(chan error, 1)
 	go func() {
-		done <- watchStatus(ctx, watchClient(t, interceptor.Funcs{}), Options{Namespace: testNS},
+		done <- watchStatus(ctx, watchClient(t, nil), Options{Namespace: testNS},
 			watchOptions{interval: time.Second, output: outputJSON}, clk, never, stdout, &stderr)
 	}()
 	select {
@@ -298,7 +301,7 @@ func TestWatchPrintsWarningOnce(t *testing.T) {
 	warning := make(chan string, 1)
 	warning <- "Warning: the CRDs are from another release"
 	w := watchOptions{interval: time.Second, output: outputJSON}
-	_, errOut, _ := runWatch(t, watchClient(t, interceptor.Funcs{}), w, 3, warning)
+	_, errOut, _ := runWatch(t, watchClient(t, nil), w, 3, warning)
 	if strings.Count(errOut, "Warning:") != 1 {
 		t.Errorf("stderr = %q, want the warning once", errOut)
 	}
@@ -318,7 +321,7 @@ func TestWatchStdoutFailureEnds(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		clk := &fakeClock{now: testNow, refreshes: 2, cancel: cancel}
 		var stderr bytes.Buffer
-		err := watchStatus(ctx, watchClient(t, interceptor.Funcs{}), Options{Namespace: testNS},
+		err := watchStatus(ctx, watchClient(t, nil), Options{Namespace: testNS},
 			watchOptions{interval: time.Second, output: output}, clk, nil, failingWriter{}, &stderr)
 		if err == nil || !strings.Contains(err.Error(), "broken pipe") || len(clk.waits) != 0 {
 			t.Errorf("%s: err %v, waits %v", output, err, clk.waits)
@@ -335,9 +338,8 @@ func TestWatchAccessDeniedEnds(t *testing.T) {
 		"forbidden":    apierrors.NewForbidden(gr, "", errors.New("no list")),
 		"unauthorized": apierrors.NewUnauthorized("token expired"),
 	} {
-		funcs := interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList,
-			_ ...client.ListOption) error {
-			return denied
+		funcs := &reactors{list: func(k8stesting.ListAction, bool) (bool, runtime.Object, error) {
+			return true, nil, denied
 		}}
 		ctx, cancel := context.WithCancel(t.Context())
 		clk := &fakeClock{now: testNow, refreshes: 3, cancel: cancel}
@@ -356,16 +358,12 @@ func TestWatchAccessDeniedEnds(t *testing.T) {
 // again under each refresh; a failed refresh does not clear the screen and does not repeat it.
 func TestWatchRepeatsWarningOnRedraw(t *testing.T) {
 	calls := 0
-	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList,
-		opts ...client.ListOption) error {
-		if _, ok := l.(*remediationv1alpha1.IncidentList); ok {
-			calls++
-			if calls == 2 {
-				return apierrors.NewServiceUnavailable("down")
-			}
+	funcs := listFails("Incident", &calls, func(call int) error {
+		if call == 2 {
+			return apierrors.NewServiceUnavailable("down")
 		}
-		return c.List(ctx, l, opts...)
-	}}
+		return nil
+	})
 	warning := make(chan string, 1)
 	warning <- "Warning: the CRDs are from another release"
 	w := watchOptions{interval: time.Second, output: outputText, redraw: true}

@@ -33,17 +33,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 	"github.com/pkalin/shadewright/internal/fluxstatus"
 )
 
@@ -151,9 +149,9 @@ func healthyKustomization() *unstructured.Unstructured {
 
 // healthyObjects is an install on which every check passes. It holds a failing Kustomization of another
 // source, which no check may report.
-func healthyObjects() []client.Object {
+func healthyObjects() []readclient.Object {
 	unrelated := fluxObj(fluxstatus.KindKustomization, "unrelated", ksSpec("other"), "False", "BuildFailed", "")
-	objs := make([]client.Object, 0, len(doctorCRDs)+6)
+	objs := make([]readclient.Object, 0, len(doctorCRDs)+6)
 	for _, name := range doctorCRDs {
 		objs = append(objs, healthyCRD(name))
 	}
@@ -162,16 +160,19 @@ func healthyObjects() []client.Object {
 		workload(testWatched, "web", testFluxNS, testKs))
 }
 
+// objectList is a list of the objects a test seeds the fake cluster with.
+type objectList = []readclient.Object
+
 // replace returns objs with each object of the same type, namespace and name as one of with replaced by it.
-func replace(objs []client.Object, with ...client.Object) []client.Object {
-	key := func(o client.Object) string {
+func replace(objs []readclient.Object, with ...readclient.Object) []readclient.Object {
+	key := func(o readclient.Object) string {
 		kind := ""
 		if u, ok := o.(*unstructured.Unstructured); ok {
 			kind = u.GetKind()
 		}
 		return fmt.Sprintf("%T/%s/%s/%s", o, kind, o.GetNamespace(), o.GetName())
 	}
-	out := make([]client.Object, 0, len(objs))
+	out := make([]readclient.Object, 0, len(objs))
 	for _, o := range objs {
 		replaced := false
 		for _, w := range with {
@@ -187,8 +188,8 @@ func replace(objs []client.Object, with ...client.Object) []client.Object {
 }
 
 // without returns objs without the objects for which drop is true.
-func without(objs []client.Object, drop func(client.Object) bool) []client.Object {
-	var out []client.Object
+func without(objs []readclient.Object, drop func(readclient.Object) bool) []readclient.Object {
+	var out []readclient.Object
 	for _, o := range objs {
 		if !drop(o) {
 			out = append(out, o)
@@ -199,15 +200,11 @@ func without(objs []client.Object, drop func(client.Object) bool) []client.Objec
 
 func doctorScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
-	s := testScheme(t)
-	if err := apiextensionsv1.AddToScheme(s); err != nil {
-		t.Fatal(err)
-	}
-	return s
+	return testScheme(t)
 }
 
 // setGVK gives typed objects their kind, so replace can compare them.
-func setGVK(t *testing.T, s *runtime.Scheme, objs []client.Object) {
+func setGVK(t *testing.T, s *runtime.Scheme, objs []readclient.Object) {
 	t.Helper()
 	for _, o := range objs {
 		if _, ok := o.(*unstructured.Unstructured); ok {
@@ -221,16 +218,11 @@ func setGVK(t *testing.T, s *runtime.Scheme, objs []client.Object) {
 	}
 }
 
-func runChecks(t *testing.T, objs []client.Object, funcs *interceptor.Funcs) *Diagnosis {
+func runChecks(t *testing.T, objs []readclient.Object, funcs *reactors) *Diagnosis {
 	t.Helper()
 	s := doctorScheme(t)
 	setGVK(t, s, objs)
-	b := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
-		WithStatusSubresource(&appsv1.Deployment{})
-	if funcs != nil {
-		b = b.WithInterceptorFuncs(*funcs)
-	}
-	return doctor(context.Background(), b.Build(), testNS, testPluginVersion)
+	return doctor(context.Background(), fakeReader(t, objs, funcs), testNS, testPluginVersion)
 }
 
 // level returns the level of the one check whose name starts with prefix, failing when there is not exactly one.
@@ -248,33 +240,30 @@ func level(t *testing.T, d *Diagnosis, prefix string) Check {
 	return found[0]
 }
 
-func forbiddenGet(match func(client.ObjectKey, client.Object) bool) *interceptor.Funcs {
-	return &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
-		obj client.Object, opts ...client.GetOption) error {
-		if match(key, obj) {
-			return apierrors.NewForbidden(schema.GroupResource{Resource: "x"}, key.Name, nil)
+// forbiddenGet refuses each get, of whole objects or of their metadata, whose key and kind match.
+func forbiddenGet(match func(key readclient.ObjectKey, kind string) bool) *reactors {
+	return &reactors{get: func(a k8stesting.GetAction, _ bool) (bool, runtime.Object, error) {
+		if match(actionKey(a), actionKind(a)) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "x"}, a.GetName(), nil)
 		}
-		return c.Get(ctx, key, obj, opts...)
+		return false, nil, nil
 	}}
 }
 
-func forbiddenList(match func(client.ObjectList) bool, err error) *interceptor.Funcs {
-	return &interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
-		opts ...client.ListOption) error {
-		if match(list) {
-			return err
+// forbiddenList fails each list that match matches with err.
+func forbiddenList(match func(a k8stesting.ListAction, metadataOnly bool) bool, err error) *reactors {
+	return &reactors{list: func(a k8stesting.ListAction, metadataOnly bool) (bool, runtime.Object, error) {
+		if match(a, metadataOnly) {
+			return true, nil, err
 		}
-		return c.List(ctx, list, opts...)
+		return false, nil, nil
 	}}
 }
 
-func listKind(kind string) func(client.ObjectList) bool {
-	return func(l client.ObjectList) bool {
-		if u, ok := l.(*unstructured.UnstructuredList); ok {
-			return u.GetKind() == kind
-		}
-		_, isDeployments := l.(*appsv1.DeploymentList)
-		return isDeployments && kind == "DeploymentList"
+// listKind matches a list of whole objects of the given list kind.
+func listKind(kind string) func(k8stesting.ListAction, bool) bool {
+	return func(a k8stesting.ListAction, metadataOnly bool) bool {
+		return !metadataOnly && actionKind(a)+"List" == kind
 	}
 }
 
@@ -395,127 +384,127 @@ func TestDoctorChecks(t *testing.T) {
 	ksFailing := fluxObj(fluxstatus.KindKustomization, testKs, ksSpec(testSource), "False", "BuildFailed",
 		"kustomize build failed")
 
-	isKind := func(kind string) func(client.Object) bool {
-		return func(o client.Object) bool { return o.GetObjectKind().GroupVersionKind().Kind == kind }
+	isKind := func(kind string) func(readclient.Object) bool {
+		return func(o readclient.Object) bool { return o.GetObjectKind().GroupVersionKind().Kind == kind }
 	}
-	isName := func(name string) func(client.ObjectKey, client.Object) bool {
-		return func(k client.ObjectKey, _ client.Object) bool { return k.Name == name }
+	isName := func(name string) func(readclient.ObjectKey, string) bool {
+		return func(k readclient.ObjectKey, _ string) bool { return k.Name == name }
 	}
 
 	for name, tc := range map[string]struct {
-		change func([]client.Object) []client.Object
-		funcs  *interceptor.Funcs
+		change func([]readclient.Object) []readclient.Object
+		funcs  *reactors
 		check  string
 		want   string
 		detail string
 		// also are other checks whose level the change sets, by name prefix.
 		also map[string]string
 	}{
-		"CRD missing": {change: func(o []client.Object) []client.Object {
-			return without(o, func(x client.Object) bool { return x.GetName() == testCRDName })
+		"CRD missing": {change: func(o objectList) objectList {
+			return without(o, func(x readclient.Object) bool { return x.GetName() == testCRDName })
 		}, check: "CRD " + testCRDName, want: levelFail, detail: "does not exist"},
-		"CRD not served": {change: func(o []client.Object) []client.Object { return replace(o, notServed) },
+		"CRD not served": {change: func(o objectList) objectList { return replace(o, notServed) },
 			check: "CRD " + testCRDName, want: levelFail, detail: "does not serve v1alpha1"},
-		"CRD not established": {change: func(o []client.Object) []client.Object { return replace(o, notEstablished) },
+		"CRD not established": {change: func(o objectList) objectList { return replace(o, notEstablished) },
 			check: "CRD " + testCRDName, want: levelFail, detail: "not Established"},
-		"CRD other release": {change: func(o []client.Object) []client.Object { return replace(o, otherRelease) },
+		"CRD other release": {change: func(o objectList) objectList { return replace(o, otherRelease) },
 			check: "CRD " + testCRDName, want: levelWarn, detail: "version 0.1.0"},
 		"CRD forbidden": {funcs: forbiddenGet(isName(testCRDName)),
 			check: "CRD " + testCRDName, want: levelWarn, detail: msgForbidden},
 
-		"settings missing": {change: func(o []client.Object) []client.Object {
+		"settings missing": {change: func(o objectList) objectList {
 			return without(o, isKind(kindSettings))
 		}, check: chkSettings, want: levelFail, detail: "does not exist",
 			also: map[string]string{chkKill: levelWarn, chkRepos: levelWarn}},
 		"settings forbidden": {funcs: forbiddenGet(isName(remediationv1alpha1.SettingsName)),
 			check: chkSettings, want: levelWarn, detail: msgForbidden,
 			also: map[string]string{chkKill: levelWarn, chkRepos: levelWarn}},
-		"settings without a limit": {change: func(o []client.Object) []client.Object { return replace(o, noLimit) },
+		"settings without a limit": {change: func(o objectList) objectList { return replace(o, noLimit) },
 			check: chkSettings, want: levelFail, detail: "maxAnalysesPerDay is not set"},
-		"settings limit 0": {change: func(o []client.Object) []client.Object { return replace(o, zeroLimit) },
+		"settings limit 0": {change: func(o objectList) objectList { return replace(o, zeroLimit) },
 			check: chkSettings, want: levelWarn, detail: "analysis is disabled"},
 
-		"kill switch on": {change: func(o []client.Object) []client.Object { return replace(o, paused) },
+		"kill switch on": {change: func(o objectList) objectList { return replace(o, paused) },
 			check: chkKill, want: levelWarn, detail: "ON"},
 
-		"executor missing": {change: func(o []client.Object) []client.Object {
-			return without(o, func(x client.Object) bool { return x.GetName() == "shadewright-executor" })
+		"executor missing": {change: func(o objectList) objectList {
+			return without(o, func(x readclient.Object) bool { return x.GetName() == "shadewright-executor" })
 		}, check: chkExecutor, want: levelFail, detail: "no Deployment labelled control-plane=executor"},
-		"verifier not deployed": {change: func(o []client.Object) []client.Object {
-			return without(o, func(x client.Object) bool { return x.GetName() == "shadewright-verifier" })
+		"verifier not deployed": {change: func(o objectList) objectList {
+			return without(o, func(x readclient.Object) bool { return x.GetName() == "shadewright-verifier" })
 		}, check: "Deployment verifier", want: levelWarn, detail: "not deployed"},
-		"verifier unavailable": {change: func(o []client.Object) []client.Object {
+		"verifier unavailable": {change: func(o objectList) objectList {
 			return replace(o, unavailableVerifier)
 		}, check: "Deployment verifier shadewright-verifier", want: levelFail, detail: reasonUnavailable},
-		"executor unavailable": {change: func(o []client.Object) []client.Object { return replace(o, unavailable) },
+		"executor unavailable": {change: func(o objectList) objectList { return replace(o, unavailable) },
 			check: chkExecutor, want: levelFail, detail: reasonUnavailable},
-		"executor rollout": {change: func(o []client.Object) []client.Object { return replace(o, rollout) },
+		"executor rollout": {change: func(o objectList) objectList { return replace(o, rollout) },
 			check: chkExecutor, want: levelWarn, detail: "rollout"},
-		"executor scaled to 0": {change: func(o []client.Object) []client.Object { return replace(o, scaledDown) },
+		"executor scaled to 0": {change: func(o objectList) objectList { return replace(o, scaledDown) },
 			check: chkExecutor, want: levelWarn, detail: "scaled to 0"},
-		"executor rollout stuck": {change: func(o []client.Object) []client.Object { return replace(o, stuck) },
+		"executor rollout stuck": {change: func(o objectList) objectList { return replace(o, stuck) },
 			check: chkExecutor, want: levelFail, detail: "rollout stuck, 1 of 1 replicas available (ProgressDeadlineExceeded"},
-		"executor stale deadline": {change: func(o []client.Object) []client.Object { return replace(o, staleDeadline) },
+		"executor stale deadline": {change: func(o objectList) objectList { return replace(o, staleDeadline) },
 			check: chkExecutor, want: levelWarn, detail: "rollout pending"},
-		"executor old replica running": {change: func(o []client.Object) []client.Object { return replace(o, oldReplica) },
+		"executor old replica running": {change: func(o objectList) objectList { return replace(o, oldReplica) },
 			check: chkExecutor, want: levelWarn, detail: "rollout is under way: 1 of 1 replicas updated, 2 running"},
-		"executor not all ready": {change: func(o []client.Object) []client.Object { return replace(o, notAllReady) },
+		"executor not all ready": {change: func(o objectList) objectList { return replace(o, notAllReady) },
 			check: chkExecutor, want: levelWarn, detail: "only 1 of 3 replicas ready"},
 		"deployments forbidden": {funcs: forbiddenList(listKind("DeploymentList"), errForbidden),
 			check: chkExecutor, want: levelWarn, detail: msgForbidden,
 			also: map[string]string{"Deployment analyzer": levelWarn, "Deployment verifier": levelWarn}},
 
-		"repository incomplete": {change: func(o []client.Object) []client.Object { return replace(o, incomplete) },
+		"repository incomplete": {change: func(o objectList) objectList { return replace(o, incomplete) },
 			check: "Repository " + testRepoName, want: levelFail,
 			detail: "github.installationID, github.signer.azureKeyVault.keyID"},
-		"repository without target branch": {change: func(o []client.Object) []client.Object {
+		"repository without target branch": {change: func(o objectList) objectList {
 			return replace(o, noBranch)
 		}, check: "Repository " + testRepoName, want: levelWarn, detail: "main is used"},
-		"no repositories": {change: func(o []client.Object) []client.Object { return replace(o, noRepos) },
+		"no repositories": {change: func(o objectList) objectList { return replace(o, noRepos) },
 			check: chkRepos, want: levelWarn, detail: "observe-only",
 			// No repository, so Flux is not checked at all.
 			also: map[string]string{}},
 
-		"source tracks another branch": {change: func(o []client.Object) []client.Object {
+		"source tracks another branch": {change: func(o objectList) objectList {
 			return replace(o, otherBranch)
 		}, check: chkSource, want: levelFail, detail: `tracks branch "develop"`,
 			also: map[string]string{chkKs: levelPass}},
-		"source failing": {change: func(o []client.Object) []client.Object { return replace(o, sourceFailing) },
+		"source failing": {change: func(o objectList) objectList { return replace(o, sourceFailing) },
 			check: chkSource, want: levelFail, detail: "GitOperationFailed: auth failed",
 			also: map[string]string{chkKs: levelPass}},
-		"source reconciling": {change: func(o []client.Object) []client.Object {
+		"source reconciling": {change: func(o objectList) objectList {
 			return replace(o, sourceReconciling)
 		}, check: chkSource, want: levelWarn, detail: "reconciling",
 			also: map[string]string{chkKs: levelPass}},
-		"source suspended": {change: func(o []client.Object) []client.Object { return replace(o, sourceSuspended) },
+		"source suspended": {change: func(o objectList) objectList { return replace(o, sourceSuspended) },
 			check: chkSource, want: levelFail, detail: "the executor refuses it: SourceOptions: GitRepository " +
 				testFluxNS + "/" + testSource + " sets spec.suspend",
 			also: map[string]string{chkKs: levelPass}},
-		"source ignores files": {change: func(o []client.Object) []client.Object { return replace(o, sourceIgnore) },
+		"source ignores files": {change: func(o objectList) objectList { return replace(o, sourceIgnore) },
 			check: chkSource, want: levelFail, detail: "SourceOptions", also: map[string]string{chkKs: levelPass}},
-		"source sparse checkout": {change: func(o []client.Object) []client.Object { return replace(o, sourceSparse) },
+		"source sparse checkout": {change: func(o objectList) objectList { return replace(o, sourceSparse) },
 			check: chkSource, want: levelFail, detail: "sets spec.sparseCheckout",
 			also: map[string]string{chkKs: levelPass}},
-		"source pinned to a tag": {change: func(o []client.Object) []client.Object { return replace(o, sourceTag) },
+		"source pinned to a tag": {change: func(o objectList) objectList { return replace(o, sourceTag) },
 			check: chkSource, want: levelFail, detail: "SourceNotBranch", also: map[string]string{chkKs: levelPass}},
-		"kustomization suspended": {change: func(o []client.Object) []client.Object { return replace(o, ksSuspended) },
+		"kustomization suspended": {change: func(o objectList) objectList { return replace(o, ksSuspended) },
 			check: chkKs, want: levelFail, detail: "the executor refuses it: KustomizationSuspended",
 			also: map[string]string{chkSource: levelPass}},
-		"kustomization postBuild": {change: func(o []client.Object) []client.Object { return replace(o, ksPostBuild) },
+		"kustomization postBuild": {change: func(o objectList) objectList { return replace(o, ksPostBuild) },
 			check: chkKs, want: levelFail, detail: "KustomizationTransforms", also: map[string]string{chkSource: levelPass}},
-		"kustomization decryption": {change: func(o []client.Object) []client.Object {
+		"kustomization decryption": {change: func(o objectList) objectList {
 			return replace(o, ksDecryption)
 		}, check: chkKs, want: levelFail, detail: "Decryption", also: map[string]string{chkSource: levelPass}},
-		"no source for the repository": {change: func(o []client.Object) []client.Object { return replace(o, otherURL) },
+		"no source for the repository": {change: func(o objectList) objectList { return replace(o, otherURL) },
 			check: "Flux for repository", want: levelWarn, detail: "no Flux GitRepository has the URL"},
-		"kustomization failing": {change: func(o []client.Object) []client.Object { return replace(o, ksFailing) },
+		"kustomization failing": {change: func(o objectList) objectList { return replace(o, ksFailing) },
 			check: chkKs, want: levelFail, detail: "BuildFailed: kustomize build failed",
 			also: map[string]string{chkSource: levelPass}},
-		"kustomization behind its source": {change: func(o []client.Object) []client.Object {
+		"kustomization behind its source": {change: func(o objectList) objectList {
 			return replace(o, ksBehind)
 		}, check: chkKs, want: levelWarn, detail: "has not applied the revision",
 			also: map[string]string{chkSource: levelPass}},
-		"no kustomization": {change: func(o []client.Object) []client.Object {
+		"no kustomization": {change: func(o objectList) objectList {
 			return without(o, isKind(fluxstatus.KindKustomization))
 		}, check: chkKs + "s of", want: levelWarn, detail: "no Kustomization applies",
 			also: map[string]string{chkSource: levelPass}},
@@ -525,7 +514,8 @@ func TestDoctorChecks(t *testing.T) {
 			check: chkKs + "s", want: levelWarn, detail: msgForbidden,
 			also: map[string]string{chkSource: levelPass}},
 		"flux not installed": {funcs: forbiddenList(listKind(fluxGitRepositories.Kind),
-			&meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: fluxstatus.SourceGroup, Kind: "GitRepository"}}),
+			// What an API server without the Flux CRDs answers.
+			apierrors.NewNotFound(schema.GroupResource{}, "")),
 			check: chkSources, want: levelWarn, detail: "does not serve Flux"},
 		"flux list error": {funcs: forbiddenList(listKind(fluxGitRepositories.Kind), errors.New("connection reset")),
 			check: chkSources, want: levelFail, detail: "could not be read: connection reset"},
@@ -585,14 +575,15 @@ func TestDoctorListTruncated(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			pages := 0
-			funcs := &interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList,
-				opts ...client.ListOption) error {
-				if !listKind(tc.kind)(list) {
-					return c.List(ctx, list, opts...)
+			funcs := &reactors{list: func(a k8stesting.ListAction, metadataOnly bool) (bool, runtime.Object, error) {
+				if !listKind(tc.kind)(a, metadataOnly) {
+					return false, nil, nil
 				}
 				pages++
-				list.(*unstructured.UnstructuredList).SetContinue("more")
-				return nil
+				list := &unstructured.UnstructuredList{}
+				list.SetGroupVersionKind(a.GetResource().GroupVersion().WithKind(tc.kind))
+				list.SetContinue("more")
+				return true, list, nil
 			}}
 			d := runChecks(t, healthyObjects(), funcs)
 			if pages != listMaxPages {
@@ -615,17 +606,14 @@ func TestDoctorListTruncated(t *testing.T) {
 	}
 }
 
-// settingsGet returns interceptor functions whose Get of the RemediationSettings fills it with obj, as read
-// from an API server whose CRD differs from the plugin's.
-func settingsGet(obj map[string]any) *interceptor.Funcs {
-	return &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
-		o client.Object, opts ...client.GetOption) error {
-		u, ok := o.(*unstructured.Unstructured)
-		if !ok || u.GetKind() != kindSettings {
-			return c.Get(ctx, key, o, opts...)
+// settingsGet returns reactors whose get of the RemediationSettings returns obj, as read from an API server
+// whose CRD differs from the plugin's.
+func settingsGet(obj map[string]any) *reactors {
+	return &reactors{get: func(a k8stesting.GetAction, metadataOnly bool) (bool, runtime.Object, error) {
+		if metadataOnly || actionKind(a) != kindSettings {
+			return false, nil, nil
 		}
-		u.Object = obj
-		return nil
+		return true, &unstructured.Unstructured{Object: obj}, nil
 	}}
 }
 
@@ -731,15 +719,15 @@ func TestRunDoctorExit(t *testing.T) {
 	s := doctorScheme(t)
 	setGVK(t, s, objs)
 	withWarn := replace(objs, paused)
-	withFail := without(objs, func(o client.Object) bool { return o.GetName() == "shadewright-analyzer" })
+	withFail := without(objs, func(o readclient.Object) bool { return o.GetName() == "shadewright-analyzer" })
 	for name, tc := range map[string]struct {
-		objs    []client.Object
+		objs    []readclient.Object
 		wantErr bool
 	}{
 		"pass": {objs: objs}, "warn": {objs: withWarn}, "fail": {objs: withFail, wantErr: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := fake.NewClientBuilder().WithScheme(s).WithObjects(tc.objs...).Build()
+			c := fakeReader(t, tc.objs, nil)
 			var out bytes.Buffer
 			err := runDoctor(context.Background(), c, testNS, outputJSON, &out)
 			if tc.wantErr != errors.Is(err, errChecksFailed) || (!tc.wantErr && err != nil) {

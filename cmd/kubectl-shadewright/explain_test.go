@@ -34,12 +34,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	k8stesting "k8s.io/client-go/testing"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 // Names of the explain tests.
@@ -74,9 +74,9 @@ func explainRequestObj(name string, phase remediationv1alpha1.RemediationPhase, 
 	return rr
 }
 
-func explainClient(t *testing.T, objs ...client.Object) client.Reader {
+func explainClient(t *testing.T, objs ...readclient.Object) readclient.Reader {
 	t.Helper()
-	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	return fakeReader(t, objs, nil)
 }
 
 func explainOut(t *testing.T, e *Explanation) (string, string) {
@@ -483,14 +483,13 @@ func TestExplainIncidentStates(t *testing.T) {
 	if !strings.Contains(text, "is not the one this request answers") || !strings.Contains(text, "Kill switch:  unknown") {
 		t.Errorf("text:\n%s", text)
 	}
-	forbidIncident := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(rr).
-		WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
-			obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*remediationv1alpha1.Incident); ok {
-				return apierrors.NewForbidden(schema.GroupResource{Resource: "incidents"}, key.Name, nil)
+	forbidIncident := fakeReader(t, []readclient.Object{rr}, &reactors{
+		get: func(a k8stesting.GetAction, _ bool) (bool, runtime.Object, error) {
+			if actionKind(a) == "Incident" {
+				return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "incidents"}, a.GetName(), nil)
 			}
-			return c.Get(ctx, key, obj, opts...)
-		}}).Build()
+			return false, nil, nil
+		}})
 	e, err = explain(context.Background(), forbidIncident, testNS, testRR)
 	if err != nil || e.IncidentState != stateForbidden {
 		t.Errorf("forbidden: %+v, %v", e, err)
@@ -506,11 +505,9 @@ func TestExplainErrors(t *testing.T) {
 	if _, err := explain(context.Background(), c, testNS, "a/b"); err == nil {
 		t.Error("a name with a slash was read")
 	}
-	forbidden := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
-			opts ...client.GetOption) error {
-			return apierrors.NewForbidden(schema.GroupResource{Resource: "remediationrequests"}, key.Name, nil)
-		}}).Build()
+	forbidden := fakeReader(t, nil, &reactors{get: func(a k8stesting.GetAction, _ bool) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "remediationrequests"}, a.GetName(), nil)
+	}})
 	if _, err := explain(context.Background(), forbidden, testNS, testRR); !apierrors.IsForbidden(err) {
 		t.Errorf("forbidden read: %v", err)
 	}

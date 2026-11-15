@@ -27,7 +27,8 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 // The bounds of --interval.
@@ -92,7 +93,7 @@ type watchOptions struct {
 // failed write to stdout. warning, when not nil, carries the CRD version warning, printed after the first
 // refresh and, when redrawing, again after each refresh that cleared the screen. It starts no goroutine of its
 // own.
-func watchStatus(ctx context.Context, c client.Reader, opts Options, w watchOptions, clk clock,
+func watchStatus(ctx context.Context, c readclient.Reader, opts Options, w watchOptions, clk clock,
 	warning <-chan string, stdout, stderr io.Writer) error {
 	warnMsg := ""
 	// printed is whether a refresh was written to stdout, so the next one is set apart from it.

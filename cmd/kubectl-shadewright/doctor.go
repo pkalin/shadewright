@@ -33,11 +33,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap/fluxrules"
 	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -137,7 +137,7 @@ func (d *Diagnosis) add(name, level, detail, anchor string) *Check {
 // list), calls no Git host, Azure or model, and never decides anything from the RemediationSettings status: it
 // only shows what the analyzer reports there. A read the caller may not make is a warn, since it says nothing
 // about the install; any other read error is a fail, since the check could not run.
-func doctor(ctx context.Context, c client.Reader, namespace, plugin string) *Diagnosis {
+func doctor(ctx context.Context, c readclient.Reader, namespace, plugin string) *Diagnosis {
 	d := &Diagnosis{Namespace: namespace, Checks: []Check{}}
 	for _, name := range doctorCRDs {
 		checkCRD(ctx, c, d, name, plugin)
@@ -173,10 +173,10 @@ func readLevel(err error, what string) (string, string) {
 
 // checkCRD checks that a CRD exists, is established, serves the API version the plugin was built for, and,
 // when both carry a release, comes from the plugin's release.
-func checkCRD(ctx context.Context, c client.Reader, d *Diagnosis, name, plugin string) {
+func checkCRD(ctx context.Context, c readclient.Reader, d *Diagnosis, name, plugin string) {
 	check := "CRD " + name
 	crd := &apiextensionsv1.CustomResourceDefinition{}
-	if err := c.Get(ctx, client.ObjectKey{Name: name}, crd); err != nil {
+	if err := c.Get(ctx, readclient.ObjectKey{Name: name}, crd); err != nil {
 		level, detail := readLevel(err, "the CRD")
 		d.add(check, level, detail, anchorCRDs)
 		return
@@ -217,12 +217,12 @@ func checkCRD(ctx context.Context, c client.Reader, d *Diagnosis, name, plugin s
 // checkSettings reads the RemediationSettings and checks that its spec parses into the plugin's type and sets
 // the daily analysis limit. It returns the parsed object, or nil with the read state. The status is decoded
 // only to be shown.
-func checkSettings(ctx context.Context, c client.Reader, d *Diagnosis) (*remediationv1alpha1.RemediationSettings,
+func checkSettings(ctx context.Context, c readclient.Reader, d *Diagnosis) (*remediationv1alpha1.RemediationSettings,
 	string) {
 	const check = "RemediationSettings " + remediationv1alpha1.SettingsName
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(remediationv1alpha1.GroupVersion.WithKind("RemediationSettings"))
-	if err := c.Get(ctx, client.ObjectKey{Name: remediationv1alpha1.SettingsName}, u); err != nil {
+	if err := c.Get(ctx, readclient.ObjectKey{Name: remediationv1alpha1.SettingsName}, u); err != nil {
 		state, _ := readState(err)
 		level, detail := readLevel(err, "the RemediationSettings")
 		if state == stateNotFound {
@@ -314,11 +314,12 @@ func checkKillSwitch(d *Diagnosis, s *remediationv1alpha1.RemediationSettings, s
 
 // checkDeployments checks that the Deployments of one component in the operator namespace are available, and
 // returns them, or the error of the list when they could not be read.
-func checkDeployments(ctx context.Context, c client.Reader, d *Diagnosis, namespace, comp string) (
+func checkDeployments(ctx context.Context, c readclient.Reader, d *Diagnosis, namespace, comp string) (
 	[]appsv1.Deployment, error) {
 	check := "Deployment " + comp
 	list := &appsv1.DeploymentList{}
-	if err := c.List(ctx, list, client.InNamespace(namespace), client.MatchingLabels{componentLabel: comp}); err != nil {
+	err := c.List(ctx, list, readclient.InNamespace(namespace), readclient.MatchingLabels{componentLabel: comp})
+	if err != nil {
 		level, detail := readLevel(err, "the Deployments of namespace "+clean(namespace, maxName))
 		d.add(check, level, detail, anchorDeployments)
 		return nil, err
@@ -544,7 +545,7 @@ func listTruncated(d *Diagnosis, what string) {
 // a source the executor refuses is a fail, as is one that tracks another branch than the repository's target.
 func checkGitRepository(d *Diagnosis, src *unstructured.Unstructured, repo, target string) {
 	check := "Flux GitRepository " + objName(src) + " (repository " + repo + ")"
-	_, branch, stop := sourcemap.CheckGitRepository(src)
+	_, branch, stop := fluxrules.CheckGitRepository(src)
 	if stop != nil {
 		d.add(check, levelFail, refusal(stop), anchorFlux)
 		return
@@ -559,7 +560,7 @@ func checkGitRepository(d *Diagnosis, src *unstructured.Unstructured, repo, targ
 }
 
 // refusal is the detail of a check that the executor's source mapping would stop on: its reason and message.
-func refusal(stop *sourcemap.Result) string {
+func refusal(stop *fluxrules.Result) string {
 	return "the executor refuses it: " + clean(string(stop.Reason), maxName) + ": " + clean(stop.Message, maxMessage)
 }
 
@@ -580,7 +581,7 @@ func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, target st
 			continue
 		}
 		found = true
-		if stop := sourcemap.KustomizationSpecRefusal(ks); stop != nil {
+		if stop := fluxrules.KustomizationSpecRefusal(ks); stop != nil {
 			d.add("Flux Kustomization "+objName(ks), levelFail, refusal(stop), anchorFlux)
 			continue
 		}
@@ -602,14 +603,14 @@ func checkKustomizations(d *Diagnosis, src *unstructured.Unstructured, target st
 }
 
 // behind reports whether a Kustomization has not applied the revision its GitRepository last fetched, by the
-// executor's own comparison (sourcemap.CompareSource, ADR-0012). It is false when the GitRepository is
+// executor's own comparison (fluxrules.CompareSource, ADR-0012). It is false when the GitRepository is
 // refused, tracks another branch than target or is not Ready: its own check reports that.
 func behind(ks, src *unstructured.Unstructured, target string) bool {
-	_, branch, stop := sourcemap.CheckGitRepository(src)
+	_, branch, stop := fluxrules.CheckGitRepository(src)
 	if stop != nil || branch != target {
 		return false
 	}
-	return sourcemap.CompareSource(ks, src) == providers.SourceBehind
+	return fluxrules.CompareSource(ks, src) == providers.SourceBehind
 }
 
 // fluxLevel is pass for a Ready object, warn while it reconciles, fail with the failing condition otherwise.
@@ -637,7 +638,7 @@ func objName(o *unstructured.Unstructured) string {
 
 // fluxLists lists each Flux kind once per run, for the Flux checks and the delivery report.
 type fluxLists struct {
-	c    client.Reader
+	c    readclient.Reader
 	read map[schema.GroupVersionKind]*listResult
 }
 
@@ -664,15 +665,15 @@ func (f *fluxLists) list(ctx context.Context, gvk schema.GroupVersionKind) *list
 
 // listAll lists every object of a kind in all namespaces, in pages, up to listMaxPages pages. truncated is
 // true when the server had more after the last page read.
-func listAll(ctx context.Context, c client.Reader, gvk schema.GroupVersionKind) (
+func listAll(ctx context.Context, c readclient.Reader, gvk schema.GroupVersionKind) (
 	items []unstructured.Unstructured, truncated bool, err error) {
 	token := ""
 	for range listMaxPages {
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(gvk)
-		opts := []client.ListOption{client.Limit(listPageSize)}
+		opts := []readclient.ListOption{readclient.Limit(listPageSize)}
 		if token != "" {
-			opts = append(opts, client.Continue(token))
+			opts = append(opts, readclient.Continue(token))
 		}
 		if err := c.List(ctx, list, opts...); err != nil {
 			return nil, false, err

@@ -43,14 +43,10 @@ import (
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 const usage = `kubectl shadewright: read-only view of Shadewright in a cluster.
@@ -284,7 +280,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		ctx, stop := interruptContext(context.Background())
 		defer stop()
 		w := watchOptions{interval: f.interval, timeout: f.timeout, output: f.output, redraw: isTerminal(stdout)}
-		return watchStatus(ctx, client.Reader(c), Options{Namespace: namespace, AllNamespaces: f.allNamespaces},
+		return watchStatus(ctx, readclient.Reader(c), Options{Namespace: namespace, AllNamespaces: f.allNamespaces},
 			w, realClock{}, versionWarning(ctx, c), stdout, stderr)
 	}
 	ctx, cancel := context.Background(), context.CancelFunc(func() {})
@@ -299,9 +295,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 	warning := versionWarning(ctx, c)
 	var out any
 	if args[0] == cmdExplain {
-		out, err = explain(ctx, client.Reader(c), namespace, f.name)
+		out, err = explain(ctx, readclient.Reader(c), namespace, f.name)
 	} else {
-		out, err = collect(ctx, client.Reader(c), Options{Namespace: namespace, AllNamespaces: f.allNamespaces}, now)
+		out, err = collect(ctx, readclient.Reader(c), Options{Namespace: namespace, AllNamespaces: f.allNamespaces}, now)
 	}
 	if w := <-warning; w != "" {
 		_, _ = fmt.Fprintln(stderr, w)
@@ -321,7 +317,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 // versionWarning starts the CRD version check next to the reads, with its own short limit, so a slow CRD read
 // cannot use up the time of the other reads. The channel receives one value (possibly "") and is buffered, so
 // the goroutine ends even when nobody reads it.
-func versionWarning(ctx context.Context, c client.Reader) <-chan string {
+func versionWarning(ctx context.Context, c readclient.Reader) <-chan string {
 	warning := make(chan string, 1)
 	go func() {
 		cctx, ccancel := context.WithTimeout(ctx, crdCheckTimeout)
@@ -333,7 +329,7 @@ func versionWarning(ctx context.Context, c client.Reader) <-chan string {
 
 // newClient builds the client from the kubeconfig, with the context, namespace and timeout of f, and returns
 // it with the namespace to read.
-func newClient(f cmdFlags) (client.Client, string, error) {
+func newClient(f cmdFlags) (*readclient.Client, string, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	rules.ExplicitPath = f.kubeconfig
 	kc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules,
@@ -349,17 +345,7 @@ func newClient(f cmdFlags) (client.Client, string, error) {
 	cfg.Timeout = f.timeout
 	cfg.UserAgent = "kubectl-shadewright"
 
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		return nil, "", err
-	}
-	if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
-		return nil, "", err
-	}
-	if err := apiextensionsv1.AddToScheme(scheme); err != nil {
-		return nil, "", err
-	}
-	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	c, err := readclient.New(cfg)
 	if err != nil {
 		return nil, "", fmt.Errorf("creating the client: %w", err)
 	}
@@ -368,7 +354,7 @@ func newClient(f cmdFlags) (client.Client, string, error) {
 
 // runDoctor runs the checks and writes them, then returns errChecksFailed when any failed, so the command exits
 // non-zero only on a fail. The CRD version is one of its checks, so it runs no separate version warning.
-func runDoctor(ctx context.Context, c client.Reader, namespace, output string, stdout io.Writer) error {
+func runDoctor(ctx context.Context, c readclient.Reader, namespace, output string, stdout io.Writer) error {
 	d := doctor(ctx, c, namespace, version)
 	var err error
 	if output == outputJSON {

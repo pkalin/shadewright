@@ -87,11 +87,11 @@ func stringConsts(t *testing.T, files []*ast.File, typ string) map[string]string
 }
 
 // Every reason that can end a request Denied is reported by name, not as Other: the reasons of package policy
-// (the decision's Reason) and of package sourcemap (a Denied result), and the reasons this package passes to
+// (the decision's Reason) and of package sourcemap (a Denied result, declared in sourcemap/fluxrules), and the reasons this package passes to
 // denied. The reasons that only come with an allowed outcome are left out.
 func TestDenialReasonsCoverEveryReason(t *testing.T) {
 	allowedOnly := map[string]bool{"WithinApprovedBounds": true, "SourceResolved": true}
-	for _, dir := range []string{filepath.Join("..", "policy"), filepath.Join("..", "gitops", "sourcemap")} {
+	for _, dir := range []string{filepath.Join("..", "policy"), filepath.Join("..", "gitops", "sourcemap", "fluxrules")} {
 		reasons := stringConsts(t, parseDir(t, dir), "Reason")
 		if len(reasons) < 10 {
 			t.Fatalf("found only %d Reason constants in %s: the walk is broken", len(reasons), dir)

@@ -32,13 +32,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 )
@@ -51,18 +49,6 @@ const (
 )
 
 var testNow = time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-
-func testScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	s := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(s); err != nil {
-		t.Fatal(err)
-	}
-	if err := remediationv1alpha1.AddToScheme(s); err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
 
 func testSettings() *remediationv1alpha1.RemediationSettings {
 	return &remediationv1alpha1.RemediationSettings{
@@ -149,8 +135,7 @@ func TestStatusPrintsNoEscapes(t *testing.T) {
 	inc.Status.Conditions[0].Message = "due\x1b]8;;https://evil.example/\x1b\\link\x1b]8;;\x1b\\"
 	inc.Status.Conditions[1].Message = "outcome\x1bP+q\x1b\\\x07"
 	rr := testRequest("rr-a\x1b[1A", "a", 7, testRepo+"/pull/7")
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(inc, rr, testSettings(), budgetMap("2026-11-06", "4")).Build()
+	c := fakeReader(t, []readclient.Object{inc, rr, testSettings(), budgetMap("2026-11-06", "4")}, nil)
 
 	r, err := collect(context.Background(), c, Options{Namespace: testNS}, testNow)
 	if err != nil {
@@ -176,12 +161,12 @@ func TestStatusPrintsNoEscapes(t *testing.T) {
 }
 
 func TestStatusText(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+	c := fakeReader(t, []readclient.Object{
 		testIncident("incident-a", "a", testSubject, "container memory limit reached"),
 		testRequest("rr-a", "a", 7, testRepo+"/pull/7"),
 		testRequest("rr-old-uid", "other", 0, ""),
 		testSettings(), budgetMap("2026-11-06", "4"),
-	).Build()
+	}, nil)
 	r, err := collect(context.Background(), c, Options{Namespace: testNS}, testNow)
 	if err != nil {
 		t.Fatal(err)
@@ -249,21 +234,19 @@ func TestPRLink(t *testing.T) {
 }
 
 func TestBudgetAndSettingsStates(t *testing.T) {
-	forbidden := interceptor.Funcs{Get: func(_ context.Context, _ client.WithWatch, key client.ObjectKey, _ client.Object,
-		_ ...client.GetOption) error {
-		return apierrors.NewForbidden(schema.GroupResource{Resource: "x"}, key.Name, nil)
+	forbidden := reactors{get: func(a k8stesting.GetAction, _ bool) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "x"}, a.GetName(), nil)
 	}}
-	failing := interceptor.Funcs{Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object,
-		_ ...client.GetOption) error {
-		return errors.New("connection refused")
+	failing := reactors{get: func(k8stesting.GetAction, bool) (bool, runtime.Object, error) {
+		return true, nil, errors.New("connection refused")
 	}}
 	noLimit := testSettings()
 	noLimit.Spec.Analysis = nil
 	zero := testSettings()
 	zero.Spec.Analysis.MaxAnalysesPerDay = new(int32(0))
 	cases := map[string]struct {
-		objs     []client.Object
-		funcs    *interceptor.Funcs
+		objs     []readclient.Object
+		funcs    *reactors
 		budget   string
 		settings string
 		stopped  string
@@ -271,30 +254,26 @@ func TestBudgetAndSettingsStates(t *testing.T) {
 	}{
 		"settings not found": {nil, nil, stateNotFound, stateNotFound, analysisdue.ReasonSettingsNotFound,
 			"analysis stopped: the RemediationSettings object default does not exist (SettingsNotFound)"},
-		"limit unset": {[]client.Object{noLimit, budgetMap("2026-11-06", "1")}, nil, stateOK, stateOK,
+		"limit unset": {[]readclient.Object{noLimit, budgetMap("2026-11-06", "1")}, nil, stateOK, stateOK,
 			analysisdue.ReasonSettingsIncomplete, "analysis stopped: RemediationSettings sets no"},
-		"budget not found": {[]client.Object{testSettings()}, nil, stateNotFound, stateOK,
+		"budget not found": {[]readclient.Object{testSettings()}, nil, stateNotFound, stateOK,
 			analysisdue.ReasonBudgetNotFound, "analysis stopped: the ConfigMap shadewright-analysis-budget does not exist"},
-		"limit 0": {[]client.Object{zero, budgetMap("2026-11-06", "0")}, nil, stateOK, stateOK,
+		"limit 0": {[]readclient.Object{zero, budgetMap("2026-11-06", "0")}, nil, stateOK, stateOK,
 			analysisdue.ReasonAnalysisDisabled, "0 of 0, analysis stopped: the daily limit is 0 (AnalysisDisabled)"},
-		"limit reached": {[]client.Object{testSettings(), budgetMap("2026-11-06", "20")}, nil, stateOK, stateOK,
+		"limit reached": {[]readclient.Object{testSettings(), budgetMap("2026-11-06", "20")}, nil, stateOK, stateOK,
 			analysisdue.ReasonDailyBudgetReached, "20 of 20, analysis stopped: the daily limit is reached"},
 		"forbidden is not a stop": {nil, &forbidden, stateForbidden, stateForbidden, "",
 			"unknown (RemediationSettings not readable with your permissions (see the viewer role); ConfigMap"},
 		"read error is not a stop": {nil, &failing, stateError, stateError, "", "could not be read: connection refused"},
-		"earlier day": {[]client.Object{testSettings(), budgetMap("2026-11-05", "9")}, nil,
+		"earlier day": {[]readclient.Object{testSettings(), budgetMap("2026-11-05", "9")}, nil,
 			stateOK, stateOK, "", "Analyses today (UTC): 0 of 20\n"},
-		"future day": {[]client.Object{testSettings(), budgetMap("2026-11-07", "1")}, nil,
+		"future day": {[]readclient.Object{testSettings(), budgetMap("2026-11-07", "1")}, nil,
 			stateUnreadable, stateOK, analysisdue.ReasonBudgetUnreadable, "taken as spent"},
-		"garbage is refused": {[]client.Object{testSettings(), budgetMap("2026-11-06", "\x1b[31m1")}, nil,
+		"garbage is refused": {[]readclient.Object{testSettings(), budgetMap("2026-11-06", "\x1b[31m1")}, nil,
 			stateUnreadable, stateOK, analysisdue.ReasonBudgetUnreadable, "taken as spent"},
 	}
 	for name, tc := range cases {
-		b := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tc.objs...)
-		if tc.funcs != nil {
-			b = b.WithInterceptorFuncs(*tc.funcs)
-		}
-		r, err := collect(context.Background(), b.Build(), Options{Namespace: testNS}, testNow)
+		r, err := collect(context.Background(), fakeReader(t, tc.objs, tc.funcs), Options{Namespace: testNS}, testNow)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -317,7 +296,7 @@ func TestAllNamespaces(t *testing.T) {
 	a := testIncident("incident-a", "a", testSubject, "")
 	b := testIncident("incident-b", "b", testSubject, "")
 	b.Namespace = "team-b"
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(a, b).Build()
+	c := fakeReader(t, []readclient.Object{a, b}, nil)
 	r, err := collect(context.Background(), c, Options{Namespace: testNS}, testNow)
 	if err != nil {
 		t.Fatal(err)
@@ -337,8 +316,7 @@ func TestAllNamespaces(t *testing.T) {
 // TestAllNamespacesEmpty: -A on a cluster without Incidents still shows the kubeconfig namespace with its
 // budget and "No Incidents.", and the JSON has an empty list, not null.
 func TestAllNamespacesEmpty(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(testSettings(), budgetMap("2026-11-06", "2")).Build()
+	c := fakeReader(t, []readclient.Object{testSettings(), budgetMap("2026-11-06", "2")}, nil)
 	r, err := collect(context.Background(), c, Options{Namespace: testNS, AllNamespaces: true}, testNow)
 	if err != nil {
 		t.Fatal(err)
@@ -382,10 +360,9 @@ func TestConditionWithoutTime(t *testing.T) {
 }
 
 func TestListFailureIsAnError(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
-		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			return apierrors.NewForbidden(schema.GroupResource{Resource: "incidents"}, "", nil)
-		}}).Build()
+	c := fakeReader(t, nil, &reactors{list: func(k8stesting.ListAction, bool) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "incidents"}, "", nil)
+	}})
 	if _, err := collect(context.Background(), c, Options{Namespace: testNS}, testNow); err == nil {
 		t.Fatal("collect succeeded with a forbidden list")
 	}

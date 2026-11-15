@@ -29,9 +29,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 // The kinds explain accepts by name.
@@ -459,7 +459,7 @@ type TimelineEntry struct {
 // explain reads, with get and list only, the request or Incident called name in namespace: a request of that
 // name first, else an Incident and its requests. It also reads the request's Incident and the
 // RemediationSettings; those may fail without failing the command.
-func explain(ctx context.Context, c client.Reader, namespace, name string) (*Explanation, error) {
+func explain(ctx context.Context, c readclient.Reader, namespace, name string) (*Explanation, error) {
 	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
 		return nil, fmt.Errorf("%q is not a valid object name", clean(name, maxName))
 	}
@@ -467,13 +467,13 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 	settings := readSettings(ctx, c, &e.Settings)
 
 	rr := &remediationv1alpha1.RemediationRequest{}
-	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, rr)
+	err := c.Get(ctx, readclient.ObjectKey{Namespace: namespace, Name: name}, rr)
 	switch {
 	case err == nil:
 		e.Kind = kindRequest
 		e.Requests = append(e.Requests, explainRequest(rr, settings))
 		inc := &remediationv1alpha1.Incident{}
-		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: rr.Spec.IncidentRef.Name}, inc); err != nil {
+		if err := c.Get(ctx, readclient.ObjectKey{Namespace: namespace, Name: rr.Spec.IncidentRef.Name}, inc); err != nil {
 			e.IncidentState, e.IncidentError = readState(err)
 			return e, nil
 		}
@@ -491,7 +491,7 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 	}
 
 	inc := &remediationv1alpha1.Incident{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, inc); err != nil {
+	if err := c.Get(ctx, readclient.ObjectKey{Namespace: namespace, Name: name}, inc); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("no RemediationRequest or Incident %s in namespace %s", e.Name, e.Namespace)
 		}
@@ -505,7 +505,7 @@ func explain(ctx context.Context, c client.Reader, namespace, name string) (*Exp
 		e.RevertsProposed = append(e.RevertsProposed, proposedRevertReport(p))
 	}
 	var rrs remediationv1alpha1.RemediationRequestList
-	if err := c.List(ctx, &rrs, client.InNamespace(namespace)); err != nil {
+	if err := c.List(ctx, &rrs, readclient.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("listing RemediationRequests: %w", err)
 	}
 	// A request belongs to the Incident only when its incidentRef names the Incident's name and UID.

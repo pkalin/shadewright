@@ -13,337 +13,107 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package sourcemap
 
 import (
-	"fmt"
-
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/pkalin/shadewright/internal/fluxstatus"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap/fluxrules"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
-// Labels Flux sets on the objects it applies.
+// The Flux rules of the mapping live in [fluxrules], which imports no Kubernetes client, so
+// kubectl-shadewright applies them without linking controller-runtime. The names below are aliases.
+
+// Labels Flux sets on the objects it applies; see [fluxrules].
 const (
-	// LabelKustomizationName names the Kustomization that applied an object.
-	LabelKustomizationName = "kustomize.toolkit.fluxcd.io/name"
-	// LabelKustomizationNamespace is the namespace of that Kustomization.
-	LabelKustomizationNamespace = "kustomize.toolkit.fluxcd.io/namespace"
-	// LabelHelmReleaseName names the HelmRelease that installed an object.
-	LabelHelmReleaseName = "helm.toolkit.fluxcd.io/name"
+	// LabelKustomizationName is [fluxrules.LabelKustomizationName].
+	LabelKustomizationName = fluxrules.LabelKustomizationName
+	// LabelKustomizationNamespace is [fluxrules.LabelKustomizationNamespace].
+	LabelKustomizationNamespace = fluxrules.LabelKustomizationNamespace
+	// LabelHelmReleaseName is [fluxrules.LabelHelmReleaseName].
+	LabelHelmReleaseName = fluxrules.LabelHelmReleaseName
 )
 
 // kindKustomization is the kind of both a Flux Kustomization and a kustomization file.
 const kindKustomization = fluxstatus.KindKustomization
 
-// The Flux API versions read. Flux objects are read as unstructured objects, so the module does not depend
-// on the Flux API packages; only the fields below are used.
+// The Flux kinds read; see [fluxrules].
 var (
-	// KustomizationGVK is the Flux Kustomization kind.
-	KustomizationGVK = schema.GroupVersionKind{
-		Group: fluxstatus.KustomizeGroup, Version: fluxstatus.KustomizeVersion, Kind: kindKustomization}
-	// GitRepositoryGVK is the Flux GitRepository kind.
-	GitRepositoryGVK = schema.GroupVersionKind{
-		Group: fluxstatus.SourceGroup, Version: fluxstatus.SourceVersion, Kind: fluxstatus.KindGitRepository}
+	// KustomizationGVK is [fluxrules.KustomizationGVK].
+	KustomizationGVK = fluxrules.KustomizationGVK
+	// GitRepositoryGVK is [fluxrules.GitRepositoryGVK].
+	GitRepositoryGVK = fluxrules.GitRepositoryGVK
 )
 
-// kustomizationTransforms are Kustomization spec fields that change what the build produces, so the
-// declaration in Git would not be what is live.
-var kustomizationTransforms = []string{
-	"patches", "patchesStrategicMerge", "patchesJson6902", "images", "components",
-	"namePrefix", "nameSuffix", "targetNamespace", "postBuild",
+// kustomizationTransforms and gitRepositoryOptions are [fluxrules.KustomizationTransforms] and
+// [fluxrules.GitRepositoryOptions].
+var (
+	kustomizationTransforms = fluxrules.KustomizationTransforms()
+	gitRepositoryOptions    = fluxrules.GitRepositoryOptions()
+)
+
+// KustomizationRefusal is [fluxrules.KustomizationRefusal].
+func KustomizationRefusal(ks *unstructured.Unstructured) *Result {
+	return fluxrules.KustomizationRefusal(ks)
 }
 
-// gitRepositoryOptions are GitRepository spec fields that change which files the artifact holds, or stop it
-// from following the branch, so the file read from the branch head might not be what Flux applies.
-var gitRepositoryOptions = []string{"suspend", "ignore", "recurseSubmodules", "sparseCheckout"}
-
-// gitRefOthers are spec.ref fields that take precedence over spec.ref.branch in Flux.
-var gitRefOthers = []string{"tag", "semver", "name", "commit"}
-
-// inventoryID is the id Flux writes in status.inventory for an object: namespace, name, group and kind joined
-// by underscores. It is only compared, never used as a path, ref or URL.
-func inventoryID(namespace, name string, gvk schema.GroupVersionKind) string {
-	return fmt.Sprintf("%s_%s_%s_%s", namespace, name, gvk.Group, gvk.Kind)
+// KustomizationSpecRefusal is [fluxrules.KustomizationSpecRefusal].
+func KustomizationSpecRefusal(ks *unstructured.Unstructured) *Result {
+	return fluxrules.KustomizationSpecRefusal(ks)
 }
 
-// checkKustomization applies the Kustomization rules of ADR-0012 step 2 and returns the source name and
-// namespace and the path, or a stop result.
+// Suspended is [fluxrules.Suspended].
+func Suspended(obj *unstructured.Unstructured) bool { return fluxrules.Suspended(obj) }
+
+// CompareSource is [fluxrules.CompareSource].
+func CompareSource(ks, src *unstructured.Unstructured) providers.SourceComparison {
+	return fluxrules.CompareSource(ks, src)
+}
+
+// CheckGitRepository is [fluxrules.CheckGitRepository].
+func CheckGitRepository(src *unstructured.Unstructured) (url, branch string, stop *Result) {
+	return fluxrules.CheckGitRepository(src)
+}
+
 func checkKustomization(ks *unstructured.Unstructured, target schema.GroupVersionKind, ns, name string) (
 	srcNamespace, srcName, path string, stop *Result) {
-	ref := kustomizationRef(ks)
-	inventory := func() *Result {
-		if inInventory(ks, target, ns, name) {
-			return nil
-		}
-		r := denied(ReasonNotInInventory,
-			"%s, named by the labels on %s %s/%s, does not list it in status.inventory", ref, target.Kind, ns, name)
-		return &r
-	}
-	if r := kustomizationRules(ks, inventory); r != nil {
-		return "", "", "", r
-	}
-	kind, _, _ := unstructured.NestedString(ks.Object, "spec", "sourceRef", "kind")
-	srcName, _, _ = unstructured.NestedString(ks.Object, "spec", "sourceRef", "name")
-	srcNamespace, _, _ = unstructured.NestedString(ks.Object, "spec", "sourceRef", "namespace")
-	if kind != GitRepositoryGVK.Kind || srcName == "" {
-		r := needsIntervention(ReasonUnsupportedSource, "the source of %s is not a GitRepository", ref)
-		return "", "", "", &r
-	}
-	if srcNamespace == "" {
-		srcNamespace = ks.GetNamespace()
-	}
-	if len(validation.IsDNS1123Subdomain(srcName)) > 0 || len(validation.IsDNS1123Label(srcNamespace)) > 0 {
-		r := needsIntervention(ReasonUnsupportedSource, "spec.sourceRef of %s is not a valid object reference", ref)
-		return "", "", "", &r
-	}
-	path, found, err := unstructured.NestedString(ks.Object, "spec", "path")
-	if err != nil {
-		r := needsIntervention(ReasonInvalidPath, "spec.path of %s is not a string", ref)
-		return "", "", "", &r
-	}
-	if !found {
-		path = ""
-	}
-	return srcNamespace, srcName, path, nil
+	return fluxrules.CheckKustomization(ks, target, ns, name)
 }
 
-// KustomizationRefusal applies the rules of ADR-0012 step 2 to a Kustomization that need no target object, in
-// the sequence the mapping applies them: spec.suspend, Ready for the current generation, spec.kubeConfig, the
-// fields that transform the build, and spec.decryption. It returns the stop result the mapping would give first,
-// or nil when the Kustomization passes them all. Only the status.inventory rule, which the mapping applies
-// between spec.kubeConfig and the transforms, is left out. The mapping and `kubectl shadewright doctor` both
-// call kustomizationRules, so the reason doctor shows is the one the executor gives.
-func KustomizationRefusal(ks *unstructured.Unstructured) *Result {
-	return kustomizationRules(ks, nil)
-}
+func kustomizationRef(ks *unstructured.Unstructured) string { return fluxrules.KustomizationRef(ks) }
 
-// kustomizationRules is the sequence of the Kustomization rules of the mapping. inventory, when not nil, is the
-// status.inventory rule of a target object.
-func kustomizationRules(ks *unstructured.Unstructured, inventory func() *Result) *Result {
-	if r := kustomizationSuspended(ks); r != nil {
-		return r
-	}
-	if !fluxstatus.Ready(ks.Object) {
-		// A reconcile in progress (a merged revision being applied) is told apart from a failure, so the
-		// caller can wait for it; both stop the mapping here.
-		reason := ReasonKustomizationNotReady
-		if fluxstatus.Reconciling(ks.Object) {
-			reason = ReasonKustomizationReconciling
-		}
-		r := needsIntervention(reason, "%s is not Ready for its current generation", kustomizationRef(ks))
-		return &r
-	}
-	// Checked before the inventory: a remote cluster's inventory entry could match a local object.
-	if r := kustomizationRemote(ks); r != nil {
-		return r
-	}
-	if inventory != nil {
-		if r := inventory(); r != nil {
-			return r
-		}
-	}
-	return kustomizationBuild(ks)
-}
-
-// KustomizationSpecRefusal applies only the rules of ADR-0012 step 2 that read a Kustomization's spec:
-// spec.suspend, spec.kubeConfig, the fields that transform the build, and spec.decryption, in that order. It
-// returns the first stop result, or nil when the spec passes them all. It is not the mapping's sequence: the
-// mapping checks Ready between spec.suspend and spec.kubeConfig, so a caller that needs the reason the mapping
-// gives first calls [KustomizationRefusal]. Doctor's Flux check calls it to fail on a spec the executor refuses
-// whatever Flux does next.
-func KustomizationSpecRefusal(ks *unstructured.Unstructured) *Result {
-	if r := kustomizationSuspended(ks); r != nil {
-		return r
-	}
-	if r := kustomizationRemote(ks); r != nil {
-		return r
-	}
-	return kustomizationBuild(ks)
-}
-
-func kustomizationRef(ks *unstructured.Unstructured) string {
-	return fmt.Sprintf("Kustomization %s/%s", ks.GetNamespace(), ks.GetName())
-}
-
-// kustomizationSuspended stops on a suspended Kustomization, which would not apply a merge.
 func kustomizationSuspended(ks *unstructured.Unstructured) *Result {
-	if Suspended(ks) {
-		r := needsIntervention(ReasonKustomizationSuspended, "%s is suspended", kustomizationRef(ks))
-		return &r
-	}
-	return nil
+	return fluxrules.KustomizationSuspended(ks)
 }
 
-// Suspended reports whether a Flux object sets spec.suspend: Flux does not reconcile it, so it applies no new
-// revision. The mapping stops on a suspended Kustomization by this rule, and the analyzer's
-// get_delivery_status reports a suspended Kustomization or HelmRelease by it.
-func Suspended(obj *unstructured.Unstructured) bool {
-	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
-	return suspended
-}
-
-// CompareSource compares a Kustomization with its GitRepository src by the mapping's own comparison
-// (checkRevision, [fluxstatus.AppliedFetched]): [providers.SourceBehind] when it has not applied the revision
-// src last fetched, [providers.SourceAtRevision] when it has, and [providers.SourceUnchecked] when src is
-// refused by [CheckGitRepository] or is not Ready for its current generation, since the mapping stops on those
-// before it compares. `kubectl shadewright doctor` and the analyzer's get_delivery_status both call it.
-func CompareSource(ks, src *unstructured.Unstructured) providers.SourceComparison {
-	_, branch, stop := CheckGitRepository(src)
-	if stop != nil || !fluxstatus.Ready(src.Object) {
-		return providers.SourceUnchecked
-	}
-	if !fluxstatus.AppliedFetched(ks.Object, src.Object, branch) {
-		return providers.SourceBehind
-	}
-	return providers.SourceAtRevision
-}
-
-// kustomizationRemote stops on a Kustomization with spec.kubeConfig, which applies to another cluster. Its
-// inventory does not say which cluster an entry is in, so a local object could match a remote entry.
 func kustomizationRemote(ks *unstructured.Unstructured) *Result {
-	if v, ok := field(ks.Object, "spec", "kubeConfig"); ok && !empty(v) {
-		r := needsIntervention(ReasonRemoteCluster, "%s applies to another cluster (spec.kubeConfig)",
-			kustomizationRef(ks))
-		return &r
-	}
-	return nil
+	return fluxrules.KustomizationRemote(ks)
 }
 
-// kustomizationBuild stops on a Kustomization whose build is not the manifests in Git: a transform, or
-// spec.decryption.
-func kustomizationBuild(ks *unstructured.Unstructured) *Result {
-	ref := kustomizationRef(ks)
-	for _, f := range kustomizationTransforms {
-		if v, ok := field(ks.Object, "spec", f); ok && !empty(v) {
-			r := needsIntervention(ReasonKustomizationTransforms,
-				"%s sets spec.%s, so the manifests in Git are not what is applied", ref, f)
-			return &r
-		}
-	}
-	// With spec.decryption, files may be SOPS-encrypted, even partly with plaintext fields left in, and
-	// editing them would break the SOPS MAC. Encrypted files are not supported.
-	if kustomizationDecrypts(ks) {
-		r := needsIntervention(ReasonDecryption, "%s decrypts its manifests (spec.decryption)", ref)
-		return &r
-	}
-	return nil
+func kustomizationDecrypts(ks *unstructured.Unstructured) bool {
+	return fluxrules.KustomizationDecrypts(ks)
 }
 
-// inInventory reports whether status.inventory lists the object with the target's group, kind and version.
 func inInventory(ks *unstructured.Unstructured, target schema.GroupVersionKind, ns, name string) bool {
-	entries, _, err := unstructured.NestedSlice(ks.Object, "status", "inventory", "entries")
-	if err != nil {
-		return false
-	}
-	want := inventoryID(ns, name, target)
-	for _, e := range entries {
-		m, ok := e.(map[string]any)
-		if ok && m["id"] == want && m["v"] == target.Version {
-			return true
-		}
-	}
-	return false
+	return fluxrules.InInventory(ks, target, ns, name)
 }
 
-// CheckGitRepository applies the source rules of ADR-0012 step 2 that read only a GitRepository's spec
-// (spec.include, spec.suspend, spec.ignore, spec.recurseSubmodules, spec.sparseCheckout, and a spec.ref that
-// names only a branch) and returns the URL and branch, or the stop result the mapping would give. Readiness and
-// the fetched revision are checked apart. The mapping and `kubectl shadewright doctor` both call it, so the
-// two cannot drift apart.
-func CheckGitRepository(src *unstructured.Unstructured) (url, branch string, stop *Result) {
-	ref := fmt.Sprintf("GitRepository %s/%s", src.GetNamespace(), src.GetName())
-	if inc, ok := field(src.Object, "spec", "include"); ok && !empty(inc) {
-		r := needsIntervention(ReasonSourceIncludes, "%s includes other sources", ref)
-		return "", "", &r
-	}
-	for _, f := range gitRepositoryOptions {
-		if v, ok := field(src.Object, "spec", f); ok && !empty(v) {
-			r := needsIntervention(ReasonSourceOptions,
-				"%s sets spec.%s, so the branch head may not be what Flux applies", ref, f)
-			return "", "", &r
-		}
-	}
-	branch, stop = gitRefBranch(src, ref)
-	if stop != nil {
-		return "", "", stop
-	}
-	url, _, err := unstructured.NestedString(src.Object, "spec", "url")
-	if err != nil {
-		url = ""
-	}
-	return url, branch, nil
-}
-
-// gitRefBranch returns the branch a GitRepository's spec.ref names, or a SourceNotBranch stop when spec.ref
-// names no branch or sets a field that takes precedence over it. ref names the GitRepository in the message.
 func gitRefBranch(src *unstructured.Unstructured, ref string) (string, *Result) {
-	gitRef, found, err := unstructured.NestedMap(src.Object, "spec", "ref")
-	branch, isString := gitRef["branch"].(string)
-	if err != nil || !found || !isString || branch == "" {
-		r := needsIntervention(ReasonSourceNotBranch, "%s does not track a branch in spec.ref.branch", ref)
-		return "", &r
-	}
-	for _, f := range gitRefOthers {
-		if v, ok := gitRef[f]; ok && !empty(v) {
-			r := needsIntervention(ReasonSourceNotBranch, "%s sets spec.ref.%s, which takes precedence over the branch", ref, f)
-			return "", &r
-		}
-	}
-	return branch, nil
+	return fluxrules.GitRefBranch(src, ref)
 }
 
-// checkRevision requires the Kustomization to have applied the revision its GitRepository last fetched, so
-// the object's live state comes from the source as it is now and not from an older or failed fetch.
-//
-// The GitRepository must also be Ready for its current generation, so its artifact was fetched for its
-// current spec (a changed URL or branch raises the generation), and the artifact revision must name the
-// branch: Flux writes it as <branch>@sha1:<commit> or <branch>@sha256:<commit>. Flux status records no
-// observed URL, so the generation is what ties the artifact to spec.url.
 func checkRevision(ks, src *unstructured.Unstructured, branch string) *Result {
-	if !fluxstatus.Ready(src.Object) {
-		r := needsIntervention(ReasonSourceNotReady, "GitRepository %s/%s is not Ready for its current generation",
-			src.GetNamespace(), src.GetName())
-		return &r
-	}
-	if !fluxstatus.AppliedFetched(ks.Object, src.Object, branch) {
-		r := needsIntervention(ReasonRevisionMismatch,
-			"Kustomization %s/%s has not applied the revision GitRepository %s/%s last fetched",
-			ks.GetNamespace(), ks.GetName(), src.GetNamespace(), src.GetName())
-		return &r
-	}
-	return nil
+	return fluxrules.CheckRevision(ks, src, branch)
 }
 
-// revisionOfBranch reports whether a Flux artifact revision was fetched from branch: the revision is the
-// branch, "@", then the commit digest (sha1:<40 hex> or sha256:<64 hex>). See [fluxstatus.RevisionOfBranch].
 func revisionOfBranch(revision, branch string) bool {
-	return fluxstatus.RevisionOfBranch(revision, branch)
+	return fluxrules.RevisionOfBranch(revision, branch)
 }
 
-// field returns the value at a path of keys, without copying it.
-func field(obj map[string]any, keys ...string) (any, bool) {
-	v, found, err := unstructured.NestedFieldNoCopy(obj, keys...)
-	return v, found && err == nil
-}
+func field(obj map[string]any, keys ...string) (any, bool) { return fluxrules.Field(obj, keys...) }
 
-// empty reports whether a decoded value is absent in effect: nil, false, an empty string, list or map.
-func empty(v any) bool {
-	switch x := v.(type) {
-	case nil:
-		return true
-	case bool:
-		return !x
-	case string:
-		return x == ""
-	case []any:
-		return len(x) == 0
-	case map[string]any:
-		return len(x) == 0
-	default:
-		return false
-	}
-}
+func empty(v any) bool { return fluxrules.Empty(v) }

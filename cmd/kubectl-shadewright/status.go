@@ -29,9 +29,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 )
 
@@ -180,10 +180,10 @@ type Options struct {
 // collect reads the status with get and list only: the Incidents and RemediationRequests of the namespace (or
 // of all namespaces), the RemediationSettings and, per namespace, the analysis budget ConfigMap. An Incident or
 // request list that fails is an error; settings or a budget that cannot be read are reported in the result.
-func collect(ctx context.Context, c client.Reader, opts Options, now time.Time) (*Report, error) {
-	var listOpts []client.ListOption
+func collect(ctx context.Context, c readclient.Reader, opts Options, now time.Time) (*Report, error) {
+	var listOpts []readclient.ListOption
 	if !opts.AllNamespaces {
-		listOpts = append(listOpts, client.InNamespace(opts.Namespace))
+		listOpts = append(listOpts, readclient.InNamespace(opts.Namespace))
 	}
 	var incs remediationv1alpha1.IncidentList
 	if err := c.List(ctx, &incs, listOpts...); err != nil {
@@ -366,9 +366,10 @@ func prLink(rr *remediationv1alpha1.RemediationRequest, settings *remediationv1a
 }
 
 // readSettings reads the RemediationSettings into r and returns it, or nil when it could not be read.
-func readSettings(ctx context.Context, c client.Reader, r *SettingsReport) *remediationv1alpha1.RemediationSettings {
+func readSettings(ctx context.Context, c readclient.Reader,
+	r *SettingsReport) *remediationv1alpha1.RemediationSettings {
 	s := &remediationv1alpha1.RemediationSettings{}
-	if err := c.Get(ctx, client.ObjectKey{Name: remediationv1alpha1.SettingsName}, s); err != nil {
+	if err := c.Get(ctx, readclient.ObjectKey{Name: remediationv1alpha1.SettingsName}, s); err != nil {
 		r.State, r.Error = readState(err)
 		return nil
 	}
@@ -408,9 +409,9 @@ func analysisStopped(s SettingsReport, b BudgetReport) string {
 }
 
 // readBudget reads the analysis budget ConfigMap of namespace with the analyzer's own parser.
-func readBudget(ctx context.Context, c client.Reader, namespace string, now time.Time) BudgetReport {
+func readBudget(ctx context.Context, c readclient.Reader, namespace string, now time.Time) BudgetReport {
 	cm := &corev1.ConfigMap{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: analysisdue.BudgetName}, cm); err != nil {
+	if err := c.Get(ctx, readclient.ObjectKey{Namespace: namespace, Name: analysisdue.BudgetName}, cm); err != nil {
 		state, msg := readState(err)
 		return BudgetReport{State: state, Error: msg}
 	}

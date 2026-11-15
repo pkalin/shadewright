@@ -304,13 +304,6 @@ func sourceOptionFields(src *unstructured.Unstructured) []string {
 	return set
 }
 
-// kustomizationDecrypts reports whether the Kustomization sets spec.decryption, the field the mapping refuses
-// with [ReasonDecryption].
-func kustomizationDecrypts(ks *unstructured.Unstructured) bool {
-	v, ok := field(ks.Object, "spec", "decryption")
-	return ok && !empty(v)
-}
-
 func noCandidate(reason Reason, format string, args ...any) CandidateResult {
 	return CandidateResult{Reason: reason, Message: fmt.Sprintf(format, args...)}
 }

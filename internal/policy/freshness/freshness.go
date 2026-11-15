@@ -504,12 +504,19 @@ func (c Checker) recheckInputs(ctx context.Context, rr *v1alpha1.RemediationRequ
 // repository entry of the plan.
 func (c Checker) loadPlan(ctx context.Context, rr *v1alpha1.RemediationRequest) (*v1alpha1.RemediationPolicy,
 	*v1alpha1.RemediationSettings, v1alpha1.GitRepository, error) {
+	return c.loadPlanOf(ctx, rr, true)
+}
+
+// loadPlanOf is loadPlan; with pausable false a pause is not tested, for the check at the merge, which writes
+// nothing to Git and must not let a pause hide a stale plan.
+func (c Checker) loadPlanOf(ctx context.Context, rr *v1alpha1.RemediationRequest, pausable bool) (
+	*v1alpha1.RemediationPolicy, *v1alpha1.RemediationSettings, v1alpha1.GitRepository, error) {
 	src := rr.Status.Source
 	// Settings first: while writes are paused nothing else is decided, because a stale plan leads to a
 	// write (closing its change request).
 	settings := &v1alpha1.RemediationSettings{}
 	settingsErr := c.Reader.Get(ctx, client.ObjectKey{Name: v1alpha1.SettingsName}, settings)
-	if settingsErr == nil && Paused(settings) {
+	if pausable && settingsErr == nil && Paused(settings) {
 		return nil, nil, v1alpha1.GitRepository{}, ErrPaused
 	}
 	pol := &v1alpha1.RemediationPolicy{}
@@ -548,8 +555,64 @@ func (c Checker) loadPlan(ctx context.Context, rr *v1alpha1.RemediationRequest) 
 	return pol, settings, repo, nil
 }
 
-// readTarget reads the live target straight from the API server.
+// CheckAtMerge is the reduced check for a pull request seen merged (ADR-0041 section 2, #737), run before the
+// merge is recorded. It reads only the API server (Reader, never a cache) and nothing in Git or Flux: after the
+// merge the target file and the live field hold the new value, so the comparisons of [Checker.Check] with the
+// previous value would call every merged plan stale. It compares what the plan recorded with what the API server
+// holds now: the policy UID and revision, the module of the action still enabled, the repository entry and its
+// target branch, the plan digest, and the target's UID and the policy's object selector. A pause is not tested:
+// the check writes nothing, and a pause must not hide a stale plan. It compares no timestamp.
+//
+// It returns nil when all of them match, and a [*StaleError] when one definitely changed (a policy, settings
+// object or target that is not found included) or when the request holds an input that can never be checked (no
+// plan digest or source: PlanChanged; a malformed target apiVersion: TargetChanged), so a retry would never
+// answer. It returns another error when a read failed (forbidden, a server error, a timeout, a kind the API
+// server does not serve now) or the context ended: neither fresh nor stale, and the caller retries.
+func (c Checker) CheckAtMerge(ctx context.Context, rr *v1alpha1.RemediationRequest) error {
+	if rr.Status.PlanDigest == "" || rr.Status.Source == nil {
+		return stale(ReasonPlanChanged, "The request records no plan digest or source, so the plan cannot be checked")
+	}
+	ref := rr.Spec.TargetRef
+	if _, err := schema.ParseGroupVersion(ref.APIVersion); err != nil {
+		return stale(ReasonTargetChanged, "The target apiVersion %q is not valid, so the target cannot be checked", ref.APIVersion)
+	}
+	pol, _, _, err := c.loadPlanOf(ctx, rr, false)
+	if err != nil {
+		return err
+	}
+	live, err := c.readTargetOf(ctx, ref, false)
+	if err != nil {
+		return err
+	}
+	if string(live.GetUID()) != string(ref.UID) {
+		return stale(ReasonTargetChanged, "%s %s/%s has another UID than the plan names", ref.Kind, ref.Namespace, ref.Name)
+	}
+	// The labels are the live ones, read when the merge is seen. The plan records no labels of the target, so a
+	// change that the merge itself made to the labels and that Flux applied already is tested here as if it had
+	// been there before the merge: a merge that moves the target out of the selector is found stale, one that
+	// moves it in is found fresh. The planned change sets the field its action names, never labels; another merge or
+	// an edit by hand can change them.
+	if reason, msg := policy.CheckObjectSelector(pol, live.GetLabels()); reason != "" {
+		return stale(ReasonTargetChanged, "%s", msg)
+	}
+	// A read that answered as the context ended may have been cut short: no verdict then.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("the plan was checked at the merge, but the check ran out of time: %w", err)
+	}
+	return nil
+}
+
+// readTarget reads the live target straight from the API server, for the periodic check: a kind the API server
+// does not serve (a NoMatchError, its CRD deleted) counts as a target that no longer exists.
 func (c Checker) readTarget(ctx context.Context, ref v1alpha1.ObjectRef) (*unstructured.Unstructured, error) {
+	return c.readTargetOf(ctx, ref, true)
+}
+
+// readTargetOf is readTarget; with noMatchStale false, for the check at the merge, a NoMatchError is no verdict
+// and is returned for a retry, which the wait for the merge bounds (ADR-0041): only a clean NotFound says the
+// target is gone.
+func (c Checker) readTargetOf(ctx context.Context, ref v1alpha1.ObjectRef, noMatchStale bool) (
+	*unstructured.Unstructured, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target apiVersion: %w", err)
@@ -557,7 +620,7 @@ func (c Checker) readTarget(ctx context.Context, ref v1alpha1.ObjectRef) (*unstr
 	live := &unstructured.Unstructured{}
 	live.SetGroupVersionKind(gv.WithKind(ref.Kind))
 	switch err := c.Reader.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, live); {
-	case apierrors.IsNotFound(err) || meta.IsNoMatchError(err):
+	case apierrors.IsNotFound(err) || noMatchStale && meta.IsNoMatchError(err):
 		return nil, stale(ReasonTargetChanged, "%s %s/%s no longer exists", ref.Kind, ref.Namespace, ref.Name)
 	case err != nil:
 		return nil, fmt.Errorf("get %s %s/%s: %w", ref.Kind, ref.Namespace, ref.Name, err)

@@ -50,9 +50,14 @@ const (
 	sourcePath  = "apps/orders/deployment.yaml"
 	otherPath   = "docs/readme.yaml"
 	otherBranch = "release"
-	tierLabel   = "tier"
-	targetUID   = "33333333-3333-4333-8333-333333333333"
-	policyUID   = "44444444-4444-4444-8444-444444444444"
+	// targetKind is the kind of the target in every world.
+	targetKind = "Deployment"
+	tierLabel  = "tier"
+	targetUID  = "33333333-3333-4333-8333-333333333333"
+	policyUID  = "44444444-4444-4444-8444-444444444444"
+	// otherTargetUID and otherPolicyUID stand for a target or a policy made again under the same name.
+	otherTargetUID = "66666666-6666-4666-8666-666666666666"
+	otherPolicyUID = "77777777-7777-4777-8777-777777777777"
 )
 
 func manifest(limit string) []byte {
@@ -149,6 +154,24 @@ func (w *world) fresh(t *testing.T) error {
 // check is fresh that also returns what the check read.
 func (w *world) check(t *testing.T) (freshness.Result, error) {
 	t.Helper()
+	c, ctx := w.reader(t)
+	var src freshness.SourceResolver
+	if w.resolve != nil {
+		src = resolverFunc(w.resolve)
+	}
+	return freshness.Checker{Reader: c, OpenRepository: w.open, Source: src}.Check(ctx, w.rr)
+}
+
+// atMerge runs the check at the merge against the live state in w, with no Git provider and no resolver.
+func (w *world) atMerge(t *testing.T) error {
+	t.Helper()
+	c, ctx := w.reader(t)
+	return freshness.Checker{Reader: c}.CheckAtMerge(ctx, w.rr)
+}
+
+// reader builds the reader of the cluster in w and the context of the check.
+func (w *world) reader(t *testing.T) (client.Reader, context.Context) {
+	t.Helper()
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatal(err)
@@ -181,11 +204,7 @@ func (w *world) check(t *testing.T) (freshness.Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var src freshness.SourceResolver
-	if w.resolve != nil {
-		src = resolverFunc(w.resolve)
-	}
-	return freshness.Checker{Reader: c, OpenRepository: w.open, Source: src}.Check(ctx, w.rr)
+	return c, ctx
 }
 
 func isNil(o client.Object) bool {
@@ -256,9 +275,9 @@ func TestStalePerDigestInput(t *testing.T) {
 			w.rr.Spec.Action.SetContainerMemoryLimit.Previous = *resourceQuantity("128Mi")
 		}, freshness.ReasonPlanChanged},
 		{"target UID in the request", func(w *world) {
-			w.rr.Spec.TargetRef.UID = "66666666-6666-4666-8666-666666666666"
+			w.rr.Spec.TargetRef.UID = otherTargetUID
 		}, freshness.ReasonPlanChanged},
-		{"target recreated with another UID", func(w *world) { w.target.UID = "66666666-6666-4666-8666-666666666666" },
+		{"target recreated with another UID", func(w *world) { w.target.UID = otherTargetUID },
 			freshness.ReasonTargetChanged},
 		{"live limit changed, UID and Git unchanged", func(w *world) {
 			w.target.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("512Mi")
@@ -286,7 +305,7 @@ func TestStalePerDigestInput(t *testing.T) {
 		{"repository removed from settings", func(w *world) { w.settings.Spec.Repositories = nil },
 			freshness.ReasonSettingsChanged},
 		{"settings deleted", func(w *world) { w.settings = nil }, freshness.ReasonSettingsChanged},
-		{"policy UID (recreated)", func(w *world) { w.pol.UID = "77777777-7777-4777-8777-777777777777" },
+		{"policy UID (recreated)", func(w *world) { w.pol.UID = otherPolicyUID },
 			freshness.ReasonPolicyChanged},
 		{"policy generation", func(w *world) { w.pol.Generation = 4 }, freshness.ReasonPolicyChanged},
 		{"policy deleted", func(w *world) { w.pol = nil }, freshness.ReasonPolicyChanged},
@@ -405,7 +424,7 @@ func TestFailClosed(t *testing.T) {
 		}},
 		{"target read fails", func(w *world) {
 			w.getErr = func(k client.ObjectKey, o client.Object) error {
-				if o.GetObjectKind().GroupVersionKind() == (schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}) {
+				if o.GetObjectKind().GroupVersionKind() == (schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: targetKind}) {
 					return boom
 				}
 				return nil
@@ -824,7 +843,7 @@ func TestPolicyChangedDuringTheScanIsRetried(t *testing.T) {
 	w = newWorld(t)
 	changeDuringMapping(w, func(obj client.Object) {
 		if pol, ok := obj.(*v1alpha1.RemediationPolicy); ok {
-			pol.UID = "77777777-7777-4777-8777-777777777777"
+			pol.UID = otherPolicyUID
 		}
 	})
 	wantRetry(t, w.fresh(t))

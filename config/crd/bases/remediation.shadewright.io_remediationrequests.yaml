@@ -984,8 +984,11 @@ spec:
                   merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
                   from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a
                   receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
-                  change it cannot check. Set once and never changed or removed (a validation rule on the object), so a
-                  restart does not start the wait again. Unset when the commit was reported at once.
+                  change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot
+                  read what it needs, the executor records the start here if it is unset, retries until the wait is over, and
+                  then records the merge with a plan not shown fresh (PlanFresh False, reason PlanChanged). Set once and never
+                  changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset
+                  when the commit was reported at once and the check at the merge answered.
                 format: date-time
                 type: string
               mergeReceipt:

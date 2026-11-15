@@ -828,7 +828,8 @@ func (r *RemediationRequestReconciler) requireOnTarget(ctx context.Context, git 
 // head held exactly the planned change (checkMerged), with its merge commit recorded as watchStep does
 // (recordMerge, #561), so delivery is checked against that commit; otherwise MergedWithForeignChange without a
 // merge commit, since the change that landed is not the planned one. A read that fails decides nothing and is
-// returned for a retry, with the status unchanged.
+// returned for a retry, with the status unchanged, except a check at the merge that did not answer, which
+// records the pull request first (mergeUnchecked).
 func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
 	// Without a full merge commit ID it waits for the host to report one, a bounded time (awaitMergeCommit), and
@@ -847,9 +848,44 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 	if ref != nil {
 		return r.mergedForeign(ctx, rr, ref)
 	}
+	// The reduced freshness check at the merge (ADR-0041): a stale plan is marked in the write below. A check that
+	// did not answer records the pull request like an open one (mergeUnchecked) and is returned for a retry.
+	if err := r.checkAtMerge(ctx, rr); err != nil {
+		return r.mergeUnchecked(ctx, rr, cr, err)
+	}
 	markClosed(rr, ReasonChangeRequestMerged, "was merged")
 	recordMerge(ctx, rr, cr)
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "The pull request was merged")
+}
+
+// mergeUnchecked records the pull request cr, found merged and checked by checkMerged, whose check at the merge
+// did not answer (checkErr): PRCreated with the pull request, as recordHandoff does, and returns checkErr for a
+// retry. The merge is not recorded. From then on recheck looks at the recorded pull request first
+// (watchPullRequest), which checks the plan at the merge again before it records the merge, within the wait that
+// checkAtMerge started; the full freshness check never runs on the merged change, which makes the plan look stale
+// (TargetFileChanged) and would end a fresh plan capped. A failed write is joined to checkErr: nothing is
+// recorded, and the retry finds the pull request through the branch again.
+func (r *RemediationRequestReconciler) mergeUnchecked(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cr providers.ChangeRequest, checkErr error) error {
+	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
+	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
+	rr.Status.Deadline = nil
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:   remediationv1alpha1.ConditionPROpened,
+		Status: metav1.ConditionTrue,
+		Reason: ReasonPullRequestOpened,
+		Message: fmt.Sprintf("Pull request #%d was found merged; the merge is recorded once the plan is checked "+
+			"at the merge", cr.Number),
+		ObservedGeneration: rr.Generation,
+	})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return errors.Join(checkErr, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
+			rr.Name, err))
+	}
+	logf.FromContext(ctx).Error(checkErr, "Recorded the merged pull request of RemediationRequest without its "+
+		"merge: the plan could not be checked at the merge", "remediationRequest", client.ObjectKeyFromObject(rr),
+		"pullRequest", cr.Number)
+	return checkErr
 }
 
 // checkMerged checks the head of a merged pull request (#524) against its own parent, the commit of the target
@@ -1057,6 +1093,10 @@ const (
 	// prMergeCommitPending: merged, and the executor waits for the Git host to report the merge commit
 	// (awaitMergeCommit). Nothing else is done meanwhile: a merged change makes the plan look stale.
 	prMergeCommitPending
+	// prMergeUnchecked: merged, and the check of the plan at the merge (checkAtMerge) could not read what it
+	// needs. Nothing is recorded and nothing else is done: the error is retried, and the full freshness check is
+	// not run on a merged change, which makes the plan look stale.
+	prMergeUnchecked
 )
 
 // watchPullRequest looks at the recorded pull request: a merge ends the request (Merged), a pull request
@@ -1073,8 +1113,14 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (prOutcome, error) {
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	look, err := r.watchStep(stepCtx, rr)
+	mergeSeen, timedOut := errors.Is(err, errMergeCheck), stepCtx.Err() != nil
 	err = boundErr(ctx, stepCtx, "pull request check", err)
 	cancel()
+	if mergeSeen {
+		// boundErr replaces the error when the step's deadline or the reconcile's cancellation ended it; the merge
+		// is still seen and not recorded, which the caller must know so it never runs the full check on it.
+		return prMergeUnchecked, r.mergeSeenErr(ctx, rr, err, timedOut)
+	}
 	switch {
 	case errors.Is(err, errStopped):
 		return prStopped, nil
@@ -1111,6 +1157,24 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		r.watchReviewCheck(ctx, rr, caughtUp)
 	}
 	return prOpen, nil
+}
+
+// mergeSeenErr returns err, the error of a look that saw the pull request merged and did not record the merge,
+// so that it matches errMergeCheck. When the step's own deadline ended the look (timedOut) and the reconcile goes
+// on, it records the start of the wait for the merge first (startMergeWait, within a deadline of its own), so a
+// check that always runs out of time is bounded by the wait like any other failure (checkAtMerge). A failed write
+// is joined to the error; the next look tries again.
+func (r *RemediationRequestReconciler) mergeSeenErr(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error, timedOut bool) error {
+	if !errors.Is(err, errMergeCheck) {
+		err = fmt.Errorf("%w: %w", errMergeCheck, err)
+	}
+	if !timedOut || rr.Status.MergeCommitAwaitedSince != nil || ctx.Err() != nil {
+		return err
+	}
+	waitCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	defer cancel()
+	return errors.Join(err, r.startMergeWait(waitCtx, rr))
 }
 
 // rejected ends a fresh request whose pull request a person closed without a merge. It may also be
@@ -1240,16 +1304,9 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
-		// Without a full merge commit ID it waits for the host to report one, a bounded time (awaitMergeCommit).
-		switch left, err := r.awaitMergeCommit(ctx, rr, cr); {
-		case err != nil:
-			return hintLook{}, err
-		case left > 0:
-			return hintLook{}, errMergeCommitPending
-		}
-		recordMerge(ctx, rr, cr)
-		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
-			"The pull request was merged")
+		// Every failure from here on is a merge seen and not recorded (errMergeCheck): the caller retries the look
+		// and never runs the full freshness check on a merged change.
+		return hintLook{}, r.recordMergeSeen(ctx, rr, cr)
 	case providers.ChangeRequestClosed:
 		return hintLook{}, errClosed
 	}
@@ -1277,6 +1334,30 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	return hintLook{}, nil
+}
+
+// recordMergeSeen records the merge of the recorded pull request, cr, seen merged with the head Shadewright
+// pushed: without a full merge commit ID it waits for the host to report one, a bounded time (awaitMergeCommit,
+// errMergeCommitPending); then the plan is checked at the merge (checkAtMerge), so a plan that became stale since
+// the last full recheck is marked in the write that sets Merged. It returns errStopped once that write went
+// through, and any failure wrapped in errMergeCheck with nothing recorded.
+func (r *RemediationRequestReconciler) recordMergeSeen(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cr providers.ChangeRequest) error {
+	switch left, err := r.awaitMergeCommit(ctx, rr, cr); {
+	case err != nil:
+		return fmt.Errorf("%w: %w", errMergeCheck, err)
+	case left > 0:
+		return errMergeCommitPending
+	}
+	if err := r.checkAtMerge(ctx, rr); err != nil {
+		return err
+	}
+	recordMerge(ctx, rr, cr)
+	err := r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged, "The pull request was merged")
+	if err != nil && !errors.Is(err, errStopped) {
+		return fmt.Errorf("%w: %w", errMergeCheck, err)
+	}
+	return err
 }
 
 // setWaitingForReview sets condition Approved False with reason WaitingForReview: the pull request waits for a

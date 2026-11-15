@@ -22,12 +22,15 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -75,6 +78,102 @@ func recordMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest
 		return
 	}
 	markNoMergeReceipt(rr)
+}
+
+// errMergeCheck marks a pull request seen merged whose merge was not recorded because the check of the plan at the
+// merge (checkAtMerge) did not answer, or because a later step of the same look failed (the wait for the merge
+// commit, the write that sets Merged). The look at the pull request is retried; the caller never goes on to a
+// check that reads Git, since a merged change makes the plan look stale there. watchPullRequest keeps it on the
+// error when the step's deadline or the reconcile's cancellation replaces the error (boundErr).
+var errMergeCheck = errors.New("the pull request was merged, and its merge is not recorded yet")
+
+// checkAtMerge runs the reduced freshness check of ADR-0041 section 2 (freshness.Checker.CheckAtMerge, #737) on a
+// request whose pull request was seen merged, right before the caller records the merge, in every path that does
+// (watchStep, endMerged, recordHandoff). The periodic check marks a stale plan only every freshRecheckInterval, so a
+// person who merges after a change of the policy, the settings or the target and before that check would
+// otherwise end a stale plan as a fresh one. It reads the API server only, compares the recorded plan with what
+// it holds now, and compares no timestamp of two sources.
+//
+// A stale plan gets the stale mark (PlanFresh False with the stale reason) in rr, not written: the caller's write
+// that sets Merged carries it, and capStaleSuccess caps the good end as for a stale plan Shadewright could not
+// close (#199). An input that can never be checked (no plan digest or source, a malformed target apiVersion) is
+// such a verdict too (freshness.CheckAtMerge). A request that already carries the mark keeps it, unchecked.
+//
+// A read that fails, or a context that ended, is retried within the wait of the merge commit (mergeCommitWait,
+// from status.mergeCommitAwaitedSince, which the first failure records when awaitMergeCommit did not): until the
+// wait is over it returns the error wrapped in errMergeCheck with nothing set in rr; once it is over, the plan
+// was not shown fresh, and it gets the mark with reason PlanChanged and a Warning Event, so the merge is recorded,
+// the target lock goes, and the outcome is capped. A failed write of the start is returned wrapped the same way.
+// It is never taken as fresh. The decision reads only the recorded start and the executor's own clock. The reads
+// run within half of what is left of ctx (mergeCheckContext), so a check that runs out of time still records
+// the start and lets the caller write, in every path.
+func (r *RemediationRequestReconciler) checkAtMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	if staleMark(rr) != nil {
+		return nil
+	}
+	checkCtx, cancel := r.mergeCheckContext(ctx)
+	err := freshness.Checker{Reader: r.reader()}.CheckAtMerge(checkCtx, rr)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	staleErr, ok := errors.AsType[*freshness.StaleError](err)
+	if !ok {
+		return r.mergeCheckFailed(ctx, rr, err)
+	}
+	markStaleAtMerge(rr, staleErr.Reason, "The plan was stale when the merge was seen: "+staleErr.Message)
+	logf.FromContext(ctx).Info("Found the plan of RemediationRequest stale at the merge",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "reason", staleErr.Reason)
+	return nil
+}
+
+// mergeCheckContext is the context of the reads of the check at the merge: it ends halfway to the deadline of ctx
+// (or after WriteTimeout when ctx has none), so a check that runs out of time leaves ctx the other half for the
+// writes that follow in every caller: the start of the wait (mergeCheckFailed), and the status write that records
+// the pull request or the merge. A check that always runs out of time is so bounded by the wait like any other
+// failure. A cancelled ctx cancels it too, and then nothing is written.
+func (r *RemediationRequestReconciler) mergeCheckContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	}
+	return context.WithTimeout(ctx, time.Until(deadline)/2)
+}
+
+// mergeCheckFailed handles a check at the merge that did not answer (checkAtMerge): it records the start of the
+// wait when there is none and the context still allows a write, and returns the failure wrapped in errMergeCheck
+// for a retry, or, once the wait is over, marks the plan as not shown fresh and returns nil.
+func (r *RemediationRequestReconciler) mergeCheckFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	checkErr error) error {
+	if rr.Status.MergeCommitAwaitedSince == nil && ctx.Err() == nil {
+		if err := r.startMergeWait(ctx, rr); err != nil {
+			return fmt.Errorf("%w: %w (%w)", errMergeCheck, checkErr, err)
+		}
+	}
+	since := rr.Status.MergeCommitAwaitedSince
+	if since == nil || mergeCommitWaitRemaining(since.Time, r.now()) > 0 {
+		return fmt.Errorf("%w: %w", errMergeCheck, checkErr)
+	}
+	msg := "The plan could not be checked at the merge within the wait for the merge (" + checkErr.Error() +
+		"), so it is not shown fresh"
+	markStaleAtMerge(rr, freshness.ReasonPlanChanged, msg)
+	logf.FromContext(ctx).Error(checkErr, "Recorded the merge of RemediationRequest with a plan not shown fresh: "+
+		"the check at the merge did not answer within the wait", "remediationRequest", client.ObjectKeyFromObject(rr))
+	if r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonStalePlanMerged, msg)
+	}
+	return nil
+}
+
+// markStaleAtMerge sets the stale mark (PlanFresh False with a stale reason) in the status about to be written.
+func markStaleAtMerge(rr *remediationv1alpha1.RemediationRequest, reason, message string) {
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:               remediationv1alpha1.ConditionPlanFresh,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: rr.Generation,
+	})
 }
 
 // markNoMergeReceipt sets condition Verified Unknown with reason NoMergeReceipt in the status about to be written.
@@ -142,16 +241,29 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 	if since := rr.Status.MergeCommitAwaitedSince; since != nil {
 		return mergeCommitWaitRemaining(since.Time, r.now()), nil
 	}
-	base := rr.DeepCopy()
-	t := metav1.NewTime(r.now().Truncate(time.Second))
-	rr.Status.MergeCommitAwaitedSince = &t
-	if err := r.Status().Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return 0, fmt.Errorf("record the wait for the merge commit of RemediationRequest %s/%s: %w", rr.Namespace,
-			rr.Name, err)
+	if err := r.startMergeWait(ctx, rr); err != nil {
+		return 0, err
 	}
 	logf.FromContext(ctx).Info("Waiting for the merge commit of RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "wait", mergeCommitWait)
 	return mergeCommitWait, nil
+}
+
+// startMergeWait records status.mergeCommitAwaitedSince, the start of the wait for a merge seen but not recorded
+// (the merge commit, or the check of the plan at the merge), on the executor's own clock, alone in a patch with
+// the resourceVersion read. Only the field and the resourceVersion of rr change, so a caller's unwritten changes
+// to rr stay for its own write. A failed write leaves rr as it was and is returned for a retry.
+func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	base := rr.DeepCopy()
+	upd := rr.DeepCopy()
+	t := metav1.NewTime(r.now().Truncate(time.Second))
+	upd.Status.MergeCommitAwaitedSince = &t
+	if err := r.Status().Patch(ctx, upd, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	rr.Status.MergeCommitAwaitedSince = upd.Status.MergeCommitAwaitedSince
+	rr.ResourceVersion = upd.ResourceVersion
+	return nil
 }
 
 // mergeCommitClockSlack is how far the recorded start of the wait may lie after the executor's clock before the
@@ -179,6 +291,22 @@ func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alph
 		left = mergeCommitWaitRemaining(since.Time, r.now())
 	}
 	return max(left, stepDelay)
+}
+
+// mergeNotRecorded is recheck's answer to a look that found the pull request merged without recording the merge:
+// merged is true, and nothing else runs, for prMergeCommitPending (looked at again until the host reports the
+// merge commit or the wait ends) and prMergeUnchecked (the plan could not be checked at the merge: lookErr is
+// returned for the error backoff). The full freshness check never runs on a merged change, which makes the plan
+// look stale.
+func (r *RemediationRequestReconciler) mergeNotRecorded(rr *remediationv1alpha1.RemediationRequest, outcome prOutcome,
+	lookErr error) (res ctrl.Result, merged bool, err error) {
+	switch outcome {
+	case prMergeCommitPending:
+		return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, true, nil
+	case prMergeUnchecked:
+		return ctrl.Result{}, true, lookErr
+	}
+	return ctrl.Result{}, false, nil
 }
 
 // setVerifiedUnknown sets condition Verified Unknown in the status about to be written.

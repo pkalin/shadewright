@@ -84,7 +84,7 @@ func TestTerminations(t *testing.T) {
 			case c.wantReason != "" && (len(got) != 1 || got[0].reason != c.wantReason):
 				t.Fatalf("terminations = %+v, want one with reason %s", got, c.wantReason)
 			}
-			if hasTermination(pod) != (c.wantReason != "") {
+			if hasPodSymptom(pod) != (c.wantReason != "") {
 				t.Error("the watch predicate disagrees with terminations")
 			}
 		})

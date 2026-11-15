@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 	"github.com/pkalin/shadewright/internal/modules"
 )
 
@@ -82,8 +83,8 @@ type Observation struct {
 	// object (a Kyverno ClusterPolicy or ClusterPolicyReport), which only a cluster-wide grant can write: its
 	// observations share one empty-named share of the Incident controller's caps.
 	Source string
-	// Reason, Type and ReportingController are the event's; or OOMKilled (or the termination reason),
-	// Warning and kubelet for a container termination read from pod status; or the symptom's reason, Warning
+	// Reason, Type and ReportingController are the event's; or OOMKilled (or the termination reason, or the
+	// waiting reason), Warning and kubelet for a container termination or wait read from pod status; or the symptom's reason, Warning
 	// and the source's reporting controller for a module symptom source.
 	Reason              string
 	Type                string
@@ -92,7 +93,8 @@ type Observation struct {
 	// module's fixed summary and its bounded evidence.
 	Symptom string
 	// Occurrence identifies what Total counts: "event:" and the Event UID, "termination:" and a hash of the
-	// pod UID, the container name and the termination's ID, or "condition:" and a hash of the object UID, its
+	// pod UID, the container name and the termination's ID, "waiting:" and a hash of the pod UID, the container
+	// name, the waiting reason and the container's restart count, or "condition:" and a hash of the object UID, its
 	// kind, the symptom's reason and when the state began, for a module symptom source. Several occurrences
 	// (pods, events, objects) can share one fingerprint.
 	Occurrence string
@@ -125,6 +127,21 @@ type Observation struct {
 	// seen again). An event never sets it, whatever its reason, because whoever can create events in a
 	// watched namespace writes the reason.
 	Immediate bool
+	// Origin is where the collector read the observation (the Source of ADR-0039 point 2; the field Source
+	// above is the namespace): fingerprint.SourcePodStatus for a container termination or waiting reason read
+	// from pod status, fingerprint.SourceEvent for an event, and empty for a module symptom source. Only a
+	// pod-status origin is part of the fingerprint.
+	Origin fingerprint.Source
+	// Container is the container the observation is about: a status entry's name, or for an event the
+	// container its regarding field path names in the verified pod (cause.go). Empty when none is named.
+	Container string
+	// Class is the observation's part in the consequence rule (ADR-0039): ClassCause only for a pod-status
+	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. Nothing acts
+	// on it yet.
+	Class Class
+	// CauseFingerprint is, on a consequence, the fingerprint of the cause its pod's status shows for its
+	// container (Collector.causeFingerprint); empty when the status shows none.
+	CauseFingerprint string
 }
 
 // immediateTerminationReasons are the container termination reasons, read from pod status, that open an
@@ -285,7 +302,7 @@ func (c *Collector) Observations() <-chan Observation {
 }
 
 // SetupWithManager registers the two watches: events.k8s.io/v1 Events of type Warning and Pods with a
-// terminated container, and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. All read
+// terminated container or a waiting cause, and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. All read
 // through the manager's cache, which the analyzer restricts to the watched namespaces (analyzer.CacheOptions). Owners are read with the API reader, one object at a time with a
 // deadline, so no informer is started for ReplicaSets, Deployments or StatefulSets. There is deliberately no
 // watch on core/v1 Events: they are the same objects, and watching both would count each event twice.
@@ -303,7 +320,7 @@ func (c *Collector) SetupWithManager(mgr ctrl.Manager) error {
 	pr := &podReconciler{c: c, reader: mgr.GetClient()}
 	err = ctrl.NewControllerManagedBy(mgr).
 		Named("collector-pods").
-		For(&corev1.Pod{}, builder.WithPredicates(predicate.NewPredicateFuncs(hasTermination))).
+		For(&corev1.Pod{}, builder.WithPredicates(predicate.NewPredicateFuncs(hasPodSymptom))).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(pr)
 	if err != nil {

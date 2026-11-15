@@ -30,8 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 )
 
 const (
@@ -46,13 +44,15 @@ const (
 	idsPerContainer = 2
 )
 
-// termination is one container termination worth an observation.
+// termination is one container termination worth an observation, or one waiting reason of
+// WaitingCauseReasons (waiting set), which has no finish time.
 type termination struct {
 	container string
 	id        string
 	reason    string
 	exitCode  int32
 	finished  time.Time
+	waiting   bool
 }
 
 // terminations returns the abnormal terminations in a pod's status: OOMKilled or a non-zero exit code, in
@@ -87,20 +87,66 @@ func terminations(pod *corev1.Pod) []termination {
 	return out
 }
 
-// occurrence identifies a termination across collectors without carrying the container ID itself.
-func (t termination) occurrence(pod types.UID) string {
-	h := sha256.Sum256([]byte(string(pod) + "\x00" + t.container + "\x00" + t.id))
-	return "termination:" + hex.EncodeToString(h[:16])
+// waitings returns the waiting reasons of WaitingCauseReasons in a pod's status, in init and app containers
+// (ADR-0039 point 4). A waiting state is identified by its reason and the container's restart count: it has no
+// ID or start time, so a container that waits again with the same reason after a restart is a new one, and
+// one that keeps waiting is the same one. The waiting message is never read: it is free text.
+func waitings(pod *corev1.Pod) []termination {
+	var out []termination
+	for _, st := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
+		w := st.State.Waiting
+		if w == nil || !slices.Contains(WaitingCauseReasons, w.Reason) {
+			continue
+		}
+		out = append(out, termination{
+			container: st.Name, id: fmt.Sprintf("waiting-%s-restarts-%d", w.Reason, st.RestartCount),
+			reason: w.Reason, waiting: true,
+		})
+	}
+	return out
 }
 
-func hasTermination(o client.Object) bool {
+// podSymptoms returns the terminations and the waiting causes of a pod's status.
+func podSymptoms(pod *corev1.Pod) []termination {
+	return append(terminations(pod), waitings(pod)...)
+}
+
+// occurrence identifies a termination across collectors without carrying the container ID itself.
+func (t termination) occurrence(pod types.UID) string {
+	prefix := "termination:"
+	if t.waiting {
+		prefix = "waiting:"
+	}
+	h := sha256.Sum256([]byte(string(pod) + "\x00" + t.container + "\x00" + t.id))
+	return prefix + hex.EncodeToString(h[:16])
+}
+
+// slot is the key of the IDs handled for t's container: waiting states have their own, so they never push a
+// handled termination out of the idsPerContainer kept. A container name is a DNS label and has no colon.
+func (t termination) slot() string {
+	if t.waiting {
+		return "waiting:" + t.container
+	}
+	return t.container
+}
+
+// class is the termination's part in the consequence rule: an OOM kill or a waiting reason is a cause; a
+// non-zero exit is a symptom of its own and links nothing (ADR-0039 point 3).
+func (t termination) class() Class {
+	if t.waiting || t.reason == ReasonOOMKilled {
+		return ClassCause
+	}
+	return ClassNone
+}
+
+func hasPodSymptom(o client.Object) bool {
 	pod, ok := o.(*corev1.Pod)
-	return ok && len(terminations(pod)) > 0
+	return ok && len(podSymptoms(pod)) > 0
 }
 
 type podState struct {
 	uid     types.UID
-	handled map[string][]string // container name to the IDs of its newest handled terminations
+	handled map[string][]string // termination.slot to the IDs of its newest handled terminations
 	newest  time.Time
 	// repeatThrough is fixed when the collector first sees the pod: the newest finish time dropped from the
 	// state until then. Terminations of the pod that finished no later may have been emitted before.
@@ -149,7 +195,7 @@ func (tr *terminationTracker) pending(key types.NamespacedName, uid types.UID, t
 	}
 	var out []pendingTermination
 	for _, t := range ts {
-		if slices.Contains(s.handled[t.container], t.id) {
+		if slices.Contains(s.handled[t.slot()], t.id) {
 			continue
 		}
 		mayRepeat := t.finished.Before(start) ||
@@ -168,11 +214,11 @@ func (tr *terminationTracker) commit(key types.NamespacedName, uid types.UID, t 
 		// Dropped since pending ran (only another pod's state can push it out): start again from the bound.
 		s = podState{uid: uid, handled: map[string][]string{}, repeatThrough: tr.evictedHigh}
 	}
-	ids := append(s.handled[t.container], t.id)
+	ids := append(s.handled[t.slot()], t.id)
 	if len(ids) > idsPerContainer {
 		ids = ids[len(ids)-idsPerContainer:]
 	}
-	s.handled[t.container] = ids
+	s.handled[t.slot()] = ids
 	if t.finished.After(s.newest) {
 		s.newest = t.finished
 	}
@@ -191,7 +237,8 @@ func (tr *terminationTracker) len() int {
 	return tr.seen.len()
 }
 
-// podReconciler turns abnormal container terminations in pod status into observations. This is how
+// podReconciler turns abnormal container terminations and the waiting reasons of WaitingCauseReasons in pod
+// status into observations. This is how
 // OOMKilled is seen: no component reports it as an event reason.
 type podReconciler struct {
 	c      *Collector
@@ -209,7 +256,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		return ctrl.Result{}, err
 	}
-	ts := terminations(&pod)
+	ts := podSymptoms(&pod)
 	for i := range ts {
 		// A finish time in the future would otherwise keep later terminations of other pods marked
 		// MayRepeat once this pod's state is dropped.
@@ -237,21 +284,16 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, nil
 	}
 	for _, t := range pending {
-		fo := fingerprint.Observation{
-			ClusterID:           r.c.cfg.ClusterID,
-			Namespace:           pod.Namespace,
-			OwnerUID:            owner,
-			ResourceUID:         string(pod.UID),
-			Reason:              t.reason,
-			Type:                corev1.EventTypeWarning,
-			ReportingController: reportingKubelet,
-			Note:                fmt.Sprintf("Container %s terminated with exit code %d", t.container, t.exitCode),
-			RegardingKind:       kindPod,
-			RegardingName:       pod.Name,
+		note := terminationNote(t.container, t.exitCode)
+		if t.waiting {
+			note = waitingNote(t.container, t.reason)
 		}
-		obs := r.c.observation(fo, subject, pod.Namespace, t.finished)
+		obs := r.c.observation(r.c.podStatusInput(&pod, owner, t.reason, note), subject, pod.Namespace, t.finished)
 		obs.Occurrence, obs.Began, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, 1, t.mayRepeat
+		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is
+		// pulled (ADR-0039 point 4).
 		obs.Immediate = immediateTermination(t.reason)
+		obs.Container, obs.Class = t.container, t.class()
 		if !t.mayRepeat {
 			obs.Count = 1
 		}

@@ -19,13 +19,22 @@ limitations under the License.
 // (design 3.1, 3.2).
 //
 // What it watches: events.k8s.io/v1 Events of type Warning, and Pods with an abnormal container
-// termination (OOMKilled or a non-zero exit code). OOMKilled comes from container status, never from an
+// termination (OOMKilled or a non-zero exit code) or a container waiting with a reason of
+// WaitingCauseReasons (an image or configuration error, never its message). OOMKilled comes from container status, never from an
 // event reason, so the pod watch is how it is seen. There is no core/v1 Event watch: those are the same
 // objects in an older version, and watching both would count each event twice. Both watches use the
 // manager's cache, which the analyzer restricts to the watched namespaces. A termination OOMKilled and a
 // symptom state of a module's source are marked Immediate, so their Incident opens at the first sighting;
 // every other symptom, events included whatever their reason, waits to be seen again, unless its total
 // already shows a repeat (package incidents).
+//
+// Consequences and causes (cause.go, ADR-0039): each observation carries where it was read (Origin: pod status
+// or an event; only a pod-status origin is hashed into the fingerprint, so an Event cannot imitate one), its
+// container (a status entry's name, or the container an event's regarding field path names in the verified
+// pod) and a Class. Only a pod-status OOM kill or waiting cause is a cause; a kubelet BackOff or Unhealthy event
+// on a named container is a consequence, and its CauseFingerprint is the cause its pod's status shows for that
+// container: a current waiting cause, else an OOM kill that finished at most KillCauseWindow before the
+// event's own time. Nothing acts on these fields yet.
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the

@@ -112,15 +112,11 @@ func occurrences(ev *eventsv1.Event) int64 {
 	return max(n, 1)
 }
 
-// lastOccurrence is when an event last happened, by the first field that is set.
+// lastOccurrence is when an event last happened, by the first field that is set: the reporter's time
+// (kubeletTime), else the creation time.
 func lastOccurrence(ev *eventsv1.Event) time.Time {
-	switch {
-	case ev.Series != nil && !ev.Series.LastObservedTime.IsZero():
-		return ev.Series.LastObservedTime.Time
-	case !ev.EventTime.IsZero():
-		return ev.EventTime.Time
-	case !ev.DeprecatedLastTimestamp.IsZero():
-		return ev.DeprecatedLastTimestamp.Time
+	if t, ok := kubeletTime(ev); ok {
+		return t
 	}
 	return ev.CreationTimestamp.Time
 }
@@ -233,8 +229,17 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 		Note:                ev.Note,
 		RegardingKind:       reg.Kind,
 		RegardingName:       reg.Name,
+		Source:              fingerprint.SourceEvent,
 	}
-	return c.observation(fo, subject, ev.Namespace, lastOccurrence(ev)), pod, subjectUsable, nil
+	obs := c.observation(fo, subject, ev.Namespace, lastOccurrence(ev))
+	var init bool
+	obs.Container, init = namedContainer(reg, pod)
+	obs.Class = eventClass(ev, obs.Container)
+	if obs.Class == ClassConsequence {
+		at, ok := kubeletTime(ev)
+		obs.CauseFingerprint = c.causeFingerprint(pod, owner, obs.Container, init, at, ok)
+	}
+	return obs, pod, subjectUsable, nil
 }
 
 // observation computes the fingerprint (from fingerprint.Normalize) and the shown symptom (fingerprint.Symptom,
@@ -242,6 +247,7 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 func (c *Collector) observation(fo fingerprint.Observation, subject remediationv1alpha1.ObjectRef, source string,
 	at time.Time) Observation {
 	return Observation{
+		Origin:              fo.Source,
 		Fingerprint:         fingerprint.Fingerprint(fo),
 		Subject:             subject,
 		Source:              source,

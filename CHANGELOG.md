@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.2](https://github.com/pkalin/shadewright/compare/v0.5.1...v0.5.2) (2026-11-15)
+
+
+### Bug fixes
+
+* **analyzer:** charge a call refused with 429 by Foundry 0 tokens ([#763](https://github.com/pkalin/shadewright/issues/763)) ([b611850](https://github.com/pkalin/shadewright/commit/b61185044f3f7317aa4a816f1effb8e15d7b934f)), closes [#725](https://github.com/pkalin/shadewright/issues/725)
+* **analyzer:** drop pod evidence only when its template is retired ([#759](https://github.com/pkalin/shadewright/issues/759)) ([6496eba](https://github.com/pkalin/shadewright/commit/6496ebaaf6178d4654c994e320aace1122babb94))
+* **analyzer:** skip probe failures that are part of a pod's start or shutdown ([#764](https://github.com/pkalin/shadewright/issues/764)) ([f00ea10](https://github.com/pkalin/shadewright/commit/f00ea1069283d0eef5f61a31bd819b1bf96633ef)), closes [#726](https://github.com/pkalin/shadewright/issues/726)
+* report ready only once the required informers have synced, with startup probes ([#765](https://github.com/pkalin/shadewright/issues/765)) ([739c78e](https://github.com/pkalin/shadewright/commit/739c78ef38ff1232031e0f6edce4b3b2524e2116)), closes [#762](https://github.com/pkalin/shadewright/issues/762)
+
 ## [0.5.1](https://github.com/pkalin/shadewright/compare/v0.5.0...v0.5.1) (2026-11-15)
 
 

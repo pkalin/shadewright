@@ -596,13 +596,13 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		fail.Store(true)
 		r := reconciler()
 		r.APIReader = failingPolicyReader{Reader: k8sClient, fail: fail.Load}
-		before := fetch()
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 		Expect(err).To(MatchError(errMergeCheck))
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(got.Status.MergeReceipt).To(BeNil())
-		Expect(got.ResourceVersion).To(Equal(before.ResourceVersion), "nothing is written")
+		Expect(got.Status.MergeCommitAwaitedSince).NotTo(BeNil(), "only the start of the wait is written")
+		Expect(planFresh()).To(BeNil())
 		Expect(closes.Load()).To(BeZero())
 
 		fail.Store(false)
@@ -610,6 +610,121 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		got = fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonPolicyChanged))
+	})
+
+	// The check at the merge runs within the look's deadline: when it runs out of time, or the reconcile is
+	// cancelled, boundErr replaces its error, and the merge must still not reach the full check, which calls a
+	// merged change stale (TargetFileChanged) and would cap a fresh plan.
+	It("never hands a merge to the full check when the check at the merge runs out of time (#737)", func() {
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		var blocked atomic.Bool
+		r := reconciler()
+		r.WriteTimeout = 300 * time.Millisecond
+		r.APIReader = blockingPolicyReader{Reader: k8sClient, block: func() bool { return blocked.CompareAndSwap(false, true) }}
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(MatchError(errMergeCheck))
+		Expect(err).To(MatchError(ErrTimeout))
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(planFresh()).To(BeNil(), "a fresh plan is never marked stale by the full check after a merge")
+		Expect(got.Status.MergeCommitAwaitedSince).NotTo(BeNil(), "the wait bounds a check that always runs out of time")
+		Expect(closes.Load()).To(BeZero())
+
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(planFresh()).To(BeNil())
+	})
+
+	It("keeps a merge seen as not recorded when the reconcile is cancelled during the check at the merge (#737)", func() {
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		parent, cancel := context.WithCancel(ctx)
+		defer cancel()
+		r := reconciler()
+		r.APIReader = blockingPolicyReader{Reader: k8sClient, block: func() bool { cancel(); return true }}
+		outcome, err := r.watchPullRequest(parent, fetch())
+		Expect(outcome).To(Equal(prMergeUnchecked))
+		Expect(err).To(MatchError(errMergeCheck))
+		Expect(err).To(MatchError(context.Canceled))
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+		Expect(planFresh()).To(BeNil())
+	})
+
+	// A read that keeps failing (here forbidden) is retried within the wait of the merge commit; at its end the
+	// merge is recorded as not shown fresh, the target lock goes, and the cap applies.
+	It("records the merge as not shown fresh when the check fails until the end of the wait (#737)", func() {
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		start := time.Now()
+		events := record.NewFakeRecorder(10)
+		reconcileAt := func(now time.Time) error {
+			r := reconciler()
+			r.Now = func() time.Time { return now }
+			r.Recorder = events
+			r.APIReader = forbiddenPolicyReader{Reader: k8sClient}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			return err
+		}
+		for _, after := range []time.Duration{0, mergeCommitWait - time.Minute} {
+			Expect(reconcileAt(start.Add(after))).To(MatchError(errMergeCheck))
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(got.Status.MergeCommitAwaitedSince).NotTo(BeNil())
+			Expect(got.Status.MergeCommitAwaitedSince.Time).To(BeTemporally("~", start, time.Second))
+			Expect(planFresh()).To(BeNil())
+		}
+		Expect(reconcileAt(start.Add(mergeCommitWait + time.Second))).To(Succeed())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(got.Status.MergeReceipt).NotTo(BeNil())
+		c := planFresh()
+		Expect(c).NotTo(BeNil())
+		Expect(c.Status).To(Equal(metav1.ConditionFalse))
+		Expect(c.Reason).To(Equal(freshness.ReasonPlanChanged))
+		Expect(stalePlanMerged(got)).To(BeTrue())
+		Expect(breakerOutcome(got)).To(Equal(outcomeNone))
+		Expect(events.Events).To(Receive(HavePrefix(corev1.EventTypeWarning + " " + ReasonStalePlanMerged)))
+	})
+
+	// The check at the merge decides from the state when the merge is seen, not from a mark an earlier check left
+	// and that is gone by then.
+	It("decides at the merge from the current state after a stale mark was cleared (#737)", func() {
+		markCleanup(func(*remediationv1alpha1.RemediationRequest) {})
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged))
+		got := fetch()
+		meta.RemoveStatusCondition(&got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 90
+		Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonPolicyChanged), "the current state, not the old mark")
+	})
+
+	It("decides at the merge from the current state after the periodic check cleared its wait (#737)", func() {
+		r := reconciler()
+		r.Source = sourceFunc(func(context.Context, sourcemap.Input) (sourcemap.Result, error) {
+			return sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonKustomizationReconciling}, nil
+		})
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(MatchError(freshness.ErrReconciling))
+		Expect(planFresh()).NotTo(BeNil())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(planFresh()).To(BeNil(), "the periodic check passed and cleared its mark")
+		policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 90
+		Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+		_, err = git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 		Expect(planFresh().Reason).To(Equal(freshness.ReasonPolicyChanged))
 	})
 

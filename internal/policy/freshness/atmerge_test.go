@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -83,6 +84,12 @@ func TestCheckAtMergeStalePerInput(t *testing.T) {
 			freshness.ReasonTargetChanged},
 		{"target relabelled out of the policy selector", func(w *world) { w.target.Labels = map[string]string{tierLabel: "db"} },
 			freshness.ReasonTargetChanged},
+		// An input that can never be checked is a definite answer, so the merge is recorded and capped instead of
+		// retried for good.
+		{"no digest recorded", func(w *world) { w.rr.Status.PlanDigest = "" }, freshness.ReasonPlanChanged},
+		{"no source recorded", func(w *world) { w.rr.Status.Source = nil }, freshness.ReasonPlanChanged},
+		{"malformed target apiVersion", func(w *world) { w.rr.Spec.TargetRef.APIVersion = "apps/v1/extra" },
+			freshness.ReasonTargetChanged},
 		// A pause does not hide a stale plan at the merge: the check writes nothing.
 		{"policy generation while paused", func(w *world) {
 			w.pol.Generation = 4
@@ -119,6 +126,7 @@ func TestCheckAtMergeFailClosed(t *testing.T) {
 			}
 		}
 	}
+	isTarget := func(o client.Object) bool { return o.GetObjectKind().GroupVersionKind().Kind == "Deployment" }
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	cases := map[string]func(w *world){
@@ -127,10 +135,17 @@ func TestCheckAtMergeFailClosed(t *testing.T) {
 			_, ok := o.(*v1alpha1.RemediationSettings)
 			return ok
 		}),
-		"target read fails":  failKind(func(o client.Object) bool { return o.GetObjectKind().GroupVersionKind().Kind == "Deployment" }),
-		"context ended":      func(w *world) { w.ctx = cancelled },
-		"no digest recorded": func(w *world) { w.rr.Status.PlanDigest = "" },
-		"no source recorded": func(w *world) { w.rr.Status.Source = nil },
+		"target read fails": failKind(isTarget),
+		// Discovery or the REST mapper did not answer for the kind: no verdict, only a clean NotFound is one.
+		"target kind not mapped": func(w *world) {
+			w.getErr = func(_ client.ObjectKey, o client.Object) error {
+				if gvk := o.GetObjectKind().GroupVersionKind(); isTarget(o) {
+					return &meta.NoKindMatchError{GroupKind: gvk.GroupKind(), SearchedVersions: []string{gvk.Version}}
+				}
+				return nil
+			}
+		},
+		"context ended": func(w *world) { w.ctx = cancelled },
 	}
 	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {

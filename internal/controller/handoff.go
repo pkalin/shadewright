@@ -674,9 +674,9 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 	// Merged without a full merge commit ID yet: recorded like an open one, and the look at the recorded pull
 	// request waits for the commit (awaitMergeCommit) and records the merge. With one, the plan is checked at the
 	// merge first (checkAtMerge, ADR-0041): a stale one is marked in the write that sets Merged. When the check
-	// cannot read what it needs, the takeover is recorded like an open pull request in the same way, and the look at
-	// the recorded pull request checks the plan again before it records the merge; a failed read never records the
-	// merge as fresh.
+	// cannot read what it needs, the takeover is recorded like an open pull request in the same way (with the
+	// start of the wait checkAtMerge recorded), and the look at the recorded pull request checks the plan again
+	// before it records the merge, until the wait is over; a failed read never records the merge as fresh.
 	if cr.State == providers.ChangeRequestMerged && shaPattern.MatchString(cr.MergeCommit) {
 		err := r.checkAtMerge(ctx, rr)
 		if err == nil {
@@ -684,9 +684,9 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 			return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
 				"The pull request was merged with this request's change, right after the handoff"))
 		}
-		logf.FromContext(ctx).Info("Recorded the takeover of a merged pull request without its merge: the plan "+
-			"could not be checked at the merge", "remediationRequest", client.ObjectKeyFromObject(rr),
-			"pullRequest", cr.Number, "error", err.Error())
+		logf.FromContext(ctx).Error(err, "Recorded the takeover of a merged pull request without its merge: the "+
+			"plan could not be checked at the merge", "remediationRequest", client.ObjectKeyFromObject(rr),
+			"pullRequest", cr.Number)
 	}
 	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
 	if err := r.Status().Update(ctx, rr); err != nil {

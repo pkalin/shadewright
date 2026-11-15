@@ -18,11 +18,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
@@ -40,6 +42,39 @@ func (f failingPolicyReader) Get(ctx context.Context, key client.ObjectKey, obj 
 	opts ...client.GetOption) error {
 	if _, ok := obj.(*api.RemediationPolicy); ok && f.fail() {
 		return apierrors.NewServiceUnavailable("the API server is not available")
+	}
+	return f.Reader.Get(ctx, key, obj, opts...)
+}
+
+// blockingPolicyReader blocks a read of a RemediationPolicy until its context ends when block returns true, and
+// returns the context's error; it reads anything else, and a policy when block returns false, from Reader.
+type blockingPolicyReader struct {
+	client.Reader
+	block func() bool
+}
+
+func (b blockingPolicyReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*api.RemediationPolicy); ok && b.block() {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return b.Reader.Get(ctx, key, obj, opts...)
+}
+
+// policyResource is the resource name of RemediationPolicy.
+const policyResource = "remediationpolicies"
+
+// forbiddenPolicyReader refuses every read of a RemediationPolicy as forbidden, and reads anything else from Reader.
+type forbiddenPolicyReader struct {
+	client.Reader
+}
+
+func (f forbiddenPolicyReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*api.RemediationPolicy); ok {
+		return apierrors.NewForbidden(schema.GroupResource{Group: api.GroupVersion.Group, Resource: policyResource},
+			key.Name, errors.New("the executor may not read it"))
 	}
 	return f.Reader.Get(ctx, key, obj, opts...)
 }

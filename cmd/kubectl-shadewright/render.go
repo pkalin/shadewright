@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/duration"
 
-	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 )
 
 // renderJSON writes a report or an explanation as indented JSON. Its strings were cleaned in collect or explain;
@@ -49,7 +49,7 @@ func renderText(w io.Writer, r *Report, now time.Time) error {
 		p.line("  Analyses today (UTC): %s", budget(ns.Budget, r.Settings))
 		if len(ns.Incidents) == 0 {
 			p.line("  No Incidents.")
-			if ns.Budget.AnalysisStopped == incidents.ReasonBudgetNotFound && len(ns.OtherRequests) == 0 {
+			if ns.Budget.AnalysisStopped == analysisdue.ReasonBudgetNotFound && len(ns.OtherRequests) == 0 {
 				// The likeliest cause of both is a namespace that is not the operator namespace.
 				p.line("  Is this the operator namespace? Pass it with -n.")
 			}
@@ -104,13 +104,13 @@ func killSwitch(s SettingsReport) string {
 
 // stoppedWords say in words why the analyzer refuses every analysis, by its AnalysisDue reason.
 var stoppedWords = map[string]string{
-	incidents.ReasonSettingsNotFound:   "the RemediationSettings object default does not exist",
-	incidents.ReasonSettingsIncomplete: "RemediationSettings sets no spec.analysis.maxAnalysesPerDay",
-	incidents.ReasonBudgetNotFound:     "the ConfigMap " + incidents.BudgetName + " does not exist; recreate it empty",
-	incidents.ReasonBudgetUnreadable: "the ConfigMap " + incidents.BudgetName +
+	analysisdue.ReasonSettingsNotFound:   "the RemediationSettings object default does not exist",
+	analysisdue.ReasonSettingsIncomplete: "RemediationSettings sets no spec.analysis.maxAnalysesPerDay",
+	analysisdue.ReasonBudgetNotFound:     "the ConfigMap " + analysisdue.BudgetName + " does not exist; recreate it empty",
+	analysisdue.ReasonBudgetUnreadable: "the ConfigMap " + analysisdue.BudgetName +
 		" holds content the analyzer does not trust, so the budget is taken as spent",
-	incidents.ReasonAnalysisDisabled:   "the daily limit is 0",
-	incidents.ReasonDailyBudgetReached: "the daily limit is reached; it resets at 00:00 UTC",
+	analysisdue.ReasonAnalysisDisabled:   "the daily limit is 0",
+	analysisdue.ReasonDailyBudgetReached: "the daily limit is reached; it resets at 00:00 UTC",
 }
 
 func budget(b BudgetReport, s SettingsReport) string {
@@ -134,7 +134,7 @@ func budget(b BudgetReport, s SettingsReport) string {
 		unknown = append(unknown, "RemediationSettings "+readFailure(s.State, s.Error))
 	}
 	if b.State != stateOK {
-		unknown = append(unknown, "ConfigMap "+incidents.BudgetName+" "+readFailure(b.State, b.Error))
+		unknown = append(unknown, "ConfigMap "+analysisdue.BudgetName+" "+readFailure(b.State, b.Error))
 	}
 	if len(unknown) > 0 {
 		prefix := "unknown"

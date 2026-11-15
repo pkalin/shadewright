@@ -86,19 +86,77 @@ func stringConsts(t *testing.T, files []*ast.File, typ string) map[string]string
 	return out
 }
 
+// sourcemapReasons returns the exported reasons package sourcemap declares, by name: those of type Reason or
+// named Reason*, each a string literal or an alias of a constant of package fluxrules (fluxrules holds them
+// by name). A reason it cannot resolve is an error, so a new kind of declaration does not go unchecked.
+func sourcemapReasons(t *testing.T, files []*ast.File, fluxrules map[string]string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				typed := false
+				if id, ok := vs.Type.(*ast.Ident); ok && id.Name == "Reason" {
+					typed = true
+				}
+				for i, name := range vs.Names {
+					if !name.IsExported() || (!typed && !strings.HasPrefix(name.Name, "Reason")) {
+						continue
+					}
+					if i >= len(vs.Values) {
+						t.Errorf("sourcemap.%s has no value of its own", name.Name)
+						continue
+					}
+					switch v := vs.Values[i].(type) {
+					case *ast.BasicLit:
+						s, err := strconv.Unquote(v.Value)
+						if v.Kind != token.STRING || err != nil {
+							t.Errorf("sourcemap.%s is not a string constant", name.Name)
+							continue
+						}
+						out[name.Name] = s
+					case *ast.SelectorExpr:
+						pkg, ok := v.X.(*ast.Ident)
+						s, found := fluxrules[v.Sel.Name]
+						if !ok || pkg.Name != "fluxrules" || !found {
+							t.Errorf("sourcemap.%s is not a Reason constant of package fluxrules", name.Name)
+							continue
+						}
+						out[name.Name] = s
+					default:
+						t.Errorf("sourcemap.%s: cannot read its value", name.Name)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
 // Every reason that can end a request Denied is reported by name, not as Other: the reasons of package policy
-// (the decision's Reason) and of package sourcemap (a Denied result), and the reasons this package passes to
-// denied. The reasons that only come with an allowed outcome are left out.
+// (the decision's Reason) and of package sourcemap (a Denied result, declared in sourcemap/fluxrules and
+// aliased or declared in sourcemap), and the reasons this package passes to denied. The reasons that only
+// come with an allowed outcome are left out.
 func TestDenialReasonsCoverEveryReason(t *testing.T) {
 	allowedOnly := map[string]bool{"WithinApprovedBounds": true, "SourceResolved": true}
-	for _, dir := range []string{filepath.Join("..", "policy"), filepath.Join("..", "gitops", "sourcemap")} {
-		reasons := stringConsts(t, parseDir(t, dir), "Reason")
+	fluxrules := stringConsts(t, parseDir(t, filepath.Join("..", "gitops", "sourcemap", "fluxrules")), "Reason")
+	sourcemap := sourcemapReasons(t, parseDir(t, filepath.Join("..", "gitops", "sourcemap")), fluxrules)
+	for pkg, reasons := range map[string]map[string]string{
+		"policy":    stringConsts(t, parseDir(t, filepath.Join("..", "policy")), "Reason"),
+		"fluxrules": fluxrules,
+		"sourcemap": sourcemap,
+	} {
 		if len(reasons) < 10 {
-			t.Fatalf("found only %d Reason constants in %s: the walk is broken", len(reasons), dir)
+			t.Fatalf("found only %d Reason constants in package %s: the walk is broken", len(reasons), pkg)
 		}
 		for name, v := range reasons {
 			if _, ok := denialReasons[v]; !ok && !allowedOnly[v] {
-				t.Errorf("%s.%s (%q) is missing from denialReasons", filepath.Base(dir), name, v)
+				t.Errorf("%s.%s (%q) is missing from denialReasons", pkg, name, v)
 			}
 		}
 	}

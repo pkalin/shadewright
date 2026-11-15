@@ -25,88 +25,41 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 )
 
-// ConditionAnalysisDue is the Incident condition that says whether the incident is due for analysis, and
-// why (design 3.2). It is a mark only: the analysis itself reads it, and reserves a unit of the daily budget
-// ([ReserveAnalysis]) before it calls the model.
-const ConditionAnalysisDue = "AnalysisDue"
+// ConditionAnalysisDue is [analysisdue.ConditionAnalysisDue], the Incident condition that says whether the
+// incident is due for analysis, and why (design 3.2). Its reasons, documented in [analysisdue], are aliased
+// below so callers keep their names.
+const ConditionAnalysisDue = analysisdue.ConditionAnalysisDue
 
-// Reasons of the AnalysisDue condition. The first five come with status True, the others with False.
+// Reasons of the AnalysisDue condition, aliases of the constants of the same name in [analysisdue].
 const (
-	// ReasonFirstAnalysis: the incident was never analyzed and has settled.
-	ReasonFirstAnalysis = "FirstAnalysis"
-	// ReasonNewOccurrence: an occurrence began after the last analysis (a new symptom) and the cooldown has
-	// passed.
-	ReasonNewOccurrence = "NewOccurrence"
-	// ReasonCooldownExpired: the symptom was seen again after the last analysis and the cooldown has passed.
-	ReasonCooldownExpired = "CooldownExpired"
-	// ReasonAnalysisTimedOut: the incident has been in phase Analyzing for longer than the analysis timeout
-	// and the cooldown since its last analysis began, so that analysis is taken as lost.
-	ReasonAnalysisTimedOut = "AnalysisTimedOut"
-	// ReasonReviewerHint: the incident is Proposed, a request naming it holds a reviewer hint no analysis has
-	// answered ([PendingHint]) and the cooldown since the last analysis has passed (ADR-0028).
-	ReasonReviewerHint = "ReviewerHint"
-
-	// ReasonNotObserved: the status records no observation yet.
-	ReasonNotObserved = "NotObserved"
-	// ReasonNotRecent: the incident was never analyzed, is not marked due, its newest occurrence is no lasting
-	// symptom state of a module, and it was last seen (in the status or held) longer ago than the recent
-	// window, so a symptom that stopped before analysis was turned on, or before the daily budget was reset,
-	// takes no unit of the budget. A new observation makes it due again through the debounce, the settle
-	// limit counting from the controller's first sight of it waiting again ([unsettledSince]).
-	ReasonNotRecent = "NotRecent"
-	// ReasonAnalyzing: an analysis is running and has not reached the analysis timeout.
-	ReasonAnalyzing = "Analyzing"
-	// ReasonAnalysisStartUnknown: the incident is in phase Analyzing without a lastAnalysisTime, so neither
-	// the analysis timeout nor the cooldown can be placed. It stays not due until the status is repaired, so
-	// that a status without the time never starts analyses faster than the cooldown.
-	ReasonAnalysisStartUnknown = "AnalysisStartUnknown"
-	// ReasonProposed: the last analysis made a proposal; the closure rules move the incident on once its request
-	// ends or it goes quiet ([Closure]).
-	ReasonProposed = "Proposed"
-	// ReasonEscalated: the last analysis, or a request that ended without success ([Closure]), handed the
-	// incident to a person; the closure rules resolve it once it goes quiet.
-	ReasonEscalated = "Escalated"
-	// ReasonResolved: the incident is Resolved and is not analyzed while it stays so (design 3.2, #251). A
-	// symptom seen again moves it to Escalated within RecurrenceWindow of resolvedTime (or back to Open when it
-	// was resolved by quiet time before any analysis, [reopens]), or opens its next occurrence after.
-	ReasonResolved = "Resolved"
-	// ReasonRecurred: the incident is Escalated because its symptom came back after it was Resolved (the
-	// condition Recurred), not because of an analysis; a person decides.
-	ReasonRecurred = "Recurred"
-	// ReasonNoNewData: nothing was seen since the last analysis.
-	ReasonNoNewData = "NoNewData"
-	// ReasonCoolingDown: the incident has data the last analysis did not see, but the cooldown since that
-	// analysis has not passed.
-	ReasonCoolingDown = "CoolingDown"
-	// ReasonDebouncing: the incident would be due, but its last observation, written or still held by the
-	// controller, is more recent than the debounce, and the settle limit since its first unsettled
-	// observation has not passed.
-	ReasonDebouncing = "Debouncing"
-	// ReasonAnalysisDisabled: the daily limit of the RemediationSettings is 0: spec.analysis.maxAnalysesPerDay,
-	// or the deprecated spec.maxAnalysesPerDay when that is set and lower.
-	ReasonAnalysisDisabled = "AnalysisDisabled"
-	// ReasonDailyBudgetReached: the analyses of the current UTC day reached the daily limit of the
-	// RemediationSettings.
-	ReasonDailyBudgetReached = "DailyBudgetReached"
-	// ReasonBudgetUnreadable: the budget ConfigMap holds a day in the future, a count out of bounds or keys
-	// it should not, so the budget is taken as spent.
-	ReasonBudgetUnreadable = "BudgetUnreadable"
-	// ReasonBudgetNotFound: the budget ConfigMap does not exist, so the budget is unknown.
-	ReasonBudgetNotFound = "BudgetNotFound"
-	// ReasonBudgetReadFailed: the budget ConfigMap could not be read, so the budget is unknown.
-	ReasonBudgetReadFailed = "BudgetReadFailed"
-	// ReasonSettingsNotFound: the RemediationSettings object does not exist, so the budget is unknown.
-	ReasonSettingsNotFound = "SettingsNotFound"
-	// ReasonSettingsUnreadable: the RemediationSettings object could not be read, so the budget is unknown.
-	ReasonSettingsUnreadable = "SettingsUnreadable"
-	// ReasonSettingsIncomplete: the RemediationSettings object sets no spec.analysis.maxAnalysesPerDay (an
-	// object the API server's defaults did not fill in), so the budget is unknown.
-	ReasonSettingsIncomplete = "SettingsIncomplete"
-	// ReasonForeignFingerprint: the Incident's name is not the one derived from its own fingerprint and
-	// occurrence number (remediationv1alpha1.IncidentName), so this controller does not analyze it.
-	ReasonForeignFingerprint = "ForeignFingerprint"
+	ReasonFirstAnalysis        = analysisdue.ReasonFirstAnalysis
+	ReasonNewOccurrence        = analysisdue.ReasonNewOccurrence
+	ReasonCooldownExpired      = analysisdue.ReasonCooldownExpired
+	ReasonAnalysisTimedOut     = analysisdue.ReasonAnalysisTimedOut
+	ReasonReviewerHint         = analysisdue.ReasonReviewerHint
+	ReasonNotObserved          = analysisdue.ReasonNotObserved
+	ReasonNotRecent            = analysisdue.ReasonNotRecent
+	ReasonAnalyzing            = analysisdue.ReasonAnalyzing
+	ReasonAnalysisStartUnknown = analysisdue.ReasonAnalysisStartUnknown
+	ReasonProposed             = analysisdue.ReasonProposed
+	ReasonEscalated            = analysisdue.ReasonEscalated
+	ReasonResolved             = analysisdue.ReasonResolved
+	ReasonRecurred             = analysisdue.ReasonRecurred
+	ReasonNoNewData            = analysisdue.ReasonNoNewData
+	ReasonCoolingDown          = analysisdue.ReasonCoolingDown
+	ReasonDebouncing           = analysisdue.ReasonDebouncing
+	ReasonAnalysisDisabled     = analysisdue.ReasonAnalysisDisabled
+	ReasonDailyBudgetReached   = analysisdue.ReasonDailyBudgetReached
+	ReasonBudgetUnreadable     = analysisdue.ReasonBudgetUnreadable
+	ReasonBudgetNotFound       = analysisdue.ReasonBudgetNotFound
+	ReasonBudgetReadFailed     = analysisdue.ReasonBudgetReadFailed
+	ReasonSettingsNotFound     = analysisdue.ReasonSettingsNotFound
+	ReasonSettingsUnreadable   = analysisdue.ReasonSettingsUnreadable
+	ReasonSettingsIncomplete   = analysisdue.ReasonSettingsIncomplete
+	ReasonForeignFingerprint   = analysisdue.ReasonForeignFingerprint
 )
 
 // Defaults of the analysis trigger (design 3.2 and 5.4). The daily limit has no default here: the schema

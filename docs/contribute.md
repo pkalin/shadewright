@@ -22,7 +22,7 @@ make test                      # unit tests and envtest
 Other checks that need no cluster:
 
 ```bash
-make lint                # golangci-lint, and a check that the Go release matches the Dockerfile
+make lint                # golangci-lint, a check that the Go release matches the Dockerfile, and the kubectl plugin's dependency and size check
 make verify-generated    # regenerates CRDs, RBAC and the API reference; fails on any difference
 ```
 

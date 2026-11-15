@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"maps"
 	"net/url"
@@ -33,13 +32,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer"
-	"github.com/pkalin/shadewright/internal/cmdutil"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/pkalin/shadewright/internal/cmdutil/sharedflags"
 	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap/fluxrules"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -140,9 +138,9 @@ type DeliverySource struct {
 
 // checkDelivery makes the delivery report: from the watched namespaces of the analyzer's Deployments, the
 // workloads there, and the Flux objects their labels name, each checked by the source mapping's own rules
-// (sourcemap.KustomizationRefusal, CheckGitRepository and CompareSource). It adds one check, never a
+// (fluxrules.KustomizationRefusal, CheckGitRepository and CompareSource). It adds one check, never a
 // fail: a read it may not make or that fails is listed as not checked.
-func checkDelivery(ctx context.Context, c client.Reader, flux *fluxLists, d *Diagnosis,
+func checkDelivery(ctx context.Context, c readclient.Reader, flux *fluxLists, d *Diagnosis,
 	s *remediationv1alpha1.RemediationSettings, namespace string, analyzers []appsv1.Deployment, analyzersErr error) {
 	const check = "Delivery sources"
 	rep := &Delivery{WatchedNamespaces: []string{}, Namespaces: []NamespaceDelivery{}, Sources: []DeliverySource{}}
@@ -196,8 +194,9 @@ func checkDelivery(ctx context.Context, c client.Reader, flux *fluxLists, d *Dia
 }
 
 // watchedNamespaces reads --watch-namespaces from the containers of the analyzer Deployments, as the analyzer
-// parses it (analyzer.ParseNamespaces). The last occurrence in a container wins, as with Go flags; several
-// Deployments give the union. The raw value is never printed: it is cluster data.
+// parses it (sharedflags.ParseNamespaces, which internal/analyzer forwards to). The last occurrence in a
+// container wins, as with Go flags; several Deployments give the union. The raw value is never printed: it is
+// cluster data.
 func watchedNamespaces(analyzers []appsv1.Deployment) ([]string, error) {
 	var all []string
 	found := false
@@ -208,7 +207,7 @@ func watchedNamespaces(analyzers []appsv1.Deployment) ([]string, error) {
 				continue
 			}
 			found = true
-			names, err := analyzer.ParseNamespaces(value)
+			names, err := sharedflags.ParseNamespaces(value)
 			if err != nil {
 				return nil, fmt.Errorf("--%s of the analyzer Deployment %s is not a list of namespace names",
 					watchNamespacesFlag, clean(analyzers[i].Name, maxName))
@@ -233,17 +232,13 @@ func containerArgs(ctr corev1.Container) []string {
 }
 
 // analyzerBoolFlags are the boolean flags of the analyzer, which take no separate value: the shared flags of
-// internal/cmdutil, read from their definitions, and the analyzer's own (cmd/analyzer).
+// internal/cmdutil (sharedflags.BoolFlags, which a test ties to their definitions) and the analyzer's own
+// (cmd/analyzer).
 var analyzerBoolFlags = func() map[string]bool {
-	fs := flag.NewFlagSet("analyzer", flag.ContinueOnError)
-	var opts cmdutil.Options
-	opts.BindFlags(fs)
 	bools := map[string]bool{"pod-logs": true}
-	fs.VisitAll(func(f *flag.Flag) {
-		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
-			bools[f.Name] = true
-		}
-	})
+	for _, name := range sharedflags.BoolFlags() {
+		bools[name] = true
+	}
 	return bools
 }()
 
@@ -280,7 +275,7 @@ func flagValue(args []string, name string) (string, bool) {
 // countWorkloads reads the metadata of the Deployments and StatefulSets of ns and counts them by their Flux
 // labels, in the mapping's order: a HelmRelease label first, then the Kustomization labels. The Kustomizations
 // named go into byKs, keyed by namespace/name.
-func countWorkloads(ctx context.Context, c client.Reader, ns string, byKs map[string]int) NamespaceDelivery {
+func countWorkloads(ctx context.Context, c readclient.Reader, ns string, byKs map[string]int) NamespaceDelivery {
 	out := NamespaceDelivery{Namespace: ns}
 	for _, kind := range workloadKinds {
 		items, truncated, err := listMetadata(ctx, c, ns, kind.list)
@@ -295,11 +290,11 @@ func countWorkloads(ctx context.Context, c client.Reader, ns string, byKs map[st
 		for i := range items {
 			out.Workloads++
 			labels := items[i].GetLabels()
-			if _, ok := labels[sourcemap.LabelHelmReleaseName]; ok {
+			if _, ok := labels[fluxrules.LabelHelmReleaseName]; ok {
 				out.HelmRelease++
 				continue
 			}
-			name, namespace := labels[sourcemap.LabelKustomizationName], labels[sourcemap.LabelKustomizationNamespace]
+			name, namespace := labels[fluxrules.LabelKustomizationName], labels[fluxrules.LabelKustomizationNamespace]
 			switch {
 			case name == "" && namespace == "":
 				out.NoFluxLabels++
@@ -332,15 +327,15 @@ func couldNotList(resource, ns string, err error) string {
 
 // listMetadata lists only the metadata of the objects of an apps/v1 list kind in ns, in pages, up to
 // listMaxPages pages: no spec or status is read.
-func listMetadata(ctx context.Context, c client.Reader, ns, listKind string) (
+func listMetadata(ctx context.Context, c readclient.Reader, ns, listKind string) (
 	items []metav1.PartialObjectMetadata, truncated bool, err error) {
 	token := ""
 	for range listMaxPages {
 		list := &metav1.PartialObjectMetadataList{}
 		list.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind(listKind))
-		opts := []client.ListOption{client.InNamespace(ns), client.Limit(listPageSize)}
+		opts := []readclient.ListOption{readclient.InNamespace(ns), readclient.Limit(listPageSize)}
 		if token != "" {
-			opts = append(opts, client.Continue(token))
+			opts = append(opts, readclient.Continue(token))
 		}
 		if err := c.List(ctx, list, opts...); err != nil {
 			return nil, false, err
@@ -364,7 +359,7 @@ func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.
 	}
 	ks := find(ksList.items, key)
 	if ks == nil {
-		out.State, out.Reason = sourceRefused, string(sourcemap.ReasonKustomizationNotFound)
+		out.State, out.Reason = sourceRefused, string(fluxrules.ReasonKustomizationNotFound)
 		out.Detail = "no Kustomization of that name exists"
 		if ksList.truncated {
 			out.State, out.Reason = sourceUnknown, ""
@@ -373,7 +368,7 @@ func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.
 		return out
 	}
 	// The mapping's own sequence: suspend, Ready, kubeConfig, then the build rules.
-	stop := sourcemap.KustomizationRefusal(ks)
+	stop := fluxrules.KustomizationRefusal(ks)
 	ref, _, _ := unstructured.NestedStringMap(ks.Object, "spec", "sourceRef")
 	srcNS := ref["namespace"]
 	if srcNS == "" {
@@ -381,7 +376,7 @@ func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.
 	}
 	if ref["kind"] != fluxstatus.KindGitRepository || len(validation.IsDNS1123Subdomain(ref["name"])) > 0 ||
 		len(validation.IsDNS1123Label(srcNS)) > 0 {
-		return finish(out, stop, sourceRefused, string(sourcemap.ReasonUnsupportedSource),
+		return finish(out, stop, sourceRefused, string(fluxrules.ReasonUnsupportedSource),
 			"its source is not a GitRepository")
 	}
 	out.GitRepository = clean(srcNS, maxName) + "/" + clean(ref["name"], maxName)
@@ -395,12 +390,12 @@ func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.
 			return finish(out, stop, sourceUnknown, "",
 				"its GitRepository is not among the ones read (the list was cut short)")
 		}
-		return finish(out, stop, sourceRefused, string(sourcemap.ReasonSourceNotFound),
+		return finish(out, stop, sourceRefused, string(fluxrules.ReasonSourceNotFound),
 			"its GitRepository does not exist")
 	}
 	rawURL, _, _ := unstructured.NestedString(src.Object, "spec", "url")
 	out.URL = hostPath(rawURL)
-	_, branch, srcStop := sourcemap.CheckGitRepository(src)
+	_, branch, srcStop := fluxrules.CheckGitRepository(src)
 	if srcStop == nil {
 		out.Branch = clean(branch, maxName)
 	}
@@ -411,18 +406,18 @@ func evalSource(key string, ksList, srcList *listResult, s *remediationv1alpha1.
 	case srcStop != nil:
 		return finish(out, srcStop, "", "", "")
 	case !fluxstatus.Ready(src.Object):
-		out.State, out.Reason = sourceNotReady, string(sourcemap.ReasonSourceNotReady)
+		out.State, out.Reason = sourceNotReady, string(fluxrules.ReasonSourceNotReady)
 		out.Detail = "its GitRepository is not Ready for its current generation"
-	case sourcemap.CompareSource(ks, src) == providers.SourceBehind:
-		out.State, out.Reason = sourceNotReady, string(sourcemap.ReasonRevisionMismatch)
+	case fluxrules.CompareSource(ks, src) == providers.SourceBehind:
+		out.State, out.Reason = sourceNotReady, string(fluxrules.ReasonRevisionMismatch)
 		out.Detail = "it has not applied the revision its GitRepository last fetched"
 	case out.Settings == settingsUnknown:
 		out.State, out.Detail = sourceUnknown, "the RemediationSettings was not read"
 	case out.Settings != settingsNamed:
-		out.State, out.Reason = sourceRefused, string(sourcemap.ReasonRepositoryNotConfigured)
+		out.State, out.Reason = sourceRefused, string(fluxrules.ReasonRepositoryNotConfigured)
 		out.Detail = "no single repository of the RemediationSettings has the URL of its GitRepository exactly"
 	case branch != target:
-		out.State, out.Reason = sourceRefused, string(sourcemap.ReasonBranchMismatch)
+		out.State, out.Reason = sourceRefused, string(fluxrules.ReasonBranchMismatch)
 		out.Detail = "its GitRepository tracks another branch than the targetBranch " + clean(target, maxName) +
 			" of repository " + out.Repository
 	default:
@@ -439,11 +434,11 @@ const (
 
 // finish sets the state of out from the mapping's stop on the Kustomization when there is one (not-ready for a
 // Kustomization that is not Ready, refused for any other), else from the given state, reason and detail.
-func finish(out DeliverySource, stop *sourcemap.Result, state, reason, detail string) DeliverySource {
+func finish(out DeliverySource, stop *fluxrules.Result, state, reason, detail string) DeliverySource {
 	switch {
 	case stop != nil:
 		out.State = sourceRefused
-		if stop.Reason == sourcemap.ReasonKustomizationNotReady || stop.Reason == sourcemap.ReasonKustomizationReconciling {
+		if stop.Reason == fluxrules.ReasonKustomizationNotReady || stop.Reason == fluxrules.ReasonKustomizationReconciling {
 			out.State = sourceNotReady
 		}
 		out.Reason, out.Detail = clean(string(stop.Reason), maxName), clean(stop.Message, maxMessage)
@@ -563,8 +558,8 @@ func renderDeliveryText(p *printer, rep *Delivery) {
 	for _, n := range rep.Namespaces {
 		p.line("  Namespace %s: %d workloads: %d from Kustomizations, %d from a HelmRelease (%s), %d without Flux "+
 			"labels (%s), %d with invalid Flux labels (%s)", n.Namespace, n.Workloads, n.Kustomization,
-			n.HelmRelease, sourcemap.ReasonHelmManaged, n.NoFluxLabels, sourcemap.ReasonNoFluxLabels,
-			n.InvalidFluxLabels, sourcemap.ReasonInvalidFluxLabels)
+			n.HelmRelease, fluxrules.ReasonHelmManaged, n.NoFluxLabels, fluxrules.ReasonNoFluxLabels,
+			n.InvalidFluxLabels, fluxrules.ReasonInvalidFluxLabels)
 		for _, u := range n.Unchecked {
 			p.line("    NOT CHECKED  %s", u)
 		}

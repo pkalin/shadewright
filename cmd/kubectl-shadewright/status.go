@@ -29,10 +29,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents"
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
 )
 
 // conditionAnalyzed is the Incident condition the analysis writes with its outcome (analysis.ConditionAnalyzed;
@@ -180,10 +180,10 @@ type Options struct {
 // collect reads the status with get and list only: the Incidents and RemediationRequests of the namespace (or
 // of all namespaces), the RemediationSettings and, per namespace, the analysis budget ConfigMap. An Incident or
 // request list that fails is an error; settings or a budget that cannot be read are reported in the result.
-func collect(ctx context.Context, c client.Reader, opts Options, now time.Time) (*Report, error) {
-	var listOpts []client.ListOption
+func collect(ctx context.Context, c readclient.Reader, opts Options, now time.Time) (*Report, error) {
+	var listOpts []readclient.ListOption
 	if !opts.AllNamespaces {
-		listOpts = append(listOpts, client.InNamespace(opts.Namespace))
+		listOpts = append(listOpts, readclient.InNamespace(opts.Namespace))
 	}
 	var incs remediationv1alpha1.IncidentList
 	if err := c.List(ctx, &incs, listOpts...); err != nil {
@@ -277,7 +277,7 @@ func incidentReport(inc *remediationv1alpha1.Incident) IncidentReport {
 		Phase:            clean(string(inc.Status.Phase), maxName),
 		Count:            inc.Status.Count,
 		LastSeen:         inc.Status.LastSeen,
-		Due:              conditionReport(inc.Status.Conditions, incidents.ConditionAnalysisDue),
+		Due:              conditionReport(inc.Status.Conditions, analysisdue.ConditionAnalysisDue),
 		LastAnalysisTime: inc.Status.LastAnalysisTime,
 		Outcome:          conditionReport(inc.Status.Conditions, conditionAnalyzed),
 	}
@@ -366,16 +366,17 @@ func prLink(rr *remediationv1alpha1.RemediationRequest, settings *remediationv1a
 }
 
 // readSettings reads the RemediationSettings into r and returns it, or nil when it could not be read.
-func readSettings(ctx context.Context, c client.Reader, r *SettingsReport) *remediationv1alpha1.RemediationSettings {
+func readSettings(ctx context.Context, c readclient.Reader,
+	r *SettingsReport) *remediationv1alpha1.RemediationSettings {
 	s := &remediationv1alpha1.RemediationSettings{}
-	if err := c.Get(ctx, client.ObjectKey{Name: remediationv1alpha1.SettingsName}, s); err != nil {
+	if err := c.Get(ctx, readclient.ObjectKey{Name: remediationv1alpha1.SettingsName}, s); err != nil {
 		r.State, r.Error = readState(err)
 		return nil
 	}
 	r.State = stateOK
 	paused := s.Spec.Paused != nil && *s.Spec.Paused
 	r.Paused = &paused
-	if limit, ok := incidents.MaxAnalysesPerDay(s); ok {
+	if limit, ok := analysisdue.MaxAnalysesPerDay(s); ok {
 		r.MaxAnalysesPerDay = &limit
 	}
 	return s
@@ -388,33 +389,33 @@ func readSettings(ctx context.Context, c client.Reader, r *SettingsReport) *reme
 func analysisStopped(s SettingsReport, b BudgetReport) string {
 	switch {
 	case s.State == stateNotFound:
-		return incidents.ReasonSettingsNotFound
+		return analysisdue.ReasonSettingsNotFound
 	case s.State != stateOK:
 		return ""
 	case s.MaxAnalysesPerDay == nil:
-		return incidents.ReasonSettingsIncomplete
+		return analysisdue.ReasonSettingsIncomplete
 	case b.State == stateNotFound:
-		return incidents.ReasonBudgetNotFound
+		return analysisdue.ReasonBudgetNotFound
 	case b.State == stateUnreadable:
-		return incidents.ReasonBudgetUnreadable
+		return analysisdue.ReasonBudgetUnreadable
 	case b.State != stateOK:
 		return ""
 	case *s.MaxAnalysesPerDay == 0:
-		return incidents.ReasonAnalysisDisabled
+		return analysisdue.ReasonAnalysisDisabled
 	case b.UsedToday != nil && *b.UsedToday >= *s.MaxAnalysesPerDay:
-		return incidents.ReasonDailyBudgetReached
+		return analysisdue.ReasonDailyBudgetReached
 	}
 	return ""
 }
 
 // readBudget reads the analysis budget ConfigMap of namespace with the analyzer's own parser.
-func readBudget(ctx context.Context, c client.Reader, namespace string, now time.Time) BudgetReport {
+func readBudget(ctx context.Context, c readclient.Reader, namespace string, now time.Time) BudgetReport {
 	cm := &corev1.ConfigMap{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: incidents.BudgetName}, cm); err != nil {
+	if err := c.Get(ctx, readclient.ObjectKey{Namespace: namespace, Name: analysisdue.BudgetName}, cm); err != nil {
 		state, msg := readState(err)
 		return BudgetReport{State: state, Error: msg}
 	}
-	used, ok := incidents.UsedToday(cm, now)
+	used, ok := analysisdue.UsedToday(cm, now)
 	if !ok {
 		return BudgetReport{State: stateUnreadable}
 	}

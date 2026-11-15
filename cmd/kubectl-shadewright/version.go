@@ -25,7 +25,8 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 // version is the plugin's version, stamped at build time with -ldflags "-X main.version=<version>" (make
@@ -50,7 +51,7 @@ var shadewrightCRDs = []string{
 // other than plugin, or "" when they agree or nothing can be compared: the plugin is a dev build, or no CRD
 // could be read (a viewer without get on customresourcedefinitions) or carries the label. It reads only the
 // CRDs' metadata, with get.
-func crdVersionWarning(ctx context.Context, c client.Reader, plugin string) string {
+func crdVersionWarning(ctx context.Context, c readclient.Reader, plugin string) string {
 	release := releaseVersion(plugin)
 	if release == "" {
 		return ""
@@ -59,7 +60,7 @@ func crdVersionWarning(ctx context.Context, c client.Reader, plugin string) stri
 	for _, name := range shadewrightCRDs {
 		m := &metav1.PartialObjectMetadata{}
 		m.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
-		if err := c.Get(ctx, client.ObjectKey{Name: name}, m); err != nil {
+		if err := c.Get(ctx, readclient.ObjectKey{Name: name}, m); err != nil {
 			continue
 		}
 		v := m.Labels[crdVersionLabel]

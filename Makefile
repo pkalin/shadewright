@@ -102,7 +102,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection and fuzz target and docs link check scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check and plugin dependency check scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
@@ -115,6 +115,7 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/require-on-main_test.sh
 	hack/fuzz-targets_test.sh
 	hack/docs-check_test.sh
+	hack/check-plugin-deps_test.sh
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
@@ -184,12 +185,16 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: lint
-lint: check-go-toolchain golangci-lint ## Run golangci-lint linter (and check the Go toolchain matches the Dockerfile builder)
+lint: check-go-toolchain check-plugin-deps golangci-lint ## Run golangci-lint linter (and check the Go toolchain matches the Dockerfile builder, and the plugin's dependencies and size)
 	"$(GOLANGCI_LINT)" run
 
 .PHONY: check-go-toolchain
 check-go-toolchain: ## Fail if go.mod's toolchain line differs from the Go release of the Dockerfile builder stage.
 	hack/check-go-toolchain.sh
+
+.PHONY: check-plugin-deps
+check-plugin-deps: ## Fail if kubectl-shadewright links the operator's server-side stack or outgrows its size ceiling.
+	hack/check-plugin-deps.sh
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes

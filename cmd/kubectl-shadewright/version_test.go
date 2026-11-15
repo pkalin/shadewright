@@ -24,8 +24,8 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 // testPluginVersion is the plugin version the CRD version tests compare against.
@@ -43,31 +43,28 @@ func testCRD(name, label string) *apiextensionsv1.CustomResourceDefinition {
 }
 
 func TestCRDVersionWarning(t *testing.T) {
-	s := testScheme(t)
-	if err := apiextensionsv1.AddToScheme(s); err != nil {
-		t.Fatal(err)
-	}
 	incidentsCRD, requestsCRD := shadewrightCRDs[0], shadewrightCRDs[1]
 	cases := map[string]struct {
-		objs   []client.Object
+		objs   []readclient.Object
 		plugin string
 		want   string
 	}{
-		"same version": {[]client.Object{testCRD(incidentsCRD, testRelease)}, testPluginVersion, ""},
-		"other version": {[]client.Object{testCRD(incidentsCRD, "0.1.0"), testCRD(requestsCRD, "0.1.0")}, "v0.2.0",
+		"same version": {[]readclient.Object{testCRD(incidentsCRD, testRelease)}, testPluginVersion, ""},
+		"other version": {[]readclient.Object{testCRD(incidentsCRD, "0.1.0"), testCRD(requestsCRD, "0.1.0")}, "v0.2.0",
 			"version 0.1.0 and this plugin is v0.2.0"},
-		"no label":           {[]client.Object{testCRD(incidentsCRD, "")}, testPluginVersion, ""},
+		"no label":           {[]readclient.Object{testCRD(incidentsCRD, "")}, testPluginVersion, ""},
 		"no CRD readable":    {nil, testPluginVersion, ""},
-		"dev build":          {[]client.Object{testCRD(incidentsCRD, "0.1.0")}, devVersion, ""},
-		"build past the tag": {[]client.Object{testCRD(incidentsCRD, testRelease)}, "v0.2.0-3-gabc1234-dirty", ""},
-		"dirty build":        {[]client.Object{testCRD(incidentsCRD, testRelease)}, "v0.2.0-dirty", ""},
-		"rc past the tag": {[]client.Object{testCRD(incidentsCRD, testRelease)}, "v0.3.0-rc.2-1-gce333cd",
+		"dev build":          {[]readclient.Object{testCRD(incidentsCRD, "0.1.0")}, devVersion, ""},
+		"build past the tag": {[]readclient.Object{testCRD(incidentsCRD, testRelease)}, "v0.2.0-3-gabc1234-dirty", ""},
+		"dirty build":        {[]readclient.Object{testCRD(incidentsCRD, testRelease)}, "v0.2.0-dirty", ""},
+		"rc past the tag": {[]readclient.Object{testCRD(incidentsCRD, testRelease)}, "v0.3.0-rc.2-1-gce333cd",
 			"version 0.2.0 and this plugin is v0.3.0-rc.2-1-gce333cd"},
-		"untagged SHA":     {[]client.Object{testCRD(incidentsCRD, "0.1.0")}, "ce333cd", ""},
-		"label is cleaned": {[]client.Object{testCRD(incidentsCRD, "0.1.0\x1b[2J")}, testPluginVersion, "version 0.1.0 and"},
+		"untagged SHA": {[]readclient.Object{testCRD(incidentsCRD, "0.1.0")}, "ce333cd", ""},
+		"label is cleaned": {[]readclient.Object{testCRD(incidentsCRD, "0.1.0\x1b[2J")}, testPluginVersion,
+			"version 0.1.0 and"},
 	}
 	for name, tc := range cases {
-		c := fake.NewClientBuilder().WithScheme(s).WithObjects(tc.objs...).Build()
+		c := fakeReader(t, tc.objs, nil)
 		got := crdVersionWarning(context.Background(), c, tc.plugin)
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) || strings.Contains(got, "\x1b") {
 			t.Errorf("%s: warning = %q, want it to hold %q", name, got, tc.want)

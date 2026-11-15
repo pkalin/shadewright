@@ -337,39 +337,31 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 	}
 }
 
-// Known leaks after a key name, kept by decision and documented in design 10.3 and threat model G4.4 (#585):
-// after a key name only the first token of a value goes, or the text between its quotes on one line. Taking
-// more needs a tokenizer per format (#708). The test fails when one no longer leaks,
-// so the list and the docs are updated with the change that closes it.
+// Known leaks after a key name, kept by decision and documented in design 10.3 and threat model G4.4 (#585,
+// #708): names the rules do not read (Unicode escapes, here-documents, short flags, one-word names), separators
+// they do not take, and values the extent rule does not reach. The test fails when one no longer leaks, so the
+// list and the docs are updated with the change that closes it.
 func TestKeyNameKnownLeaks(t *testing.T) {
 	k := leakKey()
 	for name, in := range map[string]string{
-		"unicode-escaped key":        `{"\u0070assword": "` + k + `"}`,
-		"unicode-escaped flag":       `["--\u0070assword", "` + k + `"]`,
-		"here-doc":                   "app login <<EOF\n" + k + "\nEOF",
-		"here-doc after stdin flag":  "docker login -u bob --password-stdin <<EOF\n" + k + "\nEOF",
-		"here-string":                `docker login -u bob --password-stdin <<< "` + k + `"`,
-		"short flag":                 "mysql -u root -p " + k,
-		"one-word name and a blank":  "vault write auth/x secret " + k,
-		"one-word token name":        "app set token " + k,
-		"blanks inside the argument": `args: ["--client-secret=horse battery ` + k + `"]`,
-		"flow sequence scalar":       "args: [--client-secret, horse battery " + k + ", --region]",
-		"block scalar":               "args:\n- --client-secret\n- |-\n  " + k + "\n- --region",
-		"anchor":                     "args:\n- --client-secret\n- &pw " + k,
-		"tag":                        "args:\n- --client-secret\n- !!str " + k,
-		"multi-line quoted scalar":   "--password \"horse\n" + k + "\" --region x",
-		"shell concatenated quotes":  `--client-secret="horse"'` + k + `' --region x`,
-		"command substitution":       "--password $(echo " + k + ") --region x",
-		"array value":                `{"password": ["horse", "` + k + `"], "u": "x"}`,
-		"object value":               `{"token": {"a": "horse", "b": "` + k + `"}, "u": "x"}`,
-		"escaped array value":        `{\"apiKey\":[\"horse\",\"` + k + `\"],\"u\":1}`,
-		"json comment":               "{\"password\": // rotated\n  \"" + k + "\"}",
+		"unicode-escaped key":       `{"\u0070assword": "` + k + `"}`,
+		"unicode-escaped flag":      `["--\u0070assword", "` + k + `"]`,
+		"here-doc":                  "app login <<EOF\n" + k + "\nEOF",
+		"here-doc after stdin flag": "docker login -u bob --password-stdin <<EOF\n" + k + "\nEOF",
+		"here-string":               `docker login -u bob --password-stdin <<< "` + k + `"`,
+		"short flag":                "mysql -u root -p " + k,
+		"one-word name and a blank": "vault write auth/x secret " + k,
+		"one-word token name":       "app set token " + k,
 		// The separator after a flag takes no JSON escape for whitespace ("\n"): such an escape is the start
 		// of the value.
 		"escaped json lines": `"args":"[\n  \"--client-secret\",\n  \"` + k + `\"\n]"`,
 		// Only a double quote escaped as JSON inside a string opens a quoted value: after "\'" the value is
 		// the quote and one token.
 		"escaped single quote": `--password \'horse battery ` + k + `\' --region x`,
+		// A plain item of a YAML block sequence after a flag item loses only its first token, as the same
+		// line form ("- hunter2abc --region west") is pinned by TestKeyNameRulesHoldAtTheirEdges; after an
+		// anchor or a tag the rest of the line goes (TestValueExtentAfterAKeyName).
+		"block sequence item with blanks": "args:\n- --client-secret\n- horse battery " + k + "\n- --region",
 		// An unquoted value ends at a quote, also one that belongs to the value.
 		"quote inside a value": "run --password ab'" + k + " --region x",
 		// After a compound name and a blank, only an opaque token goes.
@@ -593,11 +585,92 @@ func TestKeyNameRulesHoldAtTheirEdges(t *testing.T) {
 // own; and a double-quoted value goes on past a backslash before its line end, as in YAML.
 func TestKeyNameAcceptedOverRedaction(t *testing.T) {
 	for in, want := range map[string]string{
+		// An escaped array whose string ends before it closes: the enclosing string's quote ends the group.
+		`{"log":"{\"apiKey\":[\"abc\"","x":"]"}`:                             `{"log":"{\"apiKey\":***,"x":"]"}`,
+		`{"log":"{\"apiKey\":[\"abc","x":"\"]"}`:                             `{"log":"{\"apiKey\":***,"x":"\"]"}`,
 		"--password,client_secret 20261114T100000Z0 reason=FailedMount":      "--password,[credential] [credential] reason=FailedMount",
 		"--password \"abc\\\nreason=FailedMount node=worker\" --region west": "--password \"[REDACTED:credential]\" --region west",
 	} {
 		if got := String(in); got != want {
 			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
 		}
+	}
+}
+
+// Text after a value that TestValueExtentAfterAKeyName checks is kept.
+const (
+	listItemTail   = "\n- --region"
+	quotedItemTail = "\"\n- --region"
+	dquoteFlagTail = `" --region x`
+	squoteFlagTail = `' --region x`
+	jsonFieldTail  = `, "u": "x"}`
+)
+
+// The extent rule (#708): after a secret key name or flag, a value of more than one token goes whole, through
+// the end of its group (quotes over line ends, brackets, braces, "$(" with quotes inside), its YAML list or
+// flow item, its block scalar lines, or its quoted argument, with glued shell pieces, anchors, tags and JSON
+// comments before it; and what follows the value stays. Each input leaked on main and before this change.
+func TestValueExtentAfterAKeyName(t *testing.T) {
+	k := leakKey()
+	for in, kept := range map[string]string{
+		`args: ["--client-secret=horse battery ` + k + `"]`:                                 `"]`,
+		`{"args":"[\"--client-secret=horse battery ` + k + `\",\"--x\"]"}`:                  `\",\"--x\"]"}`,
+		`args: ['--client-secret=horse battery ` + k + `', '--x']`:                          `', '--x']`,
+		"args: [--client-secret, horse battery " + k + ", --region]":                        ", --region]",
+		"args: [--a, --client-secret, horse battery " + k + "]\nnext: x":                    "]\nnext: x",
+		"args:\n- --client-secret\n- |-\n  horse\n  battery " + k + "\n- --region":          listItemTail,
+		"args:\n  - --client-secret\n  - >\n    horse battery\n    " + k + "\n  - --region": "\n  - --region",
+		"args:\n- --client-secret\n- &pw horse battery " + k + "\n- --region":               listItemTail,
+		"args:\n- --client-secret\n- !!str horse battery " + k + "\n- --region":             listItemTail,
+		"args:\n- --password\n- &pw !!str \"horse\n  battery " + k + "\"\n- --region":       quotedItemTail,
+		"args:\n- --client-secret\n- &pw !!str " + k + "\n- --region":                       listItemTail,
+		"args: [--client-secret, !!str horse battery " + k + ", --region]":                  ", --region]",
+		"--password \"horse\nbattery " + k + "\" --region x":                                dquoteFlagTail,
+		"--password 'horse\nbattery ''" + k + "' --region x":                                squoteFlagTail,
+		"args:\n- --password\n- \"horse\n  battery " + k + "\"\n- --region":                 quotedItemTail,
+		`--client-secret="horse"'battery ` + k + `' --region x`:                             squoteFlagTail,
+		`--password "horse"'battery '` + k + ` --region x`:                                  flagAfter,
+		`PASSWORD="horse"battery'` + k + `' next=x`:                                         `' next=x`,
+		"--password $(echo horse battery " + k + ") --region x":                             flagAfter,
+		`--password "$(vault read -field=v "secret/horse battery ` + k + `")" --region x`:   dquoteFlagTail,
+		"--password `cat horse battery " + k + "` --region x":                               flagAfter,
+		"TOKEN=$(printf '%s' \"horse battery " + k + "\") next=x":                           " next=x",
+		`{"password": ["horse", "battery ` + k + `"], "u": "x"}`:                            jsonFieldTail,
+		`{"token": {"a": "horse", "b": {"c": "battery ` + k + `"}}, "u": "x"}`:              jsonFieldTail,
+		"{\"password\": [\n  \"horse\",\n  \"battery " + k + "\"\n],\n\"u\": \"x\"}":        ",\n\"u\": \"x\"}",
+		`{\"apiKey\":[\"horse\",\"battery ` + k + `\"],\"u\":1}`:                            `,\"u\":1}`,
+		`{\"apiKey\":{\"a\":[\"horse ]\",\"` + k + `\"]},\"u\":1}`:                          `,\"u\":1}`,
+		"{\"password\": // rotated\n  \"horse battery " + k + "\", \"u\": \"x\"}":           jsonFieldTail,
+		"{\"password\": /* old\n */ \"horse battery " + k + "\", \"u\": \"x\"}":             jsonFieldTail,
+	} {
+		checkRedacted(t, in, []string{k, k[:12], k[len(k)-12:], "battery"}, []string{kept})
+	}
+}
+
+// The bounds of the extent rule (#708): a group that does not close within maxValueExtent bytes, or that
+// meets a closer that does not match, gives no extent, and the value is the one it was before (one token, or
+// the text to its format's boundary), so a stray quote or bracket does not take the text after it. A flow
+// item is only a flag after "[" or ",", so "--password, --token" in prose loses only the next token.
+func TestValueExtentBounds(t *testing.T) {
+	far := strings.Repeat("x", maxValueExtent)
+	for in, want := range map[string]string{
+		"--password \"hunter2abc\n" + far + "\" --region x": "--password [REDACTED]\n" + far + "\" --region x",
+		"--password $(hunter2abc ] next --region x":         "--password [credential] ] next --region x",
+		`{"password": [abc, ` + far + `]}`:                  `{"password": ***, ` + far + `]}`,
+		"use --password, now --region west":                 "use --password, *** --region west",
+		// An escaped array whose string ends before it closes: the enclosing string's quote ends the group.
+		`{"log":"{\"apiKey\":[\"abc\"","x":"]"}`:                        `{"log":"{\"apiKey\":***,"x":"]"}`,
+		`{"log":"{\"apiKey\":[\"abc","x":"\"]"}`:                        `{"log":"{\"apiKey\":***,"x":"\"]"}`,
+		"--password,client_secret 20261114T100000Z0 reason=FailedMount": "--password,[credential] [credential] reason=FailedMount",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%.80q)\n got %.120q\nwant %.120q", in, got, want)
+		}
+	}
+	// A block scalar longer than the bound loses its first maxValueExtent bytes or so; the rest stays, a known
+	// leak documented in design 10.3.
+	long := "args:\n- --password\n- |\n" + strings.Repeat("  "+strings.Repeat("a", 60)+"\n", 2*maxValueExtent/62) + "  TAILSECRET\n"
+	if out := String(long); !strings.Contains(out, "TAILSECRET") || strings.Contains(out, "\n  aaaa") && strings.Index(out, "\n  aaaa") < 40 {
+		t.Errorf("block scalar past the bound:\nout: %.200q", out)
 	}
 }

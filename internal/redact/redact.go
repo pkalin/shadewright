@@ -65,10 +65,9 @@ limitations under the License.
 // before it whose parts read as words or acronyms (whole or in part, see base64Windows), a secret after a
 // one-word key name and a blank without a dash ("set secret x", which only the long-token rule judges,
 // because "kubectl get secret foo" has the same shape), after a single-letter flag ("-p x"), after a key or
-// flag name written with Unicode escapes, or in a here-document or here-string, the part of a value after a
-// key name past its first token or its quotes on one line (blanks inside an argument that holds the flag,
-// YAML flow, block, multi-line, anchored and tagged scalars, shell words of glued pieces and command
-// substitution, arrays and objects under a secret field, JSON comments), a value after a flag in
+// flag name written with Unicode escapes, or in a here-document or here-string, a plain YAML block sequence
+// item with blanks after a flag item, the part of a value after a key name past the bound of the extent rule
+// (maxValueExtent, extent.go), a value after a flag in
 // pretty-printed escaped JSON ("\",\n  \""), the part of an
 // unquoted value after a quote inside it, a value after a compound name and a blank that is no opaque token,
 // and a secret in a format no rule knows (TestKeyNameKnownLeaks).
@@ -1571,6 +1570,89 @@ func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
 			return pos + 1, end - 1
 		}
 	}
+	return plainValueSpan(s, pos, boundary, keyCol)
+}
+
+// extendedValueSpan is valueSpan with the extent rule (#708) for a key that is no bare short key: after JSON
+// comments in flow form the value that follows them goes with them; an array or object goes through its
+// closing bracket (ctx is the escape level of the key's quotes); a quoted value may run over line ends; and
+// in free text (boundaryWhitespace) a value is the whole shell word, glued quoted pieces and "$(" included.
+// Where the extent rule gives no extent, the value is valueSpan's.
+func extendedValueSpan(s string, pos, boundary, keyCol, ctx int) (int, int) {
+	if pos >= len(s) {
+		return pos, pos
+	}
+	if boundary == boundaryFlow {
+		if v := commentEnd(s, pos); v > pos {
+			_, end := extendedValueSpan(s, v, boundary, keyCol, ctx)
+			return pos, max(end, v)
+		}
+	}
+	if start, end, ok := bracketSpan(s, pos, ctx); ok {
+		return start, end
+	}
+	if escapeLevel(s, pos) == 0 && opensGroup(s, pos) {
+		if boundary == boundaryWhitespace {
+			if start, end, ok := quotedWordSpan(s, pos); ok {
+				return start, end
+			}
+		} else if c := s[pos]; c == '"' || c == '\'' {
+			if quotedEnd(s, pos) < 0 {
+				if end, ok := groupEnd(s, pos, extentLimit(s, pos), 0); ok {
+					return pos + 1, end - 1
+				}
+			}
+		}
+	}
+	return valueSpan(s, pos, boundary, keyCol)
+}
+
+// keyQuoteLevel returns the escape level of the quote that opens the key at pos ("\"password\"" is 1), or 0.
+func keyQuoteLevel(s string, pos int) int {
+	run := 0
+	for pos+run < len(s) && s[pos+run] == '\\' && run < 8 {
+		run++
+	}
+	if pos+run < len(s) && s[pos+run] == '"' {
+		return quoteLevel(run)
+	}
+	return 0
+}
+
+// argumentEnd returns, for "--name=value" in free text inside a quoted argument that opens right before the
+// flag ("[\"--client-secret=horse battery staple\"]", also escaped as JSON inside a string), the end of the value
+// at the quote that closes the argument, on the same line and within maxValueExtent bytes (#708): the
+// argument is one word to the program, blanks included. It returns 0 for any other key, or when the
+// value opens with a quote or the argument does not close.
+func argumentEnd(s string, m []int) int {
+	pos := m[1]
+	if s[m[2]] != '-' || strings.IndexByte(s[m[3]:pos], '=') < 0 || pos >= len(s) ||
+		s[pos] == '"' || s[pos] == '\'' || s[pos] == '\\' {
+		return 0
+	}
+	level, ok := enclosingQuote(s, m[2])
+	if !ok {
+		return 0
+	}
+	q := s[m[2]-1]
+	run := 0
+	for i := pos; i < extentLimit(s, pos); i++ {
+		switch c := s[i]; {
+		case c == '\n' || c == '\r':
+			return 0
+		case c == '\\':
+			run++
+			continue
+		case c == q && (q == '\'' || quoteLevel(run) <= level):
+			return i - run
+		}
+		run = 0
+	}
+	return 0
+}
+
+// plainValueSpan returns the unquoted value at pos by the boundary of its format (valueSpan).
+func plainValueSpan(s string, pos, boundary, keyCol int) (int, int) {
 	end := pos
 	switch boundary {
 	case boundaryWhitespace:
@@ -1643,7 +1725,8 @@ func isSpace(c byte) bool {
 // (commentOverBlock). A bare short key followed by a colon counts only with a value that looks like a
 // secret (bareShortColon); a quoted value may hold blanks (looksLikeQuotedSecret), and in flow form an
 // unquoted one is read only up to the text after its first blank (boundaryFlowWord). A refused value
-// leaves prevEnd where it was.
+// leaves prevEnd where it was. Any other key takes the union of valueSpan's value and the extent rule's
+// (extendedValueSpan, argumentEnd, #708), so the value is never shorter than valueSpan gives.
 func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd int) (int, int, bool) {
 	return func(s string, m []int, prevEnd int) (int, int, bool) {
 		if m[2] < prevEnd || keepReference(s, m) || sasRefused(s, m, !envName) {
@@ -1658,6 +1741,10 @@ func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd in
 			b = boundaryFlowWord
 		}
 		start, end := valueSpan(s, m[1], b, m[2]-m[0])
+		if !bare {
+			xs, xe := extendedValueSpan(s, m[1], b, m[2]-m[0], keyQuoteLevel(s, m[2]))
+			start, end = min(start, xs), max(end, xe, argumentEnd(s, m))
+		}
 		if bare {
 			if v := s[start:end]; start > m[1] && !looksLikeQuotedSecret(v) || start == m[1] && !looksLikeSecret(v) {
 				return 0, 0, false
@@ -1691,9 +1778,44 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	sep := s[m[3]:m[1]]
 	q := strings.TrimLeft(sep, `\`)
 	closed := q != "" && (q[0] == '"' || q[0] == '\'')
-	start, end := keyNameValue(s, m[1], m[0], closed)
+	start, end := flagExtent(s, m, closed)
 	// A value that lies inside the previous value is redacted already; one that runs past it is not.
 	return start, end, end > prevEnd
+}
+
+// flagExtent returns the value after the secret flag of m by the extent rule (#708): in a YAML block sequence
+// ("- --password" then "- |" on the next line) a block scalar is its indented lines; in a block or flow
+// sequence an anchor or tag before the value goes with it, and the value after them is the rest of its item
+// (the line, in a block sequence); in a flow sequence ("[--password, a b]") a plain
+// value runs to the end of its item; otherwise the value is keyNameValue's, a quoted or "$(" group with the
+// pieces glued to it included. closed is as in keyNameValue.
+func flagExtent(s string, m []int, closed bool) (int, int) {
+	sep := s[m[3]:m[1]]
+	pos := m[1]
+	list := strings.IndexByte(sep, '-') >= 0
+	flow := strings.IndexByte(sep, ',') >= 0 && inFlowSequence(s, m[0])
+	if list && isBlockHeader(s, pos) {
+		nl := m[3] + strings.LastIndexAny(sep, "\r\n") + 1
+		return listBlockScalarSpan(s, pos, strings.IndexByte(s[nl:pos], '-'))
+	}
+	if list || flow {
+		if v := nodeProperties(s, pos); v > pos {
+			_, end := keyNameValue(s, v, m[0], true, true)
+			switch {
+			case opensGroup(s, v):
+			case flow:
+				end = max(end, flowItemEnd(s, v))
+			default:
+				end = max(end, lineItemEnd(s, v))
+			}
+			return pos, end
+		}
+	}
+	start, end := keyNameValue(s, pos, m[0], closed, true)
+	if flow && start == pos && pos < len(s) && !opensGroup(s, pos) && s[pos] != '\\' {
+		end = max(end, flowItemEnd(s, pos))
+	}
+	return start, end
 }
 
 // compoundValueSpans is the spans function of the rule for a key name of two or more words, a blank and the
@@ -1736,7 +1858,7 @@ func compoundValueSpans(s string, m []int, prevEnd int, add func(start, end int)
 	if !named && !flag {
 		return prevEnd
 	}
-	start, end := keyNameValue(s, m[1], m[2], false)
+	start, end := keyNameValue(s, m[1], m[2], false, false)
 	if v := s[start:end]; named && opaqueToken(v) && (!spelled || !flagWord(v)) {
 		add(start, end)
 	}
@@ -1824,11 +1946,14 @@ func flagWord(v string) bool {
 // other value is one unquoted token (tokenEnd). A value never starts in the middle of a quoted string it did
 // not open: when a quote opens right before the name and the separator did not close it (closed is false),
 // the same quote at pos closes that string, and the value is empty. Each call reads forward from pos to the
-// end of its line at most, and back from keyStart over at most eight backslashes.
+// end of its line at most (maxValueExtent bytes with ext), and back from keyStart over at most eight
+// backslashes.
 //
-// Values with blanks that are not quoted, YAML block and flow scalars, shell words of glued pieces and arrays
-// or objects lose only their first token (TestKeyNameKnownLeaks): taking more needs a tokenizer per format.
-func keyNameValue(s string, pos, keyStart int, closed bool) (int, int) {
+// With ext (a flag's value, #708), a value that opens a quote, "$(" or a backtick is the whole shell word by
+// the extent rule (quotedWordSpan), over line ends and with glued pieces; when that group does not close
+// within maxValueExtent, the rules above apply. The compound rule passes no ext: an opaque token holds no
+// quote or blank, so a longer extent could not change what it redacts.
+func keyNameValue(s string, pos, keyStart int, closed, ext bool) (int, int) {
 	if pos >= len(s) {
 		return pos, pos
 	}
@@ -1836,6 +1961,11 @@ func keyNameValue(s string, pos, keyStart int, closed bool) (int, int) {
 	if !closed {
 		if enclosing, ok := enclosingQuote(s, keyStart); ok && enclosing == level && s[pos+1<<level-1] == s[keyStart-1] {
 			return pos, pos
+		}
+	}
+	if ext && level == 0 && opensGroup(s, pos) {
+		if start, end, ok := quotedWordSpan(s, pos); ok {
+			return start, end
 		}
 	}
 	if level > 0 {
@@ -1868,8 +1998,7 @@ func keyNameValue(s string, pos, keyStart int, closed bool) (int, int) {
 	return pos, tokenEnd(s, q+1)
 }
 
-// tokenEnd returns the end of the unquoted value that starts at pos, by the one extent rule of every
-// key-name form: the value ends at whitespace, the line end, or a quote character ("\"", "'", or one escaped
+// tokenEnd returns the end of the unquoted value that starts at pos, after a flag or a compound key name: the value ends at whitespace, the line end, or a quote character ("\"", "'", or one escaped
 // by backslashes), and at nothing else. So a key inside a JSON or logfmt string cannot take the fields after
 // it ("{\"msg\":\"ClientSecretCredential AuthenticationFailed\",\"reason\":\"x\"}" keeps "reason"), while ",",
 // "]" and "}" stay in the value ("[--password, abc, --x]" loses "abc,"), as one inside the value cannot be

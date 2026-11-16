@@ -244,8 +244,9 @@ spec:
                   properties:
                     began:
                       description: |-
-                        began is when the occurrence began: the event's creation time, the termination's finish time or the
-                        condition's last transition time. Absent when the cluster did not report one.
+                        began is when the occurrence began: the event's creation time, the termination's finish time, the
+                        condition's last transition time, or for a wait, which has no time from the cluster, when the analyzer
+                        first saw it, by its own clock. Absent when none is known.
                       format: date-time
                       type: string
                     id:
@@ -261,7 +262,7 @@ spec:
                     total:
                       description: |-
                         total is the highest total of the occurrence counted: the event's series count, or 1 for a
-                        termination or a condition.
+                        termination, a wait or a condition.
                       format: int64
                       maximum: 2147483647
                       minimum: 0
@@ -455,8 +456,9 @@ spec:
                   properties:
                     began:
                       description: |-
-                        began is when the occurrence began: the event's creation time, the termination's finish time or the
-                        condition's last transition time. Absent when the cluster did not report one.
+                        began is when the occurrence began: the event's creation time, the termination's finish time, the
+                        condition's last transition time, or for a wait, which has no time from the cluster, when the analyzer
+                        first saw it, by its own clock. Absent when none is known.
                       format: date-time
                       type: string
                     id:
@@ -472,7 +474,7 @@ spec:
                     total:
                       description: |-
                         total is the highest total of the occurrence counted: the event's series count, or 1 for a
-                        termination or a condition.
+                        termination, a wait or a condition.
                       format: int64
                       maximum: 2147483647
                       minimum: 0

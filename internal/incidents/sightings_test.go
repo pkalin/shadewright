@@ -548,7 +548,7 @@ func TestLastingWaitOpensOnItsRepeat(t *testing.T) {
 	t0 := time.Now().Truncate(time.Second)
 	clock := &fakeClock{now: t0}
 	r := start(t, ns, Config{Now: clock.Now})
-	first := sightingOf(1, 1, t0)
+	first := waitingOf(1, t0)
 	r.obs <- first
 	waitHeld(t, r, "the first report held", func() bool { return r.sightings.len() == 1 })
 	clock.set(t0.Add(RecurAfter))

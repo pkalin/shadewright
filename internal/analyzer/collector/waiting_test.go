@@ -23,17 +23,18 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 const reasonConfig = "CreateContainerConfigError"
 
-// waitingPod is the web pod whose app container waits with reason after restarts restarts, with a Handled
-// that has counted nothing, so a first report counts 1.
-func waitingPod(t *testing.T, reason string, restarts int32) (*harness, *corev1.Pod) {
+// waitingPod is the web pod whose app container waits with reason before any restart, with a Handled that
+// has counted nothing, so a first report counts 1.
+func waitingPod(t *testing.T, reason string) (*harness, *corev1.Pod) {
 	t.Helper()
 	d, rs, _ := workload()
 	pod := specPod()
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: containerApp, RestartCount: restarts,
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: containerApp,
 		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}}}}
 	none := func(context.Context, string, time.Time) (int64, bool, error) { return 0, false, nil }
 	return newHarness(t, Config{Handled: none}, d, rs, pod), pod
@@ -51,7 +52,7 @@ func waits(h *harness) map[string]waitState {
 // repeat of the same occurrence: Began is the collector's first sight of it, ObservedAt the read, and the
 // repeat counts nothing (ADR-0039 point 4, amended 2026-11-16).
 func TestLastingWaitIsReportedAgain(t *testing.T) {
-	h, pod := waitingPod(t, reasonConfig, 0)
+	h, pod := waitingPod(t, reasonConfig)
 	res := h.reconcilePod(pod.Name)
 	first := h.one()
 	if !first.Began.Equal(t0) || !first.ObservedAt.Equal(t0) || first.Count != 1 || first.MayRepeat {
@@ -84,7 +85,7 @@ func TestLastingWaitIsReportedAgain(t *testing.T) {
 // A wait shorter than SettleAfter is reported once and not again: the requeue keeps its delay and no pod
 // update shortens it.
 func TestShortWaitIsNotReportedAgain(t *testing.T) {
-	h, pod := waitingPod(t, reasonImagePull, 0)
+	h, pod := waitingPod(t, reasonImagePull)
 	h.reconcilePod(pod.Name)
 	if got := h.one(); !got.Began.Equal(t0) {
 		t.Fatalf("first report Began %v, want the collector's first sight %v", got.Began, t0)
@@ -109,7 +110,7 @@ func TestShortWaitIsNotReportedAgain(t *testing.T) {
 // The tracker keeps one first-seen time per waiting slot and drops it when the wait ends or its ID changes
 // (another reason, a restart), so a wait that comes back starts its own time, and when the pod is gone.
 func TestWaitStateIsDroppedOnChange(t *testing.T) {
-	h, pod := waitingPod(t, reasonConfig, 0)
+	h, pod := waitingPod(t, reasonConfig)
 	h.reconcilePod(pod.Name)
 	h.one()
 	if w := waits(h); len(w) != 1 {
@@ -174,5 +175,46 @@ func TestWaitDoesNotMoveTheEvictionBound(t *testing.T) {
 		later)
 	if len(got) != 1 || got[0].mayRepeat {
 		t.Fatalf("termination of another pod after the wait's pod was dropped: %+v, want one, not mayRepeat", got)
+	}
+}
+
+// A pod update that clears a wait passes the watch's predicate, so the reconcile drops the wait's slot and a
+// wait shown again starts its own time. Were the update dropped, a wait of 30 seconds shown again after a
+// pause would keep the first sight of the earlier wait as its Began and prove minutes of recurrence.
+func TestWaitClearedByAnUpdateStartsOver(t *testing.T) {
+	h, pod := waitingPod(t, reasonConfig)
+	pred := podPredicate()
+	// apply updates the pod and reconciles it when the watch's predicate lets the update through.
+	apply := func(state corev1.ContainerState) {
+		t.Helper()
+		old := pod.DeepCopy()
+		pod.Status.ContainerStatuses[0].State = state
+		h.update(pod)
+		if pred.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: pod.DeepCopy()}) {
+			h.reconcilePod(pod.Name)
+		}
+	}
+	if !pred.Create(event.CreateEvent{Object: pod}) {
+		t.Fatal("the predicate drops a waiting pod")
+	}
+	h.reconcilePod(pod.Name)
+	h.one()
+	h.clock.add(time.Minute)
+	apply(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}})
+	h.none()
+	h.clock.add(30 * time.Second)
+	back := h.clock.Now()
+	apply(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reasonConfig}})
+	h.none()
+	h.clock.add(SettleAfter)
+	h.reconcilePod(pod.Name)
+	if got := h.one(); !got.Began.Equal(back) {
+		t.Fatalf("repeat of the wait shown again: Began %v, want %v, when it was shown again", got.Began, back)
+	}
+	// An update with no symptom before or after is still filtered.
+	running := pod.DeepCopy()
+	running.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	if pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: running.DeepCopy()}) {
+		t.Error("the predicate lets through an update of a pod with no symptom before or after")
 	}
 }

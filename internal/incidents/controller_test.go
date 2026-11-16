@@ -948,6 +948,35 @@ func TestUnknownBeginIsNotAnsweredByTheDropMark(t *testing.T) {
 	}
 }
 
+// An event replayed after a restart, older than the drop mark, adds nothing to count. Its series spans
+// RecurAfter, but only a waiting cause reported again opens a first sighting held for its fingerprint with
+// nothing new to count: the replay leaves the sighting of another occurrence held.
+func TestReplayedEventDoesNotOpenAHeldSighting(t *testing.T) {
+	clock := &fakeClock{now: t0}
+	c, err := New(Config{Namespace: "x", Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.consume(t.Context(), sightingOf(1, 1, t0))
+	if !c.sightings.holds(fp(1)) {
+		t.Fatal("the first sighting is not held")
+	}
+	c.droppedThrough = t0.Add(-time.Minute)
+	replay := observation(1, 2, 3, 0, t0.Add(-2*time.Minute))
+	replay.MayRepeat, replay.ObservedAt = true, t0.Add(RecurAfter)
+	if !recurs(replay) {
+		t.Fatal("the replay does not span RecurAfter, so the test proves nothing")
+	}
+	clock.set(t0.Add(RecurAfter))
+	if due := c.consume(t.Context(), replay); due {
+		t.Error("the replay made a batch due")
+	}
+	if !c.sightings.holds(fp(1)) || len(c.pending) != 0 {
+		t.Fatalf("the replay opened the held sighting (held %v, %d pending batches), want it still held",
+			c.sightings.holds(fp(1)), len(c.pending))
+	}
+}
+
 // A slow status write does not stop the consumption of observations.
 func TestSlowWriteDoesNotBlockObservations(t *testing.T) {
 	ns := namespace(t)

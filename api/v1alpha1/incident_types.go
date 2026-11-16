@@ -124,14 +124,15 @@ type OccurrenceRecord struct {
 	ID string `json:"id"`
 
 	// total is the highest total of the occurrence counted: the event's series count, or 1 for a
-	// termination or a condition.
+	// termination, a wait or a condition.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=2147483647
 	// +required
 	Total int64 `json:"total"`
 
-	// began is when the occurrence began: the event's creation time, the termination's finish time or the
-	// condition's last transition time. Absent when the cluster did not report one.
+	// began is when the occurrence began: the event's creation time, the termination's finish time, the
+	// condition's last transition time, or for a wait, which has no time from the cluster, when the analyzer
+	// first saw it, by its own clock. Absent when none is known.
 	// +optional
 	Began *metav1.Time `json:"began,omitempty"`
 }

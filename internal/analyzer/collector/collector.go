@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -304,7 +305,7 @@ func (c *Collector) Observations() <-chan Observation {
 }
 
 // SetupWithManager registers the two watches: events.k8s.io/v1 Events of type Warning and Pods with a
-// terminated container or a waiting cause, and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. All read
+// terminated container or a waiting cause (and the update that clears one), and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. All read
 // through the manager's cache, which the analyzer restricts to the watched namespaces (analyzer.CacheOptions). Owners are read with the API reader, one object at a time with a
 // deadline, so no informer is started for ReplicaSets, Deployments or StatefulSets. There is deliberately no
 // watch on core/v1 Events: they are the same objects, and watching both would count each event twice.
@@ -322,13 +323,24 @@ func (c *Collector) SetupWithManager(mgr ctrl.Manager) error {
 	pr := &podReconciler{c: c, reader: mgr.GetClient()}
 	err = ctrl.NewControllerManagedBy(mgr).
 		Named("collector-pods").
-		For(&corev1.Pod{}, builder.WithPredicates(predicate.NewPredicateFuncs(hasPodSymptom))).
+		For(&corev1.Pod{}, builder.WithPredicates(podPredicate())).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(pr)
 	if err != nil {
 		return fmt.Errorf("setting up the pod collector: %w", err)
 	}
 	return c.setupSources(mgr)
+}
+
+// podPredicate lets through a pod that shows a symptom, and an update whose old or new pod shows one: an
+// update that clears a waiting cause or a termination reaches the reconcile, which drops the wait's slot, so a
+// wait shown again later starts its own time instead of keeping the first sight of the earlier one.
+func podPredicate() predicate.Funcs {
+	p := predicate.NewPredicateFuncs(hasPodSymptom)
+	p.UpdateFunc = func(e event.UpdateEvent) bool {
+		return hasPodSymptom(e.ObjectOld) || hasPodSymptom(e.ObjectNew)
+	}
+	return p
 }
 
 // started returns the time of the first reconcile.

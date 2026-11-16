@@ -37,9 +37,9 @@ const (
 
 // keySources are the ways to put the model API key file in the analyzer (ADR-0037 decision 3).
 var keySources = map[string][]string{
-	"secret": {"analyzer.analysis.anthropic.apiKey.secretName=model-key"},
+	"secret": {keySecret},
 	"secret, key": {
-		"analyzer.analysis.anthropic.apiKey.secretName=model-key",
+		keySecret,
 		"analyzer.analysis.anthropic.apiKey.secretKey=token",
 	},
 	"csi volume": {
@@ -191,7 +191,7 @@ func TestAnthropicKeyNeedsNoRBAC(t *testing.T) {
 func TestAnthropicKeyRefusals(t *testing.T) {
 	both := []string{
 		"analyzer.analysis.anthropic.apiKey.secretName=k",
-		"analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory",
+		memoryKey,
 	}
 	if out := helmFails(t, both...); !strings.Contains(out, "sets both secretName and volume") {
 		t.Errorf("both sources: %s", out)
@@ -205,7 +205,7 @@ func TestAnthropicKeyRefusals(t *testing.T) {
 	}
 	named := []string{
 		"analyzer.analysis.anthropic.apiKey.volume.name=x",
-		"analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory",
+		memoryKey,
 	}
 	if out := helmFails(t, named...); !strings.Contains(out, "may not set name") {
 		t.Errorf("a named volume: %s", out)
@@ -241,8 +241,116 @@ func TestAnthropicDeploymentNeedsAKeySource(t *testing.T) {
 		if err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.secretName=k"); err != "" {
 			t.Errorf("%s: with a Secret: %s", role, err)
 		}
-		if err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"); err != "" {
+		if err := helmTemplate(t, files, memoryKey); err != "" {
 			t.Errorf("%s: with a volume: %s", role, err)
 		}
+	}
+}
+
+// settingsFile writes a values file that renders RemediationSettings with the given models block (YAML lines
+// under spec.analysis.models, indented by six spaces) and returns it.
+func settingsFile(t *testing.T, models string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "settings.yaml")
+	body := "settings:\n  create: true\n  spec:\n    analysis:\n      models:\n" + models
+	if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// modelLine is one deployment of the models block of settingsFile.
+func modelLine(role, fields string) string { return "        " + role + ": {" + fields + "}\n" }
+
+const (
+	anthropicFields = "provider: Anthropic, endpoint: https://api.anthropic.com, deployment: claude-haiku-5-5"
+	foundryFields   = "endpoint: https://lab.services.ai.azure.com/, deployment: big, apiVersion: v1"
+	keySecret       = "analyzer.analysis.anthropic.apiKey.secretName=model-key"
+	claudeTriage    = "analyzer.analysis.triageModel=claude-haiku-5-5"
+	// memoryKey mounts the Anthropic API key from a volume the chart names itself.
+	memoryKey = "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"
+)
+
+// The chart checks only what it renders itself, never settings.spec (the RemediationSettings is created once
+// and an upgrade does not change it, so the values cannot tell what the cluster holds): with a triage model it
+// needs endpointSuffixes, the Anthropic API key, or both, and the analyzer's client ID exactly when suffixes
+// or a record store are set. The analyzer is the gate for the deployments (#814).
+func TestTriageModelNeedsSuffixesOrAKey(t *testing.T) {
+	const (
+		noSource   = "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes"
+		noClientID = "analyzer.analysis.endpointSuffixes needs analyzer.identity.azure.clientId"
+	)
+	files := []string{"-f", testValues(t)}
+
+	// Key only: renders with no Azure identity and no --model-endpoint-suffixes.
+	set := []string{keySecret, claudeTriage, "analyzer.analysis.escalationModel=claude-haiku-5-5"}
+	if err := helmTemplate(t, files, set...); err != "" {
+		t.Fatalf("key only: %s", err)
+	}
+	a := deployment(t, renderArgs(t, helmArgsWith(t, files, set...)), analyzerDeployment)
+	if _, ok := a.Spec.Template.Labels["azure.workload.identity/use"]; ok {
+		t.Error("key only: the analyzer Pod has the Azure workload identity label")
+	}
+	args := a.Spec.Template.Spec.Containers[0].Args
+	if slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, "--model-endpoint-suffixes") }) {
+		t.Errorf("key only: args %v hold --model-endpoint-suffixes", args)
+	}
+	for _, want := range []string{"--triage-model=claude-haiku-5-5", "--escalation-model=claude-haiku-5-5",
+		"--anthropic-api-key-file=" + anthropicMount + "/api-key"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("key only: args %v lack %s", args, want)
+		}
+	}
+
+	// A key from a volume counts as well.
+	if err := helmTemplate(t, files, claudeTriage, memoryKey); err != "" {
+		t.Errorf("key volume only: %s", err)
+	}
+
+	// Suffixes only: needs the client ID, then renders.
+	if err := helmTemplate(t, files, claudeTriage, labSuffix); !strings.Contains(err, noClientID) {
+		t.Errorf("suffixes without the client ID: %q", err)
+	}
+	if err := helmTemplate(t, files, claudeTriage, labSuffix, analyzerClientID); err != "" {
+		t.Errorf("suffixes with the client ID: %s", err)
+	}
+
+	// Both: needs the client ID, then renders.
+	if err := helmTemplate(t, files, keySecret, claudeTriage, labSuffix); !strings.Contains(err, noClientID) {
+		t.Errorf("both without the client ID: %q", err)
+	}
+	if err := helmTemplate(t, files, keySecret, claudeTriage, labSuffix, analyzerClientID); err != "" {
+		t.Errorf("both with the client ID: %s", err)
+	}
+
+	// Neither: the message names both.
+	err := helmTemplate(t, files, claudeTriage)
+	if !strings.Contains(err, noSource) || !strings.Contains(err, "analyzer.analysis.anthropic.apiKey") {
+		t.Errorf("neither suffixes nor key: %q", err)
+	}
+
+	// A record store is written with the workload identity, so it needs the client ID even with a key only.
+	withStore := append(slices.Clone(set), "analyzer.analysis.recordStore.azureBlob.account=stswanabc",
+		"analyzer.analysis.recordStore.azureBlob.container=records")
+	if err := helmTemplate(t, files, withStore...); !strings.Contains(err,
+		"recordStore.azureBlob.account needs analyzer.identity.azure.clientId") {
+		t.Errorf("a record store without the client ID: %q", err)
+	}
+	if err := helmTemplate(t, files, append(withStore, analyzerClientID)...); err != "" {
+		t.Errorf("a record store with the client ID: %s", err)
+	}
+}
+
+// settings.spec naming a Foundry deployment does not fail the render when only the key is set: the chart cannot
+// know what the cluster holds, and the analyzer refuses the Foundry deployment (ProviderNotConfigured) (#814).
+func TestSettingsSpecDoesNotChangeTheChartChecks(t *testing.T) {
+	foundrySettings := settingsFile(t, modelLine("triage", "provider: Foundry, "+foundryFields))
+	foundry := []string{"-f", testValues(t), "-f", foundrySettings}
+	if err := helmTemplate(t, foundry, keySecret, claudeTriage); err != "" {
+		t.Errorf("Foundry in settings.spec, only the key set: %s", err)
+	}
+	anthropic := []string{"-f", testValues(t), "-f", settingsFile(t, modelLine("triage", anthropicFields))}
+	if err := helmTemplate(t, anthropic, claudeTriage); !strings.Contains(err, "analyzer.analysis.triageModel needs") {
+		t.Errorf("Anthropic in settings.spec, neither suffixes nor key: %q", err)
 	}
 }

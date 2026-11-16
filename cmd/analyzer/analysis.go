@@ -74,8 +74,9 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 		"The model ID and version the triage deployment of RemediationSettings serves, as its replies name it, "+
 			"such as gpt-5.4-mini-2026-03-17. A reply that names another model is refused (ADR-0023). Empty (the "+
 			"default) starts no analysis: no model is called, no Azure token is requested, and the analyzer behaves "+
-			"as without a model. Set, the analyzer needs its Azure workload identity (AZURE_CLIENT_ID, "+
-			"AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE) or it refuses to start.")
+			"as without a model. Set, it needs --model-endpoint-suffixes (Foundry), --anthropic-api-key-file "+
+			"(Anthropic) or both. With --model-endpoint-suffixes the analyzer needs its Azure workload identity "+
+			"(AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE) or it refuses to start.")
 	fs.StringVar(&f.escalationModel, "escalation-model", "",
 		"The model ID and version the escalation deployment serves, as its replies name it. Empty (the default): "+
 			"escalation is not configured, whatever RemediationSettings names, and an escalation signal hands the "+
@@ -83,9 +84,10 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&f.endpointSuffixes, "model-endpoint-suffixes", "",
 		"Comma-separated host suffixes a model endpoint in RemediationSettings must end with or, without the "+
 			"leading dot, equal, each a dot and two or more DNS labels, such as .<resource>.services.ai.azure.com "+
-			"for one resource. Required with --triage-model: there is no default, so no Azure AI host is allowed "+
-			"unless named. An endpoint outside them, or on a port other than 443, is refused before any token is "+
-			"requested (EndpointNotAllowed).")
+			"for one resource. There is no default, so no Azure AI host is allowed unless named. An endpoint outside "+
+			"them, or on a port other than 443, is refused before any token is requested (EndpointNotAllowed). "+
+			"Empty: no Azure token source is built and every Foundry deployment is refused (ProviderNotConfigured), "+
+			"for an analyzer that only calls the Anthropic API; then --anthropic-api-key-file is required.")
 	fs.StringVar(&f.anthropicKeyFile, "anthropic-api-key-file", "",
 		"The path of a file that holds the Anthropic API key, mounted read-only from a Secret or a CSI volume "+
 			"the cluster operator provides (ADR-0037). It is read at every call, so a rotated key needs no restart; "+
@@ -177,8 +179,8 @@ func checkPolicyReads(cfg incidentcontext.Config) error {
 
 // buildAnalysis returns the analysis controller, or nil when --triage-model is empty: then no model is
 // called, no token source is created and the analyzer runs as without a model. Set, every analysis flag is
-// checked and the workload identity read (newTokens) before anything starts, so a wrong value stops the
-// start instead of failing each analysis.
+// checked and, with --model-endpoint-suffixes only, the workload identity read (newTokens) before anything
+// starts, so a wrong value stops the start instead of failing each analysis.
 func buildAnalysis(f analysisFlags, d analysisDeps,
 	newTokens func() (foundry.TokenSource, error)) (*analysis.Controller, error) {
 	if f.triageModel == "" {
@@ -204,8 +206,9 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if err != nil {
 		return nil, fmt.Errorf("invalid --escalation-model: %w", err)
 	}
-	if f.endpointSuffixes == "" {
-		return nil, errors.New("--triage-model needs --model-endpoint-suffixes: no model endpoint host is allowed by default")
+	if f.endpointSuffixes == "" && f.anthropicKeyFile == "" {
+		return nil, errors.New("--triage-model needs --model-endpoint-suffixes (a Foundry deployment) or " +
+			"--anthropic-api-key-file (an Anthropic deployment): no model endpoint host is allowed by default")
 	}
 	if k := f.anthropicKeyFile; k != "" && (!filepath.IsAbs(k) || filepath.Clean(k) != k) {
 		return nil, errors.New("--anthropic-api-key-file must be an absolute, clean path")
@@ -213,17 +216,22 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if f.claimTimeout <= 0 {
 		return nil, errors.New("the analysis needs the Incident trigger's analysis timeout")
 	}
-	suffixes, err := models.ParseEndpointSuffixes(f.endpointSuffixes)
-	if err != nil {
-		return nil, fmt.Errorf("invalid --model-endpoint-suffixes: %w", err)
-	}
 	policies, err := models.ParseActionPolicies(f.actionPolicies)
 	if err != nil {
 		return nil, fmt.Errorf("invalid --action-policies: %w", err)
 	}
-	tokens, err := newTokens()
-	if err != nil {
-		return nil, fmt.Errorf("the analyzer's Azure workload identity: %w", err)
+	// Without --model-endpoint-suffixes no Foundry deployment can be called, so the workload identity is not
+	// read and no Azure token source exists: an Anthropic-only analyzer needs no Azure settings (#814). The
+	// factory refuses a Foundry deployment then (ProviderNotConfigured).
+	var suffixes []string
+	var tokens foundry.TokenSource
+	if f.endpointSuffixes != "" {
+		if suffixes, err = models.ParseEndpointSuffixes(f.endpointSuffixes); err != nil {
+			return nil, fmt.Errorf("invalid --model-endpoint-suffixes: %w", err)
+		}
+		if tokens, err = newTokens(); err != nil {
+			return nil, fmt.Errorf("the analyzer's Azure workload identity, needed with --model-endpoint-suffixes: %w", err)
+		}
 	}
 	expected := map[analysis.Role]string{analysis.RoleTriage: triage}
 	if escalation != "" {

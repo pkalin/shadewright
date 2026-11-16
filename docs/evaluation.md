@@ -27,7 +27,8 @@ For each scenario in `test/eval/testdata/scenarios/`, the harness:
    for `AdjustKedaMaxReplicas`), so the context holds the policy bounds block
    ([design 3.3](design/3-observation-and-deduplication.md#the-context-builder)). In CI the model is a fake that answers with the scenario's recorded replies, in order; on
    demand it is the Foundry deployment the run names.
-3. Scores the outcome and the diagnosis against the scenario's `expected.yaml`.
+3. Scores the outcome and the diagnosis against the scenario's `expected.yaml`, and the read tool calls against the
+   reads its `rubric.yaml` expects.
 
 The harness only reads the outcome the loop returned and the reply it accepted. It runs no executor and no Git
 write, and nothing it computes authorizes anything (invariant 1): it runs the policy's preflight checks only to score
@@ -73,7 +74,39 @@ Report schema version 3 changed what a diagnosis fact means (`anyOf` and `subjec
 version are not comparable with it: the same replies score higher under version 3 (the 45 runs of the real-model
 run of 2026-11-09 went from 30 to 36 passed).
 
-A scenario run passes when both parts pass. The run passes when the share of passing scenario runs reaches the
+**Reads.** A rubric may list the tool reads the model is expected to make, in `reads`
+([#505](https://github.com/pkalin/shadewright/issues/505)). Each expected read passes when the loop ran at least
+one call that matches it and the tool accepted the call; it fails otherwise, and so does the scenario run. A
+read the rubric does not list is counted (`extra`), never failed, and a call that read nothing, refused by the loop
+or the tool, is counted apart (`refused`). Tools are offered only on escalation, so a scenario that expects reads
+needs the escalation model.
+
+```yaml
+reads:
+  - read: get_resource Deployment/web
+```
+
+An expected read is the tool's name, then what the call must say, separated by spaces:
+
+| Form | Example | Matches a call of the tool |
+| --- | --- | --- |
+| `<tool>` | `read: list_events` | with any arguments |
+| `<tool> <Kind>/<name>` | `read: get_resource Deployment/web` | whose `kind` is `Deployment` and `name` is `web`, in any namespace |
+| `<tool> <argument>=<value> ...` | `read: query_metrics template=container_memory_working_set_bytes window_minutes=60` | whose named arguments have these values; arguments left out may have any value |
+
+The `Kind/name` form comes right after the tool and can be followed by arguments
+(`read: get_resource Deployment/web namespace=demo`). It applies only to a tool with `kind` and `name` arguments
+(`get_resource`, `list_events`, `check_missing_reference`). Values are compared exactly, case included; a value has
+no spaces and may hold `=` and `/` (`path=apps/web/values.yaml`). The harness refuses a rubric whose read
+names a tool the scenario is not offered (the tools of an evaluation run without `get_delivery_status`, and
+`query_metrics` only with a `metrics.yaml`; tools whose source the run lacks, such as `get_pod_logs`, are not
+offered), an argument the tool's schema does not have, a value outside the argument's enum (`get_resource
+Service/web`: `get_resource` reads only Pods, Deployments, StatefulSets and ReplicaSets), a boolean other than
+`true` or `false`, an integer that is not a whole number, an argument given twice, and a read listed twice. Its
+error names the read and what is wrong. The parser and its generated tests are in `test/eval/reads_test.go` and
+`test/eval/reads_corpus_test.go`.
+
+A scenario run passes when all three parts pass. The run passes when the share of passing scenario runs reaches the
 threshold (`EVAL_MIN_PASS_RATE`, 1 by default; CI always uses 1).
 
 ## Run it
@@ -214,7 +247,8 @@ The switch lives only in the test package (`test/eval`, a wrapper around the con
 no flag, setting or code path that reaches it, and model output still never triggers an escalation. The
 manifest records it (`forcedEscalation`), so a forced run has its own digest and is never mistaken for a run of
 the deployment as configured, and the Markdown summary says so. Compare candidates on the per-role tokens and
-cost (`tokens.byRole`, `costUSDByRole`) with `EVAL_ESCALATION_PRICE_*` set to each candidate's prices.
+cost (`tokens.byRole`, `costUSDByRole`) with `EVAL_ESCALATION_PRICE_*` set to each candidate's prices, and on
+what a pass costs (`costPerPassedRunUSD`): a cheap candidate that fails more often can cost more per passed run.
 
 ## The scenario files
 
@@ -223,7 +257,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | File | Content |
 | --- | --- |
 | `expected.yaml` | The scenario's expectation, copied unchanged from `pkalin/shadewright-fleet` at the commit `source.yaml` names (schema `scenarios.shadewright.io/v1alpha1`, owned by the fleet repository) |
-| `rubric.yaml` | How each fact of `expected.yaml` is scored (above) |
+| `rubric.yaml` | How each fact of `expected.yaml` is scored, and the reads the model is expected to make (above) |
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events, and the KEDA ScaledObject of `broken-keda-trigger` and `keda-at-ceiling` (spec from the fleet's scenario file, synthetic status; decoded as unstructured JSON, as the analyzer reads it) |
 | `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom`, `statefulset-oom` and `keda-at-ceiling` have one (and the `oom/rollout` variant, below) |
@@ -289,20 +323,23 @@ fix any rubric the harness then refuses.
 
 ## The report
 
-`report.json` (schema version 3) and `report.md`, the same content for a person. The JSON fields:
+`report.json` (schema version 4) and `report.md`, the same content for a person. A report of another schema
+version is not read as this one: the harness's reader (`readReport`) refuses it with both versions named, and a
+field the version does not know. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 3; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable |
+| `schemaVersion` | 4; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD` |
 | `mode` | `fake` (recorded replies), `foundry` or `anthropic` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
-| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reply` and `error` (set when the run could not start; it fails) |
-| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out) |
+| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole` and `costIncomplete` (as in `totals`, for this run), `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |
+| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out), with `calls`, the model calls of the role, failed ones included. Each role is one deployment, named with its model in the manifest's `models`, so these are the counts per model |
+| `scenarios[].reads` | `pass` (every expected read made; true when the rubric expects none), `expected[]` (`read` as the rubric wrote it, `pass`), `extra` (accepted calls no expected read matches) and `refused` (calls that read nothing: refused by the loop or the tool, or stopped by the deadline) ([Scoring](#scoring)) |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |
 | `scenarios[].reply` | Only for a run whose last reply decoded as a result, whether the loop then accepted it or refused it (`NoEvidence`) ([#600](https://github.com/pkalin/shadewright/issues/600)): the model's `summary`, `hypotheses` (their descriptions) and `evidence[]` (`source`, `quote`), so a missed fact can be traced to what the model wrote. Redacted as the analyzer redacts the result's text (built-in rules, the Incident's name kept) and capped: the summary at 1024 bytes, each hypothesis, source and quote at 512, at most 10 hypotheses and 10 quotes (the result's own bounds, so a decoded reply is kept whole today); a cut field ends with ` [truncated]` and `truncated` is then true. In `report.json` only, not in the Markdown |
-| `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), and `costIncomplete` when calls with unknown usage are left out of the estimate, which is then a lower bound (the Markdown summary says so; compare `charged`) |
+| `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `toolCalls`, `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), `incompleteRuns` (runs with a call of unknown usage or that stopped with an error), `costIncomplete` when there is any, so the estimate is a lower bound (the Markdown summary says so; compare `charged`), and `costPerPassedRunUSD`, the cost of every run, failed ones included, over the passed runs: left out without prices or when no run passed (the Markdown says "none, no run passed", never 0), and a lower bound when `costIncomplete` is set. A failed call is never priced as zero: it counts in `usageUnknownCalls` and makes the cost incomplete. The exception is a call the adapter marks as refused before processing (a Foundry 429), which was not billed and has a known usage of 0 (#725) |
 
 The report holds no prompt, no token and no endpoint, and no model text beyond the redacted, capped `reply`.
 

@@ -222,7 +222,7 @@ func TestReportCostByRole(t *testing.T) {
 		t.Errorf("cost %v, by role %v", r.Totals.CostUSD, r.Totals.CostUSDByRole)
 	}
 	md := r.markdown()
-	for _, want := range []string{"Escalation forced", "  - escalation: input 2000", "estimated cost USD 0.0320",
+	for _, want := range []string{"Escalation forced", "  - escalation: calls 0, input 2000", "estimated cost USD 0.0320",
 		"| Escalated |", "| yes |"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("the markdown lacks %q:\n%s", want, md)

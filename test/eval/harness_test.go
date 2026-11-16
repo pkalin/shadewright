@@ -87,12 +87,16 @@ type tally struct {
 	usage map[analysis.Role]*roleUsage
 	// last is the content of the last reply that had any, the one the loop's outcome rests on.
 	last string
+	// reads are the read tool calls the loop ran, in order (recordedTools).
+	reads []readCall
 }
 
 // roleUsage is what the calls of one role returned.
 type roleUsage struct {
 	usage        providers.Usage
 	usageUnknown int
+	// calls counts every call of the role, failed ones too.
+	calls int
 }
 
 // recorded wraps the provider of one role and counts its replies in a tally. It only reads what the provider
@@ -115,6 +119,7 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 		u = &roleUsage{}
 		r.t.usage[r.role] = u
 	}
+	u.calls++
 	u.usage.InputTokens += c.Usage.InputTokens
 	u.usage.CachedInputTokens += c.Usage.CachedInputTokens
 	u.usage.OutputTokens += c.Usage.OutputTokens
@@ -220,7 +225,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	t := &tally{}
 	a, err := analysis.New(analysis.Config{
-		Builder: cb, Tools: set, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
+		Builder: cb, Tools: recordedTools{inner: set, t: t}, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
 		Redactor: redactor, Now: now,
 		Models: func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
 			p, err := factory(role, d)
@@ -237,9 +242,21 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	limits := analysis.Limits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens}
 	limits.Triage, limits.Escalation = models.deployments()
-	out, err := a.Analyze(ctx, s.incident.DeepCopy(), limits)
-	if err != nil {
-		return res, fmt.Errorf("the analysis stopped: %w", err)
+	out, aerr := a.Analyze(ctx, s.incident.DeepCopy(), limits)
+	// The tokens are kept before any error, so a run that stops after its calls still reports what they used
+	// (and is marked incomplete in the report).
+	t.mu.Lock()
+	res.Tokens = tokens{Charged: out.Tokens}
+	for role, u := range t.usage {
+		rt := roleTokens{Calls: u.calls, Input: u.usage.InputTokens, CachedInput: u.usage.CachedInputTokens,
+			Output: u.usage.OutputTokens, UsageUnknownCalls: u.usageUnknown}
+		res.Tokens.addRole(string(role), rt)
+	}
+	last := t.last
+	calls := slices.Clone(t.reads)
+	t.mu.Unlock()
+	if aerr != nil {
+		return res, fmt.Errorf("the analysis stopped: %w", aerr)
 	}
 	if done != nil {
 		if err := done(); err != nil {
@@ -248,15 +265,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	res.Reason, res.Escalated, res.Calls, res.ToolCalls = string(out.Reason), out.Escalated, out.Calls, out.ToolCalls
 	res.Models = out.Models
-	t.mu.Lock()
-	res.Tokens = tokens{Charged: out.Tokens}
-	for role, u := range t.usage {
-		rt := roleTokens{Input: u.usage.InputTokens, CachedInput: u.usage.CachedInputTokens,
-			Output: u.usage.OutputTokens, UsageUnknownCalls: u.usageUnknown}
-		res.Tokens.addRole(string(role), rt)
-	}
-	last := t.last
-	t.mu.Unlock()
+	res.Reads = scoreReads(s.reads, calls, out.ToolCalls)
 	res.Outcome = scoreOutcome(s, out)
 	for _, q := range out.QuoteFailures {
 		res.QuoteFailures = append(res.QuoteFailures, quoteFailure{Source: q.Source, Block: q.Block, Class: string(q.Class),
@@ -271,7 +280,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		// Redacted as the analyzer redacts the result's text for its logs and record, keeping the Incident's name.
 		res.Reply = replyOf(accepted, func(t string) string { return redactor.StringKeeping(t, s.incident.Name) })
 	}
-	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass
+	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass && res.Reads.Pass
 	return res, nil
 }
 

@@ -28,7 +28,8 @@ limitations under the License.
 // (a refusal is no plan and a reason that the result itself gave, NoProposal or MissingData; a pull request
 // is a plan of the expected action type with a desired value inside the expected bounds, which the scenario's
 // policy does not refuse by the checks of policy.Preflight) and the diagnosis
-// (each scored fact's terms in the result's summary, hypotheses and evidence quotes).
+// (each scored fact's terms in the result's summary, hypotheses and evidence quotes), and the read tool calls the
+// loop ran against the reads the rubric expects (reads_test.go).
 //
 // The harness only reads the outcome the loop returned and the reply the loop accepted: nothing it computes
 // authorizes anything (invariant 1), and it runs no executor and no Git write. It runs the policy's

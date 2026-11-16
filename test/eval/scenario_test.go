@@ -113,6 +113,9 @@ const (
 // at all, with the reason.
 type rubric struct {
 	Facts []rubricFact `json:"facts"`
+	// Reads are the tool reads the model is expected to make (#505, reads_test.go); a read it makes that is not
+	// listed is counted, not failed.
+	Reads []rubricRead `json:"reads,omitempty"`
 }
 
 // rubricFact scores one fact. It passes when every term of All, at least one of Any (when Any is set), and
@@ -181,6 +184,8 @@ type scenario struct {
 	// policies are the RemediationPolicies of the scenario's cluster (policy.yaml, #493): the context builder
 	// shows their bounds, and a proposal they refuse fails the scenario.
 	policies []*remediationv1alpha1.RemediationPolicy
+	// reads are the rubric's expected reads, parsed against the tools the scenario is offered (checkReads).
+	reads []readRule
 }
 
 // policyFile holds a scenario's RemediationPolicies. Every scenario has one; a variant without its own takes
@@ -309,6 +314,9 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 	if err := s.loadMetrics(dir); err != nil {
 		return nil, err
 	}
+	if err := s.checkReads(); err != nil {
+		return nil, err
+	}
 	if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
 		return nil, err
 	}
@@ -370,6 +378,9 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 		return nil, err
 	}
 	if err := s.loadMetrics(dir); err != nil {
+		return nil, err
+	}
+	if err := s.checkReads(); err != nil {
 		return nil, err
 	}
 	var err error

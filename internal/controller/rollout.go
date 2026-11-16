@@ -44,7 +44,7 @@ import (
 
 // The check after the merge (#532, design 6 and 7.3): once a request is Merged, the executor asks the delivery
 // verifier whether the Flux Kustomization that applies the target reports the merge commit (or a later commit of
-// the target branch that holds it) applied, records the time it first sees that (status.pullRequest
+// the branch it was merged into that holds it, deliveryBranch) applied, records the time it first sees that (status.pullRequest
 // .appliedObservedAt, set once), and then reads the target's rollout status and sets the RolledOut condition:
 // True when every pod runs the applied template, False with reason RolloutStuck when the rollout did not
 // complete within the deadline measured from that time, with one core Event.
@@ -498,7 +498,7 @@ func (r *RemediationRequestReconciler) deliveryNotObserved(ctx context.Context,
 	return r.endRollout(ctx, rr, now, metav1.ConditionFalse, rollout.ReasonDeliveryNotObserved, fmt.Sprintf(
 		"The rollout was not checked: %s was not seen applying merge commit %s, or a later commit of branch %s "+
 			"that holds it, within %s of the merge. Check the GitOps controller", unit,
-		rr.Status.PullRequest.MergeCommitSHA, rr.Status.Source.TargetBranch, deliveryWindow), corev1.EventTypeWarning)
+		rr.Status.PullRequest.MergeCommitSHA, deliveryBranch(rr), deliveryWindow), corev1.EventTypeWarning)
 }
 
 // kustomizationOf returns the Kustomization the target's Flux labels name, when both are valid object names.
@@ -579,11 +579,22 @@ type deliveryQuery struct {
 	ancestry       providers.AncestryChecker
 }
 
-// legacyQuery is the question of a request merged before receipts existed: its recorded merge commit and target
-// branch, and the plan's repository opened through the live settings.
+// legacyQuery is the question of a Merged request checked without --verify-outcomes, or merged before receipts
+// existed: its recorded merge commit, the branch it was merged into (deliveryBranch), and the plan's repository
+// opened through the live settings.
 func (r *RemediationRequestReconciler) legacyQuery(rr *remediationv1alpha1.RemediationRequest) deliveryQuery {
-	return deliveryQuery{commit: rr.Status.PullRequest.MergeCommitSHA, branch: string(rr.Status.Source.TargetBranch),
+	return deliveryQuery{commit: rr.Status.PullRequest.MergeCommitSHA, branch: string(deliveryBranch(rr)),
 		ancestry: planAncestry{r: r, rr: rr}}
+}
+
+// deliveryBranch is the branch the request's pull request was merged into: the merge receipt's when there is one
+// (after a retarget it names the target branch the settings name now, #771), and otherwise the plan's target
+// branch, as for a request merged before receipts existed.
+func deliveryBranch(rr *remediationv1alpha1.RemediationRequest) remediationv1alpha1.GitBranch {
+	if mr := rr.Status.MergeReceipt; mr != nil && mr.TargetBranch != "" {
+		return mr.TargetBranch
+	}
+	return rr.Status.Source.TargetBranch
 }
 
 // delivered reports whether the Flux Kustomization named by the target's labels applied the merge commit, or a

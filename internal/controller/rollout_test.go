@@ -111,7 +111,13 @@ func (r *rolloutReader) Get(ctx context.Context, key client.ObjectKey, obj clien
 // from the main branch.
 func kustomizationApplied(t *testing.T, commit string) *unstructured.Unstructured {
 	t.Helper()
-	rev := mainBranch + "@sha1:" + commit
+	return kustomizationAppliedFrom(t, mainBranch, commit)
+}
+
+// kustomizationAppliedFrom is kustomizationApplied for a commit of branch.
+func kustomizationAppliedFrom(t *testing.T, branch, commit string) *unstructured.Unstructured {
+	t.Helper()
+	rev := branch + "@sha1:" + commit
 	u := &unstructured.Unstructured{}
 	if err := u.UnmarshalJSON([]byte(`{
   "apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
@@ -427,6 +433,74 @@ func TestRolloutDeliveryNotObservedIsReported(t *testing.T) {
 	}
 	if reads != 0 || len(w.events()) != 0 {
 		t.Fatalf("%d reads and more Events after the report", reads)
+	}
+}
+
+// withReceipt records a merge receipt for the world's merge into branch, as the executor writes one at the merge.
+func (w *rolloutWorld) withReceipt(t *testing.T, branch remediationv1alpha1.GitBranch) {
+	t.Helper()
+	rr := w.request(t)
+	rr.Status.MergeReceipt = &remediationv1alpha1.MergeReceipt{Repository: *rr.Status.PlanRepository,
+		TargetBranch: branch, PullRequest: rr.Status.PullRequest.Number, HeadSHA: rr.Status.PullRequest.HeadSHA,
+		MergeCommitSHA: w.merge, MergedAt: metav1.NewMicroTime(w.merged)}
+	if err := w.c.Status().Update(t.Context(), rr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #771: a pull request moved to the target branch the settings name now and merged there has a receipt naming that
+// branch. Without --verify-outcomes the delivery check asks about the receipt's branch, not the plan's: Flux
+// applying the merge commit from release counts, and a delivery not seen names release.
+func TestRolloutDeliveryFollowsTheMergeReceiptBranch(t *testing.T) {
+	const release = "release"
+	t.Run("applied from the receipt's branch", func(t *testing.T) {
+		w := newRolloutWorld(t, completeStatefulSet())
+		w.withReceipt(t, release)
+		w.reader.ks = kustomizationAppliedFrom(t, release, w.merge)
+		if _, err := w.reconcile(t, t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		rr := w.request(t)
+		if rr.Status.PullRequest.AppliedObservedAt == nil ||
+			!meta.IsStatusConditionTrue(rr.Status.Conditions, rollout.ConditionRolledOut) {
+			t.Fatalf("the merge commit applied from %s was not counted: %+v", release, rr.Status)
+		}
+	})
+	t.Run("not observed names the receipt's branch", func(t *testing.T) {
+		w := newRolloutWorld(t, stuckStatefulSet())
+		w.withReceipt(t, release)
+		w.reader.ks = kustomizationAppliedFrom(t, release, w.base)
+		w.now = w.merged.Add(deliveryWindow + time.Second)
+		if _, err := w.reconcile(t, t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		c := meta.FindStatusCondition(w.request(t).Status.Conditions, rollout.ConditionRolledOut)
+		if c == nil || c.Reason != rollout.ReasonDeliveryNotObserved || !strings.Contains(c.Message, "branch "+release) {
+			t.Fatalf("RolledOut = %+v, want DeliveryNotObserved naming branch %s", c, release)
+		}
+	})
+	// A request merged into the plan's branch, with or without a receipt, asks about that branch as before.
+	for name, receipt := range map[string]bool{"receipt on the plan's branch": true, "no receipt": false} {
+		t.Run(name, func(t *testing.T) {
+			w := newRolloutWorld(t, completeStatefulSet())
+			if receipt {
+				w.withReceipt(t, mainBranch)
+			}
+			w.reader.ks = kustomizationAppliedFrom(t, release, w.merge)
+			if _, err := w.reconcile(t, t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if rr := w.request(t); rr.Status.PullRequest.AppliedObservedAt != nil {
+				t.Fatalf("a commit applied from %s counted for a merge into %s", release, mainBranch)
+			}
+			w.reader.ks = kustomizationApplied(t, w.merge)
+			if _, err := w.reconcile(t, t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if rr := w.request(t); rr.Status.PullRequest.AppliedObservedAt == nil {
+				t.Fatalf("the merge commit applied from %s was not counted", mainBranch)
+			}
+		})
 	}
 }
 

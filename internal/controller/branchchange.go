@@ -50,7 +50,7 @@ import (
 //   - a read that fails, or a provider that fails to open: retried (errBranchChangedUnread), never an end, since
 //     the pull request may be merged. Condition PullRequestUnreadable says so on every such failure (reason
 //     TargetBranchChanged, or the refusal's reason when the Git host refuses for good), and the next read that
-//     works removes it. As on the look at any recorded pull request, nothing bounds the retries in time: only the
+//     works removes it; on the configured branch only a merge that counts (retargetedMergeCounts) does. As on the look at any recorded pull request, nothing bounds the retries in time: only the
 //     error backoff, or the delay the host asked for, capped at freshRecheckInterval, paces them;
 //   - anything else (open, closed, gone, another head, a merge into a third branch): errTargetBranchChanged,
 //     handled as before.
@@ -101,7 +101,6 @@ func (r *RemediationRequestReconciler) watchBranchChanged(ctx context.Context,
 // Any other answer, and settings that can never open the repository, leave the look to the recorded branch.
 func (r *RemediationRequestReconciler) mergedRetargeted(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	repo remediationv1alpha1.GitRepository) (bool, error) {
-	pr := rr.Status.PullRequest
 	git, err := r.openRecordedBranch(ctx, repo, repo.TargetBranch)
 	switch {
 	case providers.IsInvalidConfig(err):
@@ -114,11 +113,19 @@ func (r *RemediationRequestReconciler) mergedRetargeted(ctx context.Context, rr 
 	switch {
 	case v.state == changeUnknown:
 		return true, fmt.Errorf("%w: %w", errBranchChangedUnread, v.err)
-	case v.state == changeMerged && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA:
-		// changeOf bound the answer to that branch and this request's marker.
+	case retargetedMergeCounts(rr, v):
 		return true, r.recordRetargetedMerge(ctx, rr, v.pr, repo.TargetBranch)
 	}
 	return false, nil
+}
+
+// retargetedMergeCounts reports whether v, an answer of the read on the configured target branch (changeOf with
+// q.configuredBranch, which binds it to that branch and this request's marker), is a merge that counts: merged,
+// with the recorded number and the head Shadewright pushed. Only such an answer is recorded (mergedRetargeted) and
+// removes condition PullRequestUnreadable (noteRead).
+func retargetedMergeCounts(rr *remediationv1alpha1.RemediationRequest, v changeVerdict) bool {
+	pr := rr.Status.PullRequest
+	return pr != nil && v.state == changeMerged && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA
 }
 
 // recordRetargetedMerge is recordMergeSeen for cr, the request's pull request merged into branch, the target

@@ -738,8 +738,9 @@ const (
 //     request) removes it;
 //   - on the reads after the target branch changed (q.recordedBranch, q.configuredBranch), any other unknown
 //     verdict, an answered one included, sets it with reason TargetBranchChanged (branchChangedRead): the request
-//     waits on that read alone; on the configured branch, a read that works but finds no merge leaves it to the
-//     read on the recorded branch that follows, so the two reads never set and remove it in turn;
+//     waits on that read alone; on the configured branch, a read that works but finds no merge that counts
+//     (retargetedMergeCounts: another head, or not merged) leaves it to the read on the recorded branch that
+//     follows, so the two reads never set and remove it in turn;
 //   - on a read through a new installation of the GitHub App (q.reinstalled, #797), any other failure that is not an
 //     answer listed below, but the caller's cancellation and a failed read of the Kubernetes API (a *clusterError:
 //     ownsMarker's read of the supersede chain, #812), sets it with reason GitNotFound (a 404) or GitFailed
@@ -761,8 +762,9 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 		want = ownListedRead(rr, ownListed)
 	case v.state == changeUnknown && (q.recordedBranch || q.configuredBranch != ""):
 		want = branchChangedRead(rr)
-	case q.configuredBranch != "" && v.state != changeMerged:
-		// Not merged into the configured branch: the read on the recorded branch that follows keeps the condition.
+	case q.configuredBranch != "" && !retargetedMergeCounts(rr, v):
+		// No merge that counts on the configured branch (another head, not merged): the read on the recorded
+		// branch that follows keeps the condition, so the two reads never set and remove it in turn.
 		return v
 	case v.state != changeUnknown, answeredUnknown(v.err):
 	case q.reinstalled && !errors.Is(v.err, context.Canceled) && !isClusterError(v.err):

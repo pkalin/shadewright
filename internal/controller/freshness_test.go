@@ -2786,6 +2786,28 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
 	})
 
+	It("keeps condition PullRequestUnreadable set, with one Event, while the configured branch shows the pull "+
+		"request merged with another head and the recorded branch cannot be read (#771)", func() {
+		retarget(freshOtherBranch)
+		_, err := git.Push(freshness.BranchName(fetch()), sourcePath, manifest("512Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		var fail atomic.Bool
+		fail.Store(true)
+		recorded := &failingGet{GitProvider: git, fail: &fail}
+		r := retargetedReconciler(map[string]providers.GitProvider{mainBranch: recorded})
+		recorder := record.NewFakeRecorder(10)
+		r.Recorder = recorder
+		for range 3 {
+			Expect(reconcileWith(r)).NotTo(Succeed())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(unreadable()).NotTo(BeNil())
+		}
+		Expect(recorder.Events).To(HaveLen(1), "a merge that does not count does not remove it in between")
+		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+	})
+
 	It("ends in NeedsIntervention, without closing or retrying, when a stale plan's repository settings cannot be used", func() {
 		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
 		r := reconciler()

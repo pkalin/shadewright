@@ -44,7 +44,7 @@ func Samples() []Sample {
 		{Secret: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N"},
 		{Secret: "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"},
 		{Secret: "Xy18Q~aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456_"},
-		{Key: "postgres://", Secret: "admin:s3cretPassw0rd@db.example.com/app"},
+		{Key: "postgres://", Secret: "admin:s3cretPassw0rd@db-host:5432/app"},
 		{Key: "Server=tcp:db;Password=", Secret: "Sup3rS3cret!x"},
 		{Key: "Authorization: ", Secret: "Bearer abcDEF123456ghiJKL789"},
 		{Key: "using bearer ", Secret: "Zm9vYmFyMTIzNDU2Nzg5MGFiY2Q"},

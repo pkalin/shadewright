@@ -1608,6 +1608,12 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			// refusal (#797): said in the same condition, so it names the latest step, and retried as before.
 			return r.noteNotReached(ctx, rr, notReachedCondition(rr, s), err)
 		}
+		if want, ok := unrecordedFailure(rr, err); ok {
+			// The same failures with no pull request recorded (#808): a failed token or listing of the branch says
+			// the pull requests cannot be read, a close that did not go through says the one found is not closed.
+			// Retried as before, with the backoff or the delay the host asked for.
+			return r.noteUnrecorded(ctx, rr, want, err)
+		}
 		if isUnknownChange(err) {
 			// A failed read of the change request, a refused one included (PullRequestUnreadable names it), is
 			// retried with the mark kept, never an end.
@@ -1934,6 +1940,7 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 		ObservedGeneration: rr.Generation,
 	})
 	clearNotClosed(rr)
+	clearReinstalledUnreadable(rr)
 	settleLock(rr, r.VerifyOutcomes)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)

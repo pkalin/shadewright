@@ -197,8 +197,8 @@ func (r *RemediationRequestReconciler) unmarkFresh(ctx context.Context, rr *reme
 // removed, PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
 // the metadata every write changes. Those are the executor's own writes: the mark and its removal
 // around a render, the condition that says why a stale plan's pull request is not closed (keepWatchingStale,
-// noteNotReached) and its removal with the close (recordStaleClosed), and the one that says a read through a new installation of the GitHub App failed (noteRead,
-// noteLockUnreadable), and each such reconcile returns its own delay. Without the filter
+// noteNotReached, noteUnrecorded) and its removal with the close (recordStaleClosed), and the one that says a read through a new installation of the GitHub App failed (noteRead,
+// noteLockUnreadable, noteUnrecorded), and each such reconcile returns its own delay. Without the filter
 // each would queue the request again at once, before the error backoff, the step delay or a Git host's Retry-After
 // that the reconcile returned, so a step that fails after a render (a commit the host refuses) would render again
 // with no delay (#714), and a cleanup the host asked to wait would be tried again at once (#797).

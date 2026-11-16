@@ -1141,6 +1141,241 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			apierrors.NewServiceUnavailable("the server is unavailable")),
 	)
 
+	// #808: with no pull request recorded, the cleanup through the new installation finds the request's pull request
+	// by listing its branch. A failed token or listing says so in PullRequestUnreadable, a close that does not go
+	// through in PullRequestNotClosed, each with reason GitNotFound or GitFailed and one Warning Event per reason;
+	// retried as before, and removed with the end.
+	unrecorded := func() {
+		GinkgoHelper()
+		reinstall()
+		markCleanup(func(got *remediationv1alpha1.RemediationRequest) {
+			got.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+			got.Status.PullRequest = nil
+		})
+	}
+	eventsOf := func(recorder *record.FakeRecorder, reason string) int {
+		n := 0
+		for len(recorder.Events) > 0 {
+			if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+reason+" ") {
+				n++
+			}
+		}
+		return n
+	}
+	DescribeTable("says why while the new installation fails with no pull request recorded (#808)",
+		func(tokenErr, listErr, closeErr error, condition, reason, step string) {
+			unrecorded()
+			recorder := record.NewFakeRecorder(20)
+			failing := atomic.Bool{}
+			failing.Store(true)
+			git.SetFail(func(op string) error {
+				switch {
+				case op == opList && failing.Load() && listErr != nil:
+					return listErr
+				case op == opClose && failing.Load() && closeErr != nil:
+					return closeErr
+				case op == opClose:
+					closes.Add(1)
+				}
+				return nil
+			})
+			r := reconciler()
+			r.Recorder = recorder
+			open := r.OpenRepository
+			r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				if failing.Load() && tokenErr != nil {
+					return nil, tokenErr
+				}
+				return open(ctx, repo)
+			}
+			for range 2 {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+				Expect(err).To(HaveOccurred(), "retried with the error backoff, as before")
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "not a final phase")
+				Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged), "the mark stays")
+				c := meta.FindStatusCondition(got.Status.Conditions, condition)
+				Expect(c).NotTo(BeNil(), "the retry is visible")
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Reason).To(Equal(reason))
+				Expect(c.Message).To(ContainSubstring("another installation of the GitHub App"))
+				Expect(c.Message).To(ContainSubstring(step), "names the step")
+				Expect(c.Message).NotTo(ContainSubstring("secret-host-text"), "no text of the host")
+				Expect(closes.Load()).To(BeZero())
+			}
+			Expect(eventsOf(recorder, condition)).To(Equal(1), "one Event while the reason stays")
+
+			failing.Store(false)
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				To(BeNil(), "removed with the end")
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+				To(BeNil(), "removed with the end")
+		},
+		Entry("a token the host answers with 404", fmt.Errorf("installation token: %w", providers.ErrNotFound), nil, nil,
+			remediationv1alpha1.ConditionPullRequestUnreadable, ReasonGitNotFound, "the access token"),
+		Entry("an unclassified token failure", errors.New("installation token: secret-host-text"), nil, nil,
+			remediationv1alpha1.ConditionPullRequestUnreadable, ReasonGitFailed, "the access token"),
+		Entry("a listing the host answers with 404", nil, fmt.Errorf("listing: %w", providers.ErrNotFound), nil,
+			remediationv1alpha1.ConditionPullRequestUnreadable, ReasonGitNotFound, "the listing of the pull requests"),
+		Entry("a listing that fails with a server error", nil, fmt.Errorf("listing: %w", providers.ErrRetryable), nil,
+			remediationv1alpha1.ConditionPullRequestUnreadable, ReasonGitFailed, "the listing of the pull requests"),
+		Entry("a close that fails with a server error", nil, nil, fmt.Errorf("close: %w", providers.ErrRetryable),
+			remediationv1alpha1.ConditionPullRequestNotClosed, ReasonGitFailed, "the close of pull request #"),
+		Entry("a close the host answers with 404", nil, nil, fmt.Errorf("close: %w", providers.ErrNotFound),
+			remediationv1alpha1.ConditionPullRequestNotClosed, ReasonGitNotFound, "the close of pull request #"),
+	)
+
+	It("moves PullRequestUnreadable to the latest step and removes it once the listing works (#808)", func() {
+		unrecorded()
+		recorder := record.NewFakeRecorder(20)
+		tokenFails, listFails, closeFails := atomic.Bool{}, atomic.Bool{}, atomic.Bool{}
+		tokenFails.Store(true)
+		listFails.Store(true)
+		closeFails.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opList && listFails.Load():
+				return fmt.Errorf("listing: %w", providers.ErrRetryable)
+			case op == opClose && closeFails.Load():
+				return fmt.Errorf("close: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		r := reconciler()
+		r.Recorder = recorder
+		open := r.OpenRepository
+		r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			if tokenFails.Load() {
+				return nil, fmt.Errorf("installation token: %w", providers.ErrRetryable)
+			}
+			return open(ctx, repo)
+		}
+		look := func() *remediationv1alpha1.RemediationRequest {
+			GinkgoHelper()
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).To(HaveOccurred())
+			return fetch()
+		}
+		c := meta.FindStatusCondition(look().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		Expect(c.Message).To(ContainSubstring("the access token"))
+		tokenFails.Store(false)
+		c = meta.FindStatusCondition(look().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		Expect(c.Message).To(ContainSubstring("the listing of the pull requests"), "names the latest step")
+		Expect(eventsOf(recorder, EventPullRequestUnreadable)).To(Equal(1), "one Event per change of reason")
+		listFails.Store(false)
+		got := look()
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			To(BeNil(), "the listing worked")
+		Expect(notClosed(got)).NotTo(BeNil(), "the close failed")
+		Expect(notClosed(got).Reason).To(Equal(ReasonGitFailed))
+	})
+
+	It("removes PullRequestUnreadable of the new installation when the request ends without a read that worked (#808)", func() {
+		unrecorded()
+		refused := atomic.Bool{}
+		r := reconciler()
+		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			if refused.Load() {
+				return nil, fmt.Errorf("installation token: %w", providers.ErrForbidden)
+			}
+			return nil, fmt.Errorf("installation token: %w", providers.ErrRetryable)
+		}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			NotTo(BeNil())
+		// The installation is then refused the repository for good: the request ends, and nothing reads its pull
+		// requests through the new installation again.
+		refused.Store(true)
+		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			To(BeNil(), "removed with the end")
+	})
+
+	It("keeps the delay the host asked for while the new installation fails with no pull request recorded (#808)", func() {
+		unrecorded()
+		git.SetFail(func(op string) error {
+			if op == opList {
+				return &providers.RetryableError{RetryAfter: time.Hour, Err: errors.New("rate limited")}
+			}
+			return nil
+		})
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(time.Hour), "the Retry-After, not the poll interval or at once")
+		c := meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal(ReasonGitFailed))
+	})
+
+	It("writes the condition on a fresh read after a write that lost to another one (#808)", func() {
+		unrecorded()
+		git.SetFail(func(op string) error {
+			if op == opClose {
+				return fmt.Errorf("close: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		r := reconciler()
+		bumped := atomic.Bool{}
+		r.Client = &bumpBeforeStatusUpdate{Client: k8sClient, bump: func(obj client.Object) {
+			if bumped.Swap(true) {
+				return
+			}
+			live := &remediationv1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), live)).To(Succeed())
+			base := live.DeepCopy()
+			live.Annotations = map[string]string{touchedAnnotation: "808"}
+			Expect(k8sClient.Patch(ctx, live, client.MergeFrom(base))).To(Succeed())
+		}}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(HaveOccurred())
+		Expect(bumped.Load()).To(BeTrue())
+		Expect(apierrors.IsConflict(err)).To(BeFalse(), "the write was made again on a fresh read: %v", err)
+		got := fetch()
+		Expect(got.Annotations).To(HaveKeyWithValue(touchedAnnotation, "808"))
+		Expect(notClosed(got)).NotTo(BeNil(), "written in the same look")
+		Expect(notClosed(got).Reason).To(Equal(ReasonGitFailed))
+	})
+
+	It("says nothing for a failed read of the Kubernetes API with no pull request recorded (#808)", func() {
+		unrecorded()
+		recorder := record.NewFakeRecorder(10)
+		armed := atomic.Bool{}
+		git.SetFail(func(op string) error {
+			switch op {
+			case opList:
+				armed.Store(true)
+			case opClose:
+				closes.Add(1)
+			}
+			return nil
+		})
+		r := reconciler()
+		r.Recorder = recorder
+		unavailable := apierrors.NewServiceUnavailable("the server is unavailable")
+		r.APIReader = &armedRequestReader{Reader: k8sClient, armed: &armed, fail: unavailable}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(armed.Load()).To(BeTrue(), "the branch was listed before the check")
+		Expect(err).To(MatchError(unavailable), "retried as before")
+		Expect(closes.Load()).To(BeZero())
+		got := fetch()
+		Expect(notClosed(got)).To(BeNil(), "not a failure of the Git host")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			To(BeNil(), "not a failure of the Git host")
+		for len(recorder.Events) > 0 {
+			Expect(<-recorder.Events).NotTo(Or(ContainSubstring(EventPullRequestNotClosed),
+				ContainSubstring(EventPullRequestUnreadable)))
+		}
+	})
+
 	It("closes nothing through the new installation when the pull request lacks this request's marker (#290)", func() {
 		reinstall()
 		Expect(git.SetBody(cr.Number, "Someone else's pull request")).To(Succeed())
@@ -2799,6 +3034,9 @@ func (s *bumpingStatus) Update(ctx context.Context, obj client.Object, opts ...c
 	s.bump(obj)
 	return s.SubResourceWriter.Update(ctx, obj, opts...)
 }
+
+// touchedAnnotation is the annotation a test writes to change a request between a read and a status write.
+const touchedAnnotation = "example.com/touched"
 
 // armedRequestReader is a reader whose reads of a RemediationRequest, once armed, fail with fail or answer with the
 // stored request changed by edit, so a test can change what stillOwns reads without a write to the request.

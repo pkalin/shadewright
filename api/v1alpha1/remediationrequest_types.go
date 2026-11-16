@@ -372,7 +372,9 @@ const (
 	// with its marker (the message names both numbers and what ends it), and, on a stale plan whose repository the
 	// settings reach only through a new installation of the GitHub App, with reason GitNotFound (a 404) or GitFailed
 	// (any other failure that is not an answer, the token and the cleanup's deadline included) while the read of its
-	// branch that settles the lock on its target fails through that installation (#797). The message names the read;
+	// branch that settles the lock on its target fails through that installation (#797), or while the token or the
+	// listing of its branch fails that way in the cleanup of such a plan with no pull request recorded (#808); the
+	// request's end removes these two reasons. The message names the read or the step;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,
@@ -398,7 +400,11 @@ const (
 	// refusal's reason, with GitNotFound for a 404, or with GitFailed for any other failure, a step still running at
 	// the cleanup's deadline included (#797). A close through that installation that fails without a refusal sets it
 	// too, with GitNotFound or GitFailed. The message names the latest failed step, and a step that failed without a
-	// refusal is retried with the error backoff or the delay the host asked for.
+	// refusal is retried with the error backoff or the delay the host asked for. With no pull request recorded (#808),
+	// a close through that installation of the pull request found on the request's branch that fails without a
+	// refusal sets it with GitNotFound or GitFailed, with one Warning Event per change of reason; a failed token or
+	// listing there sets PullRequestUnreadable instead, and a refusal for good still ends the request
+	// NeedsIntervention.
 	ConditionPullRequestNotClosed = "PullRequestNotClosed"
 	// ConditionCleanupRefused is True, with reason GitForbidden or GitRejected, once the Git host refused for good
 	// (403 or 422) a step of the cleanup of a deleted request: the access token for the plan's repository, the

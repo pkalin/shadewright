@@ -919,8 +919,12 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 		return r.mergedForeign(ctx, rr, ref)
 	}
 	// The reduced freshness check at the merge (ADR-0041): a stale plan is marked in the write below. A check that
-	// did not answer records the pull request like an open one (mergeUnchecked) and is returned for a retry.
-	if err := r.checkAtMerge(ctx, rr); err != nil {
+	// did not answer records the pull request like an open one (mergeUnchecked) and is returned for a retry. A
+	// request cancelled because of its Incident needs no check: its plan was stale before the merge, and it gets the
+	// mark with the reason of the cancel (markCancelledMerge), so the outcome is capped as a stale plan's is.
+	if reason, ok := cancelledForIncident(rr); ok {
+		markCancelledMerge(rr, reason)
+	} else if err := r.checkAtMerge(ctx, rr); err != nil {
 		return r.mergeUnchecked(ctx, rr, cr, err)
 	}
 	markClosed(rr, ReasonChangeRequestMerged, "was merged")

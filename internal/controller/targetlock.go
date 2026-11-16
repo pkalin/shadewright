@@ -210,9 +210,14 @@ func release(rr *remediationv1alpha1.RemediationRequest) {
 //     (changeOf), and so does a repository that cannot be opened as the settings stand (reason RepositoryUnavailable,
 //     TargetBranchChanged or RepositoryUnusable).
 //
+// A request that ended Cancelled because of its Incident (cancelledForIncident) is the one exception to open and
+// merged: its own pull request, found open, is recorded and closed, and found merged, its merge is recorded as a
+// stale plan's (settleCancelled, ADR-0039 points 21 and 22, amended 2026-11-16).
+//
 // TargetHeld is written when it changes. Every outcome but unknown is looked at again after heldRecheckInterval
 // while the lock is kept, and so is unknown; only the caller's cancellation and a failed write of
-// PullRequestUnreadable are returned as errors.
+// PullRequestUnreadable are returned as errors, besides settleCancelled's (a failed status write, a failed read of
+// the cluster, and a close or a merge check that failed without a refusal, for the error backoff).
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !ptr.Deref(rr.Status.HoldsTarget, false) || progresses(rr) || heldForVerification(rr, r.VerifyOutcomes) {
@@ -252,7 +257,15 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 			"branch, could not be looked up", "error", err.Error())
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 	}
+	if reason, ok := cancelledForIncident(rr); ok && (v.state == changeOpen || v.state == changeMerged) {
+		// Its own pull request, from an open whose answer was lost: closed, or its merge followed (settleCancelled).
+		return r.settleCancelled(ctx, rr, v, reason)
+	}
 	before := rr.Status.DeepCopy()
+	if _, ok := cancelledForIncident(rr); ok {
+		// Closed (by Shadewright, its answer lost, or by a person) or not this request's: no close is left to make.
+		clearNotClosed(rr)
+	}
 	if v.state != changeGone {
 		recordFound(rr, v.pr)
 	}

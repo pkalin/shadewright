@@ -168,9 +168,11 @@ func (o Observation) Increase(handled int64) int64 {
 	return min(max(o.Total-handled, 0), MaxCount)
 }
 
-// HandledFunc returns how much of an occurrence's Total has already been counted, by any Incident: the
-// lookup does not take the fingerprint, because the fingerprint depends on owner correlation, which can
-// differ after a restart, while the occurrence does not. It returns the highest Total recorded for the
+// HandledFunc returns how much of the Total of o's occurrence has already been counted, by any Incident: the
+// lookup is by o.Occurrence and o.Began, not by o.Fingerprint, because the fingerprint depends on owner
+// correlation, which can differ after a restart, while the occurrence does not. Of a consequence it may also
+// read o.Class and o.CauseFingerprint, to answer from the drop mark of the evidence its cause's Incident took
+// (ADR-0039 point 16) and from no other Incident's. It returns the highest Total recorded for the
 // occurrence, and found false only when the occurrence was never counted. The Incident controller (package
 // incidents) supplies it. To answer it keeps, per occurrence, the highest Total it counted and when the
 // occurrence began, for at most [remediationv1alpha1.MaxOccurrenceRecords] occurrences per Incident, newest
@@ -179,7 +181,7 @@ func (o Observation) Increase(handled int64) int64 {
 // counts twice. The collector asks only for observations it would otherwise mark MayRepeat, with the
 // deadline of an owner lookup, so the dedup state of an occurrence that started before a restart lives in
 // the Incident, not in memory alone.
-type HandledFunc func(ctx context.Context, occurrence string, began time.Time) (handled int64, found bool, err error)
+type HandledFunc func(ctx context.Context, o Observation) (handled int64, found bool, err error)
 
 // Config configures a [Collector]. Zero values take the defaults above.
 type Config struct {
@@ -391,7 +393,7 @@ func capCount(n int64) int64 {
 func (c *Collector) deliver(ctx context.Context, o Observation) (bool, error) {
 	if o.MayRepeat && c.cfg.Handled != nil {
 		hctx, cancel := context.WithTimeout(ctx, c.cfg.LookupTimeout)
-		handled, found, err := c.cfg.Handled(hctx, o.Occurrence, o.Began)
+		handled, found, err := c.cfg.Handled(hctx, o)
 		cancel()
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			return false, nil

@@ -134,9 +134,20 @@ func occurrenceOf(name string) int32 {
 }
 
 // noteState remembers whether inc is Resolved with a known resolvedTime, which decides whether a symptom seen
-// again opens its next occurrence ([Controller.rolls]). The caller holds mu.
+// again opens its next occurrence ([Controller.rolls]), and whether it counts a cause (status.cause), which
+// decides whether it takes the evidence of a consequence ([Controller.causeFor]). status.cause never goes back
+// to false on one object, so a copy of the same Incident (same UID) without it is older than what was
+// remembered and changes nothing. An Incident of the same name with another UID and no cause was deleted and
+// created again: the cause remembered was of the object deleted, and is forgotten. One remembered without a
+// UID yet (a cause observation counted, its write not done) is kept: that write sets status.cause. The caller
+// holds mu.
 func (c *Controller) noteState(inc *remediationv1alpha1.Incident) {
 	st := &inc.Status
+	if st.Cause && inc.HasDerivedName() {
+		c.causes[inc.Name] = causeIncident{spec: inc.Spec, uid: inc.UID}
+	} else if cur, ok := c.causes[inc.Name]; ok && cur.uid != "" && cur.uid != inc.UID {
+		delete(c.causes, inc.Name)
+	}
 	if inc.HasDerivedName() && st.Phase == remediationv1alpha1.IncidentResolved && st.ResolvedTime != nil &&
 		!st.ResolvedTime.IsZero() {
 		c.resolvedAt[inc.Name] = st.ResolvedTime.Time
@@ -154,6 +165,11 @@ func (c *Controller) noteStates(items []remediationv1alpha1.Incident) {
 	clear(c.resolvedAt)
 	for i := range items {
 		c.noteState(&items[i])
+	}
+	for fp := range c.absorbedDroppedThrough {
+		if _, ok := c.names[c.nameOf(fp)]; !ok {
+			delete(c.absorbedDroppedThrough, fp)
+		}
 	}
 }
 

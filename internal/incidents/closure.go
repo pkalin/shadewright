@@ -74,9 +74,10 @@ const (
 	// change took its baseline away and ended Succeeded. The Incident follows that success and moves to Resolved at
 	// once, as for ReasonRequestSucceeded.
 	ReasonHolderSucceeded = "HolderSucceeded"
-	// ReasonReopened: the Incident was Resolved by quiet time before any analysis, and its symptom came back
-	// within RecurrenceWindow of resolvedTime, so it is Open again, with no resolvedTime, and is analyzed as
-	// usual ([reopens]). It is the one Lifecycle reason the observation writer sets.
+	// ReasonReopened: the Incident was Resolved by quiet time before any analysis, or folded into its cause's
+	// Incident (FoldedIntoCause), and its symptom came back within RecurrenceWindow of resolvedTime, so it is
+	// Open again, with no resolvedTime, and is analyzed as usual ([reopens]). It is the one Lifecycle reason the
+	// observation writer sets.
 	ReasonReopened = "Reopened"
 	// ReasonRequestActive: the Incident was Resolved while a request naming it was active (one created after
 	// the closure rules listed the requests), so it moved back to Proposed, with no resolvedTime, and the
@@ -84,7 +85,8 @@ const (
 	ReasonRequestActive = "RequestActive"
 	// ReasonFoldedIntoCause: the Incident is a consequence of a cause whose Incident opened after it, on the same
 	// container, so it was folded into that Incident: Resolved, with status.foldedInto naming it (ADR-0039 point
-	// 14). Declared for the fold; nothing sets it yet.
+	// 14). Declared for the fold; nothing sets it yet. Seen again within RecurrenceWindow, such an Incident is
+	// reopened, not escalated ([reopens]).
 	ReasonFoldedIntoCause = "FoldedIntoCause"
 )
 
@@ -374,20 +376,33 @@ func applyClosure(inc *remediationv1alpha1.Incident, phase remediationv1alpha1.I
 }
 
 // reopens reports whether a recurrence within RecurrenceWindow moves a Resolved Incident back to Open instead
-// of Escalated (design 3.2, #466): the closure rules resolved it by quiet time (Lifecycle SymptomQuiet), with
-// a known resolvedTime, and it was never analyzed (no lastAnalysisTime, no request recorded). An Incident that
-// was analyzed, or resolved any other way, keeps the escalation.
+// of Escalated (design 3.2, #466), with a known resolvedTime: the closure rules resolved it by quiet time
+// (Lifecycle SymptomQuiet) and it was never analyzed (no lastAnalysisTime, no request recorded), or it was
+// folded into its cause's Incident (Lifecycle FoldedIntoCause with status.foldedInto, ADR-0039 point 24, also
+// when it was analyzed before the cause appeared: it was closed because a cause took it over, not because a
+// fix failed). An Incident resolved any other way keeps the escalation, as does a consequence Incident that
+// was not folded because a request of it had a pull request.
 func reopens(st *remediationv1alpha1.IncidentStatus) bool {
 	cond := meta.FindStatusCondition(st.Conditions, ConditionLifecycle)
-	return cond != nil && cond.Reason == ReasonSymptomQuiet && st.ResolvedTime != nil && !st.ResolvedTime.IsZero() &&
-		st.LastAnalysisTime == nil && len(st.RemediationRequests) == 0
+	if cond == nil || st.ResolvedTime == nil || st.ResolvedTime.IsZero() {
+		return false
+	}
+	switch cond.Reason {
+	case ReasonSymptomQuiet:
+		return st.LastAnalysisTime == nil && len(st.RemediationRequests) == 0
+	case ReasonFoldedIntoCause:
+		return st.FoldedInto != nil
+	}
+	return false
 }
 
-// reopen moves a Resolved Incident whose symptom came back before any analysis to Open: the same Incident, no
-// new occurrence, resolvedTime cleared, and the Lifecycle condition Reopened. The trigger then decides it as
-// any Incident never analyzed.
+// reopen moves a Resolved Incident whose symptom came back before any analysis, or that was folded into its
+// cause's Incident, to Open: the same Incident, no new occurrence, resolvedTime and foldedInto cleared, and the
+// Lifecycle condition Reopened. The trigger then decides it as usual: one never analyzed as such, one analyzed
+// before its fold after its cooldown.
 func reopen(inc *remediationv1alpha1.Incident, now time.Time) {
 	applyClosure(inc, remediationv1alpha1.IncidentOpen, ReasonReopened, now)
+	inc.Status.FoldedInto = nil
 }
 
 // closeIncidents applies the closure rules ([Closure]) to every Incident in the namespace, once per trigger

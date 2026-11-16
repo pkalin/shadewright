@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -200,8 +201,14 @@ type Controller struct {
 	// many were left uncounted since then.
 	overflowLogged time.Time
 	overflowed     int
-	// droppedThrough is the newest begin time of a record any Incident dropped.
+	// droppedThrough is the newest begin time of a record any Incident dropped from its own occurrences.
 	droppedThrough time.Time
+	// absorbedDroppedThrough is, per cause fingerprint, the newest begin time of a record its Incidents
+	// dropped from absorbedOccurrences. It answers only for a consequence linked to that fingerprint
+	// ([Controller.handled]): the absorbed list turns over fast, and its mark would otherwise take an older
+	// occurrence of any other Incident as counted. It holds at most one entry per fingerprint with a name in
+	// names.
+	absorbedDroppedThrough map[string]time.Time
 	// names are the Incidents that exist or are pending; their number is held to MaxIncidents.
 	names map[string]struct{}
 	// current is, per fingerprint, the number of its latest occurrence this process knows of (design 3.2,
@@ -216,7 +223,12 @@ type Controller struct {
 	// opens the next occurrence ([Controller.rolls]). It holds only Incidents listed or written, at most one
 	// entry per name in names.
 	resolvedAt map[string]time.Time
-	pending    map[string]*batch
+	// causes is, per Incident name, an Incident that counts a cause (status.cause, ADR-0039 point 8): from
+	// load, every trigger pass, each write, and each cause observation counted for an Incident that exists or
+	// is being opened. A consequence is counted as evidence only on an Incident listed here
+	// ([Controller.causeFor]). It holds at most one entry per name in names.
+	causes  map[string]causeIncident
+	pending map[string]*batch
 	// inflight is, per fingerprint, what the writes in flight hold: how many there are and the newest
 	// observation they carry. flush takes batches out of pending and failed before it writes them, so the
 	// closure rules read it too ([Controller.unwrittenSince]) and never take an Incident as quiet while one of
@@ -355,25 +367,27 @@ func New(cfg Config) (*Controller, error) {
 		cfg.Now = time.Now
 	}
 	return &Controller{
-		cfg:         cfg,
-		ready:       make(chan struct{}),
-		records:     map[string]record{},
-		recordsOf:   map[string]map[string]struct{}{},
-		held:        map[string]*holding{},
-		heldIn:      map[string]int{},
-		names:       map[string]struct{}{},
-		current:     map[string]int32{},
-		opening:     map[string]struct{}{},
-		resolvedAt:  map[string]time.Time{},
-		pending:     map[string]*batch{},
-		inflight:    map[string]*flight{},
-		failed:      map[string]*batch{},
-		kick:        make(chan struct{}, 1),
-		nextWrite:   map[string]time.Time{},
-		refused:     newBoundedSet(refusedRemembered),
-		sightings:   newSightings(cfg.MaxFirstSightings),
-		memory:      map[types.UID]*trace{},
-		closeFailed: map[string]struct{}{},
+		cfg:                    cfg,
+		ready:                  make(chan struct{}),
+		records:                map[string]record{},
+		recordsOf:              map[string]map[string]struct{}{},
+		held:                   map[string]*holding{},
+		heldIn:                 map[string]int{},
+		names:                  map[string]struct{}{},
+		current:                map[string]int32{},
+		opening:                map[string]struct{}{},
+		resolvedAt:             map[string]time.Time{},
+		causes:                 map[string]causeIncident{},
+		absorbedDroppedThrough: map[string]time.Time{},
+		pending:                map[string]*batch{},
+		inflight:               map[string]*flight{},
+		failed:                 map[string]*batch{},
+		kick:                   make(chan struct{}, 1),
+		nextWrite:              map[string]time.Time{},
+		refused:                newBoundedSet(refusedRemembered),
+		sightings:              newSightings(cfg.MaxFirstSightings),
+		memory:                 map[types.UID]*trace{},
+		closeFailed:            map[string]struct{}{},
 	}, nil
 }
 
@@ -539,7 +553,7 @@ func (c *Controller) load(ctx context.Context) error {
 	defer c.mu.Unlock()
 	for _, inc := range list.Items {
 		c.names[inc.Name] = struct{}{}
-		c.remember(inc.Name, &inc.Status)
+		c.remember(inc.Spec.Fingerprint, inc.Name, &inc.Status)
 		if inc.HasDerivedName() && inc.Spec.Occurrence() > max(c.current[inc.Spec.Fingerprint], 1) {
 			c.current[inc.Spec.Fingerprint] = inc.Spec.Occurrence()
 		}
@@ -550,13 +564,18 @@ func (c *Controller) load(ctx context.Context) error {
 	return nil
 }
 
-// remember takes the records of one Incident's status into memory. The caller holds mu.
-func (c *Controller) remember(name string, status *remediationv1alpha1.IncidentStatus) {
-	for _, r := range status.Occurrences {
+// remember takes the records of one Incident's status into memory, of fingerprint fp. Its own drop mark
+// goes to droppedThrough, the drop mark of its absorbed list to absorbedDroppedThrough under fp only. The
+// caller holds mu.
+func (c *Controller) remember(fp, name string, status *remediationv1alpha1.IncidentStatus) {
+	for _, r := range slices.Concat(status.Occurrences, status.AbsorbedOccurrences) {
 		cur := c.records[r.ID]
 		c.setRecord(r.ID, record{counted: higher(cur.counted, counted{total: r.Total, began: timeFrom(r.Began)}), incident: name})
 	}
 	c.droppedThrough = latest(c.droppedThrough, timeFrom(status.OccurrencesDroppedThrough))
+	if t := timeFrom(status.AbsorbedOccurrencesDroppedThrough); !t.IsZero() && fp != "" {
+		c.absorbedDroppedThrough[fp] = latest(c.absorbedDroppedThrough[fp], t)
+	}
 }
 
 // setRecord sets the record of one occurrence and moves it in recordsOf to its Incident. The caller holds
@@ -592,12 +611,13 @@ func (c *Controller) unindex(id, name string) {
 	}
 }
 
-// Handled answers the collector (collector.HandledFunc): the highest total counted for the occurrence by
+// Handled answers the collector (collector.HandledFunc): the highest total counted for o's occurrence by
 // any Incident. An occurrence with no record that began no later than the newest record any Incident
-// dropped is answered as counted in full (collector.AllHandled), so the bound never counts twice; one
-// without a begin time never is, so it may be counted again once its record is dropped. found is false
-// otherwise. It answers from memory, and waits until the Incidents are loaded or ctx ends.
-func (c *Controller) Handled(ctx context.Context, occurrence string, began time.Time) (int64, bool, error) {
+// dropped from its own occurrences is answered as counted in full (collector.AllHandled), so the bound never
+// counts twice; so is a consequence linked to a cause fingerprint whose Incidents dropped an absorbed record
+// at least as new. One without a begin time never is, so it may be counted again once its record is dropped.
+// found is false otherwise. It answers from memory, and waits until the Incidents are loaded or ctx ends.
+func (c *Controller) Handled(ctx context.Context, o collector.Observation) (int64, bool, error) {
 	select {
 	case <-c.ready:
 	case <-ctx.Done():
@@ -605,20 +625,34 @@ func (c *Controller) Handled(ctx context.Context, occurrence string, began time.
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	handled, found := c.handled(occurrence, began)
+	handled, found := c.handled(o)
 	return handled, found, nil
 }
 
 // handled is Handled without the wait. The caller holds mu.
-func (c *Controller) handled(occurrence string, began time.Time) (int64, bool) {
-	if total, ok := c.counted(occurrence); ok {
+func (c *Controller) handled(o collector.Observation) (int64, bool) {
+	if total, ok := c.counted(o.Occurrence); ok {
 		return total, true
 	}
-	// The drop mark answers only for an occurrence with a known begin time: without one it cannot be placed
-	// before or after the mark, and a possible overcount is preferred to a count silently lost.
-	if began = began.Truncate(time.Second); !began.IsZero() && !c.droppedThrough.IsZero() &&
-		!began.After(c.droppedThrough) {
-		return collector.AllHandled, true
+	// A drop mark answers only for an occurrence with a known begin time: without one it cannot be placed
+	// before or after the mark, and a possible overcount is preferred to a count silently lost. The mark of an
+	// absorbed list answers only for the consequences of that cause, the only ones it may have counted. It is
+	// keyed by the cause fingerprint, not the subject UID: the subject is the owning workload, and its key
+	// would hide never-counted consequences of every pod and container of it. Known limit (ADR-0039,
+	// 2026-11-16): a replay whose cause fingerprint the collector can no longer derive (an OOM kill loop's pod
+	// status shows only the newest kill) is not recognised and goes through the gate, failing toward opening.
+	began := o.Began.Truncate(time.Second)
+	if began.IsZero() {
+		return 0, false
+	}
+	marks := []time.Time{c.droppedThrough}
+	if o.Class == collector.ClassConsequence && o.CauseFingerprint != "" {
+		marks = append(marks, c.absorbedDroppedThrough[o.CauseFingerprint])
+	}
+	for _, mark := range marks {
+		if !mark.IsZero() && !began.After(mark) {
+			return collector.AllHandled, true
+		}
 	}
 	return 0, false
 }
@@ -646,9 +680,19 @@ func (c *Controller) counted(occurrence string) (int64, bool) {
 // It reports whether the batch is due at once: the Incident has not been written by this process yet.
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
 	o.Began = o.Began.Truncate(time.Second)
+	o.Container = containerName(ctx, o.Container)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := c.increase(o)
+	// A consequence whose cause has an Incident is counted there as evidence and opens none of its own
+	// (ADR-0039 point 6), with what is held for it as a first sighting from before the cause's Incident was
+	// opened. One whose cause has no Incident yet goes through the gate below, as any observation, until the
+	// collector holds it (point 7).
+	name, spec, reason, linked := c.causeFor(o)
+	heldDue := false
+	if linked {
+		heldDue = c.absorbHeld(ctx, o.Fingerprint, name, spec)
+	}
 	if n <= 0 {
 		// A waiting cause still shown is reported again as a repeat of its occurrence (ADR-0039 point 4, amended
 		// 2026-11-16): it adds nothing to count, and is never seen as a second occurrence, but when it proves
@@ -661,10 +705,13 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 				due = c.count(ctx, h) || due
 			}
 		}
-		return c.stillWaiting(o) || due
+		return c.stillWaiting(o) || due || heldDue
 	}
 	// From here on Count is what is new of o, whatever MayRepeat said.
 	o.Count, o.MayRepeat = n, false
+	if linked {
+		return c.absorb(ctx, o, name, spec, reason) || heldDue
+	}
 	if _, ok := c.names[c.nameOf(o.Fingerprint)]; ok && !c.rolls(o) {
 		return c.count(ctx, o)
 	}
@@ -716,7 +763,7 @@ func (c *Controller) stillWaiting(o collector.Observation) bool {
 // caller holds mu.
 func (c *Controller) increase(o collector.Observation) int64 {
 	if o.MayRepeat {
-		handled, _ := c.handled(o.Occurrence, o.Began)
+		handled, _ := c.handled(o)
 		return o.Increase(handled)
 	}
 	if total, ok := c.counted(o.Occurrence); ok {
@@ -762,22 +809,25 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 	if _, ok := b.occurrences[o.Occurrence]; !ok {
 		if c.full(o.Fingerprint, o.Source) {
 			b.add(&batch{first: at, last: at})
-			c.overflow(ctx, o)
+			c.overflow(ctx, o.Fingerprint, o.Source)
 			return !scheduled
 		}
-		h := c.held[o.Fingerprint]
-		if h == nil {
-			h = &holding{in: map[string]int{}}
-			c.held[o.Fingerprint] = h
-		}
-		h.n++
-		h.in[o.Source]++
-		c.heldIn[o.Source]++
-		c.heldTotal++
+		c.hold(o.Fingerprint, o.Source)
 	}
-	b.add(&batch{count: n, first: at, last: at, occurrences: map[string]heldOccurrence{
+	add := &batch{count: n, first: at, last: at, occurrences: map[string]heldOccurrence{
 		o.Occurrence: {counted: counted{total: o.Total, began: o.Began}, source: o.Source},
-	}})
+	}}
+	if o.Container != "" {
+		add.containers = []string{o.Container}
+	}
+	if isCause(o) {
+		add.cause = true
+		if _, known := c.causes[name]; !known {
+			// The UID is learnt from the write that sets status.cause ([Controller.noteState]).
+			c.causes[name] = causeIncident{spec: specOf(o)}
+		}
+	}
+	b.add(add)
 	// An ID the schema refuses is counted but never stored, so it is not remembered either: nothing would
 	// ever drop its record from memory.
 	if occurrenceID.MatchString(o.Occurrence) {
@@ -785,6 +835,20 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 		c.setRecord(o.Occurrence, record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began}), incident: name})
 	}
 	return !scheduled
+}
+
+// hold charges one new occurrence of fp from source namespace ns to the occurrences held unwritten. The
+// caller holds mu.
+func (c *Controller) hold(fp, ns string) {
+	h := c.held[fp]
+	if h == nil {
+		h = &holding{in: map[string]int{}}
+		c.held[fp] = h
+	}
+	h.n++
+	h.in[ns]++
+	c.heldIn[ns]++
+	c.heldTotal++
 }
 
 // full reports whether a new occurrence of fp from source namespace ns would go over the caps on occurrences
@@ -808,9 +872,10 @@ func (c *Controller) heldBy(fp string) int {
 }
 
 // overflow counts an observation of a new occurrence left uncounted at the caps, and logs at most once per
-// overflowLogInterval how many were since the last line. It names the Incident and the source namespace,
-// nothing else from the event. The caller holds mu.
-func (c *Controller) overflow(ctx context.Context, o collector.Observation) {
+// overflowLogInterval how many were since the last line. fp is the fingerprint of the Incident it would have
+// been counted on (of its cause, for a consequence counted as evidence), and ns its source namespace. It
+// names the Incident and the source namespace, nothing else from the event. The caller holds mu.
+func (c *Controller) overflow(ctx context.Context, fp, ns string) {
 	overflowedOccurrences.Inc()
 	c.overflowed++
 	now := c.cfg.Now()
@@ -818,8 +883,8 @@ func (c *Controller) overflow(ctx context.Context, o collector.Observation) {
 		return
 	}
 	logf.FromContext(ctx).Info("Left new occurrences uncounted at the cap on occurrences held unwritten",
-		"incident", c.nameOf(o.Fingerprint), "uncounted", c.overflowed, "held", c.heldBy(o.Fingerprint),
-		"heldTotal", c.heldTotal, "namespace", o.Source, "heldInNamespace", c.heldIn[o.Source],
+		"incident", c.nameOf(fp), "uncounted", c.overflowed, "held", c.heldBy(fp),
+		"heldTotal", c.heldTotal, "namespace", ns, "heldInNamespace", c.heldIn[ns],
 		"maxPerIncident", c.cfg.MaxPendingOccurrencesPerIncident,
 		"maxPerNamespace", c.cfg.MaxPendingOccurrencesPerNamespace, "max", c.cfg.MaxPendingOccurrences)
 	c.overflowLogged, c.overflowed = now, 0
@@ -1004,6 +1069,12 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 			// the Incident holds.
 			gone, stored = []*batch{res.sent}, res.stored
 		}
+		if p := c.pending[fp]; !refused.exists && p != nil && !p.own() {
+			// Consequences counted as evidence while the create was in flight belong to an Incident that was
+			// never created, and an Incident is never created for them alone: they are dropped with it.
+			gone = append(gone, p)
+			delete(c.pending, fp)
+		}
 		c.forget(fp, name, gone, stored)
 		// A write before this one whose answer was lost may have dropped records that no batch names: they go
 		// too, as after a write that succeeds. What the Incident holds stays: the status as read, or of the
@@ -1017,22 +1088,25 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		} else {
 			c.prune(fp, name, nil, &remediationv1alpha1.IncidentStatus{}, true)
 		}
-		if !refused.exists && c.pending[fp] == nil {
-			// An Incident that was never created frees its place under the cap, and a later occurrence that
-			// could not be opened leaves the one before it the latest.
-			c.unopen(fp, name)
+		if !refused.exists {
+			if p := c.pending[fp]; p == nil {
+				// An Incident that was never created frees its place under the cap, and a later occurrence that
+				// could not be opened leaves the one before it the latest.
+				c.unopen(fp, name)
+			} else if !p.cause {
+				// The pending batch creates it again, but it was not stored as a cause and nothing now counts one.
+				delete(c.causes, name)
+			}
 		}
 		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
 		droppedBatches.WithLabelValues(reason).Add(float64(len(gone)))
-		var count int64
-		for _, b := range gone {
-			count += b.count
-		}
+		count, absorbed := counts(gone)
 		msg := "Dropped observations the API server refuses to store"
 		if res.escalated {
 			msg = "Dropped observations and the escalation of a recurrence the API server refuses to store"
 		}
-		logf.FromContext(ctx).Error(err, msg, "incident", name, "reason", reason, "count", count)
+		logf.FromContext(ctx).Error(err, msg, "incident", name, "reason", reason, "count", count,
+			"absorbed", absorbed)
 		return
 	}
 	if err != nil {
@@ -1060,6 +1134,10 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	}
 	c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
 	delete(c.opening, name)
+	if len(res.containersLeft) > 0 {
+		logf.FromContext(ctx).Info("Left container names out of an Incident at the cap",
+			"incident", name, "max", remediationv1alpha1.MaxIncidentContainers, "left", res.containersLeft)
+	}
 	c.noteState(res.inc)
 	c.settle(fp, name, res.dropped, &res.inc.Status, f != nil)
 }
@@ -1068,6 +1146,7 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 // occurrence makes the one before it the latest again. The caller holds mu.
 func (c *Controller) unopen(fp, name string) {
 	delete(c.names, name)
+	delete(c.causes, name)
 	delete(c.opening, name)
 	if n := occurrenceOf(name); n >= 2 && c.current[fp] == n {
 		c.setCurrent(fp, n-1)
@@ -1091,6 +1170,7 @@ func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches [
 	c.forget(fp, name, batches, nil)
 	c.prune(fp, name, nil, &remediationv1alpha1.IncidentStatus{}, true)
 	delete(c.names, name)
+	delete(c.causes, name)
 	delete(c.opening, name)
 	delete(c.resolvedAt, name)
 	if c.current[fp] == occurrenceOf(name) {
@@ -1110,12 +1190,21 @@ func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches [
 	}
 	c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
 	droppedBatches.WithLabelValues(dropDeleted).Add(float64(len(batches)))
-	var count int64
-	for _, b := range batches {
-		count += b.count
-	}
+	count, absorbed := counts(batches)
 	logf.FromContext(ctx).Error(deleted, "Dropped observations of a deleted Incident", "incident", name,
-		"latest", c.nameOf(fp), "count", count)
+		"latest", c.nameOf(fp), "count", count, "absorbed", absorbed)
+}
+
+// counts returns what bs counted for the Incident itself (status.count) and as evidence of its cause (the
+// sum of the absorbed tallies), as the log line of a drop names them.
+func counts(bs []*batch) (count, absorbed int64) {
+	for _, b := range bs {
+		count += b.count
+		for _, t := range b.absorbed {
+			absorbed += t.count
+		}
+	}
+	return count, absorbed
 }
 
 // settle takes into memory the status of fp's Incident after a write that succeeded or was refused: prune
@@ -1123,7 +1212,7 @@ func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches [
 // mu.
 func (c *Controller) settle(fp, name string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
 	c.prune(fp, name, dropped, status, sweep)
-	c.remember(name, status)
+	c.remember(fp, name, status)
 }
 
 // prune forgets this Incident's records of dropped that status no longer holds, unless a batch still
@@ -1132,8 +1221,8 @@ func (c *Controller) settle(fp, name string, dropped []string, status *remediati
 // neither this write's dropped nor its batches name, and they would otherwise stay in memory for good. It
 // only forgets: nothing of status is taken into memory. The caller holds mu.
 func (c *Controller) prune(fp, name string, dropped []string, status *remediationv1alpha1.IncidentStatus, sweep bool) {
-	stored := make(map[string]struct{}, len(status.Occurrences))
-	for _, r := range status.Occurrences {
+	stored := make(map[string]struct{}, len(status.Occurrences)+len(status.AbsorbedOccurrences))
+	for _, r := range slices.Concat(status.Occurrences, status.AbsorbedOccurrences) {
 		stored[r.ID] = struct{}{}
 	}
 	stale := func(id string, r record) bool {
@@ -1167,7 +1256,7 @@ func (c *Controller) prune(fp, name string, dropped []string, status *remediatio
 func (c *Controller) forget(fp, name string, gone []*batch, stored *remediationv1alpha1.IncidentStatus) {
 	kept := map[string]counted{}
 	if stored != nil {
-		for _, r := range stored.Occurrences {
+		for _, r := range slices.Concat(stored.Occurrences, stored.AbsorbedOccurrences) {
 			kept[r.ID] = counted{total: r.Total, began: timeFrom(r.Began)}
 		}
 	}
@@ -1199,6 +1288,8 @@ type writeResult struct {
 	stored    *remediationv1alpha1.IncidentStatus
 	sent      *batch
 	escalated bool
+	// containersLeft are the container names the write left out at the cap of status.containers.
+	containersLeft []string
 	// created says the write created the Incident: from then on it is only updated, and one not found later
 	// was deleted.
 	created bool
@@ -1239,7 +1330,9 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 					return perr
 				}
 			}
-			if !create {
+			if !create || !slices.ContainsFunc(batches, (*batch).own) {
+				// An Incident is never created for consequences alone: their cause's Incident is gone, so they are
+				// dropped as for a deleted Incident, and may be counted again elsewhere.
 				latest, lerr := c.latestOccurrence(ctx, spec.Fingerprint)
 				if lerr != nil {
 					return fmt.Errorf("incident %s was not found: %w", key.Name, lerr)
@@ -1267,20 +1360,28 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 		}
 		var send []*batch
 		var seen time.Time
+		own := false
 		for _, b := range batches {
 			if !applied(&res.inc.Status, b) {
 				send = append(send, b)
 				seen = latest(seen, b.last)
+				own = own || b.own()
 			}
 		}
 		if len(send) == 0 {
 			return nil
 		}
-		resolved := onResolved(&res.inc.Status, seen)
+		// Consequences counted as evidence say nothing about whether the cause came back: alone they never
+		// escalate or reopen a Resolved cause (ADR-0039 point 6).
+		resolved := notResolved
+		if own {
+			resolved = onResolved(&res.inc.Status, seen)
+		}
 		res.stored = res.inc.Status.DeepCopy()
 		res.sent = combine(send)
 		for _, b := range send {
 			res.dropped = append(res.dropped, merge(&res.inc.Status, b)...)
+			res.containersLeft = append(res.containersLeft, addContainers(&res.inc.Status, b)...)
 		}
 		if resolved == escalate {
 			// Reopen only within the window: seen later (held while the Incident was Resolved, so it was not

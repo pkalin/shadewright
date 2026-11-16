@@ -36,7 +36,7 @@ func waitingPod(t *testing.T, reason string) (*harness, *corev1.Pod) {
 	pod := specPod()
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: containerApp,
 		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}}}}
-	none := func(context.Context, string, time.Time) (int64, bool, error) { return 0, false, nil }
+	none := func(context.Context, Observation) (int64, bool, error) { return 0, false, nil }
 	return newHarness(t, Config{Handled: none}, d, rs, pod), pod
 }
 

@@ -726,8 +726,8 @@ func TestOwnerReadErrorIsRetried(t *testing.T) {
 // collector started may have been counted, so the Incident controller's answer decides.
 func TestStateFromBeforeTheStartIsSettledByTheIncidents(t *testing.T) {
 	var asked []string
-	handled := func(_ context.Context, occurrence string, _ time.Time) (int64, bool, error) {
-		asked = append(asked, occurrence)
+	handled := func(_ context.Context, o Observation) (int64, bool, error) {
+		asked = append(asked, o.Occurrence)
 		return 1, true, nil
 	}
 	h := newSourceHarness(t, kedaActive(t), Config{Handled: handled})

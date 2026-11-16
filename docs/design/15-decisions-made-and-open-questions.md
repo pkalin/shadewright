@@ -56,6 +56,6 @@ Still open:
 9. **Kustomizations that wait.**
    - A Kustomization with `wait: true` or `healthChecks` stays not Ready while its workload is unhealthy, so the mapper refuses it ([ADR-0012](../adr/0012-object-to-source-mapping.md), amendment of 2026-11-04).
    - Open: whether, and how safely, to accept applied-but-unhealthy objects ([#259](https://github.com/pkalin/shadewright/issues/259)).
-10. **Consequence symptoms and their cause.** Decided on 2026-11-14: [ADR-0039](../adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) is accepted, nothing is built. Open in it:
-   - Whether the first build shows the model the tally of absorbed symptoms (point 18).
-   - Whether a folded Incident that had been analysed before its cause appeared is also exempt from the 24 hour recurrence escalation (point 24).
+10. **Consequence symptoms and their cause.** Decided on 2026-11-14: [ADR-0039](../adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) is accepted. Built: the collector's fields ([#789](https://github.com/pkalin/shadewright/issues/789)) and the count of a consequence on its cause's Incident when the cause comes first ([#791](https://github.com/pkalin/shadewright/issues/791)). Settled on 2026-11-15 (comment on [#432](https://github.com/pkalin/shadewright/issues/432)):
+   - The first build does not show the model the tally of absorbed symptoms (point 18); the tally is a later task behind the evaluation gate.
+   - A folded Incident that had been analysed before its cause appeared is also exempt from the 24 hour recurrence escalation (point 24). Nothing folds an Incident yet, so this is not built.

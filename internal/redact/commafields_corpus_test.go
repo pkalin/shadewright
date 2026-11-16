@@ -34,13 +34,20 @@ const commaFieldsMainTable = "testdata/comma-fields-main.jsonl"
 // commaFirstKeys, commaSeps, commaFirstValues, commaSecondKeys, commaSecondSeps, commaSecondValues and
 // commaTails are the pieces of a commaFieldsCorpus input: a first key, its separator and value, a comma, blanks
 // or none, a second key (secret-named or plain), its separator and value, and the text after it.
+// clientSecretKey, plainABC and nextLineTail are pieces the corpus uses more than once.
+const (
+	clientSecretKey = "client_secret"
+	plainABC        = "abc"
+	nextLineTail    = "\nnext: x"
+)
+
 var (
-	commaFirstKeys   = []string{"password", "TOKEN", "API_TOKEN", "DB_PASSWORD", "client_secret", "user", "--password ", "export TOKEN"}
+	commaFirstKeys   = []string{"password", "TOKEN", "API_TOKEN", "DB_PASSWORD", clientSecretKey, "user", "--password ", "export TOKEN"}
 	commaSeps        = []string{"=", ": ", "= ", ":"}
-	commaFirstValues = []string{`"abc"`, `'abc'`, `"a b"`, `'a b'`, `"a"x`, "abc", `"abc"def`, `""`}
+	commaFirstValues = []string{`"abc"`, `'abc'`, `"a b"`, `'a b'`, `"a"x`, plainABC, `"abc"def`, `""`}
 	commaSecondKeys  = []string{
-		"DB_PASSWORD", "password", "token", "apiKey", "client_secret", "AWS_SECRET_ACCESS_KEY", "pass", "AUTH",
-		"db.password", "x-api-key", "user", "next", "region", "abc", "id",
+		"DB_PASSWORD", "password", "token", "apiKey", clientSecretKey, "AWS_SECRET_ACCESS_KEY", "pass", "AUTH",
+		"db.password", "x-api-key", "user", "next", "region", plainABC, "id",
 	}
 	commaBlanks       = []string{"", "", " ", "  ", "\t"}
 	commaSecondSeps   = []string{"=", "= ", " = ", ": ", ":", "=  ", " =", ":= "}
@@ -48,7 +55,7 @@ var (
 		`"hidden word"`, `'hidden word'`, "hidden", `"hidden"`, "hidden word", "Hidden9word", `"Hid den9"`,
 		"hidden,more", `"hidden",more`,
 	}
-	commaTails = []string{"", " next=x", ",user=bob", `"`, ` --region west`, "\nnext: x", `", "x": 1}`}
+	commaTails = []string{"", nextX, ",user=bob", `"`, regionWest, nextLineTail, `", "x": 1}`}
 )
 
 // commaFieldsCorpus returns n inputs built from the pieces above with a fixed seed.

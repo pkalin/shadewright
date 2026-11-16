@@ -745,6 +745,8 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 	if !beforeMerge(phase) {
 		// A request that ends has no cancel left to finish (#289): a merge or a close ended it.
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionCancelPending)
+		// Nor a recovery of its handoff left to read again (#786).
+		dropRecoveryWait(rr)
 	}
 	if rr.Status.Phase != phase && !beforeMerge(phase) {
 		// A first look at a missing pull request belongs to the request that was still moving on (#688): a

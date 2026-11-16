@@ -621,11 +621,12 @@ func closedOrMerged(cr providers.ChangeRequest) string {
 // recordHandoff is step 4: the replacement records the pull request with the new head, carries every hint of
 // the chain (the merge gate excludes all their authors), the predecessor's refused commands (with their
 // replies, so each is answered once) and its comment cursor, sets from Done
-// and moves to PRCreated, or ends Merged when the merge took the new commit.
+// and moves to PRCreated, or ends Merged when the merge took the new commit. Its failures are the Kubernetes API's
+// (the check at the merge, which reads more, never fails it), and are marked so (clusterSideErr).
 func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pred *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, newHead string) error {
 	if err := r.writeAllowed(ctx); err != nil {
-		return err
+		return clusterSideErr(err)
 	}
 	from := rr.Status.Handoff.From
 	from.Phase = remediationv1alpha1.HandoffDone
@@ -693,7 +694,7 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 			if errors.Is(err, errStopped) {
 				r.unreadableEvent(rr, unreadable, nil)
 			}
-			return r.ignoreStopped(err)
+			return clusterSideErr(r.ignoreStopped(err))
 		}
 		logf.FromContext(ctx).Error(err, "Recorded the takeover of a merged pull request without its merge: the "+
 			"plan could not be checked at the merge", "remediationRequest", client.ObjectKeyFromObject(rr),
@@ -701,7 +702,7 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 	}
 	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
 	if err := r.Status().Update(ctx, rr); err != nil {
-		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		return &clusterError{err: fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)}
 	}
 	r.unreadableEvent(rr, unreadable, nil)
 	logf.FromContext(ctx).Info("Took over the pull request for RemediationRequest", "remediationRequest",
@@ -711,17 +712,18 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 
 // endHandoff ends a replacement whose handoff did not happen: Cancelled with reason, from Aborted. It holds no
 // pull request of its own, so it releases its lock in the same write; the predecessor keeps everything it had,
-// and aborts its own intent when it sees this one ended (settleHandoff).
+// and aborts its own intent when it sees this one ended (settleHandoff). Its failures are the Kubernetes API's, and
+// are marked so (clusterSideErr).
 func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason, message string) error {
 	if err := r.writeAllowed(ctx); err != nil {
-		return err
+		return clusterSideErr(err)
 	}
 	if from := rr.Status.Handoff.From; from.Phase == remediationv1alpha1.HandoffReserved {
 		from.Phase = remediationv1alpha1.HandoffAborted
 	}
 	release(rr)
-	return r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, reason, message)
+	return clusterSideErr(r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, reason, message))
 }
 
 // followHandoff is step 6 of a replacement that took the pull request over, once and recorded: while the pull
@@ -975,8 +977,16 @@ func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *r
 	}
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
-	res, done, err = r.recoverStep(stepCtx, rr)
+	// The step works on a copy: a write of it that fails (the end of the handoff, the takeover) leaves rr as it was
+	// read, so the failure is sorted on the recorded state, never on a phase or a condition that was not written. A
+	// write of the step that did go through before it failed (the start of the wait of the check at the merge) makes
+	// a later write of rr a conflict, retried after a new read.
+	work := rr.DeepCopy()
+	res, done, err = r.recoverStep(stepCtx, work)
 	err = recoveryBoundErr(ctx, stepCtx, err)
+	if err == nil || errors.Is(err, errStopped) {
+		work.DeepCopyInto(rr)
+	}
 	switch {
 	case errors.Is(err, errStopped):
 		return reconcile.Result{}, true, nil
@@ -1020,18 +1030,19 @@ const ReasonRecoveryReadFailed = "RecoveryReadFailed"
 // used never end the request (#786): its commit may still be merged and it holds the target lock, so it is watched
 // (watchRecovery), with no time limit, as cancelRecoveryFailed watches a cancelled one. While it is watched so
 // (watchedRecovery: condition PullRequestUnreadable with one of those reasons, or ReasonRecoveryReadFailed, in its
-// status), a failure of the Kubernetes API (clusterSide) goes back to the error backoff and never ends it; any other
-// failure first keeps the condition true (nowUnreadable); then a failure of the Git host worth retrying (a timeout,
-// a 5xx, a rate limit), or a read that ran into the step's own deadline (ErrTimeout, never the end of the
-// reconcile's own context, which is returned as before), keeps the watch and its pacing (keepWatching), never the
-// grace, and any other is handled as
-// for a request that is not watched. Before the deadline, and for a pause, it is retry. Past the deadline the request
-// is retried, after the delay the host asked for (Retry-After, which the deadline does not cut short) or with the
-// error backoff, until handoffRecoveryGrace after the deadline (#688); then the request ends NeedsIntervention with
-// ReasonHandoffRecoveryFailed, and its handoff Aborted (declineOnEnd).
+// status), no error ends it: only what the recovery reads does (a merge, a takeover, nothing to recover), or a
+// cancel or a deletion (waitingRecovery). A pause waits as before. Before the deadline, and for a request that does
+// not wait, it is retry. Past the deadline such a request is retried, after the delay the host asked for
+// (Retry-After, which the deadline does not cut short) or with the error backoff, until handoffRecoveryGrace after
+// the deadline (#688); then the request ends NeedsIntervention with ReasonHandoffRecoveryFailed, and its handoff
+// Aborted (declineOnEnd).
 func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
-	if ctx.Err() == nil && !errors.Is(err, freshness.ErrPaused) {
+	paused := errors.Is(err, freshness.ErrPaused)
+	if c := watchedRecovery(rr); c != nil && !paused {
+		return r.waitingRecovery(ctx, rr, c, err)
+	}
+	if ctx.Err() == nil && !paused {
 		if want := recoveryUnreadable(rr, err); want != nil {
 			res, werr := r.watchRecovery(ctx, rr, want, err)
 			if werr == nil && clusterSide(err) {
@@ -1040,20 +1051,6 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 				return reconcile.Result{}, err
 			}
 			return res, werr
-		}
-		if c := watchedRecovery(rr); c != nil {
-			if clusterSide(err) {
-				return reconcile.Result{}, err
-			}
-			if want := nowUnreadable(rr, c, err); want != nil {
-				if werr := r.setUnreadable(ctx, rr, want); werr != nil {
-					return reconcile.Result{}, errors.Join(err, werr)
-				}
-				c = want
-			}
-			if providers.IsRetryable(err) || errors.Is(err, ErrTimeout) {
-				return r.keepWatching(ctx, rr, c, err)
-			}
 		}
 	}
 	if rr.Status.Deadline == nil || !r.now().After(rr.Status.Deadline.Time) || ctx.Err() != nil ||
@@ -1087,42 +1084,44 @@ func recoveryBoundErr(parent, step context.Context, err error) error {
 	if !errors.Is(bounded, ErrTimeout) {
 		return bounded
 	}
+	if clusterSide(err) {
+		// A read or write of the Kubernetes API that ran into the deadline stays the cluster's (clusterSide).
+		return &clusterError{err: fmt.Errorf("%w: %w", bounded, err)}
+	}
 	if pe, ok := errors.AsType[*freshness.ProviderError](err); ok {
 		return fmt.Errorf("%w: %w", bounded, pe)
 	}
 	return bounded
 }
 
-// recoveryOpenError is a failure of recoverStep to open the repository of the plan. It wraps the error and adds no
-// text: it only tells nowUnreadable that the repository did not open, so a reason about it still holds.
-type recoveryOpenError struct{ err error }
-
-func (e *recoveryOpenError) Error() string { return e.err.Error() }
-
-func (e *recoveryOpenError) Unwrap() error { return e.err }
-
-// clusterSide reports whether err holds a failure of the Kubernetes API (a status error, a conflict included, or a
-// *clusterError), alone or joined to a failure of the Git host: such a failure is the reconcile's to retry with the
-// error backoff, never a reason to keep a recovery waiting.
+// clusterSide reports whether err holds a failure of the Kubernetes API, alone or joined to a failure of the Git
+// host. It never guesses this from the type of the error: every read and write of the Kubernetes API in the recovery
+// marks its failure where it is returned (a *clusterError: recoverStep, setUnreadable, endHandoff, recordHandoff,
+// recoveryBoundErr), whatever the failure is (a status error, a conflict, a transport error, a deadline). Such a
+// failure is the reconcile's to retry with the error backoff, and never changes the condition of a recovery that
+// waits (#786, decision of 2026-11-16: sort by where the error comes from).
 func clusterSide(err error) bool {
-	var status apierrors.APIStatus
-	if errors.As(err, &status) {
-		return true
+	return isClusterError(err)
+}
+
+// clusterSideErr marks err, the failure of a read or write of the Kubernetes API, as a *clusterError. nil, the
+// end of a request (errStopped) and an error already marked are returned as they are.
+func clusterSideErr(err error) error {
+	if err == nil || errors.Is(err, errStopped) || isClusterError(err) {
+		return err
 	}
-	_, ok := errors.AsType[*clusterError](err)
-	return ok
+	return &clusterError{err: err}
 }
 
 // nowUnreadable is condition PullRequestUnreadable for err, a failure of a recovery that waits on c (watchedRecovery)
-// and that is neither a refusal nor a failure of the Kubernetes API, when the cause c names is gone: nil while it
-// may still hold. A reason about the repository holds while the repository does not open (recoveryOpenError); a
-// refusal holds while the read it names is the one failing now; ReasonRecoveryReadFailed holds while it names the
-// read failing now. Otherwise the condition is replaced by recoveryReadFailed, which names that read (#786, decision
-// of 2026-11-16 narrowing point 2). It reads the status and err only, never a time.
+// and that is neither a refusal, nor settings that cannot reach the repository, nor a failure of the Kubernetes API
+// (clusterSide), when the cause c names is gone: nil while it may still hold. A reason about the repository is gone,
+// since the settings entry was read and is fine again (recoveryUnreadable would have named it otherwise), and the
+// failure is the open of the provider or a read after it; a refusal holds while the read it names is the one
+// failing now; ReasonRecoveryReadFailed holds while it names the read failing now. Otherwise the condition is
+// replaced by recoveryReadFailed, which names that read (#786, decisions of 2026-11-16). It reads the status and err
+// only, never a time.
 func nowUnreadable(rr *remediationv1alpha1.RemediationRequest, c *metav1.Condition, err error) *metav1.Condition {
-	if _, ok := errors.AsType[*recoveryOpenError](err); ok {
-		return nil
-	}
 	want := recoveryReadFailed(rr, err)
 	switch {
 	case c.Reason == ReasonGitForbidden || c.Reason == ReasonGitRejected:
@@ -1179,6 +1178,67 @@ func watchedRecovery(rr *remediationv1alpha1.RemediationRequest) *metav1.Conditi
 	return nil
 }
 
+// waitingRecovery is retryRecovery for err, a failure of a recovery that waits on c (watchedRecovery, #786, decision
+// of 2026-11-16: sort by where the error comes from, and let nothing unknown end a waiting recovery). It never ends
+// the request and never falls through to the grace of #688:
+//   - the end of the reconcile's own context is returned as it is;
+//   - a final refusal of the Git host, or settings that cannot reach the repository, is watched (watchRecovery) with
+//     the condition that names it; joined to a failure of the Kubernetes API, that failure is returned after it;
+//   - a failure of the Kubernetes API (clusterSide, marked where it is returned) is returned to the error backoff,
+//     and the condition stays as it is: it names a read of the Git host, never a read of the cluster;
+//   - any other failure first gets a condition that names the read failing now (nowUnreadable); then a failure of
+//     the Git host worth retrying (a timeout, a 5xx, a rate limit) or a read that ran into the step's own deadline
+//     (ErrTimeout) keeps the watch and its pacing (keepWatching), and every other failure, one not recognised
+//     included, is returned to the error backoff, so it is logged and counted as a reconcile error.
+//
+// A failed write of the condition is returned with err.
+func (r *RemediationRequestReconciler) waitingRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	c *metav1.Condition, err error) (reconcile.Result, error) {
+	if ctx.Err() != nil {
+		return reconcile.Result{}, err
+	}
+	if want := recoveryUnreadable(rr, err); want != nil {
+		res, werr := r.watchRecovery(ctx, rr, want, err)
+		if werr == nil && clusterSide(err) {
+			return reconcile.Result{}, err
+		}
+		return res, werr
+	}
+	if clusterSide(err) {
+		return reconcile.Result{}, err
+	}
+	if want := nowUnreadable(rr, c, err); want != nil {
+		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
+			return reconcile.Result{}, errors.Join(err, werr)
+		}
+		c = want
+	}
+	if providers.IsRetryable(err) || errors.Is(err, ErrTimeout) {
+		return r.keepWatching(ctx, rr, c, err)
+	}
+	logf.FromContext(ctx).Info("Could not recover the handoff of RemediationRequest; still watching it, retried "+
+		"with the error backoff", "remediationRequest", client.ObjectKeyFromObject(rr), "reason", c.Reason,
+		"error", err.Error())
+	return reconcile.Result{}, err
+}
+
+// dropRecoveryWait removes condition PullRequestUnreadable from rr, a request that ends, when the recovery of its
+// handoff set it with a reason that says the read is made again (a refusal, or ReasonRecoveryReadFailed): only a
+// replacement with no pull request of its own is recovering, and an ended request recovers nothing, so the message
+// would no longer hold. A request that keeps the lock on its target says what its own reads find from then on
+// (checkHeld, noteRead). A reason about the repository stays: it says why nothing can be read, which still holds.
+func dropRecoveryWait(rr *remediationv1alpha1.RemediationRequest) {
+	if rr.Spec.Replaces == nil || rr.Status.Handoff == nil || rr.Status.Handoff.From == nil ||
+		rr.Status.PullRequest != nil {
+		return
+	}
+	switch c := watchedRecovery(rr); {
+	case c == nil, repositoryReasons[c.Reason]:
+		return
+	}
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+}
+
 // keepWatching is retryRecovery for a failure of the Git host worth retrying (a timeout, a 5xx, a rate limit, or a
 // read that ran into the step's own deadline: ErrTimeout) of a recovery that already waits (watchedRecovery, #786), once its condition names what fails now (nowUnreadable):
 // the request is looked at again after the poll interval, or after the delay the host asked for when longer. The
@@ -1223,21 +1283,33 @@ func (r *RemediationRequestReconciler) recoverStep(ctx context.Context, rr *reme
 	case apierrors.IsNotFound(err):
 		return reconcile.Result{}, false, nil
 	case err != nil:
-		return reconcile.Result{}, true, fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)
+		return reconcile.Result{}, true, &clusterError{err: fmt.Errorf("get the RemediationRequest %s replaces: %w",
+			rr.Name, err)}
 	}
 	to := intent(pred)
 	if pred.UID != types.UID(from.UID) || to == nil || to.UID != remediationv1alpha1.UID(rr.UID) ||
 		pred.Status.PullRequest == nil {
 		return reconcile.Result{}, false, nil
 	}
-	git, err := r.openPlanRepository(ctx, rr)
+	// The repository of the plan, opened in two steps so that each failure says where it comes from: the read of
+	// the settings is the Kubernetes API's (a *clusterError), the entry they hold (a pause, a repository gone or
+	// another target branch) and the open of the provider (the token, settings that cannot be used) are not.
+	// Every failure is returned, never dropped: the deadline check comes next, and a replacement whose commit may
+	// already be on the pull request must not expire because the repository could not be opened for one look.
+	settings, err := r.liveSettings(ctx)
+	switch {
+	case errors.Is(err, errRepositoryGone):
+		return reconcile.Result{}, true, err
+	case err != nil:
+		return reconcile.Result{}, true, &clusterError{err: err}
+	}
+	repo, reinstalled, err := planEntryIn(settings, rr)
 	if err != nil {
-		// Returned, never dropped: the deadline check comes next, and a replacement whose commit may already be
-		// on the pull request must not expire because the repository could not be opened for one look.
-		// retryRecovery waits out a pause, ends settings that cannot reach the repository in NeedsIntervention,
-		// as the freshness check would, and retries the rest, past the deadline only for a grace. Marked, so a
-		// recovery that waits keeps a reason about the repository that this failure does not disprove.
-		return reconcile.Result{}, true, &recoveryOpenError{err: err}
+		return reconcile.Result{}, true, err
+	}
+	git, _, err := r.openPlanEntry(ctx, rr, repo, reinstalled)
+	if err != nil {
+		return reconcile.Result{}, true, err
 	}
 	head, err := git.BranchHead(ctx, freshness.BranchName(rr))
 	switch {

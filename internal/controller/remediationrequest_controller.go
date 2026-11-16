@@ -1966,9 +1966,10 @@ func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remedi
 	return nil
 }
 
-// clusterError is a failure of a cleanup on the Kubernetes side (stillOwns: a failed read of the request, a request
-// handed over or gone, an intent to hand it over that stands; ownsMarker: a failed read of a request of the supersede
-// chain, #812), not of a step of the Git host. It wraps the error and
+// clusterError is a failure on the Kubernetes side, not of a step of the Git host: of a cleanup (stillOwns: a failed
+// read of the request, a request handed over or gone, an intent to hand it over that stands; ownsMarker: a failed read
+// of a request of the supersede chain, #812), of a write of condition PullRequestUnreadable (setUnreadable), or of a
+// read or write of the recovery of a handoff (clusterSide, #786). It wraps the error and
 // adds no text. A cleanup through a new installation (#290) returns it as it is, outside a *reinstalledError, so it
 // is never said in PullRequestNotClosed as a failure of the Git host (#797).
 type clusterError struct{ err error }

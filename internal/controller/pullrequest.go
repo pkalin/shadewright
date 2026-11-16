@@ -215,14 +215,30 @@ func (r *RemediationRequestReconciler) openPlanRepositoryFor(ctx context.Context
 // carries the stale mark, so only for the cleanup of a stale plan (cleanupRepository).
 func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (remediationv1alpha1.GitRepository, bool, error) {
+	settings, err := r.liveSettings(ctx)
+	if err != nil {
+		return remediationv1alpha1.GitRepository{}, false, err
+	}
+	return planEntryIn(settings, rr)
+}
+
+// liveSettings reads RemediationSettings live (getLive). A settings object that does not exist is errRepositoryGone,
+// as planEntry has it; any other failure is returned wrapped.
+func (r *RemediationRequestReconciler) liveSettings(ctx context.Context) (*remediationv1alpha1.RemediationSettings, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
-		return remediationv1alpha1.GitRepository{}, false, errRepositoryGone
+		return nil, errRepositoryGone
 	case err != nil:
-		return remediationv1alpha1.GitRepository{}, false, fmt.Errorf("get RemediationSettings %s: %w",
-			remediationv1alpha1.SettingsName, err)
+		return nil, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
+	return settings, nil
+}
+
+// planEntryIn is planEntry for settings already read: it reads nothing, and fails only with ErrPaused,
+// errRepositoryGone or errTargetBranchChanged.
+func planEntryIn(settings *remediationv1alpha1.RemediationSettings, rr *remediationv1alpha1.RemediationRequest) (
+	remediationv1alpha1.GitRepository, bool, error) {
 	if freshness.Paused(settings) {
 		return remediationv1alpha1.GitRepository{}, false, freshness.ErrPaused
 	}

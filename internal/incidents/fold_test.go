@@ -85,6 +85,11 @@ func foldRequest(name string, phase remediationv1alpha1.RemediationPhase, opened
 	return rr
 }
 
+// consequenceProposed moves the consequence to phase Proposed, in which its newest request decides it.
+func consequenceProposed(c, _ *remediationv1alpha1.Incident) {
+	c.Status.Phase = remediationv1alpha1.IncidentProposed
+}
+
 // TestFoldable decides the fold for one change at a time from a consequence Incident that folds.
 func TestFoldable(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -151,9 +156,23 @@ func TestFoldable(t *testing.T) {
 			rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{}
 			return []remediationv1alpha1.RemediationRequest{rr}
 		}()},
-		"request without a pull request": {requests: []remediationv1alpha1.RemediationRequest{
+		"request without a pull request, an older one denied": {requests: []remediationv1alpha1.RemediationRequest{
+			foldRequest("a", remediationv1alpha1.PhaseDenied, false),
+			foldRequest("b", remediationv1alpha1.PhasePolicyChecked, false)}, want: true},
+		"newest request denied": {change: consequenceProposed, requests: []remediationv1alpha1.RemediationRequest{
 			foldRequest("a", remediationv1alpha1.PhasePolicyChecked, false),
-			foldRequest("b", remediationv1alpha1.PhaseDenied, false)}, want: true},
+			foldRequest("b", remediationv1alpha1.PhaseDenied, false)}},
+		"newest request failed": {change: consequenceProposed, requests: []remediationv1alpha1.RemediationRequest{
+			foldRequest("a", remediationv1alpha1.PhaseFailed, false)}},
+		"newest request needs intervention": {change: consequenceProposed, requests: []remediationv1alpha1.RemediationRequest{
+			foldRequest("a", remediationv1alpha1.PhaseNeedsIntervention, false)}},
+		"newest request superseded by another one's merge": {change: consequenceProposed, requests: func() []remediationv1alpha1.RemediationRequest {
+			// A request ended by another one's merge never decides: the active one does.
+			rr := foldRequest("b", remediationv1alpha1.PhaseSuperseded, false)
+			rr.Status.Conditions = []metav1.Condition{{Type: remediationv1alpha1.ConditionPlanFresh,
+				Status: metav1.ConditionFalse, Reason: remediationv1alpha1.ReasonAnotherRequestMerged}}
+			return []remediationv1alpha1.RemediationRequest{foldRequest("a", remediationv1alpha1.PhasePolicyChecked, false), rr}
+		}(), want: true},
 		"pull request of another Incident of the same name": {requests: func() []remediationv1alpha1.RemediationRequest {
 			rr := foldRequest("a", remediationv1alpha1.PhasePRCreated, true)
 			rr.Spec.IncidentRef.UID = "63636363-6363-4363-8363-636363636363"
@@ -623,7 +642,9 @@ func TestStoredCauseIsFoldedByThePass(t *testing.T) {
 
 // TestOwedFoldDoesNotAgeOut: the trigger pass decides from the two creationTimestamps alone, never from the
 // controller's clock, so a fold owed since long before (an outage, pass timeouts, a late restart) is still
-// made; a consequence created more than RecurWithin before its cause is left alone, and nothing is written.
+// made; a consequence created more than RecurWithin before its cause is left to the closure rules. Once its
+// cause exists, a consequence's lastSeen stops moving, so it is quiet for far longer than QuietBeforeResolved:
+// the pass folds it before the closure rules would resolve it SymptomQuiet.
 func TestOwedFoldDoesNotAgeOut(t *testing.T) {
 	for name, tc := range map[string]struct {
 		createdBefore time.Duration
@@ -634,10 +655,10 @@ func TestOwedFoldDoesNotAgeOut(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			// Hours after the cause opened: far past RecurWithin plus a trigger interval. The consequence was
-			// seen a minute ago, so the closure rules leave it open.
+			// last seen when the cause opened, as the observation writer leaves it.
 			now := triggerNow.Add(6 * time.Hour)
 			cons := foldConsequence(tc.createdBefore)
-			cons.Status.LastSeen = &metav1.Time{Time: now.Add(-time.Minute)}
+			cons.Status.LastSeen = &metav1.Time{Time: triggerNow}
 			c, cl, _ := foldController(t, []*remediationv1alpha1.Incident{cons})
 			c.cfg.Now = func() time.Time { return now }
 			var writes int
@@ -648,17 +669,56 @@ func TestOwedFoldDoesNotAgeOut(t *testing.T) {
 			}
 			_ = c.pass(t.Context())
 			got := getNamed(t, cl, Name(fp(2)))
+			reason := lifecycleReason(got)
 			if tc.folds {
 				if got.Status.Phase != remediationv1alpha1.IncidentResolved || !got.Status.Folded ||
-					got.Status.FoldedInto == nil || got.Status.FoldedInto.Name != Name(fp(1)) || writes != 1 {
-					t.Fatalf("phase %s folded %v foldedInto %+v, %d writes, want folded into %s by one write",
-						got.Status.Phase, got.Status.Folded, got.Status.FoldedInto, writes, Name(fp(1)))
+					reason != ReasonFoldedIntoCause || got.Status.FoldedInto == nil ||
+					got.Status.FoldedInto.Name != Name(fp(1)) || writes != 1 {
+					t.Fatalf("phase %s reason %s folded %v foldedInto %+v, %d writes, want folded into %s by one write",
+						got.Status.Phase, reason, got.Status.Folded, got.Status.FoldedInto, writes, Name(fp(1)))
 				}
 				return
 			}
-			if got.Status.FoldedInto != nil || got.Status.Folded || writes != 0 {
-				t.Fatalf("folded %v foldedInto %+v, %d writes of the consequence, want it left alone",
-					got.Status.Folded, got.Status.FoldedInto, writes)
+			if got.Status.FoldedInto != nil || got.Status.Folded || reason == ReasonFoldedIntoCause {
+				t.Fatalf("folded %v foldedInto %+v reason %s, want it not folded",
+					got.Status.Folded, got.Status.FoldedInto, reason)
+			}
+		})
+	}
+}
+
+// TestFoldLeavesAnEscalationForAPerson: a Proposed consequence whose newest request ended without success and
+// without a pull request is escalated by the closure rules; the fold, which would make them skip it, leaves it
+// alone, on the write loop's fast path and in the trigger pass.
+func TestFoldLeavesAnEscalationForAPerson(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseNeedsIntervention,
+		remediationv1alpha1.PhaseDenied, remediationv1alpha1.PhaseFailed} {
+		setup := func(t *testing.T) (*Controller, client.Client) {
+			cons := foldConsequence(5 * time.Minute)
+			cons.Status.Phase = remediationv1alpha1.IncidentProposed
+			c, cl, _ := foldController(t, []*remediationv1alpha1.Incident{cons}, foldRequest("a", phase, false))
+			return c, cl
+		}
+		t.Run(string(phase)+" fast path", func(t *testing.T) {
+			c, cl := setup(t)
+			c.mu.Lock()
+			c.oweFold(Name(fp(1)))
+			c.mu.Unlock()
+			c.foldDue(t.Context())
+			if got := getNamed(t, cl, Name(fp(2))); got.Status.Folded || got.Status.FoldedInto != nil ||
+				got.Status.Phase != remediationv1alpha1.IncidentProposed {
+				t.Fatalf("phase %s folded %v foldedInto %+v, want it Proposed and not folded", got.Status.Phase,
+					got.Status.Folded, got.Status.FoldedInto)
+			}
+		})
+		t.Run(string(phase)+" pass", func(t *testing.T) {
+			c, cl := setup(t)
+			_ = c.pass(t.Context())
+			got := getNamed(t, cl, Name(fp(2)))
+			if reason := endedWithoutSuccess[phase]; got.Status.Folded || got.Status.FoldedInto != nil ||
+				got.Status.Phase != remediationv1alpha1.IncidentEscalated || lifecycleReason(got) != reason {
+				t.Fatalf("phase %s reason %s folded %v, want Escalated with %s and not folded", got.Status.Phase,
+					lifecycleReason(got), got.Status.Folded, reason)
 			}
 		})
 	}

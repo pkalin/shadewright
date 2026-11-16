@@ -87,6 +87,8 @@ func reachedPullRequest(rr *remediationv1alpha1.RemediationRequest) bool {
 //   - inc was created at most RecurWithin before cause, by their creationTimestamps: both stamped by the API
 //     server, so one clock decides, also for a cause first seen much earlier and opened from the gate.
 //   - No request of inc reached a pull request ([reachedPullRequest]).
+//   - The newest request of inc did not end in a way the closure rules escalate to a person ([escalatesInc]):
+//     a fold would skip that escalation, since the closure rules leave a folded Incident alone.
 func foldable(inc, cause *remediationv1alpha1.Incident, requests []remediationv1alpha1.RemediationRequest) bool {
 	if !cause.Status.Cause || inc.Name == cause.Name || inc.UID == cause.UID || !inc.HasDerivedName() ||
 		!foldCandidate(inc) {
@@ -114,7 +116,29 @@ func foldable(inc, cause *remediationv1alpha1.Incident, requests []remediationv1
 			return false
 		}
 	}
-	return true
+	return !escalatesInc(inc, requests)
+}
+
+// escalatesInc reports whether the newest request naming inc (by name and UID, chosen as [Closure] chooses
+// it: a request ended by another one's merge never decides) ended without success, so the closure rules move
+// inc to Escalated for a person ([requestOutcome]).
+func escalatesInc(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.RemediationRequest) bool {
+	var newest *remediationv1alpha1.RemediationRequest
+	for i := range requests {
+		rr := &requests[i]
+		if rr.Spec.IncidentRef.Name != inc.Name || types.UID(rr.Spec.IncidentRef.UID) != inc.UID ||
+			mergedElsewhere(rr) {
+			continue
+		}
+		if newest == nil || newer(rr, newest) {
+			newest = rr
+		}
+	}
+	if newest == nil {
+		return false
+	}
+	phase, _, ok := requestOutcome(newest, requests)
+	return ok && phase == remediationv1alpha1.IncidentEscalated
 }
 
 // foldCandidate reports whether inc may still be folded into some cause: a consequence ([consequenceIncident])

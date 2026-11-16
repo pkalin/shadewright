@@ -63,28 +63,30 @@ func (c *Controller) triggerLoop(ctx context.Context) {
 	}
 }
 
-// pass reports how near the Incident cap is ([Controller.reportCap], from memory), runs the closure rules
-// ([Controller.closeIncidents]) within the first half of PassTimeout, the late-cause folds owed by the stored
-// Incidents ([Controller.foldRecent]) within the next quarter, then one [Controller.markDue] within the rest,
-// so a closure or fold pass that runs into its deadline never takes the marks' time. A failure of one does
-// not stop the others; the joined error names the Incidents whose writes failed.
+// pass reports how near the Incident cap is ([Controller.reportCap], from memory), runs the late-cause folds
+// owed by the stored Incidents ([Controller.foldRecent]) within the first quarter of PassTimeout, the closure
+// rules ([Controller.closeIncidents]) within the next half, then one [Controller.markDue] within the rest, so
+// a fold or closure pass that runs into its deadline never takes the marks' time. The folds come first: once
+// its cause exists a consequence's lastSeen stops moving, and the quiet rule would otherwise resolve an owed
+// fold as SymptomQuiet before it is made. A failure of one does not stop the others; the joined error names
+// the Incidents whose writes failed.
 func (c *Controller) pass(ctx context.Context) error {
 	pctx, cancel := context.WithTimeout(ctx, c.cfg.PassTimeout)
 	defer cancel()
 	c.reportCap(pctx)
-	cctx, cancelClose := context.WithTimeout(pctx, c.cfg.PassTimeout/2)
-	closeErr := c.closeIncidents(cctx)
-	cancelClose()
-	if pctx.Err() != nil {
-		return errors.Join(closeErr, pctx.Err())
-	}
 	fctx, cancelFold := context.WithTimeout(pctx, c.cfg.PassTimeout/4)
 	foldErr := c.foldRecent(fctx)
 	cancelFold()
 	if pctx.Err() != nil {
-		return errors.Join(closeErr, foldErr, pctx.Err())
+		return errors.Join(foldErr, pctx.Err())
 	}
-	return errors.Join(closeErr, foldErr, c.markDue(pctx))
+	cctx, cancelClose := context.WithTimeout(pctx, c.cfg.PassTimeout/2)
+	closeErr := c.closeIncidents(cctx)
+	cancelClose()
+	if pctx.Err() != nil {
+		return errors.Join(foldErr, closeErr, pctx.Err())
+	}
+	return errors.Join(foldErr, closeErr, c.markDue(pctx))
 }
 
 // markDue decides, for every Incident in the namespace, whether it is due for analysis ([Due]) and sets its

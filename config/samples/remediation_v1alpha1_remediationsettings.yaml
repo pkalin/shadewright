@@ -47,4 +47,6 @@ spec:
         endpoint: https://example.services.ai.azure.com/
         deployment: strong-model
         apiVersion: "2024-10-21"
+        # A model that refuses function tools on chat completions (the gpt-6.1 models) needs the Responses
+        # API: inferenceAPI: Responses, with apiVersion: v1 (#501).
         maxTokensPerDay: 200000

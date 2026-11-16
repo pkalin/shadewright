@@ -87,6 +87,8 @@ var _ = Describe("Incident status of the cause rule", func() {
 		inc.Status.AbsorbedOccurrencesDroppedThrough = &seen
 		inc.Status.FoldedInto = &v1alpha1.IncidentRef{Name: v1alpha1.IncidentName(
 			"sha256:"+strings.Repeat("b", 64), 0), UID: testRootUID}
+		// foldedInto is allowed only in phase Resolved (#793).
+		inc.Status.Phase, inc.Status.ResolvedTime = v1alpha1.IncidentResolved, &seen
 		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
 
 		got := &v1alpha1.Incident{}
@@ -185,7 +187,9 @@ var _ = Describe("Incident status of the cause rule", func() {
 	DescribeTable("refuses status.foldedInto",
 		func(ref v1alpha1.IncidentRef, msg string) {
 			inc := stored()
-			inc.Status.FoldedInto = &ref
+			// In phase Resolved, where the field is allowed, so only its own schema refuses it.
+			resolved := seen
+			inc.Status.Phase, inc.Status.ResolvedTime, inc.Status.FoldedInto = v1alpha1.IncidentResolved, &resolved, &ref
 			expectStatusRefused(inc, msg)
 		},
 		Entry("with a UID that is not a UID", v1alpha1.IncidentRef{Name: "incident-a", UID: "not-a-uid"},
@@ -208,7 +212,7 @@ var _ = Describe("Incident status of the cause rule", func() {
 			"lastSeen", "occurrences", "occurrencesDroppedThrough", "phase", "remediationRequests", "resolvedTime",
 			"revertsProposed"}
 		added := []string{"absorbed", "absorbedOccurrences", "absorbedOccurrencesDroppedThrough", "cause",
-			"containers", "foldedInto"}
+			"containers", "folded", "foldedInto"}
 		Expect(slices.Sorted(maps.Keys(status.Properties))).To(Equal(slices.Sorted(slices.Values(
 			append(slices.Clone(before), added...)))))
 		Expect(status.Required).To(BeEmpty(), "a new field must not be required")
@@ -239,5 +243,6 @@ var _ = Describe("Incident status of the cause rule", func() {
 		Expect(got.Status.Absorbed).To(BeNil())
 		Expect(got.Status.AbsorbedOccurrences).To(BeNil())
 		Expect(got.Status.FoldedInto).To(BeNil())
+		Expect(got.Status.Folded).To(BeFalse())
 	})
 })

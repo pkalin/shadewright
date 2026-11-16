@@ -22,7 +22,8 @@ API group and version: `remediation.shadewright.io/v1alpha1`
 
 Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
 removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
-entries or status.cause is true, and refuse a new entry of that list in any state but Pending, also in the first status write.
+entries, status.cause or status.folded is true or status.foldedInto is set, refuse a new entry of that list in any state but
+Pending, also in the first status write, and refuse a status.foldedInto that names the Incident itself.
 
 - API version: `remediation.shadewright.io/v1alpha1`
 - Kind: `Incident`
@@ -32,13 +33,16 @@ Validation rules:
 
 - status cannot be removed while status.revertsProposed has entries: `!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed) == 0 || has(self.status)`
 - status cannot be removed while status.cause is true: `!has(oldSelf.status) || !has(oldSelf.status.cause) || !oldSelf.status.cause || has(self.status)`
+- status cannot be removed while status.foldedInto is set: `!has(oldSelf.status) || !has(oldSelf.status.foldedInto) || has(self.status)`
+- status cannot be removed while status.folded is true: `!has(oldSelf.status) || !has(oldSelf.status.folded) || !oldSelf.status.folded || has(self.status)`
+- status.foldedInto cannot name the Incident itself: `!has(self.status) || !has(self.status.foldedInto) || self.status.foldedInto.name != self.metadata.name`
 - a new entry of status.revertsProposed must be Pending: `!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n, n.state == 'Pending' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed) && oldSelf.status.revertsProposed.exists(o, o.uid == n.uid)))`
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [IncidentSpec](#incidentspec) | Yes | spec identifies the incident.<br>Rule: spec is immutable; a different symptom is a new Incident<br>Rule: occurrenceNumber and previousIncident are set together<br>Rule: previousIncident must be the occurrence before this one of the same fingerprint |
-| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: cause cannot change from true to false<br>Rule: absorbed is allowed only when cause is true<br>Rule: absorbedOccurrences is allowed only when cause is true<br>Rule: occurrencesDroppedThrough only moves forward<br>Rule: absorbedOccurrencesDroppedThrough only moves forward<br>Rule: revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes |
+| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: cause cannot change from true to false<br>Rule: absorbed is allowed only when cause is true<br>Rule: absorbedOccurrences is allowed only when cause is true<br>Rule: occurrencesDroppedThrough only moves forward<br>Rule: absorbedOccurrencesDroppedThrough only moves forward<br>Rule: revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes<br>Rule: foldedInto is allowed only in phase Resolved<br>Rule: foldedInto cannot change to another Incident: once set it may only be cleared<br>Rule: foldedInto is cleared only together with a move to a phase other than Resolved<br>Rule: folded cannot change from true to false |
 
 ## RemediationPolicy
 
@@ -757,6 +761,10 @@ Validation rules:
 - occurrencesDroppedThrough only moves forward: `!has(oldSelf.occurrencesDroppedThrough) || (has(self.occurrencesDroppedThrough) && self.occurrencesDroppedThrough >= oldSelf.occurrencesDroppedThrough)`
 - absorbedOccurrencesDroppedThrough only moves forward: `!has(oldSelf.absorbedOccurrencesDroppedThrough) || (has(self.absorbedOccurrencesDroppedThrough) && self.absorbedOccurrencesDroppedThrough >= oldSelf.absorbedOccurrencesDroppedThrough)`
 - revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes: `!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || (n.state == o.state && (!has(o.reason) || (has(n.reason) && n.reason == o.reason)))))))`
+- foldedInto is allowed only in phase Resolved: `!has(self.foldedInto) || (has(self.phase) && self.phase == 'Resolved')`
+- foldedInto cannot change to another Incident: once set it may only be cleared: `!has(oldSelf.foldedInto) || !has(self.foldedInto) || self.foldedInto == oldSelf.foldedInto`
+- foldedInto is cleared only together with a move to a phase other than Resolved: `!has(oldSelf.foldedInto) || has(self.foldedInto) || (has(self.phase) && self.phase != 'Resolved')`
+- folded cannot change from true to false: `!(has(oldSelf.folded) && oldSelf.folded) || (has(self.folded) && self.folded)`
 
 Used by: [Incident](#incident).
 
@@ -773,7 +781,8 @@ Used by: [Incident](#incident).
 | `absorbed` | [AbsorbedTally](#absorbedtally) array | No | absorbed is the tally of the consequence observations this Incident took as evidence of its cause, one entry per reason, at most 8 (ADR-0039 point 16). They change neither count nor lastSeen, and the analysis trigger and the quiet rule do not read them. Allowed only when cause is true.<br>Maximum items: 8<br>List type: map<br>List key: `reason` |
 | `absorbedOccurrences` | [OccurrenceRecord](#occurrencerecord) array | No | absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point 16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped. Allowed only when cause is true.<br>Maximum items: 32<br>List type: atomic |
 | `absorbedOccurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | absorbedOccurrencesDroppedThrough is when the newest occurrence dropped from absorbedOccurrences began, the drop mark of occurrencesDroppedThrough for the absorbed list. It answers only for consequences linked to this Incident's fingerprint, and only moves forward. |
-| `foldedInto` | [IncidentRef](#incidentref) | No | foldedInto names the cause's Incident, by name and UID, when this consequence Incident was folded into it and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Nothing writes it yet. |
+| `foldedInto` | [IncidentRef](#incidentref) | No | foldedInto names the cause's Incident, by name and UID, when this consequence Incident was folded into it and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Allowed only in phase Resolved. It never changes to another Incident: a reopen of the folded Incident clears it, together with a move out of Resolved, and that is the only change allowed once it is set. It never names the Incident itself. The closure rules skip an Incident that has it. The fold sets folded with it. |
+| `folded` | boolean | No | folded is true once this consequence Incident was folded into its cause's Incident (ADR-0039 point 14, decision of 2026-11-16 on #793), set in the fold's status write. Unlike foldedInto and the Lifecycle reason, which a reopen, an escalation or a request outcome replaces, it stays: an Incident with folded true is never folded again, so a fold happens at most once per Incident. Once true it stays true, and the status cannot be removed while it is. |
 | `resolvedTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design 3.2). It cannot change while the phase stays Resolved. A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident. |
 | `lastAnalysisTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastAnalysisTime is when the analyzer last ran; it drives the cooldown. |
 | `handledHint` | [HintRef](#hintref) | No | handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3): written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint. Absent for an analysis without a hint. The trigger also writes it, with the Analyzed reason CoolingDown or BudgetSpent, for a hint it refuses without an analysis. |

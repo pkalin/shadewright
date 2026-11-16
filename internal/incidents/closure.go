@@ -85,8 +85,8 @@ const (
 	ReasonRequestActive = "RequestActive"
 	// ReasonFoldedIntoCause: the Incident is a consequence of a cause whose Incident opened after it, on the same
 	// container, so it was folded into that Incident: Resolved, with status.foldedInto naming it (ADR-0039 point
-	// 14). Declared for the fold; nothing sets it yet. Seen again within RecurrenceWindow, such an Incident is
-	// reopened, not escalated ([reopens]).
+	// 14, [fold]). The closure rules skip such an Incident ([Closure]). Seen again within RecurrenceWindow, it
+	// is reopened, not escalated ([reopens]).
 	ReasonFoldedIntoCause = "FoldedIntoCause"
 )
 
@@ -166,7 +166,10 @@ func lifecycleReason(inc *remediationv1alpha1.Incident) string {
 // controller holds unwritten, or zero. Closure reads only its arguments.
 //
 //   - Only an Incident whose name is derived from its spec, with an observation, in phase Open, Proposed,
-//     Escalated or Resolved is decided. Analyzing and no phase stay.
+//     Escalated or Resolved is decided. Analyzing and no phase stay. An Incident folded into its cause's
+//     Incident (status.foldedInto, ADR-0039 point 15) is skipped: no request of it had a pull request when it
+//     was folded, so it neither returns to Proposed for an active request nor ends Escalated for the cancel
+//     (IncidentFolded) that the fold causes.
 //   - A Resolved Incident moves only for a request the closure rules that resolved it cannot have listed (a
 //     listing is no lock), so the next pass undoes that resolution from what the API server holds, also after
 //     a restart: an active request naming it moves it back to Proposed (ReasonRequestActive); otherwise, when
@@ -191,7 +194,7 @@ func lifecycleReason(inc *remediationv1alpha1.Incident) string {
 func Closure(inc *remediationv1alpha1.Incident, requests []remediationv1alpha1.RemediationRequest, held,
 	now time.Time) (remediationv1alpha1.IncidentPhase, string, bool) {
 	st := &inc.Status
-	if !inc.HasDerivedName() || st.LastSeen == nil {
+	if !inc.HasDerivedName() || st.LastSeen == nil || st.FoldedInto != nil {
 		return "", "", false
 	}
 	switch st.Phase {

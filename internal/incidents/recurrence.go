@@ -100,7 +100,8 @@ func resolvedBefore(st *remediationv1alpha1.IncidentStatus) time.Time {
 }
 
 // escalateRecurrence moves a Resolved Incident whose symptom came back to Escalated, with the condition
-// Recurred saying why. The message holds nothing from the cluster.
+// Recurred saying why. The message holds nothing from the cluster. status.foldedInto is cleared, since the
+// schema allows it only in phase Resolved.
 func escalateRecurrence(inc *remediationv1alpha1.Incident, now time.Time) {
 	reason, msg := ReasonRecurredWithinWindow,
 		"The symptom was seen again after the resolution and within 24 hours of resolvedTime; a person decides, no analysis runs"
@@ -109,6 +110,7 @@ func escalateRecurrence(inc *remediationv1alpha1.Incident, now time.Time) {
 			"The symptom was seen again and resolvedTime is missing, so it counts as within 24 hours; a person decides, no analysis runs"
 	}
 	inc.Status.Phase = remediationv1alpha1.IncidentEscalated
+	inc.Status.FoldedInto = nil
 	meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
 		Type: ConditionRecurred, Status: metav1.ConditionTrue, Reason: reason, Message: msg,
 		ObservedGeneration: inc.Generation, LastTransitionTime: metav1.NewTime(now.UTC().Truncate(time.Second)),

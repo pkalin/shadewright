@@ -673,8 +673,8 @@ func TestStalledClosureLeavesTheMarksTheirTime(t *testing.T) {
 	c.cache = lists
 	c.reader = &stalling{Client: cl}
 	_ = c.pass(t.Context())
-	if got := lists.incidents.Load(); got != 2 {
-		t.Fatalf("the Incidents were listed %d times in the pass, want 2 (closure and marks)", got)
+	if got := lists.incidents.Load(); got != 3 {
+		t.Fatalf("the Incidents were listed %d times in the pass, want 3 (closure, folds and marks)", got)
 	}
 }
 

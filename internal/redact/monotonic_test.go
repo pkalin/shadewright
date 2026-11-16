@@ -60,7 +60,7 @@ var hiddenKeyInputs = []string{
 func TestNoWiderExtentHidesAKey(t *testing.T) {
 	for _, in := range hiddenKeyInputs {
 		out := String(in)
-		for _, w := range []string{"hidden", " word", "words", "Hunter", "three"} {
+		for _, w := range []string{hiddenWord, " word", "words", "Hunter", "three"} {
 			if strings.Contains(in, w) && strings.Contains(out, w) {
 				t.Errorf("String(%q) = %q, %q is still there", in, out, w)
 			}
@@ -71,6 +71,13 @@ func TestNoWiderExtentHidesAKey(t *testing.T) {
 	}
 }
 
+// hiddenWord, nlIndent and nlDash are pieces the corpus uses more than once.
+const (
+	hiddenWord = "hidden"
+	nlIndent   = "\n  "
+	nlDash     = "\n- "
+)
+
 // The pieces of a monotonicCorpus input: a context around the fields, a first key of any name, two or three
 // secret-named keys after it, the separators between a key and its value, the glue between fields, value
 // pieces with every quote, bracket, escape, substitution, YAML tag and anchor the extent rule reads, and the
@@ -80,31 +87,27 @@ var (
 		{"", ""}, {"{", "}"}, {"[", "]"}, {`msg="`, `"`}, {`{"cmd":"`, `"}`}, {"run ", ""}, {"- ", ""},
 		{"args: [", "]"}, {"args:\n- ", "\n"}, {"export ", ""}, {`{\"a\":\"`, `\"}`},
 	}
-	monoFirstKeys = []string{
-		"TOKEN", "token", "password", "msg", "--password", "-password", `"password"`, "client_secret", "apiKey",
-		"x", "args", "secret", "user", "'--token'", `\"apiKey\"`,
-	}
-	monoSecretKeys = []string{
-		"DB_PASSWORD", "password", "token", "apiKey", "secret", "client_secret", "--password", "-token",
-		`"password"`, "x-api-key", "AWS_SECRET_ACCESS_KEY", "--client-secret", "'token'", `\"password\"`, "pass",
-		"db.password", "aws_secret_access_key", "clientSecret",
-	}
+	monoFirstKeys = strings.Fields(`TOKEN token password msg --password -password "password" client_secret apiKey
+		x args secret user '--token' \"apiKey\"`)
+	monoSecretKeys = strings.Fields(`DB_PASSWORD password token apiKey secret client_secret --password -token
+		"password" x-api-key AWS_SECRET_ACCESS_KEY --client-secret 'token' \"password\" pass db.password
+		aws_secret_access_key clientSecret`)
 	monoSeps = []string{
-		"=", "= ", ": ", ":", ":=", " := ", " ", " = ", "=\\\n  ", ":\n  ", ":\n- ", "\n- ", ", ", ` "`, "\t",
+		"=", "= ", ": ", ":", ":=", " := ", " ", " = ", "=\\\n  ", ":\n  ", ":\n- ", nlDash, ", ", ` "`, "\t",
 	}
 	monoValuePieces = []string{
-		"abc", "ab", "x", "Staple9", `"`, `'`, "`", "[", "]", "{", "}", "(", ")", "&a ", "!!str ", "!x ", `\`, `\!`,
-		`\ `, `\"`, `\\`, "$(", " ", ",", ", ", `"a b"`, `'a b'`, "a=b", "#", "/", ";", "|", "\n", "\n  ",
+		plainABC, "ab", "x", passphraseWords[2], `"`, `'`, "`", "[", "]", "{", "}", "(", ")", "&a ", "!!str ", "!x ", `\`, `\!`,
+		`\ `, `\"`, `\\`, "$(", " ", ",", ", ", `"a b"`, `'a b'`, "a=b", "#", "/", ";", "|", "\n", nlIndent,
 	}
 	monoSecretValues = []string{
-		`"hidden word"`, `'hidden word'`, "hidden", `"hidden] secret words"`, `"Hunter two three"`,
-		"hidden word", `[hidden, word]`, `{a: hidden word}`, `$(hidden word)`, "`hidden word`", `\"hidden word\"`,
+		`"hidden word"`, `'hidden word'`, hiddenWord, `"hidden] secret words"`, `"Hunter two three"`,
+		hiddenWord + " word", `[hidden, word]`, `{a: hidden word}`, `$(hidden word)`, "`hidden word`", `\"hidden word\"`,
 	}
 	monoGlues = []string{
-		"", " ", ",", ", ", ",/", "/", `\`, ";", "&", "\t", "\n", "\n  ", "\n- ", `"`, `" `, "', ", "], ", "}, ",
+		"", " ", ",", ", ", ",/", "/", `\`, ";", "&", "\t", "\n", nlIndent, nlDash, `"`, `" `, "', ", "], ", "}, ",
 		"|", ".", "-", "=", ":", "!", "#",
 	}
-	monoTails = []string{"", " next=x", " z", " user=bob", "\nnext: x", ", u: x", `", "u": 1`, " EVIDENCE"}
+	monoTails = []string{"", nextX, " z", " user=bob", nextLineTail, ", u: x", `", "u": 1`, " evidence"}
 )
 
 // monotonicCorpus returns n inputs of two or three key/value fields built from the pieces above with a fixed
@@ -205,7 +208,7 @@ func TestMonotonicStaysLinear(t *testing.T) {
 	skipLarge(t)
 	for _, line := range hiddenKeyInputs {
 		unit := line + " "
-		var times []time.Duration
+		times := make([]time.Duration, 0, 3)
 		for _, size := range []int{4 << 10, 16 << 10, 64 << 10} {
 			times = append(times, timeString(t, line, rep(unit, size/len(unit))))
 		}

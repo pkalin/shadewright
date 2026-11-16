@@ -105,12 +105,22 @@ func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remedi
 	return err
 }
 
-// failCheckStep is failCheck's work: it writes the failed check, then records Stale.
+// failCheckStep is failCheck's work: it writes the failed check, then records Stale. Through a new installation of
+// the plan's repository (#290) it first reads the recorded pull request with this request's marker and writes
+// nothing when that read fails or the pull request is not this request's.
 func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, run providers.CheckRun) error {
-	git, err := r.openPlanRepository(ctx, rr)
+	git, _, reinstalled, err := r.openPlanRepositoryFor(ctx, rr)
 	if err != nil {
 		return err
+	}
+	if reinstalled {
+		switch v := r.changeOf(ctx, git, rr, changeQuery{marker: true}); v.state {
+		case changeUnknown:
+			return v.err
+		case changeGone:
+			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
+		}
 	}
 	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run); err != nil {
 		return freshness.WrapProvider("write the check run", err)

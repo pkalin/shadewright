@@ -1278,10 +1278,21 @@ func (r *RemediationRequestReconciler) endBeforeFresh(ctx context.Context, rr *r
 // With reviewer hints on, the check run shadewright/review is failed first (failStaleCheck, #713): a closed pull
 // request can be reopened and merged on a check that is still green, so the request does not end while the check is
 // pending. It keeps its phase and the mark and tries again after the poll interval, with no other bound, as for a
-// refused close; a pause waits as for any write.
+// refused close; a pause waits as for any write. A request whose repository the settings reach only through a new
+// installation of the GitHub App (#290) settles its target lock first (releaseReinstalled) and waits the same way
+// while it cannot.
 func (r *RemediationRequestReconciler) endStaleClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	mark *metav1.Condition) (ctrl.Result, error) {
 	switch err := r.failStaleCheck(ctx, rr, mark.Reason); {
+	case err == nil:
+	case errors.Is(err, freshness.ErrPaused):
+		return r.waitWhilePaused(ctx, rr)
+	case ctx.Err() != nil:
+		return ctrl.Result{}, err
+	default:
+		return ctrl.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
+	}
+	switch err := r.releaseReinstalled(ctx, rr); {
 	case err == nil:
 	case errors.Is(err, freshness.ErrPaused):
 		return r.waitWhilePaused(ctx, rr)
@@ -1477,6 +1488,10 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		}
 		return errStaleCheckPending
 	case err == nil:
+		// Closed through a new installation (#290): the lock is settled before the end, which reads nothing more.
+		if err := r.releaseReinstalled(ctx, rr); err != nil {
+			return err
+		}
 		closedByUs(rr, staleClosed(staleErr.Reason))
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		// The settings of the repository cannot be used, so the change request cannot be closed either.
@@ -1493,7 +1508,8 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			"from another branch or lacks this request's marker); it was not closed"
 	case errors.Is(err, errRepositoryGone):
 		// Nothing is closed: the only change request this plan could have is in a repository that cannot be
-		// reached through the settings any more, and closing a number elsewhere could close someone else's.
+		// reached through the settings any more, and closing a number elsewhere could close someone else's. The same
+		// URL under a new installation of the GitHub App is not gone: closeOwn reaches it (cleanupRepository, #290).
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonRepositoryUnavailable
 		message = "The plan is stale and the repository it was made for is not configured any more; " +
 			"its change request, if any, was not closed"
@@ -1514,7 +1530,13 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			// The Git host refuses the close of the recorded pull request for good (#199): the request keeps its
 			// phase and the mark, and its pull request is still watched (recheck), so a merge or a close by a
 			// person is recorded; the close is tried again on every look, and nothing else is written to it.
-			return r.keepWatchingStale(ctx, rr, cf, refused)
+			return r.keepWatchingStale(ctx, rr, notClosedCondition(rr, cf, refused), cf.number, refused)
+		}
+		if s, ok := refusedReinstalled(err); ok && rr.Status.PullRequest != nil {
+			// The new installation of the plan's repository (#290) is refused the token, the read or the listing for
+			// good: the same as a refused close, the request keeps its phase and the mark, and every look tries
+			// again, so a later grant, a merge or a close by a person is recorded.
+			return r.keepWatchingStale(ctx, rr, notReachedCondition(rr, s), rr.Status.PullRequest.Number, s.reason)
 		}
 		if isUnknownChange(err) {
 			// A failed read of the change request, a refused one included (PullRequestUnreadable names it), is
@@ -1543,13 +1565,13 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 // interval). It is not a final phase.
 var errStaleNotClosed = errors.New("the Git host refused to close the stale plan's pull request")
 
-// keepWatchingStale records condition PullRequestNotClosed for a stale plan whose close the Git host refused for
-// good (cf, refused), in one status write when it changes, with one Warning Event when it is set or its reason
+// keepWatchingStale records condition PullRequestNotClosed (want) for a stale plan whose close of pull request number
+// the Git host refused for good (refused is the reason), or whose new installation (#290) it refused a step before
+// the close, in one status write when it changes, with one Warning Event when it is set or its reason
 // changes, and returns errStaleNotClosed. PlanFresh keeps the mark (False, the stale reason), so the plan is not
 // checked again and nothing but the close is written for it.
 func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	cf *closeFailure, refused string) error {
-	want := notClosedCondition(rr, cf, refused)
+	want metav1.Condition, number int64, refused string) error {
 	changed, event := r.setRefused(rr, want)
 	if !changed {
 		return errStaleNotClosed
@@ -1561,9 +1583,93 @@ func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr
 		r.refusedEvent(rr, EventPullRequestNotClosed, want)
 	}
 	logf.FromContext(ctx).Info("The Git host refused to close the pull request of a stale RemediationRequest; "+
-		"watching it", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cf.number,
+		"watching it", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", number,
 		"reason", refused)
 	return errStaleNotClosed
+}
+
+// errStaleLockPending is the answer of a stale plan's cleanup that closed its pull request through a new
+// installation of the GitHub App (#290) but could not settle the lock on its target yet (releaseReinstalled): the
+// request keeps its phase and the mark, and the look and the end are tried again after the poll interval
+// (refuseOrWait, endStaleClosed). It is not a final phase.
+var errStaleLockPending = errors.New("the target lock of the stale plan's closed pull request is not settled yet")
+
+// releaseReinstalled settles, before the end of a stale plan whose pull request is closed, the lock on the target
+// of a request whose plan's repository the settings now reach only through a new installation of the GitHub App
+// (cleanupRepository, #290). Once the request ends, the look of the lock (checkHeld) does not reach that installation
+// (no final phase or finalizer uses it), so it is made now, while the mark still allows it: the same read as
+// checkHeld's (lookHeld, through the provider that writes nothing but the close and a failed check run). A verdict
+// that frees the target releases the lock in rr, for the status write that ends the request. It returns nil, and
+// changes nothing, for a request that holds no lock or whose repository is reached through its own installation:
+// checkHeld settles that one after the end, as for any stale plan.
+//
+// Otherwise the request does not end: a pause is returned as freshness.ErrPaused and a cancelled reconcile as its
+// error; anything else (a failed or refused read, which changeOf reports with PullRequestUnreadable, another open
+// pull request of the branch, which is recorded in condition TargetHeld, or a failed write of that condition) is
+// logged and returned as errStaleLockPending, and the next look closes nothing more and tries again.
+func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	if !ptr.Deref(rr.Status.HoldsTarget, false) || staleMark(rr) == nil {
+		return nil
+	}
+	_, reinstalled, err := r.planEntry(ctx, rr)
+	switch {
+	case errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged):
+		// Not reached through a new installation as the settings stand: checkHeld's look after the end says so.
+		return nil
+	case errors.Is(err, freshness.ErrPaused):
+		return err
+	case err != nil:
+		return r.lockPending(ctx, rr, err)
+	case !reinstalled:
+		return nil
+	}
+	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	v, holding, err := r.lookHeld(lookCtx, rr)
+	err = boundErr(ctx, lookCtx, "look-up of the change request", err)
+	cancel()
+	switch {
+	case ctx.Err() != nil:
+		return err
+	case errors.Is(err, freshness.ErrPaused):
+		return err
+	case err != nil:
+		return r.lockPending(ctx, rr, err)
+	case v.state == changeUnknown:
+		return r.lockPending(ctx, rr, v.err)
+	}
+	if frees(v, holding) {
+		release(rr)
+		return nil
+	}
+	if holding == nil {
+		// The request's own pull request reads open after its close: looked at again.
+		return r.lockPending(ctx, rr, fmt.Errorf("pull request #%d still reads open", v.pr.Number))
+	}
+	want := metav1.Condition{
+		Type:   remediationv1alpha1.ConditionTargetHeld,
+		Status: metav1.ConditionTrue,
+		Reason: ReasonOpenOnBranch,
+		Message: fmt.Sprintf("Pull request #%d is open on the request's branch and may still deliver its change; "+
+			"the target stays locked until it is closed or merged", holding.Number),
+		ObservedGeneration: rr.Generation,
+	}
+	if meta.SetStatusCondition(&rr.Status.Conditions, want) {
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return r.lockPending(ctx, rr, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
+				rr.Namespace, rr.Name, err))
+		}
+	}
+	return r.lockPending(ctx, rr, fmt.Errorf("pull request #%d is open on the request's branch", holding.Number))
+}
+
+// lockPending logs why releaseReinstalled could not settle the lock of rr yet and returns errStaleLockPending.
+func (r *RemediationRequestReconciler) lockPending(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cause error) error {
+	logf.FromContext(ctx).Info("Kept a stale RemediationRequest in its phase: the target lock could not be settled "+
+		"through the new installation of its repository yet; tried again", "remediationRequest",
+		client.ObjectKeyFromObject(rr), "error", cause.Error())
+	return fmt.Errorf("%w: %w", errStaleLockPending, cause)
 }
 
 // endUnrecordedMerge handles the answer of closeChangeRequest for a request with no recorded pull request whose
@@ -1667,7 +1773,8 @@ func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remedi
 // closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
-// settings, [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
+// settings (for a stale plan's cleanup, also not under a new installation of the GitHub App: cleanupRepository,
+// #290, whose failures come wrapped in a *reinstalledError), [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
 // when a recorded pull request is gone (changeOf: not this request's, or without its marker), and
 // [freshness.ErrPaused] when the settings read now pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
 // request is, or may become, its replacement's ([errChangeRequestNotOurs] when handed over,
@@ -1705,12 +1812,28 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	if freshness.Paused(settings) {
 		return freshness.ErrPaused
 	}
-	repo, ok := freshness.FindRepository(settings, rr.Status.PlanRepository)
+	// The cleanup of a stale plan also reaches the plan's URL under a new installation (#290); the finalizer does not.
+	repo, reinstalled, ok := cleanupRepository(settings, rr, staleMark(rr) != nil && !deleting)
 	if !ok {
 		return errRepositoryGone
 	}
 	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {
 		return errTargetBranchChanged
+	}
+	if reinstalled {
+		// Writes nothing but the close and a failed check run; every close below reads the pull request with this
+		// request's marker first (changeOf, closeUnrecorded).
+		git, err := r.openGated(ctx, repo, func() bool { return true })
+		if providers.IsInvalidConfig(err) {
+			return freshness.ErrRepositoryUnusable
+		}
+		if err != nil {
+			return &reinstalledError{err: &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}}
+		}
+		if err := r.closeFound(ctx, git, rr, false); err != nil {
+			return &reinstalledError{err: err}
+		}
+		return nil
 	}
 	git, err := r.openRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {
@@ -1719,6 +1842,21 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	if err != nil {
 		return &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}
 	}
+	return r.closeFound(ctx, git, rr, deleting)
+}
+
+// reinstalledError is closeOwn's failure of a cleanup that reached the plan's repository through a new
+// installation of the GitHub App (#290). It wraps the failure and adds no text, so cleanUpStale can report a step
+// that installation is refused (keepWatchingStale) instead of ending the request.
+type reinstalledError struct{ err error }
+
+func (e *reinstalledError) Error() string { return e.err.Error() }
+
+func (e *reinstalledError) Unwrap() error { return e.err }
+
+// closeFound is closeOwn once the repository is open as git.
+func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, deleting bool) error {
 	// Without a recorded pull request it is found by the request's branch: it may exist although the status
 	// write that records it failed (design section 6). A recorded one is read by its number, so a newer pull
 	// request on the same branch never stands in for it (ADR-0030 section 1), and it is closed only when it is

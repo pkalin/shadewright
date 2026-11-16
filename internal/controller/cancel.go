@@ -196,6 +196,11 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 //     the target is not kept locked for a check that cannot be written.
 //   - Anything else is a failure of the cancel (cancelFailed), and the check is tried again on the next look,
 //     which finds the pull request closed. Once cleanupFailingBound has passed, the request ends as for a refusal.
+//
+// A request whose stale plan's repository the settings reach only through a new installation of the GitHub App
+// (#290) settles its target lock first (releaseReinstalled), as endStaleClosed does: while it cannot (a failed or
+// refused read, reported with PullRequestUnreadable, or another open pull request of the branch, recorded in
+// TargetHeld), the request keeps its phase and is looked at again after the poll interval, with no other bound.
 func (r *RemediationRequestReconciler) endCancelClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	checkErr error, mark func(), message string) (reconcile.Result, error) {
 	if checkErr != nil {
@@ -214,6 +219,17 @@ func (r *RemediationRequestReconciler) endCancelClosed(ctx context.Context, rr *
 		logf.FromContext(ctx).Info("Could not fail the review check of a cancelled RemediationRequest; ending it, "+
 			"as its pull request is closed", "remediationRequest", client.ObjectKeyFromObject(rr),
 			"error", checkErr.Error())
+	}
+	// A stale plan's cleanup closed or found closed through a new installation of the GitHub App (#290): the lock is
+	// settled before the end, which no later look through that installation could settle.
+	switch err := r.releaseReinstalled(ctx, rr); {
+	case err == nil:
+	case errors.Is(err, freshness.ErrPaused):
+		return r.waitWhilePaused(ctx, rr)
+	case ctx.Err() != nil:
+		return reconcile.Result{}, err
+	default:
+		return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
 	}
 	mark()
 	return r.endCancelled(ctx, rr, message, checkErr != nil)

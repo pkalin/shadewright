@@ -681,6 +681,101 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		stillOpen()
 	})
 
+	// cancelIt sets spec.cancel on the stored request with a merge patch, as `kubectl patch --type merge` does.
+	cancelIt := func() {
+		GinkgoHelper()
+		got := fetch()
+		base := got.DeepCopy()
+		got.Spec.Cancel = true
+		Expect(k8sClient.Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+	}
+
+	It("releases the target lock of a stale request cancelled and closed through the new installation (#290)", func() {
+		reinstall()
+		forbidden := atomic.Bool{}
+		forbidden.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opClose:
+				closes.Add(1)
+			case forbidden.Load() && (op == opGet || op == opList):
+				return fmt.Errorf("installation not granted the repository: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonPlanChanged), "watched with the mark")
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+
+		// A person cancels the request; then the installation is granted the repository.
+		cancelIt()
+		forbidden.Store(false)
+		for range 4 {
+			if fetch().Status.Phase == remediationv1alpha1.PhaseCancelled {
+				break
+			}
+			_, err = reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+		}
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "released with the end, not left to a later look")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			To(BeNil())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetch().ResourceVersion).To(Equal(got.ResourceVersion), "a later look writes nothing")
+	})
+
+	It("ends a stale request cancelled with its pull request closed through the new installation only once its target lock is settled (#290)", func() {
+		reinstall()
+		forbidden := atomic.Bool{}
+		forbidden.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opClose:
+				closes.Add(1)
+			case forbidden.Load() && (op == opGet || op == opList):
+				return fmt.Errorf("installation not granted the repository: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(planFresh().Reason).To(Equal(freshness.ReasonPlanChanged), "watched with the mark")
+
+		// A person closes the pull request, opens another one from the branch and cancels the request.
+		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+		other, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
+			HeadBranch: freshness.BranchName(fetch()), BaseBranch: mainBranch, Title: "o", Body: "opened by hand",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		cancelIt()
+		forbidden.Store(false)
+		for range 2 {
+			res, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0), "looked at again, without a hot requeue")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not ended yet")
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+			held := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
+			Expect(held).NotTo(BeNil(), "the wait is visible")
+			Expect(held.Message).To(ContainSubstring(fmt.Sprintf("#%d", other.Number)))
+		}
+
+		// Once the other pull request is closed, the next look releases the lock in the write that ends the request.
+		Expect(git.CloseChangeRequest(ctx, other.Number)).To(Succeed())
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)).To(BeNil())
+	})
+
 	It("records the merge of a pull request merged before the new installation's cleanup closed it (#290)", func() {
 		reinstall()
 		sha, err := git.Merge(cr.Number)

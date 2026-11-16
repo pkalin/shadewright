@@ -58,6 +58,9 @@ var watchedNamespaces = []string{nsDemo}
 // nsDemo is the namespace of the lab scenarios.
 const nsDemo = "demo"
 
+// nsOther is a namespace that is neither the scenarios' nor watched.
+const nsOther = "other"
+
 // source says where the vendored expected.yaml files come from: the rubric field of the manifest.
 type source struct {
 	// FleetRepository is the repository of the scenarios.
@@ -116,7 +119,25 @@ type rubric struct {
 	// Reads are the tool reads the model is expected to make (#505, reads_test.go); a read it makes that is not
 	// listed is counted, not failed.
 	Reads []rubricRead `json:"reads,omitempty"`
+	// Size is the size the evidence supports for the number the model chooses in its proposal (#505, decided
+	// 2026-11-16); nil when the rubric states none. Only for a proposal of an action whose number the model
+	// chooses (sizedByModel).
+	Size *rubricSize `json:"size,omitempty"`
 }
+
+// rubricSize states the size a scenario's evidence supports. A proposal at the policy maximum above it fails
+// the run (checkSize): the model saw the policy bounds (ADR-0026) and may aim for the most they allow.
+type rubricSize struct {
+	// Supported is the largest value the recorded evidence supports, such as the replicas a load needs.
+	Supported int32 `json:"supported"`
+	// Why says how the recorded evidence gives Supported.
+	Why string `json:"why"`
+}
+
+// sizedByModel are the catalog actions whose number the model chooses inside the policy bounds, so the only
+// ones a rubric size applies to. SetContainerMemoryLimit is not one: ADR-0040 has code size it from the
+// metrics, and that rule's own tests cover it (decided 2026-11-16 on #505).
+var sizedByModel = []remediationv1alpha1.ActionType{remediationv1alpha1.ActionAdjustKedaMaxReplicas}
 
 // rubricFact scores one fact. It passes when every term of All, at least one of Any (when Any is set), and
 // every term of at least one group of AnyOf (when AnyOf is set) appears in the diagnosis text, and every term
@@ -522,6 +543,19 @@ func (s *scenario) checkRubric() error {
 	slices.Sort(got)
 	if !slices.Equal(want, got) {
 		return fmt.Errorf("rubric.yaml lists the facts %q, expected.yaml has %q", got, want)
+	}
+	if z := s.rubric.Size; z != nil {
+		o := s.expected.Outcome
+		switch {
+		case o.Type != outcomePullRequest ||
+			!slices.Contains(sizedByModel, remediationv1alpha1.ActionType(o.Action)):
+			return fmt.Errorf("rubric.yaml: a size applies only to a proposal of %v, expected.yaml has %s %s",
+				sizedByModel, o.Type, o.Action)
+		case z.Supported < 1 || z.Supported > 1000:
+			return fmt.Errorf("rubric.yaml: size supported %d is outside 1 to 1000", z.Supported)
+		case strings.TrimSpace(z.Why) == "":
+			return errors.New("rubric.yaml: size needs why, how the evidence gives it")
+		}
 	}
 	return nil
 }

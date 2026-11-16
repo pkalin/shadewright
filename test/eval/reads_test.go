@@ -27,9 +27,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
 )
 
@@ -52,10 +54,11 @@ type rubricRead struct {
 
 // The JSON schema types and the argument names the grammar knows.
 const (
-	typeBoolean = "boolean"
-	typeInteger = "integer"
-	argKind     = "kind"
-	argName     = "name"
+	typeBoolean  = "boolean"
+	typeInteger  = "integer"
+	argKind      = "kind"
+	argName      = "name"
+	argNamespace = "namespace"
 )
 
 // paramSpec is what the grammar checks of one argument of a tool: its JSON type and its enum.
@@ -279,8 +282,9 @@ var offeredToolParams = sync.OnceValues(func() (map[string]toolParams, error) {
 	return out, nil
 })
 
-// checkReads parses the rubric's expected reads against the tools the scenario is offered: query_metrics only
-// with a metrics.yaml. It runs once the scenario's metrics are loaded.
+// checkReads parses the rubric's expected reads against the tools the scenario is offered (query_metrics only
+// with a metrics.yaml), and refuses a read no accepted call can make (readRule.callable). It runs once the
+// scenario's Incident and metrics are loaded.
 func (s *scenario) checkReads() error {
 	offered, err := offeredToolParams()
 	if err != nil {
@@ -290,10 +294,17 @@ func (s *scenario) checkReads() error {
 		offered = maps.Clone(offered)
 		delete(offered, tools.NameQueryMetrics)
 	}
+	set, err := readCheckTools()
+	if err != nil {
+		return err
+	}
 	s.reads = nil
 	for _, rr := range s.rubric.Reads {
 		r, err := parseRead(rr.Read, offered)
 		if err != nil {
+			return fmt.Errorf("rubric.yaml: %w", err)
+		}
+		if err := r.callable(set, s.incident.Spec.Subject.Namespace); err != nil {
 			return fmt.Errorf("rubric.yaml: %w", err)
 		}
 		if slices.ContainsFunc(s.reads, func(o readRule) bool { return o.tool == r.tool && maps.Equal(o.args, r.args) }) {
@@ -302,6 +313,116 @@ func (s *scenario) checkReads() error {
 		s.reads = append(s.reads, r)
 	}
 	return nil
+}
+
+// readCheckTools are the read tools the expected reads are checked with (readRule.callable): the tool set of an
+// evaluation run over an empty cluster, so every call the tools accept reads nothing and ends not found.
+var readCheckTools = sync.OnceValues(func() (*tools.Set, error) {
+	scheme, err := newScheme()
+	if err != nil {
+		return nil, err
+	}
+	r, err := redact.New()
+	if err != nil {
+		return nil, err
+	}
+	c := newClient(scheme, nil)
+	return tools.New(tools.Config{Pods: c, Events: c, Objects: c, Redactor: r, Namespaces: watchedNamespaces,
+		Metrics: newReplayMetrics(&metricsRecording{}), Now: func() time.Time { return fixtureNow }})
+})
+
+// callable returns why no call that r matches can be accepted in a scenario whose subject is in
+// subjectNamespace, or nil. A read the loop or the tool refuses every time can never be made, so every run of
+// the scenario would fail for the rubric's error, not the model's. The tool's own argument checks decide
+// (tools.Set.Call, the code that checks the model's calls: types, ranges, lengths, names, patterns, the
+// watched namespaces): r's arguments are completed in every way the grammar leaves open (each free argument
+// absent, each value of its enum, or a valid name), and r is callable when the tool accepts one of them. The
+// loop's own rule comes first: every tool with a namespace argument reads only the subject's namespace
+// (internal/analysis, run.boundCall), so a free namespace is the subject's and a constrained one must be.
+func (r readRule) callable(set *tools.Set, subjectNamespace string) error {
+	fixed := map[string]any{}
+	var free []string
+	for _, name := range slices.Sorted(maps.Keys(r.params)) {
+		value, ok := r.args[name]
+		switch {
+		case name == argNamespace && ok && value != subjectNamespace:
+			return fmt.Errorf("read %q: the analysis reads only the namespace of the Incident's subject, %q", r.text,
+				subjectNamespace)
+		case ok:
+			fixed[name] = r.params[name].typed(value)
+		case name == argNamespace:
+			fixed[name] = subjectNamespace
+		default:
+			free = append(free, name)
+		}
+	}
+	refusal := ""
+	var try func(i int, args map[string]any) (bool, error)
+	try = func(i int, args map[string]any) (bool, error) {
+		if i == len(free) {
+			raw, err := json.Marshal(args)
+			if err != nil {
+				return false, err
+			}
+			res, err := set.Call(context.Background(), providers.ToolCall{ID: "check", Name: r.tool, Arguments: raw})
+			if err != nil {
+				return false, fmt.Errorf("read %q: checking it with the tool: %w", r.text, err)
+			}
+			if res.Status != tools.StatusRefused {
+				return true, nil
+			}
+			if refusal == "" {
+				refusal = strings.TrimSpace(res.Text)
+			}
+			return false, nil
+		}
+		for _, v := range r.params[free[i]].options() {
+			next := maps.Clone(args)
+			if v != nil {
+				next[free[i]] = v
+			}
+			if ok, err := try(i+1, next); ok || err != nil {
+				return ok, err
+			}
+		}
+		return false, nil
+	}
+	ok, err := try(0, fixed)
+	switch {
+	case err != nil:
+		return err
+	case !ok:
+		return fmt.Errorf("read %q: tool %s refuses every call this read matches (%s)", r.text, r.tool, refusal)
+	}
+	return nil
+}
+
+// typed is value, in the grammar's canonical form, as the JSON value of the argument's type.
+func (p paramSpec) typed(value string) any {
+	switch p.typ {
+	case typeInteger:
+		n, _ := strconv.ParseInt(value, 10, 64)
+		return n
+	case typeBoolean:
+		return value == strconv.FormatBool(true)
+	}
+	return value
+}
+
+// options are the values callable tries for an argument the read leaves free: absent (nil), and each value of
+// its enum, or for a string without one a valid object name. An integer or a boolean is only tried absent: no
+// tool requires one.
+func (p paramSpec) options() []any {
+	out := []any{nil}
+	switch {
+	case len(p.enum) > 0:
+		for _, e := range p.enum {
+			out = append(out, e)
+		}
+	case p.typ == "string":
+		out = append(out, "x")
+	}
+	return out
 }
 
 // recordedTools wraps the read tools of one scenario run and keeps every call the loop ran, in a tally. It only

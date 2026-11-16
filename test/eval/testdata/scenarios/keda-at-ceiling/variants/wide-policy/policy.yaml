@@ -1,0 +1,43 @@
+# The policies of keda-at-ceiling with a wider demo-keda (synthetic): maxReplicaCount 1 to 6 in demo, in steps
+# of at most 200%, so from 2 the most it allows is 6. demo-memory is unchanged.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationPolicy
+metadata:
+  name: demo-memory
+spec:
+  requestNamespaces: [shadewright-system]
+  targets:
+    namespaces: [demo]
+  actions:
+    - type: SetContainerMemoryLimit
+      setContainerMemoryLimit:
+        min: 64Mi
+        max: 128Mi
+        maxIncreasePercent: 50
+        maxDecreasePercent: 0
+  gitOps:
+    repositoryRef: fleet
+    allowedPaths:
+      - apps/demo/*-deployment.yaml
+  approval: Required
+---
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationPolicy
+metadata:
+  name: demo-keda
+spec:
+  requestNamespaces: [shadewright-system]
+  targets:
+    namespaces: [demo]
+  actions:
+    - type: AdjustKedaMaxReplicas
+      adjustKedaMaxReplicas:
+        min: 1
+        max: 6
+        maxIncreasePercent: 200
+        maxDecreasePercent: 0
+  gitOps:
+    repositoryRef: fleet
+    allowedPaths:
+      - apps/demo/*-scaledobject.yaml
+  approval: Required

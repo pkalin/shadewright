@@ -344,7 +344,7 @@ func TestReplayAnswersLikeTheAdapter(t *testing.T) {
 		"only the pods asked": {q: providers.MetricsQuery{Template: tmplRestarts, Params: ns,
 			Pods: []string{podCache1}, End: end}, pods: []string{podCache1}},
 		"another namespace": {q: providers.MetricsQuery{Template: tmplRestarts, Pods: []string{podCache1},
-			Params: map[string]string{prometheus.ParamNamespace: "other"}, End: end}},
+			Params: map[string]string{prometheus.ParamNamespace: nsOther}, End: end}},
 		"stale sample": {q: providers.MetricsQuery{Template: "container_memory_working_set_bytes", Params: ns,
 			Pods: []string{podCache1}, End: end}},
 	} {
@@ -418,7 +418,7 @@ func TestMetricsRecordingIsChecked(t *testing.T) {
 	}
 	// The namespace must be the Incident's.
 	other := mustLoad(t, scnOOM)
-	other.incident.Spec.Subject.Namespace = "other"
+	other.incident.Spec.Subject.Namespace = nsOther
 	if err := other.loadMetrics(filepath.Join(scenariosDir, scnOOM)); err == nil {
 		t.Error("a recording of another namespace was accepted")
 	}

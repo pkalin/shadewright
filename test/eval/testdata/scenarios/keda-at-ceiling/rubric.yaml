@@ -34,3 +34,7 @@ facts:
     unscored: checked by the policy gate for AdjustKedaMaxReplicas at the policy step, not diagnosis input
   - fact: request rate and replica history over time
     unscored: no approved metric template reads the trigger's request rate or the replica history; hpa_metric_current shows only the HPA's metric per replica over the window
+# The size the evidence supports (#505, decided 2026-11-16): a proposal at the policy maximum above it fails.
+size:
+  supported: 3
+  why: metrics.yaml shows the HPA's metric at 6.5 per replica on 2 replicas, about 13 requests per second, against a target of 5 per replica, so the load needs 13 / 5 = 2.6, that is 3 replicas

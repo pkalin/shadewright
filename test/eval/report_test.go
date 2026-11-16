@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -78,6 +79,9 @@ type scenarioResult struct {
 	CostUSD        *float64           `json:"costUSD,omitempty"`
 	CostUSDByRole  map[string]float64 `json:"costUSDByRole,omitempty"`
 	CostIncomplete bool               `json:"costIncomplete,omitempty"`
+	// CostUnknown says why CostUSD is left out although the run was given prices: a role used tokens and has no
+	// prices of its own (prices.forRole). CostUSDByRole still holds the roles that have prices.
+	CostUnknown string `json:"costUnknown,omitempty"`
 	// QuoteFailures says, for a run that ended NoEvidence, how each quote differs from the block it cites
 	// (#474): a class and lengths, never the quote or the block.
 	QuoteFailures []quoteFailure `json:"quoteFailures,omitempty"`
@@ -275,12 +279,16 @@ type totals struct {
 	// CostPerPassedRunUSD is CostUSD, every run's cost failed ones included, divided by Passed: what one pass
 	// cost. Nil without prices or when no run passed; a lower bound when CostIncomplete is set.
 	CostPerPassedRunUSD *float64 `json:"costPerPassedRunUSD,omitempty"`
+	// CostUnknown says why CostUSD and CostPerPassedRunUSD are left out although the run was given prices: a role
+	// used tokens and has no prices of its own. CostUSDByRole still holds the roles that have prices.
+	CostUnknown string `json:"costUnknown,omitempty"`
 }
 
 // prices are USD per million tokens of a deployment, from the run's configuration; nothing is built in.
 type prices struct {
 	Input, CachedInput, Output float64
-	// Escalation are the escalation deployment's prices; nil prices the escalation calls as the triage ones.
+	// Escalation are the escalation deployment's prices; nil when it has none, and then the cost of anything the
+	// escalation used is unknown, never priced at the triage deployment's prices.
 	Escalation *prices
 }
 
@@ -292,27 +300,44 @@ func (p *prices) cost(input, cachedInput, output int64) float64 {
 
 // estimate is the estimated cost of t, in all and by role. Every count is first priced at the triage prices,
 // then the counts of each role are moved to that role's prices: tokens not attributed to a role stay at the
-// triage prices.
-func (p *prices) estimate(t tokens) (float64, map[string]float64) {
-	cost := p.cost(t.Input, t.CachedInput, t.Output)
-	var byRole map[string]float64
-	for role, rt := range t.ByRole {
-		c := p.forRole(role).cost(rt.Input, rt.CachedInput, rt.Output)
+// triage prices. unknown is set when a role that used tokens, or made a call of unknown usage, has no prices:
+// the total is then unknown and left out (ok false), and byRole holds the priced roles only.
+func (p *prices) estimate(t tokens) (cost float64, byRole map[string]float64, unknown string, ok bool) {
+	cost = p.cost(t.Input, t.CachedInput, t.Output)
+	var unpriced []string
+	for _, role := range slices.Sorted(maps.Keys(t.ByRole)) {
+		rt := t.ByRole[role]
+		rp := p.forRole(role)
+		if rp == nil {
+			if rt.Input > 0 || rt.Output > 0 || rt.UsageUnknownCalls > 0 {
+				unpriced = append(unpriced, role)
+			}
+			continue
+		}
+		c := rp.cost(rt.Input, rt.CachedInput, rt.Output)
 		if byRole == nil {
 			byRole = map[string]float64{}
 		}
 		byRole[role] = c
 		cost += c - p.cost(rt.Input, rt.CachedInput, rt.Output)
 	}
-	return cost, byRole
+	if len(unpriced) > 0 {
+		return 0, byRole, fmt.Sprintf("no prices for the %s deployment, whose calls used tokens (set %s*)",
+			strings.Join(unpriced, ", "), envEscPrices), false
+	}
+	return cost, byRole, "", true
 }
 
-// forRole returns the prices of a role's deployment.
+// forRole returns the prices of a role's deployment, nil when it has none: the escalation deployment without
+// its own prices, or a role this harness does not know. A role is never priced at another role's prices.
 func (p *prices) forRole(role string) *prices {
-	if role == string(analysis.RoleEscalation) && p.Escalation != nil {
+	switch role {
+	case string(analysis.RoleTriage):
+		return p
+	case string(analysis.RoleEscalation):
 		return p.Escalation
 	}
-	return p
+	return nil
 }
 
 // manifest is the evaluation manifest of ADR-0025 decision 3: the inputs that affect behaviour, and its
@@ -532,10 +557,13 @@ func (r *report) summarise(p *prices) {
 		if incomplete {
 			t.IncompleteRuns++
 		}
-		s.CostUSD, s.CostUSDByRole, s.CostIncomplete = nil, nil, false
+		s.CostUSD, s.CostUSDByRole, s.CostIncomplete, s.CostUnknown = nil, nil, false, ""
 		if p != nil {
-			c, byRole := p.estimate(s.Tokens)
-			s.CostUSD, s.CostUSDByRole, s.CostIncomplete = &c, byRole, incomplete
+			c, byRole, unknown, ok := p.estimate(s.Tokens)
+			s.CostUSDByRole, s.CostUnknown = byRole, unknown
+			if ok {
+				s.CostUSD, s.CostIncomplete = &c, incomplete
+			}
 		}
 	}
 	if t.Runs > 0 {
@@ -543,10 +571,13 @@ func (r *report) summarise(p *prices) {
 	}
 	t.Pass = t.Runs > 0 && t.PassRate >= r.Manifest.MinPassRate
 	if p != nil {
-		cost, byRole := p.estimate(t.Tokens)
-		t.CostUSD, t.CostUSDByRole = &cost, byRole
-		t.CostIncomplete = t.IncompleteRuns > 0
-		if t.Passed > 0 {
+		cost, byRole, unknown, ok := p.estimate(t.Tokens)
+		t.CostUSDByRole, t.CostUnknown = byRole, unknown
+		if ok {
+			t.CostUSD = &cost
+			t.CostIncomplete = t.IncompleteRuns > 0
+		}
+		if ok && t.Passed > 0 {
 			per := cost / float64(t.Passed)
 			t.CostPerPassedRunUSD = &per
 		}
@@ -590,27 +621,13 @@ func (r *report) markdown() string {
 			rt.Calls, rt.Input, rt.CachedInput, rt.Output, rt.UsageUnknownCalls)
 		if c, ok := r.Totals.CostUSDByRole[string(role)]; ok {
 			fmt.Fprintf(&b, ", estimated cost USD %.4f", c)
+		} else if r.Totals.CostUnknown != "" {
+			b.WriteString(", no prices, cost unknown")
 		}
 		b.WriteString("\n")
 	}
-	if r.Totals.CostUSD != nil {
-		fmt.Fprintf(&b, "- Estimated cost: USD %.4f", *r.Totals.CostUSD)
-		if r.Totals.CostIncomplete {
-			fmt.Fprintf(&b, " (incomplete, a lower bound: %d call(s) failed or had unknown usage and are not priced, "+
-				"%d run(s) incomplete; compare the charged tokens)", tk.UsageUnknownCalls, r.Totals.IncompleteRuns)
-		}
-		b.WriteString("\n")
-		if c := r.Totals.CostPerPassedRunUSD; c != nil {
-			fmt.Fprintf(&b, "- Cost per passed run: USD %.4f (all runs' cost over %d passed)", *c, r.Totals.Passed)
-			if r.Totals.CostIncomplete {
-				b.WriteString(", incomplete, a lower bound")
-			}
-			b.WriteString("\n")
-		} else {
-			b.WriteString("- Cost per passed run: none, no run passed\n")
-		}
-	}
-	priced := r.Totals.CostUSD != nil
+	r.costMarkdown(&b)
+	priced := r.Totals.CostUSD != nil || r.Totals.CostUnknown != ""
 	b.WriteString("\n| Scenario | Run | Result | Outcome | Diagnosis | Reads | Escalated | Calls | Tokens |")
 	sep := "|---|---|---|---|---|---|---|---|---|"
 	if priced {
@@ -657,6 +674,8 @@ func (r *report) markdown() string {
 			cell(readsCell(s.Reads)), escalated, s.Calls, s.ToolCalls, s.Tokens.Charged)
 		if priced {
 			switch {
+			case s.CostUnknown != "":
+				b.WriteString(" unknown |")
 			case s.CostUSD == nil:
 				b.WriteString(" - |")
 			case s.CostIncomplete:
@@ -669,6 +688,30 @@ func (r *report) markdown() string {
 	}
 	r.quoteFailuresMarkdown(&b)
 	return b.String()
+}
+
+// costMarkdown writes the summary lines of the estimated cost, when the run was given prices.
+func (r *report) costMarkdown(b *strings.Builder) {
+	if r.Totals.CostUSD != nil {
+		fmt.Fprintf(b, "- Estimated cost: USD %.4f", *r.Totals.CostUSD)
+		if r.Totals.CostIncomplete {
+			fmt.Fprintf(b, " (incomplete, a lower bound: %d call(s) failed or had unknown usage and are not priced, "+
+				"%d run(s) incomplete; compare the charged tokens)", r.Totals.Tokens.UsageUnknownCalls, r.Totals.IncompleteRuns)
+		}
+		b.WriteString("\n")
+		if c := r.Totals.CostPerPassedRunUSD; c != nil {
+			fmt.Fprintf(b, "- Cost per passed run: USD %.4f (all runs' cost over %d passed)", *c, r.Totals.Passed)
+			if r.Totals.CostIncomplete {
+				b.WriteString(", incomplete, a lower bound")
+			}
+			b.WriteString("\n")
+		} else {
+			b.WriteString("- Cost per passed run: none, no run passed\n")
+		}
+	}
+	if r.Totals.CostUnknown != "" {
+		fmt.Fprintf(b, "- Estimated cost: unknown, %s\n- Cost per passed run: unknown\n", r.Totals.CostUnknown)
+	}
 }
 
 // readsCell is the reads of a run for the Markdown table: expected reads made, extra and refused calls, and the

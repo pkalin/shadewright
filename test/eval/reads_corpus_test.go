@@ -452,7 +452,7 @@ func TestReadRuleRealTools(t *testing.T) {
 	for _, line := range []string{
 		"get_resource",
 		readGetWeb,
-		"get_resource Deployment/web namespace=demo",
+		readGetWebDemo,
 		readEventsPods,
 		"check_missing_reference ConfigMap/web-config pod=web-0",
 		"query_metrics template=container_memory_working_set_bytes window_minutes=60",

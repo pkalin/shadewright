@@ -354,6 +354,9 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 	if detail := checkPolicy(scn, out.Plan); detail != "" {
 		return false, detail
 	}
+	if detail := checkSize(scn, out.Plan); detail != "" {
+		return false, detail
+	}
 	b := e.Outcome.Bounds
 	if b == nil {
 		return true, ""
@@ -381,6 +384,26 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 		return false, "the plan carries no parameters to check against the bounds"
 	}
 	return true, ""
+}
+
+// checkSize returns why the plan's size fails the rubric's, or "": a value above the size the evidence supports
+// fails when it is the most the scenario's policy allows, which the model saw (decided 2026-11-16 on #505). The
+// policy allows a range, so the value is its maximum when the policy refuses the next one up; a value above the
+// supported size but below the maximum is not failed. The plan already passed checkPolicy.
+func checkSize(scn *scenario, p *analysis.Plan) string {
+	z, k := scn.rubric.Size, p.Action.AdjustKedaMaxReplicas
+	if z == nil || k == nil || k.DesiredValue <= z.Supported {
+		return ""
+	}
+	up := *p
+	next := *k
+	next.DesiredValue++
+	up.Action.AdjustKedaMaxReplicas = &next
+	if checkPolicy(scn, &up) == "" {
+		return ""
+	}
+	return fmt.Sprintf("desired %d is the most the policy allows, the evidence supports %d (%s)", k.DesiredValue,
+		z.Supported, z.Why)
 }
 
 // checkPolicy returns why the scenario's policy would refuse the plan, or "": the checks of policy.Preflight,

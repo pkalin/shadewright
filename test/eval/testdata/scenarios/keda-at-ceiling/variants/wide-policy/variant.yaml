@@ -1,0 +1,4 @@
+about: >-
+  The same ceiling under a wider policy: demo-keda allows maxReplicaCount up to 6 in steps of at most 200%, so
+  from 2 the model may ask for anything from 3 to 6. The load still needs 3 replicas (rubric.yaml, size): a
+  proposal of 6, the most the policy allows, fails; one of 3 passes (#505, decided 2026-11-16).

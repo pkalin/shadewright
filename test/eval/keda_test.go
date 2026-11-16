@@ -17,8 +17,11 @@ limitations under the License.
 package eval
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/pkalin/shadewright/internal/analysis"
 )
@@ -110,5 +113,89 @@ func TestKedaAtCeilingTakesThePreviousValueFromTheScaledObject(t *testing.T) {
 	same = strings.Replace(same, `"previousValue": 2`, `"previousValue": 1`, 1)
 	if res, _, _ := runKeda(t, scnKedaCeiling, same); res.Reason != string(analysis.ReasonNoChange) {
 		t.Errorf("the current value as desired: reason %s", res.Reason)
+	}
+}
+
+// mustVariant loads the variant name (<scenario>/<variant>) of the recorded scenarios.
+func mustVariant(t *testing.T, name string) (*runtime.Scheme, *scenario) {
+	t.Helper()
+	base, v, _ := strings.Cut(name, "/")
+	scheme, s := mustScenario(t, base)
+	variants, err := loadVariants(scheme, filepath.Join(scenariosDir, base), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range variants {
+		if x.name == base+"/"+v {
+			return scheme, x
+		}
+	}
+	t.Fatalf("no variant %s", name)
+	return nil, nil
+}
+
+// keda-at-ceiling/wide-policy: the policy allows up to 6 replicas from 2, the evidence supports 3 (the rubric's
+// size). The recorded reply of 3 passes; the same reply at 6, the most the policy allows, fails the outcome
+// though the policy allows it, also where expected.yaml states no bounds that would refuse it (#505, decided
+// 2026-11-16). A value above the supported size that is not the maximum, and the maximum where the evidence
+// supports it, pass.
+func TestKedaProposalAtThePolicyMaximumFails(t *testing.T) {
+	const name = scnKedaCeiling + "/wide-policy"
+	scheme, s := mustVariant(t, name)
+	if res := run(t, scheme, s); !res.Pass || res.Reason != string(analysis.ReasonProposed) {
+		t.Fatalf("the recorded reply at the supported size: pass %t, reason %s, outcome %+v", res.Pass, res.Reason,
+			res.Outcome)
+	}
+	at := func(desired string, supported int32) scenarioResult {
+		t.Helper()
+		scheme, s := mustVariant(t, name)
+		s.expected.Outcome.Bounds = nil
+		s.rubric.Size = &rubricSize{Supported: supported, Why: "the load needs it"}
+		content := strings.Replace(s.recording.Replies[0].Content, `"desiredValue": 3`, `"desiredValue": `+desired, 1)
+		if content == s.recording.Replies[0].Content && desired != "3" {
+			t.Fatal("the recorded reply does not say desiredValue 3: the test proves nothing")
+		}
+		s.recording.Replies[0].Content = content
+		return run(t, scheme, s)
+	}
+	res := at("6", 3)
+	if res.Pass || res.Outcome.Pass || res.Reason != string(analysis.ReasonProposed) ||
+		!strings.Contains(res.Outcome.Detail, "desired 6 is the most the policy allows, the evidence supports 3") {
+		t.Errorf("a proposal at the policy maximum: pass %t, reason %s, outcome %+v", res.Pass, res.Reason, res.Outcome)
+	}
+	if !res.Diagnosis.Pass || !res.Reads.Pass {
+		t.Errorf("only the size fails: diagnosis %+v, reads %+v", res.Diagnosis, res.Reads)
+	}
+	for _, c := range []struct {
+		desired   string
+		supported int32
+	}{{"3", 3}, {"5", 3}, {"6", 6}, {"6", 8}} {
+		if res := at(c.desired, c.supported); !res.Outcome.Pass {
+			t.Errorf("desired %s, supported %d: outcome %+v", c.desired, c.supported, res.Outcome)
+		}
+	}
+}
+
+// A rubric size applies only to a proposal of an action whose number the model chooses, and needs a value in
+// the action's range and a reason.
+func TestRubricSizeIsChecked(t *testing.T) {
+	_, oom := mustScenario(t, scnOOM) // a SetContainerMemoryLimit proposal: code sizes it (ADR-0040)
+	oom.rubric.Size = &rubricSize{Supported: 3, Why: "x"}
+	if err := oom.checkRubric(); err == nil {
+		t.Error("a size on a memory proposal was accepted")
+	}
+	_, k := mustScenario(t, scnKedaCeiling)
+	if k.rubric.Size == nil || k.rubric.Size.Supported != 3 {
+		t.Fatalf("keda-at-ceiling states the size %+v, want 3", k.rubric.Size)
+	}
+	for _, z := range []rubricSize{{Supported: 0, Why: "x"}, {Supported: 1001, Why: "x"}, {Supported: 3, Why: " "}} {
+		k.rubric.Size = &z
+		if err := k.checkRubric(); err == nil {
+			t.Errorf("size %+v was accepted", z)
+		}
+	}
+	k.rubric.Size = &rubricSize{Supported: 3, Why: "x"}
+	if err := k.checkRubric(); err != nil {
+		t.Error(err)
 	}
 }

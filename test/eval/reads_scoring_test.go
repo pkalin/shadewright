@@ -17,17 +17,22 @@ limitations under the License.
 package eval
 
 import (
+	"context"
 	"encoding/json"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
 
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // readsReply is a recorded escalation reply that asks for the tool calls of calls, a YAML list.
@@ -73,6 +78,7 @@ func readsRunOf(t *testing.T, scheme *runtime.Scheme, s *scenario, reads []strin
 // Expected reads the tests use.
 const (
 	readGetWeb     = "get_resource Deployment/web"
+	readGetWebDemo = readGetWeb + " namespace=" + nsDemo
 	readEventsPods = "list_events namespace=demo kind=Pod"
 )
 
@@ -101,9 +107,9 @@ func TestExpectedReadMissingFails(t *testing.T) {
 		t.Errorf("reads %+v, pass %v", res.Reads, res.Pass)
 	}
 	// The same read with other arguments is not the expected one.
-	res = readsRun(t, []string{"get_resource Deployment/web namespace=other"}, getWebDeployment)
+	res = readsRun(t, []string{"get_resource Deployment/web-canary"}, getWebDeployment)
 	if res.Reads.Pass || res.Reads.Extra != 1 {
-		t.Errorf("another namespace: reads %+v", res.Reads)
+		t.Errorf("another name: reads %+v", res.Reads)
 	}
 }
 
@@ -149,6 +155,119 @@ func TestRubricReadsAreChecked(t *testing.T) {
 	}
 }
 
+// A rubric read that the tool or the loop refuses on every call that matches it can never be made, so every run
+// would fail for the rubric's error: it is refused when it loads, by the tool's own argument checks
+// (tools.Set.Call) and the loop's namespace rule. Hand-picked lines, one per kind of check; the generated
+// boundaries are in TestRubricReadsAtTheSchemaBoundaries.
+func TestRubricReadsTheToolRefusesAreRefused(t *testing.T) {
+	_, oom := mustScenario(t, scnOOM) // subject in demo, with metrics.yaml
+	long := strings.Repeat("a", 254)
+	for _, line := range []string{
+		"list_events namespace=demo limit=100",                                       // above the maximum of 50
+		"list_events namespace=demo limit=0",                                         // below the minimum of 1
+		"list_events limit=-3",                                                       // a negative integer
+		"get_resource Deployment/web namespace=Demo",                                 // not a DNS label, not watched
+		"get_resource Deployment/web namespace=other",                                // not the subject's namespace
+		"list_events namespace=kube-system",                                          // not the subject's namespace
+		"get_resource Deployment/Web_1",                                              // not an object name
+		"get_resource Deployment/" + long,                                            // longer than 253
+		"check_missing_reference ConfigMap/web-config pod=Web_0",                     // the pod is not an object name
+		"query_metrics template=container_memory_working_set_bytes window_minutes=5", // below 15
+		"query_metrics template=container_memory_working_set_bytes window_minutes=361",
+		"query_metrics template=container_memory_working_set_bytes deployment=web", // a pod template with a Deployment
+		"query_metrics template=deployment_replicas_unavailable pod=web-0",         // a Deployment template with a pod
+		"query_metrics template=container_memory_working_set_bytes pod=" + strings.Repeat("a", 64),
+	} {
+		oom.rubric.Reads = []rubricRead{{Read: line}}
+		if err := oom.checkReads(); err == nil {
+			t.Errorf("%q was accepted", line)
+		}
+	}
+	for _, line := range []string{
+		"list_events namespace=demo limit=50",
+		"list_events limit=1",
+		"list_events Deployment/web",
+		readGetWebDemo,
+		"get_resource kind=Pod",
+		"get_resource name=web",
+		"check_missing_reference ConfigMap/web-config pod=web-0",
+		"check_missing_reference",
+		"query_metrics template=container_memory_working_set_bytes window_minutes=15",
+		"query_metrics template=deployment_replicas_unavailable window_minutes=360",
+		"query_metrics template=container_memory_working_set_bytes pod=" + strings.Repeat("a", 63),
+		"query_metrics deployment=web",
+		"query_metrics",
+	} {
+		oom.rubric.Reads = []rubricRead{{Read: line}}
+		if err := oom.checkReads(); err != nil {
+			t.Errorf("%q: %v", line, err)
+		}
+	}
+	// The loop's own rule: a namespace the tools watch but not the subject's is refused by the loop, not the tool.
+	oom.incident.Spec.Subject.Namespace = nsOther
+	oom.rubric.Reads = []rubricRead{{Read: readGetWebDemo}}
+	if err := oom.checkReads(); err == nil || !strings.Contains(err.Error(), "namespace of the Incident's subject") {
+		t.Errorf("a watched namespace other than the subject's: %v", err)
+	}
+	oom.rubric.Reads = []rubricRead{{Read: "get_resource Deployment/web"}}
+	if err := oom.checkReads(); err == nil {
+		t.Error("a free namespace is filled with the subject's, which the tools do not watch, and was accepted")
+	}
+}
+
+// Generated from the schemas of the tools the evaluation offers: for every integer argument with bounds, the
+// bounds load and one past each is refused; for every string argument with a maximum length but the namespace,
+// one character past it is refused. The right answer is known from the schema alone.
+func TestRubricReadsAtTheSchemaBoundaries(t *testing.T) {
+	_, oom := mustScenario(t, scnOOM)
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs, err := toolDefinitions(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := 0
+	for _, d := range defs {
+		var schema struct {
+			Properties map[string]struct {
+				Type      string   `json:"type"`
+				Minimum   *int64   `json:"minimum"`
+				Maximum   *int64   `json:"maximum"`
+				MaxLength *int     `json:"maxLength"`
+				Enum      []string `json:"enum"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(d.Parameters, &schema); err != nil {
+			t.Fatal(err)
+		}
+		for name, p := range schema.Properties {
+			check := func(value string, want bool) {
+				t.Helper()
+				cases++
+				line := d.Name + " " + name + "=" + value
+				oom.rubric.Reads = []rubricRead{{Read: line}}
+				if err := oom.checkReads(); (err == nil) != want {
+					t.Errorf("%q: loaded %t, want %t (%v)", line, err == nil, want, err)
+				}
+			}
+			switch {
+			case p.Type == typeInteger && p.Minimum != nil && p.Maximum != nil:
+				check(strconv.FormatInt(*p.Minimum, 10), true)
+				check(strconv.FormatInt(*p.Maximum, 10), true)
+				check(strconv.FormatInt(*p.Minimum-1, 10), false)
+				check(strconv.FormatInt(*p.Maximum+1, 10), false)
+			case p.Type == "string" && p.MaxLength != nil && len(p.Enum) == 0 && name != argNamespace:
+				check(strings.Repeat("a", *p.MaxLength+1), false)
+			}
+		}
+	}
+	if cases < 10 {
+		t.Fatalf("only %d generated cases: the schemas were not read", cases)
+	}
+}
+
 // A run that stopped with an error after its model calls keeps the tokens they used, so its cost is reported as
 // incomplete instead of zero.
 func TestStoppedRunKeepsItsTokens(t *testing.T) {
@@ -167,6 +286,56 @@ func TestStoppedRunKeepsItsTokens(t *testing.T) {
 	if c := r.Scenarios[0].CostUSD; c == nil || *c == 0 || !r.Scenarios[0].CostIncomplete || !r.Totals.CostIncomplete ||
 		r.Totals.IncompleteRuns != 1 {
 		t.Errorf("run %+v, totals %+v", r.Scenarios[0], r.Totals)
+	}
+}
+
+// cancelingSource replays the scenario's replies and cancels the run's context once the first reply is back,
+// as a caller that gives up (a timeout) does: the analysis itself then returns an error.
+type cancelingSource struct {
+	replaySource
+	cancel context.CancelFunc
+}
+
+type cancelingModel struct {
+	inner  providers.ModelProvider
+	cancel context.CancelFunc
+}
+
+func (m cancelingModel) Complete(ctx context.Context, req providers.CompletionRequest) (providers.Completion, error) {
+	c, err := m.inner.Complete(ctx, req)
+	m.cancel()
+	return c, err
+}
+
+func (s cancelingSource) factory(sc *scenario) (analysis.ModelFactory, func() error, error) {
+	f, done, err := s.replaySource.factory(sc)
+	if err != nil {
+		return nil, nil, err
+	}
+	return func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
+		p, err := f(role, d)
+		if err != nil {
+			return nil, err
+		}
+		return cancelingModel{inner: p, cancel: s.cancel}, nil
+	}, done, nil
+}
+
+// A run whose analysis itself returns an error after a model call (the context ended during the tool call the
+// reply asked for) keeps the tokens of that call, as one that stops after the analysis does
+// (TestStoppedRunKeepsItsTokens).
+func TestFailedAnalysisKeepsItsTokens(t *testing.T) {
+	scheme, s := mustScenario(t, scnOOM)
+	s.recording.Replies = append([]recordedReply{readsReply(t, getWebDeployment)}, s.recording.Replies...)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	res, err := runScenario(ctx, scheme, s, cancelingSource{replaySource: replaySource{force: true}, cancel: cancel})
+	if err == nil || !strings.Contains(err.Error(), "the analysis stopped") {
+		t.Fatalf("the analysis did not stop with an error: %v", err)
+	}
+	if esc := res.Tokens.ByRole[string(analysis.RoleEscalation)]; res.Tokens.Input == 0 || esc.Calls != 1 ||
+		esc.Input == 0 {
+		t.Errorf("tokens of a failed analysis %+v", res.Tokens)
 	}
 }
 
@@ -232,7 +401,7 @@ func TestReadReportChecksTheSchemaVersion(t *testing.T) {
 	r := &report{SchemaVersion: reportSchemaVersion, Mode: providerFake,
 		Manifest:  manifest{MinPassRate: 1, Repeats: 1, Rubric: manifestRubric{FleetCommit: "0123abc"}},
 		Scenarios: []scenarioResult{res}}
-	r.summarise(&prices{Input: 1, CachedInput: 1, Output: 1})
+	r.summarise(&prices{Input: 1, CachedInput: 1, Output: 1, Escalation: &prices{Input: 2, CachedInput: 2, Output: 2}})
 	dir := t.TempDir()
 	if err := r.write(dir); err != nil {
 		t.Fatal(err)
@@ -275,5 +444,14 @@ func TestReadReportChecksTheSchemaVersion(t *testing.T) {
 	}
 	if _, err := readReport([]byte("not json")); err == nil {
 		t.Error("a non-JSON report was read")
+	}
+	// Data after the report is refused, whatever it is: a second report would otherwise be ignored.
+	for _, tail := range []string{"{}", "\n" + string(raw), "x", "1", "]", "null", " \"x\""} {
+		if _, err := readReport(append(slices.Clone(raw), tail...)); err == nil {
+			t.Errorf("a report followed by %q was read", tail)
+		}
+	}
+	if _, err := readReport(append(slices.Clone(raw), " \n\t"...)); err != nil {
+		t.Errorf("a report followed by white space: %v", err)
 	}
 }

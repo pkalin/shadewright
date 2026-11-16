@@ -338,7 +338,7 @@ func TestSpelledCompoundKeyNames(t *testing.T) {
 }
 
 // Known leaks after a key name, kept by decision and documented in design 10.3 and threat model G4.4 (#585,
-// #708): names the rules do not read (Unicode escapes, here-documents, short flags, one-word names), separators
+// #708, #769): names the rules do not read (Unicode escapes, here-documents, short flags, one-word names), separators
 // they do not take, and values the extent rule does not reach. The test fails when one no longer leaks, so the
 // list and the docs are updated with the change that closes it.
 func TestKeyNameKnownLeaks(t *testing.T) {
@@ -358,31 +358,37 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		// Only a double quote escaped as JSON inside a string opens a quoted value: after "\'" the value is
 		// the quote and one token.
 		"escaped single quote": `--password \'horse battery ` + k + `\' --region x`,
-		// A plain item of a YAML block sequence after a flag item loses only its first token, as the same
-		// line form ("- hunter2abc --region west") is pinned by TestKeyNameRulesHoldAtTheirEdges; after an
-		// anchor or a tag the rest of the line goes (TestValueExtentAfterAKeyName).
-		"block sequence item with blanks": "args:\n- --client-secret\n- horse battery " + k + "\n- --region",
 		// The extent rule reads at most maxValueExtent bytes past the start of a value: the part of a longer
-		// value after that bound stays.
+		// value after that bound stays (#769: any bound leaves a part past it, and the bound keeps each value
+		// at constant cost).
 		"part of a value past the bound": "args:\n- --password\n- |\n" +
 			strings.Repeat("  "+strings.Repeat("a", 60)+"\n", 2*maxValueExtent/62) + "  " + k + "\n",
 		// An unquoted value ends at a quote, also one that belongs to the value.
 		"quote inside a value": "run --password ab'" + k + " --region x",
-		// A closed quote glued to an unquoted value ends it too: the value may sit inside a JSON or logfmt
-		// string whose fields follow the quote (plainWordEnd).
-		"quote glued to a value": `run --password ab"cd ` + k + `" --region x`,
-		// After a key name (not a flag), a comma glued to a quoted piece ends the shell word, as in
-		// "password=\"abc\",user=bob" the fields after the comma stay.
-		"comma glued to a quoted value": `TOKEN="abc",` + k + ` next=x`,
+		// A quote glued to a plain value opens a piece of it only when the piece closes on its line, as one
+		// that does not may close an enclosing JSON or logfmt string (gluedQuoteEnd).
+		"glued quote over a line end": "run --password ab\"cd\n" + k + "\" --region x",
+		// After a flag, a backslash and a letter or digit glued to a quoted piece ends the shell word: it reads
+		// as a JSON escape ("\n") in a log line (shellEscapedPunct).
+		"letter escape glued to a quoted piece": `--client-secret "horse"\x` + k + ` --region west`,
+		// After a key name (not a flag), a comma glued to a quoted piece and followed by a name and "=" or ":"
+		// starts the next field (fieldAfterComma).
+		"field after a comma glued to a quoted value": `TOKEN="abc",x=` + k + ` next=x`,
 		// After a compound name and a blank, only an opaque token goes.
 		"comma inside a blank-form value": "set aws_secret_access_key abc," + k + " now",
-		// "--name=value" in a JSON argument whose value opens with a backslash takes one token only
-		// (argumentEnd).
-		"argument value after a backslash": `["--client-secret=\\horse ` + k + `", "--region"]`,
-		// A quoted scalar behind a YAML tag inside an array ends at its first "]".
-		"tagged quoted scalar in an array": `{password: [!!str "horse]` + k + `", staple], u: x}`,
-		// An escaped character other than a blank glued to a quoted piece after a flag ends the shell word.
-		"escape glued to a quoted piece": `--client-secret "horse"\!` + k + ` --region west`,
+		// A quoted flag as an item of a block sequence is no flag item for the plain item rule: the next item
+		// loses only its first token.
+		"quoted flag as a block item": "args:\n- \"--password\"\n- alpha " + k + " gamma\n- --region",
+		// An item after a flag item is the rest of its line only when it opens with plain text: one that opens
+		// with a backslash or "$(" loses only its first token.
+		"block item opening with a backslash": "- --password\n- \\alpha " + k + " gamma",
+		"block item opening with $(":          "- --password\n- $(alpha " + k + " gamma)",
+		// A verbatim tag ("!<...>") is read as no tag, so the quote after it opens no string and the value ends
+		// at the first "]".
+		"verbatim tag before a quoted scalar": `{password: [!<tag:yaml.org,2002:str> "a]` + k + `", b], u: x}`,
+		// A quoted value that never closes before the next key's value opens runs to that quote: the next key
+		// is inside it, so its value is read from the middle and loses only its first token.
+		"unclosed quote before the next key": `token="x DB_PASSWORD="hidden ` + k + `"`,
 	} {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",

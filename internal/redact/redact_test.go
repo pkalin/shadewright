@@ -660,6 +660,18 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"extent escaped parentheses":  `--password $(a \) `,
 		"extent glued commas":         "--password $(a),b,",
 		"extent go assignment values": "PASSWORD := =a ",
+		// Issue #769: plain items of a block sequence after a flag item, quotes glued to a plain value, commas
+		// after a quoted piece, node properties before a quoted scalar in an array, escapes glued to a quoted
+		// piece and quoted arguments whose value opens with a backslash.
+		"blanks block items":         "- --password\n- a b c\n",
+		"blanks glued quotes":        `--password a"b `,
+		"blanks glued quote pieces":  `--password a"b"`,
+		"blanks commas":              `TOKEN="a",b,`,
+		"blanks tagged scalars":      `{password: [!!str "a, `,
+		"blanks closed tagged items": `{password: [&a !!str 'b]', `,
+		"blanks escaped punctuation": `--password "a"\!`,
+		"blanks backslash arguments": `["--password=\a `,
+		"blanks comma secret keys":   `TOKEN="a",DB_PASSWORD= "b",x-token= `,
 	} {
 		tail := tails[name]
 		small := timeString(t, name, rep(unit, size/8/len(unit))+tail)

@@ -366,6 +366,9 @@ type ModelDeployment struct {
 	// +required
 	APIVersion string `json:"apiVersion"`
 
+	// No schema default on inferenceAPI: the API server would set it on an Anthropic deployment too, and the rule
+	// that allows the field only for provider Foundry would then refuse every Anthropic deployment.
+
 	// inferenceAPI is the API a Foundry deployment is called through: ChatCompletions (used when it is left
 	// out) or Responses, which needs apiVersion v1 and posts to <endpoint>/openai/v1/responses. Both carry the
 	// same redacted context, tool definitions, response schema and output limit; the Responses request asks the

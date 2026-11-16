@@ -641,7 +641,8 @@ func (c *Controller) counted(occurrence string) (int64, bool) {
 // fingerprint are then counted first. Any other is held as a first sighting until the symptom is seen again
 // ([RecurAfter], [RecurWithin]); the sighting that opens the Incident counts every observation held for it,
 // in order. An observation with nothing new to count is neither held nor counted; when it proves that its
-// symptom recurs, it still opens the Incident of a first sighting held for it (a waiting cause reported again).
+// symptom recurs, it still opens the Incident of a first sighting held for it (a waiting cause reported again),
+// and a waiting cause reported again moves its Incident's last seen ([Controller.stillWaiting]).
 //
 // It reports whether the batch is due at once: the Incident has not been written by this process yet.
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
@@ -653,14 +654,13 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 		// A repeat of an occurrence held as a first sighting adds nothing to count, but when it proves that the
 		// symptom recurs it opens the Incident with what is held: a waiting cause still shown is reported again
 		// this way (ADR-0039 point 4, amended 2026-11-16), and is never seen as a second occurrence.
+		due := false
 		if recurs(o) && c.sightings.holds(o.Fingerprint) {
-			due := false
 			for _, h := range c.sightings.take(o.Fingerprint) {
 				due = c.count(ctx, h) || due
 			}
-			return due
 		}
-		return false
+		return c.stillWaiting(o) || due
 	}
 	// From here on Count is what is new of o, whatever MayRepeat said.
 	o.Count, o.MayRepeat = n, false
@@ -680,6 +680,32 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 		due = c.count(ctx, h) || due
 	}
 	return due
+}
+
+// stillWaiting moves the last seen of the Incident of a waiting cause reported again while it is still shown
+// (ADR-0039 point 4, amended 2026-11-16) to the repeat's ObservedAt, so the Incident is not taken as quiet
+// while the wait lasts. It counts nothing: the batch gets no count and no occurrence, merge never moves
+// lastSeen backwards, and a batch with no occurrence is never taken as applied, so a write sent again only
+// widens lastSeen again. Only an Incident that exists, or is being opened, and that the repeat would not roll
+// over to the next occurrence is touched; a repeat of a wait with no Incident opens nothing here. Other
+// observations with nothing new to count (an event or termination seen again after a restart) are older than
+// what they repeat and move nothing. It reports what consume does. The caller holds mu.
+func (c *Controller) stillWaiting(o collector.Observation) bool {
+	if !strings.HasPrefix(o.Occurrence, collector.WaitingOccurrencePrefix) {
+		return false
+	}
+	if _, ok := c.names[c.nameOf(o.Fingerprint)]; !ok || c.rolls(o) {
+		return false
+	}
+	b := c.pending[o.Fingerprint]
+	if b == nil {
+		b = &batch{spec: specOf(o), occurrences: map[string]heldOccurrence{}}
+		c.pending[o.Fingerprint] = b
+	}
+	at := c.notFuture(o.ObservedAt)
+	b.add(&batch{last: at})
+	_, scheduled := c.nextWrite[o.Fingerprint]
+	return !scheduled
 }
 
 // increase returns how much of o is new. An observation marked MayRepeat counts Increase of what Handled

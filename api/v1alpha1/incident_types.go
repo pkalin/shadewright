@@ -114,10 +114,11 @@ const MaxOccurrenceRecords = 32
 // OccurrenceRecord is what an Incident counted of one occurrence (design 3.2). It holds no event text.
 type OccurrenceRecord struct {
 	// id names the occurrence: "event:" and the Event UID, "termination:" and a hash of the pod UID, the
-	// container and the termination, or "condition:" and a hash of the object UID, the kind, the symptom
+	// container and the termination, "waiting:" and a hash of the pod UID, the container, the waiting reason
+	// and the container's restart count, or "condition:" and a hash of the object UID, the kind, the symptom
 	// reason and when the condition began, for a symptom read from an object's status by a module's symptom
 	// source.
-	// +kubebuilder:validation:Pattern=`^(event|termination|condition):[A-Za-z0-9-]{1,64}$`
+	// +kubebuilder:validation:Pattern=`^(event|termination|waiting|condition):[A-Za-z0-9-]{1,64}$`
 	// +kubebuilder:validation:MaxLength=76
 	// +required
 	ID string `json:"id"`

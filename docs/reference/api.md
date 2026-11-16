@@ -1002,7 +1002,7 @@ Used by: [IncidentStatus](#incidentstatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `id` | string | Yes | id names the occurrence: "event:" and the Event UID, "termination:" and a hash of the pod UID, the container and the termination, or "condition:" and a hash of the object UID, the kind, the symptom reason and when the condition began, for a symptom read from an object's status by a module's symptom source.<br>Maximum length: 76<br>Pattern: <code>^(event&#124;termination&#124;condition):&#91;A-Za-z0-9-]{1,64}$</code> |
+| `id` | string | Yes | id names the occurrence: "event:" and the Event UID, "termination:" and a hash of the pod UID, the container and the termination, "waiting:" and a hash of the pod UID, the container, the waiting reason and the container's restart count, or "condition:" and a hash of the object UID, the kind, the symptom reason and when the condition began, for a symptom read from an object's status by a module's symptom source.<br>Maximum length: 76<br>Pattern: <code>^(event&#124;termination&#124;waiting&#124;condition):&#91;A-Za-z0-9-]{1,64}$</code> |
 | `total` | integer | Yes | total is the highest total of the occurrence counted: the event's series count, or 1 for a termination or a condition.<br>Maximum: 2147483647<br>Minimum: 0 |
 | `began` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | began is when the occurrence began: the event's creation time, the termination's finish time or the condition's last transition time. Absent when the cluster did not report one. |
 

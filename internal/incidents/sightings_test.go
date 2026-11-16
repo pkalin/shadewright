@@ -17,6 +17,7 @@ limitations under the License.
 package incidents
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,10 +26,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
+	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 )
 
 // sightingOf is a Warning event observation of fingerprint fp(f), occurrence eventID(i), seen at at: not
@@ -583,5 +586,87 @@ func TestShortWaitOpensNothing(t *testing.T) {
 	err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(1))}, inc)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("a wait shorter than RecurAfter opened an Incident (%v), want none", err)
+	}
+}
+
+// waitingOf is the first report of a waiting cause of fingerprint fp(f) read from pod status at at: a
+// "waiting:" occurrence that began when the collector first saw it, not immediate.
+func waitingOf(f int, at time.Time) collector.Observation {
+	o := sightingOf(f, 0, at)
+	o.Reason, o.Symptom = "CreateContainerConfigError", "Container app is waiting: CreateContainerConfigError"
+	o.Occurrence = collector.WaitingOccurrencePrefix + fmt.Sprintf("%032x", f)
+	o.Origin = fingerprint.SourcePodStatus
+	return o
+}
+
+// lastSeenIs holds when the Incident was last seen at at.
+func lastSeenIs(at time.Time) func(*remediationv1alpha1.Incident) bool {
+	return func(inc *remediationv1alpha1.Incident) bool {
+		return inc.Status.LastSeen != nil && inc.Status.LastSeen.Time.Equal(at)
+	}
+}
+
+// While a container keeps waiting, each repeat of its wait moves the Incident's lastSeen to the repeat's
+// ObservedAt without counting anything, so the quiet rule keeps the Incident Open for as long as the wait
+// lasts, well past QuietBeforeResolved. A late repeat never moves lastSeen backwards. Once the repeats stop,
+// the Incident resolves as quiet QuietBeforeResolved after the last one (ADR-0039 point 4, amended
+// 2026-11-16).
+func TestLastingWaitKeepsItsIncidentOpen(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	clock := &fakeClock{now: t0}
+	r := start(t, ns, Config{Now: clock.Now})
+	first := waitingOf(1, t0)
+	r.obs <- first
+	waitHeld(t, r, "the first report held", func() bool { return r.sightings.len() == 1 })
+
+	// A repeat every 10 minutes for twice QuietBeforeResolved; the first one opens the Incident.
+	var last time.Time
+	for at := t0.Add(RecurAfter); !at.After(t0.Add(2 * QuietBeforeResolved)); at = at.Add(10 * time.Minute) {
+		clock.set(at)
+		r.obs <- waitRepeat(first, at)
+		eventually(t, ns, 1, lastSeenIs(at))
+		if err := r.closeIncidents(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if inc := get(t, ns); inc.Status.Phase != remediationv1alpha1.IncidentOpen {
+			t.Fatalf("phase %s at %v into the wait, want Open while it lasts", inc.Status.Phase, at.Sub(t0))
+		}
+		last = at
+	}
+
+	// A repeat older than the last one moves nothing back.
+	r.obs <- waitRepeat(first, t0.Add(30*time.Minute))
+	r.obs <- immediate(observation(2, 2, 1, 1, t0))
+	eventually(t, ns, 2, countIs(1))
+	inc := get(t, ns)
+	if !inc.Status.LastSeen.Time.Equal(last) {
+		t.Errorf("lastSeen %v after an old repeat, want %v", inc.Status.LastSeen.Time, last)
+	}
+	if inc.Status.Count != 1 {
+		t.Errorf("status.count %d after the repeats, want 1", inc.Status.Count)
+	}
+	if len(inc.Status.Occurrences) != 1 || inc.Status.Occurrences[0].ID != first.Occurrence ||
+		inc.Status.Occurrences[0].Total != 1 {
+		t.Errorf("occurrences %+v, want the wait once with total 1", inc.Status.Occurrences)
+	}
+
+	// The wait ended: no more repeats. Just under an hour after the last one it is still Open, just over it
+	// resolves as quiet.
+	clock.set(last.Add(QuietBeforeResolved - time.Minute))
+	if err := r.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, ns).Status.Phase; got != remediationv1alpha1.IncidentOpen {
+		t.Fatalf("phase %s less than QuietBeforeResolved after the last repeat, want Open", got)
+	}
+	clock.set(last.Add(QuietBeforeResolved + time.Minute))
+	if err := r.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	inc = get(t, ns)
+	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionLifecycle)
+	if inc.Status.Phase != remediationv1alpha1.IncidentResolved || cond == nil || cond.Reason != ReasonSymptomQuiet {
+		t.Fatalf("phase %s, Lifecycle %+v, want Resolved as quiet once the repeats stopped", inc.Status.Phase, cond)
 	}
 }

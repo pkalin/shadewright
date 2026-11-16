@@ -1124,6 +1124,7 @@ var _ = Describe("Incident", func() {
 				s.Occurrences = append(s.Occurrences, record(fmt.Sprintf("event:0a1b2c3d-4e5f-4a6b-8c7d-%012d", i), 2147483647))
 			}
 			s.Occurrences[0] = record("termination:"+strings.Repeat("ab", 16), 1)
+			s.Occurrences[1] = record("waiting:"+strings.Repeat("cd", 16), 1)
 			s.OccurrencesDroppedThrough = &metav1.Time{Time: time.Unix(1700000000, 0)}
 			for i := range v1alpha1.MaxAnalysisRecords {
 				s.AnalysisRecords = append(s.AnalysisRecords, v1alpha1.RecordID(fmt.Sprintf("%d-", i)+strings.Repeat("a", 190)))

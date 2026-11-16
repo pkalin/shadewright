@@ -108,6 +108,11 @@ func waitings(pod *corev1.Pod) []termination {
 	return out
 }
 
+// WaitingOccurrencePrefix starts the Occurrence of a waiting cause read from pod status. Such an occurrence
+// is reported again, with nothing new to count, while the state is still shown (ADR-0039 point 4, amended
+// 2026-11-16); the consumer tells it apart by this prefix.
+const WaitingOccurrencePrefix = "waiting:"
+
 // podSymptoms returns the terminations and the waiting causes of a pod's status.
 func podSymptoms(pod *corev1.Pod) []termination {
 	return append(terminations(pod), waitings(pod)...)
@@ -117,7 +122,7 @@ func podSymptoms(pod *corev1.Pod) []termination {
 func (t termination) occurrence(pod types.UID) string {
 	prefix := "termination:"
 	if t.waiting {
-		prefix = "waiting:"
+		prefix = WaitingOccurrencePrefix
 	}
 	h := sha256.Sum256([]byte(string(pod) + "\x00" + t.container + "\x00" + t.id))
 	return prefix + hex.EncodeToString(h[:16])

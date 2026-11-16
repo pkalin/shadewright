@@ -646,7 +646,7 @@ func TestHoldOfAnOlderEventOfTheNameIsDropped(t *testing.T) {
 // holdOutcomeCounts reads shadewright_analyzer_held_consequences_total by outcome.
 func holdOutcomeCounts() map[string]float64 {
 	out := map[string]float64{}
-	for _, o := range []string{holdOpened, holdNotOpened, holdReleased, holdDropped, holdOverflow} {
+	for _, o := range []string{holdOpened, holdNotOpened, holdReleased, holdUncaused, holdDropped, holdOverflow} {
 		out[o] = testutil.ToFloat64(heldConsequences.WithLabelValues(o))
 	}
 	return out
@@ -744,7 +744,8 @@ func TestOverflowMarksAreBounded(t *testing.T) {
 	}
 }
 
-// TestHoldOutcomesAddUp: every hold started ends in exactly one of opened, not_opened, released and dropped.
+// TestHoldOutcomesAddUp: every hold started ends in exactly one of opened, not_opened, released, cause_unopened
+// and dropped.
 func TestHoldOutcomesAddUp(t *testing.T) {
 	getEvent := func(t *testing.T, h *harness) *eventsv1.Event {
 		ev := &eventsv1.Event{}

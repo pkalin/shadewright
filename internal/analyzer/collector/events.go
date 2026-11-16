@@ -188,8 +188,13 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			return ctrl.Result{}, nil
 		}
 	}
-	// A consequence whose pod shows no cause is held before it is emitted (ADR-0039 point 19, hold.go).
-	switch hv, wait := r.c.holdConsequence(ctx, req.NamespacedName, &ev, obs, pod); hv {
+	// A consequence whose pod shows no cause, or a cause with no Incident yet, is held before it is emitted
+	// (ADR-0039 points 7 and 19, hold.go).
+	hv, wait, err := r.c.holdConsequence(ctx, req.NamespacedName, &ev, &obs, pod)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	switch hv {
 	case holdWait:
 		return ctrl.Result{RequeueAfter: wait}, nil
 	case holdDrop:

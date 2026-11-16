@@ -18,6 +18,8 @@ package collector
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -33,10 +35,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// ConsequenceGrace is how long the collector holds a consequence whose pod status shows no cause before it
-// decides on it (ADR-0039 point 19). It is measured on the collector's clock alone, from its first sight of the
-// occurrence (or of the increase of its series), never against a time the cluster reported.
+// ConsequenceGrace is how long the collector holds a consequence before it decides on it: one whose pod status
+// shows no cause (ADR-0039 point 19), or one whose cause has no Incident yet (point 7). It is measured on the
+// collector's clock alone, from its first sight of the occurrence (or of the increase of its series), never
+// against a time the cluster reported.
 const ConsequenceGrace = 2 * time.Minute
+
+// CausePoll is how often a consequence held for its cause asks again whether the cause was consumed, when no
+// update of its pod samples it sooner. The answer comes from the Incident controller's memory in the same
+// process (Config.CauseCounted), so a hold costs at most ConsequenceGrace/CausePoll such reconciles besides the
+// updates of its pod.
+const CausePoll = 10 * time.Second
 
 // DefaultMaxHeldConsequences bounds the consequences held at once (ADR-0039 point 19).
 const DefaultMaxHeldConsequences = 1024
@@ -58,25 +67,28 @@ const (
 	holdOpened    = "opened"
 	holdNotOpened = "not_opened"
 	holdReleased  = "released"
+	holdUncaused  = "cause_unopened"
 	holdDropped   = "dropped"
 	holdOverflow  = "overflow"
 )
 
-// heldConsequences counts the ends of consequence holds: opened (emitted for the gate), not_opened (the
-// container recovered, or its pod is gone or replaced), released (a cause appeared during the wait, emitted with
-// it), dropped (the event ended the hold itself: deleted, no longer a Warning, replaced by another event of the
-// name, or handled without an observation for another reason), so that these four add up to the holds started;
-// and overflow (no room to hold, emitted at once), a consequence that was never held.
+// heldConsequences counts the ends of consequence holds: opened (no cause shown, emitted for the gate),
+// not_opened (no cause shown, and the container recovered, or its pod is gone or replaced), released (its cause
+// was consumed during the wait, emitted with it), cause_unopened (its pod showed a cause whose Incident did not
+// exist at the end of the wait, or when the pod went: emitted with that cause for the gate), dropped (the event
+// ended the hold itself: deleted, no longer a Warning, replaced by another event of the name, or handled without
+// an observation for another reason), so that these five add up to the holds started; and overflow (no room to
+// hold, emitted at once), a consequence that was never held.
 var heldConsequences = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_analyzer_held_consequences_total",
-	Help: "Consequence symptoms with no cause held by the collector, by outcome: opened, not_opened, released, " +
+	Help: "Consequence symptoms held by the collector, by outcome: opened, not_opened, released, cause_unopened, " +
 		"dropped or overflow.",
 }, []string{"outcome"})
 
 // consequencesHeld is the number of consequences held now, summed over the collectors of the process.
 var consequencesHeld = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "shadewright_analyzer_consequences_held",
-	Help: "Consequence symptoms with no cause the collector holds now, waiting for the end of their grace period.",
+	Help: "Consequence symptoms the collector holds now, with no cause or with a cause that has no Incident yet.",
 })
 
 func init() {
@@ -86,6 +98,10 @@ func init() {
 // consequenceHold is one held consequence: the event it came from, the container it names in the pod it named
 // at the first sight, and what the collector saw of that container since.
 type consequenceHold struct {
+	// cause is the cause fingerprint the latest sample's pod status showed, empty when it showed none. A hold
+	// with a cause waits for the cause to be consumed (ADR-0039 point 7); one without is judged by its samples
+	// (point 19).
+	cause     string
 	event     types.UID
 	pod       types.UID
 	container string
@@ -269,6 +285,24 @@ func (h *consequenceHolds) len() int {
 	return len(h.holds)
 }
 
+// errCauseUnanswered is a CauseCounted call that ran out of its deadline: no answer, asked again later.
+var errCauseUnanswered = errors.New("the Incident controller did not answer within the deadline")
+
+// causeCounted asks Config.CauseCounted, with the deadline of a Handled call, whether the cause obs names was
+// consumed. An expired deadline is errCauseUnanswered; any other error is returned. Neither is an answer.
+func (c *Collector) causeCounted(ctx context.Context, obs Observation) (bool, error) {
+	cctx, cancel := context.WithTimeout(ctx, c.cfg.LookupTimeout)
+	defer cancel()
+	ok, err := c.cfg.CauseCounted(cctx, obs)
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+		return false, errCauseUnanswered
+	case err != nil:
+		return false, fmt.Errorf("asking whether the cause of a consequence was counted: %w", err)
+	}
+	return ok, nil
+}
+
 // holdVerdict is what the collector decided on a consequence.
 type holdVerdict uint8
 
@@ -294,43 +328,58 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 	return reqs
 }
 
-// holdConsequence decides on a consequence (ADR-0039 point 19). obs is the event's observation and pod the pod
-// it names as fromEvent read it (nil when gone or replaced; a failed read never reaches here, it is retried).
+// holdConsequence decides on a consequence (ADR-0039 points 7 and 19). obs is the event's observation and pod the
+// pod it names as fromEvent read it (nil when gone or replaced; a failed read never reaches here, it is retried).
 // A reconcile of the event is a sample, whether its event or an update of its pod (heldEventsOf) caused it.
 //
-//   - No hold and not a consequence with no cause: holdEmit, as before.
-//   - A hold whose decision to open is not delivered yet: holdEmit.
-//   - A held event whose pod is gone or replaced: holdDrop.
-//   - A held event whose pod now shows a cause: the hold is released, holdEmit.
+//   - Not a consequence, and not held: holdEmit, as before.
+//   - A hold whose decision to emit is not delivered yet: holdEmit.
+//   - A pod that shows a cause the Incident controller has consumed (Config.CauseCounted): holdEmit, and a hold
+//     is released. Without CauseCounted any cause shown is taken as consumed, as before point 7 was built.
+//   - A held event whose pod is gone or replaced: emitted with the cause the previous sample showed (holdEmit),
+//     or, when it showed none, holdDrop.
 //   - No room to hold a new one: holdEmit at once, without a verdict, so it goes through the gate. The event is
 //     remembered until its delivery ends, so a delivery retry emits it again even once room has freed.
-//   - Otherwise the reconcile is a sample of the container. Before the end of ConsequenceGrace: holdWait. At
-//     the end (amended 2026-11-16): holdEmit when at least minHoldSamples samples were failing and either this
-//     last one is failing or the container restarted at least minHoldRestarts times during the hold, else
-//     holdDrop.
+//   - Otherwise the reconcile is a sample of the container. Before the end of ConsequenceGrace: holdWait, after
+//     CausePoll at most while the pod shows a cause. At the end, when the pod shows a cause whose Incident does
+//     not exist: holdEmit with that cause, for the gate (point 7). With no cause shown (amended 2026-11-16):
+//     holdEmit when at least minHoldSamples samples were failing and either this last one is failing or the
+//     container restarted at least minHoldRestarts times during the hold, else holdDrop.
+//
+// A CauseCounted call that does not answer within its deadline decides nothing: holdWait after retryAfter, the
+// hold as it was. Any other error of it is returned, for the reconciler's backoff.
 func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event,
-	obs Observation, pod *corev1.Pod) (holdVerdict, time.Duration) {
+	obs *Observation, pod *corev1.Pod) (holdVerdict, time.Duration, error) {
 	if c.holdOff || c.holds.wasOverflow(key, ev.UID) {
-		return holdEmit, 0
+		return holdEmit, 0, nil
 	}
 	s, held := c.holds.get(key, ev.UID)
-	if !held && (obs.Class != ClassConsequence || obs.CauseFingerprint != "") {
-		return holdEmit, 0
-	}
 	if held && s.opened {
-		return holdEmit, 0
+		s.restoreCause(obs)
+		return holdEmit, 0, nil
+	}
+	if !held && obs.Class != ClassConsequence {
+		return holdEmit, 0, nil
 	}
 	if held && (pod == nil || pod.UID != s.pod) {
+		if s.cause != "" {
+			// The previous sample showed a cause whose Incident did not exist: the consequence goes to the gate with
+			// it, which counts it on the cause's Incident if that opens (point 7: the hold never drops a symptom).
+			s.restoreCause(obs)
+			heldConsequences.WithLabelValues(holdUncaused).Inc()
+			logf.FromContext(ctx).V(1).Info("Emitted held consequence with its cause, its Pod is gone or replaced",
+				"reason", s.reason, "container", s.container)
+			s.opened = true
+			c.holds.put(key, s)
+			return holdEmit, 0, nil
+		}
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
 		logf.FromContext(ctx).V(1).Info("Dropped held consequence, its Pod is gone or replaced",
 			"reason", s.reason, "container", s.container)
-		return holdDrop, 0
+		return holdDrop, 0, nil
 	}
-	if held && obs.CauseFingerprint != "" {
-		// A cause appeared during the wait: the consequence goes to the gate with it.
-		heldConsequences.WithLabelValues(holdReleased).Inc()
-		c.holds.done(key)
-		return holdEmit, 0
+	if done, v, wait, err := c.askCause(ctx, key, ev, obs, held); done {
+		return v, wait, err
 	}
 	now := c.now()
 	st, found := containerStatus(pod, s.container, s.init)
@@ -342,6 +391,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 			restarts: st.RestartCount,
 		}
 	}
+	s.cause = obs.CauseFingerprint
 	failing := found && s.failingNow(st)
 	if failing {
 		s.failing++
@@ -358,23 +408,76 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 			heldConsequences.WithLabelValues(holdOverflow).Inc()
 			logf.FromContext(ctx).V(1).Info("Emitted consequence at once, too many held",
 				"limit", c.holds.max, "namespaceShare", c.holds.share)
-			return holdEmit, 0
+			return holdEmit, 0, nil
 		}
-		return holdWait, left
+		if s.cause != "" {
+			return holdWait, min(left, CausePoll), nil
+		}
+		return holdWait, left, nil
+	}
+	if s.cause != "" {
+		// The end of the wait, and the cause shown has no Incident: to the gate with it (point 7).
+		s.opened = true
+		if c.holds.put(key, s) {
+			heldConsequences.WithLabelValues(holdUncaused).Inc()
+			logf.FromContext(ctx).V(1).Info("Emitted held consequence with its cause, which has no Incident",
+				"reason", s.reason, "container", s.container)
+		}
+		return holdEmit, 0, nil
 	}
 	if s.failing < minHoldSamples || (!failing && s.restarted < minHoldRestarts) {
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
 		logf.FromContext(ctx).V(1).Info("Dropped held consequence, its container did not keep failing",
 			"reason", s.reason, "container", s.container, "failingSamples", s.failing, "restarts", s.restarted)
-		return holdDrop, 0
+		return holdDrop, 0, nil
 	}
 	s.opened = true
 	if !c.holds.put(key, s) {
 		// Not held before (a grace of zero): nothing to remember across a delivery retry.
-		return holdEmit, 0
+		return holdEmit, 0, nil
 	}
 	heldConsequences.WithLabelValues(holdOpened).Inc()
-	return holdEmit, 0
+	return holdEmit, 0, nil
+}
+
+// askCause decides on a consequence whose pod shows a cause, when the cause was consumed or there is no answer
+// (holdConsequence): done is false when the hold goes on, its pod showing no cause or a cause not consumed.
+func (c *Collector) askCause(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event, obs *Observation,
+	held bool) (bool, holdVerdict, time.Duration, error) {
+	if obs.CauseFingerprint == "" {
+		return false, holdWait, 0, nil
+	}
+	counted := true
+	if c.cfg.CauseCounted != nil {
+		var err error
+		if counted, err = c.causeCounted(ctx, *obs); errors.Is(err, errCauseUnanswered) {
+			// Only while the Incident controller has not loaded its Incidents, whose own error it logs.
+			logf.FromContext(ctx).Info("Asked again whether the cause of a consequence was counted, no answer yet",
+				"reason", ev.Reason, "retryAfter", retryAfter)
+			return true, holdWait, retryAfter, nil
+		} else if err != nil {
+			return true, holdEmit, 0, err
+		}
+	}
+	if !counted {
+		return false, holdWait, 0, nil
+	}
+	if held {
+		// The cause was consumed during the wait: the consequence goes on with it.
+		heldConsequences.WithLabelValues(holdReleased).Inc()
+		c.holds.done(key)
+	}
+	return true, holdEmit, 0, nil
+}
+
+// restoreCause gives obs the cause the hold recorded when obs shows none: a hold decided to emit with its cause
+// keeps that cause across a delivery retry, and one whose pod went is emitted with the cause its last sample
+// showed. A hold with no cause changes nothing.
+func (s consequenceHold) restoreCause(obs *Observation) {
+	if s.cause == "" || obs.CauseFingerprint != "" {
+		return
+	}
+	obs.Class, obs.Container, obs.CauseFingerprint = ClassConsequence, s.container, s.cause
 }
 
 // failingNow reports whether the held container fails in st (ADR-0039 point 19, amended 2026-11-16): its restart

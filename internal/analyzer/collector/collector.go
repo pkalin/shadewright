@@ -141,7 +141,7 @@ type Observation struct {
 	Container string
 	// Class is the observation's part in the consequence rule (ADR-0039): ClassCause only for a pod-status
 	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. The collector
-	// holds a consequence with no cause before it emits it (hold.go); the Incident controller does not read it yet.
+	// holds a consequence with no cause, or whose cause has no Incident yet, before it emits it (hold.go).
 	Class Class
 	// CauseFingerprint is, on a consequence, the fingerprint of the cause its pod's status shows for its
 	// container (Collector.causeFingerprint); empty when the status shows none.
@@ -183,6 +183,13 @@ func (o Observation) Increase(handled int64) int64 {
 // the Incident, not in memory alone.
 type HandledFunc func(ctx context.Context, o Observation) (handled int64, found bool, err error)
 
+// CauseCountedFunc reports whether the cause a consequence names has been consumed: the Incident controller's
+// own list has an Incident of o.CauseFingerprint that counts a cause for o's subject UID, so that o would be
+// counted there as evidence (ADR-0039 points 6 and 7). It answers from memory, in the same process, and an
+// error (the Incidents not loaded within the deadline) is no answer: the collector asks again. The Incident
+// controller (package incidents) supplies it.
+type CauseCountedFunc func(ctx context.Context, o Observation) (bool, error)
+
 // Config configures a [Collector]. Zero values take the defaults above.
 type Config struct {
 	// ClusterID is hashed into every fingerprint. Required.
@@ -208,14 +215,19 @@ type Config struct {
 	// Handled, when set, settles observations that would be marked MayRepeat: their Count becomes what the
 	// Incident has not counted yet, and they are dropped when that is nothing.
 	Handled HandledFunc
+	// CauseCounted, when set, is asked whether the cause a consequence names has been consumed. A consequence
+	// whose cause is not is held (hold.go) until it is, at the latest for ConsequenceGrace (ADR-0039 point 7).
+	// Nil emits such a consequence at once.
+	CauseCounted CauseCountedFunc
 	// Modules, when set, returns the modules active now (detection.Detector.Selection). The collector then
 	// also watches the kinds in [SourceKinds] and evaluates on each object the symptom source an active module
 	// declares for its kind (sources.go). Nil watches none of them.
 	Modules func() modules.Selection
 	// MaxObjects bounds the number of objects whose handled symptom states are remembered.
 	MaxObjects int
-	// MaxHeldConsequences bounds the consequences with no cause held at once (hold.go), a quarter of it per
-	// namespace. Over it a consequence is emitted at once, without a verdict.
+	// MaxHeldConsequences bounds the consequences held at once (hold.go), those with no cause and those whose
+	// cause has no Incident yet together, a quarter of it per namespace. Over it a consequence is emitted at
+	// once, without a verdict.
 	MaxHeldConsequences int
 	// SelectionPoll is how often the collector checks whether a module became active for a kind in
 	// [SourceKinds], to evaluate then the objects of that kind it filtered out while none was, and, for a kind
@@ -254,7 +266,7 @@ type Collector struct {
 	conditions *stateTracker
 	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go).
 	probes *probeDeferrals
-	// holds remembers the consequences with no cause held for ConsequenceGrace (hold.go).
+	// holds remembers the consequences held for at most ConsequenceGrace (hold.go).
 	holds *consequenceHolds
 	// holdOff, set by tests of the observation's fields only, emits a consequence without holding it.
 	holdOff bool

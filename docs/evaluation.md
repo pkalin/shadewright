@@ -384,15 +384,16 @@ analyses (units taken from the daily budget, and model calls) and the requests.
   request. Without the rule each event is an observation of its own, which the gate opens once it recurs, as
   the lab saw (#432); the case fails then, since the cause's tally stays empty. The case pins that order: it
   creates the kubelet events only once the cause's Incident exists. The collector delivers pod and event
-  observations from separate reconcilers, and a consequence seen once that reaches the Incident controller just
-  before its cause is held as a first sighting and never counted on the cause unless it is seen again, so the
-  order is not left to chance.
+  observations from separate reconcilers. Since #828 the collector holds a consequence whose cause has no
+  Incident yet until the cause is counted, at most 2 minutes; the order is pinned so that the case does not depend
+  on that hold's end, where the Incident controller's first sightings count it instead.
 - `TestGroupingOOMFoldsALateCause`: an `Unhealthy` Incident of the `web` container opened before the kill and not
   analyzed yet. When the cause's Incident opens, it is folded into it (`Resolved`, `status.foldedInto`); one
   Incident stays open, analyzed once. The case holds back every analysis until it has seen the fold, so a slow
   run cannot analyze the `Unhealthy` Incident first: the analysis controller's reads of the API wait on a gate
   the case opens. No case covers a consequence held by the collector (ADR-0039 point 19) whose cause appears
-  during the hold: its release and the cause reach the Incident controller in either order. A consequence Incident that already has a request with no pull request is
+  during the hold: since #828 the collector releases it only once the cause is consumed (point 7), or at the end of
+  the hold, when the Incident controller's first sightings carry it. A consequence Incident that already has a request with no pull request is
   the executor's to cancel ([#794](https://github.com/pkalin/shadewright/issues/794)); this case does not cover it.
 - `TestGroupingStartupProbeOpensNothing`: the readiness probe failure of the new `demo/worker` pod. The collector
   skips it as part of the pod's start (its counter

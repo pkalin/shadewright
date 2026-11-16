@@ -709,8 +709,9 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 	n := c.increase(o)
 	// A consequence whose cause has an Incident is counted there as evidence and opens none of its own
 	// (ADR-0039 point 6), with what is held for it as a first sighting from before the cause's Incident was
-	// opened. One whose cause has no Incident yet goes through the gate below, as any observation, until the
-	// collector holds it (point 7).
+	// opened. One whose cause has no Incident yet goes through the gate below, as any observation: the collector
+	// holds it until the cause is consumed (point 7, CauseCounted), so it comes here only when it left that hold
+	// first (over its bound, or at its end).
 	name, spec, reason, linked := c.causeFor(o)
 	heldDue := false
 	if linked {

@@ -184,7 +184,8 @@ func main() {
 	var det *detection.Detector
 	recheck := make(chan struct{}, 1)
 	col, err := collector.New(collector.Config{
-		ClusterID: clusterID, Handled: inc.Handled, Namespaces: watched, Grants: moduleGrants,
+		ClusterID: clusterID, Handled: inc.Handled, CauseCounted: inc.CauseCounted, Namespaces: watched,
+		Grants:       moduleGrants,
 		Modules:      func() modules.Selection { return det.Selection() },
 		WatchChanged: notify(recheck),
 	})

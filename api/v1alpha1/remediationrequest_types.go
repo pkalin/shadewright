@@ -227,8 +227,9 @@ type RemediationRequestSpec struct {
 	Cancel bool `json:"cancel,omitempty"`
 }
 
-// Reasons of a request that ends Cancelled because of its Incident (ADR-0039 points 21 and 22). They are
-// declared for the executor's live read of the Incident before the pull request; nothing sets them yet.
+// Reasons of a request that ends Cancelled because of its Incident (ADR-0039 points 21 and 22), on condition
+// PullRequestOpened. The executor sets them after its live read of the Incident, the last step before it opens
+// the pull request (#794).
 const (
 	// ReasonIncidentFolded: the request ended Cancelled before its pull request because its Incident has
 	// status.foldedInto: it was folded into the Incident of its cause.

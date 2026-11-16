@@ -350,13 +350,24 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(body).To(ContainSubstring("incident `" + inc.Name + "`, policy"))
 	})
 
-	It("redacts an Incident name of the collector's form that no Incident with that UID has", func() {
+	It("opens no pull request for an Incident name of the collector's form that no Incident with that UID has", func() {
 		hex := strings.Repeat("3f1c9a7b", 7) + fmt.Sprintf("%08x", seq)
 		inc := collectorIncident(hex)
-		// A hex secret written as "incident-<secret>": the right form, but no Incident has this UID.
-		body := answering(remediationv1alpha1.IncidentRef{Name: inc.Name, UID: "22222222-2222-4222-8222-222222222222"})
-		Expect(body).NotTo(ContainSubstring(hex))
-		Expect(body).To(ContainSubstring("for incident `[REDACTED:token]`."))
+		// A hex secret written as "incident-<secret>": the right form, but no Incident has this UID. The live
+		// read before the pull request finds the Incident gone (ADR-0039 point 22), so no body is ever written.
+		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+		replaced := fx.MemoryLimitRequest(requestNamespace, request.Name+"-incident")
+		replaced.Spec.PolicyRef, replaced.Spec.TargetRef = request.Spec.PolicyRef, request.Spec.TargetRef
+		replaced.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: inc.Name, UID: "22222222-2222-4222-8222-222222222222"}
+		Expect(k8sClient.Create(ctx, replaced)).To(Succeed())
+		request = replaced
+		got := drive(remediationv1alpha1.PhaseCancelled)
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+		Expect(openRequests()).To(BeEmpty())
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonIncidentGone))
+		Expect(c.Message).NotTo(ContainSubstring(hex))
 	})
 
 	It("opens the pull request with the name redacted when the Incident read hangs", func() {
@@ -366,7 +377,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// Its own deadline is far shorter than the step's, so the step still has the time to open the pull
 		// request. Without that deadline the read would use up the step's and the open would time out.
 		hangs := &atomic.Int32{}
-		apiReader = hangingIncidentReader{Reader: k8sClient, hangs: hangs}
+		// Only the first read hangs: the live read before the open (ADR-0039 point 21) needs an answer, and a
+		// hang there holds the request (see "holds the request while the live read of its Incident fails").
+		apiReader = hangingIncidentReader{Reader: k8sClient, hangs: hangs, first: 1}
 		writeTimeout, incidentReadTimeout = 2*time.Second, 100*time.Millisecond
 		Expect(k8sClient.Delete(ctx, request)).To(Succeed())
 		replaced := fx.MemoryLimitRequest(requestNamespace, request.Name+"-incident")
@@ -2294,6 +2307,211 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(queued).NotTo(BeNil())
 		Expect(queued.Reason).To(Equal(ReasonTargetLocked))
 	}
+
+	// ADR-0039 points 21 and 22: the live read of the Incident as the last step before the pull request.
+	Context("when the request's Incident is folded or gone before its pull request", func() {
+		var inc *remediationv1alpha1.Incident
+
+		// naming replaces request with one that names an Incident of its own, created here, and makes it
+		// PolicyChecked.
+		naming := func() {
+			GinkgoHelper()
+			inc = fx.Incident(requestNamespace, fmt.Sprintf("consequence-%d", seq))
+			Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+			DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, inc))).To(Succeed()) })
+			Expect(k8sClient.Delete(ctx, request)).To(Succeed())
+			replaced := fx.MemoryLimitRequest(requestNamespace, request.Name+"-named")
+			replaced.Spec.PolicyRef, replaced.Spec.TargetRef = request.Spec.PolicyRef, request.Spec.TargetRef
+			replaced.Spec.IncidentRef = remediationv1alpha1.IncidentRef{Name: inc.Name, UID: remediationv1alpha1.UID(inc.UID)}
+			Expect(k8sClient.Create(ctx, replaced)).To(Succeed())
+			request = replaced
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		}
+		fold := func() {
+			GinkgoHelper()
+			got := &remediationv1alpha1.Incident{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(inc), got)).To(Succeed())
+			got.Status.Phase = remediationv1alpha1.IncidentResolved
+			got.Status.ResolvedTime = &metav1.Time{Time: clock}
+			got.Status.FoldedInto = &remediationv1alpha1.IncidentRef{Name: "cause-" + inc.Name,
+				UID: "6f0d2c1e-94a7-4b3e-8c21-5d7e9f0a1b2c"}
+			got.Status.Folded = true
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		}
+		remove := func() {
+			GinkgoHelper()
+			Expect(k8sClient.Delete(ctx, inc)).To(Succeed())
+		}
+		makeAgain := func() {
+			GinkgoHelper()
+			remove()
+			again := fx.Incident(requestNamespace, inc.Name)
+			Expect(k8sClient.Create(ctx, again)).To(Succeed())
+			Expect(again.UID).NotTo(Equal(inc.UID))
+		}
+		// afterCommit runs change once, right after the commit to the branch: after every slow step but the open.
+		afterCommit := func(change func()) {
+			done := false
+			git.SetAfter(func(op string) error {
+				if op == opCommit && !done {
+					done = true
+					change()
+				}
+				return nil
+			})
+		}
+		// expectCancelled checks that the request ended Cancelled with reason, opened no pull request, left its
+		// branch with the commit and released its target lock and its slot under maxConcurrentRemediations.
+		expectCancelled := func(reason string) *remediationv1alpha1.RemediationRequest {
+			GinkgoHelper()
+			got := drive(remediationv1alpha1.PhaseCancelled)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionFalse))
+			Expect(c.Reason).To(Equal(reason))
+			Expect(c.Message).NotTo(ContainSubstring(inc.Name), "the message names no Incident")
+			Expect(got.Status.PullRequest).To(BeNil())
+			Expect(git.ChangeRequests()).To(BeEmpty(), "no pull request is opened")
+			Expect(git.BranchHead(ctx, freshness.BranchName(got))).NotTo(BeEmpty(), "the branch is left as it is")
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "the target lock is released")
+			Expect(active(got)).To(BeFalse(), "the request leaves its slot under maxConcurrentRemediations")
+			// More reconciles change nothing.
+			before := got.ResourceVersion
+			for range 3 {
+				Expect(reconcileOnce()).To(Succeed())
+			}
+			Expect(fetch().ResourceVersion).To(Equal(before))
+			Expect(git.ChangeRequests()).To(BeEmpty())
+			return got
+		}
+
+		It("ends the request Cancelled with IncidentFolded when its Incident is folded after the commit", func() {
+			naming()
+			afterCommit(fold)
+			expectCancelled(remediationv1alpha1.ReasonIncidentFolded)
+		})
+
+		It("ends the request Cancelled with IncidentGone when its Incident is deleted after the commit", func() {
+			naming()
+			afterCommit(remove)
+			expectCancelled(remediationv1alpha1.ReasonIncidentGone)
+		})
+
+		It("ends the request Cancelled with IncidentGone when its Incident is made again under the same name", func() {
+			naming()
+			afterCommit(makeAgain)
+			expectCancelled(remediationv1alpha1.ReasonIncidentGone)
+		})
+
+		It("lets the next request waiting on the target lock go on once the request is cancelled", func() {
+			naming()
+			afterCommit(remove)
+			// Up to the commit: the request holds the lock, and a second request on the same target waits.
+			for range 5 {
+				_ = reconcileOnce()
+				if fetch().Status.HoldsTarget != nil && *fetch().Status.HoldsTarget {
+					break
+				}
+			}
+			Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
+			_, reconcileSecond := second()
+			expectLocked(reconcileSecond())
+			expectCancelled(remediationv1alpha1.ReasonIncidentGone)
+			next := reconcileSecond()
+			Expect(next.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+			Expect(meta.FindStatusCondition(next.Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeNil())
+		})
+
+		It("holds the request while the live read of its Incident fails, and decides once it answers", func() {
+			naming()
+			fail := &atomic.Bool{}
+			fail.Store(true)
+			// verifiedIncidentName's read of the Incident fails open (it redacts the name in the body), so the
+			// check of ADR-0039 point 21 is what holds the request.
+			apiReader = &switchedIncidentReader{Reader: k8sClient, fail: fail}
+			afterCommit(fold) // never seen while the read fails
+			var lastErr error
+			for range 8 {
+				if err := reconcileOnce(); err != nil {
+					lastErr = err
+				}
+			}
+			Expect(lastErr).To(MatchError(errIncidentUnread))
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "held, not ended")
+			Expect(git.ChangeRequests()).To(BeEmpty(), "never let through on a failed read")
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+			fail.Store(false)
+			expectCancelled(remediationv1alpha1.ReasonIncidentFolded)
+		})
+
+		It("holds the request on a NotFound that does not name its Incident", func() {
+			naming()
+			fail := &atomic.Bool{}
+			fail.Store(true)
+			apiReader = &switchedIncidentReader{Reader: k8sClient, fail: fail, notFound: true}
+			for range 8 {
+				_ = reconcileOnce()
+			}
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+			Expect(git.ChangeRequests()).To(BeEmpty())
+		})
+
+		It("decides again after a conflict on the status write that ends the request", func() {
+			naming()
+			remove()
+			// The request changes between the reconcile's read of it and the write that ends it.
+			apiReader = &touchingIncidentReader{Reader: k8sClient, touch: func() {
+				got := fetch()
+				base := got.DeepCopy()
+				if got.Annotations == nil {
+					got.Annotations = map[string]string{}
+				}
+				got.Annotations["example.com/touched"] = "true"
+				Expect(k8sClient.Patch(ctx, got, client.MergeFrom(base))).To(Succeed())
+			}}
+			var conflicts int
+			for range 8 {
+				if err := reconcileOnce(); apierrors.IsConflict(err) {
+					conflicts++
+				}
+				if fetch().Status.Phase == remediationv1alpha1.PhaseCancelled {
+					break
+				}
+			}
+			Expect(conflicts).To(Equal(1), "the first ending write met the change")
+			apiReader = nil
+			expectCancelled(remediationv1alpha1.ReasonIncidentGone)
+		})
+
+		It("opens the pull request when the Incident is neither folded nor gone", func() {
+			naming()
+			got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(openRequests()).To(HaveLen(1))
+		})
+
+		DescribeTable("a request that already has a pull request runs its course",
+			func(change func()) {
+				naming()
+				Expect(drive(remediationv1alpha1.PhaseAwaitingApproval).Status.Phase).
+					To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				change()
+				for range 3 {
+					_ = reconcileOnce()
+				}
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				Expect(openRequests()).To(HaveLen(1))
+				Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
+			},
+			Entry("folded", func() { fold() }),
+			Entry("deleted", func() { remove() }),
+			Entry("made again", func() { makeAgain() }),
+		)
+	})
 
 	It("keeps the target locked while a stopped request's pull request is open, across restarts, until it is deleted", func() {
 		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
@@ -6744,11 +6962,13 @@ func (f failingIncidentReader) Get(ctx context.Context, key client.ObjectKey, ob
 type hangingIncidentReader struct {
 	client.Reader
 	hangs *atomic.Int32
+	// first, when above zero, is how many Incident reads hang; the later ones go to Reader.
+	first int32
 }
 
 func (h hangingIncidentReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
 	opts ...client.GetOption) error {
-	if _, ok := obj.(*remediationv1alpha1.Incident); ok {
+	if _, ok := obj.(*remediationv1alpha1.Incident); ok && (h.first <= 0 || h.hangs.Load() < h.first) {
 		h.hangs.Add(1)
 		<-ctx.Done()
 		return ctx.Err()
@@ -6793,4 +7013,38 @@ func (o *openListedOnly) ListChangeRequests(ctx context.Context, branch string, 
 		return all, err
 	}
 	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == o.n }), err
+}
+
+// switchedIncidentReader fails every Incident read while fail is set, with a server error, or with notFound a
+// NotFound that names no object; every other read goes to Reader.
+type switchedIncidentReader struct {
+	client.Reader
+	fail     *atomic.Bool
+	notFound bool
+}
+
+func (f *switchedIncidentReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.Incident); ok && f.fail.Load() {
+		if f.notFound {
+			return apierrors.NewNotFound(schema.GroupResource{}, "")
+		}
+		return apierrors.NewServiceUnavailable("the API server is not ready")
+	}
+	return f.Reader.Get(ctx, key, obj, opts...)
+}
+
+// touchingIncidentReader calls touch once, on the first get of an Incident, before it reads it from Reader.
+type touchingIncidentReader struct {
+	client.Reader
+	touch   func()
+	touched atomic.Bool
+}
+
+func (t *touchingIncidentReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.Incident); ok && t.touched.CompareAndSwap(false, true) {
+		t.touch()
+	}
+	return t.Reader.Get(ctx, key, obj, opts...)
 }

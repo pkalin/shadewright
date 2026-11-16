@@ -19,6 +19,7 @@ package incidents
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -581,5 +582,230 @@ func TestLostCauseWriteStillFolds(t *testing.T) {
 	eventually(t, ns, 2, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.FoldedInto != nil })
 	if !lost.Load() {
 		t.Fatal("no answer of the cause write was lost")
+	}
+}
+
+// TestStoredCauseIsFoldedByThePass: a cause Incident stored before this controller started (written by the
+// final flush at stop, or before a restart) is no fold this controller owes in memory; the trigger pass derives
+// the fold from the stored Incidents. A second pass, with nothing left to fold, writes nothing.
+func TestStoredCauseIsFoldedByThePass(t *testing.T) {
+	c, cl, w := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
+	if len(c.folds) != 0 {
+		t.Fatalf("%d folds owed after the load, want none: the test needs the stored state alone", len(c.folds))
+	}
+	// The closure rules may write the cause (quiet for an hour); only the writes of the consequence count.
+	var writes int
+	w.before = func(_ context.Context, inc *remediationv1alpha1.Incident) {
+		if inc.Name == Name(fp(2)) {
+			writes++
+		}
+	}
+	_ = c.pass(t.Context())
+	checkFolded(t, getNamed(t, cl, Name(fp(2))))
+	if writes != 1 {
+		t.Fatalf("%d status writes of the consequence, want 1", writes)
+	}
+	_ = c.pass(t.Context())
+	if writes != 1 {
+		t.Fatalf("%d status writes of the consequence after a pass with nothing to fold, want still 1", writes)
+	}
+}
+
+// TestFoldRecentLooksOnlyAtYoungCauses: a cause created more than RecurWithin plus one trigger interval ago is
+// no longer checked, so its consequence stays as it is and nothing is written; one just inside is folded.
+func TestFoldRecentLooksOnlyAtYoungCauses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		after time.Duration
+		folds bool
+	}{
+		"inside the window": {after: RecurWithin + DefaultTriggerInterval, folds: true},
+		"past the window":   {after: RecurWithin + DefaultTriggerInterval + time.Second},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, cl, w := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
+			c.cfg.Now = func() time.Time { return triggerNow.Add(tc.after) }
+			if err := c.foldRecent(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			got := getNamed(t, cl, Name(fp(2)))
+			if folded := got.Status.FoldedInto != nil; folded != tc.folds {
+				t.Fatalf("folded %v, want %v", folded, tc.folds)
+			}
+			if !tc.folds && w.updates.Load() != 0 {
+				t.Fatalf("%d status writes for a cause past the window, want none", w.updates.Load())
+			}
+		})
+	}
+}
+
+// hiding hides the Incident named hidden from the listings of the cache while it is set, as an informer that
+// has not seen it yet.
+type hiding struct {
+	client.Client
+	hidden atomic.Pointer[string]
+}
+
+func (h *hiding) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := h.Client.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if l, ok := list.(*remediationv1alpha1.IncidentList); ok {
+		if name := h.hidden.Load(); name != nil {
+			l.Items = slices.DeleteFunc(l.Items, func(inc remediationv1alpha1.Incident) bool { return inc.Name == *name })
+		}
+	}
+	return nil
+}
+
+// TestFoldMissedByTheCacheIsFoldedLater: the cache had not seen the consequence when the owed fold ran, so the
+// fast path found nothing to fold and dropped it; the next trigger pass, once the cache has it, folds it.
+func TestFoldMissedByTheCacheIsFoldedLater(t *testing.T) {
+	c, cl, _ := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
+	h := &hiding{Client: cl}
+	name := Name(fp(2))
+	h.hidden.Store(&name)
+	c.cache = h
+	c.mu.Lock()
+	c.oweFold(Name(fp(1)))
+	c.mu.Unlock()
+	c.foldDue(t.Context())
+	if got := getNamed(t, cl, name); got.Status.FoldedInto != nil {
+		t.Fatal("folded an Incident the cache did not show")
+	}
+	_ = c.pass(t.Context())
+	if got := getNamed(t, cl, name); got.Status.FoldedInto != nil {
+		t.Fatal("folded an Incident the cache did not show")
+	}
+	h.hidden.Store(nil)
+	_ = c.pass(t.Context())
+	checkFolded(t, getNamed(t, cl, name))
+}
+
+// reopenNamed reopens the folded Incident name as a recurrence does: Open, Lifecycle Reopened, foldedInto
+// cleared.
+func reopenNamed(t *testing.T, cl client.Client, name string, now time.Time) {
+	t.Helper()
+	live := getNamed(t, cl, name)
+	if live.Status.FoldedInto == nil {
+		t.Fatalf("%s is not folded, nothing to reopen", name)
+	}
+	reopen(live, now)
+	if err := cl.Status().Update(t.Context(), live); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// checkReopened fails unless the Incident name is Open, Reopened and not folded.
+func checkReopened(t *testing.T, cl client.Client, name string) {
+	t.Helper()
+	got := getNamed(t, cl, name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, ConditionLifecycle)
+	if got.Status.Phase != remediationv1alpha1.IncidentOpen || got.Status.FoldedInto != nil || cond == nil ||
+		cond.Reason != ReasonReopened {
+		t.Fatalf("%s: phase %s lifecycle %+v foldedInto %+v, want it reopened and left so", name, got.Status.Phase,
+			cond, got.Status.FoldedInto)
+	}
+}
+
+// TestLostFoldAnswerDoesNotFoldAReopenedIncident: the fold was stored but its answer lost, so it stays owed;
+// meanwhile the consequence was seen again and reopened. The retry, and the trigger pass, leave it Open.
+func TestLostFoldAnswerDoesNotFoldAReopenedIncident(t *testing.T) {
+	c, cl, w := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
+	lost := false
+	w.after = func(err error) error {
+		if err == nil && !lost {
+			lost = true
+			return apierrors.NewTimeoutError("the answer was lost", 1)
+		}
+		return err
+	}
+	c.mu.Lock()
+	c.oweFold(Name(fp(1)))
+	c.mu.Unlock()
+	c.foldDue(t.Context())
+	c.mu.Lock()
+	owed, ok := c.folds[Name(fp(1))]
+	c.mu.Unlock()
+	if !lost || !ok {
+		t.Fatalf("answer lost %v, owed %v: want the fold owed again after a lost answer", lost, ok)
+	}
+	reopenNamed(t, cl, Name(fp(2)), triggerNow.Add(time.Minute))
+	c.cfg.Now = func() time.Time { return owed.at }
+	c.foldDue(t.Context())
+	checkReopened(t, cl, Name(fp(2)))
+	_ = c.pass(t.Context())
+	checkReopened(t, cl, Name(fp(2)))
+}
+
+// TestPartialFoldRetryLeavesAReopenedIncident: of two consequences, one is folded and the other's write is
+// refused, so the fold stays owed; the folded one is reopened before the retry. The retry folds the other and
+// leaves the reopened one Open.
+func TestPartialFoldRetryLeavesAReopenedIncident(t *testing.T) {
+	second := foldConsequence(5 * time.Minute)
+	second.Name, second.Spec.Fingerprint, second.UID = Name(fp(3)), fp(3), "68686868-6868-4868-8868-686868686868"
+	c, cl, w := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute), second})
+	refuse := true
+	var sending string
+	w.before = func(_ context.Context, inc *remediationv1alpha1.Incident) { sending = inc.Name }
+	w.instead = func(context.Context) error {
+		if refuse && sending == second.Name {
+			return apierrors.NewServiceUnavailable("refused")
+		}
+		return nil
+	}
+	c.mu.Lock()
+	c.oweFold(Name(fp(1)))
+	c.mu.Unlock()
+	c.foldDue(t.Context())
+	c.mu.Lock()
+	owed, ok := c.folds[Name(fp(1))]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatal("the fold is not owed after a refused write")
+	}
+	checkFolded(t, getNamed(t, cl, Name(fp(2))))
+	if got := getNamed(t, cl, second.Name); got.Status.FoldedInto != nil {
+		t.Fatal("the refused write folded")
+	}
+	reopenNamed(t, cl, Name(fp(2)), triggerNow.Add(time.Minute))
+	refuse = false
+	c.cfg.Now = func() time.Time { return owed.at }
+	c.foldDue(t.Context())
+	checkReopened(t, cl, Name(fp(2)))
+	if got := getNamed(t, cl, second.Name); got.Status.FoldedInto == nil || got.Status.FoldedInto.Name != Name(fp(1)) {
+		t.Fatalf("the other consequence: foldedInto %+v, want folded into %s by the retry", got.Status.FoldedInto,
+			Name(fp(1)))
+	}
+}
+
+// TestCauseStoredAtStopIsFoldedAfterRestart (envtest): the cause's Incident is written by the final flush at
+// stop, after the write loop that folds has ended, so that run never folds; the next run's trigger pass does.
+func TestCauseStoredAtStopIsFoldedAfterRestart(t *testing.T) {
+	ns := namespace(t)
+	at := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	first := start(t, ns, Config{Window: 100 * time.Millisecond})
+	first.obs <- consequenceOf(2, 0, foldContainer, reasonBackOff, 1, 2, at)
+	eventually(t, ns, 2, countIs(2))
+	first.stop()
+
+	// A window longer than the test: the cause is written only by the flush at stop.
+	second := start(t, ns, Config{Window: time.Hour, SettleLimit: time.Hour})
+	second.obs <- oomCause(1, at.Add(time.Minute))
+	second.stop()
+	cause := eventually(t, ns, 1, countIs(1))
+	if !cause.Status.Cause {
+		t.Fatal("the stored Incident is not a cause")
+	}
+	if got := eventually(t, ns, 2, countIs(2)); got.Status.FoldedInto != nil {
+		t.Fatal("folded by the run that stopped: the test needs a cause written by the flush at stop")
+	}
+
+	third := start(t, ns, Config{Window: 100 * time.Millisecond, TriggerInterval: time.Second})
+	defer third.stop()
+	got := eventually(t, ns, 2, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.FoldedInto != nil })
+	if got.Status.Phase != remediationv1alpha1.IncidentResolved || got.Status.FoldedInto.Name != cause.Name ||
+		types.UID(got.Status.FoldedInto.UID) != cause.UID {
+		t.Fatalf("phase %s foldedInto %+v, want Resolved and folded into %s", got.Status.Phase, got.Status.FoldedInto,
+			cause.Name)
 	}
 }

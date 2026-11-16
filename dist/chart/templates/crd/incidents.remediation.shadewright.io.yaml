@@ -65,7 +65,8 @@ spec:
         description: |-
           Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
           removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
-          entries or status.cause is true, and refuse a new entry of that list in any state but Pending, also in the first status write.
+          entries, status.cause is true or status.foldedInto is set, refuse a new entry of that list in any state but
+          Pending, also in the first status write, and refuse a status.foldedInto that names the Incident itself.
         properties:
           apiVersion:
             description: |-
@@ -395,8 +396,9 @@ spec:
                 description: |-
                   foldedInto names the cause's Incident, by name and UID, when this consequence Incident was folded into it
                   and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Allowed only in phase
-                  Resolved. It never changes to another Incident: a reopen of the folded Incident clears it, and that is
-                  the only change allowed once it is set. The closure rules skip an Incident that has it.
+                  Resolved. It never changes to another Incident: a reopen of the folded Incident clears it, together with
+                  a move out of Resolved, and that is the only change allowed once it is set. It never names the Incident
+                  itself. The closure rules skip an Incident that has it.
                 properties:
                   name:
                     description: name of the Incident.
@@ -625,6 +627,10 @@ spec:
                 may only be cleared'
               rule: '!has(oldSelf.foldedInto) || !has(self.foldedInto) || self.foldedInto
                 == oldSelf.foldedInto'
+            - message: foldedInto is cleared only together with a move to a phase
+                other than Resolved
+              rule: '!has(oldSelf.foldedInto) || has(self.foldedInto) || (has(self.phase)
+                && self.phase != ''Resolved'')'
         required:
         - spec
         type: object
@@ -635,6 +641,11 @@ spec:
         - message: status cannot be removed while status.cause is true
           rule: '!has(oldSelf.status) || !has(oldSelf.status.cause) || !oldSelf.status.cause
             || has(self.status)'
+        - message: status cannot be removed while status.foldedInto is set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.foldedInto) || has(self.status)'
+        - message: status.foldedInto cannot name the Incident itself
+          rule: '!has(self.status) || !has(self.status.foldedInto) || self.status.foldedInto.name
+            != self.metadata.name'
         - message: a new entry of status.revertsProposed must be Pending
           rule: '!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n,
             n.state == ''Pending'' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed)

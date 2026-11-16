@@ -176,7 +176,7 @@ type Controller struct {
 	cache  client.Reader
 	obs    <-chan collector.Observation
 	ready  chan struct{}
-	// noTrigger keeps Start from running the analysis trigger (closure rules and due marks). Only tests set
+	// noTrigger keeps Start from running the analysis trigger (closure rules, folds and due marks). Only tests set
 	// it: those that drive the observation writes alone, so that no pass writes their Incidents meanwhile.
 	noTrigger bool
 

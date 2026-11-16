@@ -78,6 +78,11 @@ func reachedPullRequest(rr *remediationv1alpha1.RemediationRequest) bool {
 //   - cause has status.cause and is not inc itself.
 //   - inc is a consequence ([consequenceIncident]), not a cause, not folded and not Resolved (a Resolved
 //     Incident is closed already, and its resolvedTime cannot change).
+//   - inc was not reopened (Lifecycle Reopened): a reopened consequence is never folded again. A fold tried
+//     again after its answer was lost, or after a partial failure, may find the consequence it already folded
+//     reopened since by a recurrence, and must not fold it into the old cause a second time. The reopen time
+//     is the controller's clock and the cause's creationTimestamp the API server's, so no cause, also one
+//     created after the reopen, folds a reopened consequence: it keeps its own analysis.
 //   - Both name the same subject UID and share a container in status.containers.
 //   - inc was created at most RecurWithin before cause, by their creationTimestamps: both stamped by the API
 //     server, so one clock decides, also for a cause first seen much earlier and opened from the gate.
@@ -86,6 +91,10 @@ func foldable(inc, cause *remediationv1alpha1.Incident, requests []remediationv1
 	if !cause.Status.Cause || inc.Name == cause.Name || inc.UID == cause.UID || !inc.HasDerivedName() ||
 		!consequenceIncident(inc) || inc.Status.Cause || inc.Status.FoldedInto != nil ||
 		inc.Status.Phase == remediationv1alpha1.IncidentResolved {
+		return false
+	}
+	if cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionLifecycle); cond != nil &&
+		cond.Reason == ReasonReopened {
 		return false
 	}
 	if inc.Spec.Subject.UID == "" || inc.Spec.Subject.UID != cause.Spec.Subject.UID {
@@ -153,10 +162,10 @@ func (c *Controller) oweFoldAfter(name string, res writeResult, err error) {
 }
 
 // foldDue tries every owed fold that is due, in the write loop's pass after the writes that created the cause
-// Incidents. A fold that fails is owed again RetryAfter later; one done, or with nothing left to fold, is
-// dropped. The retry ends when it succeeds, the cause's Incident is gone or is not a cause, or the process
-// stops: an owed fold lives in memory only, so a restart between the write that created the cause and its
-// fold leaves the consequence Incident unfolded, with its own analysis.
+// Incidents: the fast path. A fold that fails is owed again RetryAfter later; one done, or with nothing left to
+// fold, is dropped. The retry ends when it succeeds, the cause's Incident is gone or is not a cause, or the
+// process stops. What this path misses (a cause written by the final flush at stop, a restart, a consequence
+// the cache had not seen yet) the trigger pass finds from the stored Incidents ([Controller.foldRecent]).
 func (c *Controller) foldDue(ctx context.Context) {
 	c.mu.Lock()
 	now := c.cfg.Now()
@@ -187,6 +196,59 @@ func (c *Controller) foldDue(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// foldRecent derives the owed folds from the stored Incidents, once per trigger pass, the first at start
+// (ADR-0039 point 14, decision of 2026-11-16 on #793): every cause Incident (status.cause) created at most
+// RecurWithin plus TriggerInterval before now is checked against the Incidents the cache lists, and each
+// cause with a [foldable] consequence is folded ([Controller.foldInto]: the cause read live, each fold decided
+// again on the live Incident). A pass that finds nothing to fold reads and writes nothing more than its two
+// listings. It covers a cause written by the final flush at stop or before a restart, while the cause is that
+// young, and a consequence the cache had not seen when the fast path ([Controller.foldDue]) ran. The age
+// compares now with creationTimestamp, two clocks, but it only bounds how long a cause is checked: whether a
+// consequence folds is decided by [foldable] on creationTimestamps alone. A failed listing or fold is an
+// error, and the next pass tries again while the cause is in the window.
+func (c *Controller) foldRecent(ctx context.Context) error {
+	var list remediationv1alpha1.IncidentList
+	if err := c.cache.List(ctx, &list, client.InNamespace(c.cfg.Namespace)); err != nil {
+		return fmt.Errorf("listing the Incidents to fold: %w", err)
+	}
+	now, within := c.cfg.Now(), RecurWithin+c.cfg.TriggerInterval
+	var causes []*remediationv1alpha1.Incident
+	for i := range list.Items {
+		inc := &list.Items[i]
+		if inc.Status.Cause && inc.HasDerivedName() && !inc.CreationTimestamp.IsZero() &&
+			now.Sub(inc.CreationTimestamp.Time) <= within {
+			causes = append(causes, inc)
+		}
+	}
+	if len(causes) == 0 {
+		return nil
+	}
+	var requests remediationv1alpha1.RemediationRequestList
+	if err := c.cache.List(ctx, &requests, client.InNamespace(c.cfg.Namespace)); err != nil {
+		return fmt.Errorf("listing the RemediationRequests to fold: %w", err)
+	}
+	owed := map[string]struct{}{}
+	for _, cause := range causes {
+		for i := range list.Items {
+			if foldable(&list.Items[i], cause, requests.Items) {
+				owed[cause.Name] = struct{}{}
+				break
+			}
+		}
+	}
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(owed)) {
+		if err := c.foldInto(ctx, name); err != nil {
+			incidentWriteErrors.Inc()
+			errs = append(errs, err)
+			if ctx.Err() != nil {
+				break
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // foldInto folds into the cause Incident name every consequence Incident the controller's own list shows as

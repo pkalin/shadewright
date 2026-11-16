@@ -975,6 +975,60 @@ var _ = Describe("Incident", func() {
 		Expect(k8sClient.Status().Update(ctx, reopened)).To(Succeed())
 	})
 
+	// A clear that keeps the phase Resolved would let a second write set another cause (A, cleared, B), which
+	// the rule above cannot see across two writes (#793).
+	It("clears foldedInto only together with a move out of Resolved", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		resolved := metav1.NewTime(time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC))
+		first := &v1alpha1.IncidentRef{Name: "cause-c", UID: "36363636-3636-4636-8636-363636363636"}
+		inc.Status.Phase, inc.Status.ResolvedTime, inc.Status.FoldedInto = v1alpha1.IncidentResolved, &resolved, first
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+
+		stays := inc.DeepCopy()
+		stays.Status.FoldedInto = nil
+		err := k8sClient.Status().Update(ctx, stays)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("foldedInto is cleared only together with a move to a phase other than Resolved"))
+
+		noPhase := inc.DeepCopy()
+		noPhase.Status.Phase, noPhase.Status.ResolvedTime, noPhase.Status.FoldedInto = "", nil, nil
+		// Another field keeps the status object, so the rule of the status object, not the root, decides.
+		noPhase.Status.Containers = []v1alpha1.Name{"web"}
+		err = k8sClient.Status().Update(ctx, noPhase)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("foldedInto is cleared only together with a move to a phase other than Resolved"))
+
+		escalated := inc.DeepCopy()
+		escalated.Status.Phase, escalated.Status.FoldedInto = v1alpha1.IncidentEscalated, nil
+		Expect(k8sClient.Status().Update(ctx, escalated)).To(Succeed(), "an escalated recurrence clears it")
+	})
+
+	It("refuses removing the status while foldedInto is set", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		resolved := metav1.NewTime(time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC))
+		inc.Status.Phase, inc.Status.ResolvedTime = v1alpha1.IncidentResolved, &resolved
+		inc.Status.FoldedInto = &v1alpha1.IncidentRef{Name: "cause-d", UID: "37373737-3737-4737-8737-373737373737"}
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		removed := inc.DeepCopy()
+		removed.Status = v1alpha1.IncidentStatus{}
+		err := k8sClient.Status().Update(ctx, removed)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("status cannot be removed while status.foldedInto is set"))
+	})
+
+	It("refuses a foldedInto that names the Incident itself", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		resolved := metav1.NewTime(time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC))
+		inc.Status.Phase, inc.Status.ResolvedTime = v1alpha1.IncidentResolved, &resolved
+		inc.Status.FoldedInto = &v1alpha1.IncidentRef{Name: inc.Name, UID: "38383838-3838-4838-8838-383838383838"}
+		err := k8sClient.Status().Update(ctx, inc)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("status.foldedInto cannot name the Incident itself"))
+	})
+
 	It("keeps every entry of revertsProposed and moves a state only from Pending to Created or Abandoned", func() {
 		inc := fx.Incident("default", unique("inc"))
 		Expect(k8sClient.Create(ctx, inc)).To(Succeed())

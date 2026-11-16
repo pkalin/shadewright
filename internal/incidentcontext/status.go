@@ -18,6 +18,7 @@ package incidentcontext
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -73,6 +74,7 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	if st.LastSeen != nil {
 		l.add("last seen: %s", stamp(*st.LastSeen))
 	}
+	absorbedLines(&l, st.Absorbed)
 	if st.Phase != "" {
 		// The phase is written by the analyzer itself, never evidence.
 		l.add("phase: %s", b.value(string(st.Phase)))
@@ -298,4 +300,33 @@ func (b *Builder) state(l *lines, s corev1.ContainerState) string {
 		return "running since " + stamp(s.Running.StartedAt)
 	}
 	return "unknown"
+}
+
+// absorbedReasons are the consequence reasons the summary shows from status.absorbed, in the order it shows
+// them: the values of the AbsorbedReason enum (ADR-0039 point 16), the fixed table of the rule. An entry with
+// any other reason is left out, so the lines hold no text from the cluster even if the schema let one in.
+var absorbedReasons = []remediationv1alpha1.AbsorbedReason{
+	remediationv1alpha1.AbsorbedBackOff,
+	remediationv1alpha1.AbsorbedUnhealthy,
+}
+
+// absorbedLines adds the absorbed tally of a cause Incident to the summary (ADR-0039 point 18, #796): one line
+// per reason of [absorbedReasons] that the tally holds, in that order, with its count and the time of its
+// latest observation. Only the reason (a code constant), a number and a time are written, and none of it is
+// quotable: it is what the analyzer counted, not evidence from a source. An empty tally adds nothing, so the
+// summary of every other Incident is unchanged. A reason found twice is shown once, from its first entry, so
+// the lines are at most len(absorbedReasons).
+func absorbedLines(l *lines, tally []remediationv1alpha1.AbsorbedTally) {
+	header := false
+	for _, reason := range absorbedReasons {
+		i := slices.IndexFunc(tally, func(a remediationv1alpha1.AbsorbedTally) bool { return a.Reason == reason })
+		if i < 0 {
+			continue
+		}
+		if !header {
+			l.add("consequences counted on this cause, not in its occurrences:")
+			header = true
+		}
+		l.add("  %s: %d occurrences, last seen %s", string(reason), max(tally[i].Count, 0), stamp(tally[i].LastSeen))
+	}
 }

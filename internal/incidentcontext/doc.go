@@ -21,7 +21,9 @@ limitations under the License.
 //
 // The context has six sections, in this order, each with its own byte bound ([Limits]):
 //
-//   - summary: the Incident itself (subject, reason, symptom, counts and times);
+//   - summary: the Incident itself (subject, reason, symptom, counts and times) and, for a cause Incident, its
+//     absorbed tally: the consequence reasons of the fixed table, their counts and last seen times (ADR-0039
+//     point 18), never text from the cluster;
 //   - object status and owners: the target workload's status and conditions, the memory limits of its pod
 //     template, the owner chain and the status of each of its current pods with that pod's own memory limits,
 //     each labelled as the template's or the pod's (during a rollout they differ); for a KEDA ScaledObject

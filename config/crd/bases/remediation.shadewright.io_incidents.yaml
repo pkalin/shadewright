@@ -60,7 +60,7 @@ spec:
         description: |-
           Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
           removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
-          entries, and refuse a new entry of that list in any state but Pending, also in the first status write.
+          entries or status.cause is true, and refuse a new entry of that list in any state but Pending, also in the first status write.
         properties:
           apiVersion:
             description: |-
@@ -192,7 +192,7 @@ spec:
                 description: |-
                   absorbed is the tally of the consequence observations this Incident took as evidence of its cause, one
                   entry per reason, at most 8 (ADR-0039 point 16). They change neither count nor lastSeen, and the analysis
-                  trigger and the quiet rule do not read them. Nothing writes it yet.
+                  trigger and the quiet rule do not read them. Allowed only when cause is true.
                 items:
                   description: |-
                     AbsorbedTally counts the observations of one consequence reason that a cause's Incident took as evidence
@@ -232,7 +232,7 @@ spec:
                   absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart
                   from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point
                   16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped.
-                  Nothing writes them yet.
+                  Allowed only when cause is true.
                 items:
                   description: OccurrenceRecord is what an Incident counted of one
                     occurrence (design 3.2). It holds no event text.
@@ -272,7 +272,8 @@ spec:
               absorbedOccurrencesDroppedThrough:
                 description: |-
                   absorbedOccurrencesDroppedThrough is when the newest occurrence dropped from absorbedOccurrences began,
-                  the drop mark of occurrencesDroppedThrough for the absorbed list. Nothing writes it yet.
+                  the drop mark of occurrencesDroppedThrough for the absorbed list. It answers only for consequences linked
+                  to this Incident's fingerprint, and only moves forward.
                 format: date-time
                 type: string
               analysisRecords:
@@ -293,7 +294,8 @@ spec:
                 description: |-
                   cause is true when the Incident was opened or counted by a pod-status observation of class cause, an OOM
                   kill or a waiting reason the kubelet wrote (ADR-0039 point 8). Only such an Incident takes the evidence of
-                  a consequence or folds a consequence Incident. An Event never sets it. Nothing writes it yet.
+                  a consequence or folds a consequence Incident. An Event never sets it. Once true it stays true, and the
+                  status cannot be removed while it is.
                 type: boolean
               conditions:
                 description: conditions explain the phase.
@@ -358,8 +360,9 @@ spec:
               containers:
                 description: |-
                   containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039
-                  point 8). The late-cause fold compares them between a consequence Incident and its cause's Incident.
-                  Nothing writes them yet.
+                  point 8), written in the status write that counts an observation naming one. A name that is not a DNS
+                  label, or one past the eighth, is left out and logged. The late-cause fold compares them between a
+                  consequence Incident and its cause's Incident.
                 items:
                   description: Name is a DNS label used to reference other Shadewright
                     objects or entries.
@@ -485,7 +488,7 @@ spec:
                 description: |-
                   occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence
                   with no record that began no later than this is treated as counted in full, so the bound never counts
-                  one twice.
+                  one twice. It only moves forward.
                 format: date-time
                 type: string
               phase:
@@ -587,6 +590,21 @@ spec:
               rule: '!(has(oldSelf.phase) && oldSelf.phase == ''Resolved'' && has(oldSelf.resolvedTime)
                 && has(self.phase) && self.phase == ''Resolved'') || (has(self.resolvedTime)
                 && self.resolvedTime == oldSelf.resolvedTime)'
+            - message: cause cannot change from true to false
+              rule: '!(has(oldSelf.cause) && oldSelf.cause) || (has(self.cause) &&
+                self.cause)'
+            - message: absorbed is allowed only when cause is true
+              rule: '!has(self.absorbed) || size(self.absorbed) == 0 || (has(self.cause)
+                && self.cause)'
+            - message: absorbedOccurrences is allowed only when cause is true
+              rule: '!has(self.absorbedOccurrences) || size(self.absorbedOccurrences)
+                == 0 || (has(self.cause) && self.cause)'
+            - message: occurrencesDroppedThrough only moves forward
+              rule: '!has(oldSelf.occurrencesDroppedThrough) || (has(self.occurrencesDroppedThrough)
+                && self.occurrencesDroppedThrough >= oldSelf.occurrencesDroppedThrough)'
+            - message: absorbedOccurrencesDroppedThrough only moves forward
+              rule: '!has(oldSelf.absorbedOccurrencesDroppedThrough) || (has(self.absorbedOccurrencesDroppedThrough)
+                && self.absorbedOccurrencesDroppedThrough >= oldSelf.absorbedOccurrencesDroppedThrough)'
             - message: 'revertsProposed only grows: an entry is never removed, its
                 state only moves from Pending to Created or Abandoned, and its reason
                 never changes'
@@ -601,6 +619,9 @@ spec:
         - message: status cannot be removed while status.revertsProposed has entries
           rule: '!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed)
             == 0 || has(self.status)'
+        - message: status cannot be removed while status.cause is true
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.cause) || !oldSelf.status.cause
+            || has(self.status)'
         - message: a new entry of status.revertsProposed must be Pending
           rule: '!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n,
             n.state == ''Pending'' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed)

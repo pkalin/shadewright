@@ -43,19 +43,48 @@ type counted struct {
 	began time.Time
 }
 
-// heldOccurrence is one occurrence a batch holds: what was counted of it, and the namespace it came from
-// (the observation's Source), whose share of the occurrences held unwritten it is charged to.
+// heldOccurrence is one occurrence a batch holds: what was counted of it, the namespace it came from (the
+// observation's Source), whose share of the occurrences held unwritten it is charged to, and, for a
+// consequence counted as evidence of the Incident's cause (ADR-0039 point 16), its reason: such an occurrence
+// is recorded in absorbedOccurrences, apart from the Incident's own.
 type heldOccurrence struct {
 	counted
-	source string
+	source   string
+	absorbed remediationv1alpha1.AbsorbedReason
 }
 
-// batch is what one Incident has gained since its last status write.
+// tally is what a batch adds to one entry of status.absorbed: how many occurrences, and the newest.
+type tally struct {
+	count int64
+	last  time.Time
+}
+
+// batch is what one Incident has gained since its last status write. count, first and last are its own
+// observations only; absorbed holds the consequences counted as evidence of its cause, which change neither
+// (ADR-0039 point 16). cause says a pod-status observation of class cause was counted (status.cause), and
+// containers are the container names its observations named, already checked to be DNS labels.
 type batch struct {
 	spec        remediationv1alpha1.IncidentSpec
 	count       int64
 	first, last time.Time
 	occurrences map[string]heldOccurrence
+	absorbed    map[remediationv1alpha1.AbsorbedReason]tally
+	cause       bool
+	containers  []string
+}
+
+// own reports whether b holds anything of the Incident's own: a count, a time seen or an occurrence that is
+// not absorbed. A batch that holds only absorbed consequences is not a recurrence of a Resolved Incident.
+func (b *batch) own() bool {
+	if b.count > 0 || !b.first.IsZero() || !b.last.IsZero() {
+		return true
+	}
+	for _, o := range b.occurrences {
+		if o.absorbed == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // occurrenceOf returns what b holds of one occurrence. b may be nil.
@@ -74,10 +103,23 @@ func (b *batch) add(other *batch) {
 	b.count += other.count
 	b.first = earliest(b.first, other.first)
 	b.last = latest(b.last, other.last)
+	b.cause = b.cause || other.cause
+	for _, name := range other.containers {
+		if !slices.Contains(b.containers, name) {
+			b.containers = append(b.containers, name)
+		}
+	}
+	for reason, t := range other.absorbed {
+		if b.absorbed == nil {
+			b.absorbed = map[remediationv1alpha1.AbsorbedReason]tally{}
+		}
+		cur := b.absorbed[reason]
+		b.absorbed[reason] = tally{count: cur.count + t.count, last: latest(cur.last, t.last)}
+	}
 	for id, o := range other.occurrences {
 		cur, ok := b.occurrences[id]
 		if !ok {
-			cur.source = o.source
+			cur.source, cur.absorbed = o.source, o.absorbed
 		}
 		cur.counted = higher(cur.counted, o.counted)
 		b.occurrences[id] = cur
@@ -131,17 +173,25 @@ func latest(a, b time.Time) time.Time {
 //
 // b counts as applied when no occurrence says it was not written and at least one proves it was. A batch
 // with no occurrence that can prove it is never taken as applied: a possible overcount is preferred to a
-// silent loss.
+// silent loss. An absorbed occurrence is checked against absorbedOccurrences and its drop mark, an own one
+// against occurrences.
 func applied(status *remediationv1alpha1.IncidentStatus, b *batch) bool {
-	recorded := make(map[string]int64, len(status.Occurrences))
+	recordedOwn := make(map[string]int64, len(status.Occurrences))
 	for _, r := range status.Occurrences {
-		recorded[r.ID] = r.Total
+		recordedOwn[r.ID] = r.Total
 	}
-	droppedThrough := timeFrom(status.OccurrencesDroppedThrough)
+	recordedAbsorbed := make(map[string]int64, len(status.AbsorbedOccurrences))
+	for _, r := range status.AbsorbedOccurrences {
+		recordedAbsorbed[r.ID] = r.Total
+	}
 	proved := false
 	for id, o := range b.occurrences {
 		if !occurrenceID.MatchString(id) {
 			continue
+		}
+		recorded, droppedThrough := recordedOwn, timeFrom(status.OccurrencesDroppedThrough)
+		if o.absorbed != "" {
+			recorded, droppedThrough = recordedAbsorbed, timeFrom(status.AbsorbedOccurrencesDroppedThrough)
 		}
 		if total, ok := recorded[id]; ok {
 			if total < min(o.total, math.MaxInt32) {
@@ -160,7 +210,10 @@ func applied(status *remediationv1alpha1.IncidentStatus, b *batch) bool {
 // merge adds b to status at now: the count saturates at MaxIncidentCount, first and last seen widen, and the
 // occurrence records take b's totals. The records are then sorted newest first and cut to
 // MaxOccurrenceRecords; the IDs of those dropped are returned, and occurrencesDroppedThrough moves to the
-// newest begin time among them.
+// newest begin time among them. b's absorbed consequences go to absorbed and absorbedOccurrences the same
+// way, with their own drop mark, and touch none of count, firstSeen, lastSeen or occurrences (ADR-0039 point
+// 16). A batch that counted a cause sets status.cause, which is never cleared. Container names are added by
+// [addContainers].
 func merge(status *remediationv1alpha1.IncidentStatus, b *batch) (dropped []string) {
 	if status.Phase == "" {
 		status.Phase = remediationv1alpha1.IncidentOpen
@@ -168,12 +221,65 @@ func merge(status *remediationv1alpha1.IncidentStatus, b *batch) (dropped []stri
 	status.Count = min(status.Count+b.count, remediationv1alpha1.MaxIncidentCount)
 	status.FirstSeen = timeOf(earliest(timeFrom(status.FirstSeen), b.first))
 	status.LastSeen = timeOf(latest(timeFrom(status.LastSeen), b.last))
+	if b.cause {
+		status.Cause = true
+	}
+	mergeAbsorbed(status, b.absorbed)
 
-	records := make(map[string]counted, len(status.Occurrences)+len(b.occurrences))
-	for _, r := range status.Occurrences {
+	own := map[string]counted{}
+	absorbed := map[string]counted{}
+	for id, o := range b.occurrences {
+		if o.absorbed != "" {
+			absorbed[id] = o.counted
+		} else {
+			own[id] = o.counted
+		}
+	}
+	var gone []string
+	status.Occurrences, gone = mergeRecords(status.Occurrences, &status.OccurrencesDroppedThrough, own)
+	dropped = append(dropped, gone...)
+	if len(absorbed) > 0 {
+		status.AbsorbedOccurrences, gone = mergeRecords(status.AbsorbedOccurrences,
+			&status.AbsorbedOccurrencesDroppedThrough, absorbed)
+		dropped = append(dropped, gone...)
+	}
+	return dropped
+}
+
+// mergeAbsorbed adds a batch's tallies to status.absorbed: each count saturates at MaxIncidentCount and each
+// lastSeen only moves forward. Entries stay sorted by reason; a reason past MaxAbsorbedReasons is left out
+// (the enum has two values, so it cannot happen while the schema holds).
+func mergeAbsorbed(status *remediationv1alpha1.IncidentStatus, add map[remediationv1alpha1.AbsorbedReason]tally) {
+	for reason, t := range add {
+		i := slices.IndexFunc(status.Absorbed, func(a remediationv1alpha1.AbsorbedTally) bool { return a.Reason == reason })
+		if i < 0 {
+			if len(status.Absorbed) >= remediationv1alpha1.MaxAbsorbedReasons {
+				continue
+			}
+			status.Absorbed = append(status.Absorbed, remediationv1alpha1.AbsorbedTally{Reason: reason})
+			i = len(status.Absorbed) - 1
+		}
+		a := &status.Absorbed[i]
+		a.Count = min(a.Count+t.count, remediationv1alpha1.MaxIncidentCount)
+		if last := timeOf(latest(a.LastSeen.Time, t.last)); last != nil {
+			a.LastSeen = *last
+		}
+	}
+	slices.SortFunc(status.Absorbed, func(x, y remediationv1alpha1.AbsorbedTally) int {
+		return strings.Compare(string(x.Reason), string(y.Reason))
+	})
+}
+
+// mergeRecords adds the occurrences of add to the records stored, sorts them newest first and cuts them to
+// MaxOccurrenceRecords. It returns the records kept and the IDs of those dropped, and moves the drop mark
+// through to the newest begin time among them. An ID the schema refuses is not recorded.
+func mergeRecords(stored []remediationv1alpha1.OccurrenceRecord, through **metav1.Time,
+	add map[string]counted) ([]remediationv1alpha1.OccurrenceRecord, []string) {
+	records := make(map[string]counted, len(stored)+len(add))
+	for _, r := range stored {
 		records[r.ID] = counted{total: r.Total, began: timeFrom(r.Began)}
 	}
-	for id, o := range b.occurrences {
+	for id, o := range add {
 		if occurrenceID.MatchString(id) {
 			records[id] = higher(records[id], counted{total: min(o.total, math.MaxInt32), began: o.began})
 		}
@@ -189,19 +295,35 @@ func merge(status *remediationv1alpha1.IncidentStatus, b *batch) (dropped []stri
 		return strings.Compare(x, y)
 	})
 	keep := ids[:min(len(ids), remediationv1alpha1.MaxOccurrenceRecords)]
-	dropped = ids[len(keep):]
-	status.Occurrences = make([]remediationv1alpha1.OccurrenceRecord, 0, len(keep))
+	dropped := ids[len(keep):]
+	out := make([]remediationv1alpha1.OccurrenceRecord, 0, len(keep))
 	for _, id := range keep {
 		r := records[id]
-		status.Occurrences = append(status.Occurrences, remediationv1alpha1.OccurrenceRecord{
+		out = append(out, remediationv1alpha1.OccurrenceRecord{
 			ID: id, Total: max(r.total, 0), Began: timeOf(r.began),
 		})
 	}
 	if len(dropped) > 0 {
-		through := beganOrNone(records[dropped[0]].began)
-		status.OccurrencesDroppedThrough = timeOf(latest(timeFrom(status.OccurrencesDroppedThrough), through))
+		*through = timeOf(latest(timeFrom(*through), beganOrNone(records[dropped[0]].began)))
 	}
-	return dropped
+	return out, dropped
+}
+
+// addContainers adds the container names of b to status.containers, keeping those it holds, up to
+// MaxIncidentContainers. It returns the names left out at the cap. The names were checked to be DNS labels
+// when the observation was consumed ([containerName]).
+func addContainers(status *remediationv1alpha1.IncidentStatus, b *batch) (left []string) {
+	for _, name := range b.containers {
+		if slices.Contains(status.Containers, remediationv1alpha1.Name(name)) {
+			continue
+		}
+		if len(status.Containers) >= remediationv1alpha1.MaxIncidentContainers {
+			left = append(left, name)
+			continue
+		}
+		status.Containers = append(status.Containers, remediationv1alpha1.Name(name))
+	}
+	return left
 }
 
 // beganOrNone returns t, or noBegin when t is zero.

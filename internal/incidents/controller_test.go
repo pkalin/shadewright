@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +41,7 @@ import (
 	corerecord "k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
@@ -172,12 +174,41 @@ func (s *countingStatus) Update(ctx context.Context, obj client.Object, opts ...
 	return err
 }
 
-// running is a controller started on its own channel, stopped by stop.
+// running is a controller started on its own channel, stopped by stop. logs holds the lines it logged.
 type running struct {
 	*Controller
 	writes *countingClient
 	obs    chan collector.Observation
 	stop   func()
+	logs   *logLines
+}
+
+// logLines collects the lines a logger wrote, for a test to read.
+type logLines struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+// context returns a context whose logger writes to l.
+func (l *logLines) context(ctx context.Context) context.Context {
+	return logf.IntoContext(ctx, funcr.New(func(_, args string) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.lines = append(l.lines, args)
+	}, funcr.Options{}))
+}
+
+// with returns the lines that hold every one of parts.
+func (l *logLines) with(parts ...string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		if !slices.ContainsFunc(parts, func(p string) bool { return !strings.Contains(line, p) }) {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 func start(t *testing.T, ns string, cfg Config) *running {
@@ -204,12 +235,13 @@ func startWith(t *testing.T, ns string, cfg Config, setup func(*Controller, *cou
 		t.Fatal(err)
 	}
 	c.noTrigger = noTrigger
-	r := &running{Controller: c, writes: &countingClient{Client: env.admin}, obs: make(chan collector.Observation)}
+	r := &running{Controller: c, writes: &countingClient{Client: env.admin}, obs: make(chan collector.Observation),
+		logs: &logLines{}}
 	c.client, c.reader, c.cache, c.obs = r.writes, env.admin, env.admin, r.obs
 	if setup != nil {
 		setup(c, r.writes)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(r.logs.context(context.Background()))
 	done := make(chan error, 1)
 	go func() { done <- c.Start(ctx) }()
 	var once sync.Once
@@ -246,6 +278,12 @@ func observation(f, i int, total, count int64, began time.Time) collector.Observ
 		Symptom:    "Back-off restarting failed container worker",
 		Occurrence: eventID(i), Total: total, Count: count, Began: began, ObservedAt: began,
 	}
+}
+
+// occurrenceAt returns the observation the collector asks Handled about: occurrence id, begun at began, of no
+// class.
+func occurrenceAt(id string, began time.Time) collector.Observation {
+	return collector.Observation{Occurrence: id, Began: began}
 }
 
 // immediate returns o marked Immediate, as the collector marks an OOMKilled termination, so that it opens
@@ -351,7 +389,7 @@ func TestBurstMakesOneIncidentWithFewWrites(t *testing.T) {
 		{eventID(1000), now.Add(-time.Hour), collector.AllHandled, true},
 		{eventID(1001), now.Add(time.Hour), 0, false},
 	} {
-		got, found, err := r.Handled(t.Context(), q.id, q.began)
+		got, found, err := r.Handled(t.Context(), occurrenceAt(q.id, q.began))
 		if err != nil || got != q.want || found != q.found {
 			t.Errorf("Handled(%s) = %d, %v, %v; want %d, %v", q.id, got, found, err, q.want, q.found)
 		}
@@ -480,10 +518,10 @@ func TestRestartNeitherResetsNorDoubles(t *testing.T) {
 	eventually(t, ns, 1, countIs(8))
 
 	b := start(t, ns, Config{Window: 200 * time.Millisecond})
-	if got, found, err := b.Handled(t.Context(), eventID(1), began); err != nil || !found || got != 5 {
+	if got, found, err := b.Handled(t.Context(), occurrenceAt(eventID(1), began)); err != nil || !found || got != 5 {
 		t.Fatalf("Handled after restart = %d, %v, %v; want 5, true", got, found, err)
 	}
-	if _, found, _ := b.Handled(t.Context(), eventID(9), began.Add(time.Hour)); found {
+	if _, found, _ := b.Handled(t.Context(), occurrenceAt(eventID(9), began.Add(time.Hour))); found {
 		t.Fatal("an occurrence never counted must not be found")
 	}
 	repeat := observation(1, 1, 5, 0, began)
@@ -527,7 +565,7 @@ func TestHandledWaitsForTheIncidents(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	if _, _, err := c.Handled(ctx, eventID(1), t0); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := c.Handled(ctx, occurrenceAt(eventID(1), t0)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Handled before the load = %v, want a deadline error so the collector asks again", err)
 	}
 }
@@ -710,7 +748,7 @@ func TestRefusedIncidentIsDroppedAndFreesItsPlace(t *testing.T) {
 	if n := r.writes.creates.Load(); n != 1 {
 		t.Fatalf("%d creates of a refused Incident, want 1", n)
 	}
-	if total, found, err := r.Handled(t.Context(), bad.Occurrence, now); err != nil || found {
+	if total, found, err := r.Handled(t.Context(), occurrenceAt(bad.Occurrence, now)); err != nil || found {
 		t.Fatalf("Handled = %d, %v, %v for an occurrence never stored: want not found", total, found, err)
 	}
 	r.obs <- immediate(observation(2, 2, 1, 1, now))
@@ -923,7 +961,7 @@ func TestRefusedStatusUpdateRollsTheMemoryBack(t *testing.T) {
 	r.obs <- immediate(observation(1, 1, 3, 2, now))
 	waitFor(t, refused)
 	time.Sleep(200 * time.Millisecond)
-	if got, found, err := r.Handled(t.Context(), eventID(1), now); err != nil || !found || got != 1 {
+	if got, found, err := r.Handled(t.Context(), occurrenceAt(eventID(1), now)); err != nil || !found || got != 1 {
 		t.Fatalf("Handled = %d, %v, %v after the refused update; want the stored 1", got, found, err)
 	}
 	again := immediate(observation(1, 1, 3, 0, now))
@@ -940,10 +978,10 @@ func TestUnknownBeginIsNotAnsweredByTheDropMark(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.droppedThrough = t0
-	if got, found := c.handled(eventID(1), time.Time{}); found || got != 0 {
+	if got, found := c.handled(occurrenceAt(eventID(1), time.Time{})); found || got != 0 {
 		t.Fatalf("handled = %d, %v for an unknown begin time, want not found", got, found)
 	}
-	if got, found := c.handled(eventID(1), t0.Add(-time.Second)); !found || got != collector.AllHandled {
+	if got, found := c.handled(occurrenceAt(eventID(1), t0.Add(-time.Second))); !found || got != collector.AllHandled {
 		t.Fatalf("handled = %d, %v for an occurrence before the mark, want AllHandled", got, found)
 	}
 }
@@ -1100,7 +1138,7 @@ func TestIncidentWithAnotherFingerprintIsRefused(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if got, found, err := r.Handled(t.Context(), eventID(1), now); err != nil || found {
+	if got, found, err := r.Handled(t.Context(), occurrenceAt(eventID(1), now)); err != nil || found {
 		t.Fatalf("Handled = %d, %v, %v for a refused occurrence, want not found", got, found, err)
 	}
 	if r.writes.updates.Load() != 0 {
@@ -1131,7 +1169,7 @@ func TestForeignStatusIsNotRemembered(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := start(t, ns, Config{Window: 100 * time.Millisecond})
-	if _, _, err := r.Handled(t.Context(), eventID(50), now); err != nil {
+	if _, _, err := r.Handled(t.Context(), occurrenceAt(eventID(50), now)); err != nil {
 		t.Fatal(err)
 	}
 	// After load, the other Incident gains a record and a later drop mark.
@@ -1156,13 +1194,13 @@ func TestForeignStatusIsNotRemembered(t *testing.T) {
 	if want := now.Add(-3 * time.Hour); !r.droppedThrough.Equal(want) {
 		t.Errorf("droppedThrough %v, want %v as load remembered it", r.droppedThrough, want)
 	}
-	if got, found := r.handled(eventID(50), now.Add(-2*time.Hour)); !found || got != 5 {
+	if got, found := r.handled(occurrenceAt(eventID(50), now.Add(-2*time.Hour))); !found || got != 5 {
 		t.Errorf("handled = %d, %v for the record load remembered, want 5", got, found)
 	}
-	if got, found := r.handled(eventID(51), now.Add(-time.Minute)); found {
+	if got, found := r.handled(occurrenceAt(eventID(51), now.Add(-time.Minute))); found {
 		t.Errorf("handled = %d for a record the other Incident gained after load, want not found", got)
 	}
-	if got, found := r.handled(eventID(52), now.Add(-2*time.Hour)); found {
+	if got, found := r.handled(occurrenceAt(eventID(52), now.Add(-2*time.Hour))); found {
 		t.Errorf("handled = %d for an occurrence before the later drop mark, want not found", got)
 	}
 	indexed(t, r.Controller)

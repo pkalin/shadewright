@@ -899,6 +899,27 @@ var _ = Describe("Incident", func() {
 		Expect(k8sClient.Status().Update(ctx, escalated)).To(Succeed())
 	})
 
+	It("keeps cause true once it is set", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		// The rule is a transition rule of the status object, so the status keeps another field (its phase).
+		inc.Status.Phase = v1alpha1.IncidentOpen
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "a status without cause may stay without it")
+		inc.Status.Cause = true
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "cause may move from absent to true")
+
+		cleared := inc.DeepCopy()
+		cleared.Status.Cause = false
+		err := k8sClient.Status().Update(ctx, cleared)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("cause cannot change from true to false"))
+
+		// Other changes keep it.
+		escalated := inc.DeepCopy()
+		escalated.Status.Phase = v1alpha1.IncidentEscalated
+		Expect(k8sClient.Status().Update(ctx, escalated)).To(Succeed())
+	})
+
 	It("keeps every entry of revertsProposed and moves a state only from Pending to Created or Abandoned", func() {
 		inc := fx.Incident("default", unique("inc"))
 		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
@@ -1060,6 +1081,88 @@ var _ = Describe("Incident", func() {
 		spec.Status = v1alpha1.IncidentStatus{}
 		Expect(k8sClient.Update(ctx, spec)).To(Succeed())
 		Expect(spec.Status.RevertsProposed).To(HaveLen(1))
+	})
+
+	// The rule that keeps cause true sits on the optional status object, so a write that removes the whole
+	// status would skip it; the rule on the root refuses that once cause is true.
+	It("refuses removing the status while cause is true", func() {
+		inc := fx.Incident("default", unique("inc"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Status.Phase = v1alpha1.IncidentOpen
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+		cleared := inc.DeepCopy()
+		cleared.Status = v1alpha1.IncidentStatus{}
+		Expect(k8sClient.Status().Update(ctx, cleared)).To(Succeed(), "a status without cause may be removed")
+
+		cleared.Status.Cause = true
+		Expect(k8sClient.Status().Update(ctx, cleared)).To(Succeed())
+		removed := cleared.DeepCopy()
+		removed.Status = v1alpha1.IncidentStatus{}
+		err := k8sClient.Status().Update(ctx, removed)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("status cannot be removed while status.cause is true"))
+	})
+
+	It("allows absorbed and absorbedOccurrences only when cause is true", func() {
+		seen := metav1.NewTime(time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC))
+		tally := []v1alpha1.AbsorbedTally{{Reason: v1alpha1.AbsorbedBackOff, Count: 2, LastSeen: seen}}
+		records := []v1alpha1.OccurrenceRecord{{ID: "event:" + strings.Repeat("a", 32), Total: 2, Began: &seen}}
+		for _, tc := range []struct {
+			field string
+			set   func(*v1alpha1.IncidentStatus)
+		}{
+			{"absorbed", func(st *v1alpha1.IncidentStatus) { st.Absorbed = tally }},
+			{"absorbedOccurrences", func(st *v1alpha1.IncidentStatus) { st.AbsorbedOccurrences = records }},
+		} {
+			inc := fx.Incident("default", unique("inc"))
+			Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+			inc.Status.Phase = v1alpha1.IncidentOpen
+			tc.set(&inc.Status)
+			err := k8sClient.Status().Update(ctx, inc)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s without cause: unexpected error: %v", tc.field, err)
+			Expect(err.Error()).To(ContainSubstring(tc.field + " is allowed only when cause is true"))
+
+			inc.Status.Cause = true
+			Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "%s with cause", tc.field)
+		}
+	})
+
+	It("moves the drop marks only forward", func() {
+		at := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+		for _, tc := range []struct {
+			field string
+			mark  func(*v1alpha1.IncidentStatus) **metav1.Time
+		}{
+			{"occurrencesDroppedThrough", func(st *v1alpha1.IncidentStatus) **metav1.Time { return &st.OccurrencesDroppedThrough }},
+			{"absorbedOccurrencesDroppedThrough", func(st *v1alpha1.IncidentStatus) **metav1.Time {
+				return &st.AbsorbedOccurrencesDroppedThrough
+			}},
+		} {
+			inc := fx.Incident("default", unique("inc"))
+			Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+			inc.Status.Phase, inc.Status.Cause = v1alpha1.IncidentOpen, true
+			Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "%s absent", tc.field)
+			set := func(t time.Time) { m := metav1.NewTime(t); *tc.mark(&inc.Status) = &m }
+			set(at)
+			Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "%s set", tc.field)
+			set(at)
+			Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "%s kept", tc.field)
+			set(at.Add(time.Minute))
+			Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed(), "%s moved forward", tc.field)
+
+			back := inc.DeepCopy()
+			m := metav1.NewTime(at)
+			*tc.mark(&back.Status) = &m
+			err := k8sClient.Status().Update(ctx, back)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s moved back: unexpected error: %v", tc.field, err)
+			Expect(err.Error()).To(ContainSubstring(tc.field + " only moves forward"))
+
+			removed := inc.DeepCopy()
+			*tc.mark(&removed.Status) = nil
+			err = k8sClient.Status().Update(ctx, removed)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s removed: unexpected error: %v", tc.field, err)
+			Expect(err.Error()).To(ContainSubstring(tc.field + " only moves forward"))
+		}
 	})
 
 	// The other writers of Incident status in the analyzer (the analysis controller, the Incident controller's

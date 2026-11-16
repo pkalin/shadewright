@@ -29,7 +29,8 @@ limitations under the License.
 // (remediationv1alpha1.IncidentName) whose spec links it to the one before and whose status starts empty,
 // under the cap like a new fingerprint. Any other observation written to it moves it to Escalated in the same
 // status update (condition Recurred), unless it was seen no later than resolvedTime; an Incident the closure
-// rules resolved by quiet time before any analysis goes back to Open instead (#466). Which Incidents are
+// rules resolved by quiet time before any analysis, or one folded into its cause's Incident (FoldedIntoCause,
+// analysed before or not), goes back to Open instead (#466, ADR-0039 point 24). Which Incidents are
 // Resolved is known from load, every trigger pass and each write; the latest occurrence of each fingerprint
 // from the names load lists, so a restart writes there. A later occurrence deleted while running is never
 // created again from memory: its batches are dropped and the newest that exists becomes the latest.
@@ -46,6 +47,18 @@ limitations under the License.
 // (Config.MaxFirstSightings, 4,096, oldest forgotten first, at most 4 occurrences each, copies of one
 // merged), answered by Handled, forgotten after 15 minutes and on a restart, and counted in the gauge
 // shadewright_incident_first_sightings_held.
+//
+// A consequence (a kubelet BackOff or Unhealthy on a named container) whose pod status shows a cause is
+// counted on the cause's Incident as evidence when the controller's own list has that Incident with
+// status.cause for the same subject UID (ADR-0039, #791): in status.absorbed and status.absorbedOccurrences,
+// apart from the Incident's own count, lastSeen and occurrences, so it never makes the cause due, restarts no
+// cooldown, does not keep it from going quiet and takes no place under the cap. The cause's phase is not
+// read. A consequence whose cause has no Incident yet goes through the gate as any observation; one held as
+// a first sighting is counted on the cause in full once a later observation of it links there. A pod-status
+// cause sets status.cause, and every counted observation adds its container (a DNS label, at most 8) to
+// status.containers. The drop mark of a cause's absorbed list answers Handled only for consequences linked to
+// that cause's fingerprint; a replay whose cause fingerprint changed or is empty is not recognised and goes
+// through the gate.
 //
 // Writes are batched: the observations that open an Incident, or the first one of an existing Incident in
 // a process, are written at once, and the ones that follow within the aggregation window (5 minutes) go

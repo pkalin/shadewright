@@ -178,3 +178,32 @@ func TestBoundedSet(t *testing.T) {
 		t.Fatalf("%d items, ring %d of %d: want both bounded at 2", len(s.items), len(s.ring), cap(s.ring))
 	}
 }
+
+// TestAppliedChecksAbsorbedRecords: a batch of absorbed consequences is proved written by absorbedOccurrences
+// and its own drop mark, not by occurrences, so a write whose answer was lost is not counted twice.
+func TestAppliedChecksAbsorbedRecords(t *testing.T) {
+	st := &remediationv1alpha1.IncidentStatus{}
+	merge(st, batchOf(1, map[string]counted{eventID(1): {total: 1, began: t0}}))
+	absorbed := func(total int64) *batch {
+		return &batch{
+			absorbed: map[remediationv1alpha1.AbsorbedReason]tally{remediationv1alpha1.AbsorbedBackOff: {count: 1, last: t0}},
+			occurrences: map[string]heldOccurrence{
+				eventID(2): {counted: counted{total: total, began: t0}, absorbed: remediationv1alpha1.AbsorbedBackOff},
+			},
+		}
+	}
+	b := absorbed(3)
+	if applied(st, b) {
+		t.Fatal("an absorbed batch not written yet counts as applied")
+	}
+	merge(st, b)
+	if !applied(st, b) {
+		t.Fatal("an absorbed batch written counts as not applied: a lost answer would count it twice")
+	}
+	if applied(st, absorbed(4)) {
+		t.Fatal("a higher total of an absorbed occurrence counts as applied")
+	}
+	if len(st.Occurrences) != 1 || len(st.AbsorbedOccurrences) != 1 || st.Count != 1 || st.Absorbed[0].Count != 1 {
+		t.Fatalf("status %+v: absorbed records mixed with the Incident's own", st)
+	}
+}

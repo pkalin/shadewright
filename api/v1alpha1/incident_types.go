@@ -179,6 +179,11 @@ type AbsorbedTally struct {
 
 // IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)",message="resolvedTime cannot change while the phase stays Resolved"
+// +kubebuilder:validation:XValidation:rule="!(has(oldSelf.cause) && oldSelf.cause) || (has(self.cause) && self.cause)",message="cause cannot change from true to false"
+// +kubebuilder:validation:XValidation:rule="!has(self.absorbed) || size(self.absorbed) == 0 || (has(self.cause) && self.cause)",message="absorbed is allowed only when cause is true"
+// +kubebuilder:validation:XValidation:rule="!has(self.absorbedOccurrences) || size(self.absorbedOccurrences) == 0 || (has(self.cause) && self.cause)",message="absorbedOccurrences is allowed only when cause is true"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.occurrencesDroppedThrough) || (has(self.occurrencesDroppedThrough) && self.occurrencesDroppedThrough >= oldSelf.occurrencesDroppedThrough)",message="occurrencesDroppedThrough only moves forward"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.absorbedOccurrencesDroppedThrough) || (has(self.absorbedOccurrencesDroppedThrough) && self.absorbedOccurrencesDroppedThrough >= oldSelf.absorbedOccurrencesDroppedThrough)",message="absorbedOccurrencesDroppedThrough only moves forward"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || (n.state == o.state && (!has(o.reason) || (has(n.reason) && n.reason == o.reason)))))))",message="revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes"
 type IncidentStatus struct {
 	// phase summarizes the incident.
@@ -211,13 +216,14 @@ type IncidentStatus struct {
 
 	// occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence
 	// with no record that began no later than this is treated as counted in full, so the bound never counts
-	// one twice.
+	// one twice. It only moves forward.
 	// +optional
 	OccurrencesDroppedThrough *metav1.Time `json:"occurrencesDroppedThrough,omitempty"`
 
 	// containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039
-	// point 8). The late-cause fold compares them between a consequence Incident and its cause's Incident.
-	// Nothing writes them yet.
+	// point 8), written in the status write that counts an observation naming one. A name that is not a DNS
+	// label, or one past the eighth, is left out and logged. The late-cause fold compares them between a
+	// consequence Incident and its cause's Incident.
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
@@ -225,13 +231,14 @@ type IncidentStatus struct {
 
 	// cause is true when the Incident was opened or counted by a pod-status observation of class cause, an OOM
 	// kill or a waiting reason the kubelet wrote (ADR-0039 point 8). Only such an Incident takes the evidence of
-	// a consequence or folds a consequence Incident. An Event never sets it. Nothing writes it yet.
+	// a consequence or folds a consequence Incident. An Event never sets it. Once true it stays true, and the
+	// status cannot be removed while it is.
 	// +optional
 	Cause bool `json:"cause,omitempty"`
 
 	// absorbed is the tally of the consequence observations this Incident took as evidence of its cause, one
 	// entry per reason, at most 8 (ADR-0039 point 16). They change neither count nor lastSeen, and the analysis
-	// trigger and the quiet rule do not read them. Nothing writes it yet.
+	// trigger and the quiet rule do not read them. Allowed only when cause is true.
 	// +listType=map
 	// +listMapKey=reason
 	// +kubebuilder:validation:MaxItems=8
@@ -241,14 +248,15 @@ type IncidentStatus struct {
 	// absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart
 	// from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point
 	// 16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped.
-	// Nothing writes them yet.
+	// Allowed only when cause is true.
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=32
 	// +optional
 	AbsorbedOccurrences []OccurrenceRecord `json:"absorbedOccurrences,omitempty"`
 
 	// absorbedOccurrencesDroppedThrough is when the newest occurrence dropped from absorbedOccurrences began,
-	// the drop mark of occurrencesDroppedThrough for the absorbed list. Nothing writes it yet.
+	// the drop mark of occurrencesDroppedThrough for the absorbed list. It answers only for consequences linked
+	// to this Incident's fingerprint, and only moves forward.
 	// +optional
 	AbsorbedOccurrencesDroppedThrough *metav1.Time `json:"absorbedOccurrencesDroppedThrough,omitempty"`
 
@@ -326,8 +334,9 @@ type IncidentStatus struct {
 
 // Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
 // removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
-// entries, and refuse a new entry of that list in any state but Pending, also in the first status write.
+// entries or status.cause is true, and refuse a new entry of that list in any state but Pending, also in the first status write.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed) == 0 || has(self.status)",message="status cannot be removed while status.revertsProposed has entries"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.cause) || !oldSelf.status.cause || has(self.status)",message="status cannot be removed while status.cause is true"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n, n.state == 'Pending' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed) && oldSelf.status.revertsProposed.exists(o, o.uid == n.uid)))",message="a new entry of status.revertsProposed must be Pending"
 type Incident struct {
 	metav1.TypeMeta `json:",inline"`

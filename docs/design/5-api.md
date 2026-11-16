@@ -169,7 +169,7 @@ A namespaced CR in the operator namespace, next to the requests that point at it
 
 - the fingerprint, counters, first and last seen, and the correlated owner;
 - references to analyses and requests;
-- <span class="sw-status sw-planned">planned</span> the state of the cause rule ([ADR-0039](../adr/0039-consequence-symptoms-attach-to-their-causes-incident.md)): the containers it counted, whether a pod-status cause opened it, the tally of absorbed consequences and the cause Incident it was folded into. The fields and their bounds are in the API ([#790](https://github.com/pkalin/shadewright/issues/790)); nothing writes them yet.
+- the state of the cause rule ([ADR-0039](../adr/0039-consequence-symptoms-attach-to-their-causes-incident.md)): <span class="sw-status sw-built">built</span> the containers it counted, whether a pod-status cause opened it (once true it stays true) and the tally of absorbed consequences ([#791](https://github.com/pkalin/shadewright/issues/791), design 3.2); <span class="sw-status sw-planned">planned</span> the cause Incident it was folded into (`foldedInto`, in the API since [#790](https://github.com/pkalin/shadewright/issues/790), written by nothing yet).
 
 Large data (log excerpts, full model transcripts) lives outside etcd, or is dropped after analysis in the MVP.
 

@@ -222,8 +222,8 @@ func TestPreexistingEventMayRepeat(t *testing.T) {
 
 // handledBy returns a Handled func that answers from counted, keyed by occurrence.
 func handledBy(counted map[string]int64) HandledFunc {
-	return func(_ context.Context, occurrence string, _ time.Time) (int64, bool, error) {
-		n, ok := counted[occurrence]
+	return func(_ context.Context, o Observation) (int64, bool, error) {
+		n, ok := counted[o.Occurrence]
 		return n, ok, nil
 	}
 }
@@ -272,7 +272,7 @@ func TestHandledSettlesRepeats(t *testing.T) {
 }
 
 func TestHandledErrorRetries(t *testing.T) {
-	h := newHarness(t, Config{Handled: func(context.Context, string, time.Time) (int64, bool, error) {
+	h := newHarness(t, Config{Handled: func(context.Context, Observation) (int64, bool, error) {
 		return 0, false, errors.New("cache not synced")
 	}})
 	ev := warning("err", 2)
@@ -428,7 +428,7 @@ func TestCollectorBoundsEventsUnderLoad(t *testing.T) {
 // without recording anything as handled.
 func TestHandledHasADeadline(t *testing.T) {
 	h := newHarness(t, Config{LookupTimeout: 20 * time.Millisecond,
-		Handled: func(ctx context.Context, _ string, _ time.Time) (int64, bool, error) {
+		Handled: func(ctx context.Context, _ Observation) (int64, bool, error) {
 			<-ctx.Done()
 			return 0, false, ctx.Err()
 		}})
@@ -462,8 +462,8 @@ func TestHandledHasADeadline(t *testing.T) {
 func TestHandledIsAskedByOccurrence(t *testing.T) {
 	var gotOccurrence string
 	var gotBegan time.Time
-	h := newHarness(t, Config{Handled: func(_ context.Context, occurrence string, began time.Time) (int64, bool, error) {
-		gotOccurrence, gotBegan = occurrence, began
+	h := newHarness(t, Config{Handled: func(_ context.Context, o Observation) (int64, bool, error) {
+		gotOccurrence, gotBegan = o.Occurrence, o.Began
 		return 0, false, nil
 	}})
 	ev := warning("asked", 2)

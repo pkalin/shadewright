@@ -167,6 +167,39 @@ func (s *sightings) take(fingerprint string) []collector.Observation {
 	return e.Value.(*sighting).held
 }
 
+// takeWhere returns the observations held for fingerprint that match keep and forgets them, keeping the
+// others held under the same first sighting; a sighting left with none is forgotten.
+func (s *sightings) takeWhere(fingerprint string, keep func(collector.Observation) bool) []collector.Observation {
+	e, ok := s.items[fingerprint]
+	if !ok {
+		return nil
+	}
+	h := e.Value.(*sighting)
+	var taken, left []collector.Observation
+	for _, o := range h.held {
+		if keep(o) {
+			taken = append(taken, o)
+		} else {
+			left = append(left, o)
+		}
+	}
+	if len(taken) == 0 {
+		return nil
+	}
+	if len(left) == 0 {
+		defer s.report()
+		s.remove(e)
+		return taken
+	}
+	h.held = left
+	for _, o := range taken {
+		if t, ok := s.totals[o.Occurrence]; ok && t.fingerprint == fingerprint {
+			delete(s.totals, o.Occurrence)
+		}
+	}
+	return taken
+}
+
 // expire forgets the first sightings older than RecurWithin at now.
 func (s *sightings) expire(now time.Time) {
 	defer s.report()

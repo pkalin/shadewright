@@ -400,7 +400,7 @@ func TestHandledAnswersForHeldOccurrences(t *testing.T) {
 	held.Began = time.Time{} // so only what is held can answer, not a drop mark
 	r.obs <- held
 	waitHeld(t, r, "the sighting held", func() bool { return r.sightings.len() == 1 })
-	if got, found, err := r.Handled(t.Context(), eventID(1), time.Time{}); err != nil || !found || got != 1 {
+	if got, found, err := r.Handled(t.Context(), occurrenceAt(eventID(1), time.Time{})); err != nil || !found || got != 1 {
 		t.Fatalf("Handled for a held occurrence = %d, %v, %v; want 1, true", got, found, err)
 	}
 	again := held

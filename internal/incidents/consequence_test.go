@@ -863,3 +863,335 @@ func TestRefusedCauseDropsTheEvidenceHeldForIt(t *testing.T) {
 		t.Fatalf("after the refused create: name kept %v, cause kept %v, pending %+v", named, cause, pending)
 	}
 }
+
+// newAt is a controller with no API server, at t0 on its own clock.
+func newAt(t *testing.T) (*Controller, *fakeClock) {
+	t.Helper()
+	clock := &fakeClock{now: t0}
+	c, err := New(Config{Namespace: "x", Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, clock
+}
+
+// heldOnce is a BackOff of container web in fingerprint fp(heldF), occurrence eventID(2), linked to the cause
+// fingerprint fp(causeF), seen once at at: its occurrence began when it was observed, so it is
+// held as a first sighting.
+func heldOnce(causeF int, count int64, at time.Time) collector.Observation {
+	o := consequenceOf(heldF, causeF, "web", reasonBackOff, 2, count, at)
+	o.Began = at
+	return o
+}
+
+// absorbedOn returns what the pending batch of fp holds as evidence under BackOff, and which occurrences.
+func absorbedOn(c *Controller, fp string) (int64, []string) {
+	b := c.pending[fp]
+	if b == nil {
+		return 0, nil
+	}
+	var ids []string
+	for id, o := range b.occurrences {
+		if o.absorbed != "" {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return b.absorbed[remediationv1alpha1.AbsorbedBackOff].count, ids
+}
+
+// TestHeldConsequenceIsAbsorbedWhenItsCauseOpensAlone (#820): a consequence seen once, just before its cause,
+// is held as a first sighting; the cause opens its Incident and the held consequence is counted there in the
+// same pass, with no later observation of it. Its record names the cause's Incident, so Handled answers for it.
+func TestHeldConsequenceIsAbsorbedWhenItsCauseOpensAlone(t *testing.T) {
+	c, _ := newAt(t)
+	c.consume(t.Context(), heldOnce(1, 3, t0))
+	if !c.sightings.holds(fp(2)) {
+		t.Fatal("the consequence is not held as a first sighting, so the test proves nothing")
+	}
+	if !c.consume(t.Context(), oomCause(1, t0.Add(time.Second))) {
+		t.Error("the cause's Incident is not due at once")
+	}
+	if n, ids := absorbedOn(c, fp(1)); n != 3 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 3 [%s]", n, ids, eventID(2))
+	}
+	if c.sightings.holds(fp(2)) || c.sightings.len() != 0 || len(c.sightings.byCause) != 0 {
+		t.Fatalf("still held: %d first sightings, index %v", c.sightings.len(), c.sightings.byCause)
+	}
+	if r := c.records[eventID(2)]; r.incident != Name(fp(1)) || r.total != 3 {
+		t.Fatalf("record %+v, want total 3 on %s", r, Name(fp(1)))
+	}
+	if _, ok := c.pending[fp(2)]; ok {
+		t.Fatal("the consequence opened an Incident of its own")
+	}
+}
+
+// TestHeldConsequenceIsAbsorbedWhenAWaitingCauseOpens (#820): a waiting cause held as a first sighting opens
+// its Incident when its repeat proves it recurs, with nothing new to count; the consequence held for it before
+// is counted there too.
+func TestHeldConsequenceIsAbsorbedWhenAWaitingCauseOpens(t *testing.T) {
+	c, clock := newAt(t)
+	wait := symptomOf(1, reasonConfig, waitingID(1), 1, fingerprint.SourcePodStatus, "web", collector.ClassCause, t0)
+	wait.Began = t0
+	c.consume(t.Context(), wait)
+	c.consume(t.Context(), heldOnce(1, 2, t0.Add(time.Second)))
+	if c.sightings.len() != 2 || len(c.pending) != 0 {
+		t.Fatalf("%d first sightings, %d pending batches; want the cause and the consequence held, nothing open",
+			c.sightings.len(), len(c.pending))
+	}
+	repeat := wait
+	repeat.Count, repeat.MayRepeat, repeat.ObservedAt = 0, true, t0.Add(RecurAfter)
+	clock.set(t0.Add(RecurAfter))
+	c.consume(t.Context(), repeat)
+	if b := c.pending[fp(1)]; b == nil || !b.cause || b.count != 1 {
+		t.Fatalf("the waiting cause did not open its Incident: %+v", b)
+	}
+	if n, ids := absorbedOn(c, fp(1)); n != 2 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 2 [%s]", n, ids, eventID(2))
+	}
+	if c.sightings.len() != 0 {
+		t.Fatalf("%d first sightings still held", c.sightings.len())
+	}
+}
+
+// TestHeldConsequenceIsAbsorbedWhenAnIncidentBecomesACause (#820): the Incident of the cause's fingerprint
+// exists but is not known as a cause (stored without status.cause), so a consequence seen then is held. The
+// cause reported again for that Incident makes it a cause and counts the held consequence there.
+func TestHeldConsequenceIsAbsorbedWhenAnIncidentBecomesACause(t *testing.T) {
+	c, _ := newAt(t)
+	c.names[Name(fp(1))] = struct{}{}
+	c.consume(t.Context(), heldOnce(1, 4, t0))
+	if !c.sightings.holds(fp(2)) {
+		t.Fatal("the consequence is not held, so the test proves nothing")
+	}
+	c.consume(t.Context(), oomCause(2, t0.Add(time.Second)))
+	if n, ids := absorbedOn(c, fp(1)); n != 4 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 4 [%s]", n, ids, eventID(2))
+	}
+	if c.sightings.len() != 0 {
+		t.Fatalf("%d first sightings still held", c.sightings.len())
+	}
+}
+
+// The consequence fingerprint fp(heldF) and its cause fingerprint fp(heldCauseF) of the tests of a held consequence
+// that its cause's Incident is looked up for.
+const heldF, heldCauseF = 2, 7
+
+// causeOf is an OOMKilled termination of container web in fingerprint fp(cf), read from pod status and
+// observed at at: a cause that opens its Incident at once.
+func causeOf(cf int, at time.Time) collector.Observation {
+	o := symptomOf(cf, reasonOOM, terminationID(1), 1, fingerprint.SourcePodStatus, "web", collector.ClassCause, at)
+	o.Immediate = true
+	return o
+}
+
+// heldFor fails the test unless the first sighting of fp(heldF) is held and indexed under the cause fp(heldCauseF),
+// so that the cause observation that follows looks it up ([Controller.absorbHeldFor]).
+func heldFor(t *testing.T, c *Controller) {
+	t.Helper()
+	if _, ok := c.sightings.byCause[fp(heldCauseF)][fp(heldF)]; !ok || !c.sightings.holds(fp(heldF)) {
+		t.Fatalf("fp(%d) is not held under the cause fp(%d), so the case proves nothing", heldF, heldCauseF)
+	}
+}
+
+// TestHeldConsequenceStaysHeldWithoutItsCause pins what #820 leaves as it was: a held consequence is looked up
+// when a cause observation of its cause fingerprint is consumed, and stays held, counted nowhere, when the
+// controller's list does not link it to that cause's Incident ([Controller.causeFor]): the Incident is of
+// another subject UID, it is not under the cap, it remembers another fingerprint, it was Resolved more than
+// RecurrenceWindow before the consequence was seen, or the cause opens no Incident (held as a first sighting
+// itself, or refused at the cap). Seen again 2 to 15 minutes later it opens its own Incident through the
+// gate, with what was held.
+func TestHeldConsequenceStaysHeldWithoutItsCause(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup prepares what the controller knows of the cause's Incident before the consequence is seen.
+		setup func(c *Controller, clock *fakeClock)
+		// consequence is the consequence held first; cause is then consumed.
+		consequence, cause func() collector.Observation
+		// atCap leaves out the consequence seen again: its own Incident is refused at the cap too.
+		atCap bool
+		// check, when set, shows the cause was handled the way the case needs.
+		check func(t *testing.T, c *Controller)
+	}{{
+		name: "another subject UID",
+		consequence: func() collector.Observation {
+			o := heldOnce(heldCauseF, 1, t0)
+			o.Subject = subjectWith(otherSubjectUID)
+			return o
+		},
+		cause: func() collector.Observation { return causeOf(heldCauseF, t0.Add(time.Second)) },
+	}, {
+		// A cause remembered for a name that left the cap: dropDeleted takes the first occurrence's name out of
+		// names when no occurrence is left, and only the deleted occurrence's cause.
+		name: "Incident not under the cap",
+		setup: func(c *Controller, _ *fakeClock) {
+			c.causes[Name(fp(heldCauseF))] = causeIncident{spec: specOf(causeOf(heldCauseF, t0))}
+		},
+		consequence: func() collector.Observation { return heldOnce(heldCauseF, 1, t0) },
+		cause: func() collector.Observation {
+			wait := symptomOf(heldCauseF, reasonConfig, waitingID(heldCauseF), 1, fingerprint.SourcePodStatus, "web",
+				collector.ClassCause, t0.Add(time.Second))
+			wait.Began = wait.ObservedAt
+			return wait
+		},
+	}, {
+		name: "Incident of another fingerprint",
+		setup: func(c *Controller, _ *fakeClock) {
+			c.names[Name(fp(heldCauseF))] = struct{}{}
+			c.causes[Name(fp(heldCauseF))] = causeIncident{spec: specOf(causeOf(heldCauseF+1, t0))}
+		},
+		consequence: func() collector.Observation { return heldOnce(heldCauseF, 1, t0) },
+		cause:       func() collector.Observation { return causeOf(heldCauseF, t0.Add(time.Second)) },
+	}, {
+		// The cause observation is older than the consequence: it is counted on the Resolved Incident (it does
+		// not roll), but the consequence, seen more than RecurrenceWindow after the Incident was Resolved, is not.
+		name: "Resolved more than RecurrenceWindow before the consequence",
+		setup: func(c *Controller, clock *fakeClock) {
+			c.names[Name(fp(heldCauseF))] = struct{}{}
+			c.causes[Name(fp(heldCauseF))] = causeIncident{spec: specOf(causeOf(heldCauseF, t0))}
+			c.resolvedAt[Name(fp(heldCauseF))] = t0
+			clock.set(t0.Add(RecurrenceWindow + time.Hour))
+		},
+		consequence: func() collector.Observation {
+			return heldOnce(heldCauseF, 1, t0.Add(RecurrenceWindow+time.Hour))
+		},
+		cause: func() collector.Observation { return causeOf(heldCauseF, t0.Add(time.Hour)) },
+	}, {
+		name:        "cause held as a first sighting",
+		consequence: func() collector.Observation { return heldOnce(heldCauseF, 1, t0) },
+		check: func(t *testing.T, c *Controller) {
+			if !c.sightings.holds(fp(heldCauseF)) || len(c.pending) != 0 {
+				t.Fatalf("the cause is not held as a first sighting: %d pending batches", len(c.pending))
+			}
+		},
+		cause: func() collector.Observation {
+			wait := symptomOf(heldCauseF, reasonConfig, waitingID(heldCauseF), 1, fingerprint.SourcePodStatus, "web",
+				collector.ClassCause, t0.Add(time.Second))
+			wait.Began = wait.ObservedAt
+			return wait
+		},
+	}, {
+		name:  "cause refused at the cap",
+		atCap: true,
+		check: func(t *testing.T, c *Controller) {
+			if !c.refused.has(fp(heldCauseF)) || len(c.pending) != 0 {
+				t.Fatalf("the cause is not refused at the cap: %d pending batches", len(c.pending))
+			}
+		},
+		setup: func(c *Controller, _ *fakeClock) {
+			c.cfg.MaxIncidents = 1
+			c.names[Name(fp(9))] = struct{}{}
+		},
+		consequence: func() collector.Observation { return heldOnce(heldCauseF, 1, t0) },
+		cause:       func() collector.Observation { return causeOf(heldCauseF, t0.Add(time.Second)) },
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, clock := newAt(t)
+			if tc.setup != nil {
+				tc.setup(c, clock)
+			}
+			c.consume(t.Context(), tc.consequence())
+			heldFor(t, c)
+			c.consume(t.Context(), tc.cause())
+			if tc.check != nil {
+				tc.check(t, c)
+			}
+			if n, ids := absorbedOn(c, fp(heldCauseF)); n != 0 || len(ids) != 0 {
+				t.Fatalf("absorbed on the cause = %d %v, want nothing", n, ids)
+			}
+			if !c.sightings.holds(fp(heldF)) {
+				t.Fatal("the consequence is no longer held")
+			}
+			if r, ok := c.records[eventID(2)]; ok {
+				t.Fatalf("the consequence is recorded on %s", r.incident)
+			}
+			if tc.atCap {
+				return
+			}
+			again := tc.consequence()
+			again.ObservedAt = clock.Now().Add(RecurAfter)
+			again.Began, again.Total, again.Count = again.ObservedAt, 3, 2
+			clock.set(again.ObservedAt)
+			c.consume(t.Context(), again)
+			if b := c.pending[fp(heldF)]; b == nil || b.count != 3 || len(b.absorbed) != 0 {
+				t.Fatalf("the consequence seen again did not open its own Incident with what was held: %+v", b)
+			}
+		})
+	}
+}
+
+// TestHeldConsequenceGoesToTheNewOccurrence (#820): a consequence seen more than RecurrenceWindow after its
+// cause's Incident was Resolved is held, and the cause seen again rolls to the next occurrence; the held
+// consequence is counted on that occurrence, never on the Resolved one.
+func TestHeldConsequenceGoesToTheNewOccurrence(t *testing.T) {
+	c, clock := newAt(t)
+	old := Name(fp(heldCauseF))
+	c.names[old] = struct{}{}
+	c.causes[old] = causeIncident{spec: specOf(causeOf(heldCauseF, t0))}
+	c.resolvedAt[old] = t0
+	at := t0.Add(RecurrenceWindow + time.Hour)
+	clock.set(at.Add(time.Second))
+	c.consume(t.Context(), heldOnce(heldCauseF, 4, at))
+	heldFor(t, c)
+	c.consume(t.Context(), causeOf(heldCauseF, at.Add(time.Second)))
+	next := remediationv1alpha1.IncidentName(fp(heldCauseF), 2)
+	if got := c.nameOf(fp(heldCauseF)); got != next {
+		t.Fatalf("the cause did not roll: latest is %s, want %s", got, next)
+	}
+	if n, ids := absorbedOn(c, fp(heldCauseF)); n != 4 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 4 [%s]", n, ids, eventID(2))
+	}
+	if r := c.records[eventID(2)]; r.incident != next {
+		t.Fatalf("the consequence is recorded on %q, want %s", r.incident, next)
+	}
+	if c.sightings.len() != 0 {
+		t.Fatalf("%d first sightings still held", c.sightings.len())
+	}
+}
+
+// TestConsequenceJustBeforeItsCauseIsCounted (#820, found by the eval case of #795): the collector releases a
+// kubelet consequence linked to its cause at the end of its hold (collector.ConsequenceGrace) a moment before
+// the pod reconciler's cause observation reaches the controller, and never sends it again. It is held as a
+// first sighting; the cause then opens its Incident, and the stored Incident shows the consequence in its
+// absorbed tally, with no Incident of the consequence's own.
+func TestConsequenceJustBeforeItsCauseIsCounted(t *testing.T) {
+	ns := namespace(t)
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	clock := &fakeClock{now: at}
+	r := start(t, ns, Config{Window: 100 * time.Millisecond, Now: clock.Now})
+	r.obs <- heldOnce(1, 5, at)
+	waitHeld(t, r, "the consequence held as a first sighting", func() bool { return r.sightings.len() == 1 })
+	clock.set(at.Add(time.Second))
+	r.obs <- oomCause(1, at.Add(time.Second))
+	w := &want{cause: true}
+	w.addOwn(1, at.Add(time.Second), terminationID(1), "web")
+	w.addAbsorbed(reasonBackOff, 5, at, eventID(2))
+	settledTo(t, ns, map[string]*want{Name(fp(1)): w})
+	// Past the first sighting's window: nothing is left held to open an Incident of its own later.
+	clock.set(at.Add(RecurWithin + time.Minute))
+	waitHeld(t, r, "no first sighting held", func() bool { return r.sightings.len() == 0 })
+	time.Sleep(300 * time.Millisecond)
+	settledTo(t, ns, map[string]*want{Name(fp(1)): w})
+}
+
+// TestHeldConsequenceNamingItsCauseOnARepeatIsAbsorbed (#820): a consequence held as a first sighting with no
+// cause fingerprint, then seen again within RecurAfter naming its cause, takes the cause from the repeat; when
+// the cause opens its Incident, what is held is counted there.
+func TestHeldConsequenceNamingItsCauseOnARepeatIsAbsorbed(t *testing.T) {
+	c, _ := newAt(t)
+	c.consume(t.Context(), heldOnce(0, 2, t0))
+	repeat := heldOnce(1, 3, t0.Add(time.Second))
+	repeat.Count = 1
+	c.consume(t.Context(), repeat)
+	if !c.sightings.holds(fp(2)) || len(c.pending) != 0 {
+		t.Fatal("the consequence is not held, so the test proves nothing")
+	}
+	c.consume(t.Context(), oomCause(1, t0.Add(2*time.Second)))
+	if n, ids := absorbedOn(c, fp(1)); n != 3 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 3 [%s]", n, ids, eventID(2))
+	}
+	if c.sightings.len() != 0 || len(c.sightings.byCause) != 0 {
+		t.Fatalf("still held: %d first sightings, index %v", c.sightings.len(), c.sightings.byCause)
+	}
+}

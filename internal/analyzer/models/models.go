@@ -144,9 +144,11 @@ const anthropicHost = "api.anthropic.com"
 // ModelsConfig configures [NewModelFactory].
 type ModelsConfig struct {
 	// Suffixes is the allow-list of endpoint host suffixes ([ParseEndpointSuffixes]) of Foundry deployments.
-	// Required.
+	// Set together with Tokens or not at all. Empty refuses every Foundry deployment
+	// (analysis.ErrProviderNotConfigured): an analyzer that only calls the Anthropic API needs no Azure
+	// settings (#814).
 	Suffixes []string
-	// Tokens is the workload identity token source of Foundry deployments. Required.
+	// Tokens is the workload identity token source of Foundry deployments. Set together with Suffixes.
 	Tokens foundry.TokenSource
 	// AnthropicKeyFile is the path of the file that holds the Anthropic API key (--anthropic-api-key-file).
 	// Empty refuses every Anthropic deployment (analysis.ErrProviderNotConfigured).
@@ -162,8 +164,9 @@ type ModelsConfig struct {
 
 // NewModelFactory returns the analysis's [analysis.ModelFactory]. It builds the provider a deployment's
 // provider field names and makes no network call:
-//   - Foundry (the default): it refuses the Anthropic API's host whatever the allow-list says, then checks the
-//     endpoint against the allow-list ([CheckEndpoint]), so a refused endpoint gets no request and no token,
+//   - Foundry (the default): it refuses the deployment when the analyzer has no allow-list and token source
+//     (analysis.ErrProviderNotConfigured, naming --model-endpoint-suffixes), and the Anthropic API's host
+//     whatever the allow-list says, then checks the endpoint against the allow-list ([CheckEndpoint]), so a refused endpoint gets no request and no token,
 //     then builds a Foundry provider bound to that endpoint, deployment and API version, with the workload
 //     identity token source (Cognitive Services audience only; the adapter refuses private addresses at dial
 //     time).
@@ -174,8 +177,12 @@ type ModelsConfig struct {
 //     and logs every failed call.
 //   - Any other provider is refused (analysis.ErrProviderNotConfigured).
 func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
-	if len(cfg.Suffixes) == 0 || cfg.Tokens == nil {
-		return nil, errors.New("the model factory needs an endpoint allow-list and a token source")
+	foundryOn := len(cfg.Suffixes) > 0
+	if foundryOn != (cfg.Tokens != nil) {
+		return nil, errors.New("the model factory needs an endpoint allow-list and a token source together, or neither")
+	}
+	if !foundryOn && cfg.AnthropicKeyFile == "" {
+		return nil, errors.New("the model factory needs an endpoint allow-list and a token source, or an Anthropic key file")
 	}
 	refused := func(role analysis.Role, d remediationv1alpha1.ModelDeployment, err error) error {
 		cfg.Log.Info("Refused a model deployment from RemediationSettings", "role", role,
@@ -185,6 +192,10 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	return func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
 		switch d.ProviderName() {
 		case remediationv1alpha1.ModelProviderFoundry:
+			if !foundryOn {
+				return nil, refused(role, d, fmt.Errorf("the analyzer runs without --model-endpoint-suffixes and its "+
+					"Azure workload identity: %w", analysis.ErrProviderNotConfigured))
+			}
 			if u, err := url.Parse(d.Endpoint); err == nil && strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") == anthropicHost {
 				return nil, refused(role, d, fmt.Errorf("model endpoint host is the Anthropic API's, not a Foundry "+
 					"resource: %w", analysis.ErrEndpointNotAllowed))

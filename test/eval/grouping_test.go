@@ -108,10 +108,16 @@ func (c gatedClient) Get(ctx context.Context, key client.ObjectKey, obj client.O
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
+// relayFunc passes the collector's observations from in to out, the Incident controller's input, until ctx
+// ends. A case that needs an order of delivery the collector's concurrent reconcilers leave to chance sets one
+// (startGrouping's relay); inc answers which observations the Incident controller has consumed (Handled).
+type relayFunc func(ctx context.Context, inc *incidents.Controller, in <-chan collector.Observation,
+	out chan<- collector.Observation)
+
 // startGrouping starts an API server and the pipeline. model replays the scenario's replies; every analysis
 // is one model call, so its requests count the analyses too. A non-nil gate holds back every analysis until
-// the case closes it.
-func startGrouping(t *testing.T, s *scenario, gate <-chan struct{}) *groupingEnv {
+// the case closes it. A relay, when given, stands between the collector and the Incident controller.
+func startGrouping(t *testing.T, s *scenario, gate <-chan struct{}, relay ...relayFunc) *groupingEnv {
 	t.Helper()
 	logOnce.Do(func() { ctrllog.SetLogger(logr.Discard()) })
 	scheme := runtime.NewScheme()
@@ -198,7 +204,14 @@ func startGrouping(t *testing.T, s *scenario, gate <-chan struct{}) *groupingEnv
 	if err := col.SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
-	if err := inc.SetupWithManager(mgr, col.Observations()); err != nil {
+	obs := col.Observations()
+	for _, r := range relay {
+		relayed := make(chan collector.Observation)
+		in := obs
+		running.Go(func() { r(ctx, inc, in, relayed) })
+		obs = relayed
+	}
+	if err := inc.SetupWithManager(mgr, obs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -557,9 +570,8 @@ func checkOneAnalysis(t *testing.T, c counts) remediationv1alpha1.Incident {
 // BackOff, Unhealthy), each analyzed (#432).
 //
 // The case pins that order: the events are created only once the cause's Incident exists. The collector's pod
-// and event reconcilers deliver concurrently, and a consequence seen once that reaches the Incident controller
-// just before its cause is held as a first sighting there, never counted on the cause unless it is seen again,
-// so with both created at once the tally stayed empty in some runs.
+// and event reconcilers deliver concurrently, so with both created at once either may reach the Incident
+// controller first; the cases of grouping_order_test.go pin the other order (#820).
 func TestGroupingOOMOpensOneIncident(t *testing.T) {
 	s, cluster, events, shift := oomFixture(t)
 	g := startGrouping(t, s, nil)

@@ -976,7 +976,7 @@ func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *r
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	res, done, err = r.recoverStep(stepCtx, rr)
-	err = boundErr(ctx, stepCtx, "recovery of the handoff", err)
+	err = recoveryBoundErr(ctx, stepCtx, err)
 	switch {
 	case errors.Is(err, errStopped):
 		return reconcile.Result{}, true, nil
@@ -1022,7 +1022,9 @@ const ReasonRecoveryReadFailed = "RecoveryReadFailed"
 // (watchedRecovery: condition PullRequestUnreadable with one of those reasons, or ReasonRecoveryReadFailed, in its
 // status), a failure of the Kubernetes API (clusterSide) goes back to the error backoff and never ends it; any other
 // failure first keeps the condition true (nowUnreadable); then a failure of the Git host worth retrying (a timeout,
-// a 5xx, a rate limit) keeps the watch and its pacing (keepWatching), never the grace, and any other is handled as
+// a 5xx, a rate limit), or a read that ran into the step's own deadline (ErrTimeout, never the end of the
+// reconcile's own context, which is returned as before), keeps the watch and its pacing (keepWatching), never the
+// grace, and any other is handled as
 // for a request that is not watched. Before the deadline, and for a pause, it is retry. Past the deadline the request
 // is retried, after the delay the host asked for (Retry-After, which the deadline does not cut short) or with the
 // error backoff, until handoffRecoveryGrace after the deadline (#688); then the request ends NeedsIntervention with
@@ -1049,7 +1051,7 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 				}
 				c = want
 			}
-			if providers.IsRetryable(err) {
+			if providers.IsRetryable(err) || errors.Is(err, ErrTimeout) {
 				return r.keepWatching(ctx, rr, c, err)
 			}
 		}
@@ -1074,6 +1076,21 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 	logf.FromContext(ctx).Info("Waiting before retrying the recovery of the handoff of RemediationRequest",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)
 	return reconcile.Result{RequeueAfter: d}, nil
+}
+
+// recoveryBoundErr is boundErr for the recovery of a handoff. When the step's own deadline ended it (ErrTimeout),
+// the read that ran into it stays named: the failed read of the Git host (*freshness.ProviderError, whose text is
+// fixed) is kept next to ErrTimeout, so the condition of a recovery that waits names the read that times out
+// (recoveryReadFailed, refusedRead). The end of the reconcile's own context is boundErr's, unchanged.
+func recoveryBoundErr(parent, step context.Context, err error) error {
+	bounded := boundErr(parent, step, "recovery of the handoff", err)
+	if !errors.Is(bounded, ErrTimeout) {
+		return bounded
+	}
+	if pe, ok := errors.AsType[*freshness.ProviderError](err); ok {
+		return fmt.Errorf("%w: %w", bounded, pe)
+	}
+	return bounded
 }
 
 // recoveryOpenError is a failure of recoverStep to open the repository of the plan. It wraps the error and adds no
@@ -1162,8 +1179,8 @@ func watchedRecovery(rr *remediationv1alpha1.RemediationRequest) *metav1.Conditi
 	return nil
 }
 
-// keepWatching is retryRecovery for a failure of the Git host worth retrying (a timeout, a 5xx, a rate limit) of a
-// recovery that already waits (watchedRecovery, #786), once its condition names what fails now (nowUnreadable):
+// keepWatching is retryRecovery for a failure of the Git host worth retrying (a timeout, a 5xx, a rate limit, or a
+// read that ran into the step's own deadline: ErrTimeout) of a recovery that already waits (watchedRecovery, #786), once its condition names what fails now (nowUnreadable):
 // the request is looked at again after the poll interval, or after the delay the host asked for when longer. The
 // grace of #688 never ends it: one failure worth retrying after a long refusal would otherwise end the request and
 // lose a merge of its commit.

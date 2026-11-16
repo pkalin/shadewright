@@ -70,8 +70,10 @@ limitations under the License.
 // value that does not close on its line, a backslash and a letter or digit glued to a quoted piece after a
 // flag, a field after a comma glued to a quoted piece after a key name that is no flag, a value after a flag in
 // pretty-printed escaped JSON ("\",\n  \""), the part of an
-// unquoted value after a quote inside it, a value after a compound name and a blank that is no opaque token,
-// and a secret in a format no rule knows (TestKeyNameKnownLeaks).
+// unquoted value after a quote inside it, the words after the first of a block sequence item after a quoted
+// flag item or of an item after a flag item that opens with a backslash or "$(", a quoted scalar after a
+// verbatim tag in an array, a value after a compound name and a blank that is no opaque token, and a secret in
+// a format no rule knows (TestKeyNameKnownLeaks).
 package redact
 
 import (

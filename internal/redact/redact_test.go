@@ -671,6 +671,7 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"blanks closed tagged items": `{password: [&a !!str 'b]', `,
 		"blanks escaped punctuation": `--password "a"\!`,
 		"blanks backslash arguments": `["--password=\a `,
+		"blanks comma secret keys":   `TOKEN="a",DB_PASSWORD= "b",x-token= `,
 	} {
 		tail := tails[name]
 		small := timeString(t, name, rep(unit, size/8/len(unit))+tail)

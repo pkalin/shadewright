@@ -16,7 +16,10 @@ limitations under the License.
 
 package redact
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // The extent rule (#708). After a secret key name or flag, a value that opens a group (a quote, "[", "{",
 // "$(" or a backtick) runs to the end of that group, over line ends, with nested groups and quoted strings
@@ -445,11 +448,16 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag bool) (end int, last bo
 
 // fieldAfterComma reports whether the comma at i, glued to a shell word after a key name, starts the next
 // field of a list rather than more of the value (#769): it is followed by whitespace, the end of the input, a
-// quote or a separator, or by a name and "=" or ":" ("password=\"abc\",user=bob", ",next: x"). A name and "="
-// followed by whitespace, the end or another "=" is base64 padding, not a field ("\"a\",abc=").
+// quote or a separator, by a secret key name the key rules match on their own, with blanks, "=", ":" or ":="
+// after it ("password=\"abc\",DB_PASSWORD= \"x y\"", whose value is then redacted as on main), or by a name
+// and "=" or ":" ("password=\"abc\",user=bob", ",next: x"). Any other name and "=" followed by whitespace, the
+// end or another "=" is base64 padding, not a field ("\"a\",abc=").
 func fieldAfterComma(s string, i, limit int) bool {
 	j := i + 1
 	if j >= limit || isSpace(s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
+		return true
+	}
+	if commaSecretKey.MatchString(s[j:limit]) {
 		return true
 	}
 	for j < limit && (isAlnum(s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
@@ -465,6 +473,10 @@ func fieldAfterComma(s string, i, limit int) bool {
 	}
 	return false
 }
+
+// commaSecretKey is a secret key name at the start of the text after a comma, followed by what the key rules
+// read as its separator: "=", ":" or ":=" after optional blanks, or blanks (a compound name).
+var commaSecretKey = regexp.MustCompile(`(?i)^(?:` + bareKeyExpr + `)(?:[ \t]*[:=]|[ \t]+)`)
 
 // plainWordEnd returns the end of a shell word that starts with plain text at pos (no quote, "$(" or
 // backtick), when a "$(" or backtick group or an escaped blank is glued to that text ("abc$(cat pw)",

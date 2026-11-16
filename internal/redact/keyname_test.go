@@ -376,6 +376,16 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		"field after a comma glued to a quoted value": `TOKEN="abc",x=` + k + ` next=x`,
 		// After a compound name and a blank, only an opaque token goes.
 		"comma inside a blank-form value": "set aws_secret_access_key abc," + k + " now",
+		// A quoted flag as an item of a block sequence is no flag item for the plain item rule: the next item
+		// loses only its first token.
+		"quoted flag as a block item": "args:\n- \"--password\"\n- alpha " + k + " gamma\n- --region",
+		// An item after a flag item is the rest of its line only when it opens with plain text: one that opens
+		// with a backslash or "$(" loses only its first token.
+		"block item opening with a backslash": "- --password\n- \\alpha " + k + " gamma",
+		"block item opening with $(":          "- --password\n- $(alpha " + k + " gamma)",
+		// A verbatim tag ("!<...>") is read as no tag, so the quote after it opens no string and the value ends
+		// at the first "]".
+		"verbatim tag before a quoted scalar": `{password: [!<tag:yaml.org,2002:str> "a]` + k + `", b], u: x}`,
 	} {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",

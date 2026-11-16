@@ -378,6 +378,25 @@ func TestBlanksClosedLeaks(t *testing.T) {
 	}
 }
 
+// A comma glued to a quoted piece after a key name, followed by a secret key name the key rules match on
+// their own, ends the value: the second key's value is redacted as on main, also with blanks around its "="
+// (#769 fix round: the comma once took the second key name into the first value and its value stayed).
+// After a flag that is no item of a block sequence, an indented item on the next line keeps the narrower
+// value of one token.
+func TestBlanksSecretKeyAfterAComma(t *testing.T) {
+	for in, want := range map[string]string{
+		`password="abc",DB_PASSWORD= "hidden word" next=x`: `password="***",DB_PASSWORD= "[REDACTED]" next=x`,
+		`TOKEN='a b',client_secret = hidden next=x`:        `TOKEN='***',client_secret = *** next=x`,
+		`password="abc",x-api-key: "hidden word" next=x`:   `password="***",x-api-key: "[REDACTED]" next=x`,
+		`TOKEN="abc",token next=x`:                         `TOKEN="***",token next=x`,
+		"--password\n  - a b":                              "--password\n  - * b",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
 // Over-redaction #769 accepts, pinned so that a change to it is seen: a comment after a plain item of a block
 // sequence goes with the item, a comma glued to a quoted piece after a key name takes the word after it when
 // that word is no "name=" or "name:" field, and a quote glued to a plain value takes the quoted piece with

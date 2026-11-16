@@ -212,7 +212,7 @@ var _ = Describe("Incident status of the cause rule", func() {
 			"lastSeen", "occurrences", "occurrencesDroppedThrough", "phase", "remediationRequests", "resolvedTime",
 			"revertsProposed"}
 		added := []string{"absorbed", "absorbedOccurrences", "absorbedOccurrencesDroppedThrough", "cause",
-			"containers", "foldedInto"}
+			"containers", "folded", "foldedInto"}
 		Expect(slices.Sorted(maps.Keys(status.Properties))).To(Equal(slices.Sorted(slices.Values(
 			append(slices.Clone(before), added...)))))
 		Expect(status.Required).To(BeEmpty(), "a new field must not be required")
@@ -243,5 +243,6 @@ var _ = Describe("Incident status of the cause rule", func() {
 		Expect(got.Status.Absorbed).To(BeNil())
 		Expect(got.Status.AbsorbedOccurrences).To(BeNil())
 		Expect(got.Status.FoldedInto).To(BeNil())
+		Expect(got.Status.Folded).To(BeFalse())
 	})
 })

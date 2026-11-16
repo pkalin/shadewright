@@ -60,7 +60,7 @@ spec:
         description: |-
           Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
           removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
-          entries, status.cause is true or status.foldedInto is set, refuse a new entry of that list in any state but
+          entries, status.cause or status.folded is true or status.foldedInto is set, refuse a new entry of that list in any state but
           Pending, also in the first status write, and refuse a status.foldedInto that names the Incident itself.
         properties:
           apiVersion:
@@ -387,13 +387,21 @@ spec:
                 description: firstSeen is when the first observation arrived.
                 format: date-time
                 type: string
+              folded:
+                description: |-
+                  folded is true once this consequence Incident was folded into its cause's Incident (ADR-0039 point 14,
+                  decision of 2026-11-16 on #793), set in the fold's status write. Unlike foldedInto and the Lifecycle reason,
+                  which a reopen, an escalation or a request outcome replaces, it stays: an Incident with folded true is never
+                  folded again, so a fold happens at most once per Incident. Once true it stays true, and the status cannot
+                  be removed while it is.
+                type: boolean
               foldedInto:
                 description: |-
                   foldedInto names the cause's Incident, by name and UID, when this consequence Incident was folded into it
                   and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Allowed only in phase
                   Resolved. It never changes to another Incident: a reopen of the folded Incident clears it, together with
                   a move out of Resolved, and that is the only change allowed once it is set. It never names the Incident
-                  itself. The closure rules skip an Incident that has it.
+                  itself. The closure rules skip an Incident that has it. The fold sets folded with it.
                 properties:
                   name:
                     description: name of the Incident.
@@ -626,6 +634,9 @@ spec:
                 other than Resolved
               rule: '!has(oldSelf.foldedInto) || has(self.foldedInto) || (has(self.phase)
                 && self.phase != ''Resolved'')'
+            - message: folded cannot change from true to false
+              rule: '!(has(oldSelf.folded) && oldSelf.folded) || (has(self.folded)
+                && self.folded)'
         required:
         - spec
         type: object
@@ -638,6 +649,9 @@ spec:
             || has(self.status)'
         - message: status cannot be removed while status.foldedInto is set
           rule: '!has(oldSelf.status) || !has(oldSelf.status.foldedInto) || has(self.status)'
+        - message: status cannot be removed while status.folded is true
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.folded) || !oldSelf.status.folded
+            || has(self.status)'
         - message: status.foldedInto cannot name the Incident itself
           rule: '!has(self.status) || !has(self.status.foldedInto) || self.status.foldedInto.name
             != self.metadata.name'

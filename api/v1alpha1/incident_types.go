@@ -188,6 +188,7 @@ type AbsorbedTally struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.foldedInto) || (has(self.phase) && self.phase == 'Resolved')",message="foldedInto is allowed only in phase Resolved"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.foldedInto) || !has(self.foldedInto) || self.foldedInto == oldSelf.foldedInto",message="foldedInto cannot change to another Incident: once set it may only be cleared"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.foldedInto) || has(self.foldedInto) || (has(self.phase) && self.phase != 'Resolved')",message="foldedInto is cleared only together with a move to a phase other than Resolved"
+// +kubebuilder:validation:XValidation:rule="!(has(oldSelf.folded) && oldSelf.folded) || (has(self.folded) && self.folded)",message="folded cannot change from true to false"
 type IncidentStatus struct {
 	// phase summarizes the incident.
 	// +optional
@@ -267,9 +268,17 @@ type IncidentStatus struct {
 	// and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Allowed only in phase
 	// Resolved. It never changes to another Incident: a reopen of the folded Incident clears it, together with
 	// a move out of Resolved, and that is the only change allowed once it is set. It never names the Incident
-	// itself. The closure rules skip an Incident that has it.
+	// itself. The closure rules skip an Incident that has it. The fold sets folded with it.
 	// +optional
 	FoldedInto *IncidentRef `json:"foldedInto,omitempty"`
+
+	// folded is true once this consequence Incident was folded into its cause's Incident (ADR-0039 point 14,
+	// decision of 2026-11-16 on #793), set in the fold's status write. Unlike foldedInto and the Lifecycle reason,
+	// which a reopen, an escalation or a request outcome replaces, it stays: an Incident with folded true is never
+	// folded again, so a fold happens at most once per Incident. Once true it stays true, and the status cannot
+	// be removed while it is.
+	// +optional
+	Folded bool `json:"folded,omitempty"`
 
 	// resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design
 	// 3.2). It cannot change while the phase stays Resolved. A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated
@@ -340,11 +349,12 @@ type IncidentStatus struct {
 
 // Incident groups repeated symptoms of one problem on one workload. The rules on the root keep a write from
 // removing the whole status, which the rules on the status object cannot see, once status.revertsProposed has
-// entries, status.cause is true or status.foldedInto is set, refuse a new entry of that list in any state but
+// entries, status.cause or status.folded is true or status.foldedInto is set, refuse a new entry of that list in any state but
 // Pending, also in the first status write, and refuse a status.foldedInto that names the Incident itself.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.revertsProposed) || size(oldSelf.status.revertsProposed) == 0 || has(self.status)",message="status cannot be removed while status.revertsProposed has entries"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.cause) || !oldSelf.status.cause || has(self.status)",message="status cannot be removed while status.cause is true"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.foldedInto) || has(self.status)",message="status cannot be removed while status.foldedInto is set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.folded) || !oldSelf.status.folded || has(self.status)",message="status cannot be removed while status.folded is true"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.foldedInto) || self.status.foldedInto.name != self.metadata.name",message="status.foldedInto cannot name the Incident itself"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.revertsProposed) || self.status.revertsProposed.all(n, n.state == 'Pending' || (has(oldSelf.status) && has(oldSelf.status.revertsProposed) && oldSelf.status.revertsProposed.exists(o, o.uid == n.uid)))",message="a new entry of status.revertsProposed must be Pending"
 type Incident struct {

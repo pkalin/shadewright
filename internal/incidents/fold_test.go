@@ -35,6 +35,7 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // The tests of the late-cause fold (ADR-0039 points 12 to 15 and 23).
@@ -110,8 +111,16 @@ func TestFoldable(t *testing.T) {
 		"Unhealthy":       {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.Reason = reasonUnhealthy }, want: true},
 		"phase Analyzing": {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = remediationv1alpha1.IncidentAnalyzing }, want: true},
 		"phase Proposed":  {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = remediationv1alpha1.IncidentProposed }, want: true},
-		"phase Escalated": {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = remediationv1alpha1.IncidentEscalated }, want: true},
-		"phase Resolved":  {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = remediationv1alpha1.IncidentResolved }},
+		"no phase":        {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = "" }, want: true},
+		"phase Escalated": {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = remediationv1alpha1.IncidentEscalated }},
+		"folded before, reopened and analysed": {change: func(c, _ *remediationv1alpha1.Incident) {
+			c.Status.Folded, c.Status.Phase = true, remediationv1alpha1.IncidentProposed
+		}},
+		"reopened, not folded before": {change: func(c, _ *remediationv1alpha1.Incident) {
+			c.Status.Conditions = []metav1.Condition{{Type: ConditionLifecycle, Status: metav1.ConditionTrue,
+				Reason: ReasonReopened, LastTransitionTime: *ago(time.Minute)}}
+		}, want: true},
+		"phase Resolved": {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = remediationv1alpha1.IncidentResolved }},
 		"already folded": {change: func(c, _ *remediationv1alpha1.Incident) {
 			c.Status.FoldedInto = &remediationv1alpha1.IncidentRef{Name: "x", UID: "y"}
 		}},
@@ -185,7 +194,7 @@ func TestFoldRefusesItself(t *testing.T) {
 			if err := fold(inc, cause(inc), triggerNow); !errors.Is(err, errSelfFold) {
 				t.Fatalf("fold into itself: %v, want errSelfFold", err)
 			}
-			if inc.Status.Phase != before.Status.Phase || inc.Status.FoldedInto != nil {
+			if inc.Status.Phase != before.Status.Phase || inc.Status.FoldedInto != nil || inc.Status.Folded {
 				t.Fatalf("status changed by a refused fold: %+v", inc.Status)
 			}
 		})
@@ -234,10 +243,10 @@ func checkFolded(t *testing.T, inc *remediationv1alpha1.Incident) {
 	at := metav1.NewTime(triggerNow.Truncate(time.Second))
 	if inc.Status.Phase != remediationv1alpha1.IncidentResolved || inc.Status.ResolvedTime == nil ||
 		!inc.Status.ResolvedTime.Equal(&at) || cond == nil || cond.Reason != ReasonFoldedIntoCause ||
-		cond.Message != lifecycleMessages[ReasonFoldedIntoCause] || inc.Status.FoldedInto == nil ||
+		cond.Message != lifecycleMessages[ReasonFoldedIntoCause] || !inc.Status.Folded || inc.Status.FoldedInto == nil ||
 		inc.Status.FoldedInto.Name != Name(fp(1)) || types.UID(inc.Status.FoldedInto.UID) != foldCauseUID {
-		t.Fatalf("phase %s resolvedTime %v lifecycle %+v foldedInto %+v, want folded into %s", inc.Status.Phase,
-			inc.Status.ResolvedTime, cond, inc.Status.FoldedInto, Name(fp(1)))
+		t.Fatalf("phase %s resolvedTime %v lifecycle %+v folded %v foldedInto %+v, want folded into %s",
+			inc.Status.Phase, inc.Status.ResolvedTime, cond, inc.Status.Folded, inc.Status.FoldedInto, Name(fp(1)))
 	}
 }
 
@@ -500,8 +509,9 @@ func TestEscalationClearsFoldedInto(t *testing.T) {
 		t.Fatal(err)
 	}
 	escalateRecurrence(inc, triggerNow)
-	if inc.Status.Phase != remediationv1alpha1.IncidentEscalated || inc.Status.FoldedInto != nil {
-		t.Fatalf("phase %s foldedInto %+v, want Escalated and cleared", inc.Status.Phase, inc.Status.FoldedInto)
+	if inc.Status.Phase != remediationv1alpha1.IncidentEscalated || inc.Status.FoldedInto != nil || !inc.Status.Folded {
+		t.Fatalf("phase %s foldedInto %+v folded %v, want Escalated, foldedInto cleared and folded kept",
+			inc.Status.Phase, inc.Status.FoldedInto, inc.Status.Folded)
 	}
 }
 
@@ -611,31 +621,139 @@ func TestStoredCauseIsFoldedByThePass(t *testing.T) {
 	}
 }
 
-// TestFoldRecentLooksOnlyAtYoungCauses: a cause created more than RecurWithin plus one trigger interval ago is
-// no longer checked, so its consequence stays as it is and nothing is written; one just inside is folded.
-func TestFoldRecentLooksOnlyAtYoungCauses(t *testing.T) {
+// TestOwedFoldDoesNotAgeOut: the trigger pass decides from the two creationTimestamps alone, never from the
+// controller's clock, so a fold owed since long before (an outage, pass timeouts, a late restart) is still
+// made; a consequence created more than RecurWithin before its cause is left alone, and nothing is written.
+func TestOwedFoldDoesNotAgeOut(t *testing.T) {
 	for name, tc := range map[string]struct {
-		after time.Duration
-		folds bool
+		createdBefore time.Duration
+		folds         bool
 	}{
-		"inside the window": {after: RecurWithin + DefaultTriggerInterval, folds: true},
-		"past the window":   {after: RecurWithin + DefaultTriggerInterval + time.Second},
+		"within RecurWithin of the cause":    {createdBefore: RecurWithin, folds: true},
+		"more than RecurWithin before cause": {createdBefore: RecurWithin + time.Second},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c, cl, w := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
-			c.cfg.Now = func() time.Time { return triggerNow.Add(tc.after) }
-			if err := c.foldRecent(t.Context()); err != nil {
-				t.Fatal(err)
+			// Hours after the cause opened: far past RecurWithin plus a trigger interval. The consequence was
+			// seen a minute ago, so the closure rules leave it open.
+			now := triggerNow.Add(6 * time.Hour)
+			cons := foldConsequence(tc.createdBefore)
+			cons.Status.LastSeen = &metav1.Time{Time: now.Add(-time.Minute)}
+			c, cl, _ := foldController(t, []*remediationv1alpha1.Incident{cons})
+			c.cfg.Now = func() time.Time { return now }
+			var writes int
+			c.client.(*countingClient).before = func(_ context.Context, inc *remediationv1alpha1.Incident) {
+				if inc.Name == Name(fp(2)) {
+					writes++
+				}
 			}
+			_ = c.pass(t.Context())
 			got := getNamed(t, cl, Name(fp(2)))
-			if folded := got.Status.FoldedInto != nil; folded != tc.folds {
-				t.Fatalf("folded %v, want %v", folded, tc.folds)
+			if tc.folds {
+				if got.Status.Phase != remediationv1alpha1.IncidentResolved || !got.Status.Folded ||
+					got.Status.FoldedInto == nil || got.Status.FoldedInto.Name != Name(fp(1)) || writes != 1 {
+					t.Fatalf("phase %s folded %v foldedInto %+v, %d writes, want folded into %s by one write",
+						got.Status.Phase, got.Status.Folded, got.Status.FoldedInto, writes, Name(fp(1)))
+				}
+				return
 			}
-			if !tc.folds && w.updates.Load() != 0 {
-				t.Fatalf("%d status writes for a cause past the window, want none", w.updates.Load())
+			if got.Status.FoldedInto != nil || got.Status.Folded || writes != 0 {
+				t.Fatalf("folded %v foldedInto %+v, %d writes of the consequence, want it left alone",
+					got.Status.Folded, got.Status.FoldedInto, writes)
 			}
 		})
 	}
+}
+
+// TestFoldedIncidentIsNeverFoldedAgain: a consequence folded, reopened by a recurrence and analysed has lost
+// foldedInto and the Lifecycle reason Reopened (an analysis, a request outcome or an escalation replaces it);
+// status.folded still keeps every later pass from folding it a second time. An Escalated consequence, never
+// folded, waits for a person and is not folded either.
+func TestFoldedIncidentIsNeverFoldedAgain(t *testing.T) {
+	t.Run("reopened and analysed", func(t *testing.T) {
+		c, cl, _ := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
+		_ = c.pass(t.Context())
+		checkFolded(t, getNamed(t, cl, Name(fp(2))))
+		reopenNamed(t, cl, Name(fp(2)), triggerNow.Add(time.Minute))
+		live := getNamed(t, cl, Name(fp(2)))
+		// Analysed after the reopen: the Lifecycle reason is no longer Reopened.
+		live.Status.Phase = remediationv1alpha1.IncidentAnalyzing
+		meta.SetStatusCondition(&live.Status.Conditions, metav1.Condition{Type: ConditionLifecycle,
+			Status: metav1.ConditionTrue, Reason: ReasonRequestDenied, Message: "denied"})
+		if err := cl.Status().Update(t.Context(), live); err != nil {
+			t.Fatal(err)
+		}
+		_ = c.pass(t.Context())
+		if got := getNamed(t, cl, Name(fp(2))); got.Status.FoldedInto != nil ||
+			got.Status.Phase != remediationv1alpha1.IncidentAnalyzing {
+			t.Fatalf("phase %s foldedInto %+v, want a folded Incident never folded again", got.Status.Phase,
+				got.Status.FoldedInto)
+		}
+	})
+	t.Run("escalated", func(t *testing.T) {
+		cons := foldConsequence(5 * time.Minute)
+		cons.Status.Phase = remediationv1alpha1.IncidentEscalated
+		c, cl, _ := foldController(t, []*remediationv1alpha1.Incident{cons})
+		if err := c.foldRecent(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.foldInto(t.Context(), Name(fp(1))); err != nil {
+			t.Fatal(err)
+		}
+		if got := getNamed(t, cl, Name(fp(2))); got.Status.FoldedInto != nil {
+			t.Fatalf("phase %s folded, want an Escalated Incident left for a person", got.Status.Phase)
+		}
+	})
+}
+
+// failingReads fails every read of an Incident with a server error.
+type failingReads struct{ client.Client }
+
+func (f *failingReads) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return apierrors.NewServiceUnavailable("unavailable")
+}
+
+// TestFoldFailureCounts: a fold of the fast path that fails is a write error, counted once; one cancelled by
+// shutdown is none. A fold of the trigger pass that fails is returned by the pass, which counts it as a pass
+// error, and not counted as a write error too.
+func TestFoldFailureCounts(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cancelled bool
+		want      float64
+	}{
+		"failed read": {want: 1},
+		"shutdown":    {cancelled: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, cl, _ := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
+			c.reader = &failingReads{Client: cl}
+			ctx := t.Context()
+			if tc.cancelled {
+				c.reader = &stalling{Client: cl}
+				cctx, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cctx
+			}
+			c.mu.Lock()
+			c.oweFold(Name(fp(1)))
+			c.mu.Unlock()
+			before := testutil.ToFloat64(incidentWriteErrors)
+			c.foldDue(ctx)
+			if got := testutil.ToFloat64(incidentWriteErrors) - before; got != tc.want {
+				t.Fatalf("write errors counted %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("trigger pass", func(t *testing.T) {
+		c, cl, _ := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
+		c.reader = &failingReads{Client: cl}
+		before := testutil.ToFloat64(incidentWriteErrors)
+		if err := c.foldRecent(t.Context()); err == nil {
+			t.Fatal("a failed fold of the trigger pass returned no error")
+		}
+		if got := testutil.ToFloat64(incidentWriteErrors) - before; got != 0 {
+			t.Fatalf("write errors counted %v, want 0: the pass counts its failure once", got)
+		}
+	})
 }
 
 // hiding hides the Incident named hidden from the listings of the cache while it is set, as an informer that

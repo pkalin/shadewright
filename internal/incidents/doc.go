@@ -62,15 +62,16 @@ limitations under the License.
 //
 // A consequence Incident that opened before its cause is folded into the cause's Incident (ADR-0039 points
 // 12 to 15 and 23, #793): the write that creates a cause Incident, or sets its status.cause, makes its fold
-// owed, and the write loop's pass folds (the fast path); every trigger pass, the first at start, also checks
-// each cause Incident created at most RecurWithin plus TriggerInterval ago against the listed Incidents, so a
-// cause written at stop, before a restart or before the cache saw its consequence is folded too. It folds
-// each kubelet BackOff or Unhealthy Incident of the same subject UID and container created at most
-// [RecurWithin] before it (by creationTimestamp) none of whose requests reached a pull request: Resolved,
-// Lifecycle FoldedIntoCause and status.foldedInto, in one status write with the resource version it read,
-// decided again on a conflict. The closure rules skip a folded Incident. A fold
-// that fails is owed again RetryAfter later and tried by the next trigger pass. A reopened consequence
-// (Lifecycle Reopened) is never folded again.
+// owed, and the write loop's pass folds (the fast path); every trigger pass, the first at start, also starts
+// from the listed consequence Incidents that may still be folded and looks for a cause Incident created at
+// most RecurWithin after each (creationTimestamps only, never the controller's clock), so a cause written at
+// stop, before a restart, during an outage or before the cache saw its consequence is folded too. It folds
+// each kubelet BackOff or Unhealthy Incident of the same subject UID and container, neither Resolved nor
+// Escalated and never folded before (status.folded), created at most [RecurWithin] before the cause (by
+// creationTimestamp) none of whose requests reached a pull request: Resolved, Lifecycle FoldedIntoCause,
+// status.foldedInto and status.folded, in one status write with the resource version it read, decided again
+// on a conflict. The closure rules skip a folded Incident. A fold that fails is owed again RetryAfter later
+// and tried by the next trigger pass. A fold happens at most once per Incident.
 //
 // Writes are batched: the observations that open an Incident, or the first one of an existing Incident in
 // a process, are written at once, and the ones that follow within the aggregation window (5 minutes) go

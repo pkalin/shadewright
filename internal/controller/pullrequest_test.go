@@ -2361,11 +2361,17 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				return nil
 			})
 		}
-		// expectCancelled checks that the request ended Cancelled with reason, opened no pull request, left its
-		// branch with the commit and released its target lock and its slot under maxConcurrentRemediations.
-		expectCancelled := func(reason string) *remediationv1alpha1.RemediationRequest {
+		// cancelled drives the request to Cancelled (unless the last reconcile ended it so) and checks that it
+		// ended with reason, opened no pull request, left its branch with the commit and left its slot under
+		// maxConcurrentRemediations, and that it still holds its target lock: it has no recorded pull request, so
+		// only the read of its branch after the cancel may release it (ADR-0039 points 21 and 22, amended
+		// 2026-11-16).
+		cancelled := func(reason string) *remediationv1alpha1.RemediationRequest {
 			GinkgoHelper()
-			got := drive(remediationv1alpha1.PhaseCancelled)
+			got := fetch()
+			if got.Status.Phase != remediationv1alpha1.PhaseCancelled {
+				got = drive(remediationv1alpha1.PhaseCancelled)
+			}
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
 			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
 			Expect(c).NotTo(BeNil())
@@ -2375,16 +2381,30 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(got.Status.PullRequest).To(BeNil())
 			Expect(git.ChangeRequests()).To(BeEmpty(), "no pull request is opened")
 			Expect(git.BranchHead(ctx, freshness.BranchName(got))).NotTo(BeEmpty(), "the branch is left as it is")
-			Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "the target lock is released")
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the cancel keeps the lock until the branch is read")
 			Expect(active(got)).To(BeFalse(), "the request leaves its slot under maxConcurrentRemediations")
-			// More reconciles change nothing.
+			return got
+		}
+		// releasedByRead runs the reconcile that reads the branch of a cancelled request with no pull request on
+		// it, checks that it released the lock, and that more reconciles change nothing.
+		releasedByRead := func() {
+			GinkgoHelper()
+			Expect(reconcileOnce()).To(Succeed())
+			got := fetch()
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "the read of the branch found none open")
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)).To(BeNil())
 			before := got.ResourceVersion
 			for range 3 {
 				Expect(reconcileOnce()).To(Succeed())
 			}
 			Expect(fetch().ResourceVersion).To(Equal(before))
 			Expect(git.ChangeRequests()).To(BeEmpty())
-			return got
+		}
+		// expectCancelled checks the cancel (cancelled), then the release by the read of the branch.
+		expectCancelled := func(reason string) {
+			GinkgoHelper()
+			cancelled(reason)
+			releasedByRead()
 		}
 
 		It("ends the request Cancelled with IncidentFolded when its Incident is folded after the commit", func() {
@@ -2418,11 +2438,95 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
 			_, reconcileSecond := second()
 			expectLocked(reconcileSecond())
-			expectCancelled(remediationv1alpha1.ReasonIncidentGone)
+			cancelled(remediationv1alpha1.ReasonIncidentGone)
+			expectLocked(reconcileSecond()) // the cancel alone does not let it go on
+			releasedByRead()
 			next := reconcileSecond()
 			Expect(next.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 			Expect(meta.FindStatusCondition(next.Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeNil())
 		})
+
+		It("keeps the lock when the read after the cancel finds a pull request opened from the branch it left", func() {
+			naming()
+			afterCommit(fold)
+			got := cancelled(remediationv1alpha1.ReasonIncidentFolded)
+			// A person opens a pull request from the branch the cancel left: it carries the change, not the marker.
+			byHand, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+				BaseBranch: mainBranch, Title: "by hand"})
+			Expect(err).NotTo(HaveOccurred())
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(heldRecheckInterval), "looked at again while it is kept")
+			got = fetch()
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "an open pull request of the branch may deliver the change")
+			held := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
+			Expect(held).NotTo(BeNil())
+			Expect(held.Reason).To(Equal(ReasonOpenOnBranch))
+			_, reconcileSecond := second()
+			expectLocked(reconcileSecond())
+			// Once it is closed, the next read releases the lock and the waiting request goes on.
+			Expect(git.CloseChangeRequest(ctx, byHand.Number)).To(Succeed())
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()))
+			Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		})
+
+		It("keeps the lock when the read after the cancel finds its own pull request from an open whose answer was lost", func() {
+			naming()
+			afterCommit(remove)
+			got := cancelled(remediationv1alpha1.ReasonIncidentGone)
+			// The pull request of an earlier open, with the request's marker, that no status recorded and that the
+			// look-up before the open did not list yet.
+			own, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(got),
+				BaseBranch: mainBranch, Title: "lost", Body: pullRequestBody(got, "", nil)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reconcileOnce()).To(Succeed())
+			got = fetch()
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "its own pull request is open")
+			Expect(got.Status.PullRequest).NotTo(BeNil(), "the read records it")
+			Expect(got.Status.PullRequest.Number).To(Equal(own.Number))
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+			_, reconcileSecond := second()
+			expectLocked(reconcileSecond())
+		})
+
+		DescribeTable("keeps the lock while the read after the cancel fails, and releases it once the read answers",
+			func(fault error, visible bool) {
+				naming()
+				afterCommit(fold)
+				cancelled(remediationv1alpha1.ReasonIncidentFolded)
+				git.SetFail(func(op string) error {
+					if op == opList || op == opFind || op == opGet {
+						return fault
+					}
+					return nil
+				})
+				for range 2 {
+					res, err := reconcileResult()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(res.RequeueAfter).To(Equal(heldRecheckInterval), "read again later, never released on a failed read")
+				}
+				got := fetch()
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+				unreadable := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+				if visible {
+					Expect(unreadable).NotTo(BeNil(), "a refused read says why the lock stays")
+				} else {
+					Expect(unreadable).To(BeNil())
+				}
+				_, reconcileSecond := second()
+				expectLocked(reconcileSecond())
+				git.SetFail(nil)
+				Expect(reconcileOnce()).To(Succeed())
+				got = fetch()
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+					To(BeNil())
+				Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+			},
+			Entry("a server error", &providers.RetryableError{Err: errors.New("server error")}, false),
+			Entry("a refused read", fmt.Errorf("status 403: %w", providers.ErrForbidden), true),
+		)
 
 		It("holds the request while the live read of its Incident fails, and decides once it answers", func() {
 			naming()

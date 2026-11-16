@@ -655,8 +655,9 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 		return reconcile.Result{}, err
 	}
 	// The last step before the create, after every slow one (ADR-0039 points 21 and 22): a request whose
-	// Incident was folded into its cause's, or is gone, ends Cancelled and opens no pull request, releasing its
-	// lock and its slot in the write that ends it; a read that fails holds it for a retry.
+	// Incident was folded into its cause's, or is gone, ends Cancelled and opens no pull request, leaving its slot
+	// in the write that ends it and its lock after the read of its branch (checkHeld); a read that fails holds it
+	// for a retry.
 	switch reason, message, err := r.incidentStanding(ctx, rr); {
 	case err != nil:
 		return reconcile.Result{}, err

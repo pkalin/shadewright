@@ -94,16 +94,20 @@ func notFoundIncident(err error, name string) bool {
 }
 
 // endForIncident ends a request whose Incident was folded or is gone (incidentStanding) Cancelled with reason and
-// message, as endHandoff ends a replacement: the kill switch's gate first, then one status write that sets the
-// phase and releases the target lock. Cancelled is a final phase, so the same write takes the request out of
-// the count under maxConcurrentRemediations (active). The request has no pull request: incidentStanding runs
-// only right before one is opened. A conflict or a failed write is returned for a retry, which reads the
-// request again and decides again; a write that went through but whose answer was lost is found Cancelled.
+// message: the kill switch's gate first, then one status write that sets the phase. Cancelled is a final phase,
+// so the same write takes the request out of the count under maxConcurrentRemediations (active). The target lock
+// is not released in that write (ADR-0039 points 21 and 22, amended 2026-11-16): the request has no recorded pull
+// request, so one may still exist (an earlier open whose answer was lost and that the listing does not show yet,
+// or one a person opens from the branch the cancel leaves), and the status rule keeps the lock (prMayBeOpen,
+// settleLock in stop). The write wakes the request again, and the next reconcile reads the branch (afterStop,
+// checkHeld), as after Expired: it releases the lock when no open pull request of the branch may deliver the
+// change, and otherwise keeps it and looks again after heldRecheckInterval. A conflict or a failed write is
+// returned for a retry, which reads the request again and decides again; a write that went through but whose
+// answer was lost is found Cancelled.
 func (r *RemediationRequestReconciler) endForIncident(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason, message string) error {
 	if err := r.writeAllowed(ctx); err != nil {
 		return err
 	}
-	release(rr)
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, reason, message)
 }

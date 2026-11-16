@@ -52,9 +52,9 @@ import (
 // It only reports (invariant 2): it never deletes, restarts or otherwise acts on a pod. It reads the target and
 // the Kustomization with the get the executor already holds on them and asks the Git host, a read, whether a
 // later applied commit holds the merge commit; it writes only the request's status and one Event (invariant 6).
-// No Git write is made, so the kill switch has nothing to gate; the Git provider is opened through
-// openPlanRepository, which refuses while writes are paused, so a paused executor also asks the Git host nothing
-// and the check waits.
+// No Git write is made, so the kill switch has nothing to gate; the Git provider is chosen by mergeQuery (the merge
+// receipt's repository, or the plan's for a request merged before receipts existed), and this check asks it
+// nothing while writes are paused: it waits.
 //
 // A read that fails, a delivery not yet seen applied and a cancelled reconcile are never a verdict: the request
 // keeps its status and is looked at again. The check is bounded in time and always ends with a verdict in
@@ -111,7 +111,9 @@ const maxPaused = 365 * 24 * time.Hour
 var errNoAncestry = errors.New("the Git provider cannot check commit ancestry")
 
 // planAncestry is the AncestryChecker of the plan's repository, opened only when the delivery check needs it:
-// when the unit applied a later commit than the merge commit.
+// when the unit applied a later commit than the merge commit. It is for a request merged before merge receipts
+// existed only (mergeQuery): after a retarget the plan's entry names another branch than the recorded one, and
+// planEntry refuses it.
 type planAncestry struct {
 	r  *RemediationRequestReconciler
 	rr *remediationv1alpha1.RemediationRequest
@@ -235,7 +237,7 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 		}
 	}
 	windowEnd := deliveryWindowEnd(rr, start, now)
-	d, err := r.delivered(stepCtx, rr, r.legacyQuery(rr))
+	d, err := r.delivered(stepCtx, rr, r.mergeQuery(rr, true))
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
 		return reconcile.Result{}, nil, err
@@ -572,17 +574,25 @@ type delivery struct {
 }
 
 // deliveryQuery is what delivered asks about: the merge commit, the branch it was merged into and the Git host
-// that answers whether a later commit holds it. A request with a merge receipt asks about the receipt's
-// (receiptQuery); one merged before receipts existed about its recorded pull request and source (legacyQuery).
+// that answers whether a later commit holds it. Only mergeQuery builds one.
 type deliveryQuery struct {
 	commit, branch string
 	ancestry       providers.AncestryChecker
 }
 
-// legacyQuery is the question of a Merged request checked without --verify-outcomes, or merged before receipts
-// existed: its recorded merge commit, the branch it was merged into (deliveryBranch), and the plan's repository
-// opened through the live settings.
-func (r *RemediationRequestReconciler) legacyQuery(rr *remediationv1alpha1.RemediationRequest) deliveryQuery {
+// mergeQuery is the one place a check after the merge picks what it asks about, in both modes (#771). A request
+// with a merge receipt asks about the receipt: its merge commit, its target branch (after a retarget, the one the
+// settings name now; after a merge seen on the recorded branch, that one) and its repository, opened by the
+// receipt's URL and installation whatever target branch the settings name (receiptAncestry). Only a request
+// merged before receipts existed asks about its recorded pull request and source, through the plan's repository
+// (planAncestry). pauseGated is true for the check without --verify-outcomes, which asks the Git host nothing
+// while writes are paused (freshness.ErrPaused) and waits.
+func (r *RemediationRequestReconciler) mergeQuery(rr *remediationv1alpha1.RemediationRequest,
+	pauseGated bool) deliveryQuery {
+	if mr := rr.Status.MergeReceipt; mr != nil {
+		return deliveryQuery{commit: mr.MergeCommitSHA, branch: string(deliveryBranch(rr)),
+			ancestry: receiptAncestry{r: r, receipt: mr, stale: stalePlanMerged(rr), pauseGated: pauseGated}}
+	}
 	return deliveryQuery{commit: rr.Status.PullRequest.MergeCommitSHA, branch: string(deliveryBranch(rr)),
 		ancestry: planAncestry{r: r, rr: rr}}
 }

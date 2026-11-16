@@ -235,10 +235,14 @@ func (r *RemediationRequestReconciler) enterDelivery(ctx context.Context, rr *re
 // #797): the installation change is what made such a plan stale (#290), and its outcome is capped as a stale merge
 // whatever the delivery shows. That provider writes nothing but a close and a failed check run (openGated), and only
 // IsAncestor is called on it. Any other request whose receipt's installation is gone gets errRepositoryGone as before.
+//
+// pauseGated (the check without --verify-outcomes) makes it return freshness.ErrPaused while writes are paused, as
+// that check has always asked the Git host nothing during a pause; the check with it reads on.
 type receiptAncestry struct {
-	r       *RemediationRequestReconciler
-	receipt *remediationv1alpha1.MergeReceipt
-	stale   bool
+	r          *RemediationRequestReconciler
+	receipt    *remediationv1alpha1.MergeReceipt
+	stale      bool
+	pauseGated bool
 }
 
 func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {
@@ -248,6 +252,9 @@ func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string
 		return false, errRepositoryGone
 	case err != nil:
 		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+	}
+	if a.pauseGated && freshness.Paused(settings) {
+		return false, freshness.ErrPaused
 	}
 	repo, ok := freshness.FindRepository(settings, &a.receipt.Repository)
 	reinstalled := false
@@ -272,13 +279,6 @@ func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string
 	return checker.IsAncestor(ctx, ancestor, commit)
 }
 
-// receiptQuery asks about the receipt's merge commit on the receipt's target branch.
-func (r *RemediationRequestReconciler) receiptQuery(rr *remediationv1alpha1.RemediationRequest) deliveryQuery {
-	mr := rr.Status.MergeReceipt
-	return deliveryQuery{commit: mr.MergeCommitSHA, branch: string(mr.TargetBranch),
-		ancestry: receiptAncestry{r: r, receipt: mr, stale: stalePlanMerged(rr)}}
-}
-
 // deliveryStep is one look at the delivery of a WaitingForDelivery request. When the merge commit is applied it
 // records in rr (not written yet: the move to Verifying writes them) the applied time and the rollout fields and
 // returns the target read right after. A target gone or replaced ends the request at once. Otherwise it waits
@@ -301,7 +301,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 		}
 	}
 	windowEnd := deliveryWindowEnd(rr, start, now)
-	d, err := r.delivered(stepCtx, rr, r.receiptQuery(rr))
+	d, err := r.delivered(stepCtx, rr, r.mergeQuery(rr, false))
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
 		return reconcile.Result{}, nil, err

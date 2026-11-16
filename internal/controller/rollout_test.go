@@ -1174,3 +1174,136 @@ func TestRolloutTargetAdoptedByAnotherKustomizationBeforeCapture(t *testing.T) {
 		t.Fatalf("later template reported successful: applied=%s generation=%d revision=%s ended=%v", rr.Status.Rollout.AppliedRevision, rr.Status.Rollout.TargetGeneration, rr.Status.Rollout.TemplateRevision, rr.Status.Rollout.Ended)
 	}
 }
+
+// retarget makes the plan's repository entry in RemediationSettings name branch as its target branch.
+func (w *rolloutWorld) retarget(t *testing.T, branch remediationv1alpha1.GitBranch) {
+	t.Helper()
+	settings := &remediationv1alpha1.RemediationSettings{}
+	if err := w.c.Get(t.Context(), client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Repositories[0].TargetBranch = branch
+	if err := w.c.Update(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// laterOn pushes a commit on branch that holds the world's merge commit (the branch is made at the merge commit
+// first when it does not exist) and returns it.
+func (w *rolloutWorld) laterOn(t *testing.T, branch remediationv1alpha1.GitBranch) string {
+	t.Helper()
+	if _, err := w.git.BranchHead(t.Context(), string(branch)); err != nil {
+		if err := w.git.CreateBranch(t.Context(), string(branch), w.merge); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later, err := w.git.Push(string(branch), "apps/other.yaml", []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return later
+}
+
+// untilApplied reconciles until the request records the delivery seen applied, at most three times (with
+// --verify-outcomes the first moves Merged to WaitingForDelivery).
+func (w *rolloutWorld) untilApplied(t *testing.T) *remediationv1alpha1.RemediationRequest {
+	t.Helper()
+	var err error
+	for range 3 {
+		if _, err = w.reconcile(t, t.Context()); err != nil {
+			continue
+		}
+		if rr := w.request(t); rr.Status.PullRequest.AppliedObservedAt != nil {
+			return rr
+		}
+	}
+	rr := w.request(t)
+	t.Fatalf("the later commit was not counted as delivered (last error %v): phase %s, conditions %+v", err,
+		rr.Status.Phase, rr.Status.Conditions)
+	return nil
+}
+
+// #771: after a merge, a later commit of the branch the merge receipt names that holds the merge commit counts as
+// delivered, in both modes, while the settings name release: for a pull request moved to release and merged there,
+// and for one merged into the recorded branch main after the settings changed (#754). The settings' entry no
+// longer names the plan's branch, so the plan's repository cannot be opened (errTargetBranchChanged): the
+// ancestry is asked of the receipt's repository.
+func TestRolloutLaterCommitOfTheReceiptBranch(t *testing.T) {
+	const release = "release"
+	for _, merged := range []remediationv1alpha1.GitBranch{release, mainBranch} {
+		for _, verify := range []bool{false, true} {
+			t.Run(fmt.Sprintf("merged into %s, verify outcomes %t", merged, verify), func(t *testing.T) {
+				w := newRolloutWorld(t, completeStatefulSet())
+				w.r.VerifyOutcomes = verify
+				w.withReceipt(t, merged)
+				w.retarget(t, release)
+				later := w.laterOn(t, merged)
+				w.reader.ks = kustomizationAppliedFrom(t, string(merged), later)
+				rr := w.untilApplied(t)
+				if st := rr.Status.Rollout; st == nil || st.AppliedRevision != later {
+					t.Fatalf("status.rollout = %+v, want appliedRevision %s", st, later)
+				}
+			})
+		}
+	}
+}
+
+// No check after the merge opens the plan's repository while the request has a merge receipt: every read of
+// ancestry goes to the receipt's repository, in both modes. The receipt here names another entry of the settings
+// than the plan's, so an open of the plan's entry, which would work, is seen.
+func TestAfterMergeReadsTheReceiptRepositoryOnly(t *testing.T) {
+	for _, verify := range []bool{false, true} {
+		t.Run(fmt.Sprintf("verify outcomes %t", verify), func(t *testing.T) {
+			w := newRolloutWorld(t, completeStatefulSet())
+			w.r.VerifyOutcomes = verify
+			settings := &remediationv1alpha1.RemediationSettings{}
+			if err := w.c.Get(t.Context(), client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+				t.Fatal(err)
+			}
+			plan := settings.Spec.Repositories[0]
+			other := *plan.DeepCopy()
+			other.Name = "receipt-repository"
+			other.URL = plan.URL + "-receipt"
+			settings.Spec.Repositories = append(settings.Spec.Repositories, other)
+			if err := w.c.Update(t.Context(), settings); err != nil {
+				t.Fatal(err)
+			}
+			w.withReceipt(t, mainBranch)
+			w.mutate(t, func(rr *remediationv1alpha1.RemediationRequest) {
+				rr.Status.MergeReceipt.Repository = *freshness.RepositoryOf(other)
+			})
+			opened := 0
+			w.r.OpenRepository = func(_ context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				if repo.URL == plan.URL {
+					t.Errorf("a check after the merge opened the plan's repository while a merge receipt exists")
+				}
+				opened++
+				return w.git, nil
+			}
+			later := w.laterOn(t, mainBranch)
+			w.reader.ks = kustomizationApplied(t, later)
+			w.untilApplied(t)
+			if opened == 0 {
+				t.Fatal("the ancestry of the later commit was never asked")
+			}
+		})
+	}
+}
+
+// Without --verify-outcomes the check asks the Git host nothing while writes are paused, with a merge receipt as
+// without one: a later commit is not counted until the pause ends.
+func TestRolloutReceiptAncestryWaitsForThePause(t *testing.T) {
+	w := newRolloutWorld(t, completeStatefulSet())
+	w.withReceipt(t, mainBranch)
+	later := w.laterOn(t, mainBranch)
+	w.reader.ks = kustomizationApplied(t, later)
+	w.setPaused(t, true)
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if rr := w.request(t); rr.Status.PullRequest.AppliedObservedAt != nil {
+		t.Fatal("the Git host was asked while writes are paused")
+	}
+	w.setPaused(t, false)
+	w.untilApplied(t)
+}

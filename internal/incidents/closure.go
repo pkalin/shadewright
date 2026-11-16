@@ -33,12 +33,14 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents/quiet"
 )
 
 // QuietBeforeResolved is how long an Incident in phase Open, Proposed or Escalated must go quiet, with no
 // active request naming it, before the analyzer moves it to Resolved (design 3.2, #251). Quiet means nothing
-// happened to it in that time: no observation (written or held), no analysis and no lifecycle move.
-const QuietBeforeResolved = time.Hour
+// happened to it in that time: no observation (written or held), no analysis and no lifecycle move. The executor
+// uses the same value for condition IncidentStopped of a request waiting for review ([quiet.BeforeResolved]).
+const QuietBeforeResolved = quiet.BeforeResolved
 
 // ConditionLifecycle is the Incident condition that says why the closure rules last moved the Incident's
 // phase: to Resolved (quiet, a request that Succeeded, or HolderSucceeded: a request that waited behind another

@@ -1197,6 +1197,41 @@ spec:
                       head stops automation.
                     pattern: ^[0-9a-f]{40}$
                     type: string
+                  incidentStopped:
+                    description: |-
+                      incidentStopped is the reading of the Incident's status.count with which the executor found the Incident
+                      stopped while the pull request waited for review: the same count, of spec.incidentRef.uid, read by one
+                      executor process over at least an hour. It is the source of condition IncidentStopped (#715), which is
+                      derived from it in the same status patch, and it is what a restarted executor reads so that it marks once.
+                      A later read of another count, or an Incident that is gone, removes both. Its readAt is only shown, never
+                      compared. Only the executor writes it.
+                    properties:
+                      count:
+                        description: |-
+                          count is the Incident's status.count as read. MaxIncidentCount is the saturation value; a saturated
+                          reading never counts.
+                        format: int64
+                        maximum: 1000000
+                        minimum: 0
+                        type: integer
+                      readAt:
+                        description: |-
+                          readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for
+                          atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is
+                          compared only with the other reading's readAt. For status.pullRequest.incidentStopped it is the time of the
+                          read that found the Incident stopped, and is never compared.
+                        format: date-time
+                        type: string
+                      uid:
+                        description: uid is the UID of the Incident read. The reading
+                          counts only when it equals spec.incidentRef.uid.
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                    required:
+                    - readAt
+                    - uid
+                    type: object
                   mergeCommitSHA:
                     description: |-
                       mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when
@@ -1610,7 +1645,8 @@ spec:
                             description: |-
                               readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for
                               atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is
-                              compared only with the other reading's readAt.
+                              compared only with the other reading's readAt. For status.pullRequest.incidentStopped it is the time of the
+                              read that found the Incident stopped, and is never compared.
                             format: date-time
                             type: string
                           uid:
@@ -1640,7 +1676,8 @@ spec:
                             description: |-
                               readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for
                               atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is
-                              compared only with the other reading's readAt.
+                              compared only with the other reading's readAt. For status.pullRequest.incidentStopped it is the time of the
+                              read that found the Incident stopped, and is never compared.
                             format: date-time
                             type: string
                           uid:

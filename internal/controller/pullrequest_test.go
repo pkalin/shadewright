@@ -50,6 +50,7 @@ import (
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/pkalin/shadewright/internal/incidents/quiet"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
@@ -4173,6 +4174,347 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		})
 	})
 
+	// #715: a request whose Incident stops counting while its pull request waits for review says so with a
+	// condition and one Event; nothing is closed and the phase stays AwaitingApproval.
+	Context("when the Incident stops while the pull request waits for review", func() {
+		var inc *remediationv1alpha1.Incident
+
+		// setIncident writes the Incident's count, and its occurrences when given.
+		setIncident := func(count int64, occurrences ...remediationv1alpha1.OccurrenceRecord) {
+			GinkgoHelper()
+			live := &remediationv1alpha1.Incident{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(inc), live)).To(Succeed())
+			live.Status.Count = count
+			if occurrences != nil {
+				live.Status.Occurrences = occurrences
+			}
+			Expect(k8sClient.Status().Update(ctx, live)).To(Succeed())
+		}
+		// full moves the clock on by the full recheck's period and reconciles with r: a full recheck.
+		full := func(r *RemediationRequestReconciler) {
+			GinkgoHelper()
+			clock = clock.Add(FullRecheckInterval)
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+		}
+		stopped := func() *metav1.Condition {
+			return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionIncidentStopped)
+		}
+		// fullsUnmarked runs n full rechecks with r and expects no mark after any of them.
+		fullsUnmarked := func(r *RemediationRequestReconciler, n int, why string) {
+			GinkgoHelper()
+			for i := range n {
+				full(r)
+				Expect(stopped()).To(BeNil(), "%s (full recheck %d)", why, i+1)
+			}
+		}
+		// waitingUnchanged expects the request still waiting for review with its pull request open.
+		waitingUnchanged := func() {
+			GinkgoHelper()
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+				To(Equal(ReasonWaitingForReview))
+			crs := openRequests()
+			Expect(crs).To(HaveLen(1))
+			Expect(crs[0].State).To(Equal(providers.ChangeRequestOpen))
+		}
+		stopEvent := "Normal " + EventIncidentStopped + " " + messageIncidentStopped
+		// fullRechecksPerQuiet is how many full rechecks after the first read of a count reach the quiet time.
+		fullRechecksPerQuiet := int(quiet.BeforeResolved / FullRecheckInterval)
+
+		BeforeEach(func() {
+			recorder = record.NewFakeRecorder(20)
+			inc = collectorIncident(strings.Repeat("7c24fc0a", 7) + fmt.Sprintf("%08x", seq))
+			setIncident(3)
+			answering(remediationv1alpha1.IncidentRef{Name: inc.Name, UID: remediationv1alpha1.UID(inc.UID)})
+			for len(recorder.Events) > 0 {
+				<-recorder.Events
+			}
+		})
+
+		It("marks the request once the count has not changed for an hour, once, and removes the mark when it rises", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour since the first read of the count")
+			full(r)
+			c := stopped()
+			Expect(c).NotTo(BeNil(), "an hour after the first read of the same count")
+			Expect(c.Status).To(Equal(metav1.ConditionTrue))
+			Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonIncidentCountUnchanged))
+			got := fetch()
+			Expect(got.Status.PullRequest.IncidentStopped).NotTo(BeNil())
+			Expect(got.Status.PullRequest.IncidentStopped.Count).To(Equal(int64(3)))
+			Expect(got.Status.PullRequest.IncidentStopped.UID).To(Equal(string(inc.UID)))
+			waitingUnchanged()
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+
+			version := fetch().ResourceVersion
+			for range 3 {
+				full(r)
+			}
+			Expect(fetch().ResourceVersion).To(Equal(version), "a mark is written once, not on every look")
+			Expect(recorder.Events).NotTo(Receive(), "one Event per transition")
+
+			setIncident(4)
+			full(r)
+			Expect(stopped()).To(BeNil(), "the count rose: the mark is removed")
+			Expect(fetch().Status.PullRequest.IncidentStopped).To(BeNil())
+			waitingUnchanged()
+			Expect(recorder.Events).NotTo(Receive())
+		})
+
+		It("removes a mark whose reading an older executor dropped, and waits again", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+			// An executor that predates the field writes the status without it and keeps the condition.
+			got := fetch()
+			got.Status.PullRequest.IncidentStopped = nil
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			full(r)
+			Expect(stopped()).To(BeNil(), "the count of the mark is unknown, so the mark goes")
+			waitingUnchanged()
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "the wait starts again")
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+			Expect(fetch().Status.PullRequest.IncidentStopped).NotTo(BeNil())
+		})
+
+		It("never marks a request whose Incident is still counting", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			for i := range 2 * fullRechecksPerQuiet {
+				setIncident(int64(4 + i))
+				full(r)
+				Expect(stopped()).To(BeNil(), "the count rose before full recheck %d", i+1)
+			}
+			// It stops: an hour of the same count marks the request.
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour since the count last changed")
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+		})
+
+		It("decides nothing while the read of the Incident fails, and removes the mark when the Incident is gone", func() {
+			apiReader = failingIncidentReader{Reader: k8sClient}
+			r := reconciler()
+			fullsUnmarked(r, 2*fullRechecksPerQuiet, "the Incident cannot be read")
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+			r.APIReader = k8sClient
+			full(r)
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "the wait starts with the first read that succeeds")
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+
+			// A failed read after the mark keeps it: it is no sign that the Incident went on.
+			r.APIReader = failingIncidentReader{Reader: k8sClient}
+			version := fetch().ResourceVersion
+			full(r)
+			Expect(stopped()).NotTo(BeNil(), "a failed read decides nothing")
+			Expect(fetch().ResourceVersion).To(Equal(version))
+
+			r.APIReader = k8sClient
+			Expect(k8sClient.Delete(ctx, inc)).To(Succeed())
+			full(r)
+			Expect(stopped()).To(BeNil(), "the Incident is gone: the mark goes")
+			Expect(fetch().Status.PullRequest.IncidentStopped).To(BeNil())
+			waitingUnchanged()
+			Expect(recorder.Events).NotTo(Receive())
+			fullsUnmarked(r, 2*fullRechecksPerQuiet, "a gone Incident is never marked")
+		})
+
+		It("removes the mark and never marks again when the Incident is made again under the same name", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+
+			// The collector makes an Incident with the same name and the same count: another UID.
+			old := inc.UID
+			Expect(k8sClient.Delete(ctx, inc)).To(Succeed())
+			inc = &remediationv1alpha1.Incident{ObjectMeta: metav1.ObjectMeta{Namespace: inc.Namespace, Name: inc.Name},
+				Spec: inc.Spec}
+			Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+			Expect(inc.UID).NotTo(Equal(old))
+			setIncident(3)
+			full(r)
+			Expect(stopped()).To(BeNil(), "the request's Incident is gone")
+			Expect(fetch().Status.PullRequest.IncidentStopped).To(BeNil())
+			fullsUnmarked(r, 2*fullRechecksPerQuiet, "an Incident of another UID is never marked")
+			waitingUnchanged()
+		})
+
+		It("does not mark when the step of the full recheck stopped at a pause", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			// An hour after the first read, the render of a moved target branch meets the kill switch.
+			clock = clock.Add(FullRecheckInterval)
+			_, err = r.advanceAndWatch(ctx, fetch(), freshness.Result{Head: strings.Repeat("e", 40),
+				Git: pausedReads{Git: git}}, prOpen)
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).
+				NotTo(BeNil(), "the step stopped at the pause")
+			Expect(stopped()).To(BeNil(), "a paused executor does not mark")
+			Expect(got.Status.PullRequest.IncidentStopped).To(BeNil())
+		})
+
+		// writtenMeanwhile returns a hook that has another writer change the request between the read and the
+		// patch of the mark, for the first n patches, and lets the later ones through.
+		writtenMeanwhile := func(n int) func() error {
+			return func() error {
+				if n == 0 {
+					return nil
+				}
+				n--
+				live := fetch()
+				base := live.DeepCopy()
+				live.Annotations = map[string]string{"example.invalid/written-meanwhile": fmt.Sprint(n)}
+				return k8sClient.Patch(ctx, live, client.MergeFrom(base))
+			}
+		}
+
+		It("reads the request again and marks it in the same reconcile when it was written meanwhile", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			r.Client = &statusPatchHook{Client: k8sClient, before: writtenMeanwhile(1)}
+			clock = clock.Add(FullRecheckInterval)
+			res, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred(), "a conflict is no failed reconcile")
+			Expect(res.RequeueAfter).To(Equal(r.pullRequestPollInterval()), "the step's requeue stands")
+			Expect(stopped()).NotTo(BeNil(), "the retry after the conflict marks")
+			Expect(fetch().Annotations).To(HaveKey("example.invalid/written-meanwhile"))
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+			Expect(recorder.Events).NotTo(Receive(), "one Event")
+
+			// The removal is retried the same way.
+			setIncident(4)
+			r.Client = &statusPatchHook{Client: k8sClient, before: writtenMeanwhile(1)}
+			full(r)
+			Expect(stopped()).To(BeNil(), "the retry after the conflict removes the mark")
+			Expect(fetch().Status.PullRequest.IncidentStopped).To(BeNil())
+		})
+
+		It("leaves a second conflict to the next full recheck and keeps the step's requeue", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			r.Client = &statusPatchHook{Client: k8sClient, before: writtenMeanwhile(2)}
+			clock = clock.Add(FullRecheckInterval)
+			res, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(r.pullRequestPollInterval()), "no shorter requeue after a conflict")
+			Expect(stopped()).To(BeNil())
+			Expect(recorder.Events).NotTo(Receive())
+			// A reconcile with no time gone by is a look at the pull request only: it decides nothing.
+			_, err = r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stopped()).To(BeNil(), "no forced full recheck")
+			full(r)
+			Expect(stopped()).NotTo(BeNil(), "the next full recheck marks")
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+		})
+
+		It("keeps a wait the Git host asked for when the mark meets a conflict", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			r.Client = &statusPatchHook{Client: k8sClient, before: writtenMeanwhile(1)}
+			// An hour after the first read, the render of a moved target branch is rate limited by the Git host.
+			clock = clock.Add(FullRecheckInterval)
+			res, err := r.advanceAndWatch(ctx, fetch(), freshness.Result{Head: strings.Repeat("e", 40),
+				Git: rateLimitedReads{Git: git}}, prOpen)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(30*time.Second), "the Retry-After of the Git host stands")
+			Expect(stopped()).NotTo(BeNil(), "the retry after the conflict marks")
+		})
+
+		It("keeps the step's requeue when a write other than a conflict fails, and tries again at the next full recheck", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+
+			setIncident(4)
+			r.Client = &statusPatchHook{Client: k8sClient, before: func() error {
+				return apierrors.NewInternalError(errors.New("etcd unavailable"))
+			}}
+			clock = clock.Add(FullRecheckInterval)
+			res, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(r.pullRequestPollInterval()))
+			Expect(stopped()).NotTo(BeNil(), "the removal failed")
+			r.Client = k8sClient
+			full(r)
+			Expect(stopped()).To(BeNil())
+		})
+
+		It("decides nothing while writes are paused", func() {
+			setPaused := func(on bool) {
+				GinkgoHelper()
+				live := &remediationv1alpha1.RemediationSettings{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
+				live.Spec.Paused = new(on)
+				Expect(k8sClient.Update(ctx, live)).To(Succeed())
+			}
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			setPaused(true)
+			fullsUnmarked(r, 2*fullRechecksPerQuiet, "writes are paused")
+			setPaused(false)
+			full(r)
+			Expect(stopped()).NotTo(BeNil(), "the count read before the pause did not change for over an hour")
+		})
+
+		It("starts the wait again in a new process", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			// A restart: the first read of the new process starts the wait on its own clock.
+			r = reconciler()
+			fullsUnmarked(r, fullRechecksPerQuiet, "the new process has not read the count for an hour")
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+		})
+
+		It("never marks an Incident whose newest occurrence is a lasting symptom state", func() {
+			began := metav1.NewTime(clock.Add(-time.Hour))
+			setIncident(3, remediationv1alpha1.OccurrenceRecord{ID: quiet.StatePrefix + strings.Repeat("a", 32), Total: 1,
+				Began: &began})
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, 2*fullRechecksPerQuiet, "a lasting state does not move the count while it lasts")
+			// The newest occurrence is an event now (the record set changed, the count not).
+			later := metav1.NewTime(clock)
+			setIncident(3,
+				remediationv1alpha1.OccurrenceRecord{ID: quiet.StatePrefix + strings.Repeat("a", 32), Total: 1, Began: &began},
+				remediationv1alpha1.OccurrenceRecord{ID: "event:" + strings.Repeat("b", 32), Total: 1, Began: &later})
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+		})
+	})
+
 	// Issue #181: the target branch can move under the change twice, between cutting the branch and the commit,
 	// and while the pull request waits. Both are covered by one rule: the change is rendered at the head of the
 	// target branch, and while the pull request waits, again whenever that head moves.
@@ -6328,6 +6670,73 @@ func bodyRequest() *remediationv1alpha1.RemediationRequest {
 	rr.Status.PolicyRevision = "p/1"
 	rr.Status.Source = &remediationv1alpha1.ResolvedSource{Path: sourcePath, TargetBranch: mainBranch}
 	return rr
+}
+
+// pausedReads is a Git host whose file reads stop at the kill switch, as a render step that meets a pause.
+type pausedReads struct {
+	*fakegit.Git
+}
+
+func (pausedReads) ReadFile(context.Context, string, string, int) (providers.File, error) {
+	return providers.File{}, freshness.ErrPaused
+}
+
+// rateLimitedReads is a Git provider whose file reads are refused by the host's rate limit, with a Retry-After
+// of 30 seconds.
+type rateLimitedReads struct {
+	*fakegit.Git
+}
+
+func (rateLimitedReads) ReadFile(context.Context, string, string, int) (providers.File, error) {
+	return providers.File{}, &providers.RetryableError{RetryAfter: 30 * time.Second,
+		Err: errors.New("secondary rate limit")}
+}
+
+// statusPatchHook calls before ahead of each status patch of a RemediationRequest that sets or removes condition
+// IncidentStopped; an error from it is the patch's answer, and nil lets the patch through.
+type statusPatchHook struct {
+	client.Client
+	before func() error
+}
+
+func (h *statusPatchHook) Status() client.SubResourceWriter {
+	return &statusPatchHookWriter{SubResourceWriter: h.Client.Status(), before: h.before}
+}
+
+type statusPatchHookWriter struct {
+	client.SubResourceWriter
+	before func() error
+}
+
+// patchesIncidentStopped reports whether the patch from the request's last read sets or removes IncidentStopped.
+func patchesIncidentStopped(rr *remediationv1alpha1.RemediationRequest, patch client.Patch) bool {
+	data, err := patch.Data(rr)
+	// The mark names the condition; the removal sets status.pullRequest.incidentStopped to null.
+	return err == nil && bytes.Contains(bytes.ToLower(data), []byte("incidentstopped"))
+}
+
+func (w *statusPatchHookWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch,
+	opts ...client.SubResourcePatchOption) error {
+	if rr, ok := obj.(*remediationv1alpha1.RemediationRequest); ok && patchesIncidentStopped(rr, patch) {
+		if err := w.before(); err != nil {
+			return err
+		}
+	}
+	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
+}
+
+// failingIncidentReader is a reader whose get of an Incident fails with a server error; every other read goes
+// through.
+type failingIncidentReader struct {
+	client.Reader
+}
+
+func (f failingIncidentReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	if _, ok := obj.(*remediationv1alpha1.Incident); ok {
+		return apierrors.NewInternalError(errors.New("etcd unavailable"))
+	}
+	return f.Reader.Get(ctx, key, obj, opts...)
 }
 
 // hangingIncidentReader is a reader whose get of an Incident blocks until its context ends, as a stalled API

@@ -384,9 +384,20 @@ analyses (units taken from the daily budget, and model calls) and the requests.
   request. Without the rule each event is an observation of its own, which the gate opens once it recurs, as
   the lab saw (#432); the case fails then, since the cause's tally stays empty. The case pins that order: it
   creates the kubelet events only once the cause's Incident exists. The collector delivers pod and event
-  observations from separate reconcilers, and a consequence seen once that reaches the Incident controller just
-  before its cause is held as a first sighting and never counted on the cause unless it is seen again, so the
-  order is not left to chance.
+  observations from separate reconcilers, so with both created at once either may reach the Incident controller
+  first; the other order has cases of its own (below).
+- `TestGroupingOOMConsequenceFirst` (`grouping_order_test.go`, #820): the same fault with the other order. A relay
+  between the collector and the Incident controller holds back what the collector reports until it has the cause
+  and both consequences, delivers each consequence once, waits until the Incident controller holds it as a first
+  sighting, and only then delivers the cause; it drops every later observation of a consequence, so no repeat
+  counts it. The cause's observation counts what is held for its consequences on its Incident: one Incident, the
+  cause's, with `BackOff` 5 and `Unhealthy` 4 (the events' series counts) in `status.absorbed`, analyzed once
+  with one request, and no Incident of a consequence. The order is set by the relay, not by timing.
+- `TestGroupingOOMConsequenceRepeatNamesCause` (#820): as above, but the relay first delivers each consequence
+  without a cause fingerprint and one less in its total, the collector's reading before it linked the event to
+  the pod's cause, then the consequence as the collector reported it, a repeat of the held occurrence that names
+  its cause. The held first sighting takes the cause from the repeat, so the cause finds and counts it; the
+  outcome is the same as above.
 - `TestGroupingOOMFoldsALateCause`: an `Unhealthy` Incident of the `web` container opened before the kill and not
   analyzed yet. When the cause's Incident opens, it is folded into it (`Resolved`, `status.foldedInto`); one
   Incident stays open, analyzed once. The case holds back every analysis until it has seen the fold, so a slow

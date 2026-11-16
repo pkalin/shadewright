@@ -55,6 +55,8 @@ const (
 	envTriageMod = "EVAL_TRIAGE_MODEL"
 	envEscDep    = "EVAL_ESCALATION_DEPLOYMENT"
 	envEscMod    = "EVAL_ESCALATION_MODEL"
+	envTriageAPI = "EVAL_TRIAGE_INFERENCE_API"     // ChatCompletions (default) or Responses, as inferenceAPI
+	envEscAPI    = "EVAL_ESCALATION_INFERENCE_API" // the same for the escalation deployment
 	envRepeats   = "EVAL_REPEATS"
 	envPassRate  = "EVAL_MIN_PASS_RATE" // #nosec G101 -- the name of the pass threshold variable, not a credential
 	envPriceIn   = "EVAL_PRICE_INPUT_PER_MTOK"
@@ -141,6 +143,14 @@ func newFoundrySource() (*foundrySource, error) {
 	if err != nil {
 		return nil, err
 	}
+	triageAPI, err := envInferenceAPI(envTriageAPI)
+	if err != nil {
+		return nil, err
+	}
+	escAPI, err := envInferenceAPI(envEscAPI)
+	if err != nil {
+		return nil, err
+	}
 	suffixes, err := models.ParseEndpointSuffixes(os.Getenv(envSuffixes))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", envSuffixes, err)
@@ -164,13 +174,27 @@ func newFoundrySource() (*foundrySource, error) {
 		return nil, fmt.Errorf("%s, %s and %s are required", envEndpoint, envTriageDep, envTriageMod)
 	}
 	src.triage = deployment(endpoint, os.Getenv(envTriageDep), api)
+	src.triage.InferenceAPI = triageAPI
 	if dep := os.Getenv(envEscDep); dep != "" {
 		if src.escModel == "" {
 			return nil, fmt.Errorf("%s needs %s", envEscDep, envEscMod)
 		}
 		src.escalation = deployment(endpoint, dep, api)
+		src.escalation.InferenceAPI = escAPI
+	} else if escAPI != "" {
+		return nil, fmt.Errorf("%s needs %s", envEscAPI, envEscDep)
 	}
 	return src, nil
+}
+
+// envInferenceAPI reads the inference API of a Foundry deployment: unset (chat completions, inferenceAPI left
+// out), ChatCompletions or Responses.
+func envInferenceAPI(name string) (remediationv1alpha1.InferenceAPI, error) {
+	switch v := remediationv1alpha1.InferenceAPI(os.Getenv(name)); v {
+	case "", remediationv1alpha1.InferenceAPIChatCompletions, remediationv1alpha1.InferenceAPIResponses:
+		return v, nil
+	}
+	return "", fmt.Errorf("%s must be ChatCompletions, Responses or unset", name)
 }
 
 // envForceEscalation reads EVAL_FORCE_ESCALATION: 1 forces every run to the escalation model, which must
@@ -222,7 +246,7 @@ type anthropicSource struct {
 
 // foundryOnly are the settings that mean nothing with EVAL_MODEL=anthropic; one that is set is refused, so a
 // run never looks like it used them.
-var foundryOnly = []string{envEndpoint, envSuffixes, envAPI, envTriageDep, envEscDep}
+var foundryOnly = []string{envEndpoint, envSuffixes, envAPI, envTriageDep, envEscDep, envTriageAPI, envEscAPI}
 
 func newAnthropicSource() (*anthropicSource, error) {
 	for _, n := range foundryOnly {

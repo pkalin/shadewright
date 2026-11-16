@@ -28,7 +28,8 @@ package foundry
 //	FOUNDRY_ENDPOINT=https://<resource>.services.ai.azure.com/ FOUNDRY_DEPLOYMENT=triage \
 //	  go test -tags foundrysmoke -run Smoke -v -count=1 ./internal/providers/model/foundry/
 //
-// FOUNDRY_API_VERSION selects the API version (default v1).
+// FOUNDRY_API_VERSION selects the API version (default v1), and FOUNDRY_INFERENCE_API=Responses the Responses
+// API instead of chat completions (with API version v1 only).
 
 import (
 	"context"
@@ -75,6 +76,7 @@ func smokeProvider(t *testing.T) *Provider {
 	}
 	p, err := New(Config{
 		Endpoint: endpoint, Deployment: deployment, APIVersion: version, Tokens: tokens, MaxOutputTokens: 1024,
+		API: API(os.Getenv("FOUNDRY_INFERENCE_API")),
 		OnCall: func(r CallReport) {
 			t.Logf("call: model=%s input=%d cached=%d output=%d attempts=%d duration=%s err=%v",
 				r.Model, r.Usage.InputTokens, r.Usage.CachedInputTokens, r.Usage.OutputTokens, r.Attempts,

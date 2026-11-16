@@ -66,4 +66,4 @@ The lab Terraform (`shadewright-azure`) defaults a model deployment to Global St
 
 ## Amendments
 
-None.
+- 2026-11-16: the Foundry adapter can call a deployment through the Responses API (`inferenceAPI: Responses`, [#501](https://github.com/pkalin/shadewright/issues/501)). The 0 of 27 in the evidence table was measured on chat completions and has not been measured again on Responses, so the decision and the table stand as written.

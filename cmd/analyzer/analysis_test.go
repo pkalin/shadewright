@@ -291,7 +291,7 @@ func TestAnalysisAnthropicKeyFile(t *testing.T) {
 	ok := func() (foundry.TokenSource, error) { return noTokens{}, nil }
 	f := validFlags()
 	f.triageModel = ""
-	f.anthropicKeyFile = "/var/run/shadewright/anthropic/api-key"
+	f.anthropicKeyFile = testKeyFile
 	if _, err := buildAnalysis(f, testDeps(t), ok); err == nil {
 		t.Error("--anthropic-api-key-file without --triage-model was accepted")
 	}
@@ -312,7 +312,7 @@ func TestAnalysisAnthropicKeyFile(t *testing.T) {
 		want           analysis.Reason
 	}{
 		"no key file":         {"", "claude-haiku-5-5", analysis.ReasonProviderNotConfigured},
-		"another model":       {"/var/run/shadewright/anthropic/api-key", "claude-opus-5-5", analysis.ReasonUnexpectedModel},
+		"another model":       {testKeyFile, "claude-opus-5-5", analysis.ReasonUnexpectedModel},
 		"no key, other model": {"", "claude-opus-5-5", analysis.ReasonProviderNotConfigured},
 	} {
 		f := validFlags()
@@ -329,3 +329,53 @@ func TestAnalysisAnthropicKeyFile(t *testing.T) {
 		}
 	}
 }
+
+// An analyzer that only calls the Anthropic API starts without --model-endpoint-suffixes and without its Azure
+// workload identity, and builds no token source; a Foundry deployment is then refused before any call, and
+// without --anthropic-api-key-file too the start is refused naming both flags (#814).
+func TestAnalysisAnthropicOnlyNeedsNoAzureSettings(t *testing.T) {
+	asked := false
+	noIdentity := func() (foundry.TokenSource, error) {
+		asked = true
+		return nil, errors.New("AZURE_CLIENT_ID is not set")
+	}
+	f := validFlags()
+	f.endpointSuffixes = ""
+	f.anthropicKeyFile = testKeyFile
+	d := testDeps(t)
+	d.builder = emptyBuilder{}
+	c, err := buildAnalysis(f, d, noIdentity)
+	if err != nil || c == nil {
+		t.Fatalf("controller %v, error %v", c, err)
+	}
+	if asked {
+		t.Error("the workload identity was read without --model-endpoint-suffixes")
+	}
+	limits := analysis.Limits{MaxOutputTokens: 1024, Triage: &remediationv1alpha1.ModelDeployment{
+		Endpoint: "https://lab.services.ai.azure.com/", Deployment: "small", APIVersion: "v1",
+		MaxTokensPerDay: new(int64(1000))}}
+	inc := &remediationv1alpha1.Incident{ObjectMeta: metav1.ObjectMeta{Name: "web-oom", Namespace: operatorNamespace}}
+	out, err := c.Analyzer.Analyze(t.Context(), inc, limits)
+	if err != nil || out.Reason != analysis.ReasonProviderNotConfigured || out.Calls != 0 {
+		t.Errorf("a Foundry deployment: reason %s, calls %d, error %v", out.Reason, out.Calls, err)
+	}
+
+	f.anthropicKeyFile = ""
+	_, err = buildAnalysis(f, testDeps(t), noIdentity)
+	if err == nil || !strings.Contains(err.Error(), "--model-endpoint-suffixes") ||
+		!strings.Contains(err.Error(), "--anthropic-api-key-file") {
+		t.Errorf("no suffixes and no key file: %v", err)
+	}
+
+	// One Foundry setting brings the identity back: with --model-endpoint-suffixes a missing identity stops
+	// the start, whatever the key file says.
+	f = validFlags()
+	f.anthropicKeyFile = testKeyFile
+	_, err = buildAnalysis(f, testDeps(t), noIdentity)
+	if err == nil || !strings.Contains(err.Error(), "AZURE_CLIENT_ID") {
+		t.Errorf("suffixes without the identity: %v", err)
+	}
+}
+
+// testKeyFile is the Anthropic key file path of these tests.
+const testKeyFile = "/var/run/shadewright/anthropic/api-key"

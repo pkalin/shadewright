@@ -1,7 +1,7 @@
 name: Chart test
 
 # Lints and renders the Helm chart and installs it on Kind: with explicit values, and with chart-testing (ct lint,
-# then the default values plus image.allowTag with images built from the checkout, the metrics TLS profile scraped with a right and wrong CA and server name, ct install and helm test), and
+# then the default values plus image.allowTag with images built from the checkout, an Anthropic-only install, the metrics TLS profile scraped with a right and wrong CA and server name, ct install and helm test), and
 # scans the rendered chart and config/ for misconfigurations with Trivy (HIGH and CRITICAL fail the run unless
 # .trivyignore.yaml ignores them with a reason).
 # Called by ci.yml on pull requests and by chart.yml before a release tag publishes the chart.
@@ -194,6 +194,13 @@ jobs:
 
       - name: Install with the default values and check what it may read and write
         run: make test-chart-defaults
+
+      # An install whose model deployments are all Anthropic (#814): a triage model and the API key from a Secret
+      # made in the script with a dummy value (no repository secret, no model call), no Azure client ID, no
+      # endpoint suffixes and no record store. The analyzer starts without an Azure identity, and the API server
+      # accepts an Anthropic deployment without apiVersion and refuses a Foundry one.
+      - name: Install with Anthropic-only values and check the analyzer starts
+        run: make test-chart-anthropic
 
       # The metrics TLS trust profile: a throwaway CA and serving certificate in the component Secrets, then a scrape
       # from a Pod with a ServiceAccount token: the right CA and server name succeed, a wrong CA or name fail.

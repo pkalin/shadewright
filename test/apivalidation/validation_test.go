@@ -1997,10 +1997,116 @@ var _ = Describe("RemediationSettings", func() {
 				Entry("with a port and a path", v1alpha1.ModelProviderFoundry, "https://api.anthropic.com:443/openai/v1"),
 			)
 
+			// apiVersion is required for Foundry only (#814): the Anthropic adapter's version is fixed in code. A
+			// value on an Anthropic deployment stays valid, so objects stored while the field was required for
+			// every provider still pass their next update.
+			DescribeTable("requires apiVersion for a Foundry deployment only",
+				func(provider v1alpha1.ModelProvider, apiVersion string, accepted bool) {
+					s := withModel(func(m *v1alpha1.ModelDeployment) {
+						if provider == v1alpha1.ModelProviderAnthropic {
+							anthropic(m)
+						}
+						m.Provider, m.APIVersion = provider, apiVersion
+					})
+					if accepted {
+						expectAccepted(s)
+						return
+					}
+					expectRefused(s, "a deployment with a provider other than Anthropic needs apiVersion")
+				},
+				Entry("Foundry with apiVersion", v1alpha1.ModelProviderFoundry, "2024-10-21", true),
+				Entry("Foundry without apiVersion", v1alpha1.ModelProviderFoundry, "", false),
+				Entry("provider left out, with apiVersion", v1alpha1.ModelProvider(""), "v1", true),
+				Entry("provider left out, without apiVersion", v1alpha1.ModelProvider(""), "", false),
+				Entry("Anthropic with apiVersion", v1alpha1.ModelProviderAnthropic, "v1", true),
+				Entry("Anthropic without apiVersion", v1alpha1.ModelProviderAnthropic, "", true),
+			)
+
+			It("accepts an update of a stored Anthropic deployment that has apiVersion", func() {
+				s := withModel(func(m *v1alpha1.ModelDeployment) {
+					anthropic(m)
+					m.APIVersion = "2023-06-01"
+				})
+				expectAccepted(s)
+				got := &v1alpha1.RemediationSettings{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(s), got)).To(Succeed())
+				got.Spec.Analysis.Models.Triage.MaxTokensPerDay = ptr.To[int64](400000)
+				Expect(k8sClient.Update(ctx, got)).To(Succeed())
+				Expect(got.Spec.Analysis.Models.Triage.APIVersion).To(Equal("2023-06-01"))
+				// The value can also be dropped on a later update.
+				got.Spec.Analysis.Models.Triage.APIVersion = ""
+				Expect(k8sClient.Update(ctx, got)).To(Succeed())
+			})
+
+			It("refuses switching an Anthropic deployment without apiVersion to Foundry", func() {
+				s := withModel(anthropic)
+				s.Spec.Analysis.Models.Triage.APIVersion = ""
+				expectAccepted(s)
+				got := &v1alpha1.RemediationSettings{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(s), got)).To(Succeed())
+				m := got.Spec.Analysis.Models.Triage
+				m.Provider, m.Endpoint, m.Deployment = v1alpha1.ModelProviderFoundry,
+					"https://example.services.ai.azure.com/", "small-model"
+				err := k8sClient.Update(ctx, got)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("a deployment with a provider other than Anthropic needs apiVersion"))
+			})
+
 			It("refuses an unknown provider", func() {
 				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.Provider = "OpenAI" }),
 					"spec.analysis.models.triage.provider")
 			})
+		})
+
+		Describe("inferenceAPI (#501)", func() {
+			It("is left out by default, and the stored object keeps it out", func() {
+				s := withModel(func(*v1alpha1.ModelDeployment) {})
+				expectAccepted(s)
+				Expect(s.Spec.Analysis.Models.Triage.InferenceAPI).To(BeEmpty())
+			})
+
+			DescribeTable("accepts it on a Foundry deployment",
+				func(api v1alpha1.InferenceAPI, provider v1alpha1.ModelProvider, version string) {
+					expectAccepted(withModel(func(m *v1alpha1.ModelDeployment) {
+						m.InferenceAPI, m.Provider, m.APIVersion = api, provider, version
+					}))
+				},
+				Entry("Responses with v1", v1alpha1.InferenceAPIResponses, v1alpha1.ModelProviderFoundry, "v1"),
+				Entry("Responses, provider left out", v1alpha1.InferenceAPIResponses, v1alpha1.ModelProvider(""), "v1"),
+				Entry("ChatCompletions with v1", v1alpha1.InferenceAPIChatCompletions, v1alpha1.ModelProviderFoundry, "v1"),
+				Entry("ChatCompletions with a date", v1alpha1.InferenceAPIChatCompletions, v1alpha1.ModelProviderFoundry,
+					"2024-10-21"),
+			)
+
+			// With the field left out the rule must still answer with its message, not fail to evaluate:
+			// apiVersion is optional in the schema since #814.
+			DescribeTable("refuses Responses with a dated API version or none",
+				func(version string) {
+					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+						m.InferenceAPI, m.APIVersion = v1alpha1.InferenceAPIResponses, version
+					}), "inferenceAPI Responses needs apiVersion v1")
+				},
+				Entry(nil, "2024-10-21"), Entry(nil, "2025-04-01-preview"), Entry("no apiVersion", ""),
+			)
+
+			DescribeTable("refuses it on an Anthropic deployment",
+				func(api v1alpha1.InferenceAPI) {
+					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+						m.Provider, m.Endpoint, m.Deployment = v1alpha1.ModelProviderAnthropic,
+							"https://api.anthropic.com", "claude-haiku-5-5"
+						m.InferenceAPI = api
+					}), "inferenceAPI is only for a deployment with provider Foundry")
+				},
+				Entry(nil, v1alpha1.InferenceAPIResponses), Entry(nil, v1alpha1.InferenceAPIChatCompletions),
+			)
+
+			DescribeTable("refuses an unknown API",
+				func(api v1alpha1.InferenceAPI) {
+					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.InferenceAPI = api }),
+						"spec.analysis.models.triage.inferenceAPI")
+				},
+				Entry(nil, v1alpha1.InferenceAPI("responses")), Entry(nil, v1alpha1.InferenceAPI("Completions")),
+			)
 		})
 
 		It("accepts a deployment name of 64 characters", func() {

@@ -109,7 +109,8 @@ func (c *Controller) causeFor(o collector.Observation) (string, remediationv1alp
 // fp held as a first sighting that are linked to that Incident (ADR-0039 point 16): a consequence seen before
 // its cause's Incident was opened was held, and the observation that links it now counts only what is new of
 // it ([Controller.increase] reads the held total), so without this the held part would never reach the
-// tally. Held observations linked elsewhere, or to nothing, stay held. It reports what consume does. The
+// tally. It runs for a later observation of the consequence, and for each cause observation
+// ([Controller.absorbHeldFor]). Held observations linked elsewhere, or to nothing, stay held. It reports what consume does. The
 // caller holds mu.
 func (c *Controller) absorbHeld(ctx context.Context, fp, name string, spec remediationv1alpha1.IncidentSpec) bool {
 	held := c.sightings.takeWhere(fp, func(h collector.Observation) bool {
@@ -120,6 +121,33 @@ func (c *Controller) absorbHeld(ctx context.Context, fp, name string, spec remed
 	for _, h := range held {
 		reason, _ := absorbedReason(h.Reason)
 		due = c.absorb(ctx, h, name, spec, reason) || due
+	}
+	return due
+}
+
+// absorbHeldFor counts on the Incident of cause fingerprint cause, as evidence, what is held as a first
+// sighting for its consequences (ADR-0039 point 6, #820): a consequence seen once before its cause was
+// consumed is held by the gate, and nothing else would count it if it is never seen again. It runs after
+// each cause observation is consumed, so it also covers an Incident that existed before and became a cause
+// only now. It finds the held consequences through the sightings' index by cause fingerprint, so it costs
+// one map lookup plus, per consequence fingerprint held for that cause, the observations held for it (at most
+// maxHeldPerFingerprint); it never scans the first sightings. Each held observation is linked by
+// [Controller.causeFor], from the controller's own list, so one of another subject UID, or whose cause has no
+// Incident (refused at the cap, held as a first sighting itself), stays held as before. It reports what
+// consume does. The caller holds mu.
+func (c *Controller) absorbHeldFor(ctx context.Context, cause string) bool {
+	fps := c.sightings.consequencesOf(cause)
+	if len(fps) == 0 {
+		return false
+	}
+	name := c.nameOf(cause)
+	inc, ok := c.causes[name]
+	if !ok || inc.spec.Fingerprint != cause {
+		return false
+	}
+	due := false
+	for _, fp := range fps {
+		due = c.absorbHeld(ctx, fp, name, inc.spec) || due
 	}
 	return due
 }

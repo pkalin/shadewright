@@ -42,6 +42,9 @@ const (
 // toolTypeFunction is the only kind of tool and tool call: a function.
 const toolTypeFunction = "function"
 
+// responseSchemaName is the name the response schema is sent under, in both APIs.
+const responseSchemaName = "response"
+
 var (
 	// toolNamePattern is OpenAI's rule for function names.
 	toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -120,61 +123,95 @@ type (
 	}
 )
 
-// encode checks a request and builds its body. It returns the names of the tools offered, against which the
-// reply's tool calls are checked. Errors are fixed text matching providers.ErrRejected (or ErrTooLarge), and
-// never quote the request.
+// checkedRequest is a request that passed every check, in the chat completions form both encoders start from.
+type checkedRequest struct {
+	maxOut   int
+	tools    []toolFunction
+	schema   json.RawMessage
+	messages []chatMessage
+	offered  map[string]bool
+}
+
+// encode checks a request and builds its body in the Provider's API. It returns the names of the tools
+// offered, against which the reply's tool calls are checked. Errors are fixed text matching
+// providers.ErrRejected (or ErrTooLarge), and never quote the request.
 func (p *Provider) encode(req providers.CompletionRequest) ([]byte, map[string]bool, error) {
+	cr, err := p.check(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	var body any
+	if p.api == APIResponses {
+		body = responsesBody(cr, p.deployment)
+	} else {
+		body = chatBody(cr, p.deployment, p.sendModel)
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("foundry: the request could not be encoded: %w", providers.ErrRejected)
+	}
+	if len(data) > maxRequestBytes {
+		return nil, nil, fmt.Errorf("foundry: the request is larger than %d bytes: %w", maxRequestBytes, providers.ErrTooLarge)
+	}
+	return data, cr.offered, nil
+}
+
+// check checks a request against the rules both APIs share. Errors are fixed text matching
+// providers.ErrRejected.
+func (p *Provider) check(req providers.CompletionRequest) (checkedRequest, error) {
 	rejected := func(msg string) error { return fmt.Errorf("foundry: %s: %w", msg, providers.ErrRejected) }
 	if len(req.Messages) == 0 {
-		return nil, nil, rejected("the request has no messages")
+		return checkedRequest{}, rejected("the request has no messages")
 	}
 	maxOut := req.MaxOutputTokens
 	if maxOut == 0 {
 		maxOut = p.maxOutput
 	}
 	if maxOut < 1 || maxOut > MaxOutputTokens {
-		return nil, nil, rejected("the output token limit is out of range")
+		return checkedRequest{}, rejected("the output token limit is out of range")
 	}
-	body := chatRequest{MaxCompletionTokens: maxOut}
-	if p.sendModel {
-		body.Model = p.deployment
-	}
-	offered := map[string]bool{}
+	cr := checkedRequest{maxOut: maxOut, offered: map[string]bool{}}
 	for _, t := range req.Tools {
-		if !toolNamePattern.MatchString(t.Name) || offered[t.Name] {
-			return nil, nil, rejected("a tool name is invalid or repeated")
+		if !toolNamePattern.MatchString(t.Name) || cr.offered[t.Name] {
+			return checkedRequest{}, rejected("a tool name is invalid or repeated")
 		}
 		if !isJSONObject(t.Parameters) {
-			return nil, nil, rejected("the parameters of a tool are not a JSON schema object")
+			return checkedRequest{}, rejected("the parameters of a tool are not a JSON schema object")
 		}
-		offered[t.Name] = true
-		body.Tools = append(body.Tools, chatTool{Type: toolTypeFunction, Function: toolFunction{
-			Name: t.Name, Description: t.Description, Parameters: t.Parameters,
-		}})
+		cr.offered[t.Name] = true
+		cr.tools = append(cr.tools, toolFunction{Name: t.Name, Description: t.Description, Parameters: t.Parameters})
 	}
 	if len(req.ResponseSchema) > 0 {
 		if !isJSONObject(req.ResponseSchema) {
-			return nil, nil, rejected("the response schema is not a JSON object")
+			return checkedRequest{}, rejected("the response schema is not a JSON object")
 		}
-		body.ResponseFormat = &responseFormat{Type: "json_schema", JSONSchema: jsonSchema{
-			Name: "response", Strict: true, Schema: req.ResponseSchema,
-		}}
+		cr.schema = req.ResponseSchema
 	}
 	for _, m := range req.Messages {
 		cm, err := encodeMessage(m)
 		if err != nil {
-			return nil, nil, rejected(err.Error())
+			return checkedRequest{}, rejected(err.Error())
 		}
-		body.Messages = append(body.Messages, cm)
+		cr.messages = append(cr.messages, cm)
 	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return nil, nil, rejected("the request could not be encoded")
+	return cr, nil
+}
+
+// chatBody is the chat completions body of a checked request.
+func chatBody(cr checkedRequest, deployment string, sendModel bool) chatRequest {
+	body := chatRequest{MaxCompletionTokens: cr.maxOut, Messages: cr.messages}
+	if sendModel {
+		body.Model = deployment
 	}
-	if len(data) > maxRequestBytes {
-		return nil, nil, fmt.Errorf("foundry: the request is larger than %d bytes: %w", maxRequestBytes, providers.ErrTooLarge)
+	for _, t := range cr.tools {
+		body.Tools = append(body.Tools, chatTool{Type: toolTypeFunction, Function: t})
 	}
-	return data, offered, nil
+	if cr.schema != nil {
+		body.ResponseFormat = &responseFormat{Type: "json_schema", JSONSchema: jsonSchema{
+			Name: responseSchemaName, Strict: true, Schema: cr.schema,
+		}}
+	}
+	return body
 }
 
 // encodeMessage maps one message. Error text is fixed.
@@ -259,12 +296,23 @@ func parseResponse(data []byte, offered map[string]bool, structured bool) (provi
 	if msg.Content != nil {
 		content = *msg.Content
 	}
-	if len(msg.ToolCalls) > maxToolCalls {
+	return checkOutput(billed, content, msg.ToolCalls, offered, structured)
+}
+
+// checkOutput checks the content and tool calls of a reply that completed, in either API, and returns the
+// Completion. billed carries the reply's Usage and Model, and is what an error returns. Error text is fixed and
+// never quotes the reply.
+func checkOutput(billed providers.Completion, content string, toolCalls []chatToolCall, offered map[string]bool,
+	structured bool) (providers.Completion, error) {
+	fail := func(msg string) (providers.Completion, error) {
+		return billed, fmt.Errorf("foundry: %s: %w", msg, providers.ErrMalformedOutput)
+	}
+	if len(toolCalls) > maxToolCalls {
 		return fail("the reply has too many tool calls")
 	}
-	calls := make([]providers.ToolCall, 0, len(msg.ToolCalls))
+	calls := make([]providers.ToolCall, 0, len(toolCalls))
 	seen := map[string]bool{}
-	for _, tc := range msg.ToolCalls {
+	for _, tc := range toolCalls {
 		switch {
 		case tc.Type != toolTypeFunction:
 			return fail("a tool call is not a function call")
@@ -289,7 +337,7 @@ func parseResponse(data []byte, offered map[string]bool, structured bool) (provi
 		}
 		calls = nil
 	}
-	return providers.Completion{Content: content, ToolCalls: calls, Usage: u, Model: r.Model}, nil
+	return providers.Completion{Content: content, ToolCalls: calls, Usage: billed.Usage, Model: billed.Model}, nil
 }
 
 // isJSONObject reports whether b is one valid JSON object, surrounded by white space at most.
@@ -322,13 +370,19 @@ func billedUsage(data []byte) providers.Completion {
 	if data == nil || json.Unmarshal(data, &r) != nil {
 		return providers.Completion{UsageUnknown: true}
 	}
-	u, ok := usageOf(r.Usage)
+	return billedOf(r.Model, r.Usage)
+}
+
+// billedOf is the Completion of a billed reply that was refused before it was parsed: its usage, or
+// UsageUnknown without a usable usage block, and its model when that is valid.
+func billedOf(model string, cu *chatUsage) providers.Completion {
+	u, ok := usageOf(cu)
 	if !ok {
 		return providers.Completion{UsageUnknown: true}
 	}
 	c := providers.Completion{Usage: u}
-	if validModel(r.Model) {
-		c.Model = r.Model
+	if validModel(model) {
+		c.Model = model
 	}
 	return c
 }

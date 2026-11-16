@@ -131,8 +131,9 @@ spec:
                           apiVersion:
                             description: |-
                               apiVersion is the inference API version the adapter sends: v1, or a date such as 2024-10-21 (month 01
-                              to 12, day 01 to 31), optionally followed by -preview. For provider Anthropic it is required too but not
-                              sent: that adapter's API version is fixed in code.
+                              to 12, day 01 to 31), optionally followed by -preview. Required for provider Foundry. For provider
+                              Anthropic leave it out: that adapter's API version is fixed in code, so a value is accepted (an object
+                              stored when the field was required stays valid) but never sent.
                             maxLength: 32
                             minLength: 2
                             pattern: ^(v1|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(-preview)?)$
@@ -163,6 +164,17 @@ spec:
                             minLength: 1
                             pattern: ^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$
                             type: string
+                          inferenceAPI:
+                            description: |-
+                              inferenceAPI is the API a Foundry deployment is called through: ChatCompletions (used when it is left
+                              out) or Responses, which needs apiVersion v1 and posts to <endpoint>/openai/v1/responses. Both carry the
+                              same redacted context, tool definitions, response schema and output limit; the Responses request asks the
+                              service to store nothing. Set Responses for a model that refuses function tools on chat completions,
+                              such as the gpt-6.1 models, whose escalation calls need the read tools (#501). Only for provider Foundry.
+                            enum:
+                            - ChatCompletions
+                            - Responses
+                            type: string
                           maxTokensPerDay:
                             description: |-
                               maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
@@ -187,20 +199,26 @@ spec:
                               Anthropic. It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
                               Anthropic the endpoint must be https://api.anthropic.com, the analyzer reads its API key from the file
                               of its --anthropic-api-key-file flag (not in this object) and refuses the deployment without it,
-                              deployment must equal the role's --triage-model or --escalation-model value, apiVersion is not sent
-                              (the adapter's API version is fixed), and the redacted context leaves Azure. A Foundry deployment may
+                              deployment must equal the role's --triage-model or --escalation-model value, apiVersion may be left out
+                              and is not sent (the adapter's API version is fixed), and the redacted context leaves Azure. A Foundry
+                              deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
+                              started without them refuses it (ProviderNotConfigured). A Foundry deployment may
                               not name the host api.anthropic.com. There is no fallback between providers.
                             enum:
                             - Foundry
                             - Anthropic
                             type: string
                         required:
-                        - apiVersion
                         - deployment
                         - endpoint
                         - maxTokensPerDay
                         type: object
                         x-kubernetes-validations:
+                        - fieldPath: .apiVersion
+                          message: a deployment with a provider other than Anthropic
+                            needs apiVersion
+                          rule: has(self.apiVersion) || (has(self.provider) && self.provider
+                            == 'Anthropic')
                         - message: a deployment with provider Anthropic must have
                             the endpoint https://api.anthropic.com
                           rule: '!has(self.provider) || self.provider != ''Anthropic''
@@ -210,6 +228,13 @@ spec:
                           rule: (has(self.provider) && self.provider == 'Anthropic')
                             || !isURL(self.endpoint) || url(self.endpoint).getHostname()
                             != 'api.anthropic.com'
+                        - message: inferenceAPI is only for a deployment with provider
+                            Foundry
+                          rule: '!has(self.inferenceAPI) || !has(self.provider) ||
+                            self.provider == ''Foundry'''
+                        - message: inferenceAPI Responses needs apiVersion v1
+                          rule: '!has(self.inferenceAPI) || self.inferenceAPI != ''Responses''
+                            || (has(self.apiVersion) && self.apiVersion == ''v1'')'
                       triage:
                         description: |-
                           triage is the small model for the one structured call on the prepared context, without tools. Left out,
@@ -219,8 +244,9 @@ spec:
                           apiVersion:
                             description: |-
                               apiVersion is the inference API version the adapter sends: v1, or a date such as 2024-10-21 (month 01
-                              to 12, day 01 to 31), optionally followed by -preview. For provider Anthropic it is required too but not
-                              sent: that adapter's API version is fixed in code.
+                              to 12, day 01 to 31), optionally followed by -preview. Required for provider Foundry. For provider
+                              Anthropic leave it out: that adapter's API version is fixed in code, so a value is accepted (an object
+                              stored when the field was required stays valid) but never sent.
                             maxLength: 32
                             minLength: 2
                             pattern: ^(v1|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(-preview)?)$
@@ -251,6 +277,17 @@ spec:
                             minLength: 1
                             pattern: ^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$
                             type: string
+                          inferenceAPI:
+                            description: |-
+                              inferenceAPI is the API a Foundry deployment is called through: ChatCompletions (used when it is left
+                              out) or Responses, which needs apiVersion v1 and posts to <endpoint>/openai/v1/responses. Both carry the
+                              same redacted context, tool definitions, response schema and output limit; the Responses request asks the
+                              service to store nothing. Set Responses for a model that refuses function tools on chat completions,
+                              such as the gpt-6.1 models, whose escalation calls need the read tools (#501). Only for provider Foundry.
+                            enum:
+                            - ChatCompletions
+                            - Responses
+                            type: string
                           maxTokensPerDay:
                             description: |-
                               maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
@@ -275,20 +312,26 @@ spec:
                               Anthropic. It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
                               Anthropic the endpoint must be https://api.anthropic.com, the analyzer reads its API key from the file
                               of its --anthropic-api-key-file flag (not in this object) and refuses the deployment without it,
-                              deployment must equal the role's --triage-model or --escalation-model value, apiVersion is not sent
-                              (the adapter's API version is fixed), and the redacted context leaves Azure. A Foundry deployment may
+                              deployment must equal the role's --triage-model or --escalation-model value, apiVersion may be left out
+                              and is not sent (the adapter's API version is fixed), and the redacted context leaves Azure. A Foundry
+                              deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
+                              started without them refuses it (ProviderNotConfigured). A Foundry deployment may
                               not name the host api.anthropic.com. There is no fallback between providers.
                             enum:
                             - Foundry
                             - Anthropic
                             type: string
                         required:
-                        - apiVersion
                         - deployment
                         - endpoint
                         - maxTokensPerDay
                         type: object
                         x-kubernetes-validations:
+                        - fieldPath: .apiVersion
+                          message: a deployment with a provider other than Anthropic
+                            needs apiVersion
+                          rule: has(self.apiVersion) || (has(self.provider) && self.provider
+                            == 'Anthropic')
                         - message: a deployment with provider Anthropic must have
                             the endpoint https://api.anthropic.com
                           rule: '!has(self.provider) || self.provider != ''Anthropic''
@@ -298,6 +341,13 @@ spec:
                           rule: (has(self.provider) && self.provider == 'Anthropic')
                             || !isURL(self.endpoint) || url(self.endpoint).getHostname()
                             != 'api.anthropic.com'
+                        - message: inferenceAPI is only for a deployment with provider
+                            Foundry
+                          rule: '!has(self.inferenceAPI) || !has(self.provider) ||
+                            self.provider == ''Foundry'''
+                        - message: inferenceAPI Responses needs apiVersion v1
+                          rule: '!has(self.inferenceAPI) || self.inferenceAPI != ''Responses''
+                            || (has(self.apiVersion) && self.apiVersion == ''v1'')'
                     type: object
                     x-kubernetes-validations:
                     - message: an escalation model needs a triage model

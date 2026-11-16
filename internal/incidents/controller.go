@@ -684,6 +684,8 @@ func (c *Controller) counted(occurrence string) (int64, bool) {
 // ([RecurAfter], [RecurWithin]); the sighting that opens the Incident counts every observation held for it,
 // in order. An observation with nothing new to count is neither held nor counted; a waiting cause reported
 // again that proves its symptom recurs still opens the Incident of a first sighting held for it, and a waiting cause reported again moves its Incident's last seen ([Controller.stillWaiting]).
+// A cause observation then counts on its Incident what is held as a first sighting for its consequences
+// ([Controller.absorbHeldFor]).
 //
 // It reports whether the batch is due at once: the Incident has not been written by this process yet.
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
@@ -691,6 +693,19 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	o.Container = containerName(ctx, o.Container)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	due := c.consumeLocked(ctx, o)
+	if isCause(o) {
+		// The cause's Incident may have opened just now, or exist already, while first sightings of its
+		// consequences are held from before it did: they are counted there now, whether or not the consequence
+		// is seen again (ADR-0039 point 6, #820).
+		due = c.absorbHeldFor(ctx, o.Fingerprint) || due
+	}
+	return due
+}
+
+// consumeLocked is consume once o is prepared and mu is held, before the held consequences of a cause are
+// absorbed.
+func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation) bool {
 	n := c.increase(o)
 	// A consequence whose cause has an Incident is counted there as evidence and opens none of its own
 	// (ADR-0039 point 6), with what is held for it as a first sighting from before the cause's Incident was

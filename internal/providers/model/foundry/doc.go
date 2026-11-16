@@ -15,14 +15,23 @@ limitations under the License.
 */
 
 // Package foundry is the Microsoft Foundry adapter of [providers.ModelProvider] (ADR-0013, design section
-// 11.1). It calls one deployment of an OpenAI-format model through the chat completions API, with structured
-// output (a JSON schema, strict) and function tools. It imports the standard library and this module only.
+// 11.1). It calls one deployment of an OpenAI-format model through the chat completions API or, for a
+// deployment configured so ([APIResponses], #501), the Responses API, with structured output (a JSON schema,
+// strict) and function tools. It imports the standard library and this module only.
 //
 // A [Provider] is bound at construction to one endpoint, deployment and API version, the fields of a
 // ModelDeployment in RemediationSettings. With API version v1 it posts to <endpoint>/openai/v1/chat/completions
 // (or <endpoint>/chat/completions when the endpoint already ends in /openai/v1) and names the deployment in the
 // body; with a dated version it posts to <endpoint>/openai/deployments/<deployment>/chat/completions. The
-// endpoint's host must be a DNS name, never an IP address. The Provider follows no redirect, uses no proxy, and
+// endpoint's host must be a DNS name, never an IP address. With the Responses API (API version v1 only) it posts
+// to <endpoint>/openai/v1/responses (or <endpoint>/responses when the endpoint ends in /openai/v1), with the
+// deployment in the body. The Responses request carries the same messages, tools, schema and output limit as
+// the chat completion would: messages as input items, the tool calls of an assistant message as function_call
+// items and tool results as function_call_output items, the schema in text.format, every function tool with
+// strict false (as chat completions treat it), and store false, so the service keeps no copy of the context or
+// the reply. Some models refuse function tools on chat completions (the gpt-6.1 models, whose reasoning
+// cannot be combined with tools there) and need it; partner models that speak chat completions only keep it.
+// The Provider follows no redirect, uses no proxy, and
 // connects only to public unicast addresses: an endpoint that resolves to a loopback, private, link-local,
 // shared, reserved, documentation or benchmarking address, or to an IPv6 address that embeds one (NAT64,
 // 6to4, IPv4-compatible) or whose embedded IPv4 cannot be read reliably (Teredo, local-use NAT64), gets no
@@ -51,8 +60,11 @@ limitations under the License.
 // empty 200, for example), is that timeout and is not counted as billed.
 //
 // A reply is untrusted (invariant 4). Its body is read up to Config.MaxResponseBytes, must be one JSON value
-// of the chat completion shape with exactly one choice and a usage block, and is then checked against the
-// request: a reply cut off at the output limit, filtered, refused, with no content and no tool call, with
+// of the chat completion shape with exactly one choice and a usage block (with the Responses API: a response
+// with status completed, a usage block with both counts, and only reasoning, assistant message and
+// function_call output items; reasoning is skipped, and an incomplete or failed response is treated as a chat
+// completion cut off, filtered or ended for an unknown reason), and is then checked against the request: a
+// reply cut off at the output limit, filtered, refused, with no content and no tool call, with
 // content that is not one JSON object when a response schema was sent, or with a tool call that names a tool
 // the request did not offer, has a malformed ID or arguments that are not a JSON object, is
 // [providers.ErrMalformedOutput]. Such a reply was billed, so its Usage and Model are returned with the error.

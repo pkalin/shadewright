@@ -193,6 +193,91 @@ spec:
           status:
             description: status is the deduplication state.
             properties:
+              absorbed:
+                description: |-
+                  absorbed is the tally of the consequence observations this Incident took as evidence of its cause, one
+                  entry per reason, at most 8 (ADR-0039 point 16). They change neither count nor lastSeen, and the analysis
+                  trigger and the quiet rule do not read them. Nothing writes it yet.
+                items:
+                  description: |-
+                    AbsorbedTally counts the observations of one consequence reason that a cause's Incident took as evidence
+                    (ADR-0039 point 16). It holds no event text.
+                  properties:
+                    count:
+                      description: |-
+                        count is the number of occurrences of the reason counted on this Incident, counting event series
+                        increments like status.count. It saturates at 1,000,000.
+                      format: int64
+                      maximum: 1000000
+                      minimum: 0
+                      type: integer
+                    lastSeen:
+                      description: lastSeen is when the latest observation of the
+                        reason arrived.
+                      format: date-time
+                      type: string
+                    reason:
+                      description: reason is the consequence reason counted.
+                      enum:
+                      - BackOff
+                      - Unhealthy
+                      type: string
+                  required:
+                  - count
+                  - lastSeen
+                  - reason
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - reason
+                x-kubernetes-list-type: map
+              absorbedOccurrences:
+                description: |-
+                  absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart
+                  from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point
+                  16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped.
+                  Nothing writes them yet.
+                items:
+                  description: OccurrenceRecord is what an Incident counted of one
+                    occurrence (design 3.2). It holds no event text.
+                  properties:
+                    began:
+                      description: |-
+                        began is when the occurrence began: the event's creation time, the termination's finish time or the
+                        condition's last transition time. Absent when the cluster did not report one.
+                      format: date-time
+                      type: string
+                    id:
+                      description: |-
+                        id names the occurrence: "event:" and the Event UID, "termination:" and a hash of the pod UID, the
+                        container and the termination, or "condition:" and a hash of the object UID, the kind, the symptom
+                        reason and when the condition began, for a symptom read from an object's status by a module's symptom
+                        source.
+                      maxLength: 76
+                      pattern: ^(event|termination|condition):[A-Za-z0-9-]{1,64}$
+                      type: string
+                    total:
+                      description: |-
+                        total is the highest total of the occurrence counted: the event's series count, or 1 for a
+                        termination or a condition.
+                      format: int64
+                      maximum: 2147483647
+                      minimum: 0
+                      type: integer
+                  required:
+                  - id
+                  - total
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: atomic
+              absorbedOccurrencesDroppedThrough:
+                description: |-
+                  absorbedOccurrencesDroppedThrough is when the newest occurrence dropped from absorbedOccurrences began,
+                  the drop mark of occurrencesDroppedThrough for the absorbed list. Nothing writes it yet.
+                format: date-time
+                type: string
               analysisRecords:
                 description: analysisRecords are the newest analysis record IDs, oldest
                   first (at most MaxAnalysisRecords).
@@ -207,6 +292,12 @@ spec:
                 maxItems: 20
                 type: array
                 x-kubernetes-list-type: atomic
+              cause:
+                description: |-
+                  cause is true when the Incident was opened or counted by a pod-status observation of class cause, an OOM
+                  kill or a waiting reason the kubelet wrote (ADR-0039 point 8). Only such an Incident takes the evidence of
+                  a consequence or folds a consequence Incident. An Event never sets it. Nothing writes it yet.
+                type: boolean
               conditions:
                 description: conditions explain the phase.
                 items:
@@ -267,6 +358,21 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              containers:
+                description: |-
+                  containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039
+                  point 8). The late-cause fold compares them between a consequence Incident and its cause's Incident.
+                  Nothing writes them yet.
+                items:
+                  description: Name is a DNS label used to reference other Shadewright
+                    objects or entries.
+                  maxLength: 63
+                  minLength: 1
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                  type: string
+                maxItems: 8
+                type: array
+                x-kubernetes-list-type: set
               count:
                 description: |-
                   count is the number of occurrences counted, counting event series increments, not totals. It
@@ -280,6 +386,26 @@ spec:
                 description: firstSeen is when the first observation arrived.
                 format: date-time
                 type: string
+              foldedInto:
+                description: |-
+                  foldedInto names the cause's Incident, by name and UID, when this consequence Incident was folded into it
+                  and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Nothing writes it yet.
+                properties:
+                  name:
+                    description: name of the Incident.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  uid:
+                    description: uid of the Incident.
+                    maxLength: 36
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
               handledHint:
                 description: |-
                   handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3):

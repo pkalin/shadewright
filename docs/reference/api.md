@@ -163,6 +163,36 @@ Validation rules:
 
 Types used by the resources above, in alphabetical order.
 
+### AbsorbedReason
+
+AbsorbedReason is a consequence reason whose observations count on the Incident of their cause instead of
+opening one of their own (ADR-0039 point 16). The values come from the fixed table of the rule, never from
+the cluster, so the tally carries no text an Event or a pod writes.
+
+- Underlying type: string
+- One of `BackOff`, `Unhealthy`
+
+Used by: [AbsorbedTally](#absorbedtally).
+
+| Value | Description |
+| --- | --- |
+| `BackOff` | AbsorbedBackOff is a kubelet BackOff of a container whose pod status shows a cause. |
+| `Unhealthy` | AbsorbedUnhealthy is a kubelet probe failure of a container whose pod status shows a cause. |
+
+### AbsorbedTally
+
+AbsorbedTally counts the observations of one consequence reason that a cause's Incident took as evidence
+(ADR-0039 point 16). It holds no event text.
+
+
+Used by: [IncidentStatus](#incidentstatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `reason` | [AbsorbedReason](#absorbedreason) | Yes | reason is the consequence reason counted.<br>One of `BackOff`, `Unhealthy` |
+| `count` | integer | Yes | count is the number of occurrences of the reason counted on this Incident, counting event series increments like status.count. It saturates at 1,000,000.<br>Maximum: 1000000<br>Minimum: 0 |
+| `lastSeen` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | lastSeen is when the latest observation of the reason arrived. |
+
 ### Action
 
 Action is one entry from the action catalog. Exactly the member named by type is set.
@@ -680,7 +710,7 @@ Used by: [IncidentStatus](#incidentstatus).
 IncidentRef points to the Incident a request answers, in the same namespace.
 
 
-Used by: [RemediationRequestSpec](#remediationrequestspec).
+Used by: [IncidentStatus](#incidentstatus), [RemediationRequestSpec](#remediationrequestspec).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -732,6 +762,12 @@ Used by: [Incident](#incident).
 | `count` | integer | No | count is the number of occurrences counted, counting event series increments, not totals. It saturates at 1,000,000: a series count is written by whoever can create events, so forged updates can raise it without bound otherwise. It is not a count of distinct occurrences.<br>Maximum: 1000000<br>Minimum: 0 |
 | `occurrences` | [OccurrenceRecord](#occurrencerecord) array | No | occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each, the highest total the cluster reported that was counted, and when it began. After a restart the analyzer reads them to count only what is new. Older ones are dropped.<br>Maximum items: 32<br>List type: atomic |
 | `occurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence with no record that began no later than this is treated as counted in full, so the bound never counts one twice. |
+| `containers` | [Name](#name) array | No | containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039 point 8). The late-cause fold compares them between a consequence Incident and its cause's Incident. Nothing writes them yet.<br>Maximum items: 8<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: set |
+| `cause` | boolean | No | cause is true when the Incident was opened or counted by a pod-status observation of class cause, an OOM kill or a waiting reason the kubelet wrote (ADR-0039 point 8). Only such an Incident takes the evidence of a consequence or folds a consequence Incident. An Event never sets it. Nothing writes it yet. |
+| `absorbed` | [AbsorbedTally](#absorbedtally) array | No | absorbed is the tally of the consequence observations this Incident took as evidence of its cause, one entry per reason, at most 8 (ADR-0039 point 16). They change neither count nor lastSeen, and the analysis trigger and the quiet rule do not read them. Nothing writes it yet.<br>Maximum items: 8<br>List type: map<br>List key: `reason` |
+| `absorbedOccurrences` | [OccurrenceRecord](#occurrencerecord) array | No | absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point 16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped. Nothing writes them yet.<br>Maximum items: 32<br>List type: atomic |
+| `absorbedOccurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | absorbedOccurrencesDroppedThrough is when the newest occurrence dropped from absorbedOccurrences began, the drop mark of occurrencesDroppedThrough for the absorbed list. Nothing writes it yet. |
+| `foldedInto` | [IncidentRef](#incidentref) | No | foldedInto names the cause's Incident, by name and UID, when this consequence Incident was folded into it and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Nothing writes it yet. |
 | `resolvedTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design 3.2). It cannot change while the phase stays Resolved. A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated without an analysis; seen again later, it opens the next occurrence of the fingerprint as a new Incident. |
 | `lastAnalysisTime` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastAnalysisTime is when the analyzer last ran; it drives the cooldown. |
 | `handledHint` | [HintRef](#hintref) | No | handledHint is the reviewer hint the analysis claimed by lastAnalysisTime answers (ADR-0028 section 3): written in the status update that takes the claim and kept with the outcome in the Analyzed condition, so a restarted analyzer does not run the same hint twice and the executor can match a refusal to the hint. Absent for an analysis without a hint. The trigger also writes it, with the Analyzed reason CoolingDown or BudgetSpent, for a hint it refuses without an analysis. |

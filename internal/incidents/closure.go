@@ -80,6 +80,10 @@ const (
 	// the closure rules listed the requests), so it moved back to Proposed, with no resolvedTime, and the
 	// request decides it as usual.
 	ReasonRequestActive = "RequestActive"
+	// ReasonFoldedIntoCause: the Incident is a consequence of a cause whose Incident opened after it, on the same
+	// container, so it was folded into that Incident: Resolved, with status.foldedInto naming it (ADR-0039 point
+	// 14). Declared for the fold; nothing sets it yet.
+	ReasonFoldedIntoCause = "FoldedIntoCause"
 )
 
 // lifecycleFieldOwner is the field manager of the closure rules' status writes, so the managed fields tell
@@ -116,6 +120,7 @@ var lifecycleMessages = map[string]string{
 	ReasonRequestInconclusive:      "The newest request naming the Incident was merged, and its effect could not be shown; a person decides",
 	ReasonReopened:                 "The symptom came back within 24 hours of a quiet resolution before any analysis; the Incident is Open again",
 	ReasonRequestActive:            "A request naming the Incident is active; it is Proposed again until the request ends",
+	ReasonFoldedIntoCause:          "The Incident is a consequence of a cause on the same container and was folded into the cause's Incident",
 }
 
 // finalRequest reports whether a request phase is final for the closure rules (design 3.2): Succeeded, one

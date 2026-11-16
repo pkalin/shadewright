@@ -270,6 +270,12 @@ type Controller struct {
 	// others, so a few that keep failing never hold up the rest. Only the trigger goroutine uses it, and it
 	// holds only listed names.
 	closeFailed map[string]struct{}
+	// folds are the cause Incidents whose late-cause fold is owed (ADR-0039 point 14, [Controller.foldDue]):
+	// added by the write that created the Incident or set its status.cause, or whose answer was lost while it
+	// may have, and dropped once the fold is done or the Incident is gone. It holds at most one entry per name
+	// in names. foldSeq numbers the entries.
+	folds   map[string]owedFold
+	foldSeq uint64
 }
 
 // flight is what the writes of one fingerprint in flight hold: how many there are, and the newest
@@ -388,6 +394,7 @@ func New(cfg Config) (*Controller, error) {
 		sightings:              newSightings(cfg.MaxFirstSightings),
 		memory:                 map[types.UID]*trace{},
 		closeFailed:            map[string]struct{}{},
+		folds:                  map[string]owedFold{},
 	}, nil
 }
 
@@ -506,6 +513,7 @@ func (c *Controller) writeLoop(ctx context.Context) {
 		c.sightings.expire(c.cfg.Now())
 		c.mu.Unlock()
 		c.flushDue(ctx, false)
+		c.foldDue(ctx)
 	}
 }
 
@@ -1109,6 +1117,7 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 			"absorbed", absorbed)
 		return
 	}
+	c.oweFoldAfter(name, res, err)
 	if err != nil {
 		if res.sent != nil {
 			// The last attempt sent these batches together and its answer is unknown: they were stored together
@@ -1146,6 +1155,7 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 // occurrence makes the one before it the latest again. The caller holds mu.
 func (c *Controller) unopen(fp, name string) {
 	delete(c.names, name)
+	delete(c.folds, name)
 	delete(c.causes, name)
 	delete(c.opening, name)
 	if n := occurrenceOf(name); n >= 2 && c.current[fp] == n {
@@ -1173,6 +1183,7 @@ func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches [
 	delete(c.causes, name)
 	delete(c.opening, name)
 	delete(c.resolvedAt, name)
+	delete(c.folds, name)
 	if c.current[fp] == occurrenceOf(name) {
 		latest := int32(1)
 		if deleted.latest != nil {

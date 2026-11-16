@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
 )
@@ -115,6 +116,47 @@ func TestControllerDropsTheResultOfALostClaim(t *testing.T) {
 				t.Errorf("the successor's claim was overwritten: %+v", got.Status)
 			}
 		})
+	}
+}
+
+// ADR-0039 point 23: a late-cause fold that wins over Analyzing (Resolved, FoldedIntoCause, foldedInto, written
+// while the model runs) ends the analysis as a lost claim: no request, no outcome write, and the fold stands.
+func TestFoldOverAnalyzingEndsTheAnalysis(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	f := newFixture()
+	f.triage.steps = []step{reply(validResult)}
+	resolved := metav1.NewTime(time.Now().Truncate(time.Second))
+	withHook(f, func(ctx context.Context) {
+		live := liveIncident(t, inc)
+		live.Status.Phase, live.Status.ResolvedTime = remediationv1alpha1.IncidentResolved, &resolved
+		live.Status.FoldedInto = &remediationv1alpha1.IncidentRef{Name: "incident-cause",
+			UID: "71717171-7171-4171-8171-717171717171"}
+		live.Status.Conditions = append(live.Status.Conditions, metav1.Condition{Type: incidents.ConditionLifecycle,
+			Status: metav1.ConditionTrue, Reason: incidents.ReasonFoldedIntoCause, Message: "folded by the test",
+			LastTransitionTime: resolved})
+		if err := env.admin.Status().Update(ctx, live); err != nil {
+			t.Error(err)
+		}
+	})
+	c, rc := newController(t, ns, f)
+	ctx, last := logged(t)
+	if _, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(inc)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if n := len(requestsIn(t, ns)); n != 0 {
+		t.Errorf("%d requests created for a folded Incident", n)
+	}
+	if line := last("Dropped the result of an analysis whose claim was lost"); line == "" {
+		t.Error("the analysis did not end as a lost claim")
+	}
+	if len(rc.updates) != 1 {
+		t.Errorf("%d status updates, want the claim only", len(rc.updates))
+	}
+	got := liveIncident(t, inc)
+	if got.Status.Phase != remediationv1alpha1.IncidentResolved || got.Status.FoldedInto == nil {
+		t.Errorf("the fold was overwritten: phase %s foldedInto %+v", got.Status.Phase, got.Status.FoldedInto)
 	}
 }
 

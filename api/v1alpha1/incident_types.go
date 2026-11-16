@@ -185,6 +185,8 @@ type AbsorbedTally struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.occurrencesDroppedThrough) || (has(self.occurrencesDroppedThrough) && self.occurrencesDroppedThrough >= oldSelf.occurrencesDroppedThrough)",message="occurrencesDroppedThrough only moves forward"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.absorbedOccurrencesDroppedThrough) || (has(self.absorbedOccurrencesDroppedThrough) && self.absorbedOccurrencesDroppedThrough >= oldSelf.absorbedOccurrencesDroppedThrough)",message="absorbedOccurrencesDroppedThrough only moves forward"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || (n.state == o.state && (!has(o.reason) || (has(n.reason) && n.reason == o.reason)))))))",message="revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes"
+// +kubebuilder:validation:XValidation:rule="!has(self.foldedInto) || (has(self.phase) && self.phase == 'Resolved')",message="foldedInto is allowed only in phase Resolved"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.foldedInto) || !has(self.foldedInto) || self.foldedInto == oldSelf.foldedInto",message="foldedInto cannot change to another Incident: once set it may only be cleared"
 type IncidentStatus struct {
 	// phase summarizes the incident.
 	// +optional
@@ -261,7 +263,9 @@ type IncidentStatus struct {
 	AbsorbedOccurrencesDroppedThrough *metav1.Time `json:"absorbedOccurrencesDroppedThrough,omitempty"`
 
 	// foldedInto names the cause's Incident, by name and UID, when this consequence Incident was folded into it
-	// and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Nothing writes it yet.
+	// and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Allowed only in phase
+	// Resolved. It never changes to another Incident: a reopen of the folded Incident clears it, and that is
+	// the only change allowed once it is set. The closure rules skip an Incident that has it.
 	// +optional
 	FoldedInto *IncidentRef `json:"foldedInto,omitempty"`
 

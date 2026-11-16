@@ -60,6 +60,14 @@ limitations under the License.
 // that cause's fingerprint; a replay whose cause fingerprint changed or is empty is not recognised and goes
 // through the gate.
 //
+// A consequence Incident that opened before its cause is folded into the cause's Incident (ADR-0039 points
+// 12 to 15 and 23, #793): the write that creates a cause Incident, or sets its status.cause, makes its fold
+// owed, and the write loop's pass folds each kubelet BackOff or Unhealthy Incident of the same subject UID
+// and container created at most [RecurWithin] before it (by creationTimestamp) none of whose requests reached
+// a pull request: Resolved, Lifecycle FoldedIntoCause and status.foldedInto, in one status write with the
+// resource version it read, decided again on a conflict. The closure rules skip a folded Incident. A fold
+// that fails is owed again RetryAfter later; owed folds live in memory only.
+//
 // Writes are batched: the observations that open an Incident, or the first one of an existing Incident in
 // a process, are written at once, and the ones that follow within the aggregation window (5 minutes) go
 // into one status write after it. Writes run in their own goroutine, so a slow API server does not hold

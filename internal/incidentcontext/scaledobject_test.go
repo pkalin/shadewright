@@ -37,6 +37,8 @@ const (
 	soHPA = "keda-hpa-app"
 	// keyName is the name key of a JSON object.
 	keyName = "name"
+	// keyKind is the kind key of a JSON object.
+	keyKind = "kind"
 )
 
 // Fields of the ScaledObject fixture that the status section must never show (ADR-0036 decision 3).
@@ -63,7 +65,7 @@ func readyConditions() []any {
 
 func scaledObject(uid string, conds []any) *unstructured.Unstructured {
 	so := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": kedaready.APIVersion, "kind": kedaready.KindScaledObject,
+		"apiVersion": kedaready.APIVersion, keyKind: kedaready.KindScaledObject,
 		"metadata": map[string]any{"namespace": testNS, keyName: appName, "uid": uid,
 			"annotations": map[string]any{"example.com/note": soAnnotation},
 			"labels":      map[string]any{"team": soLabel}},

@@ -30,7 +30,9 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/kedaready"
@@ -226,16 +228,20 @@ func TestHostileHPAMetricNameShapesNoLine(t *testing.T) {
 // kedaHPA is an autoscaling/v2 HPA in the test namespace as KEDA creates it: controlled by the ScaledObject of
 // ownerUID (none when it is empty), scaling the workload of the kind and name.
 func kedaHPA(name, ownerUID, kind, workload string) *unstructured.Unstructured {
-	meta := map[string]any{"namespace": testNS, keyName: name, "uid": "uid-" + name}
-	if ownerUID != "" {
-		meta["ownerReferences"] = []any{map[string]any{"apiVersion": kedaready.APIVersion,
-			"kind": kedaready.KindScaledObject, keyName: appName, "uid": ownerUID, "controller": true}}
-	}
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": meta,
-		"spec": map[string]any{"scaleTargetRef": map[string]any{"apiVersion": "apps/v1", "kind": kind, keyName: workload},
+	hpa := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{"scaleTargetRef": map[string]any{"apiVersion": "apps/v1", keyKind: kind, keyName: workload},
 			"minReplicas": int64(1), "maxReplicas": int64(2)},
 	}}
+	hpa.SetAPIVersion("autoscaling/v2")
+	hpa.SetKind("HorizontalPodAutoscaler")
+	hpa.SetNamespace(testNS)
+	hpa.SetName(name)
+	hpa.SetUID(types.UID("uid-" + name))
+	if ownerUID != "" {
+		hpa.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: kedaready.APIVersion, Kind: kedaready.KindScaledObject,
+			Name: appName, UID: types.UID(ownerUID), Controller: new(true)}})
+	}
+	return hpa
 }
 
 // withHPAName points the ScaledObject's status.hpaName at another HPA.

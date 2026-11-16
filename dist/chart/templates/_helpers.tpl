@@ -210,11 +210,16 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- end -}}
 {{- if eq .component "analyzer" -}}
 {{- $a := $c.analysis | default dict -}}
-{{- if and $a.triageModel (not $c.identity.azure.clientId) -}}
-{{- fail "analyzer.analysis.triageModel needs analyzer.identity.azure.clientId: the model call authenticates with the analyzer's Azure workload identity" -}}
+{{- $key := (($a.anthropic | default dict).apiKey | default dict) -}}
+{{- /* The chart checks only what it renders itself. For the identity and suffix checks it does not read settings.spec: the RemediationSettings is
+created once and never changed by an upgrade, so the values cannot tell which deployments the cluster holds. The
+analyzer is the gate for them: without --model-endpoint-suffixes it builds no token source and refuses every
+Foundry deployment (#814). */ -}}
+{{- if and $a.triageModel (not $a.endpointSuffixes) (not (or $key.secretName $key.volume)) -}}
+{{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes (Foundry deployments: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com) or analyzer.analysis.anthropic.apiKey (Anthropic deployments), or both" -}}
 {{- end -}}
-{{- if and $a.triageModel (not $a.endpointSuffixes) -}}
-{{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com" -}}
+{{- if and $a.triageModel $a.endpointSuffixes (not $c.identity.azure.clientId) -}}
+{{- fail "analyzer.analysis.endpointSuffixes needs analyzer.identity.azure.clientId: with a triage model and suffixes the analyzer builds an Azure token source, which needs the analyzer's workload identity" -}}
 {{- end -}}
 {{- if and $a.escalationModel (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.escalationModel needs analyzer.analysis.triageModel" -}}
@@ -223,10 +228,12 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- if and $blob.account (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.analysis.triageModel: records are written only by the analysis" -}}
 {{- end -}}
+{{- if and $blob.account (not $c.identity.azure.clientId) -}}
+{{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.identity.azure.clientId: records are written with the analyzer's Azure workload identity" -}}
+{{- end -}}
 {{- if and $blob.account (not $blob.container) -}}
 {{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.analysis.recordStore.azureBlob.container" -}}
 {{- end -}}
-{{- $key := (($a.anthropic | default dict).apiKey | default dict) -}}
 {{- if and $key.secretName $key.volume -}}
 {{- fail "analyzer.analysis.anthropic.apiKey sets both secretName and volume: set one" -}}
 {{- end -}}

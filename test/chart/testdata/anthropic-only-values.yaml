@@ -1,0 +1,17 @@
+# An install whose model deployments are all Anthropic (#814): a triage model and the Anthropic API key from an
+# existing Secret, no analyzer.identity.azure.clientId, no analyzer.analysis.endpointSuffixes and no record store.
+# The Secret anthropic-key (key api-key) is created by hack/chart-anthropic-install-test.sh with a dummy value; a
+# real install creates it with a real key. image.allowTag runs the appVersion images built from a checkout.
+# Run it on a Kind cluster with: make test-chart-anthropic
+image:
+  allowTag: true
+clusterId: chart-anthropic
+analyzer:
+  watchNamespaces: [demo]
+  analysis:
+    triageModel: claude-haiku-5-5
+    anthropic:
+      apiKey:
+        secretName: anthropic-key
+verifier:
+  watchNamespaces: [demo]

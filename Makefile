@@ -535,6 +535,10 @@ chart-ct-cluster: kind ## Create the Kind cluster of the chart-testing job and l
 test-chart-defaults: chart-ct-cluster ## Install the chart with the default values (plus image.allowTag) on the chart-testing Kind cluster, check what it may read and write, then run helm test.
 	hack/chart-default-install-test.sh "$(KUBECTL)" "$(HELM)" "$(CHART_CT_VALUES)"
 
+.PHONY: test-chart-anthropic
+test-chart-anthropic: chart-ct-cluster ## Install the chart with Anthropic-only values (test/chart/testdata/anthropic-only-values.yaml, a dummy key Secret) on the chart-testing Kind cluster and check the Deployments, the analyzer's restarts and log, and what the API server does with RemediationSettings.
+	hack/chart-anthropic-install-test.sh "$(KUBECTL)" "$(HELM)"
+
 .PHONY: test-chart-metrics-tls
 test-chart-metrics-tls: chart-ct-cluster ## Install the chart with the metrics TLS trust profile on the chart-testing Kind cluster and scrape the metrics Services of all three components with the right CA (200), a wrong CA and a wrong server name (TLS failure).
 	hack/chart-metrics-tls-test.sh "$(KUBECTL)" "$(HELM)" "$(CHART_CT_VALUES)"

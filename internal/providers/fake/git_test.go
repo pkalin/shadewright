@@ -618,3 +618,53 @@ func TestGitCommentChangeRequestContract(t *testing.T) {
 		}
 	})
 }
+
+// #771: CheckFirstParent judges a merge commit against its first parent, and a view's CheckChain judges a head
+// against the view's target branch.
+func TestGitCheckFirstParentAndViewChain(t *testing.T) {
+	ctx := t.Context()
+	const path = "apps/a.yaml"
+	g := fake.NewGit("main", map[string][]byte{path: []byte("a"), "README": []byte("r")})
+	base, _ := g.BranchHead(ctx, "main")
+	if err := g.CreateBranch(ctx, "release", base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Push("main", "README", []byte("r2")); err != nil {
+		t.Fatal(err)
+	}
+	extra, _ := g.BranchHead(ctx, "main")
+	if err := g.CreateBranch(ctx, "shadewright/x", extra); err != nil {
+		t.Fatal(err)
+	}
+	head, err := g.CommitFile(ctx, "shadewright/x", extra, providers.FileChange{Path: path, Content: []byte("b")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := g.ForTarget("release").CheckChain(ctx, head, path, 1); err != nil || got != providers.BranchForeign {
+		t.Errorf("CheckChain over release = %v, %v; want foreign: the head carries a commit release lacks", got, err)
+	}
+	if got, err := g.CheckChain(ctx, head, path, 1); err != nil || got != providers.BranchOneChange {
+		t.Errorf("CheckChain over main = %v, %v; want one change", got, err)
+	}
+	cr, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: "shadewright/x", BaseBranch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetBase(cr.Number, "release"); err != nil {
+		t.Fatal(err)
+	}
+	merge, err := g.MergeWithCommit(cr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, parent, err := g.CheckFirstParent(ctx, merge, path); err != nil || got != providers.BranchForeign || parent != "" {
+		t.Errorf("CheckFirstParent(merge) = %v, %q, %v; want foreign: it brought README too", got, parent, err)
+	}
+	if got, parent, err := g.CheckFirstParent(ctx, head, path); err != nil || got != providers.BranchOneChange ||
+		parent != extra {
+		t.Errorf("CheckFirstParent(head) = %v, %q, %v; want the one change on %s", got, parent, err, extra)
+	}
+	if _, _, err := g.CheckFirstParent(ctx, strings.Repeat("0", 40), path); !providers.IsNotFound(err) {
+		t.Errorf("CheckFirstParent of an unknown commit = %v, want not found", err)
+	}
+}

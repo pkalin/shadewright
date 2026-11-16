@@ -1182,7 +1182,8 @@ const (
 	// not run on a merged change, which makes the plan look stale.
 	prMergeUnchecked
 	// prBranchUnread: the target branch of the plan's repository changed, and the pull request could not be read
-	// on the recorded one (watchBranchChanged, #754). Nothing else is done: the error is retried, since the full
+	// on the target branch the settings name now (#771) or on the recorded one (#754), or a provider for either
+	// could not be opened (watchBranchChanged). Nothing else is done: the error is retried, since the full
 	// freshness check would end the request without knowing whether it was merged.
 	prBranchUnread
 )
@@ -1207,8 +1208,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	cancel()
 	if branchUnread {
 		// boundErr may replace the error, as for a merge seen: the pull request is still unread.
-		logf.FromContext(ctx).Info("Could not read the pull request of RemediationRequest on its recorded "+
-			"target branch", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		logf.FromContext(ctx).Info("Could not read the pull request of RemediationRequest after its target "+
+			"branch changed", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 		return prBranchUnread, err
 	}
 	if mergeSeen {
@@ -1372,7 +1373,8 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	repo, reinstalled, err := r.planEntry(ctx, rr)
 	switch {
 	case errors.Is(err, errTargetBranchChanged):
-		// A merge is recorded from the recorded branch, the stale plan's (#754); anything else is as before.
+		// A merge is recorded from the target branch the settings name now, when it brought the planned change
+		// alone (#771), or from the recorded branch, the stale plan's (#754); anything else is as before.
 		return hintLook{}, r.watchBranchChanged(ctx, rr, repo)
 	case err != nil:
 		return hintLook{}, err

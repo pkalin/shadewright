@@ -123,6 +123,10 @@ func (p *checkpointProbe) CheckCommit(ctx context.Context, _, _ string) (provide
 	return 0, "", p.probe(ctx, "CheckCommit")
 }
 
+func (p *checkpointProbe) CheckFirstParent(ctx context.Context, _, _ string) (providers.BranchState, string, error) {
+	return 0, "", p.probe(ctx, "CheckFirstParent")
+}
+
 func (p *checkpointProbe) CheckMerged(ctx context.Context, _, _, _ string) (providers.BranchState, string, error) {
 	return 0, "", p.probe(ctx, "CheckMerged")
 }

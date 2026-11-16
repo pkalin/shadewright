@@ -557,6 +557,20 @@ func (p *Provider) CheckMerged(ctx context.Context, head, mergeCommit, path stri
 // CheckCommit reports what commit carries over its own parent, whatever the target branch holds
 // (providers.GitProvider.CheckCommit): one parent, and the trees compared as CheckBranch compares them.
 func (p *Provider) CheckCommit(ctx context.Context, commit, path string) (providers.BranchState, string, error) {
+	return p.checkOverParent(ctx, commit, path, false)
+}
+
+// CheckFirstParent reports what commit, a merge commit included, changed over its first parent
+// (providers.GitProvider.CheckFirstParent): at least one parent, and the trees of commit and its first parent
+// compared as CheckBranch compares them.
+func (p *Provider) CheckFirstParent(ctx context.Context, commit, path string) (providers.BranchState, string, error) {
+	return p.checkOverParent(ctx, commit, path, true)
+}
+
+// checkOverParent is CheckCommit, or with merges CheckFirstParent: commit judged against its first parent, which
+// must be its only one unless merges is true.
+func (p *Provider) checkOverParent(ctx context.Context, commit, path string, merges bool) (providers.BranchState,
+	string, error) {
 	switch {
 	case !validSHA(commit):
 		return 0, "", errors.New(opCheckCommit + ": commit is not a full SHA")
@@ -569,7 +583,7 @@ func (p *Provider) CheckCommit(ctx context.Context, commit, path string) (provid
 	if err != nil {
 		return 0, "", err
 	}
-	if len(parents) != 1 {
+	if len(parents) == 0 || (len(parents) != 1 && !merges) {
 		return providers.BranchForeign, "", nil
 	}
 	state, err := p.changedOnly(ctx, commit, parents[0], strings.Split(path, "/"))

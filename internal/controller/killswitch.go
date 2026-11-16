@@ -166,6 +166,10 @@ func (g *gatedGit) CheckCommit(ctx context.Context, commit, path string) (provid
 	return g.git.CheckCommit(ctx, commit, path)
 }
 
+func (g *gatedGit) CheckFirstParent(ctx context.Context, commit, path string) (providers.BranchState, string, error) {
+	return g.git.CheckFirstParent(ctx, commit, path)
+}
+
 func (g *gatedGit) CheckMerged(ctx context.Context, head, mergeCommit, path string) (providers.BranchState, string, error) {
 	return g.git.CheckMerged(ctx, head, mergeCommit, path)
 }

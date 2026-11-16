@@ -384,17 +384,17 @@ func lastingCause(err error) string {
 
 // deliveryReadFailed returns err, a failed delivery read, for a retry with backoff. When it has a lasting cause
 // (lastingCause, errDeliveryMoved aside), Delivered Unknown names it first, in a status write, so the cause is not
-// only in the log.
+// only in the log. Both checks after the merge use it, with --verify-outcomes and without (#771), so it reads the
+// recorded merge commit and deliveryBranch, which a request merged before receipts existed has too.
 func (r *RemediationRequestReconciler) deliveryReadFailed(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, err error) error {
 	cause := lastingCause(err)
-	if cause == "" || errors.Is(err, errDeliveryMoved) {
+	if cause == "" || errors.Is(err, errDeliveryMoved) || rr.Status.PullRequest == nil {
 		return err
 	}
-	mr := rr.Status.MergeReceipt
 	changed := setCondition(rr, remediationv1alpha1.ConditionDelivered, metav1.ConditionUnknown, ReasonDeliveryPending,
 		fmt.Sprintf("Waiting for the GitOps controller to apply merge commit %s of branch %s, or a later commit that "+
-			"holds it; the delivery cannot be read: %s", mr.MergeCommitSHA, mr.TargetBranch, cause))
+			"holds it; the delivery cannot be read: %s", rr.Status.PullRequest.MergeCommitSHA, deliveryBranch(rr), cause))
 	if werr := r.writeIf(ctx, rr, changed); werr != nil {
 		return errors.Join(err, werr)
 	}

@@ -229,6 +229,12 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		log.Info("Released the target lock of RemediationRequest: its status shows the pull request closed or merged")
 		return reconcile.Result{}, nil
 	}
+	if stoppedForBranchChange(rr) {
+		// Its pull request may have been moved to the target branch the settings name now (#771).
+		if res, done, err := r.heldOnConfigured(ctx, rr); done {
+			return res, err
+		}
+	}
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	v, holding, err := r.lookHeld(lookCtx, rr)
 	err = boundErr(ctx, lookCtx, "look-up of the change request", err)
@@ -236,7 +242,12 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err
 	}
-	if c := repositoryRead(rr, err); c != nil {
+	c := repositoryRead(rr, err)
+	if errors.Is(err, errBranchChangedUnread) {
+		// The recorded branch of a request stopped with TargetBranchChanged could not be opened (lookHeld).
+		c = branchChangedOpenRead(rr, err)
+	}
+	if c != nil {
 		// No read can be made: the lock is kept, and condition PullRequestUnreadable says why as the settings stand
 		// now (once per reason), until the repository can be opened again (changeOf removes it then) or the
 		// request is deleted.
@@ -251,6 +262,13 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		log.Info("Kept the target lock of RemediationRequest: its pull request, or the open pull requests of its "+
 			"branch, could not be looked up", "error", err.Error())
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+	}
+	if pr := rr.Status.PullRequest; stoppedForBranchChange(rr) && v.state == changeMerged && v.pr.Number == pr.Number &&
+		v.pr.HeadSHA == pr.HeadSHA {
+		// Merged into the recorded branch, with the head Shadewright pushed, after the request stopped (#771).
+		cr := v.pr
+		res, _, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error { return r.recordHeldMerge(ctx, rr, cr) })
+		return res, err
 	}
 	before := rr.Status.DeepCopy()
 	if v.state != changeGone {
@@ -331,15 +349,31 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 		return changeVerdict{}, nil, errRepositoryGone
 	}
 	repo, reinstalled, err := r.planEntry(ctx, rr)
-	if err != nil {
+	q := changeQuery{marker: !closedOnly(rr), openOnBranch: true, reinstalled: reinstalled}
+	var git providers.GitProvider
+	switch {
+	case errors.Is(err, errTargetBranchChanged) && stoppedForBranchChange(rr):
+		// #771: the recorded branch is read after the one the settings name now (heldOnConfigured), through a
+		// provider that writes nothing; every failed read says so in PullRequestUnreadable.
+		git, err = r.openRecordedBranch(ctx, repo, rr.Status.Source.TargetBranch)
+		switch {
+		case providers.IsInvalidConfig(err):
+			return changeVerdict{}, nil, freshness.ErrRepositoryUnusable
+		case err != nil:
+			return changeVerdict{}, nil, fmt.Errorf("%w: %w", errBranchChangedUnread,
+				freshness.WrapProvider("open the repository", err))
+		}
+		q.recordedBranch = true
+	case err != nil:
 		return changeVerdict{}, nil, err
+	default:
+		git, _, err = r.openPlanEntry(ctx, rr, repo, reinstalled)
+		if err != nil {
+			// The token step, named so releaseReinstalled can say a failure of the new installation (#797).
+			return changeVerdict{}, nil, &stepFailure{step: stepToken, err: err}
+		}
 	}
-	git, _, err := r.openPlanEntry(ctx, rr, repo, reinstalled)
-	if err != nil {
-		// The token step, named so releaseReinstalled can say a failure of the new installation (#797).
-		return changeVerdict{}, nil, &stepFailure{step: stepToken, err: err}
-	}
-	v := r.changeOf(ctx, git, rr, changeQuery{marker: !closedOnly(rr), openOnBranch: true, reinstalled: reinstalled})
+	v := r.changeOf(ctx, git, rr, q)
 	if lockRule[v.state] != lockReleaseUnlessOpen {
 		return v, nil, nil
 	}

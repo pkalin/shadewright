@@ -1249,12 +1249,27 @@ func TestRolloutLaterCommitOfTheReceiptBranch(t *testing.T) {
 }
 
 // No check after the merge opens the plan's repository while the request has a merge receipt: every read of
-// ancestry goes to the receipt's repository, in both modes. The receipt here names another entry of the settings
-// than the plan's, so an open of the plan's entry, which would work, is seen.
+// ancestry goes to the receipt's repository, in both modes, up to the end of the rollout or a final phase, by a
+// complete rollout or by another template (without --verify-outcomes, endRollout). The receipt here names another entry of the settings than the
+// plan's, so an open of the plan's entry, which would work, is seen.
 func TestAfterMergeReadsTheReceiptRepositoryOnly(t *testing.T) {
-	for _, verify := range []bool{false, true} {
-		t.Run(fmt.Sprintf("verify outcomes %t", verify), func(t *testing.T) {
-			w := newRolloutWorld(t, completeStatefulSet())
+	for _, superseded := range []bool{false, true} {
+		for _, verify := range []bool{false, true} {
+			t.Run(fmt.Sprintf("verify outcomes %t, superseded %t", verify, superseded), func(t *testing.T) {
+				afterMergeReadsTheReceiptRepositoryOnly(t, verify, superseded)
+			})
+		}
+	}
+}
+
+func afterMergeReadsTheReceiptRepositoryOnly(t *testing.T, verify, superseded bool) {
+	{
+		{
+			target := completeStatefulSet()
+			if superseded {
+				target = gen3Unobserved()
+			}
+			w := newRolloutWorld(t, target)
 			w.r.VerifyOutcomes = verify
 			settings := &remediationv1alpha1.RemediationSettings{}
 			if err := w.c.Get(t.Context(), client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
@@ -1285,6 +1300,76 @@ func TestAfterMergeReadsTheReceiptRepositoryOnly(t *testing.T) {
 			w.untilApplied(t)
 			if opened == 0 {
 				t.Fatal("the ancestry of the later commit was never asked")
+			}
+			if superseded {
+				w.gen4Elsewhere(t)
+			}
+			// On to the end of the rollout or a final phase: no later step may open the plan's repository either.
+			w.untilRolloutEnds(t)
+			if c := rolledOut(t, w); superseded && !verify && (c == nil || c.Reason != rollout.ReasonRolloutSuperseded) {
+				t.Fatalf("RolledOut = %+v, want the end by another template", c)
+			}
+		}
+	}
+}
+
+// untilRolloutEnds reconciles, moving the clock on, until the rollout check ended (status.rollout.ended) or the
+// request reached a final phase after Merged, at most ten times.
+func (w *rolloutWorld) untilRolloutEnds(t *testing.T) {
+	t.Helper()
+	for range 10 {
+		rr := w.request(t)
+		if st := rr.Status.Rollout; (st != nil && st.Ended) || (ended(rr.Status.Phase) &&
+			rr.Status.Phase != remediationv1alpha1.PhaseMerged) {
+			return
+		}
+		if _, err := w.reconcile(t, t.Context()); err != nil {
+			t.Logf("reconcile: %v", err)
+		}
+		w.now = w.now.Add(time.Minute)
+	}
+	rr := w.request(t)
+	t.Fatalf("the rollout did not end: phase %s, rollout %+v, conditions %+v", rr.Status.Phase, rr.Status.Rollout,
+		rr.Status.Conditions)
+}
+
+// #771: a merge receipt whose repository entry is gone from the settings leaves the delivery unreadable. Its cause
+// shows in condition Delivered while the check waits, and in the end's message, with --verify-outcomes and without.
+func TestRolloutReceiptRepositoryGoneShowsTheCause(t *testing.T) {
+	const cause = "the repository of the merge receipt is not in RemediationSettings any more"
+	for _, verify := range []bool{false, true} {
+		t.Run(fmt.Sprintf("verify outcomes %t", verify), func(t *testing.T) {
+			w := newRolloutWorld(t, completeStatefulSet())
+			w.r.VerifyOutcomes = verify
+			w.withReceipt(t, mainBranch)
+			later := w.laterOn(t, mainBranch)
+			w.reader.ks = kustomizationApplied(t, later)
+			settings := &remediationv1alpha1.RemediationSettings{}
+			if err := w.c.Get(t.Context(), client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+				t.Fatal(err)
+			}
+			settings.Spec.Repositories[0].URL += "-moved"
+			if err := w.c.Update(t.Context(), settings); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				_, _ = w.reconcile(t, t.Context())
+			}
+			c := meta.FindStatusCondition(w.request(t).Status.Conditions, remediationv1alpha1.ConditionDelivered)
+			if c == nil || c.Status != metav1.ConditionUnknown || !strings.Contains(c.Message, cause) {
+				t.Fatalf("Delivered = %+v while the delivery cannot be read, want Unknown naming the cause", c)
+			}
+			w.now = w.merged.Add(deliveryWindow + finalGrace + time.Minute)
+			_, _ = w.reconcile(t, t.Context())
+			rr := w.request(t)
+			var end *metav1.Condition
+			if verify {
+				end = meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
+			} else {
+				end = rolledOut(t, w)
+			}
+			if end == nil || !strings.Contains(end.Message, cause) || strings.Contains(end.Message, "executor log") {
+				t.Fatalf("the end says %+v, want the cause", end)
 			}
 		})
 	}

@@ -250,6 +250,11 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 		if isCommitID(d.commit) {
 			st.AppliedRevision = d.commit
 		}
+		if meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionDelivered) != nil {
+			// Set only while a read failed for a lasting cause (deliveryReadFailed): the delivery is seen now.
+			setCondition(rr, remediationv1alpha1.ConditionDelivered, metav1.ConditionTrue, ReasonMergeCommitApplied,
+				"The merge commit "+rr.Status.PullRequest.MergeCommitSHA+" is applied")
+		}
 		logf.FromContext(ctx).Info("Observed the merge commit of RemediationRequest applied",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "appliedObservedAt", now.Truncate(time.Second),
 			"appliedRevision", st.AppliedRevision, "targetGeneration", st.TargetGeneration)
@@ -264,7 +269,8 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 	}
 	if now.Before(windowEnd) {
 		if err != nil {
-			return reconcile.Result{}, nil, err
+			// A cause that lasts shows in condition Delivered, as with --verify-outcomes (#771).
+			return reconcile.Result{}, nil, r.deliveryReadFailed(ctx, rr, err)
 		}
 		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, nil, nil
 	}
@@ -284,12 +290,16 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 	case now.After(windowEnd.Add(finalGrace)):
 		logf.FromContext(ctx).Info("The delivery of RemediationRequest could not be checked",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		why := "the executor log has the error"
+		if cause := lastingCause(err); cause != "" {
+			why = cause
+		}
 		return reconcile.Result{}, nil, r.endRollout(ctx, rr, now, metav1.ConditionUnknown,
 			rollout.ReasonRolloutNotDetermined, "The rollout was not checked: the delivery of merge commit "+
-				rr.Status.PullRequest.MergeCommitSHA+" could not be checked until the end of the check (the "+
-				"executor log has the error)", corev1.EventTypeWarning)
+				rr.Status.PullRequest.MergeCommitSHA+" could not be checked until the end of the check ("+why+")",
+			corev1.EventTypeWarning)
 	}
-	return reconcile.Result{}, nil, err
+	return reconcile.Result{}, nil, r.deliveryReadFailed(ctx, rr, err)
 }
 
 // trackPause records in rr when writes were first seen paused, and on the resume adds the paused time to

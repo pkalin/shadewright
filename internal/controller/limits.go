@@ -274,6 +274,10 @@ func breakerOutcome(rr *remediationv1alpha1.RemediationRequest) outcomeClass {
 		// A stale plan a person merged (#199) is never a success: capStaleSuccess ends it Inconclusive once its
 		// rollout check is over, and it is read as that already.
 		return outcomeNone
+	case mergedForeignStale(rr):
+		// A pull request merged into the target branch the settings name now with more than the planned change
+		// (#771): the plan was stale, and what landed is not its change, so it is neither side's outcome.
+		return outcomeNone
 	case remediationv1alpha1.IsRevert(rr) && slices.Contains(successPhases, rr.Status.Phase):
 		// A revert is never a success (ADR-0030 section 8): it clears nothing, so the failure it reverts stays
 		// counted. With --verify-outcomes off it stays Merged, which would otherwise read as one.

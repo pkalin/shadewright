@@ -1186,6 +1186,65 @@ func TestCheckCommit(t *testing.T) {
 	}
 }
 
+// #771: CheckFirstParent judges a commit, a merge commit included, against its first parent: everything a merge
+// brought to the branch shows there, whatever its second parent carries.
+func TestCheckFirstParent(t *testing.T) {
+	root, apps := mustRead(t, "tree_root.json"), mustRead(t, "tree_apps.json")
+	newRoot := strings.ReplaceAll(root, shaApps, shaNewTree)
+	newApps := strings.ReplaceAll(apps, shaDeploy, shaNewBlob)
+	trees := func(appsA string) []step {
+		return []step{raw("/git/trees/"+shaCommit, newRoot), raw("/git/trees/"+shaOld, root),
+			raw("/git/trees/"+shaNewTree, appsA), raw("/git/trees/"+shaApps, apps)}
+	}
+	const elsewhere = "8888888888888888888888888888888888888888"
+	for name, c := range map[string]struct {
+		steps  []step
+		want   providers.BranchState
+		parent string
+	}{
+		"one parent, one change": {slices.Concat([]step{raw("/git/commits/"+shaCommit, commitBody(shaOld))},
+			trees(newApps)), providers.BranchOneChange, shaOld},
+		"merge commit, one change over its first parent": {slices.Concat([]step{raw("/git/commits/"+shaCommit,
+			commitBody(shaOld, elsewhere))}, trees(newApps)), providers.BranchOneChange, shaOld},
+		"merge commit that brought a second file": {slices.Concat([]step{raw("/git/commits/"+shaCommit,
+			commitBody(shaOld, elsewhere))}, trees(strings.ReplaceAll(newApps, shaRun, elsewhere))),
+			providers.BranchForeign, ""},
+		"no parent": {[]step{raw("/git/commits/"+shaCommit, commitBody())}, providers.BranchForeign, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			got, parent, err := h.p.CheckFirstParent(ctx, shaCommit, deployPath)
+			if err != nil || got != c.want || parent != c.parent {
+				t.Fatalf("CheckFirstParent() = %v, %q, %v, want %v, %q", got, parent, err, c.want, c.parent)
+			}
+		})
+	}
+	for name, steps := range map[string][]step{
+		"refused":        {status(http.MethodGet, "/git/commits/"+shaCommit, http.StatusForbidden, fxForbidden)},
+		"missing commit": {status(http.MethodGet, "/git/commits/"+shaCommit, http.StatusNotFound, "")},
+		"truncated tree": {raw("/git/commits/"+shaCommit, commitBody(shaOld, elsewhere)), raw("/git/trees/"+shaCommit,
+			strings.ReplaceAll(newRoot, `"truncated":false`, `"truncated":true`)), raw("/git/trees/"+shaOld, root)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, steps...)
+			got, parent, err := h.p.CheckFirstParent(ctx, shaCommit, deployPath)
+			if err == nil || got != 0 || parent != "" {
+				t.Fatalf("CheckFirstParent() = %v, %q, %v, want an error and no answer", got, parent, err)
+			}
+			assertSafe(t, err)
+		})
+	}
+	h := newHarness(t)
+	for name, c := range map[string]struct{ commit, path string }{
+		"abbreviated commit": {"1111", deployPath},
+		"path with dot dot":  {shaCommit, "x/../y"},
+	} {
+		if _, _, err := h.p.CheckFirstParent(ctx, c.commit, c.path); err == nil {
+			t.Errorf("%s: allowed", name)
+		}
+	}
+}
+
 func TestCheckMergedFailsClosed(t *testing.T) {
 	for name, steps := range map[string][]step{
 		"forbidden": {status(http.MethodGet, mainRef, http.StatusForbidden, fxForbidden)},

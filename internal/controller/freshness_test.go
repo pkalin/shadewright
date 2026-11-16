@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/analyzer/revert"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -2808,6 +2809,258 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
 	})
 
+	// #771, decision of 2026-11-16: the merge is recorded whenever it happens. The settings change first; then a
+	// person moves the pull request to the configured branch and merges or closes it there, or merges or closes it
+	// on the recorded branch. Between any two steps the executor looks, restarts and looks, or does not look. The
+	// ending is known from the rule: a merge that counts is recorded with its receipt, on the branch it went into,
+	// and capped as a stale plan's (no breaker outcome); a close releases the lock and leaves the request as the
+	// settings change left it (NeedsIntervention with TargetBranchChanged). While the pull request is open, a
+	// stopped request keeps the lock. Every first look at a missing number is aged past confirmWait before each look,
+	// so the ending does not depend on the clock.
+	type orderStep int
+	const (
+		stepMove orderStep = iota
+		stepMerge
+		stepMergeCommit
+		stepClose
+	)
+	type orderGap int
+	const (
+		gapNone orderGap = iota
+		gapLook
+		gapRestart
+	)
+	gapNames := map[orderGap]string{gapNone: "-", gapLook: "look", gapRestart: "restart+look"}
+	stepNames := map[orderStep]string{stepMove: "move", stepMerge: "squash merge", stepMergeCommit: "merge commit",
+		stepClose: "close"}
+	type order struct {
+		steps []orderStep
+		gaps  []orderGap // after the settings change, then after each step
+	}
+	orders := make([]order, 0, 64)
+	for _, steps := range [][]orderStep{
+		{stepMove, stepMerge}, {stepMove, stepMergeCommit}, {stepMove, stepClose}, {stepMerge}, {stepClose},
+	} {
+		n := len(steps) + 1
+		total := 1
+		for range n {
+			total *= 3
+		}
+		for c := range total {
+			gaps := make([]orderGap, n)
+			for i, x := 0, c; i < n; i, x = i+1, x/3 {
+				gaps[i] = orderGap(x % 3)
+			}
+			orders = append(orders, order{steps: steps, gaps: gaps})
+		}
+	}
+	for _, o := range orders {
+		desc := []string{"settings change", gapNames[o.gaps[0]]}
+		for i, s := range o.steps {
+			desc = append(desc, stepNames[s], gapNames[o.gaps[i+1]])
+		}
+		moved := o.steps[0] == stepMove
+		last := o.steps[len(o.steps)-1]
+		merged := last == stepMerge || last == stepMergeCommit
+		It("ends as the rule says after "+strings.Join(desc, ", ")+" (#771)", func() {
+			r := retargetedReconciler(nil)
+			look := func() {
+				if first, ok := r.looks().first(fetch(), cr.Number); ok {
+					r.looks().note(fetch(), cr.Number, first.Add(-confirmWait-time.Second))
+				}
+				_ = reconcileWith(r)
+				if got := fetch(); got.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention &&
+					git.ChangeRequests()[0].State == providers.ChangeRequestOpen {
+					Expect(holdsLock(got)).To(BeTrue(), "a stopped request keeps the lock while its pull request is open")
+				}
+			}
+			gap := func(g orderGap) {
+				switch g {
+				case gapRestart:
+					r = retargetedReconciler(nil)
+					look()
+				case gapLook:
+					look()
+				}
+			}
+			settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+			Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+			gap(o.gaps[0])
+			var sha string
+			for i, s := range o.steps {
+				var err error
+				switch s {
+				case stepMove:
+					head, herr := git.BranchHead(ctx, mainBranch)
+					Expect(herr).NotTo(HaveOccurred())
+					Expect(git.CreateBranch(ctx, freshOtherBranch, head)).To(Succeed())
+					Expect(git.SetBase(cr.Number, freshOtherBranch)).To(Succeed())
+				case stepMerge:
+					sha, err = git.Merge(cr.Number)
+				case stepMergeCommit:
+					sha, err = git.MergeWithCommit(cr.Number)
+				case stepClose:
+					err = git.CloseChangeRequest(ctx, cr.Number)
+					closes.Add(-1) // the person's close, not Shadewright's
+				}
+				Expect(err).NotTo(HaveOccurred())
+				gap(o.gaps[i+1])
+			}
+			for range 8 {
+				got := fetch()
+				if (merged && got.Status.MergeReceipt != nil) || (!merged && !holdsLock(got) &&
+					got.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention) {
+					break
+				}
+				look()
+			}
+			got := fetch()
+			if merged {
+				Expect(got.Status.Phase).To(BeElementOf(remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseInconclusive))
+				Expect(got.Status.MergeReceipt).NotTo(BeNil(), "the merge is recorded")
+				want := remediationv1alpha1.GitBranch(mainBranch)
+				if moved {
+					want = freshOtherBranch
+				}
+				Expect(got.Status.MergeReceipt.TargetBranch).To(Equal(want), "the branch the merge went into")
+				Expect(got.Status.MergeReceipt.MergeCommitSHA).To(Equal(sha))
+				Expect(stalePlanMerged(got)).To(BeTrue())
+				Expect(breakerOutcome(got)).To(Equal(outcomeNone))
+			} else {
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+				Expect(planFresh().Reason).To(Equal(reasonTargetBranchChanged), "the request stays as it is")
+				Expect(got.Status.MergeReceipt).To(BeNil())
+			}
+			Expect(holdsLock(got)).To(BeFalse(), "the lock is released once the pull request is merged or closed")
+			Expect(closes.Load()).To(BeZero())
+		})
+	}
+
+	// onNewMainCommit makes the request's head the planned commit on top of a new commit of main that changes
+	// another file, as a pull request opened after that commit would be, and returns the commit of main before it.
+	onNewMainCommit := func() string {
+		before, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		extra, err := git.Push(mainBranch, "README.yaml", []byte("a: 2\n"))
+		Expect(err).NotTo(HaveOccurred())
+		branch := freshness.BranchName(fetch())
+		Expect(git.ForcePush(branch, extra)).To(Succeed())
+		head, err := git.Push(branch, sourcePath, manifest("384Mi"))
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		got.Status.PullRequest.HeadSHA = head
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		cr.HeadSHA = head
+		return before
+	}
+	// moveTo changes the target branch in the settings to the configured branch, made at commit from, and moves the
+	// pull request there.
+	moveTo := func(from string) {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		Expect(git.CreateBranch(ctx, freshOtherBranch, from)).To(Succeed())
+		Expect(git.SetBase(cr.Number, freshOtherBranch)).To(Succeed())
+	}
+	// foreignEnd checks the end of a merge into the configured branch that brought more than the planned change.
+	foreignEnd := func() {
+		GinkgoHelper()
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		Expect(approved).NotTo(BeNil())
+		Expect(approved.Reason).To(Equal(ReasonMergedWithForeignChange))
+		Expect(approved.Message).To(ContainSubstring(freshOtherBranch))
+		Expect(got.Status.MergeReceipt).To(BeNil(), "nothing after the merge is judged on content the policy never checked")
+		Expect(got.Status.PullRequest.MergeCommitSHA).To(BeEmpty())
+		Expect(breakerOutcome(got)).To(Equal(outcomeNone), "no breaker outcome")
+		Expect(revert.Revertible(got)).To(BeFalse(), "no revert proposal")
+		Expect(holdsLock(got)).To(BeFalse())
+		Expect(closes.Load()).To(BeZero())
+	}
+
+	for _, withCommit := range []bool{false, true} {
+		how := map[bool]string{false: "a squash merge", true: "a merge commit"}[withCommit]
+		merge := func() string {
+			GinkgoHelper()
+			var sha string
+			var err error
+			if withCommit {
+				sha, err = git.MergeWithCommit(cr.Number)
+			} else {
+				sha, err = git.Merge(cr.Number)
+			}
+			Expect(err).NotTo(HaveOccurred())
+			return sha
+		}
+		It("records "+how+" into the configured branch that brought the planned change alone (#771)", func() {
+			onNewMainCommit()
+			head, err := git.BranchHead(ctx, mainBranch)
+			Expect(err).NotTo(HaveOccurred())
+			moveTo(head)
+			sha := merge()
+			Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
+			Expect(got.Status.MergeReceipt).NotTo(BeNil())
+			Expect(got.Status.MergeReceipt.MergeCommitSHA).To(Equal(sha))
+			Expect(got.Status.MergeReceipt.TargetBranch).To(Equal(remediationv1alpha1.GitBranch(freshOtherBranch)))
+		})
+		It("ends "+how+" into the configured branch that brought a commit it lacked MergedWithForeignChange (#771)", func() {
+			before := onNewMainCommit()
+			moveTo(before)
+			merge()
+			Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
+			foreignEnd()
+		})
+		It("ends "+how+" into the configured branch that brought a commit it lacked MergedWithForeignChange after the "+
+			"request stopped (#771)", func() {
+			before := onNewMainCommit()
+			settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+			Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+			r := retargetedReconciler(nil)
+			Expect(reconcileWith(r)).To(Succeed())
+			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			Expect(holdsLock(fetch())).To(BeTrue())
+			Expect(git.CreateBranch(ctx, freshOtherBranch, before)).To(Succeed())
+			Expect(git.SetBase(cr.Number, freshOtherBranch)).To(Succeed())
+			merge()
+			Expect(reconcileWith(r)).To(Succeed())
+			foreignEnd()
+		})
+	}
+
+	It("records the merge of a stopped request again after a status write that lost a race (#771)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		r := retargetedReconciler(nil)
+		Expect(reconcileWith(r)).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		head, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.CreateBranch(ctx, freshOtherBranch, head)).To(Succeed())
+		Expect(git.SetBase(cr.Number, freshOtherBranch)).To(Succeed())
+		sha, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		var raced atomic.Bool
+		r.Client = &racingClient{Client: k8sClient, before: func(obj client.Object) {
+			if rr, ok := obj.(*remediationv1alpha1.RemediationRequest); ok &&
+				rr.Status.Phase == remediationv1alpha1.PhaseMerged && raced.CompareAndSwap(false, true) {
+				live := fetch()
+				orig := live.DeepCopy()
+				live.Annotations = map[string]string{"example.test/touched": "after-the-read"}
+				Expect(k8sClient.Patch(ctx, live, client.MergeFrom(orig))).To(Succeed())
+			}
+		}}
+		Expect(reconcileWith(r)).NotTo(Succeed(), "the write that records the merge lost the race")
+		Expect(raced.Load()).To(BeTrue())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(holdsLock(fetch())).To(BeTrue(), "the lock is kept until the merge is recorded")
+		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
+		got := fetch()
+		Expect(got.Status.Phase).To(BeElementOf(remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseInconclusive))
+		Expect(got.Status.MergeReceipt.MergeCommitSHA).To(Equal(sha))
+	})
+
 	It("ends in NeedsIntervention, without closing or retrying, when a stale plan's repository settings cannot be used", func() {
 		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
 		r := reconciler()
@@ -3025,4 +3278,25 @@ func (f *failingGet) GetChangeRequest(ctx context.Context, n int64) (providers.C
 		return providers.ChangeRequest{}, &providers.RetryableError{Err: errors.New("bad gateway")}
 	}
 	return f.GitProvider.GetChangeRequest(ctx, n)
+}
+
+// racingClient runs before on every status update, before it is sent: a test changes the object there, as another
+// writer would between the read and the write.
+type racingClient struct {
+	client.Client
+	before func(client.Object)
+}
+
+func (c *racingClient) Status() client.SubResourceWriter {
+	return &racingStatus{SubResourceWriter: c.Client.Status(), before: c.before}
+}
+
+type racingStatus struct {
+	client.SubResourceWriter
+	before func(client.Object)
+}
+
+func (s *racingStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	s.before(obj)
+	return s.SubResourceWriter.Update(ctx, obj, opts...)
 }

@@ -317,6 +317,24 @@ func (g *Git) CheckCommit(ctx context.Context, sha, path string) (providers.Bran
 	return providers.BranchOneChange, c.parent, nil
 }
 
+// CheckFirstParent reports what commit, a merge commit included, changed over its first parent
+// (providers.GitProvider.CheckFirstParent).
+func (g *Git) CheckFirstParent(ctx context.Context, sha, path string) (providers.BranchState, string, error) {
+	if err := g.before("CheckFirstParent"); err != nil {
+		return 0, "", err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c, ok := g.commits[sha]
+	if !ok {
+		return 0, "", fmt.Errorf("commit %q: %w", sha, providers.ErrNotFound)
+	}
+	if c.parent == "" || !g.onlyFile(c, c.parent, path) {
+		return providers.BranchForeign, "", nil
+	}
+	return providers.BranchOneChange, c.parent, nil
+}
+
 // CheckMerged reports what head carried over the target branch before mergeCommit merged it
 // (providers.GitProvider.CheckMerged).
 func (g *Git) CheckMerged(ctx context.Context, head, mergeCommit, path string) (providers.BranchState, string, error) {

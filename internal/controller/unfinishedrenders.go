@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crevent "sigs.k8s.io/controller-runtime/pkg/event"
@@ -194,7 +195,7 @@ func (r *RemediationRequestReconciler) unmarkFresh(ctx context.Context, rr *reme
 
 // skipOwnMarks drops the watch events of an update that changed nothing of a request but status.unfinishedRenders,
 // condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound, set or
-// removed, PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
+// removed, condition Delivered Unknown with reason DeliveryPending, set or changed (deliveryReadFailed), PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
 // the metadata every write changes. Those are the executor's own writes: the mark and its removal
 // around a render, the condition that says why a stale plan's pull request is not closed (keepWatchingStale,
 // noteNotReached) and its removal with the close (recordStaleClosed), and the one that says a read through a new installation of the GitHub App failed (noteRead,
@@ -233,6 +234,11 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 		rr.Status.UnfinishedRenders = nil
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 	}
+	if deliveryPending(o) && deliveryPending(n) {
+		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
+			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
+		}
+	}
 	if reinstalledUnreadable(o) && reinstalledUnreadable(n) {
 		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
@@ -248,6 +254,14 @@ func closedRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(n.Status.Conditions, remediationv1alpha1.ConditionPROpened)
 	return notClosed(o) != nil && meta.FindStatusCondition(n.Status.Conditions,
 		remediationv1alpha1.ConditionPullRequestNotClosed) == nil && c != nil && c.Reason == ReasonPullRequestClosed
+}
+
+// deliveryPending reports whether rr has no condition Delivered, or one Unknown with reason DeliveryPending: the
+// write of deliveryReadFailed, which names a lasting cause of a failed delivery read and returns the failure for the
+// error backoff, changes only that (#771, also without --verify-outcomes).
+func deliveryPending(rr *remediationv1alpha1.RemediationRequest) bool {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
+	return c == nil || (c.Status == metav1.ConditionUnknown && c.Reason == ReasonDeliveryPending)
 }
 
 // reinstalledUnreadable reports whether rr has no condition PullRequestUnreadable, or one with reason GitFailed or

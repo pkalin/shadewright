@@ -65,17 +65,16 @@ func absorbed(reason remediationv1alpha1.AbsorbedReason, count int64, at time.Ti
 	return remediationv1alpha1.AbsorbedTally{Reason: reason, Count: count, LastSeen: metav1.NewTime(at)}
 }
 
-// ADR-0039 point 18: a cause Incident's summary shows its absorbed tally, the reasons in the table's order
+// ADR-0039 point 18: a cause Incident's summary ends with its absorbed tally, the reasons in the table's order
 // whatever the order of status.absorbed, each with its count and last seen time, and none of it is quotable.
 func TestSummaryShowsTheAbsorbedTally(t *testing.T) {
 	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
 	inc := cause(absorbed(remediationv1alpha1.AbsorbedUnhealthy, 3, testNow.Add(-2*time.Minute)),
 		absorbed(remediationv1alpha1.AbsorbedBackOff, 12, testNow.Add(-time.Minute)))
 	sum := one(t, build(t, b, inc), SectionSummary)
-	want := "last seen: 2026-11-05T11:59:00Z\n" + absorbedHeader + "\n" +
+	want := "last seen: 2026-11-05T11:59:00Z\nphase: Open\n" + absorbedHeader + "\n" +
 		"  BackOff: 12 occurrences, last seen 2026-11-05T11:59:00Z\n" +
-		"  Unhealthy: 3 occurrences, last seen 2026-11-05T11:58:00Z\n" +
-		"phase: Open\n"
+		"  Unhealthy: 3 occurrences, last seen 2026-11-05T11:58:00Z\n"
 	if !strings.HasSuffix(sum.Text, want) {
 		t.Fatalf("summary:\n%s\nwant it to end with:\n%s", sum.Text, want)
 	}

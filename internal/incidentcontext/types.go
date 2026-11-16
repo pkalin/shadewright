@@ -190,6 +190,9 @@ type Block struct {
 	Values []string
 	// headLen is the length of the header lines at the start of Text that a cut keeps (log blocks).
 	headLen int
+	// unitAt, when not zero, is where the unit at the end of Text that a cut removes whole starts: the
+	// absorbed tally of a summary (#796).
+	unitAt int
 }
 
 // Data returns the parts of the block's text that are data from a source, the only parts a quote may cite as

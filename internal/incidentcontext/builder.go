@@ -325,6 +325,13 @@ func (b *Builder) fitTotal(c *Context) {
 				blk.headLen = len(head)
 			} else {
 				blk.Text, _ = keepHead(blk.Text, keep)
+				// A cut that leaves part of the unit at the end removes all of it.
+				if blk.unitAt > 0 && len(blk.Text) > blk.unitAt && len(blk.Text) < before {
+					blk.Text = blk.Text[:blk.unitAt]
+				}
+				if blk.unitAt >= len(blk.Text) {
+					blk.unitAt = 0
+				}
 			}
 			over -= before - len(blk.Text)
 			blk.addLabel(LabelContextCut)

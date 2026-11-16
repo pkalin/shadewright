@@ -254,7 +254,7 @@ and passes the outcome check ([Scoring](#scoring)). The lab's model asked for 96
 kubelet's `BackOff` (5, last 11:56:10) and `Unhealthy` (4, last 11:56:00) counted in `status.absorbed`, the counts
 the grouping case takes from `grouping.yaml`. Its context's summary shows the absorbed tally (point 18,
 [#796](https://github.com/pkalin/shadewright/issues/796), [design 3.3](design/3-observation-and-deduplication.md#the-context-builder));
-everything else is the scenario's, and so is its reply, unchanged: the tally adds lines to the summary block and
+everything else is the scenario's, and so is its reply, unchanged: the tally adds lines at the end of the summary block and
 moves no block ID, and none of its lines is quotable. It is the recorded scenario the evaluation gate of ADR-0025
 asked for before the tally reached the model. `TestPromptShowsTheAbsorbedTally` replays it, checks that it passes
 and that its prompt holds one line per entry of the tally.

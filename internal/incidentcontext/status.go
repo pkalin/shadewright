@@ -74,14 +74,34 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	if st.LastSeen != nil {
 		l.add("last seen: %s", stamp(*st.LastSeen))
 	}
-	absorbedLines(&l, st.Absorbed)
 	if st.Phase != "" {
 		// The phase is written by the analyzer itself, never evidence.
 		l.add("phase: %s", b.value(string(st.Phase)))
 	}
 	blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident, Availability: Available}
 	b.finish(&blk, &l, b.limits.Summary)
+	var tally lines
+	absorbedLines(&tally, st.Absorbed)
+	b.appendWhole(&blk, tally.String(), b.limits.Summary)
 	return blk
+}
+
+// appendWhole adds unit, lines code wrote, after the finished text of blk as one piece (#796, decided
+// 2026-11-16): redacted first, then written whole when it fits in what is left of the section bound n, or
+// not at all, marking the block cut. Nothing is added after a block that was already cut, so the unit never
+// displaces a line written before it, and an empty unit leaves the block as it was. The total bound later
+// cuts the unit whole too ([Block.unitAt]).
+func (b *Builder) appendWhole(blk *Block, unit string, n int) {
+	if unit == "" {
+		return
+	}
+	unit = b.redact(unit)
+	if slices.Contains(blk.Labels, LabelSectionCut) || len(blk.Text)+len(unit) > n {
+		blk.addLabel(LabelSectionCut)
+		return
+	}
+	blk.unitAt = len(blk.Text)
+	blk.Text += unit
 }
 
 // statusBlock describes the target, its owners and its current pods, most relevant first.
@@ -310,12 +330,13 @@ var absorbedReasons = []remediationv1alpha1.AbsorbedReason{
 	remediationv1alpha1.AbsorbedUnhealthy,
 }
 
-// absorbedLines adds the absorbed tally of a cause Incident to the summary (ADR-0039 point 18, #796): one line
-// per reason of [absorbedReasons] that the tally holds, in that order, with its count and the time of its
-// latest observation. Only the reason (a code constant), a number and a time are written, and none of it is
-// quotable: it is what the analyzer counted, not evidence from a source. An empty tally adds nothing, so the
-// summary of every other Incident is unchanged. A reason found twice is shown once, from its first entry, so
-// the lines are at most len(absorbedReasons).
+// absorbedLines writes the absorbed tally of a cause Incident, the last thing in the summary and cut whole
+// ([Builder.appendWhole]; ADR-0039 point 18, #796): a heading, then one line per reason of [absorbedReasons]
+// that the tally holds, in that order, with its count and the time of its latest observation. Only the reason
+// (a code constant), a number and a time are written, and none of it is quotable: it is what the analyzer
+// counted, not evidence from a source. An empty tally writes nothing, so the summary of every other Incident
+// is unchanged. A reason found twice is shown once, from its first entry, so the lines are at most
+// len(absorbedReasons).
 func absorbedLines(l *lines, tally []remediationv1alpha1.AbsorbedTally) {
 	header := false
 	for _, reason := range absorbedReasons {

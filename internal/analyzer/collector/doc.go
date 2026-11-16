@@ -19,7 +19,8 @@ limitations under the License.
 // (design 3.1, 3.2).
 //
 // What it watches: events.k8s.io/v1 Events of type Warning, and Pods with an abnormal container
-// termination (OOMKilled or a non-zero exit code). OOMKilled comes from container status, never from an
+// termination (OOMKilled or a non-zero exit code) or a container waiting with a reason of
+// WaitingCauseReasons (an image or configuration error, never its message). OOMKilled comes from container status, never from an
 // event reason, so the pod watch is how it is seen. There is no core/v1 Event watch: those are the same
 // objects in an older version, and watching both would count each event twice. Both watches use the
 // manager's cache, which the analyzer restricts to the watched namespaces. A termination OOMKilled and a
@@ -27,10 +28,22 @@ limitations under the License.
 // every other symptom, events included whatever their reason, waits to be seen again, unless its total
 // already shows a repeat (package incidents).
 //
+// Consequences and causes (cause.go, ADR-0039): each observation carries where it was read (Origin: pod status
+// or an event; only a pod-status origin is hashed into the fingerprint, so an Event cannot imitate one), its
+// container (a status entry's name, or the container an event's regarding field path names in the verified
+// pod) and a Class. Only a pod-status OOM kill or waiting cause is a cause; a kubelet BackOff or Unhealthy event
+// on a named container is a consequence, and its CauseFingerprint is the cause its pod's status shows for that
+// container: a current waiting cause, else an OOM kill that finished at most KillCauseWindow before the
+// event's own time. Nothing acts on these fields yet.
+//
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the
-// increase, at most MaxCount per observation. Per pod it remembers the IDs of handled terminations. Both
-// are LRU maps with a fixed capacity. When the collector cannot tell how much of an occurrence is new
+// increase, at most MaxCount per observation. Per pod it remembers the IDs of handled terminations and, per
+// container, the waiting cause it shows with the time the collector first saw it. Both are LRU maps with a
+// fixed capacity. A waiting cause still shown is reported again at most once per SettleAfter, on a pod update
+// or a requeue, as a repeat of the same occurrence: Began unchanged, ObservedAt the read, Count 0 and
+// MayRepeat set, so it counts nothing and opens its Incident through the gate once the wait has lasted
+// RecurAfter (ADR-0039 point 4, amended 2026-11-16). When the collector cannot tell how much of an occurrence is new
 // (anything older than the first reconcile, a restart or a new leader, or as old as state that was dropped
 // to stay within the capacity), it asks a HandledFunc from the Incident controller how much of that
 // occurrence the Incident already counted; without one it emits the observation with Count 0, the

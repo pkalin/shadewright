@@ -36,6 +36,18 @@ const Prefix = "sha256:"
 // instead of silently merging old and new incidents.
 const version = "shadewright.io/fingerprint/v2"
 
+// Source is where the collector read an observation (ADR-0039 point 2).
+type Source string
+
+const (
+	// SourceEvent is an observation read from an events.k8s.io Event, which whoever can create events in a
+	// watched namespace can write.
+	SourceEvent Source = "event"
+	// SourcePodStatus is an observation read from a container's status entry in a Pod, which the kubelet
+	// writes.
+	SourcePodStatus Source = "podStatus"
+)
+
 // Observation is one symptom as seen by the collector: an event or an object status condition.
 type Observation struct {
 	// ClusterID identifies the cluster the observation comes from.
@@ -61,11 +73,16 @@ type Observation struct {
 	// ReplicaSet name from the note.
 	RegardingKind string
 	RegardingName string
+	// Source is where the observation was read. Only [SourcePodStatus] is hashed, so the fingerprint of an
+	// Event, and of every observation without a source, is the one computed before sources existed, and no
+	// Event can produce the fingerprint of a pod-status observation, whatever note, controller and reason it
+	// carries.
+	Source Source
 }
 
 // Fingerprint returns "sha256:" followed by 64 lowercase hex digits, computed from the cluster ID,
 // namespace, owner UID (or resource UID when there is no owner), reason, action, type, reporting
-// controller and the normalized symptom. Every field is length-prefixed, so no two different inputs share
+// controller and the normalized symptom, followed by the source for a pod-status observation only. Every field is length-prefixed, so no two different inputs share
 // an encoding.
 func Fingerprint(o Observation) string {
 	subject := o.OwnerUID
@@ -73,7 +90,7 @@ func Fingerprint(o Observation) string {
 		subject = o.ResourceUID
 	}
 	h := sha256.New()
-	for _, field := range []string{
+	fields := []string{
 		version,
 		o.ClusterID,
 		o.Namespace,
@@ -83,7 +100,13 @@ func Fingerprint(o Observation) string {
 		o.Type,
 		o.ReportingController,
 		Normalize(o),
-	} {
+	}
+	if o.Source == SourcePodStatus {
+		// Appended, not inserted: the encoding of every other observation stays as it was, and a length-prefixed
+		// tenth field cannot be read as part of a ninth.
+		fields = append(fields, string(o.Source))
+	}
+	for _, field := range fields {
 		writeField(h, field)
 	}
 	return Prefix + hex.EncodeToString(h.Sum(nil))

@@ -1033,3 +1033,24 @@ func TestConsequenceJustBeforeItsCauseIsCounted(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	settledTo(t, ns, map[string]*want{Name(fp(1)): w})
 }
+
+// TestHeldConsequenceNamingItsCauseOnARepeatIsAbsorbed (#820): a consequence held as a first sighting with no
+// cause fingerprint, then seen again within RecurAfter naming its cause, takes the cause from the repeat; when
+// the cause opens its Incident, what is held is counted there.
+func TestHeldConsequenceNamingItsCauseOnARepeatIsAbsorbed(t *testing.T) {
+	c, _ := newAt(t)
+	c.consume(t.Context(), heldOnce(2, 0, 2, 2, t0))
+	repeat := heldOnce(2, 1, 2, 3, t0.Add(time.Second))
+	repeat.Count = 1
+	c.consume(t.Context(), repeat)
+	if !c.sightings.holds(fp(2)) || len(c.pending) != 0 {
+		t.Fatal("the consequence is not held, so the test proves nothing")
+	}
+	c.consume(t.Context(), oomCause(1, t0.Add(2*time.Second)))
+	if n, ids := absorbedOn(c, fp(1)); n != 3 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 3 [%s]", n, ids, eventID(2))
+	}
+	if c.sightings.len() != 0 || len(c.sightings.byCause) != 0 {
+		t.Fatalf("still held: %d first sightings, index %v", c.sightings.len(), c.sightings.byCause)
+	}
+}

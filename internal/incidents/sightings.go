@@ -126,7 +126,11 @@ func (s *sightings) admit(o collector.Observation, now time.Time) []collector.Ob
 }
 
 // hold adds o to h: merged into the observation of its occurrence when h holds one (the highest total, the
-// counts added, the earliest start and the latest time), else as a new one while there is room.
+// counts added, the earliest start and the latest time), else as a new one while there is room. A merge takes
+// o's cause fingerprint when o names one, and keeps the held one when o names none (#820): a consequence first
+// seen before the collector linked it to its cause is then found by that cause when it is consumed. When o
+// names another cause than the one held, o's wins, as the collector's latest reading of the pod; the
+// controller decides by the order it consumes observations in, never by comparing their times.
 func (s *sightings) hold(h *sighting, o collector.Observation) {
 	for i := range h.held {
 		if p := &h.held[i]; p.Occurrence == o.Occurrence {
@@ -134,6 +138,10 @@ func (s *sightings) hold(h *sighting, o collector.Observation) {
 			p.Count = min(p.Count+o.Count, collector.MaxCount)
 			p.Began, p.ObservedAt = earliest(p.Began, o.Began), latest(p.ObservedAt, o.ObservedAt)
 			s.note(h.fingerprint, p.Occurrence, p.Total)
+			if o.CauseFingerprint != "" && o.CauseFingerprint != p.CauseFingerprint {
+				p.CauseFingerprint = o.CauseFingerprint
+				s.index(h)
+			}
 			return
 		}
 	}
@@ -150,8 +158,8 @@ func (s *sightings) hold(h *sighting, o collector.Observation) {
 	s.index(h)
 }
 
-// index files h under the cause fingerprints its held observations name now, and under no other. A merge in
-// hold keeps the held observation's cause fingerprint, so only an append or a take changes them.
+// index files h under the cause fingerprints its held observations name now, and under no other. An append,
+// a merge that changes a held observation's cause fingerprint, or a take changes them.
 func (s *sightings) index(h *sighting) {
 	s.unindex(h)
 	for _, o := range h.held {

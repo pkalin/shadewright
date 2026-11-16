@@ -691,10 +691,27 @@ func indexByScan(s *sightings) map[string][]string {
 	return out
 }
 
+// heldOf returns the observation held for occurrence under the first sighting of fpr, or nil.
+func heldOf(s *sightings, fpr, occurrence string) *collector.Observation {
+	e, ok := s.items[fpr]
+	if !ok {
+		return nil
+	}
+	h := e.Value.(*sighting)
+	for i := range h.held {
+		if h.held[i].Occurrence == occurrence {
+			return &h.held[i]
+		}
+	}
+	return nil
+}
+
 // TestSightingsIndexByCauseMatchesAScan (#820): generated runs of every operation on the first sightings (admit
 // within, at and past the windows, take, takeWhere, expire, eviction at a small capacity, occurrences merged and
-// past maxHeldPerFingerprint, observations with no cause or several causes per fingerprint). After each step
-// the index by cause answers exactly what a scan of everything held answers, for every cause fingerprint.
+// past maxHeldPerFingerprint, observations with no cause or several causes per fingerprint, repeats of a held
+// occurrence that name no cause, its cause or another one). After each step the index by cause answers exactly
+// what a scan of everything held answers, for every cause fingerprint, and a merged repeat leaves the held
+// observation naming the repeat's cause, or the one held before when the repeat names none.
 func TestSightingsIndexByCauseMatchesAScan(t *testing.T) {
 	for seed := range uint64(200) {
 		rng := rand.New(rand.NewPCG(seed, 820)) // #nosec G404 -- a seeded corpus, reproducible by design
@@ -710,7 +727,19 @@ func TestSightingsIndexByCauseMatchesAScan(t *testing.T) {
 			switch k := rng.IntN(10); {
 			case k < 6:
 				op = "admit"
+				// The cause the held observation of o's occurrence must name after the admit, known by
+				// construction: o's when it names one, else the one held before (a merge keeps it).
+				wantCause, check := o.CauseFingerprint, false
+				if h := heldOf(s, o.Fingerprint, o.Occurrence); h != nil {
+					check = now.Sub(s.items[o.Fingerprint].Value.(*sighting).first) < RecurAfter
+					if wantCause == "" {
+						wantCause = h.CauseFingerprint
+					}
+				}
 				s.admit(o, now)
+				if h := heldOf(s, o.Fingerprint, o.Occurrence); check && (h == nil || h.CauseFingerprint != wantCause) {
+					t.Fatalf("seed %d step %d: merged into %+v, want cause fingerprint %q", seed, step, h, wantCause)
+				}
 			case k < 7:
 				op = "take"
 				s.take(fp(f))
@@ -736,5 +765,56 @@ func TestSightingsIndexByCauseMatchesAScan(t *testing.T) {
 					seed, step, op, len(s.byCause), len(want))
 			}
 		}
+	}
+}
+
+// TestHeldMergeTakesTheCauseOfARepeat (#820): a repeat of an occurrence already held is merged into it. A
+// repeat that names a cause fingerprint gives it to the held observation, which is then indexed by it, so the
+// cause finds it when it is consumed; a repeat naming another cause replaces the one held (the latest reading
+// of the pod wins) and the old index entry goes; a repeat that names none keeps the cause held.
+func TestHeldMergeTakesTheCauseOfARepeat(t *testing.T) {
+	at := func(cause int, d time.Duration) collector.Observation {
+		o := sightingOf(2, 1, t0.Add(d))
+		if cause > 0 {
+			o.CauseFingerprint = fp(cause)
+		}
+		return o
+	}
+	for _, tc := range []struct {
+		name   string
+		causes []int
+		want   int
+	}{
+		{"no cause, then a cause", []int{0, 1}, 1},
+		{"a cause, then another", []int{1, 3}, 3},
+		{"a cause, then none", []int{1, 0}, 1},
+		{"no cause, a cause, none, another", []int{0, 1, 0, 3}, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSightings(10)
+			for i, cause := range tc.causes {
+				s.admit(at(cause, time.Duration(i)*time.Second), t0.Add(time.Duration(i)*time.Second))
+			}
+			e := s.items[fp(2)]
+			if e == nil || len(e.Value.(*sighting).held) != 1 {
+				t.Fatal("the repeats were not merged into one held occurrence, so the test proves nothing")
+			}
+			if got := e.Value.(*sighting).held[0].CauseFingerprint; got != fp(tc.want) {
+				t.Fatalf("held cause fingerprint %q, want %q", got, fp(tc.want))
+			}
+			for _, c := range []int{1, 3} {
+				got := s.consequencesOf(fp(c))
+				if c == tc.want && !slices.Equal(got, []string{fp(2)}) {
+					t.Errorf("consequencesOf(%s) = %v, want [%s]", fp(c), got, fp(2))
+				}
+				if c != tc.want && len(got) != 0 {
+					t.Errorf("consequencesOf(%s) = %v, want nothing (a stale entry)", fp(c), got)
+				}
+			}
+			taken := s.takeWhere(fp(2), func(o collector.Observation) bool { return o.CauseFingerprint == fp(tc.want) })
+			if len(taken) != 1 || len(s.byCause) != 0 {
+				t.Fatalf("took %d for the cause, index left %v", len(taken), s.byCause)
+			}
+		})
 	}
 }

@@ -41,7 +41,7 @@ type sample uint8
 const (
 	sampleFailing   sample = iota // waiting in CrashLoopBackOff (BackOff) or not ready (Unhealthy)
 	sampleFine                    // running and ready, no new restart
-	sampleRestart                 // running and ready after one more restart (BackOff: failing by the restart)
+	sampleRestart                 // running and ready after one more restart (failing by the restart, both reasons)
 	sampleGone                    // the pod is deleted
 	sampleReplaced                // a pod of the same name with another UID
 	sampleReadError               // the read of the pod fails once, then the same step is read again
@@ -132,7 +132,8 @@ func TestHoldCorpus(t *testing.T) {
 // runHoldSequence runs seq and returns whether the consequence was emitted.
 func runHoldSequence(t *testing.T, reason string, seq []sample) bool {
 	h := holdHarness(t, reason, seq[0])
-	var restarts int32
+	// restarts is the count set in the pod, seen the count at the previous sample of the hold.
+	var restarts, seen int32
 	failing, ended := 0, false
 	last := len(seq) - 1
 	for i, s := range seq {
@@ -176,7 +177,9 @@ func runHoldSequence(t *testing.T, reason string, seq []sample) bool {
 		}
 		cur := readPod(t, h, webPod)
 		st := cur.Status.ContainerStatuses[0]
-		now := !st.Ready || (reason == reasonBackOff && st.RestartCount > 0)
+		// Failing: not ready (both reasons here, a back-off is never ready) or restarted since the previous sample.
+		now := !st.Ready || st.RestartCount > seen
+		seen = st.RestartCount
 		if now {
 			failing++
 		}
@@ -482,4 +485,66 @@ func TestOnlyConsequencesWithNoCauseAreHeld(t *testing.T) {
 			h.one()
 		})
 	}
+}
+
+// TestBackOffRecoveredByOneRestartOpensNothing: a container in back-off at the first sight that restarts once
+// and then runs and is ready for the rest of the wait is failing at the sample of the restart only, so it
+// opens nothing (ADR-0039 point 19, amended 2026-11-16). A restart counted from the first sight would make every
+// later sample failing, and this would open.
+func TestBackOffRecoveredByOneRestartOpensNothing(t *testing.T) {
+	h := holdHarness(t, reasonBackOff, sampleFailing)
+	h.reconcileEvent("ev-hold")
+	h.clock.add(ConsequenceGrace / 2)
+	h.setPodState(reasonBackOff, sampleRestart, 1)
+	h.reconcileEvent("ev-hold")
+	h.none()
+	h.clock.add(ConsequenceGrace / 2)
+	// Still running and ready, no new restart.
+	h.setPodState(reasonBackOff, sampleFine, 1)
+	h.reconcileEvent("ev-hold")
+	h.none()
+	if h.c.holds.len() != 0 {
+		t.Fatal("the hold is kept after its end")
+	}
+}
+
+// TestLivenessLoopWithoutReadinessOpens: a liveness probe that keeps killing a container with no readiness probe
+// leaves it ready at each sample while its restart count goes up (0, 2, 4). Each sample after the first is
+// failing by its restarts, so it opens (ADR-0039 point 19, amended 2026-11-16).
+func TestLivenessLoopWithoutReadinessOpens(t *testing.T) {
+	h := holdHarness(t, ReasonUnhealthy, sampleFine)
+	h.reconcileEvent("ev-hold")
+	h.none()
+	for _, restarts := range []int32{2, 4} {
+		h.clock.add(ConsequenceGrace / 2)
+		h.setPodState(ReasonUnhealthy, sampleFine, restarts)
+		h.reconcileEvent("ev-hold")
+	}
+	if o := h.one(); o.Class != ClassConsequence || o.Count != 1 {
+		t.Fatalf("emitted %+v, want the consequence for the gate", o)
+	}
+}
+
+// TestHoldOfAnOlderEventOfTheNameIsDropped: an event deleted and created again under the same name (another
+// UID) between two reconciles starts its own hold; the samples of the older event's hold do not count for it.
+func TestHoldOfAnOlderEventOfTheNameIsDropped(t *testing.T) {
+	h := holdHarness(t, reasonBackOff, sampleFailing)
+	h.reconcileEvent("ev-hold")
+	old := &eventsv1.Event{}
+	key := types.NamespacedName{Namespace: testNS, Name: "ev-hold"}
+	if err := h.cl.Get(t.Context(), key, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.cl.Delete(t.Context(), old); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.add(ConsequenceGrace)
+	ev := consequence("ev-hold", reasonBackOff, appPath, h.clock.Now())
+	ev.UID = "ev-hold-second"
+	h.create(ev)
+	// The older hold had one failing sample and its grace is over: kept, it would decide and emit now.
+	if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != ConsequenceGrace {
+		t.Fatalf("requeue after %s, want a new hold of the full grace", res.RequeueAfter)
+	}
+	h.none()
 }

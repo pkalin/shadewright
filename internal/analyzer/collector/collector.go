@@ -139,8 +139,8 @@ type Observation struct {
 	// container its regarding field path names in the verified pod (cause.go). Empty when none is named.
 	Container string
 	// Class is the observation's part in the consequence rule (ADR-0039): ClassCause only for a pod-status
-	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. Only the
-	// collector's hold of a consequence with no cause acts on it so far (hold.go).
+	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. The collector
+	// holds a consequence with no cause before it emits it (hold.go); the Incident controller does not read it yet.
 	Class Class
 	// CauseFingerprint is, on a consequence, the fingerprint of the cause its pod's status shows for its
 	// container (Collector.causeFingerprint); empty when the status shows none.

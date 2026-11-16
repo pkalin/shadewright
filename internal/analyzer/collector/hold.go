@@ -79,7 +79,8 @@ type consequenceHold struct {
 	container string
 	init      bool
 	reason    string
-	// restarts is the container's restart count at the first sight: a larger one later is a restart since.
+	// restarts is the container's restart count at the previous sample (at the first sight for the first one):
+	// a larger one at the next sample is a restart between the two.
 	restarts int32
 	// since is the collector's clock at the first sight.
 	since time.Time
@@ -219,6 +220,9 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 	if failing {
 		s.failing++
 	}
+	if found {
+		s.restarts = st.RestartCount
+	}
 	if left := s.since.Add(ConsequenceGrace).Sub(now); left > 0 {
 		if !c.holds.put(key, s) {
 			heldConsequences.WithLabelValues(holdOverflow).Inc()
@@ -243,14 +247,18 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 	return holdEmit, 0
 }
 
-// failingNow reports whether the held container fails in st: not ready for Unhealthy; for BackOff, waiting in
-// a back-off or restarted since the first sight.
+// failingNow reports whether the held container fails in st (ADR-0039 point 19, amended 2026-11-16): its restart
+// count went up since the previous sample of the hold, or it is not ready (Unhealthy) or waiting in a back-off
+// (BackOff). A container that restarted once and then runs fine is failing at that one sample only, and a
+// liveness loop with no readiness probe, ready at each sample, is failing by its restarts.
 func (s consequenceHold) failingNow(st corev1.ContainerStatus) bool {
+	if st.RestartCount > s.restarts {
+		return true
+	}
 	if s.reason == ReasonUnhealthy {
 		return !st.Ready
 	}
-	return (st.State.Waiting != nil && strings.HasSuffix(st.State.Waiting.Reason, reasonBackOff)) ||
-		st.RestartCount > s.restarts
+	return st.State.Waiting != nil && strings.HasSuffix(st.State.Waiting.Reason, reasonBackOff)
 }
 
 // containerStatus returns the status of the named container (init or not) of pod.

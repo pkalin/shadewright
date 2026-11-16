@@ -28,6 +28,10 @@
   <rect class="box" x="820" y="92" width="130" height="44" rx="22"/><text class="h" x="885" y="119" text-anchor="middle">Merged</text>
   <rect class="bad" x="985" y="92" width="115" height="44" rx="22"/><text class="badt" x="1042" y="119" text-anchor="middle">Inconclusive</text>
   <path class="f" d="M950 114H979" marker-end="url(#a)"/>
+  <rect class="box" x="985" y="182" width="115" height="44" rx="22"/><text class="h" x="1042" y="209" text-anchor="middle">Cancelled</text>
+  <path class="f" d="M985 204H920V142" marker-end="url(#a)"/>
+  <text class="lbl" x="930" y="158">own pull request</text>
+  <text class="lbl" x="930" y="172">found merged</text>
   <text class="lbl" x="985" y="68">no merge receipt,</text>
   <text class="lbl" x="985" y="84">stale plan merged</text>
   <rect class="box" x="300" y="222" width="210" height="44" rx="22"/><text class="h" x="405" y="249" text-anchor="middle">WaitingForDelivery</text>

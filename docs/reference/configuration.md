@@ -304,6 +304,8 @@ metrics:
 
 The analyzer's `query_metrics` tool reads cAdvisor and kube-state-metrics series through the Prometheus adapter (`internal/providers/metrics/prometheus`, [design section 4](../design/4-tools.md#4-tools)). The analyzer creates it from `--prometheus-url` and `--prometheus-cluster` and gives it the watched namespaces; it hands it to the context builder and the `query_metrics` tool, which the analysis loop calls when the analyzer runs with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)). The chart sets the flags from `analyzer.prometheus.url` and `analyzer.prometheus.cluster`; set `networkPolicy.analyzer.prometheus` with them. This section states what source the adapter supports, so that your Prometheus and the flags agree.
 
+For the Incident of a KEDA `ScaledObject`, the context builder also reads the HPA series of kube-state-metrics, `kube_horizontalpodautoscaler_status_target_metric` and `kube_horizontalpodautoscaler_spec_target_metric`, which kube-state-metrics exports by default ([#480](https://github.com/pkalin/shadewright/issues/480)). A kube-state-metrics that drops them (`--metric-denylist`) leaves those lines of the metrics block at "no series". kube-state-metrics marks `kube_horizontalpodautoscaler_spec_target_metric` as EXPERIMENTAL (and `kube_horizontalpodautoscaler_status_target_metric` as STABLE), so a release can rename or drop it; when the target series is missing, the context shows `hpa_metric_target: no series` and keeps the current-metric line.
+
 | Source | Supported | What to set |
 | --- | --- | --- |
 | A Prometheus that holds the series of this cluster only (the lab's, [ADR-0017](../adr/0017-prometheus-in-the-lab.md)) | yes, the default | nothing |

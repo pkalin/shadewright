@@ -85,7 +85,7 @@ No model runs in the cluster and no GPU is needed: the analyzer calls a managed 
 
 **What it may read.**
 
-- Events (`events.k8s.io/v1`), pods and HorizontalPodAutoscalers (`autoscaling`, for the KEDA module's symptom source, 2.5.3) (`get`, `list`, `watch`), pod logs (`get` on `pods/log`, for the pod logs source of the context builder, 2.3.2), and workloads (ReplicaSets, Deployments and StatefulSets) and KEDA `ScaledObject`s (`get` here; `list` and `watch` too through the KEDA module role, 2.2.2), only in the namespaces it is started with (`--watch-namespaces`). The analyzer reads `ScaledObject`s only while the KEDA module is active; the grant itself does not depend on it.
+- Events (`events.k8s.io/v1`), pods and HorizontalPodAutoscalers (`autoscaling`, for the KEDA module's symptom source, 2.5.3, and the context builder's check of a ScaledObject's HPA, 3.3) (`get`, `list`, `watch`), pod logs (`get` on `pods/log`, for the pod logs source of the context builder, 2.3.2), and workloads (ReplicaSets, Deployments and StatefulSets) and KEDA `ScaledObject`s (`get` here; `list` and `watch` too through the KEDA module role, 2.2.2), only in the namespaces it is started with (`--watch-namespaces`). The analyzer reads `ScaledObject`s only while the KEDA module is active; the grant itself does not depend on it.
 - That is a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide.
 - Its cache is restricted to the same list for those kinds, and to the operator namespace for Incidents and requests.
 - The cache drops managed fields before it stores an object.

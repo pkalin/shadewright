@@ -65,7 +65,8 @@ type Redactor interface {
 // Config configures a [Builder].
 type Config struct {
 	// Pods reads pods: the analyzer's cache, which already holds the pods of the watched namespaces (a list in
-	// one namespace and a get). Required.
+	// one namespace and a get). It also gets the HPA a ScaledObject subject names, as an unstructured
+	// autoscaling/v2 object, the informer the KEDA module's symptom source runs on the same cache. Required.
 	Pods client.Reader
 	// Objects gets Deployments, StatefulSets and ReplicaSets from the API server: the analyzer may get them,
 	// not list or watch them. Required.

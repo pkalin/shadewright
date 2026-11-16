@@ -38,10 +38,11 @@ import (
 
 var now = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 
-// The namespace and workload of the valid queries.
+// The namespace, workload and HorizontalPodAutoscaler of the valid queries.
 const (
 	testNS       = "demo"
 	testWorkload = "web"
+	testHPA      = "keda-hpa-worker"
 )
 
 // testSource serves h and returns a Source pointed at it, with the clock fixed at now, and a counter of the
@@ -81,9 +82,8 @@ const testStatefulPod = "web-0"
 // testPods are the target's pods of the valid queries: one of a Deployment and one of a StatefulSet.
 var testPods = []string{"web-7d9c8b6f4-x2x9q", testStatefulPod}
 
-func params(ns, w string) map[string]string {
-	return map[string]string{ParamNamespace: ns, ParamWorkload: w}
-}
+// testParams are the valid values of each parameter a template may take.
+var testParams = map[string]string{ParamNamespace: testNS, ParamWorkload: testWorkload, ParamHPA: testHPA}
 
 // isPodTemplate reports whether the named template selects pods.
 func isPodTemplate(t *testing.T, name string) bool {
@@ -95,13 +95,15 @@ func isPodTemplate(t *testing.T, name string) bool {
 	return tmpl.info.Pods
 }
 
-// validQuery is a valid instant query of the template in testNS: with testPods for a pod template, with
-// testWorkload for the others.
+// validQuery is a valid instant query of the template in testNS: with testPods for a pod template, and the
+// valid value of each parameter it takes (testParams).
 func validQuery(t *testing.T, template string) providers.MetricsQuery {
 	t.Helper()
-	q := providers.MetricsQuery{Template: template, Params: params(testNS, testWorkload), End: now}
+	q := providers.MetricsQuery{Template: template, Params: map[string]string{}, End: now}
+	for _, p := range registry[template].info.Params {
+		q.Params[p] = testParams[p]
+	}
 	if isPodTemplate(t, template) {
-		q.Params = map[string]string{ParamNamespace: testNS}
 		q.Pods = slices.Clone(testPods)
 	}
 	return q
@@ -169,6 +171,12 @@ func TestTemplatesRender(t *testing.T) {
 			`(kube_pod_container_status_waiting_reason{` + pods + `} == 1)`,
 		"deployment_replicas_unavailable": `max by (deployment, cluster) ` +
 			`(kube_deployment_status_replicas_unavailable{namespace="demo",deployment="web"})`,
+		tHPACurrent: `max by (horizontalpodautoscaler, metric_name, metric_target_type, cluster) ` +
+			`(kube_horizontalpodautoscaler_status_target_metric{namespace="demo",` +
+			`horizontalpodautoscaler="keda-hpa-worker"})`,
+		tHPATarget: `max by (horizontalpodautoscaler, metric_name, metric_target_type, cluster) ` +
+			`(kube_horizontalpodautoscaler_spec_target_metric{namespace="demo",` +
+			`horizontalpodautoscaler="keda-hpa-worker"})`,
 	}
 	names := make([]string, 0, len(want))
 	for _, info := range Templates() {
@@ -300,20 +308,25 @@ func refusedBeforeRequest(t *testing.T, what string, err error, values ...string
 }
 
 func TestParametersAreValidated(t *testing.T) {
-	// Values of the workload parameter, refused by the templates that take it.
-	workloads := map[string]string{
-		"quote and PromQL":       `web"} or vector(1) #`,
-		"closing brace":          "web}",
-		"regexp wildcard":        "web.*",
-		"regexp alternation":     "web|db",
-		"regexp class":           "[a-z]+",
-		"backslash":              `web\`,
-		"newline":                "web\nx",
-		"upper case":             "Web",
-		"unicode":                "wеb", // Cyrillic e
-		"empty workload":         "",
-		"too long workload":      strings.Repeat("a", 254),
-		"double dot in workload": "web..v2",
+	// Values of a parameter that names one object (workload, hpa), refused by the templates that take it.
+	objectNames := map[string]string{
+		"quote and PromQL":   `web"} or vector(1) #`,
+		"closing brace":      "web}",
+		"regexp wildcard":    "web.*",
+		"regexp alternation": "web|db",
+		"regexp class":       "[a-z]+",
+		"backslash":          `web\`,
+		"newline":            "web\nx",
+		"upper case":         "Web",
+		"unicode":            "wеb", // Cyrillic e
+		"empty name":         "",
+		"too long name":      strings.Repeat("a", 254),
+		"double dot in name": "web..v2",
+		"braces and newline": "web{a=\"b\"}\n",
+		"leading hyphen":     "-web",
+		"trailing dot":       "web.",
+		"NUL byte":           "web\x00",
+		"long hostile value": strings.Repeat(`"}or{`, 60),
 	}
 	// Values of the namespace parameter, refused by every template.
 	namespaces := map[string]string{
@@ -327,26 +340,43 @@ func TestParametersAreValidated(t *testing.T) {
 		"missing namespace": func(q *providers.MetricsQuery, _ bool) bool { delete(q.Params, ParamNamespace); return true },
 		"extra parameter":   func(q *providers.MetricsQuery, _ bool) bool { q.Params["query"] = "up"; return true },
 		"no parameters":     func(q *providers.MetricsQuery, _ bool) bool { q.Params = nil; return true },
-		"missing workload": func(q *providers.MetricsQuery, pods bool) bool {
-			delete(q.Params, ParamWorkload)
-			return !pods
-		},
 		// The pod templates select pods by the given names only, never by a workload name.
 		"workload for a pod template": func(q *providers.MetricsQuery, pods bool) bool {
 			q.Params[ParamWorkload] = testWorkload
 			return pods
 		},
+		// An object parameter of another template is refused like any unknown one.
+		"hpa for a template that does not take it": func(q *providers.MetricsQuery, _ bool) bool {
+			if _, ok := q.Params[ParamHPA]; ok {
+				return false
+			}
+			q.Params[ParamHPA] = testHPA
+			return true
+		},
+		"workload for another object template": func(q *providers.MetricsQuery, pods bool) bool {
+			if _, ok := q.Params[ParamWorkload]; ok || pods {
+				return false
+			}
+			q.Params[ParamWorkload] = testWorkload
+			return true
+		},
 	}
 	s, _, n := testSource(t, emptyVector)
 	for _, info := range Templates() {
-		for name, w := range workloads {
-			if !slices.Contains(info.Params, ParamWorkload) {
+		for _, p := range objectParams {
+			if !slices.Contains(info.Params, p) {
 				continue
 			}
 			q := validQuery(t, info.Name)
-			q.Params[ParamWorkload] = w
+			delete(q.Params, p)
 			_, err := s.Query(testCtx(t), q)
-			refusedBeforeRequest(t, info.Name+", "+name, err, w)
+			refusedBeforeRequest(t, info.Name+", missing "+p, err)
+			for name, v := range objectNames {
+				q := validQuery(t, info.Name)
+				q.Params[p] = v
+				_, err := s.Query(testCtx(t), q)
+				refusedBeforeRequest(t, info.Name+", "+p+", "+name, err, v)
+			}
 		}
 		for name, ns := range namespaces {
 			q := validQuery(t, info.Name)
@@ -612,7 +642,7 @@ func TestEmptyNamespaceSetRefusesEveryQuery(t *testing.T) {
 func TestUnknownTemplateIsNotFound(t *testing.T) {
 	s, _, n := testSource(t, emptyVector)
 	for _, name := range []string{"", "up", "CONTAINER_RESTARTS_TOTAL", "container_restarts_total "} {
-		_, err := s.Query(testCtx(t), providers.MetricsQuery{Template: name, Params: params(testNS, testWorkload), End: now})
+		_, err := s.Query(testCtx(t), providers.MetricsQuery{Template: name, Params: map[string]string{ParamNamespace: testNS, ParamWorkload: testWorkload}, End: now})
 		if !providers.IsNotFound(err) {
 			t.Errorf("%q: error = %v, want ErrNotFound", name, err)
 		}

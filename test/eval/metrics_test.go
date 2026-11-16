@@ -69,9 +69,13 @@ type recordedSample struct {
 // lookback is how long a sample answers a query after its time, as Prometheus's default lookback delta.
 const lookback = 5 * time.Minute
 
-// workloadLabel is the label a template that takes the workload parameter matches it against. A new such
-// template must be added here, or loading a recording fails.
-var workloadLabel = map[string]string{"deployment_replicas_unavailable": "deployment"}
+// objectLabel is, for a template that takes a parameter naming one object, that parameter and the label of its
+// series it matches. A new such template must be added here, or loading a recording fails.
+var objectLabel = map[string]struct{ param, label string }{
+	"deployment_replicas_unavailable": {prometheus.ParamWorkload, "deployment"},
+	"hpa_metric_current":              {prometheus.ParamHPA, "horizontalpodautoscaler"},
+	"hpa_metric_target":               {prometheus.ParamHPA, "horizontalpodautoscaler"},
+}
 
 // plainName is what the adapter accepts as a label value of a result (internal/providers/metrics/prometheus,
 // decode.go): a recording may hold only what the real source could return.
@@ -90,8 +94,8 @@ func (r *metricsRecording) check() error {
 	infos := make(map[string]prometheus.TemplateInfo)
 	for _, ti := range prometheus.Templates() {
 		infos[ti.Name] = ti
-		if slices.Contains(ti.Params, prometheus.ParamWorkload) && workloadLabel[ti.Name] == "" {
-			return fmt.Errorf("template %s takes a workload: add the label it matches to workloadLabel", ti.Name)
+		if len(ti.Params) > 1 && !slices.Contains(ti.Params, objectLabel[ti.Name].param) {
+			return fmt.Errorf("template %s takes an object: add its parameter and label to objectLabel", ti.Name)
 		}
 	}
 	seen := map[string]bool{}
@@ -133,8 +137,8 @@ func checkSeries(ti prometheus.TemplateInfo, s recordedSeries) error {
 	if ti.Pods && s.Labels["pod"] == "" {
 		return errors.New("a series of a pod template needs a pod label")
 	}
-	if w := workloadLabel[ti.Name]; w != "" && s.Labels[w] == "" {
-		return fmt.Errorf("a series needs the %s label", w)
+	if o := objectLabel[ti.Name]; o.label != "" && s.Labels[o.label] == "" {
+		return fmt.Errorf("a series needs the %s label", o.label)
 	}
 	if len(s.Samples) == 0 {
 		return errors.New("no samples")
@@ -148,7 +152,7 @@ func checkSeries(ti prometheus.TemplateInfo, s recordedSeries) error {
 }
 
 // replayMetrics answers metric queries from a recording, as a Prometheus holding those series would through
-// the adapter: only approved templates with the template's parameters, only the pods (or the workload) asked
+// the adapter: only approved templates with the template's parameters, only the pods (or the object) asked
 // for, an instant query at its end time and a range query at each step, a sample answering for [lookback]
 // after its time.
 type replayMetrics struct {
@@ -190,7 +194,7 @@ func (m replayMetrics) Query(ctx context.Context, q providers.MetricsQuery) (pro
 		if ti.Pods && !slices.Contains(q.Pods, s.Labels["pod"]) {
 			continue
 		}
-		if w := workloadLabel[ti.Name]; w != "" && s.Labels[w] != q.Params[prometheus.ParamWorkload] {
+		if o := objectLabel[ti.Name]; o.label != "" && s.Labels[o.label] != q.Params[o.param] {
 			continue
 		}
 		if samples := samplesFor(s.Samples, q); len(samples) > 0 {

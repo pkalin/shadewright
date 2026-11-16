@@ -22,8 +22,9 @@ limitations under the License.
 // to send PromQL text: neither the model, the cluster nor the configuration can add or change a query (the
 // configuration can only scope every selector to one cluster, see Source profile below). A
 // template takes named parameters only, each a Kubernetes name: the namespace must be a DNS-1123 label and
-// the workload, which only deployment_replicas_unavailable takes, a DNS-1123 subdomain, and anything else, an
-// unknown or a missing parameter included, is refused with [ErrInvalidQuery] before a request is made.
+// the workload, which only deployment_replicas_unavailable takes, and the hpa, which only hpa_metric_current and
+// hpa_metric_target take, each a DNS-1123 subdomain, and anything else, an unknown or a missing parameter
+// included, is refused with [ErrInvalidQuery] before a request is made.
 // Prometheus applies no authorization of its own, so the adapter does: a query may name only a namespace in
 // [Config.Namespaces] (the analyzer's watched namespaces), any other is refused with [ErrInvalidQuery] before
 // a request, and an empty set refuses every query; the error never repeats the namespace.
@@ -93,7 +94,10 @@ limitations under the License.
 // template returns, when a series carries a label the template does not produce or a label value that is not
 // a plain name (letters, digits, '.', '_', ':' and '-', at most 253 bytes), when a sample lies more than a
 // second outside the time asked for or its times are not strictly increasing, or when it is malformed in any
-// other way. A successful response with a warning (a store behind the server that did not answer, for example)
+// other way. One label is free text: the metric_name of the HPA templates, which whoever defines the HPA
+// chooses. A series whose metric name is not 1 to [MaxFreeTextValue] letters, digits, '_', '-', '.', '/' or ':'
+// is left out and counted in [providers.MetricsResult] LeftOut, with no part of it kept, and the rest of the
+// answer is returned. A successful response with a warning (a store behind the server that did not answer, for example)
 // is returned with [providers.MetricsResult] Partial set; so is one whose warnings field has another shape than
 // a list of strings. Infos, and warnings that start with "PromQL info: " (where older Prometheus releases put them),
 // describe the query, not missing data, and do not make a result partial. The text of warnings, infos and

@@ -387,8 +387,10 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 	return s, nil
 }
 
-// unstructuredKinds are the group versions an objects.yaml may hold without a Go type in the scheme.
-var unstructuredKinds = []string{kedaready.APIVersion}
+// unstructuredKinds are the group versions an objects.yaml may hold without a Go type in the scheme: KEDA's,
+// and autoscaling/v2, whose HPAs the analyzer's cache holds as unstructured objects (the KEDA module's symptom
+// source) and the context builder reads that way.
+var unstructuredKinds = []string{kedaready.APIVersion, "autoscaling/v2"}
 
 // decodeUnstructured decodes one document of an allowed group version as unstructured JSON.
 func decodeUnstructured(doc []byte) (runtime.Object, error) {
@@ -429,8 +431,8 @@ func readObjects(decoder runtime.Decoder, path string) ([]client.Object, error) 
 		}
 		obj, _, err := decoder.Decode(doc, nil, nil)
 		if runtime.IsNotRegisteredError(err) {
-			// A kind the operator has no Go type for (a KEDA ScaledObject): the analyzer reads it as
-			// unstructured JSON, and so does the fake API server.
+			// A kind the operator has no Go type for (a KEDA ScaledObject) or reads only as unstructured JSON (an
+			// HPA): the analyzer reads it as unstructured JSON, and so does the fake API server.
 			obj, err = decodeUnstructured(doc)
 		}
 		if err != nil {

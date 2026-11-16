@@ -7,8 +7,30 @@ facts:
     # The ScaledObject is the Incident's subject: scored from the Incident, not from the reply.
     subject: ["ScaledObject", "worker"]
   - fact: the backlog, the current external metric value (about 13 requests per second) against its target (5 per replica)
-    unscored: no approved metric template reads HPA or external metrics, and a ScaledObject subject resolves no pods, so the metrics section has nothing to query; the Incident's symptom evidence would carry the values, but recorded milli quantities (such as 6500m) are normalized away, so this recorded Incident does not hold them
+    # metrics.yaml records the HPA's metric through hpa_metric_current and hpa_metric_target (#480): 6.5 per
+    # replica against an average target of 5. The harness matches substrings only (case ignored), so every
+    # number carries a delimiter that "16.5", "130" and "50" lack: a leading space or "last " before the
+    # number, a trailing space, newline or punctuation after it. The current value counts per replica (6.5) or
+    # in all (13); the target must be cited with its value, in words or as the end of its metric line
+    # ("} 5"), never by the metric name alone. A value at the very end of the text has no delimiter after it
+    # and does not match; the reply's evidence quotes come last, so quote the line with its window or in words.
+    any: ["last 6.5", " 6.5 per", " 6.5,", " 6.5.", " 6.5)", " 6.5\n", " 13 req", " 13 in all", " 13 per", " 13 total", " 13,", " 13.", " 13)", " 13\n"]
+    anyOf:
+      - ["hpa_metric_target{", "} 5 "]
+      - ["hpa_metric_target{", "} 5\n"]
+      - ["target of 5 "]
+      - ["target of 5,"]
+      - ["target of 5."]
+      - ["target of 5\n"]
+      - ["target is 5 "]
+      - ["target is 5,"]
+      - ["target is 5."]
+      - ["target is 5\n"]
+      - ["target 5 "]
+      - ["target 5,"]
+      - ["target 5."]
+      - ["target 5\n"]
   - fact: the ScaledObject is Ready, not paused, not on fallback, and its HPA can read its metrics
     unscored: checked by the policy gate for AdjustKedaMaxReplicas at the policy step, not diagnosis input
   - fact: request rate and replica history over time
-    unscored: no approved metric template reads request rates or replica history, so the scenario records no metrics.yaml
+    unscored: no approved metric template reads the trigger's request rate or the replica history; hpa_metric_current shows only the HPA's metric per replica over the window

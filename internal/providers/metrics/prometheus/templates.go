@@ -34,6 +34,9 @@ const (
 	// ParamWorkload is the name of a workload, a DNS-1123 subdomain. Only a template that matches a workload by
 	// its own label takes it (deployment_replicas_unavailable); the pod templates take the pods instead.
 	ParamWorkload = "workload"
+	// ParamHPA is the name of a HorizontalPodAutoscaler, a DNS-1123 subdomain. Only the templates that read one
+	// HPA's metrics take it (hpa_metric_current, hpa_metric_target).
+	ParamHPA = "hpa"
 )
 
 // Bounds of MetricsQuery.Pods for the pod templates.
@@ -68,21 +71,26 @@ type TemplateInfo struct {
 
 // template is an approved query, rendered from a validated [selection].
 type template struct {
-	info   TemplateInfo
-	render func(sel selection) string
+	info TemplateInfo
+	// freeText are the labels of info.Labels whose values are free text, which Kubernetes does not hold to a
+	// name syntax. A series whose value of one of them is not a plain name ([freeTextValue]) is left out of the
+	// result and counted in [providers.MetricsResult.LeftOut], where any other label value that is not a plain
+	// name refuses the whole response.
+	freeText []string
+	render   func(sel selection) string
 }
 
 // Rate windows are fixed: a query never takes a duration from its parameters.
 const rateWindow = "[5m]"
 
-// selection is what a template renders from: values that are already validated (workload is empty unless the
-// template takes it, pods is sorted, without duplicates, and empty unless info.Pods is set) and the source
-// scope, Config.Cluster rendered as `,cluster="<value>"` or empty. A template selects series only through
+// selection is what a template renders from: values that are already validated (workload and hpa are empty
+// unless the template takes them, pods is sorted, without duplicates, and empty unless info.Pods is set) and the
+// source scope, Config.Cluster rendered as `,cluster="<value>"` or empty. A template selects series only through
 // its methods, so that every selector carries the namespace and the scope.
 type selection struct {
-	namespace, workload string
-	pods                []string
-	scope               string
+	namespace, workload, hpa string
+	pods                     []string
+	scope                    string
 }
 
 // series selects metric in the namespace and the scope, with the given matchers.
@@ -124,6 +132,22 @@ func eq(label, value string) string { return label + "=" + strconv.Quote(value) 
 func matchRegexp(label, re string) string { return label + "=~" + strconv.Quote(re) }
 
 var podContainer = []string{"pod", "container"}
+
+// hpaMetric are the labels of an HPA template's series: the HPA, and the metric's name and target type
+// (kube-state-metrics: value, average or utilization), which tell the metrics of one HPA apart.
+var hpaMetric = []string{"horizontalpodautoscaler", "metric_name", "metric_target_type"}
+
+// hpaFreeText is the free-text label of an HPA template's series: the metric name, which whoever defines the
+// HPA chooses (Kubernetes only refuses '/' and '%' and the names "." and ".."). The HPA name is a DNS-1123
+// subdomain and the target type is one of three words, both checked as plain names like any label value.
+var hpaFreeText = []string{"metric_name"}
+
+// hpaSeries reduces the series of one HPA metric of kube-state-metrics, one per HPA, metric and target type, to
+// one value: max drops duplicate scrapes.
+func hpaSeries(s selection, metric string) string {
+	return "max by (horizontalpodautoscaler, metric_name, metric_target_type, cluster) (" +
+		s.series(metric, eq("horizontalpodautoscaler", s.hpa)) + ")"
+}
 
 // Deduplication. A source may hold several series of one measurement: two scrape jobs (or a standalone
 // cAdvisor next to the kubelet's, or two kube-state-metrics replicas) collect the same series with different
@@ -251,6 +275,33 @@ var registry = buildRegistry([]template{
 				s.series("kube_deployment_status_replicas_unavailable", eq("deployment", s.workload)) + ")"
 		},
 	},
+	{
+		info: TemplateInfo{
+			Name: "hpa_metric_current",
+			Description: "Current value of each metric of the HorizontalPodAutoscaler named by the hpa parameter, " +
+				"from its status, per metric name and target type (value, average per pod, or utilization in " +
+				"percent of the request) (kube-state-metrics).",
+			Params: []string{ParamHPA},
+			Labels: hpaMetric,
+		},
+		freeText: hpaFreeText,
+		render: func(s selection) string {
+			return hpaSeries(s, "kube_horizontalpodautoscaler_status_target_metric")
+		},
+	},
+	{
+		info: TemplateInfo{
+			Name: "hpa_metric_target",
+			Description: "Target of each metric of the HorizontalPodAutoscaler named by the hpa parameter, from " +
+				"its spec, per metric name and target type, in the units of hpa_metric_current (kube-state-metrics).",
+			Params: []string{ParamHPA},
+			Labels: hpaMetric,
+		},
+		freeText: hpaFreeText,
+		render: func(s selection) string {
+			return hpaSeries(s, "kube_horizontalpodautoscaler_spec_target_metric")
+		},
+	},
 })
 
 // cpuRate is the 5-minute rate of a cAdvisor CPU counter per container, from a selector of its series:
@@ -280,6 +331,11 @@ func buildRegistry(ts []template) map[string]template {
 		}
 		if t.info.Pods != slices.Contains(t.info.Labels, "pod") {
 			panic("template " + t.info.Name + " must select pods exactly when its series carry the pod label")
+		}
+		for _, p := range t.info.Params {
+			if !slices.Contains(objectParams, p) {
+				panic("template " + t.info.Name + " takes a parameter that names no object: " + p)
+			}
 		}
 		t.info.Params = append([]string{ParamNamespace}, t.info.Params...)
 		m[t.info.Name] = t
@@ -315,21 +371,33 @@ func (t template) renderQuery(params map[string]string, pods []string, scope str
 	if len(validation.IsDNS1123Label(ns)) > 0 {
 		return "", nil, fmt.Errorf("parameter %s is not a DNS-1123 label: %w", ParamNamespace, ErrInvalidQuery)
 	}
-	var w string
-	if slices.Contains(t.info.Params, ParamWorkload) {
-		if w, ok = params[ParamWorkload]; !ok {
-			return "", nil, fmt.Errorf("parameter %s is required: %w", ParamWorkload, ErrInvalidQuery)
+	// Every other parameter names one object: a DNS-1123 subdomain, which holds no quote, brace, space or
+	// control character, and at most 253 characters.
+	names := make(map[string]string, len(t.info.Params))
+	for _, p := range t.info.Params {
+		if p == ParamNamespace {
+			continue
 		}
-		if len(validation.IsDNS1123Subdomain(w)) > 0 {
-			return "", nil, fmt.Errorf("parameter %s is not a DNS-1123 subdomain: %w", ParamWorkload, ErrInvalidQuery)
+		v, ok := params[p]
+		if !ok {
+			return "", nil, fmt.Errorf("parameter %s is required: %w", p, ErrInvalidQuery)
 		}
+		if len(validation.IsDNS1123Subdomain(v)) > 0 {
+			return "", nil, fmt.Errorf("parameter %s is not a DNS-1123 subdomain: %w", p, ErrInvalidQuery)
+		}
+		names[p] = v
 	}
 	selected, err := t.validPods(pods)
 	if err != nil {
 		return "", nil, err
 	}
-	return t.render(selection{namespace: ns, workload: w, pods: selected, scope: scope}), selected, nil
+	sel := selection{namespace: ns, workload: names[ParamWorkload], hpa: names[ParamHPA], pods: selected, scope: scope}
+	return t.render(sel), selected, nil
 }
+
+// objectParams are the parameters a template may take besides ParamNamespace (which buildRegistry adds to
+// every template), each the name of one object.
+var objectParams = []string{ParamWorkload, ParamHPA}
 
 // validPods checks the pods of a query: none for a template that does not select pods, 1 to MaxPods distinct
 // names otherwise, each a DNS-1123 subdomain of at most MaxPodName characters. It returns them sorted and

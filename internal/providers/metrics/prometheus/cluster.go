@@ -64,7 +64,7 @@ func (s *Source) CheckCluster(ctx context.Context) error {
 	form.Set("query", clusterProbe(s.cluster))
 	form.Set("time", formatMs(end))
 	form.Set("timeout", strconv.FormatInt(server.Milliseconds(), 10)+"ms")
-	res, err := s.do(ctx, "api/v1/query", form, window{fromMs: end, toMs: end, instant: true}, nil)
+	res, err := s.do(ctx, "api/v1/query", form, window{fromMs: end, toMs: end, instant: true}, nil, nil)
 	switch {
 	case err != nil:
 		return err

@@ -34,7 +34,8 @@ var scaledObjectConditions = []string{kedaready.ConditionReady, kedaready.Condit
 
 // resolveScaledObject reads a keda.sh/v1alpha1 ScaledObject subject with one get from the API server, the
 // object the KEDA module's role lets the analyzer get (ADR-0036 decision 2). It looks up nothing else: not the
-// scale target, not the HPA, no list. A ScaledObject has no pods of its own here.
+// scale target, not the HPA (the metrics block gets that from the cache, [Builder.checkHPA]), no list. A
+// ScaledObject has no pods of its own here.
 func (b *Builder) resolveScaledObject(ctx context.Context, t *target) error {
 	so := &unstructured.Unstructured{}
 	so.SetAPIVersion(kedaready.APIVersion)

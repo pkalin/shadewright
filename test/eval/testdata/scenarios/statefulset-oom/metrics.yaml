@@ -73,3 +73,7 @@ templates:
           - {at: "2026-11-04T11:55:00Z", value: 0}
   - name: deployment_replicas_unavailable
     series: []
+  - name: hpa_metric_current
+    series: []
+  - name: hpa_metric_target
+    series: []

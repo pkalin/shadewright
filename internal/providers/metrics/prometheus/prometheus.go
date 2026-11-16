@@ -234,7 +234,7 @@ func (s *Source) Query(ctx context.Context, q providers.MetricsQuery) (providers
 		return providers.MetricsResult{}, err
 	}
 	form.Set("timeout", strconv.FormatInt(server.Milliseconds(), 10)+"ms")
-	res, err := s.do(ctx, path, form, win, t.info.Labels)
+	res, err := s.do(ctx, path, form, win, t.info.Labels, t.freeText)
 	if err != nil {
 		return providers.MetricsResult{}, err
 	}
@@ -327,7 +327,7 @@ func formatMs(ms int64) string {
 }
 
 // do sends one request and decodes the response. Errors carry fixed text and the status code only.
-func (s *Source) do(ctx context.Context, path string, form url.Values, win window, labels []string,
+func (s *Source) do(ctx context.Context, path string, form url.Values, win window, labels, freeText []string,
 ) (providers.MetricsResult, error) {
 	u := s.base.JoinPath(path)
 	u.RawQuery = form.Encode()
@@ -357,7 +357,7 @@ func (s *Source) do(ctx context.Context, path string, form url.Values, win windo
 			providers.ErrTooLarge)
 	}
 	body := &capReader{r: resp.Body, left: MaxBodyBytes}
-	res, err := decode(body, win, labels)
+	res, err := decode(body, win, labels, freeText)
 	if err != nil {
 		// A body cut short by the connection (a reset, an unexpected EOF) is transient, not a bad answer.
 		if ctx.Err() != nil || body.readErr != nil {

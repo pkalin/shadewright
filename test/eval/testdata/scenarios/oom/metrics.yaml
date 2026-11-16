@@ -69,3 +69,7 @@ templates:
         samples:
           - {at: "2026-11-04T11:40:00Z", value: 1}
           - {at: "2026-11-04T11:59:30Z", value: 1}
+  - name: hpa_metric_current
+    series: []
+  - name: hpa_metric_target
+    series: []

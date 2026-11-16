@@ -226,7 +226,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `rubric.yaml` | How each fact of `expected.yaml` is scored (above) |
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events, and the KEDA ScaledObject of `broken-keda-trigger` and `keda-at-ceiling` (spec from the fleet's scenario file, synthetic status; decoded as unstructured JSON, as the analyzer reads it) |
-| `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom` and `statefulset-oom` have one (and the `oom/rollout` variant, below) |
+| `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom`, `statefulset-oom` and `keda-at-ceiling` have one (and the `oom/rollout` variant, below) |
 | `policy.yaml` | The RemediationPolicies of the scenario's cluster (#493): the lab's `demo-memory`, its spec copied from the fleet repository (the file names the commit), and a synthetic `demo-keda` (the lab has no KEDA policy yet). The context shows their bounds and a plan they refuse fails |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |
 | `variants/<name>/` | Optional. Variants of the scenario, below |
@@ -253,16 +253,20 @@ not have returned: every approved template listed once (with no series when the 
 template, only the template's labels, plain-name label values, a pod label on every series of a pod template, and
 samples in time order. The replay checks what the scenarios exercise, not every check of the adapter (it skips the name format, lookback and future end checks): it refuses a query with other parameters than the
 template's, or pods for a template that takes none (and none for one that does); it returns only the pods (or the
-Deployment) asked for, in the recorded namespace; an instant query gets the latest sample at its end and a range
+Deployment or HPA) asked for, in the recorded namespace; an instant query gets the latest sample at its end and a range
 query one point per step, each sample answering for 5 minutes, Prometheus's default lookback. The context builder
 renders, redacts, bounds and labels the answers as in the analyzer (design 3.3), so a model can quote a series line
 of the metrics block verbatim as evidence.
 
-**What the recordings cannot carry yet.** `keda-at-ceiling` has no `metrics.yaml`: no approved template reads HPA or
-external metrics, and its subject, a `ScaledObject`, resolves no pods, so the builder has nothing to ask. The external
-metric value against its target is evidence of the Incident's symptom in the analyzer (design 2.5.3), but the
-recorded Incident leaves it out: the analyzer's symptom normalization turns a milli quantity such as `6500m` into a
-placeholder, so a real Incident would not reliably hold it either. Both facts stay unscored, with that reason in the rubric.
+**The HPA metric of `keda-at-ceiling`.** Its subject, a `ScaledObject`, resolves no pods, so the builder asks only
+the two HPA templates, for the HPA the ScaledObject's `status.hpaName` names, once that HPA in `objects.yaml` passes
+the owner check (design 3.3, [#480](https://github.com/pkalin/shadewright/issues/480)). Its `metrics.yaml` (synthetic, as no recording of a cluster with these series exists yet) holds the external metric
+`s0-prometheus` at 6.5 per replica, about 13 requests per second over the 2 replicas of the ceiling, against an average
+target of 5, and the backlog fact is scored from it: the current value (per replica or in all) and the target with its
+value. The rubric matches each number with a delimiter after it, so a value at the very end of the reply's text (the
+end of its last evidence quote, say) does not match. The Incident's own symptom evidence would carry the values too, but the analyzer's symptom normalization turns
+a milli quantity such as `6500m` into a placeholder, so the recorded Incident leaves them out. The request rate and
+replica history stay unscored: no template reads them.
 
 **Cases that expect no proposal after a wrong one.** `startup-probe` (a readiness probe that failed once at pod start,
 the pod Ready now, no restart, no `OOMKilled`; [#726](https://github.com/pkalin/shadewright/issues/726)) and

@@ -26,7 +26,14 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -39,13 +46,17 @@ const MaxMetricPods = 16
 const (
 	paramNamespace = "namespace"
 	paramWorkload  = "workload"
+	paramHPA       = "hpa"
 )
 
 // metricPlan is one approved template the builder asks for.
 type metricPlan struct {
 	template string
-	// pods: the template selects the target's pods; otherwise it takes the workload parameter.
+	// pods: the template selects the target's pods; otherwise it takes the workload parameter, or the hpa
+	// parameter when hpa is set.
 	pods bool
+	// hpa: the template reads the HorizontalPodAutoscaler of a ScaledObject target, named by its status.
+	hpa bool
 	// overWindow: a range query over the window, shown as last, minimum and maximum; otherwise an instant
 	// query at the end of the window.
 	overWindow bool
@@ -57,7 +68,10 @@ const (
 	fixedTooLarge      = ": answer too large for the pods asked"
 	fixedCouldNotFetch = ": could not fetch"
 	fixedNoSeries      = ": no series"
-	partialSuffix      = " (partial answer)"
+	// fixedLeftOut follows the count of series the source left out for a free-text label value (the metric name
+	// of an HPA) that is not a plain name; no part of the label is shown.
+	fixedLeftOut  = " series left out because of a label value that is not a plain name"
+	partialSuffix = " (partial answer)"
 )
 
 // metricPlans are in order of relevance, so that a cut keeps what explains a crash first.
@@ -70,6 +84,8 @@ var metricPlans = []metricPlan{
 	{template: "container_cpu_usage_cores", pods: true, overWindow: true},
 	{template: "container_cpu_throttled_ratio", pods: true},
 	{template: "deployment_replicas_unavailable"},
+	{template: "hpa_metric_current", hpa: true, overWindow: true},
+	{template: "hpa_metric_target", hpa: true},
 }
 
 // rangeStep is the step of a range query: about 60 points over the window, at least one minute.
@@ -91,6 +107,16 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 		pods = append(pods, t.pods[i].Name)
 	}
 	_, deployment := t.workload.(*appsv1.Deployment)
+	hpa := hpaOf(t)
+	if t.scaledObject != nil && hpa == "" {
+		return notAvailable(SectionMetrics, ProvenanceMetric, "not available: the ScaledObject reports no HPA name\n"), false, nil
+	}
+	if hpa != "" {
+		blk, ok, err := b.checkHPA(ctx, t, hpa)
+		if err != nil || !ok {
+			return blk, blk.Availability == CouldNotFetch, err
+		}
+	}
 	blk := Block{Section: SectionMetrics, Provenance: ProvenanceMetric, Availability: Available}
 	b.podLabels(&blk, t)
 	if len(t.pods) > MaxMetricPods {
@@ -101,6 +127,11 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 	for _, plan := range metricPlans {
 		q := providers.MetricsQuery{Template: plan.template, Params: map[string]string{paramNamespace: t.ref.Namespace}, End: w.end}
 		switch {
+		case plan.hpa:
+			if hpa == "" {
+				continue
+			}
+			q.Params[paramHPA] = hpa
 		case plan.pods && len(pods) > 0:
 			q.Pods = pods
 		case !plan.pods && deployment:
@@ -148,14 +179,108 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 	return blk, failed > 0, nil
 }
 
+// hpaOf returns the name of the HorizontalPodAutoscaler a ScaledObject target reports in status.hpaName, the
+// HPA KEDA created for it, or "" when the target is not a ScaledObject or the name is missing or not a DNS-1123
+// subdomain. The name selects the HPA's series of kube-state-metrics in the target's namespace, once
+// [Builder.checkHPA] has found that HPA to be the ScaledObject's own.
+func hpaOf(t *target) string {
+	if t.scaledObject == nil {
+		return ""
+	}
+	status, _ := t.scaledObject.Object["status"].(map[string]any)
+	name, _ := status["hpaName"].(string)
+	if len(validation.IsDNS1123Subdomain(name)) > 0 {
+		return ""
+	}
+	return name
+}
+
+// Fixed texts of the metrics block of a ScaledObject whose HPA gives no templates. None quotes the cluster.
+const (
+	fixedHPANotFound   = "not available: the HPA the ScaledObject names was not found\n"
+	fixedHPANotItsOwn  = "not available: the HPA the ScaledObject names does not scale its target for it\n"
+	fixedHPAReadFailed = "could not fetch: reading the HPA the ScaledObject names failed\n"
+)
+
+// checkHPA reads the HPA a ScaledObject target names in status.hpaName from the analyzer's cache, which watches
+// the HPAs of the watched namespaces (as unstructured autoscaling/v2 objects, the collector's informer), and
+// reports whether its metric templates may be asked (ADR-0036, amendment of 2026-11-16). The HPA must be
+// controlled by the ScaledObject of the Incident, matched by UID, and its spec.scaleTargetRef must name the
+// ScaledObject's own scale target (kind, API group and name; KEDA's default kind is a Deployment). Otherwise the
+// block is "not available" with a fixed reason. A failed read is a failed source, never "not found", so the
+// analysis escalates and a later build reads again; the error text is not shown. It returns an error only when
+// ctx is done.
+func (b *Builder) checkHPA(ctx context.Context, t *target, name string) (Block, bool, error) {
+	hpa := &unstructured.Unstructured{}
+	hpa.SetGroupVersionKind(schema.GroupVersionKind{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"})
+	err := b.call(ctx, func(ctx context.Context) error {
+		return b.pods.Get(ctx, client.ObjectKey{Namespace: t.ref.Namespace, Name: name}, hpa)
+	})
+	switch {
+	case err == nil:
+	case abandoned(ctx) != nil:
+		return Block{}, false, abandoned(ctx)
+	case apierrors.IsNotFound(err):
+		return notAvailable(SectionMetrics, ProvenanceMetric, fixedHPANotFound), false, nil
+	default:
+		blk := notAvailable(SectionMetrics, ProvenanceMetric, fixedHPAReadFailed)
+		blk.Availability = CouldNotFetch
+		return blk, false, nil
+	}
+	owner := metav1.GetControllerOfNoCopy(hpa)
+	if owner == nil || owner.Kind != kedaready.KindScaledObject || groupOf(owner.APIVersion) != kedaready.Group ||
+		string(owner.UID) != string(t.ref.UID) || t.scaledObject.GetUID() != owner.UID {
+		return notAvailable(SectionMetrics, ProvenanceMetric, fixedHPANotItsOwn), false, nil
+	}
+	hpaSpec, _ := hpa.Object["spec"].(map[string]any)
+	soSpec, _ := t.scaledObject.Object["spec"].(map[string]any)
+	if !sameScaleTarget(hpaSpec["scaleTargetRef"], soSpec["scaleTargetRef"]) {
+		return notAvailable(SectionMetrics, ProvenanceMetric, fixedHPANotItsOwn), false, nil
+	}
+	return Block{}, true, nil
+}
+
+// sameScaleTarget reports whether an HPA's scaleTargetRef names the same object as a ScaledObject's. KEDA's
+// defaults apply to the ScaledObject's: kind Deployment and API version apps/v1 when they are not set. The
+// version is not compared, only the group: KEDA writes the version the target is served in.
+func sameScaleTarget(hpaRef, soRef any) bool {
+	h, _ := hpaRef.(map[string]any)
+	s, _ := soRef.(map[string]any)
+	field := func(m map[string]any, key, def string) string {
+		v, _ := m[key].(string)
+		if v == "" {
+			return def
+		}
+		return v
+	}
+	name := field(s, "name", "")
+	return name != "" && field(h, "name", "") == name &&
+		field(h, "kind", "") == field(s, "kind", "Deployment") &&
+		groupOf(field(h, "apiVersion", "")) == groupOf(field(s, "apiVersion", "apps/v1"))
+}
+
+// groupOf returns the group of an API version: "" for the core group ("v1").
+func groupOf(apiVersion string) string {
+	group, _, found := strings.Cut(apiVersion, "/")
+	if !found {
+		return ""
+	}
+	return group
+}
+
 // seriesLines writes one line per series, sorted by labels.
 func (b *Builder) seriesLines(l *lines, plan metricPlan, res providers.MetricsResult) {
 	partial := ""
 	if res.Partial {
 		partial = partialSuffix
 	}
+	if res.LeftOut > 0 {
+		l.add("%s: %d%s%s", plan.template, res.LeftOut, fixedLeftOut, partial)
+	}
 	if len(res.Series) == 0 {
-		l.add("%s%s%s", plan.template, fixedNoSeries, partial)
+		if res.LeftOut == 0 {
+			l.add("%s%s%s", plan.template, fixedNoSeries, partial)
+		}
 		return
 	}
 	out := make([]string, 0, len(res.Series))

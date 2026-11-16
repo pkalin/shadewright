@@ -65,6 +65,15 @@ func (c *capReader) Read(p []byte) (int, error) {
 // labelValue is what a label value of a result must look like: a plain name, never free text.
 var labelValue = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,253}$`)
 
+// MaxFreeTextValue bounds a free-text label value that is returned. It is the bound of every other label value:
+// the metric names KEDA gives an HPA (s0-prometheus, s1-cpu, s2-kafka-orders) run to tens of characters.
+const MaxFreeTextValue = 253
+
+// freeTextValue is what a free-text label value (template.freeText) must look like to be returned: letters,
+// digits, '_', '-', '.', '/' and ':', 1 to MaxFreeTextValue of them. None of these can close a label set, start
+// another label or a value, or end a line where the context shows the series.
+var freeTextValue = regexp.MustCompile(fmt.Sprintf(`^[A-Za-z0-9_./:-]{1,%d}$`, MaxFreeTextValue))
+
 // maxSkipDepth bounds the nesting of an unknown field that is skipped.
 const maxSkipDepth = 16
 
@@ -76,8 +85,12 @@ type decoder struct {
 	dec    *json.Decoder
 	win    window
 	labels []string
-	points int
-	series []providers.Series
+	// freeText are the labels whose value is free text: a series with such a value that is not a plain name is
+	// left out and counted in leftOut, not refused.
+	freeText []string
+	leftOut  int
+	points   int
+	series   []providers.Series
 	// keys holds the labels of each series read, the cluster label left out, to refuse a second series of the
 	// same container from another cluster.
 	keys map[string]struct{}
@@ -89,8 +102,8 @@ type decoder struct {
 
 // decode reads a response of the Prometheus query API. A successful response that carries warnings is
 // returned as Partial.
-func decode(r io.Reader, win window, labels []string) (providers.MetricsResult, error) {
-	d := &decoder{dec: json.NewDecoder(r), win: win, labels: labels, keys: map[string]struct{}{}}
+func decode(r io.Reader, win window, labels, freeText []string) (providers.MetricsResult, error) {
+	d := &decoder{dec: json.NewDecoder(r), win: win, labels: labels, freeText: freeText, keys: map[string]struct{}{}}
 	d.dec.UseNumber()
 	err := d.top()
 	switch {
@@ -103,7 +116,7 @@ func decode(r io.Reader, win window, labels []string) (providers.MetricsResult, 
 		// A syntax error or a failed read: the text of either may quote the response.
 		return providers.MetricsResult{}, fmt.Errorf("prometheus response cannot be decoded: %w", ErrInvalidResponse)
 	}
-	return providers.MetricsResult{Series: d.series, Partial: d.partial}, nil
+	return providers.MetricsResult{Series: d.series, Partial: d.partial, LeftOut: d.leftOut}, nil
 }
 
 func invalid(msg string) error {
@@ -203,12 +216,17 @@ func (d *decoder) result() error {
 		return err
 	}
 	for d.dec.More() {
-		if len(d.series) == MaxSeries {
+		// A series left out counts toward the bound: it was read all the same.
+		if len(d.series)+d.leftOut == MaxSeries {
 			return fmt.Errorf("prometheus response has more than %d series: %w", MaxSeries, providers.ErrTooLarge)
 		}
-		s, err := d.element()
+		s, leftOut, err := d.element()
 		if err != nil {
 			return err
+		}
+		if leftOut {
+			d.leftOut++
+			continue
 		}
 		// Every template keeps the cluster label apart and metric drops it, so two series with the same labels
 		// are one container in two clusters (or a source that labels only some of its series): refused rather
@@ -224,87 +242,100 @@ func (d *decoder) result() error {
 }
 
 // element reads one series: {"metric": {...}, "values": [[t, "v"], ...]} or {"metric": {...}, "value": [t, "v"]}.
-func (d *decoder) element() (providers.Series, error) {
+// It reports whether the series is left out for a free-text label value; the series is read whole either way.
+func (d *decoder) element() (providers.Series, bool, error) {
 	if err := d.delim('{'); err != nil {
-		return providers.Series{}, err
+		return providers.Series{}, false, err
 	}
 	var s providers.Series
-	var sawMetric, sawSamples bool
+	var sawMetric, sawSamples, leftOut bool
 	seen := map[string]bool{}
 	for d.dec.More() {
 		key, err := d.key(seen)
 		if err != nil {
-			return s, err
+			return s, false, err
 		}
 		switch key {
 		case "metric":
 			sawMetric = true
-			if s.Labels, err = d.metric(); err != nil {
-				return s, err
+			if s.Labels, leftOut, err = d.metric(); err != nil {
+				return s, false, err
 			}
 		case "values":
 			d.matrix, sawSamples = true, true
 			if s.Samples, err = d.values(); err != nil {
-				return s, err
+				return s, false, err
 			}
 		case "value":
 			// One sample per series: MaxSeries bounds these, well below MaxPoints.
 			d.vector, sawSamples = true, true
 			p, err := d.sample()
 			if err != nil {
-				return s, err
+				return s, false, err
 			}
 			d.points++
 			s.Samples = []providers.Sample{p}
 		default: // "histogram", "histograms" and anything else: no template returns them.
-			return s, invalid("has an unexpected field in a series")
+			return s, false, invalid("has an unexpected field in a series")
 		}
 	}
 	if !sawMetric || !sawSamples {
-		return s, invalid("has a series without labels or samples")
+		return s, false, invalid("has a series without labels or samples")
 	}
-	return s, d.delim('}')
+	return s, leftOut, d.delim('}')
 }
 
-func (d *decoder) metric() (map[string]string, error) {
+// metric reads the labels of a series. It reports whether a free-text label value is not a plain name, which
+// leaves the series out; every other label is still checked, and refuses the response as for any series.
+func (d *decoder) metric() (map[string]string, bool, error) {
 	if err := d.delim('{'); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	labels := map[string]string{}
-	var sawCluster bool
+	var sawCluster, leftOut bool
 	for d.dec.More() {
 		key, err := d.key(nil)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if key == clusterLabel {
 			// Kept apart by every template, checked, and dropped: the caller asked about one cluster.
 			v, err := d.str()
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if sawCluster || !clusterValue.MatchString(v) {
-				return nil, invalid("has a cluster label that is repeated or not a plain name")
+				return nil, false, invalid("has a cluster label that is repeated or not a plain name")
 			}
 			sawCluster = true
 			continue
 		}
 		if !slices.Contains(d.labels, key) {
-			return nil, invalid("has a label the template does not produce")
+			return nil, false, invalid("has a label the template does not produce")
 		}
 		if _, dup := labels[key]; dup {
-			return nil, invalid("repeats a label")
+			return nil, false, invalid("repeats a label")
 		}
 		v, err := d.str()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		if !labelValue.MatchString(v) {
-			return nil, invalid("has a label value that is not a plain name")
+		switch {
+		case slices.Contains(d.freeText, key):
+			// Free text, shown to the model as a label value: a value that could end the label set or the line,
+			// or pass for another label, leaves the series out. No part of it is kept.
+			if !freeTextValue.MatchString(v) {
+				leftOut = true
+			}
+		case !labelValue.MatchString(v):
+			return nil, false, invalid("has a label value that is not a plain name")
 		}
 		labels[key] = v
 	}
-	return labels, d.delim('}')
+	if leftOut {
+		labels = nil
+	}
+	return labels, leftOut, d.delim('}')
 }
 
 // seriesKey is a canonical form of a label set. Names and values are plain names, so neither holds the

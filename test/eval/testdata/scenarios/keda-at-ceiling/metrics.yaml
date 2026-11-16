@@ -1,0 +1,46 @@
+# Synthetic: what the lab's Prometheus (kube-state-metrics, ADR-0017) would hold for this scenario, written from
+# the scenario manifests, objects.yaml and the observation in expected.yaml, not recorded in the lab. KEDA's HPA
+# keda-hpa-worker (the ScaledObject's status.hpaName) has one external metric, s0-prometheus, with an AverageValue
+# target of 5 (the trigger's threshold), so kube-state-metrics reports both as metric_target_type average: the
+# current value is the request rate per replica. The load rises to about 13 requests per second, 6.5 per replica
+# of the 2 the ceiling allows, from 11:38. The ScaledObject resolves no pods, so the pod and Deployment templates
+# have no series here. Every approved template is listed (internal/providers/metrics/prometheus); the harness
+# replays them through the MetricsSource interface (test/eval/metrics_test.go).
+source: synthetic
+namespace: demo
+templates:
+  - name: container_last_terminated_oomkilled
+    series: []
+  - name: container_waiting_reason
+    series: []
+  - name: container_restarts_total
+    series: []
+  - name: container_memory_working_set_bytes
+    series: []
+  - name: container_memory_limit_bytes
+    series: []
+  - name: container_cpu_usage_cores
+    series: []
+  - name: container_cpu_throttled_ratio
+    series: []
+  - name: deployment_replicas_unavailable
+    series: []
+  - name: hpa_metric_current
+    series:
+      - labels: {horizontalpodautoscaler: keda-hpa-worker, metric_name: s0-prometheus, metric_target_type: average}
+        samples:
+          - {at: "2026-11-04T11:30:00Z", value: 4}
+          - {at: "2026-11-04T11:34:00Z", value: 5.5}
+          - {at: "2026-11-04T11:38:00Z", value: 6.5}
+          - {at: "2026-11-04T11:42:00Z", value: 6.5}
+          - {at: "2026-11-04T11:46:00Z", value: 6.5}
+          - {at: "2026-11-04T11:50:00Z", value: 6.5}
+          - {at: "2026-11-04T11:54:00Z", value: 6.5}
+          - {at: "2026-11-04T11:58:00Z", value: 6.5}
+          - {at: "2026-11-04T11:59:30Z", value: 6.5}
+  - name: hpa_metric_target
+    series:
+      - labels: {horizontalpodautoscaler: keda-hpa-worker, metric_name: s0-prometheus, metric_target_type: average}
+        samples:
+          - {at: "2026-11-04T11:30:00Z", value: 5}
+          - {at: "2026-11-04T11:59:30Z", value: 5}

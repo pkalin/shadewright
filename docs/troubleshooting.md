@@ -485,4 +485,3 @@ kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep -i -E 'for
 A missing add-on CRD (Flux, KEDA, Kyverno) or a module grant that is off never keeps a Pod not Ready: see [No Incident appears](#no-incident-appears) for how those show.
 
 After five minutes without a sync the kubelet restarts the container: the restart count rises, and `kubectl logs --previous` shows the run before. Once a Pod has been Ready, it stays Ready until the container stops, also through a later API server outage; such an outage shows in the log and the metrics, not in readiness. A standby replica is Ready like the leader once it has synced; one that is not Ready has one of the causes above, not a missing Lease.
-

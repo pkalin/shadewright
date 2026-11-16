@@ -558,21 +558,23 @@ func TestPodWithoutHoldEnqueuesNothing(t *testing.T) {
 	}
 }
 
-// TestLivenessLoopSampledWhileRunning: a liveness probe kills a container with no readiness probe, so it is ready
-// at the first sight. Each kill is a pod update with one more restart, and the end of the grace falls in a life
-// where it runs and is ready. Two restarts during the hold open the consequence; one is a recovery and opens
-// nothing (ADR-0039 point 19, amended 2026-11-16).
+// TestLivenessLoopSampledWhileRunning: a liveness probe kills a container with no readiness probe. Each kill is a
+// pod update with one more restart, and the end of the grace falls in a life where it runs and is ready. Two
+// restarts during the hold open the consequence. One restart opens nothing even when two samples were failing (not
+// ready at the first sight, then the restart): it is a recovery, and only the restart threshold could open it
+// (ADR-0039 point 19, amended 2026-11-16).
 func TestLivenessLoopSampledWhileRunning(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
+		first    sample
 		restarts []int32
 		open     bool
 	}{
-		{"one restart", []int32{1}, false},
-		{"two restarts", []int32{1, 2}, true},
+		{"one restart", sampleFailing, []int32{1}, false},
+		{"two restarts", sampleFine, []int32{1, 2}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := holdHarness(t, ReasonUnhealthy, sampleFine)
+			h := holdHarness(t, ReasonUnhealthy, tc.first)
 			h.reconcileEvent("ev-hold")
 			for _, r := range tc.restarts {
 				h.clock.add(40 * time.Second)
@@ -580,8 +582,13 @@ func TestLivenessLoopSampledWhileRunning(t *testing.T) {
 				h.sampleByPod()
 			}
 			h.none()
-			// The end of the grace, in the same life as the last restart.
+			if s := h.c.holds.holds[reqFor("ev-hold").NamespacedName]; !tc.open && (s.failing != 2 || s.restarted != 1) {
+				t.Fatalf("before the end: %d failing samples and %d restarts, want 2 and 1", s.failing, s.restarted)
+			}
+			last := tc.restarts[len(tc.restarts)-1]
+			// The end of the grace, in the same life as the last restart: running and ready.
 			h.clock.set(t0.Add(ConsequenceGrace))
+			h.setPodState(ReasonUnhealthy, sampleFine, last)
 			h.reconcileEvent("ev-hold")
 			if !tc.open {
 				h.none()

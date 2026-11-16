@@ -135,12 +135,14 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		if apierrors.IsNotFound(err) {
 			r.c.series.forget(req.NamespacedName)
 			r.c.probes.done(req.NamespacedName)
+			r.c.holds.drop(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 	if ev.Type != corev1.EventTypeWarning {
 		r.c.probes.done(req.NamespacedName)
+		r.c.holds.drop(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 	n := occurrences(&ev)
@@ -148,6 +150,7 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	delta, mayRepeat := r.c.series.pending(req.NamespacedName, ev.UID, created, start, n)
 	if delta == 0 && !mayRepeat {
 		r.c.probes.done(req.NamespacedName)
+		r.c.holds.drop(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 	obs, pod, v, err := r.c.fromEvent(ctx, &ev)
@@ -159,12 +162,14 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		// About a pod whose template its workload has retired (#724): handled, counted once.
 		dropRetired(ctx, obs.Subject.Kind, "Event", 1)
 		r.c.probes.done(req.NamespacedName)
+		r.c.holds.drop(req.NamespacedName)
 		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 		return ctrl.Result{}, nil
 	case subjectUnusable:
 		// Not a usable symptom; remembering it keeps updates of the same event cheap.
 		logf.FromContext(ctx).V(1).Info("Ignored Event that cannot be correlated")
 		r.c.probes.done(req.NamespacedName)
+		r.c.holds.drop(req.NamespacedName)
 		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 		return ctrl.Result{}, nil
 	}
@@ -178,9 +183,21 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		case probeSettled, probeTerminating:
 			skipSettled(ctx, probe, pv)
 			r.c.probes.done(req.NamespacedName)
+			r.c.holds.drop(req.NamespacedName)
 			r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 			return ctrl.Result{}, nil
 		}
+	}
+	// A consequence whose pod shows no cause is held before it is emitted (ADR-0039 point 19, hold.go).
+	switch hv, wait := r.c.holdConsequence(ctx, req.NamespacedName, &ev, obs, pod); hv {
+	case holdWait:
+		return ctrl.Result{RequeueAfter: wait}, nil
+	case holdDrop:
+		// Handled without an observation: only a larger series total later is a new hold.
+		r.c.probes.done(req.NamespacedName)
+		r.c.holds.done(req.NamespacedName)
+		r.c.series.commit(req.NamespacedName, ev.UID, created, n)
+		return ctrl.Result{}, nil
 	}
 	obs.Occurrence, obs.Began = "event:"+string(ev.UID), r.c.notFuture(created)
 	obs.Total, obs.Count, obs.MayRepeat = n, capCount(delta), mayRepeat
@@ -192,6 +209,7 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{RequeueAfter: retryAfter}, nil
 	}
 	r.c.probes.done(req.NamespacedName)
+	r.c.holds.done(req.NamespacedName)
 	r.c.series.commit(req.NamespacedName, ev.UID, created, n)
 	return ctrl.Result{}, nil
 }

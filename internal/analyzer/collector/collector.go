@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -139,8 +140,8 @@ type Observation struct {
 	// container its regarding field path names in the verified pod (cause.go). Empty when none is named.
 	Container string
 	// Class is the observation's part in the consequence rule (ADR-0039): ClassCause only for a pod-status
-	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. Nothing acts
-	// on it yet.
+	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. The collector
+	// holds a consequence with no cause before it emits it (hold.go); the Incident controller does not read it yet.
 	Class Class
 	// CauseFingerprint is, on a consequence, the fingerprint of the cause its pod's status shows for its
 	// container (Collector.causeFingerprint); empty when the status shows none.
@@ -211,6 +212,9 @@ type Config struct {
 	Modules func() modules.Selection
 	// MaxObjects bounds the number of objects whose handled symptom states are remembered.
 	MaxObjects int
+	// MaxHeldConsequences bounds the consequences with no cause held at once (hold.go), a quarter of it per
+	// namespace. Over it a consequence is emitted at once, without a verdict.
+	MaxHeldConsequences int
 	// SelectionPoll is how often the collector checks whether a module became active for a kind in
 	// [SourceKinds], to evaluate then the objects of that kind it filtered out while none was, and, for a kind
 	// that is not built in, whether it is served and may be listed (lazy.go).
@@ -248,6 +252,10 @@ type Collector struct {
 	conditions *stateTracker
 	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go).
 	probes *probeDeferrals
+	// holds remembers the consequences with no cause held for ConsequenceGrace (hold.go).
+	holds *consequenceHolds
+	// holdOff, set by tests of the observation's fields only, emits a consequence without holding it.
+	holdOff bool
 
 	// watches is the watch state of each kind of SourceKinds that is not built in (lazy.go).
 	watchMu sync.Mutex
@@ -266,6 +274,7 @@ func New(cfg Config) (*Collector, error) {
 	setDefault(&cfg.MaxEvents, DefaultMaxEvents)
 	setDefault(&cfg.MaxPods, DefaultMaxPods)
 	setDefault(&cfg.MaxObjects, DefaultMaxObjects)
+	setDefault(&cfg.MaxHeldConsequences, DefaultMaxHeldConsequences)
 	setDefault(&cfg.MaxOwners, DefaultMaxOwners)
 	setDefault(&cfg.OwnerTTL, DefaultOwnerTTL)
 	setDefault(&cfg.LookupTimeout, DefaultLookupTimeout)
@@ -289,6 +298,7 @@ func New(cfg Config) (*Collector, error) {
 		// watched kinds, keep apart.
 		conditions: newStateTracker(cfg.MaxObjects),
 		probes:     newProbeDeferrals(cfg.MaxEvents),
+		holds:      newConsequenceHolds(cfg.MaxHeldConsequences),
 		watches:    map[schema.GroupVersionKind]WatchState{},
 	}, nil
 }
@@ -305,7 +315,8 @@ func (c *Collector) Observations() <-chan Observation {
 }
 
 // SetupWithManager registers the two watches: events.k8s.io/v1 Events of type Warning and Pods with a
-// terminated container or a waiting cause (and the update that clears one), and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. All read
+// terminated container or a waiting cause (and the update that clears one), and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. The event
+// controller also maps any update of a pod to the consequences held on it (hold.go), through the same pod informer. All read
 // through the manager's cache, which the analyzer restricts to the watched namespaces (analyzer.CacheOptions). Owners are read with the API reader, one object at a time with a
 // deadline, so no informer is started for ReplicaSets, Deployments or StatefulSets. There is deliberately no
 // watch on core/v1 Events: they are the same objects, and watching both would count each event twice.
@@ -315,6 +326,8 @@ func (c *Collector) SetupWithManager(mgr ctrl.Manager) error {
 	err := ctrl.NewControllerManagedBy(mgr).
 		Named("collector-events").
 		For(&eventsv1.Event{}, builder.WithPredicates(predicate.NewPredicateFuncs(isWarning))).
+		// An update of the pod of a held consequence is a sample of its hold (hold.go).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(c.heldEventsOf)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(er)
 	if err != nil {

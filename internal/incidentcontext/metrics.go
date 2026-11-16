@@ -26,8 +26,14 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -105,6 +111,12 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 	if t.scaledObject != nil && hpa == "" {
 		return notAvailable(SectionMetrics, ProvenanceMetric, "not available: the ScaledObject reports no HPA name\n"), false, nil
 	}
+	if hpa != "" {
+		blk, ok, err := b.checkHPA(ctx, t, hpa)
+		if err != nil || !ok {
+			return blk, blk.Availability == CouldNotFetch, err
+		}
+	}
 	blk := Block{Section: SectionMetrics, Provenance: ProvenanceMetric, Availability: Available}
 	b.podLabels(&blk, t)
 	if len(t.pods) > MaxMetricPods {
@@ -169,8 +181,8 @@ func (b *Builder) metricsBlock(ctx context.Context, t *target, w window) (Block,
 
 // hpaOf returns the name of the HorizontalPodAutoscaler a ScaledObject target reports in status.hpaName, the
 // HPA KEDA created for it, or "" when the target is not a ScaledObject or the name is missing or not a DNS-1123
-// subdomain. The HPA itself is not read (ADR-0036 decision 2): the name only selects the HPA's series of
-// kube-state-metrics in the target's namespace.
+// subdomain. The name selects the HPA's series of kube-state-metrics in the target's namespace, once
+// [Builder.checkHPA] has found that HPA to be the ScaledObject's own.
 func hpaOf(t *target) string {
 	if t.scaledObject == nil {
 		return ""
@@ -181,6 +193,79 @@ func hpaOf(t *target) string {
 		return ""
 	}
 	return name
+}
+
+// Fixed texts of the metrics block of a ScaledObject whose HPA gives no templates. None quotes the cluster.
+const (
+	fixedHPANotFound   = "not available: the HPA the ScaledObject names was not found\n"
+	fixedHPANotItsOwn  = "not available: the HPA the ScaledObject names does not scale its target for it\n"
+	fixedHPAReadFailed = "could not fetch: reading the HPA the ScaledObject names failed\n"
+)
+
+// checkHPA reads the HPA a ScaledObject target names in status.hpaName from the analyzer's cache, which watches
+// the HPAs of the watched namespaces (as unstructured autoscaling/v2 objects, the collector's informer), and
+// reports whether its metric templates may be asked (ADR-0036, amendment of 2026-11-16). The HPA must be
+// controlled by the ScaledObject of the Incident, matched by UID, and its spec.scaleTargetRef must name the
+// ScaledObject's own scale target (kind, API group and name; KEDA's default kind is a Deployment). Otherwise the
+// block is "not available" with a fixed reason. A failed read is a failed source, never "not found", so the
+// analysis escalates and a later build reads again; the error text is not shown. It returns an error only when
+// ctx is done.
+func (b *Builder) checkHPA(ctx context.Context, t *target, name string) (Block, bool, error) {
+	hpa := &unstructured.Unstructured{}
+	hpa.SetGroupVersionKind(schema.GroupVersionKind{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"})
+	err := b.call(ctx, func(ctx context.Context) error {
+		return b.pods.Get(ctx, client.ObjectKey{Namespace: t.ref.Namespace, Name: name}, hpa)
+	})
+	switch {
+	case err == nil:
+	case abandoned(ctx) != nil:
+		return Block{}, false, abandoned(ctx)
+	case apierrors.IsNotFound(err):
+		return notAvailable(SectionMetrics, ProvenanceMetric, fixedHPANotFound), false, nil
+	default:
+		blk := notAvailable(SectionMetrics, ProvenanceMetric, fixedHPAReadFailed)
+		blk.Availability = CouldNotFetch
+		return blk, false, nil
+	}
+	owner := metav1.GetControllerOfNoCopy(hpa)
+	if owner == nil || owner.Kind != kedaready.KindScaledObject || groupOf(owner.APIVersion) != kedaready.Group ||
+		string(owner.UID) != string(t.ref.UID) || t.scaledObject.GetUID() != owner.UID {
+		return notAvailable(SectionMetrics, ProvenanceMetric, fixedHPANotItsOwn), false, nil
+	}
+	hpaSpec, _ := hpa.Object["spec"].(map[string]any)
+	soSpec, _ := t.scaledObject.Object["spec"].(map[string]any)
+	if !sameScaleTarget(hpaSpec["scaleTargetRef"], soSpec["scaleTargetRef"]) {
+		return notAvailable(SectionMetrics, ProvenanceMetric, fixedHPANotItsOwn), false, nil
+	}
+	return Block{}, true, nil
+}
+
+// sameScaleTarget reports whether an HPA's scaleTargetRef names the same object as a ScaledObject's. KEDA's
+// defaults apply to the ScaledObject's: kind Deployment and API version apps/v1 when they are not set. The
+// version is not compared, only the group: KEDA writes the version the target is served in.
+func sameScaleTarget(hpaRef, soRef any) bool {
+	h, _ := hpaRef.(map[string]any)
+	s, _ := soRef.(map[string]any)
+	field := func(m map[string]any, key, def string) string {
+		v, _ := m[key].(string)
+		if v == "" {
+			return def
+		}
+		return v
+	}
+	name := field(s, "name", "")
+	return name != "" && field(h, "name", "") == name &&
+		field(h, "kind", "") == field(s, "kind", "Deployment") &&
+		groupOf(field(h, "apiVersion", "")) == groupOf(field(s, "apiVersion", "apps/v1"))
+}
+
+// groupOf returns the group of an API version: "" for the core group ("v1").
+func groupOf(apiVersion string) string {
+	group, _, found := strings.Cut(apiVersion, "/")
+	if !found {
+		return ""
+	}
+	return group
 }
 
 // seriesLines writes one line per series, sorted by labels.

@@ -3,8 +3,8 @@
 # source.yaml names (maxReplicaCount 2), with the UID of incident.yaml. The status is synthetic, written from
 # the conditions KEDA v2.21 sets while its trigger is active and healthy. The context builder reads it with one
 # get and shows only the fields ADR-0036 allows (never the trigger's serverAddress or query); the analyzer
-# takes the previous maxReplicaCount of a proposal from it. The HorizontalPodAutoscaler is not read: its
-# status.hpaName only names the HPA whose series metrics.yaml holds (#480).
+# takes the previous maxReplicaCount of a proposal from it. Its status.hpaName names the HPA whose series
+# metrics.yaml holds (#480).
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -52,3 +52,27 @@ status:
       status: "False"
       reason: ScaledObjectUnpaused
       message: pause annotation removed for ScaledObject
+---
+# The HPA KEDA creates for the ScaledObject (controllers/keda/hpa.go at v2.21.0): controlled by the ScaledObject
+# and scaling its target. The context builder reads it from the analyzer's cache and asks its metric templates
+# only because both hold (ADR-0036, amendment of 2026-11-16). Only the fields that check reads are kept.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: keda-hpa-worker
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000792
+  ownerReferences:
+    - apiVersion: keda.sh/v1alpha1
+      kind: ScaledObject
+      name: worker
+      uid: 00000000-0000-4000-8000-000000000791
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 1
+  maxReplicas: 2

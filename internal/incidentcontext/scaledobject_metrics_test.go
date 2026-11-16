@@ -30,6 +30,10 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/metrics/prometheus"
 )
@@ -75,7 +79,7 @@ func withMetrics(m providers.MetricsSource) func(*Config) {
 func TestScaledObjectMetricsReadItsHPA(t *testing.T) {
 	src := &recordedQueries{series: map[string][]providers.Series{
 		tHPACurrent: hpaSeries(6.5), tHPATarget: hpaSeries(5)}}
-	c := build(t, newBuilder(t, reader(t, scaledObject(soUID, readyConditions())), sources{}, withMetrics(src)),
+	c := build(t, newBuilder(t, reader(t, scaledObject(soUID, readyConditions()), kedaHPA(soHPA, soUID, "Deployment", "worker")), sources{}, withMetrics(src)),
 		incident(scaledObjectRef()))
 	blk := one(t, c, SectionMetrics)
 	if blk.Availability != Available || c.Escalate() {
@@ -139,7 +143,7 @@ func TestScaledObjectWithoutAValidHPANameIsNotQueried(t *testing.T) {
 // A failed HPA query is a failed source, as for any target: the block could not fetch and the analysis escalates.
 func TestScaledObjectMetricsFailureIsAFailedSource(t *testing.T) {
 	src := &recordedQueries{err: &providers.RetryableError{Err: errors.New("connection refused")}}
-	c := build(t, newBuilder(t, reader(t, scaledObject(soUID, readyConditions())), sources{}, withMetrics(src)),
+	c := build(t, newBuilder(t, reader(t, scaledObject(soUID, readyConditions()), kedaHPA(soHPA, soUID, "Deployment", "worker")), sources{}, withMetrics(src)),
 		incident(scaledObjectRef()))
 	blk := one(t, c, SectionMetrics)
 	if blk.Availability != CouldNotFetch || !c.Escalate() || len(blk.Data()) != 0 ||
@@ -190,7 +194,7 @@ func TestHostileHPAMetricNameShapesNoLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := build(t, newBuilder(t, reader(t, scaledObject(soUID, readyConditions())), sources{},
+	c := build(t, newBuilder(t, reader(t, scaledObject(soUID, readyConditions()), kedaHPA(soHPA, soUID, "Deployment", "worker")), sources{},
 		withMetrics(wallClock{src})), incident(scaledObjectRef()))
 	blk := one(t, c, SectionMetrics)
 	if blk.Availability != Available || c.Escalate() {
@@ -216,5 +220,97 @@ func TestHostileHPAMetricNameShapesNoLine(t *testing.T) {
 	}
 	if len(blk.Data()) != 2 {
 		t.Errorf("data %q", blk.Data())
+	}
+}
+
+// kedaHPA is an autoscaling/v2 HPA in the test namespace as KEDA creates it: controlled by the ScaledObject of
+// ownerUID (none when it is empty), scaling the workload of the kind and name.
+func kedaHPA(name, ownerUID, kind, workload string) *unstructured.Unstructured {
+	meta := map[string]any{"namespace": testNS, keyName: name, "uid": "uid-" + name}
+	if ownerUID != "" {
+		meta["ownerReferences"] = []any{map[string]any{"apiVersion": kedaready.APIVersion,
+			"kind": kedaready.KindScaledObject, keyName: appName, "uid": ownerUID, "controller": true}}
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": meta,
+		"spec": map[string]any{"scaleTargetRef": map[string]any{"apiVersion": "apps/v1", "kind": kind, keyName: workload},
+			"minReplicas": int64(1), "maxReplicas": int64(2)},
+	}}
+}
+
+// withHPAName points the ScaledObject's status.hpaName at another HPA.
+func withHPAName(so *unstructured.Unstructured, name string) *unstructured.Unstructured {
+	so.Object["status"].(map[string]any)["hpaName"] = name
+	return so
+}
+
+// The HPA named by status.hpaName gives metric templates only when the ScaledObject of the Incident controls
+// it (its UID) and it scales the ScaledObject's own target. Any other HPA of the namespace, such as one of
+// another workload, gives no query, and the block says so in fixed text with no part of the HPA.
+func TestHPAOfAnotherWorkloadGivesNoTemplates(t *testing.T) {
+	const other = "other-hpa"
+	for name, hpa := range map[string]*unstructured.Unstructured{
+		"another workload's HPA": kedaHPA(other, "", "Deployment", "billing"),
+		"owned, other target":    kedaHPA(other, soUID, "Deployment", "billing"),
+		"owned, other kind":      kedaHPA(other, soUID, "StatefulSet", "worker"),
+		"other owner":            kedaHPA(other, "uid-other-so", "Deployment", "worker"),
+	} {
+		src := &recordedQueries{series: map[string][]providers.Series{tHPACurrent: hpaSeries(6.5)}}
+		so := withHPAName(scaledObject(soUID, readyConditions()), other)
+		c := build(t, newBuilder(t, reader(t, so, hpa, kedaHPA(soHPA, soUID, "Deployment", "worker")), sources{},
+			withMetrics(src)), incident(scaledObjectRef()))
+		blk := one(t, c, SectionMetrics)
+		if len(src.queries) != 0 || blk.Availability != NotAvailable || c.Escalate() ||
+			blk.Text != "not available: the HPA the ScaledObject names does not scale its target for it\n" {
+			t.Errorf("%s: queries %v, metrics %s, escalate %t:\n%s", name, src.queries, blk.Availability, c.Escalate(), blk.Text)
+		}
+	}
+}
+
+// An HPA that is not in the cache gives no query and is no failed source.
+func TestMissingHPAGivesNoTemplates(t *testing.T) {
+	src := &recordedQueries{}
+	c := build(t, newBuilder(t, reader(t, scaledObject(soUID, readyConditions())), sources{}, withMetrics(src)),
+		incident(scaledObjectRef()))
+	blk := one(t, c, SectionMetrics)
+	if len(src.queries) != 0 || blk.Availability != NotAvailable || c.Escalate() ||
+		blk.Text != "not available: the HPA the ScaledObject names was not found\n" {
+		t.Fatalf("queries %v, metrics %s, escalate %t:\n%s", src.queries, blk.Availability, c.Escalate(), blk.Text)
+	}
+}
+
+// failingHPAReads fails every get of an HPA, as a cache that has not synced or may not read them.
+type failingHPAReads struct{ client.Reader }
+
+func (f failingHPAReads) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if obj.GetObjectKind().GroupVersionKind().Kind == "HorizontalPodAutoscaler" {
+		return errors.New("timed out waiting for cache to be synced")
+	}
+	return f.Reader.Get(ctx, key, obj, opts...)
+}
+
+// A failed read of the HPA is a failed source, never "not found": no query, the block could not fetch and the
+// analysis escalates, so a later build tries again. The error text is not shown.
+func TestHPAReadFailureIsAFailedSource(t *testing.T) {
+	src := &recordedQueries{}
+	r := failingHPAReads{reader(t, scaledObject(soUID, readyConditions()), kedaHPA(soHPA, soUID, "Deployment", "worker"))}
+	c := build(t, newBuilder(t, r, sources{}, withMetrics(src)), incident(scaledObjectRef()))
+	blk := one(t, c, SectionMetrics)
+	if len(src.queries) != 0 || blk.Availability != CouldNotFetch || !c.Escalate() ||
+		blk.Text != "could not fetch: reading the HPA the ScaledObject names failed\n" {
+		t.Fatalf("queries %v, metrics %s, escalate %t:\n%s", src.queries, blk.Availability, c.Escalate(), blk.Text)
+	}
+}
+
+// A ScaledObject with no kind in its scale target scales a Deployment (KEDA's default): its HPA, which names
+// the kind, matches.
+func TestHPAMatchesTheDefaultKindOfTheScaleTarget(t *testing.T) {
+	so := scaledObject(soUID, readyConditions())
+	delete(so.Object["spec"].(map[string]any)["scaleTargetRef"].(map[string]any), "kind")
+	src := &recordedQueries{series: map[string][]providers.Series{tHPACurrent: hpaSeries(6.5), tHPATarget: hpaSeries(5)}}
+	c := build(t, newBuilder(t, reader(t, so, kedaHPA(soHPA, soUID, "Deployment", "worker")), sources{}, withMetrics(src)),
+		incident(scaledObjectRef()))
+	if blk := one(t, c, SectionMetrics); len(src.queries) != 2 || blk.Availability != Available {
+		t.Fatalf("queries %v, metrics %s:\n%s", src.queries, blk.Availability, blk.Text)
 	}
 }

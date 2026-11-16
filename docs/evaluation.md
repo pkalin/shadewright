@@ -259,11 +259,12 @@ renders, redacts, bounds and labels the answers as in the analyzer (design 3.3),
 of the metrics block verbatim as evidence.
 
 **The HPA metric of `keda-at-ceiling`.** Its subject, a `ScaledObject`, resolves no pods, so the builder asks only
-the two HPA templates, for the HPA the ScaledObject's `status.hpaName` names (design 3.3,
-[#480](https://github.com/pkalin/shadewright/issues/480)). Its `metrics.yaml` (synthetic, as no recording of a cluster with these series exists yet) holds the external metric
+the two HPA templates, for the HPA the ScaledObject's `status.hpaName` names, once that HPA in `objects.yaml` passes
+the owner check (design 3.3, [#480](https://github.com/pkalin/shadewright/issues/480)). Its `metrics.yaml` (synthetic, as no recording of a cluster with these series exists yet) holds the external metric
 `s0-prometheus` at 6.5 per replica, about 13 requests per second over the 2 replicas of the ceiling, against an average
 target of 5, and the backlog fact is scored from it: the current value (per replica or in all) and the target with its
-value. The Incident's own symptom evidence would carry the values too, but the analyzer's symptom normalization turns
+value. The rubric matches each number with a delimiter after it, so a value at the very end of the reply's text (the
+end of its last evidence quote, say) does not match. The Incident's own symptom evidence would carry the values too, but the analyzer's symptom normalization turns
 a milli quantity such as `6500m` into a placeholder, so the recorded Incident leaves them out. The request rate and
 replica history stay unscored: no template reads them.
 

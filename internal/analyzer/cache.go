@@ -68,7 +68,7 @@ func CacheOptions(operatorNamespace string, watched []string) cache.Options {
 // RemediationSettings, and, with at least one watched namespace, the events.k8s.io Events and the Pods the
 // collector reads there. The add-on kinds of the modules (Flux, KEDA, Kyverno and the rest) are never in the
 // list: they may not be installed or granted, and the collector watches them on a cache of its own. Neither are
-// the HorizontalPodAutoscalers, a symptom source only for the KEDA module, nor the Nodes, which the analyzer may
+// the HorizontalPodAutoscalers, a symptom source for the KEDA module that the context builder also reads, nor the Nodes, which the analyzer may
 // list but not watch.
 func ReadinessKinds(watched []string) []client.Object {
 	kinds := []client.Object{

@@ -127,7 +127,13 @@ func quoteLevel(run int) int {
 // the text is literal, a quoted string ends at its closing quote, and inside an array or object a quote opens
 // a string only at the start of a scalar (after "[", "{", "," or ":"), so "horse'battery" is plain text.
 func groupEnd(s string, pos, limit, ctx, keyPos int, shell bool) (int, bool) {
-	g := groupScan{s: s, limit: limit, ctx: ctx, shell: shell}
+	return groupScanEnd(groupScan{s: s, limit: limit, ctx: ctx, shell: shell}, pos, keyPos)
+}
+
+// groupScanEnd is groupEnd with the scanner g, whose props field says whether a YAML node property opens a
+// scalar inside an array or object (bracketSpan).
+func groupScanEnd(g groupScan, pos, keyPos int) (int, bool) {
+	s, limit := g.s, g.limit
 	keyCol := -1
 	for i := pos; i < limit; i++ {
 		if s[i] == '\n' && g.quote != 0 && keyPos != noKey {
@@ -179,6 +185,11 @@ type groupScan struct {
 	// a shell string; prev the last byte read outside quoted strings that is no blank and no backslash.
 	shell, qShell bool
 	prev          byte
+	// props is whether node properties are read at all (bracketSpan's first scan); inProp is whether a YAML
+	// node property ("!!str", "&a") that opens a scalar inside an array or object is
+	// being read; afterProp whether one ended with a blank and nothing else of the scalar was read yet, so a
+	// quote still opens a string ("[!!str \"a]b\"]", #769).
+	props, inProp, afterProp bool
 }
 
 // shellText reports whether the byte read now is shell text: inside "$(" or backticks, or in a group that
@@ -190,7 +201,7 @@ func (g *groupScan) shellText() bool {
 // scalarStart reports whether a quote read now inside an array or object opens a string: it does at the
 // start of a scalar only, after "[", "{", "," or ":" and blanks.
 func (g *groupScan) scalarStart() bool {
-	return g.shellText() || strings.IndexByte("[{,:", g.prev) >= 0
+	return g.shellText() || g.afterProp || strings.IndexByte("[{,:", g.prev) >= 0
 }
 
 // push opens a nested group whose closer is c, and reports false when that nests too deep.
@@ -273,10 +284,22 @@ func (g *groupScan) doubleQuoted(i int) (int, scanStep) {
 }
 
 // unquoted reads the byte at i outside any quoted string, and records it as prev when it is no blank or
-// backslash and opens no string.
+// backslash and opens no string. It also follows the YAML node properties that open a scalar inside an array
+// or object (inProp, afterProp).
 func (g *groupScan) unquoted(i int) (int, scanStep) {
 	c := g.s[i]
+	startsProp := g.props && (c == '!' || c == '&') && g.run == 0 && g.depth > 0 && !g.inShell() && !g.inProp && g.scalarStart()
 	j, st := g.unquotedByte(i)
+	switch {
+	case isSpace(c):
+		if g.inProp {
+			g.inProp, g.afterProp = false, true
+		}
+	case startsProp:
+		g.inProp, g.afterProp = true, false
+	case strings.IndexByte(",[]{}", c) >= 0 || !g.inProp:
+		g.inProp, g.afterProp = false, false
+	}
 	if g.quote == 0 && c != '\\' && !isSpace(c) {
 		g.prev = c
 	}
@@ -394,7 +417,7 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag bool) (end int, last bo
 			end = e
 			continue
 		}
-		if c == '\\' && end+1 < limit && (s[end+1] == ' ' || s[end+1] == '\t') {
+		if c == '\\' && end+1 < limit && (s[end+1] == ' ' || s[end+1] == '\t' || strings.IndexByte(shellEscapedPunct, s[end+1]) >= 0) {
 			last = false
 			end += 2
 			continue
@@ -411,13 +434,36 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag bool) (end int, last bo
 			}
 			break
 		}
-		if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 && (c != ',' || !flag) {
+		if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 && (c != ',' || !flag && fieldAfterComma(s, end, limit)) {
 			break
 		}
 		last = false
 		end++
 	}
 	return end, last, true
+}
+
+// fieldAfterComma reports whether the comma at i, glued to a shell word after a key name, starts the next
+// field of a list rather than more of the value (#769): it is followed by whitespace, the end of the input, a
+// quote or a separator, or by a name and "=" or ":" ("password=\"abc\",user=bob", ",next: x"). A name and "="
+// followed by whitespace, the end or another "=" is base64 padding, not a field ("\"a\",abc=").
+func fieldAfterComma(s string, i, limit int) bool {
+	j := i + 1
+	if j >= limit || isSpace(s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
+		return true
+	}
+	for j < limit && (isAlnum(s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
+		j++
+	}
+	switch {
+	case j == i+1 || j >= limit:
+		return false
+	case s[j] == ':':
+		return true
+	case s[j] == '=':
+		return j+1 < limit && !isSpace(s[j+1]) && s[j+1] != '='
+	}
+	return false
 }
 
 // plainWordEnd returns the end of a shell word that starts with plain text at pos (no quote, "$(" or
@@ -441,6 +487,12 @@ func plainWordEnd(s string, pos, limit, keyPos int) int {
 			end, glued = end+2, true
 		case c == '\\' && end+1 < limit && !isSpace(s[end+1]) && s[end+1] != '"' && s[end+1] != '\'':
 			end += 2
+		case (c == '"' || c == '\'') && end > pos:
+			e := gluedQuoteEnd(s, end, limit, keyPos)
+			if e < 0 {
+				return wordEnd(pos, end, glued)
+			}
+			end, glued = e, true
 		case isSpace(c), c == '"', c == '\'', c == '\\', strings.IndexByte(";|&<>()", c) >= 0:
 			return wordEnd(pos, end, glued)
 		default:
@@ -450,6 +502,21 @@ func plainWordEnd(s string, pos, limit, keyPos int) int {
 	return wordEnd(pos, end, glued)
 }
 
+// gluedQuoteEnd returns the end of a quoted piece that opens at q, glued to plain text before it ("ab\"c d\"",
+// #769), or -1 when the quote may close an enclosing JSON, YAML or logfmt string instead: the byte after it is
+// whitespace, the end of the input, a quote, a backslash or one of ",;:)]}", or the piece does not close on
+// its line within the bound.
+func gluedQuoteEnd(s string, q, limit, keyPos int) int {
+	if q+1 >= limit || isSpace(s[q+1]) || strings.IndexByte(",;:)]}\"'\\", s[q+1]) >= 0 {
+		return -1
+	}
+	e, ok := groupEnd(s, q, limit, 0, keyPos, true)
+	if !ok || strings.ContainsAny(s[q:e], "\r\n") {
+		return -1
+	}
+	return e
+}
+
 // wordEnd returns end when glued, else pos.
 func wordEnd(pos, end int, glued bool) int {
 	if glued {
@@ -457,6 +524,11 @@ func wordEnd(pos, end int, glued bool) int {
 	}
 	return pos
 }
+
+// shellEscapedPunct are the punctuation bytes a backslash escapes inside a shell word of shellWordEnd ("a"\!b,
+// #769). A letter or digit after a backslash ("\n", "\t", "\u") ends the word instead, as it reads as a JSON
+// escape in a log line, and so do a quote and another backslash, which may close or escape an enclosing string.
+const shellEscapedPunct = "!#$%&()*+,-./:;<=>?@[]^_`{|}~"
 
 // wordStops are the bytes that end a shell word of shellWordEnd, besides whitespace.
 const wordStops = ",;|&<>(){}[]\\"
@@ -510,7 +582,13 @@ func bracketSpan(s string, pos, ctx int) (int, int, bool) {
 	if pos >= len(s) || s[pos] != '[' && s[pos] != '{' {
 		return 0, 0, false
 	}
-	end, ok := groupEnd(s, pos, extentLimit(s, pos), ctx, noKey, false)
+	limit := extentLimit(s, pos)
+	// A quoted scalar behind a YAML node property is read as a string (#769) in a second scan; the value is
+	// the longer of the two scans that close, so it is never shorter than without the property rule.
+	end, ok := groupEnd(s, pos, limit, ctx, noKey, false)
+	if pe, pok := groupScanEnd(groupScan{s: s, limit: limit, ctx: ctx, props: true}, pos, noKey); pok {
+		end, ok = max(end, pe), true
+	}
 	return pos, end, ok
 }
 

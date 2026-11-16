@@ -65,10 +65,10 @@ limitations under the License.
 // before it whose parts read as words or acronyms (whole or in part, see base64Windows), a secret after a
 // one-word key name and a blank without a dash ("set secret x", which only the long-token rule judges,
 // because "kubectl get secret foo" has the same shape), after a single-letter flag ("-p x"), after a key or
-// flag name written with Unicode escapes, or in a here-document or here-string, a plain YAML block sequence
-// item with blanks after a flag item, the part of a value after a key name past the bound of the extent rule
-// (maxValueExtent, extent.go), a closed quote glued to an unquoted value, the part after a comma glued to a
-// quoted piece after a key name that is no flag, a value after a flag in
+// flag name written with Unicode escapes, or in a here-document or here-string, the part of a value after a
+// key name past the bound of the extent rule (maxValueExtent, extent.go), a quoted piece glued to an unquoted
+// value that does not close on its line, a backslash and a letter or digit glued to a quoted piece after a
+// flag, a field after a comma glued to a quoted piece after a key name that is no flag, a value after a flag in
 // pretty-printed escaped JSON ("\",\n  \""), the part of an
 // unquoted value after a quote inside it, a value after a compound name and a blank that is no opaque token,
 // and a secret in a format no rule knows (TestKeyNameKnownLeaks).
@@ -1631,10 +1631,12 @@ func keyQuoteLevel(s string, pos int) int {
 // at the quote that closes the argument, on the same line and within maxValueExtent bytes (#708): the
 // argument is one word to the program, blanks and other quotes included ("[\"--password='a b' c\"]": the
 // single quotes are literal). It returns 0 for any other key, or when the value opens with the argument's own
-// quote or a backslash, or the argument does not close.
+// quote, or the argument does not close. A value that opens with a backslash runs to the closing quote too
+// (#769): a backslash escaped as the argument's level is literal text, and a quote escaped deeper than the
+// argument does not close it.
 func argumentEnd(s string, m []int) int {
 	pos := m[1]
-	if s[m[2]] != '-' || strings.IndexByte(s[m[3]:pos], '=') < 0 || pos >= len(s) || s[pos] == '\\' {
+	if s[m[2]] != '-' || strings.IndexByte(s[m[3]:pos], '=') < 0 || pos >= len(s) {
 		return 0
 	}
 	level, ok := enclosingQuote(s, m[2])
@@ -1888,10 +1890,47 @@ func flagExtendedValue(s string, m []int, closed bool) (int, int) {
 		}
 	}
 	start, end := keyNameValue(s, pos, m[0], closed, ext)
-	if flow && start == pos && pos < len(s) && !opensGroup(s, pos) && s[pos] != '\\' {
-		end = max(end, flowItemEnd(s, pos))
+	if start == pos && pos < len(s) && !opensGroup(s, pos) && s[pos] != '\\' {
+		switch {
+		case flow:
+			end = max(end, flowItemEnd(s, pos))
+		case list && blockSequenceItem(s, m):
+			end = max(end, lineItemEnd(s, pos))
+		}
 	}
 	return start, end
+}
+
+// blockSequenceItem reports whether the secret flag of m is an item of a YAML block sequence ("- --password",
+// after indentation at the start of its line) and its value the next item of the same sequence: the dash of
+// the value's line is in the column of the flag's dash (#769). A flag that is no item ("--password" then
+// "  - x" on the next line) gives false, so only the first token after the dash goes.
+func blockSequenceItem(s string, m []int) bool {
+	sep := s[m[3]:m[1]]
+	nl := strings.LastIndexAny(sep, "\r\n")
+	if nl < 0 {
+		return false
+	}
+	valueDash := strings.IndexByte(sep[nl+1:], '-')
+	if valueDash < 0 {
+		return false
+	}
+	i := m[0]
+	for i > 0 && m[0]-i < maxValueExtent && (s[i-1] == ' ' || s[i-1] == '\t') {
+		i--
+	}
+	if i == m[0] || i == 0 || s[i-1] != '-' {
+		return false
+	}
+	dash := i - 1
+	j := dash
+	for j > 0 && dash-j < maxValueExtent && (s[j-1] == ' ' || s[j-1] == '\t') {
+		j--
+	}
+	if j > 0 && s[j-1] != '\n' && s[j-1] != '\r' {
+		return false
+	}
+	return dash-j == valueDash
 }
 
 // compoundValueSpans is the spans function of the rule for a key name of two or more words, a blank and the

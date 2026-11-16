@@ -225,9 +225,8 @@ func (k *knownValue) squoted() {
 }
 
 // shellWord writes a shell word of one to three glued pieces. A word that starts with plain text glues no
-// quoted piece after it: a quote ends an unquoted value (TestKeyNameKnownLeaks, "quote glued to a value").
-// After a key name (flag false) a comma glued to a word that starts with a group ends it (TestKeyNameKnownLeaks,
-// "comma glued to a quoted value"), so such a word holds none.
+// quoted piece after it, and after a key name (flag false) a word holds no comma: blanksKnownCorpus covers
+// both (#769).
 func (k *knownValue) shellWord(flag bool) {
 	plain := false
 	for i := range 1 + k.rng.IntN(3) {

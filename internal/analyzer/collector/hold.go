@@ -27,8 +27,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // ConsequenceGrace is how long the collector holds a consequence whose pod status shows no cause before it
@@ -43,9 +45,13 @@ const DefaultMaxHeldConsequences = 1024
 // the Incident controller holds unwritten (package incidents, DefaultNamespaceShareDivisor).
 const holdShareDivisor = 4
 
-// minHoldSamples is how many times the held container must be seen failing during the wait, the last sample
-// included, for the consequence to be emitted.
+// minHoldSamples is how many samples of the wait must see the held container failing for the consequence to be
+// emitted.
 const minHoldSamples = 2
+
+// minHoldRestarts is how many restarts during the wait open the consequence even when the last sample sees the
+// container running (a liveness loop sampled between two kills).
+const minHoldRestarts = 2
 
 // Outcomes of a hold, the label values of heldConsequences.
 const (
@@ -82,9 +88,11 @@ type consequenceHold struct {
 	// restarts is the container's restart count at the previous sample (at the first sight for the first one):
 	// a larger one at the next sample is a restart between the two.
 	restarts int32
+	// restarted is how many restarts the samples saw since the first sight.
+	restarted int32
 	// since is the collector's clock at the first sight.
 	since time.Time
-	// failing is how many reconciles saw the container failing.
+	// failing is how many samples saw the container failing.
 	failing int
 	// opened is set once the hold decided to emit, so a delivery retried later still emits.
 	opened bool
@@ -99,6 +107,9 @@ type consequenceHolds struct {
 	share int
 	holds map[types.NamespacedName]consequenceHold
 	perNS map[string]int
+	// byPod indexes the holds by the UID of their pod, for the samples an update of the pod makes. It has an
+	// entry per hold and no other, so it is bounded as holds is.
+	byPod map[types.UID]map[types.NamespacedName]struct{}
 }
 
 func newConsequenceHolds(capacity int) *consequenceHolds {
@@ -106,6 +117,36 @@ func newConsequenceHolds(capacity int) *consequenceHolds {
 	return &consequenceHolds{
 		max: capacity, share: max(capacity/holdShareDivisor, 1),
 		holds: map[types.NamespacedName]consequenceHold{}, perNS: map[string]int{},
+		byPod: map[types.UID]map[types.NamespacedName]struct{}{},
+	}
+}
+
+// ofPod returns the keys of the events held on the pod with this UID and not decided yet. A hold decided to
+// open waits for its delivery retry (retryAfter), which an update of the pod must not hurry.
+func (h *consequenceHolds) ofPod(uid types.UID) []types.NamespacedName {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keys := make([]types.NamespacedName, 0, len(h.byPod[uid]))
+	for k := range h.byPod[uid] {
+		if !h.holds[k].opened {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// index adds key to the holds of pod. Called with mu held.
+func (h *consequenceHolds) index(pod types.UID, key types.NamespacedName) {
+	if h.byPod[pod] == nil {
+		h.byPod[pod] = map[types.NamespacedName]struct{}{}
+	}
+	h.byPod[pod][key] = struct{}{}
+}
+
+// unindex drops key from the holds of pod. Called with mu held.
+func (h *consequenceHolds) unindex(pod types.UID, key types.NamespacedName) {
+	if delete(h.byPod[pod], key); len(h.byPod[pod]) == 0 {
+		delete(h.byPod, pod)
 	}
 }
 
@@ -125,23 +166,29 @@ func (h *consequenceHolds) get(key types.NamespacedName, uid types.UID) (consequ
 func (h *consequenceHolds) put(key types.NamespacedName, s consequenceHold) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, ok := h.holds[key]; !ok {
+	old, ok := h.holds[key]
+	if !ok {
 		if len(h.holds) >= h.max || h.perNS[key.Namespace] >= h.share {
 			return false
 		}
 		h.perNS[key.Namespace]++
 		consequencesHeld.Inc()
+	} else if old.pod != s.pod {
+		h.unindex(old.pod, key)
 	}
+	h.index(s.pod, key)
 	h.holds[key] = s
 	return true
 }
 
 // remove drops key. Called with mu held.
 func (h *consequenceHolds) remove(key types.NamespacedName) {
-	if _, ok := h.holds[key]; !ok {
+	s, ok := h.holds[key]
+	if !ok {
 		return
 	}
 	delete(h.holds, key)
+	h.unindex(s.pod, key)
 	consequencesHeld.Dec()
 	if h.perNS[key.Namespace]--; h.perNS[key.Namespace] <= 0 {
 		delete(h.perNS, key.Namespace)
@@ -173,8 +220,22 @@ const (
 	holdDrop
 )
 
+// heldEventsOf maps an update of a pod to the events held on it, so that the update is a sample of each hold
+// (ADR-0039 point 19: "two reconciles of the pod or the event"). A container that recovers sends no more events,
+// and only its pod's updates show the recovery. It enqueues nothing for a pod with no hold, keeps no state of its
+// own, and an event reconcile it causes writes nothing, so it cannot feed itself.
+func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconcile.Request {
+	keys := c.holds.ofPod(obj.GetUID())
+	reqs := make([]reconcile.Request, 0, len(keys))
+	for _, k := range keys {
+		reqs = append(reqs, reconcile.Request{NamespacedName: k})
+	}
+	return reqs
+}
+
 // holdConsequence decides on a consequence (ADR-0039 point 19). obs is the event's observation and pod the pod
 // it names as fromEvent read it (nil when gone or replaced; a failed read never reaches here, it is retried).
+// A reconcile of the event is a sample, whether its event or an update of its pod (heldEventsOf) caused it.
 //
 //   - No hold and not a consequence with no cause: holdEmit, as before.
 //   - A hold whose decision to open is not delivered yet: holdEmit.
@@ -182,7 +243,9 @@ const (
 //   - A held event whose pod now shows a cause: the hold is released, holdEmit.
 //   - No room to hold a new one: holdEmit at once, without a verdict, so it goes through the gate.
 //   - Otherwise the reconcile is a sample of the container. Before the end of ConsequenceGrace: holdWait. At
-//     the end: holdEmit when this last sample is failing and at least minHoldSamples were, else holdDrop.
+//     the end (amended 2026-11-16): holdEmit when at least minHoldSamples samples were failing and either this
+//     last one is failing or the container restarted at least minHoldRestarts times during the hold, else
+//     holdDrop.
 func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event,
 	obs Observation, pod *corev1.Pod) (holdVerdict, time.Duration) {
 	if c.holdOff {
@@ -221,6 +284,9 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 		s.failing++
 	}
 	if found {
+		if st.RestartCount > s.restarts {
+			s.restarted += st.RestartCount - s.restarts
+		}
 		s.restarts = st.RestartCount
 	}
 	if left := s.since.Add(ConsequenceGrace).Sub(now); left > 0 {
@@ -232,10 +298,10 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 		}
 		return holdWait, left
 	}
-	if !failing || s.failing < minHoldSamples {
+	if s.failing < minHoldSamples || (!failing && s.restarted < minHoldRestarts) {
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
 		logf.FromContext(ctx).V(1).Info("Dropped held consequence, its container did not keep failing",
-			"reason", s.reason, "container", s.container, "failingSamples", s.failing)
+			"reason", s.reason, "container", s.container, "failingSamples", s.failing, "restarts", s.restarted)
 		return holdDrop, 0
 	}
 	s.opened = true

@@ -89,6 +89,17 @@ func (h *harness) failPodReads() func() {
 	return func() { h.c.owners.pods = orig }
 }
 
+// sampleByPod is an update of the web pod: it reconciles the events heldEventsOf maps the pod to, which must be
+// the one held event ev-hold, and returns the result.
+func (h *harness) sampleByPod() ctrl.Result {
+	h.t.Helper()
+	reqs := h.c.heldEventsOf(h.t.Context(), readPod(h.t, h, webPod))
+	if len(reqs) != 1 || reqs[0] != reqFor("ev-hold") {
+		h.t.Fatalf("an update of the pod enqueued %v, want ev-hold", reqs)
+	}
+	return h.reconcileEvent("ev-hold")
+}
+
 func (h *harness) reconcileEventErr(name string) (ctrl.Result, error) {
 	return h.events.Reconcile(h.t.Context(), reqFor(name))
 }
@@ -105,7 +116,10 @@ func holdHarness(t *testing.T, reason string, first sample) *harness {
 // TestHoldCorpus runs generated sequences of pod states through the event collector, each with its answer known
 // by construction (ADR-0039 point 19): a consequence with no cause is emitted only when, at the end of
 // ConsequenceGrace, its pod exists with the same UID, the container is failing, and it was seen failing at least
-// twice; a pod gone or replaced during the wait opens nothing; a failed read changes nothing and is retried.
+// twice, and either the last sample is failing or it restarted at least twice during the wait (amended
+// 2026-11-16); a pod gone or replaced during the wait opens nothing; a failed read changes nothing and is
+// retried. The samples between the first and the last are made by updates of the pod and by reconciles of the
+// event in turn.
 func TestHoldCorpus(t *testing.T) {
 	rng := rand.New(rand.NewPCG(792, 19)) // #nosec G404 -- a seeded corpus, not a secret
 	middle := []sample{sampleFailing, sampleFine, sampleRestart, sampleGone, sampleReplaced, sampleReadError}
@@ -183,7 +197,12 @@ func runHoldSequence(t *testing.T, reason string, seq []sample) bool {
 		if now {
 			failing++
 		}
-		res := h.reconcileEvent("ev-hold")
+		var res ctrl.Result
+		if i > 0 && i < last && i%2 == 1 {
+			res = h.sampleByPod()
+		} else {
+			res = h.reconcileEvent("ev-hold")
+		}
 		if i < last {
 			if want := ConsequenceGrace - at.Sub(t0); res.RequeueAfter != want {
 				t.Fatalf("step %d: requeue after %s, want %s", i, res.RequeueAfter, want)
@@ -191,7 +210,8 @@ func runHoldSequence(t *testing.T, reason string, seq []sample) bool {
 			h.none()
 			continue
 		}
-		emitted := now && failing >= 2
+		// seen is the restarts during the hold: the count starts at 0.
+		emitted := failing >= 2 && (now || seen >= 2)
 		if emitted {
 			o := h.one()
 			if o.Class != ClassConsequence || o.Count != 1 || o.Total != 1 {
@@ -418,7 +438,8 @@ func TestHoldAfterRestart(t *testing.T) {
 }
 
 // TestHoldDecisionStandsAcrossADeliveryRetry: once the end decided to emit, a full channel retries the delivery,
-// and the retry emits even when the container is fine by then.
+// and the retry emits even when the container is fine by then. An update of the pod meanwhile enqueues nothing,
+// so the retry keeps its delay.
 func TestHoldDecisionStandsAcrossADeliveryRetry(t *testing.T) {
 	d, rs, _ := workload()
 	h := newHarness(t, Config{Buffer: 1}, d, rs, holdPod(reasonBackOff, sampleFailing, 0),
@@ -435,6 +456,9 @@ func TestHoldDecisionStandsAcrossADeliveryRetry(t *testing.T) {
 	}
 	h.drain()
 	h.setPodState(reasonBackOff, sampleFine, 0)
+	if reqs := h.c.heldEventsOf(t.Context(), readPod(t, h, webPod)); len(reqs) != 0 {
+		t.Fatalf("an update of the pod enqueued %v during the delivery retry", reqs)
+	}
 	h.reconcileEvent("ev-hold")
 	if o := h.one(); o.Count != 1 {
 		t.Fatalf("emitted %+v", o)
@@ -488,23 +512,85 @@ func TestOnlyConsequencesWithNoCauseAreHeld(t *testing.T) {
 }
 
 // TestBackOffRecoveredByOneRestartOpensNothing: a container in back-off at the first sight that restarts once
-// and then runs and is ready for the rest of the wait is failing at the sample of the restart only, so it
-// opens nothing (ADR-0039 point 19, amended 2026-11-16). A restart counted from the first sight would make every
-// later sample failing, and this would open.
+// and then runs and is ready for the rest of the wait opens nothing (ADR-0039 point 19, amended 2026-11-16). It
+// sends no more BackOff events once it runs, so the only reconciles of the event are the first sight and the end
+// of the grace; the restart and the readiness are seen through the updates of the pod. Without those samples the
+// end compares restart 1 with restart 0 at the first sight, finds a failing sample, and opens.
 func TestBackOffRecoveredByOneRestartOpensNothing(t *testing.T) {
 	h := holdHarness(t, reasonBackOff, sampleFailing)
 	h.reconcileEvent("ev-hold")
-	h.clock.add(ConsequenceGrace / 2)
-	h.setPodState(reasonBackOff, sampleRestart, 1)
-	h.reconcileEvent("ev-hold")
-	h.none()
-	h.clock.add(ConsequenceGrace / 2)
-	// Still running and ready, no new restart.
+	h.clock.add(10 * time.Second)
+	// The kubelet restarts it: running, not ready yet.
+	cur := readPod(t, h, webPod)
+	cur.Status = holdPod(reasonBackOff, sampleRestart, 1).Status
+	cur.Status.ContainerStatuses[0].Ready = false
+	h.update(cur)
+	if res := h.sampleByPod(); res.RequeueAfter != ConsequenceGrace-10*time.Second {
+		t.Fatalf("requeue after %s, want the rest of the grace", res.RequeueAfter)
+	}
+	h.clock.add(5 * time.Second)
+	// Ready, no new restart.
 	h.setPodState(reasonBackOff, sampleFine, 1)
+	h.sampleByPod()
+	h.none()
+	h.clock.set(t0.Add(ConsequenceGrace))
 	h.reconcileEvent("ev-hold")
 	h.none()
 	if h.c.holds.len() != 0 {
 		t.Fatal("the hold is kept after its end")
+	}
+}
+
+// TestPodWithoutHoldEnqueuesNothing: an update of a pod no consequence is held on maps to no event, and an ended
+// hold leaves nothing in the index.
+func TestPodWithoutHoldEnqueuesNothing(t *testing.T) {
+	h := holdHarness(t, reasonBackOff, sampleFailing)
+	if reqs := h.c.heldEventsOf(t.Context(), readPod(t, h, webPod)); len(reqs) != 0 {
+		t.Fatalf("enqueued %v before any hold", reqs)
+	}
+	h.reconcileEvent("ev-hold")
+	h.clock.add(ConsequenceGrace)
+	h.reconcileEvent("ev-hold")
+	h.one()
+	h.reconcileEvent("ev-hold")
+	if reqs := h.c.heldEventsOf(t.Context(), readPod(t, h, webPod)); len(reqs) != 0 || len(h.c.holds.byPod) != 0 {
+		t.Fatalf("enqueued %v after the end, index %v", reqs, h.c.holds.byPod)
+	}
+}
+
+// TestLivenessLoopSampledWhileRunning: a liveness probe kills a container with no readiness probe, so it is ready
+// at the first sight. Each kill is a pod update with one more restart, and the end of the grace falls in a life
+// where it runs and is ready. Two restarts during the hold open the consequence; one is a recovery and opens
+// nothing (ADR-0039 point 19, amended 2026-11-16).
+func TestLivenessLoopSampledWhileRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		restarts []int32
+		open     bool
+	}{
+		{"one restart", []int32{1}, false},
+		{"two restarts", []int32{1, 2}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := holdHarness(t, ReasonUnhealthy, sampleFine)
+			h.reconcileEvent("ev-hold")
+			for _, r := range tc.restarts {
+				h.clock.add(40 * time.Second)
+				h.setPodState(ReasonUnhealthy, sampleRestart, r)
+				h.sampleByPod()
+			}
+			h.none()
+			// The end of the grace, in the same life as the last restart.
+			h.clock.set(t0.Add(ConsequenceGrace))
+			h.reconcileEvent("ev-hold")
+			if !tc.open {
+				h.none()
+				return
+			}
+			if o := h.one(); o.Class != ClassConsequence || o.Count != 1 {
+				t.Fatalf("emitted %+v, want the consequence for the gate", o)
+			}
+		})
 	}
 }
 

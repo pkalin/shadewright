@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -314,7 +315,8 @@ func (c *Collector) Observations() <-chan Observation {
 }
 
 // SetupWithManager registers the two watches: events.k8s.io/v1 Events of type Warning and Pods with a
-// terminated container or a waiting cause (and the update that clears one), and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. All read
+// terminated container or a waiting cause (and the update that clears one), and, when [Config.Modules] is set, one watch per kind in [SourceKinds]. The event
+// controller also maps any update of a pod to the consequences held on it (hold.go), through the same pod informer. All read
 // through the manager's cache, which the analyzer restricts to the watched namespaces (analyzer.CacheOptions). Owners are read with the API reader, one object at a time with a
 // deadline, so no informer is started for ReplicaSets, Deployments or StatefulSets. There is deliberately no
 // watch on core/v1 Events: they are the same objects, and watching both would count each event twice.
@@ -324,6 +326,8 @@ func (c *Collector) SetupWithManager(mgr ctrl.Manager) error {
 	err := ctrl.NewControllerManagedBy(mgr).
 		Named("collector-events").
 		For(&eventsv1.Event{}, builder.WithPredicates(predicate.NewPredicateFuncs(isWarning))).
+		// An update of the pod of a held consequence is a sample of its hold (hold.go).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(c.heldEventsOf)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(er)
 	if err != nil {

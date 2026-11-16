@@ -35,8 +35,9 @@ limitations under the License.
 // on a named container is a consequence, and its CauseFingerprint is the cause its pod's status shows for that
 // container: a current waiting cause, else an OOM kill that finished at most KillCauseWindow before the
 // event's own time. A consequence with no cause is held (hold.go, ADR-0039 point 19): it is emitted only when,
-// ConsequenceGrace after the collector first saw it, its pod has the same UID and the container is still
-// failing and was seen failing at least twice; otherwise it is handled without an observation. The holds are
+// ConsequenceGrace after the collector first saw it, its pod has the same UID, the container was seen failing
+// at least twice (each reconcile of the event, and each update of its pod, is a sample), and it is still failing
+// or restarted at least twice during the hold; otherwise it is handled without an observation. The holds are
 // bounded (DefaultMaxHeldConsequences, a quarter per namespace); over the bound a consequence is emitted at once.
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled

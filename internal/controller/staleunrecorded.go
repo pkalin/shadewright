@@ -45,9 +45,9 @@ import (
 //   - the close of the pull request found on the branch, or a step no other class names (reinstalledCloseFailure),
 //     gives PullRequestNotClosed with the same reasons.
 //
-// ok is false for anything else: a request with a recorded pull request, a refusal (403 or 422, which ends the
-// request NeedsIntervention), a failure of the Kubernetes API (a *clusterError, never wrapped in a
-// *reinstalledError), a pause and the caller's cancellation.
+// ok is false for anything else: a request with a recorded pull request, a refusal (403 or 422: a refused close is
+// unrecordedRefused's, a refused step before it ends the request NeedsIntervention), a failure of the Kubernetes API
+// (a *clusterError, never wrapped in a *reinstalledError), a pause and the caller's cancellation.
 func unrecordedFailure(rr *remediationv1alpha1.RemediationRequest, err error) (metav1.Condition, bool) {
 	if rr.Status.PullRequest != nil {
 		return metav1.Condition{}, false
@@ -113,8 +113,53 @@ func unrecordedNotClosed(rr *remediationv1alpha1.RemediationRequest, s refusedSt
 	}
 }
 
-// noteUnrecorded records want, the condition unrecordedFailure gave for err, in the status of rr when it changes,
-// with one Warning Event (named after the condition's type) when it is set or its reason changes, logs the retry,
+// errUnrecordedCloseRefused is cleanUpStale's answer when the Git host refused for good to close the pull request
+// of a stale plan found on its branch with no pull request recorded (#808, decision of 2026-11-16): the request
+// keeps its phase, the mark and the lock, and refuseOrWait retries it at the error backoff (or after the delay the
+// host asked for) instead of ending it. It wraps the refusal, which is not a final phase here.
+var errUnrecordedCloseRefused = errors.New("the Git host refused to close the stale plan's pull request found on " +
+	"its branch")
+
+// unrecordedCleanup reports whether rr is a stale plan's cleanup (the mark) with no pull request recorded.
+func unrecordedCleanup(rr *remediationv1alpha1.RemediationRequest) bool {
+	return rr.Status.PullRequest == nil && staleMark(rr) != nil
+}
+
+// unrecordedRefused is condition PullRequestNotClosed for the stale plan of rr, with no pull request recorded, whose
+// close of pull request cf, found on its branch, the Git host refused for good with reason (GitForbidden,
+// GitRejected), through the plan's installation or a new one. The message names the pull request, never the Git
+// host's answer.
+func unrecordedRefused(rr *remediationv1alpha1.RemediationRequest, cf *closeFailure, reason string) metav1.Condition {
+	return metav1.Condition{
+		Type:   remediationv1alpha1.ConditionPullRequestNotClosed,
+		Status: metav1.ConditionTrue,
+		Reason: reason,
+		Message: fmt.Sprintf("The plan is stale and the Git host refused (%s) to close pull request %s on branch %s, "+
+			"which no status recorded; the target stays locked, Shadewright tries the close again and ends the "+
+			"request once the pull request is closed, by anyone, or merged", reason,
+			pullRequestName(cf.number, cf.url), freshness.BranchName(rr)),
+		ObservedGeneration: rr.Generation,
+	}
+}
+
+// setUnrecorded sets want, PullRequestUnreadable or PullRequestNotClosed, in the status of rr about to be written
+// (setRefused), and removes the other one: with no pull request recorded, the cleanup shows one of them, never both
+// (#808). It reports whether that changed the status, and whether the Event of want is due.
+func (r *RemediationRequestReconciler) setUnrecorded(rr *remediationv1alpha1.RemediationRequest,
+	want metav1.Condition) (changed, event bool) {
+	other := remediationv1alpha1.ConditionPullRequestNotClosed
+	if want.Type == remediationv1alpha1.ConditionPullRequestNotClosed {
+		other = remediationv1alpha1.ConditionPullRequestUnreadable
+	}
+	removed := meta.RemoveStatusCondition(&rr.Status.Conditions, other)
+	changed, event = r.setRefused(rr, want)
+	return changed || removed, event
+}
+
+// noteUnrecorded records want, the condition unrecordedFailure or unrecordedRefused gave for err, in the status of rr
+// when it changes, removes the other of PullRequestUnreadable and PullRequestNotClosed in the same write
+// (setUnrecorded), with one Warning Event (named after the condition's type) when it is set or its reason changes,
+// logs the retry,
 // and returns err, so the caller retries as before (waitOrFail: the error backoff, or the delay the host asked
 // for). The write changes nothing but that condition, so it wakes no reconcile of its own (skipOwnMarks: a
 // PullRequestNotClosed, or a PullRequestUnreadable with reason GitFailed or GitNotFound). A conflict reads the
@@ -122,7 +167,7 @@ func unrecordedNotClosed(rr *remediationv1alpha1.RemediationRequest, s refusedSt
 // pull request recorded. A write that still fails is returned with err; the next look sets the condition again.
 func (r *RemediationRequestReconciler) noteUnrecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	want metav1.Condition, err error) error {
-	changed, event := r.setRefused(rr, want)
+	changed, event := r.setUnrecorded(rr, want)
 	if changed {
 		werr := r.Status().Update(ctx, rr)
 		if apierrors.IsConflict(werr) {
@@ -135,7 +180,7 @@ func (r *RemediationRequestReconciler) noteUnrecorded(ctx context.Context, rr *r
 					return errStaleMarkGone
 				}
 				var again bool
-				if again, event = r.setRefused(fresh, want); !again {
+				if again, event = r.setUnrecorded(fresh, want); !again {
 					fresh.DeepCopyInto(rr)
 					return nil
 				}

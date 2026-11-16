@@ -1713,6 +1713,11 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 		// and the close, the check or the look tried, again after the poll interval.
 		return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
 	}
+	if errors.Is(err, errUnrecordedCloseRefused) {
+		// A stale plan's close refused for good with no pull request recorded (#808): not a final phase, the close
+		// is tried again at the error backoff, or after the delay the host asked for.
+		return r.waitOrFail(ctx, rr, err)
+	}
 	if isUnknownChange(err) {
 		// A read of a pull request that failed, whatever its class (a 403 included), is never a refusal of a
 		// write: it is retried, until the request's own deadline (expire) or the handoff's (retryRecovery).

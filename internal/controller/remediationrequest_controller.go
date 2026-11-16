@@ -1586,6 +1586,16 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		}
 		return endErr
 	case err != nil:
+		if cf, refused, ok := refusedClose(err); ok && rr.Status.PullRequest == nil {
+			// The Git host refuses for good the close of the pull request found on the branch with no pull request
+			// recorded (#808, 2026-11-16). Ending the request would leave that pull request open and mergeable with
+			// the lock held and, through a new installation, no look that sees its merge. So the request waits like
+			// one with a recorded pull request: phase, mark and lock kept, PullRequestNotClosed, the close tried
+			// again at the error backoff (or after the delay the host asked for), and the end comes from a look that
+			// finds it closed, by anyone, or merged (a stale plan's merge, endUnrecordedMerge).
+			return r.noteUnrecorded(ctx, rr, unrecordedRefused(rr, cf, refused),
+				fmt.Errorf("%w: %w", errUnrecordedCloseRefused, err))
+		}
 		if cf, refused, ok := refusedClose(err); ok && rr.Status.PullRequest != nil {
 			// The Git host refuses the close of the recorded pull request for good (#199): the request keeps its
 			// phase and the mark, and its pull request is still watched (recheck), so a merge or a close by a
@@ -1625,13 +1635,13 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			// timeout, a 5xx): only a close that went through or a read that finds it closed or merged does.
 			return err
 		}
-		// The Git host refuses the close of a pull request found by the branch (none is recorded, so none is
-		// watched), or a step before it, for good (a permission the App lacks, a rule): the plan is stale and
-		// nothing more may be written for it, so a person has to close the change request. The lock stays
-		// (prMayBeOpen keeps it) until checkHeld finds none open.
+		// The Git host refuses a step before the close of a pull request found by the branch (none is recorded, so
+		// none is watched) for good (a permission the App lacks, a rule): the plan is stale and nothing more may be
+		// written for it, so a person has to close the change request. The lock stays (prMayBeOpen keeps it) until
+		// checkHeld finds none open. A refused close itself waits (above).
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, refused
-		message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to close its " +
-			"change request; it was not closed"
+		message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused a step of the close of " +
+			"its change request; it was not closed"
 	}
 	return r.endFreshness(ctx, rr, phase, reason, message)
 }

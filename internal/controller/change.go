@@ -710,7 +710,9 @@ const (
 //     (repositoryReasons), which the repository just opened disproves.
 //
 // Retrying is the caller's as before; noteRead changes no verdict except that a write of the condition that fails
-// answers unknown, so nothing is decided on a status that may not be there.
+// answers unknown, so nothing is decided on a status that may not be there. That failure, the read of the request
+// or its write, is a *clusterError (#808): a stale plan's cleanup through a new installation never says it as a
+// failure of the Git host.
 func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	n int64, q changeQuery, v changeVerdict) changeVerdict {
 	cur := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
@@ -731,10 +733,13 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 		return v
 	}
 	if err := r.setUnreadable(ctx, rr, want); err != nil {
+		// The read or the write of the request failed: a failure of the Kubernetes side, whatever its type (a
+		// transport error is no status error), so no caller says it as a failure of the Git host (#808).
+		cerr := &clusterError{err: err}
 		if v.state == changeUnknown {
-			return unknownChange(errors.Join(v.err, err))
+			return unknownChange(errors.Join(v.err, cerr))
 		}
-		return unknownChange(err)
+		return unknownChange(cerr)
 	}
 	return v
 }
@@ -888,7 +893,8 @@ func (r *RemediationRequestReconciler) unreadableEvent(rr *remediationv1alpha1.R
 	}
 }
 
-// setUnreadable writes condition PullRequestUnreadable as want (nil removes it), alone, when it changes. The
+// setUnreadable writes condition PullRequestUnreadable as want (nil removes it), alone, when it changes; for a stale
+// plan's cleanup with no pull request recorded, setting it also removes PullRequestNotClosed (#808). The
 // patch is made against the request as the API server has it, at the resourceVersion of rr, so it never carries
 // a caller's unsaved status; a request changed since rr was read is a conflict, returned for a retry. rr gets the
 // condition and the new resourceVersion.
@@ -913,11 +919,19 @@ func (r *RemediationRequestReconciler) setUnreadable(ctx context.Context, rr *re
 	}
 	base := live.DeepCopy()
 	putUnreadable(&live.Status.Conditions, want)
+	if unrecordedCleanup(live) && want != nil {
+		// With no pull request recorded, a stale plan's cleanup shows one of PullRequestUnreadable and
+		// PullRequestNotClosed, never both (#808).
+		clearNotClosed(live)
+	}
 	if err := r.Status().Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("record whether the pull requests of RemediationRequest %s/%s can be read: %w",
 			rr.Namespace, rr.Name, err)
 	}
 	rr.ResourceVersion = live.ResourceVersion
+	if notClosed(live) == nil {
+		clearNotClosed(rr)
+	}
 	if c := meta.FindStatusCondition(live.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
 		meta.SetStatusCondition(&rr.Status.Conditions, *c)
 	} else {

@@ -403,8 +403,12 @@ const (
 	// refusal is retried with the error backoff or the delay the host asked for. With no pull request recorded (#808),
 	// a close through that installation of the pull request found on the request's branch that fails without a
 	// refusal sets it with GitNotFound or GitFailed, with one Warning Event per change of reason; a failed token or
-	// listing there sets PullRequestUnreadable instead, and a refusal for good still ends the request
-	// NeedsIntervention.
+	// listing there sets PullRequestUnreadable instead (never both: setting one removes the other), and a refused
+	// token or listing still ends the request NeedsIntervention. A close of that pull request that the Git host
+	// refuses for good, through the plan's installation or a new one, sets it with the refusal's reason and does not
+	// end the request (decided 2026-11-16): it keeps its phase, the mark and the lock, and the close is tried again
+	// with the error backoff or the delay the host asked for, until a look of the branch finds the pull request
+	// closed (Superseded) or merged (Merged, with the stale mark).
 	ConditionPullRequestNotClosed = "PullRequestNotClosed"
 	// ConditionCleanupRefused is True, with reason GitForbidden or GitRejected, once the Git host refused for good
 	// (403 or 422) a step of the cleanup of a deleted request: the access token for the plan's repository, the

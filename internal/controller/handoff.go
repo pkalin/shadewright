@@ -1009,19 +1009,24 @@ const handoffRecoveryGrace = 15 * time.Minute
 // until handoffRecoveryGrace after the deadline: whether the handoff commit is on the pull request is unknown.
 const ReasonHandoffRecoveryFailed = "HandoffRecoveryFailed"
 
-// retryRecovery is retry for an error of recoverStep. A final refusal of the Git host (not a failed read of a pull
-// request, #688), a repository that left the settings, a changed target branch and settings that cannot be used
-// never end the request (#786): its commit may still be merged and it holds the target lock, so it is watched
-// (watchRecovery), with no time limit, as cancelRecoveryFailed watches a cancelled one. Before the deadline, and for
-// a pause, it is retry. Past the deadline any other failure is retried, after the delay the host asked for
+// retryRecovery is retry for an error of recoverStep. A final refusal of the Git host (of a read of the branch or of
+// a pull request alike), a repository that left the settings, a changed target branch and settings that cannot be
+// used never end the request (#786): its commit may still be merged and it holds the target lock, so it is watched
+// (watchRecovery), with no time limit, as cancelRecoveryFailed watches a cancelled one. While it is watched so
+// (condition PullRequestUnreadable with one of those reasons in its status), any other failure keeps the watch and
+// its pacing (keepWatching), never the grace. Before the deadline, and for a pause, it is retry. Past the deadline
+// any other failure of a request that never met such a refusal is retried, after the delay the host asked for
 // (Retry-After, which the deadline does not cut short) or with the error backoff, until handoffRecoveryGrace after
-// the deadline; then the request ends NeedsIntervention with ReasonHandoffRecoveryFailed, and its handoff Aborted
-// (declineOnEnd).
+// the deadline (#688); then the request ends NeedsIntervention with ReasonHandoffRecoveryFailed, and its handoff
+// Aborted (declineOnEnd).
 func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
 	if ctx.Err() == nil && !errors.Is(err, freshness.ErrPaused) {
 		if want := recoveryUnreadable(rr, err); want != nil {
 			return r.watchRecovery(ctx, rr, want, err)
+		}
+		if c := watchedRecovery(rr); c != nil {
+			return r.keepWatching(ctx, rr, c, err)
 		}
 	}
 	if rr.Status.Deadline == nil || !r.now().After(rr.Status.Deadline.Time) || ctx.Err() != nil ||
@@ -1047,17 +1052,40 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 }
 
 // recoveryUnreadable is condition PullRequestUnreadable for err, a failure of recoverStep that the recovery waits
-// out instead of ending the request (#786): a final refusal of the Git host (refusedRead, which names the refused
-// read by its operation text), or settings that cannot reach the plan's repository (repositoryRead). A failed read
-// of a pull request (isUnknownChange) and any other failure give nil: they are retried within the grace (#688).
+// out instead of ending the request (#786): a final refusal of the Git host, of a read of the branch or of a pull
+// request alike (refusedRead, which names the refused read by its operation text), or settings that cannot reach
+// the plan's repository (repositoryRead). Any other failure gives nil.
 func recoveryUnreadable(rr *remediationv1alpha1.RemediationRequest, err error) *metav1.Condition {
 	if reason, _, final := refusal(err); final {
-		if isUnknownChange(err) {
-			return nil
-		}
 		return refusedRead(rr, reason, err, 0)
 	}
 	return repositoryRead(rr, err)
+}
+
+// watchedRecovery is condition PullRequestUnreadable of rr when it records a recovery that waits (watchRecovery):
+// one with the reason of a final refusal or of settings that cannot reach the plan's repository. Any other, or
+// none, gives nil. It reads the status only, never a time.
+func watchedRecovery(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	if c == nil || c.Status != metav1.ConditionTrue {
+		return nil
+	}
+	if c.Reason == ReasonGitForbidden || c.Reason == ReasonGitRejected || repositoryReasons[c.Reason] {
+		return c
+	}
+	return nil
+}
+
+// keepWatching is retryRecovery for a failure that is not a refusal (a timeout, a 5xx, a rate limit) of a recovery
+// that already waits (watchedRecovery, #786): the condition stays as it is (no write, no Event), and the request is
+// looked at again after the poll interval, or after the delay the host asked for when longer. The grace of #688
+// never ends it: one failure worth retrying after a long refusal would otherwise end the request and lose a merge
+// of its commit.
+func (r *RemediationRequestReconciler) keepWatching(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	c *metav1.Condition, err error) (reconcile.Result, error) {
+	logf.FromContext(ctx).Info("Could not recover the handoff of RemediationRequest; still watching it",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "reason", c.Reason, "error", err.Error())
+	return reconcile.Result{RequeueAfter: max(r.pullRequestPollInterval(), retryAfterOf(err))}, nil
 }
 
 // watchRecovery keeps a replacement whose recovery cannot read in its phase (#786): condition PullRequestUnreadable

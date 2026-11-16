@@ -182,7 +182,7 @@ func TestAbsorbedTallyFitGenerated(t *testing.T) {
 		for k := 0; k*len(unit) <= 400; k++ {
 			rc := strings.Repeat("r", 140) + strings.Repeat(unit, k)
 			full := fullSummary(t, ub, wideCause(rc))
-			var heads []string
+			heads := make([]string, 0, len(tallies))
 			for _, tc := range tallies {
 				with := one(t, build(t, b, wideCause(rc, tc.tally...)), SectionSummary)
 				name := unit + "/" + strconv.Itoa(k) + "/" + tc.name

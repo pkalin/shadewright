@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
@@ -157,4 +158,37 @@ func TestReinstalledCleanupKeepsAChainReadOutOfNotClosed(t *testing.T) {
 			t.Errorf("%d Events, want one", len(events.Events))
 		}
 	})
+}
+
+// TestReinstalledLockLookKeepsAChainReadOutOfUnreadable (#812): the look of the target lock before the end of a
+// stale plan through a new installation (releaseReinstalled) reads the supersede chain in ownsMarker too. A failed
+// read there is a failure on the Kubernetes side: it is retried, with no PullRequestUnreadable GitFailed and no
+// Warning Event.
+func TestReinstalledLockLookKeepsAChainReadOutOfUnreadable(t *testing.T) {
+	readErr := apierrors.NewServiceUnavailable("the server is unavailable")
+	r, _, rr, events := reinstalledChainWorld(t, readErr)
+	ctx := context.Background()
+	rr.Status.HoldsTarget = new(true)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	err := r.releaseReinstalled(ctx, rr)
+	if !errors.Is(err, errStaleLockPending) || !errors.Is(err, readErr) {
+		t.Fatalf("releaseReinstalled = %v, want the failed read tried again", err)
+	}
+	got := &api.RemediationRequest{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPullRequestUnreadable); c != nil {
+		t.Errorf("PullRequestUnreadable = %s: %s, want none", c.Reason, c.Message)
+	}
+	if !ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Error("the lock was released, want it held")
+	}
+	for len(events.Events) > 0 {
+		if e := <-events.Events; strings.HasPrefix(e, "Warning") {
+			t.Errorf("Event %q, want no Warning", e)
+		}
+	}
 }

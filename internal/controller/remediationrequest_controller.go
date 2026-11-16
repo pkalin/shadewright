@@ -1772,7 +1772,8 @@ var errStaleLockPending = errors.New("the target lock of the stale plan's closed
 // checkHeld settles that one after the end, as for any stale plan.
 //
 // Otherwise the request does not end: a pause is returned as freshness.ErrPaused and a cancelled reconcile as its
-// error; anything else (a failed or refused read, which changeOf reports with PullRequestUnreadable, another open
+// error; anything else (a failed or refused read, which changeOf reports with PullRequestUnreadable unless it is a
+// read of the Kubernetes API (a *clusterError, #812), another open
 // pull request of the branch, which is recorded in condition TargetHeld, or a failed write of that condition) is
 // logged and returned as errStaleLockPending, and the next look closes nothing more and tries again.
 func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,

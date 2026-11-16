@@ -52,7 +52,7 @@ analyzer:
     url: ""         # --prometheus-url, when set
     cluster: ""     # --prometheus-cluster, when set
   analysis:         # off unless triageModel is set; an evaluation run in the lab only until #78
-    triageModel: "" # --triage-model; needs analyzer.identity.azure.clientId and endpointSuffixes unless all deployments are Anthropic
+    triageModel: "" # --triage-model; needs endpointSuffixes or the Anthropic API key (or both)
 ```
 
 Each component also takes the standard Pod values, bounded by the schema: `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`, `priorityClassName`, `imagePullSecrets` (added to the global list) and `podAnnotations`. Every object carries the `app.kubernetes.io/*` labels and `helm.sh/chart`. The chart passes `ct lint` and `ct install` (chart-testing, with the default values on Kind) and `helm lint --strict` in CI.

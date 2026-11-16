@@ -105,7 +105,8 @@ type Observation struct {
 	Total int64
 	// Began is when the occurrence began, as the cluster reports it: the event's creation time, the
 	// termination's finish time or the symptom state's start (zero when the cluster did not report one),
-	// never later than the collector's clock. It orders occurrences for a consumer that keeps a bounded number
+	// never later than the collector's clock. For a waiting cause, whose status has no time, it is when this
+	// collector first saw the state, by its own clock. It orders occurrences for a consumer that keeps a bounded number
 	// of them.
 	Began time.Time
 	// Count is how many new occurrences this observation stands for: the increase of Total since this
@@ -113,7 +114,8 @@ type Observation struct {
 	// for. It is 0 exactly when MayRepeat is set.
 	Count int64
 	// ObservedAt is when the latest of these occurrences happened, as reported by the cluster, never later
-	// than the collector's clock.
+	// than the collector's clock. For a waiting cause it is the collector's read: Began on its first report,
+	// the time of the read on a repeat (a waiting cause still shown, reported again with Count 0).
 	ObservedAt time.Time
 	// MayRepeat is set when the collector cannot tell how much of Total is new: the occurrence is older than
 	// this collector's first reconcile (a restart or a new leader), or the collector dropped state of

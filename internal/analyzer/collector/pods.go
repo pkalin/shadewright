@@ -90,7 +90,9 @@ func terminations(pod *corev1.Pod) []termination {
 // waitings returns the waiting reasons of WaitingCauseReasons in a pod's status, in init and app containers
 // (ADR-0039 point 4). A waiting state is identified by its reason and the container's restart count: it has no
 // ID or start time, so a container that waits again with the same reason after a restart is a new one, and
-// one that keeps waiting is the same one. The waiting message is never read: it is free text.
+// one that keeps waiting is the same one. Its finish time stays zero here; the tracker sets it to the time the
+// collector first saw the state (terminationTracker.pending). The waiting message is never read: it is free
+// text.
 func waitings(pod *corev1.Pod) []termination {
 	var out []termination
 	for _, st := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
@@ -147,16 +149,34 @@ func hasPodSymptom(o client.Object) bool {
 type podState struct {
 	uid     types.UID
 	handled map[string][]string // termination.slot to the IDs of its newest handled terminations
-	newest  time.Time
+	// waits holds, per waiting slot (one per container), the waiting state the pod showed at its latest
+	// reconcile: at most one entry per container of the pod.
+	waits  map[string]waitState
+	newest time.Time
 	// repeatThrough is fixed when the collector first sees the pod: the newest finish time dropped from the
 	// state until then. Terminations of the pod that finished no later may have been emitted before.
 	repeatThrough time.Time
 }
 
-// pendingTermination is a termination not handled yet.
+// waitState is a waiting state the collector sees in a slot: its ID, when the collector first saw it (the pod
+// status has no time for a wait), and when it last reported it (zero until its first report is handled).
+type waitState struct {
+	id       string
+	began    time.Time
+	reported time.Time
+}
+
+// pendingTermination is a termination not handled yet, or a waiting state handled before and due to be
+// reported again (repeat).
 type pendingTermination struct {
 	termination
 	mayRepeat bool
+	repeat    bool
+}
+
+func newPodState(uid types.UID, repeatThrough time.Time) podState {
+	return podState{uid: uid, handled: map[string][]string{}, waits: map[string]waitState{},
+		repeatThrough: repeatThrough}
 }
 
 // terminationTracker remembers which container terminations were handled, for at most a fixed number of
@@ -184,42 +204,115 @@ func newTerminationTracker(maxPods int) *terminationTracker {
 // So the answer is the same for every termination of the pod and does not change when some of them are
 // committed and the rest wait for a retry. A termination without a finish time may always repeat: nothing
 // tells when it happened.
+//
+// A waiting state gets as its finish time the time the collector first saw it in its slot, read at now; the
+// slot's time is dropped when the pod no longer shows the state or shows another ID there. A waiting state
+// may always repeat on its first report, since an earlier process may have reported it. One handled before is
+// returned again, marked repeat, once at least SettleAfter has passed since its latest report (ADR-0039 point
+// 4, amended 2026-11-16); a state handled before whose slot is new (it came back) counts as reported at now.
 func (tr *terminationTracker) pending(key types.NamespacedName, uid types.UID, ts []termination,
-	start time.Time) []pendingTermination {
+	start, now time.Time) []pendingTermination {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	s, ok := tr.seen.get(key)
 	if !ok || s.uid != uid {
-		s = podState{uid: uid, handled: map[string][]string{}, repeatThrough: tr.evictedHigh}
-		tr.seen.put(key, s)
+		s = newPodState(uid, tr.evictedHigh)
+	}
+	shown := map[string]string{}
+	for _, t := range ts {
+		if t.waiting {
+			shown[t.slot()] = t.id
+		}
+	}
+	for slot, w := range s.waits {
+		if shown[slot] != w.id {
+			delete(s.waits, slot)
+		}
 	}
 	var out []pendingTermination
 	for _, t := range ts {
-		if slices.Contains(s.handled[t.slot()], t.id) {
+		handled := slices.Contains(s.handled[t.slot()], t.id)
+		if !t.waiting {
+			if handled {
+				continue
+			}
+			mayRepeat := t.finished.Before(start) ||
+				(!s.repeatThrough.IsZero() && !t.finished.After(s.repeatThrough))
+			out = append(out, pendingTermination{termination: t, mayRepeat: mayRepeat})
 			continue
 		}
-		mayRepeat := t.finished.Before(start) ||
-			(!s.repeatThrough.IsZero() && !t.finished.After(s.repeatThrough))
-		out = append(out, pendingTermination{termination: t, mayRepeat: mayRepeat})
+		w, ok := s.waits[t.slot()]
+		if !ok {
+			w = waitState{id: t.id, began: now}
+			if handled {
+				w.reported = now
+			}
+			s.waits[t.slot()] = w
+		}
+		t.finished = w.began
+		switch {
+		case !handled:
+			out = append(out, pendingTermination{termination: t, mayRepeat: true})
+		case now.Sub(w.reported) >= SettleAfter:
+			out = append(out, pendingTermination{termination: t, repeat: true})
+		}
 	}
+	tr.seen.put(key, s)
 	return out
 }
 
-// commit records that termination t of the pod has been handled.
-func (tr *terminationTracker) commit(key types.NamespacedName, uid types.UID, t termination) {
+// nextRepeat returns how long until a waiting state of the pod handled before is due to be reported again,
+// and false when the pod shows none.
+func (tr *terminationTracker) nextRepeat(key types.NamespacedName, uid types.UID, now time.Time) (time.Duration,
+	bool) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	s, ok := tr.seen.get(key)
+	if !ok || s.uid != uid {
+		return 0, false
+	}
+	var next time.Duration
+	found := false
+	for _, w := range s.waits {
+		if w.reported.IsZero() {
+			continue
+		}
+		d := max(w.reported.Add(SettleAfter).Sub(now), time.Second)
+		if !found || d < next {
+			next, found = d, true
+		}
+	}
+	return next, found
+}
+
+// commit records that termination t of the pod has been handled, at now. For a waiting state it also records
+// now as the time of its latest report, so its next repeat comes SettleAfter later.
+func (tr *terminationTracker) commit(key types.NamespacedName, uid types.UID, t termination, now time.Time) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	s, ok := tr.seen.get(key)
 	if !ok || s.uid != uid {
 		// Dropped since pending ran (only another pod's state can push it out): start again from the bound.
-		s = podState{uid: uid, handled: map[string][]string{}, repeatThrough: tr.evictedHigh}
+		s = newPodState(uid, tr.evictedHigh)
+	}
+	if t.waiting {
+		if w, ok := s.waits[t.slot()]; ok && w.id == t.id {
+			w.reported = now
+			s.waits[t.slot()] = w
+		}
+	}
+	if slices.Contains(s.handled[t.slot()], t.id) {
+		tr.seen.put(key, s)
+		return
 	}
 	ids := append(s.handled[t.slot()], t.id)
 	if len(ids) > idsPerContainer {
 		ids = ids[len(ids)-idsPerContainer:]
 	}
 	s.handled[t.slot()] = ids
-	if t.finished.After(s.newest) {
+	// A wait's finish time is the collector's first sight of it, not a time the cluster reported: it must not move
+	// the eviction bound, which would mark later terminations of other pods MayRepeat.
+	if !t.waiting && t.finished.After(s.newest) {
 		s.newest = t.finished
 	}
 	tr.seen.put(key, s)
@@ -262,9 +355,10 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// MayRepeat once this pod's state is dropped.
 		ts[i].finished = r.c.notFuture(ts[i].finished)
 	}
-	pending := r.c.pods.pending(req.NamespacedName, pod.UID, ts, start)
+	now := r.c.now()
+	pending := r.c.pods.pending(req.NamespacedName, pod.UID, ts, start, now)
 	if len(pending) == 0 {
-		return ctrl.Result{}, nil
+		return r.repeatLater(req.NamespacedName, pod.UID, now), nil
 	}
 	subject, owner, v, err := r.c.owners.podSubject(ctx, &pod)
 	if err != nil {
@@ -277,34 +371,63 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// The pod's template is retired (#724): each termination is handled without an observation and
 		// counted once, so later updates of the pod do not read and count it again, and a rollback does not
 		// bring the backlog back.
+		news := 0
 		for _, t := range pending {
-			r.c.pods.commit(req.NamespacedName, pod.UID, t.termination)
+			r.c.pods.commit(req.NamespacedName, pod.UID, t.termination, now)
+			if !t.repeat {
+				news++
+			}
 		}
-		dropRetired(ctx, subject.Kind, "container termination", len(pending))
-		return ctrl.Result{}, nil
+		if news > 0 {
+			dropRetired(ctx, subject.Kind, "container termination", news)
+		}
+		return r.repeatLater(req.NamespacedName, pod.UID, now), nil
 	}
 	for _, t := range pending {
 		note := terminationNote(t.container, t.exitCode)
 		if t.waiting {
 			note = waitingNote(t.container, t.reason)
 		}
-		obs := r.c.observation(r.c.podStatusInput(&pod, owner, t.reason, note), subject, pod.Namespace, t.finished)
+		at := t.finished
+		if t.repeat {
+			at = now
+		}
+		obs := r.c.observation(r.c.podStatusInput(&pod, owner, t.reason, note), subject, pod.Namespace, at)
 		obs.Occurrence, obs.Began, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, 1, t.mayRepeat
 		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is
 		// pulled (ADR-0039 point 4).
 		obs.Immediate = immediateTermination(t.reason)
 		obs.Container, obs.Class = t.container, t.class()
-		if !t.mayRepeat {
-			obs.Count = 1
-		}
-		sent, err := r.c.deliver(ctx, obs)
-		if err != nil {
-			return ctrl.Result{}, err
+		var sent bool
+		if t.repeat {
+			// The same occurrence reported again: nothing new to count (MayRepeat, Count 0), so the Incident
+			// controller merges it, and its ObservedAt, SettleAfter or more after Began once the wait lasts,
+			// opens the Incident (incidents.recurs). It goes to the consumer as it is: settling it with Handled
+			// here would drop it, since its total is already counted or held.
+			obs.MayRepeat = true
+			sent = r.c.emit(ctx, obs)
+		} else {
+			if !t.mayRepeat {
+				obs.Count = 1
+			}
+			sent, err = r.c.deliver(ctx, obs)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		if !sent {
 			return ctrl.Result{RequeueAfter: retryAfter}, nil
 		}
-		r.c.pods.commit(req.NamespacedName, pod.UID, t.termination)
+		r.c.pods.commit(req.NamespacedName, pod.UID, t.termination, now)
 	}
-	return ctrl.Result{}, nil
+	return r.repeatLater(req.NamespacedName, pod.UID, now), nil
+}
+
+// repeatLater asks for the pod to be read again when a waiting state it shows is due to be reported again,
+// so a wait the pod shows with no further update still reaches the Incident controller's gate.
+func (r *podReconciler) repeatLater(key types.NamespacedName, uid types.UID, now time.Time) ctrl.Result {
+	if d, ok := r.c.pods.nextRepeat(key, uid, now); ok {
+		return ctrl.Result{RequeueAfter: d}
+	}
+	return ctrl.Result{}
 }

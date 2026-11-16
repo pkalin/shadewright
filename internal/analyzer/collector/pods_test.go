@@ -134,22 +134,22 @@ func TestPodStateIsBounded(t *testing.T) {
 	for i := range 1000 {
 		key := types.NamespacedName{Namespace: testNS, Name: fmt.Sprintf("p%d", i)}
 		term := termination{container: containerApp, id: fmt.Sprint(i), finished: t0.Add(time.Duration(i) * time.Second)}
-		tr.commit(key, types.UID(key.Name), term)
+		tr.commit(key, types.UID(key.Name), term, t0)
 	}
 	if n := tr.len(); n > capacity {
 		t.Fatalf("state holds %d pods, cap %d", n, capacity)
 	}
 	key := types.NamespacedName{Namespace: testNS, Name: "p0"}
-	got := tr.pending(key, "p0", []termination{{container: containerApp, id: "0", finished: t0}}, t0)
+	got := tr.pending(key, "p0", []termination{{container: containerApp, id: "0", finished: t0}}, t0, t0)
 	if len(got) != 1 || !got[0].mayRepeat {
 		t.Fatalf("evicted pod: pending = %+v, want one marked mayRepeat", got)
 	}
 	// Two terminations per container are remembered; older IDs are dropped.
 	key = types.NamespacedName{Namespace: testNS, Name: "p999"}
 	for _, id := range []string{"a", "b", "c"} {
-		tr.commit(key, "p999", termination{container: containerApp, id: id})
+		tr.commit(key, "p999", termination{container: containerApp, id: id}, t0)
 	}
-	if got := tr.pending(key, "p999", []termination{{container: containerApp, id: "b"}}, t0); len(got) != 0 {
+	if got := tr.pending(key, "p999", []termination{{container: containerApp, id: "b"}}, t0, t0); len(got) != 0 {
 		t.Error("second newest termination forgotten")
 	}
 }
@@ -316,10 +316,10 @@ func TestRebuiltPodStateKeepsTheStartBound(t *testing.T) {
 	b := types.NamespacedName{Namespace: testNS, Name: "b"}
 	old1 := termination{container: containerApp, id: "1", finished: t0.Add(-time.Hour)}
 	old2 := termination{container: "sidecar", id: "2", finished: t0.Add(-time.Hour)}
-	tr.pending(a, "a", []termination{old1, old2}, t0)
-	tr.pending(b, "b", nil, t0) // drops the state of a
-	tr.commit(a, "a", old1)     // rebuilds it
-	got := tr.pending(a, "a", []termination{old1, old2}, t0)
+	tr.pending(a, "a", []termination{old1, old2}, t0, t0)
+	tr.pending(b, "b", nil, t0, t0) // drops the state of a
+	tr.commit(a, "a", old1, t0)     // rebuilds it
+	got := tr.pending(a, "a", []termination{old1, old2}, t0, t0)
 	if len(got) != 1 || !got[0].mayRepeat {
 		t.Fatalf("pending after a rebuilt state = %+v, want the second termination marked mayRepeat", got)
 	}

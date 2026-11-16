@@ -186,6 +186,12 @@ func (s *sightings) remove(e *list.Element) {
 	}
 }
 
+// holds reports whether a first sighting of fingerprint is held.
+func (s *sightings) holds(fingerprint string) bool {
+	_, ok := s.items[fingerprint]
+	return ok
+}
+
 // len returns the number of fingerprints held.
 func (s *sightings) len() int {
 	return s.order.Len()

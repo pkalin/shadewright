@@ -529,3 +529,59 @@ func TestCollectorSettlesLikeTheGate(t *testing.T) {
 		t.Errorf("collector.SettleAfter %v, RecurAfter %v", collector.SettleAfter, RecurAfter)
 	}
 }
+
+// waitRepeat returns the collector's report again of a waiting cause still shown (ADR-0039 point 4, amended
+// 2026-11-16): the same occurrence as o, Began unchanged, ObservedAt at, nothing new to count.
+func waitRepeat(o collector.Observation, at time.Time) collector.Observation {
+	o.ObservedAt, o.Count, o.MayRepeat = at, 0, true
+	return o
+}
+
+// A waiting cause shown with no pod update is reported once, held as a first sighting, then reported again
+// as a repeat of the same occurrence: the repeat opens the Incident once the wait has lasted RecurAfter,
+// counts the occurrence once, and later repeats add nothing.
+func TestLastingWaitOpensOnItsRepeat(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	clock := &fakeClock{now: t0}
+	r := start(t, ns, Config{Now: clock.Now})
+	first := sightingOf(1, 1, t0)
+	r.obs <- first
+	waitHeld(t, r, "the first report held", func() bool { return r.sightings.len() == 1 })
+	clock.set(t0.Add(RecurAfter))
+	r.obs <- waitRepeat(first, t0.Add(RecurAfter))
+	eventually(t, ns, 1, countIs(1))
+	waitHeld(t, r, "the sighting taken", func() bool { return r.sightings.len() == 0 })
+	for i := 2; i <= 3; i++ {
+		at := t0.Add(time.Duration(i) * RecurAfter)
+		clock.set(at)
+		r.obs <- waitRepeat(first, at)
+	}
+	// A marker observation of another fingerprint, sent after the repeats, shows they were consumed.
+	r.obs <- immediate(observation(2, 2, 1, 1, t0))
+	eventually(t, ns, 2, countIs(1))
+	if got := get(t, ns).Status.Count; got != 1 {
+		t.Errorf("status.count %d after the repeats, want 1", got)
+	}
+}
+
+// A wait that ends before RecurAfter (an image being pulled) opens nothing: its repeat, if any, came too
+// early to prove that it recurs.
+func TestShortWaitOpensNothing(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	clock := &fakeClock{now: t0}
+	r := start(t, ns, Config{Now: clock.Now})
+	first := sightingOf(1, 1, t0)
+	r.obs <- first
+	clock.set(t0.Add(RecurAfter - time.Second))
+	r.obs <- waitRepeat(first, t0.Add(RecurAfter-time.Second))
+	r.obs <- immediate(observation(2, 2, 1, 1, t0))
+	eventually(t, ns, 2, countIs(1))
+	waitHeld(t, r, "the wait still held", func() bool { return r.sightings.len() == 1 })
+	inc := &remediationv1alpha1.Incident{}
+	err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(1))}, inc)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("a wait shorter than RecurAfter opened an Incident (%v), want none", err)
+	}
+}

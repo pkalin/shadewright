@@ -135,6 +135,14 @@ const (
 	// ReasonGitRejected: the Git host refused the request as invalid and the state in Git does not explain the
 	// refusal. Nothing is retried.
 	ReasonGitRejected = "GitRejected"
+	// ReasonGitNotFound (conditions PullRequestNotClosed and PullRequestUnreadable, #797): the Git host answered 404
+	// to a step of a stale plan's cleanup through a new installation of the GitHub App (#290), such as an
+	// installation ID with a typing mistake or one not granted the repository. It is tried again.
+	ReasonGitNotFound = "GitNotFound"
+	// ReasonGitFailed (conditions PullRequestNotClosed and PullRequestUnreadable, #797): a step of a stale plan's
+	// cleanup through a new installation of the GitHub App (#290) failed without a refusal or a 404: a server error,
+	// a timeout, a rate limit, an answer that settles nothing or an unclassified failure. It is tried again.
+	ReasonGitFailed = "GitFailed"
 
 	// ReasonRecordedMissingOtherListed (condition PullRequestUnreadable): the Git host has no pull request of this
 	// request with the recorded number, but the request's branch lists another one with its marker, so the request

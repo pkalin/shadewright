@@ -74,7 +74,8 @@ const (
 	// stepClose is the close call itself.
 	stepClose
 	// stepOther is a failure of the cleanup outside the steps above (the read of the settings, the check that the
-	// request still owns the pull request, the cleanup's deadline).
+	// request still owns the pull request, the cleanup's deadline). Through a new installation (#290) it is only a
+	// failure on the Git host's side or the deadline: the Kubernetes side (a *clusterError) is never wrapped there.
 	stepOther
 )
 
@@ -209,32 +210,82 @@ func notClosedCondition(rr *remediationv1alpha1.RemediationRequest, cf *closeFai
 	}
 }
 
-// refusedReinstalled returns the refused step in err when err is a failure of a cleanup through a new installation
-// of the plan's repository (reinstalledError, #290) that the Git host refused for good at the token, the read of the
-// recorded pull request or the listing of the branch. A refused close is refusedClose's; any other failure is not
-// a refusal and is retried.
-func refusedReinstalled(err error) (refusedStep, bool) {
-	if _, ok := errors.AsType[*reinstalledError](err); !ok {
+// reinstalledFailure returns the failed step in err when err is a failure of a cleanup through a new installation
+// of the plan's repository (reinstalledError, #290) at the token, the read of the recorded pull request or the
+// listing of the branch, whatever its class (#797), with the reason: the refusal's (GitForbidden, GitRejected),
+// GitNotFound for an answer 404 (an installation ID with a typing mistake, an installation not granted the
+// repository), or GitFailed for any other failure (a server error, a timeout, a rate limit, an answer that settles
+// nothing, an unclassified failure such as a token that could not be minted). refused says the reason is a refusal.
+// A failed close is refusedClose's, a failure outside those steps is not one, and neither is the caller's
+// cancellation.
+func reinstalledFailure(err error) (s refusedStep, refused, ok bool) {
+	if _, ok := errors.AsType[*reinstalledError](err); !ok || errors.Is(err, context.Canceled) {
+		return refusedStep{}, false, false
+	}
+	s = stepOf(err)
+	if s.step == stepClose || s.step == stepOther {
+		return refusedStep{}, false, false
+	}
+	s.reason, refused = reinstalledReason(err)
+	return s, refused, true
+}
+
+// reinstalledReason is the reason of PullRequestNotClosed for err, a failed step of a cleanup through a new
+// installation: the refusal's (GitForbidden, GitRejected; refused is true), GitNotFound for an answer 404, or
+// GitFailed for any other failure.
+func reinstalledReason(err error) (reason string, refused bool) {
+	reason, _, refused = refusal(err)
+	switch {
+	case refused:
+	case providers.IsNotFound(err) && !providers.IsRetryable(err):
+		reason = ReasonGitNotFound
+	default:
+		reason = ReasonGitFailed
+	}
+	return reason, refused
+}
+
+// reinstalledCloseFailure returns the failed step in err when err is a failure of a cleanup through a new
+// installation of the plan's repository (#290) that reinstalledFailure leaves out and that is no refusal: the close
+// call (a 5xx, a timeout, a rate limit, a 404, an unclassified failure) or a step no other class names (#797), with
+// GitNotFound or GitFailed. A refused close is refusedClose's, a refused other step ends the request
+// (cleanUpStale), and a pause or the caller's cancellation is not a failure of a step.
+func reinstalledCloseFailure(err error) (refusedStep, bool) {
+	if _, ok := errors.AsType[*reinstalledError](err); !ok || errors.Is(err, context.Canceled) ||
+		errors.Is(err, freshness.ErrPaused) {
 		return refusedStep{}, false
 	}
-	s, ok := refusedCleanup(err)
-	if !ok || s.step == stepClose {
+	s := stepOf(err)
+	if s.step != stepClose && s.step != stepOther {
 		return refusedStep{}, false
 	}
+	reason, refused := reinstalledReason(err)
+	if refused {
+		return refusedStep{}, false
+	}
+	s.reason = reason
 	return s, true
 }
 
 // notReachedCondition is condition PullRequestNotClosed for the stale plan of rr whose recorded pull request could
-// not be closed because the Git host refused step s through the repository's new installation (#290).
+// not be closed because step s failed through the repository's new installation (#290): refused by the Git host,
+// answered with 404 (GitNotFound) or failed another way (GitFailed, #797).
 func notReachedCondition(rr *remediationv1alpha1.RemediationRequest, s refusedStep) metav1.Condition {
 	pr := rr.Status.PullRequest
+	what := fmt.Sprintf("which the Git host refused (%s) %s", s.reason, stepText(rr, s))
+	switch s.reason {
+	case ReasonGitNotFound:
+		what = fmt.Sprintf("for which the Git host answered not found (%s) to %s", s.reason, stepText(rr, s))
+	case ReasonGitFailed:
+		what = fmt.Sprintf("through which %s failed (%s)", stepText(rr, s), s.reason)
+	}
 	return metav1.Condition{
 		Type:   remediationv1alpha1.ConditionPullRequestNotClosed,
 		Status: metav1.ConditionTrue,
 		Reason: s.reason,
 		Message: fmt.Sprintf("The plan is stale and the settings now reach its repository through another installation "+
-			"of the GitHub App, which the Git host refused (%s) %s, so pull request %s was not closed; Shadewright "+
-			"tries again on every look and records a merge or a close by a person", s.reason, stepText(rr, s),
+			"of the GitHub App, %s, so pull request %s is not known to be closed; Shadewright "+
+			"tries again and records a merge or a close by a person", what,
 			pullRequestName(pr.Number, pr.URL)),
 		ObservedGeneration: rr.Generation,
 	}

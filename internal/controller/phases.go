@@ -229,9 +229,16 @@ func (r *RemediationRequestReconciler) enterDelivery(ctx context.Context, rr *re
 // receiptAncestry answers whether one commit is in the history of another in the repository of the merge
 // receipt, opened by the receipt's URL and installation, whatever the settings' entries name now. It only reads,
 // so it is not gated by the kill switch (openRepository gates writes only).
+//
+// For a merged stale plan (stalePlanMerged, set as stale) whose receipt names an installation of the GitHub App the
+// settings no longer have, it reads the same URL through the new installation instead (freshness.FindReinstalled,
+// #797): the installation change is what made such a plan stale (#290), and its outcome is capped as a stale merge
+// whatever the delivery shows. That provider writes nothing but a close and a failed check run (openGated), and only
+// IsAncestor is called on it. Any other request whose receipt's installation is gone gets errRepositoryGone as before.
 type receiptAncestry struct {
 	r       *RemediationRequestReconciler
 	receipt *remediationv1alpha1.MergeReceipt
+	stale   bool
 }
 
 func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {
@@ -243,10 +250,15 @@ func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string
 		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 	repo, ok := freshness.FindRepository(settings, &a.receipt.Repository)
+	reinstalled := false
+	if !ok && a.stale {
+		repo, ok = freshness.FindReinstalled(settings, &a.receipt.Repository)
+		reinstalled = ok
+	}
 	if !ok {
 		return false, errRepositoryGone
 	}
-	git, err := a.r.openRepository(ctx, repo)
+	git, err := a.r.openGated(ctx, repo, func() bool { return reinstalled })
 	switch {
 	case providers.IsInvalidConfig(err):
 		return false, freshness.ErrRepositoryUnusable
@@ -264,7 +276,7 @@ func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string
 func (r *RemediationRequestReconciler) receiptQuery(rr *remediationv1alpha1.RemediationRequest) deliveryQuery {
 	mr := rr.Status.MergeReceipt
 	return deliveryQuery{commit: mr.MergeCommitSHA, branch: string(mr.TargetBranch),
-		ancestry: receiptAncestry{r: r, receipt: mr}}
+		ancestry: receiptAncestry{r: r, receipt: mr, stale: stalePlanMerged(rr)}}
 }
 
 // deliveryStep is one look at the delivery of a WaitingForDelivery request. When the merge commit is applied it

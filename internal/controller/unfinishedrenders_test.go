@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -416,9 +418,9 @@ func TestUnfinishedRendersLostRemovalOfALiveProcess(t *testing.T) {
 	}
 }
 
-// TestOnlyRenderMarkChanged checks which updates of a request the controller's event filter drops: only those
-// that change status.unfinishedRenders and nothing a reconcile reads besides.
-func TestOnlyRenderMarkChanged(t *testing.T) {
+// TestOnlyOwnMarksChanged checks which updates of a request the controller's event filter drops: only those
+// that change status.unfinishedRenders or condition PullRequestNotClosed and nothing a reconcile reads besides.
+func TestOnlyOwnMarksChanged(t *testing.T) {
 	base := renderEndsRequest("a", "uid-a", digestA)
 	base.ResourceVersion = "1"
 	marked := base.DeepCopy()
@@ -429,20 +431,78 @@ func TestOnlyRenderMarkChanged(t *testing.T) {
 	annotated.Annotations = map[string]string{"example.com/note": "x"}
 	passed := base.DeepCopy()
 	passed.Status.ObservedGeneration = 3
+	notClosed := base.DeepCopy()
+	notClosed.ResourceVersion = "3"
+	meta.SetStatusCondition(&notClosed.Status.Conditions, metav1.Condition{
+		Type: remediationv1alpha1.ConditionPullRequestNotClosed, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
+		Message: "m"})
+	notFound := notClosed.DeepCopy()
+	meta.SetStatusCondition(&notFound.Status.Conditions, metav1.Condition{
+		Type: remediationv1alpha1.ConditionPullRequestNotClosed, Status: metav1.ConditionTrue, Reason: ReasonGitNotFound,
+		Message: "m"})
+	notClosedAndPhase := notClosed.DeepCopy()
+	notClosedAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
+	notClosedAndOther := notClosed.DeepCopy()
+	meta.SetStatusCondition(&notClosedAndOther.Status.Conditions, metav1.Condition{
+		Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: ReasonGitForbidden,
+		Message: "m"})
+	unreadable := func(from *remediationv1alpha1.RemediationRequest, reason string) *remediationv1alpha1.RemediationRequest {
+		rr := from.DeepCopy()
+		rr.ResourceVersion = "4"
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+			Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: reason,
+			Message: "m"})
+		return rr
+	}
+	unreadableFailed := unreadable(base, ReasonGitFailed)
+	unreadableNotFound := unreadable(base, ReasonGitNotFound)
+	unreadableRefused := unreadable(base, ReasonGitForbidden)
+	unreadableAndPhase := unreadableFailed.DeepCopy()
+	unreadableAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
+	opened := func(from *remediationv1alpha1.RemediationRequest, reason string) *remediationv1alpha1.RemediationRequest {
+		rr := from.DeepCopy()
+		rr.ResourceVersion = "5"
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+			Type: remediationv1alpha1.ConditionPROpened, Status: metav1.ConditionTrue, Reason: reason, Message: "m"})
+		return rr
+	}
+	closedRecord := opened(notClosed, ReasonPullRequestClosed)
+	closedAndPhase := closedRecord.DeepCopy()
+	closedAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
 	for name, tc := range map[string]struct {
 		old, new *remediationv1alpha1.RemediationRequest
 		want     bool
 	}{
-		"the mark":                   {base, marked, true},
-		"its removal":                {marked, base, true},
-		"the mark and an annotation": {base, annotated, false},
-		"the removal and a pass":     {marked, passed, false},
-		"no change of the mark":      {base, base, false},
+		// #797: recordStaleClosed removes PullRequestNotClosed and records the close in one write while the end waits.
+		"the close recorded with the removal": {notClosed, closedRecord, true},
+		"the close recorded and a phase":      {notClosed, closedAndPhase, false},
+		"the close recorded alone":            {base, opened(base, ReasonPullRequestClosed), false},
+		"another PROpened with the removal":   {notClosed, opened(notClosed, ReasonChangeRequestMerged), false},
+		"the mark":                            {base, marked, true},
+		"its removal":                         {marked, base, true},
+		"the mark and an annotation":          {base, annotated, false},
+		"the removal and a pass":              {marked, passed, false},
+		"no change of the mark":               {base, base, false},
+		"PullRequestNotClosed set":            {base, notClosed, true},
+		"its reason":                          {notClosed, notFound, true},
+		"it and a phase":                      {notClosed, notClosedAndPhase, false},
+		"it and another condition":            {base, notClosedAndOther, false},
+		"it and the render mark":              {marked, notClosed, true},
+		// #797: a read through a new installation that fails sets PullRequestUnreadable with these reasons on
+		// every poll; its write, a change of reason and its removal must not wake the request before its delay.
+		"PullRequestUnreadable GitFailed set":  {base, unreadableFailed, true},
+		"its reason GitNotFound":               {unreadableFailed, unreadableNotFound, true},
+		"the unreadable removal":               {unreadableNotFound, base, true},
+		"it and the not-closed condition":      {notClosed, unreadable(notClosed, ReasonGitFailed), true},
+		"unreadable and a phase":               {unreadableFailed, unreadableAndPhase, false},
+		"PullRequestUnreadable with a refusal": {base, unreadableRefused, false},
+		"from a refusal to GitFailed":          {unreadableRefused, unreadableFailed, false},
 	} {
-		if got := onlyRenderMarkChanged(tc.old, tc.new); got != tc.want {
+		if got := onlyOwnMarksChanged(tc.old, tc.new); got != tc.want {
 			t.Errorf("%s: got %v, want %v", name, got, tc.want)
 		}
-		if got := skipRenderMarks.Update(crevent.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got == tc.want {
+		if got := skipOwnMarks.Update(crevent.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got == tc.want {
 			t.Errorf("%s: the filter let it through: %v", name, got)
 		}
 	}

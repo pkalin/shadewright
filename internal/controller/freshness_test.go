@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crevent "sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -664,6 +665,481 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
 		Expect(closes.Load()).To(Equal(int32(1)))
 	})
+
+	// #797: a failure of the new installation other than a refusal (a token the host answers with 404, an
+	// unclassified one, a server error) is said in PullRequestNotClosed as a refusal is, with one Event per reason,
+	// and retried as before.
+	DescribeTable("says why on PullRequestNotClosed while the new installation fails without a refusal (#797)",
+		func(failure error, reason string) {
+			reinstall()
+			recorder := record.NewFakeRecorder(10)
+			failing := atomic.Bool{}
+			failing.Store(true)
+			git.SetFail(func(op string) error {
+				switch {
+				case op == opClose:
+					closes.Add(1)
+				case failing.Load() && (op == opGet || op == opList):
+					return failure
+				}
+				return nil
+			})
+			r := reconciler()
+			r.Recorder = recorder
+			for range 2 {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+				Expect(err).To(HaveOccurred(), "retried with the error backoff, as before")
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not a final phase")
+				Expect(planFresh().Reason).To(Equal(freshness.ReasonPlanChanged), "the mark stays")
+				c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+				Expect(c).NotTo(BeNil())
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				Expect(c.Reason).To(Equal(reason))
+				Expect(c.Message).To(ContainSubstring("another installation of the GitHub App"))
+				Expect(c.Message).To(Or(ContainSubstring("the read of the recorded pull request"),
+					ContainSubstring("the listing of the pull requests of branch")), "names the step")
+				Expect(c.Message).To(ContainSubstring(fmt.Sprintf("#%d", cr.Number)))
+				Expect(c.Message).NotTo(ContainSubstring("secret-host-text"), "no text of the host")
+				Expect(closes.Load()).To(BeZero())
+			}
+			events := 0
+			for len(recorder.Events) > 0 {
+				if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+EventPullRequestNotClosed+" ") {
+					events++
+				}
+			}
+			Expect(events).To(Equal(1), "one Event while the reason stays")
+
+			failing.Store(false)
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				To(BeNil(), "removed with the end")
+		},
+		Entry("a token the host answers with 404", fmt.Errorf("installation token unavailable: %w",
+			providers.ErrNotFound), ReasonGitNotFound),
+		Entry("an unclassified token failure", errors.New("installation token unavailable: secret-host-text"),
+			ReasonGitFailed),
+		Entry("a server error", fmt.Errorf("listing: %w", providers.ErrRetryable), ReasonGitFailed),
+	)
+
+	It("keeps the delay the host asked for while the new installation fails (#797)", func() {
+		reinstall()
+		git.SetFail(func(op string) error {
+			if op == opGet || op == opList {
+				return &providers.RetryableError{RetryAfter: time.Hour, Err: errors.New("rate limited")}
+			}
+			return nil
+		})
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(time.Hour), "the Retry-After, not the poll interval or at once")
+		c := meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal(ReasonGitFailed))
+	})
+
+	It("writes PullRequestNotClosed again after a write that lost to another one (#797)", func() {
+		reinstall()
+		git.SetFail(func(op string) error {
+			if op == opGet || op == opList {
+				return fmt.Errorf("installation token unavailable: %w", providers.ErrNotFound)
+			}
+			return nil
+		})
+		r := reconciler()
+		bumped := atomic.Bool{}
+		r.Client = &bumpBeforeStatusUpdate{Client: k8sClient, bump: func(obj client.Object) {
+			if bumped.Swap(true) {
+				return
+			}
+			live := &remediationv1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), live)).To(Succeed())
+			base := live.DeepCopy()
+			live.Annotations = map[string]string{"example.com/touched": "797"}
+			Expect(k8sClient.Patch(ctx, live, client.MergeFrom(base))).To(Succeed())
+		}}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsConflict(err)).To(BeTrue(), "the lost write is returned: %v", err)
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+			To(BeNil(), "lost")
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(HaveOccurred())
+		got := fetch()
+		Expect(got.Annotations).To(HaveKeyWithValue("example.com/touched", "797"))
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+		Expect(c).NotTo(BeNil(), "written by the next look")
+		Expect(c.Reason).To(Equal(ReasonGitNotFound))
+	})
+
+	It("says why the lock waits while the branch cannot be read through the new installation after the close (#797)", func() {
+		reinstall()
+		recorder := record.NewFakeRecorder(10)
+		listFails := atomic.Bool{}
+		listFails.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opClose:
+				closes.Add(1)
+			case op == opList && listFails.Load() && closes.Load() > 0:
+				return fmt.Errorf("listing: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		r := reconciler()
+		r.Recorder = recorder
+		for i := range 2 {
+			// The first look closes the pull request and cannot settle the lock; the next one cannot read the
+			// pull request either, and is retried with the error backoff.
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			if i == 0 {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			}
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not ended yet")
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+			Expect(c).NotTo(BeNil(), "the wait is visible")
+			Expect(c.Reason).To(Equal(ReasonGitFailed))
+			Expect(c.Message).To(ContainSubstring("new installation of the GitHub App"))
+		}
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+		events := 0
+		for len(recorder.Events) > 0 {
+			if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+EventPullRequestUnreadable+" ") {
+				events++
+			}
+		}
+		Expect(events).To(Equal(1))
+
+		listFails.Store(false)
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			To(BeNil(), "removed by the read that worked")
+	})
+
+	// #797: a token, read or listing of the new installation that runs past the cleanup's deadline is said in
+	// PullRequestNotClosed (GitFailed) as any other failure of that step, not left as a bare timeout.
+	It("says why on PullRequestNotClosed when the new installation runs past the cleanup's deadline (#797)", func() {
+		reinstall()
+		recorder := record.NewFakeRecorder(10)
+		git.SetFail(func(op string) error {
+			switch op {
+			case opClose:
+				closes.Add(1)
+			case opGet, opList:
+				time.Sleep(300 * time.Millisecond)
+				return fmt.Errorf("listing: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		r := reconciler()
+		r.Recorder = recorder
+		r.CleanupTimeout = 50 * time.Millisecond
+		for range 2 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).To(MatchError(ErrTimeout), "retried with the error backoff")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not a final phase")
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+			Expect(c).NotTo(BeNil(), "the retry is visible")
+			Expect(c.Reason).To(Equal(ReasonGitFailed))
+			Expect(c.Message).To(Or(ContainSubstring("the read of the recorded pull request"),
+				ContainSubstring("the listing of the pull requests of branch")), "names the step")
+		}
+		Expect(closes.Load()).To(BeZero())
+		events := 0
+		for len(recorder.Events) > 0 {
+			if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+EventPullRequestNotClosed+" ") {
+				events++
+			}
+		}
+		Expect(events).To(Equal(1))
+	})
+
+	// #797: the token of the new installation that settles the target lock after the close fails: the wait is said
+	// in PullRequestUnreadable, as a failed read there is.
+	It("says why the lock waits while the new installation's token fails after the close (#797)", func() {
+		reinstall()
+		tokenFails := atomic.Bool{}
+		tokenFails.Store(true)
+		git.SetFail(func(op string) error {
+			if op == opClose {
+				closes.Add(1)
+			}
+			return nil
+		})
+		r := reconciler()
+		open := r.OpenRepository
+		r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			if tokenFails.Load() && closes.Load() > 0 {
+				return nil, fmt.Errorf("installation token: %w", providers.ErrRetryable)
+			}
+			return open(ctx, repo)
+		}
+		for range 2 {
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not ended yet")
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+			Expect(c).NotTo(BeNil(), "the wait is visible")
+			Expect(c.Reason).To(Equal(ReasonGitFailed))
+			Expect(c.Message).To(ContainSubstring("open the repository"))
+			Expect(c.Message).To(ContainSubstring("new installation of the GitHub App"))
+		}
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+
+		tokenFails.Store(false)
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			To(BeNil(), "removed by the read that worked")
+	})
+
+	// #797: PullRequestNotClosed set by an earlier look through the new installation is removed by the look that
+	// closes the pull request, in the same write as the closed record, also while the target lock waits; the end then
+	// says that Shadewright closed it.
+	It("records the close through the new installation while the lock waits after an earlier failure (#797)", func() {
+		reinstall()
+		getFails, listFails := atomic.Bool{}, atomic.Bool{}
+		getFails.Store(true)
+		listFails.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opClose:
+				closes.Add(1)
+			case op == opGet && getFails.Load():
+				return fmt.Errorf("installation token unavailable: %w", providers.ErrNotFound)
+			case op == opList && listFails.Load() && closes.Load() > 0:
+				return fmt.Errorf("listing: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+			NotTo(BeNil(), "the failed read is said")
+
+		getFails.Store(false)
+		before := fetch()
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval), "the poll interval is kept")
+		Expect(closes.Load()).To(Equal(int32(1)))
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the lock waits")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+			To(BeNil(), "removed by the close that went through")
+		opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Reason).To(Equal(ReasonPullRequestClosed), "the close is recorded in the same write")
+		Expect(skipOwnMarks.Update(crevent.UpdateEvent{ObjectOld: before, ObjectNew: got})).To(BeFalse(),
+			"the write wakes no reconcile of its own, so the poll interval stands")
+
+		listFails.Store(false)
+		_, err = reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		opened = meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+		Expect(opened.Message).NotTo(ContainSubstring("not known whether"), "Shadewright closed it")
+	})
+
+	It("writes the close through the new installation again after a write that lost to another one (#797)", func() {
+		reinstall()
+		getFails, listFails := atomic.Bool{}, atomic.Bool{}
+		getFails.Store(true)
+		listFails.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opClose:
+				closes.Add(1)
+			case op == opGet && getFails.Load():
+				return fmt.Errorf("installation token unavailable: %w", providers.ErrNotFound)
+			case op == opList && listFails.Load() && closes.Load() > 0:
+				return fmt.Errorf("listing: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).To(HaveOccurred())
+		getFails.Store(false)
+		r := reconciler()
+		bumps := atomic.Int32{}
+		r.Client = &bumpBeforeStatusUpdate{Client: k8sClient, bump: func(obj client.Object) {
+			rr := obj.(*remediationv1alpha1.RemediationRequest)
+			if notClosed(rr) != nil || bumps.Add(1) > 1 {
+				return
+			}
+			live := &remediationv1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), live)).To(Succeed())
+			base := live.DeepCopy()
+			live.Annotations = map[string]string{"example.com/touched": "797"}
+			Expect(k8sClient.Patch(ctx, live, client.MergeFrom(base))).To(Succeed())
+		}}
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+		Expect(bumps.Load()).To(BeNumerically(">=", 1), "the write met a change")
+		got := fetch()
+		Expect(got.Annotations).To(HaveKeyWithValue("example.com/touched", "797"))
+		Expect(notClosed(got)).To(BeNil(), "written again after the conflict")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+			To(Equal(ReasonPullRequestClosed))
+	})
+
+	// #797: every failure of a look through the new installation, the close included, moves PullRequestNotClosed to
+	// that step, with one Event per change of reason or step, and keeps the delay the host asked for.
+	DescribeTable("names the latest failed step of the new installation on PullRequestNotClosed (#797)",
+		func(first error, firstReason string, closeErr error, closeReason string, delay time.Duration) {
+			reinstall()
+			recorder := record.NewFakeRecorder(10)
+			getFails, closeFails := atomic.Bool{}, atomic.Bool{}
+			getFails.Store(true)
+			git.SetFail(func(op string) error {
+				switch {
+				case (op == opGet || op == opList) && getFails.Load():
+					return first
+				case op == opClose && closeFails.Load():
+					closes.Add(1)
+					return closeErr
+				}
+				return nil
+			})
+			r := reconciler()
+			r.Recorder = recorder
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			c := notClosed(fetch())
+			Expect(c).NotTo(BeNil())
+			Expect(c.Reason).To(Equal(firstReason))
+			Expect(c.Message).To(Or(ContainSubstring("the read of the recorded pull request"),
+				ContainSubstring("the listing of the pull requests of branch")))
+
+			getFails.Store(false)
+			closeFails.Store(true)
+			for range 2 {
+				res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+				if delay > 0 {
+					Expect(err).NotTo(HaveOccurred())
+					Expect(res.RequeueAfter).To(Equal(delay), "the Retry-After is kept")
+				} else {
+					Expect(err).To(HaveOccurred(), "retried with the error backoff")
+				}
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
+				c = notClosed(got)
+				Expect(c).NotTo(BeNil())
+				Expect(c.Reason).To(Equal(closeReason))
+				Expect(c.Message).To(ContainSubstring("the close of pull request"), "names the latest step")
+				Expect(c.Message).NotTo(Or(ContainSubstring("the read of the recorded pull request"),
+					ContainSubstring("the listing of the pull requests of branch")))
+				Expect(c.Message).NotTo(ContainSubstring("secret-host-text"))
+			}
+			Expect(closes.Load()).To(Equal(int32(2)))
+			events := 0
+			for len(recorder.Events) > 0 {
+				if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+EventPullRequestNotClosed+" ") {
+					events++
+				}
+			}
+			Expect(events).To(Equal(2), "one Event for each step")
+		},
+		Entry("a server error on the close after a 404 on the read",
+			fmt.Errorf("read: %w", providers.ErrNotFound), ReasonGitNotFound,
+			fmt.Errorf("close: secret-host-text: %w", providers.ErrRetryable), ReasonGitFailed, time.Duration(0)),
+		Entry("a server error on the close after one on the read",
+			fmt.Errorf("read: %w", providers.ErrRetryable), ReasonGitFailed,
+			fmt.Errorf("close: %w", providers.ErrRetryable), ReasonGitFailed, time.Duration(0)),
+		Entry("a rate limit on the close",
+			fmt.Errorf("read: %w", providers.ErrRetryable), ReasonGitFailed,
+			&providers.RetryableError{RetryAfter: time.Hour, Err: errors.New("rate limited")}, ReasonGitFailed, time.Hour),
+		Entry("an unclassified failure of the close",
+			fmt.Errorf("read: %w", providers.ErrNotFound), ReasonGitNotFound,
+			errors.New("secret-host-text"), ReasonGitFailed, time.Duration(0)),
+	)
+
+	It("names the close on PullRequestNotClosed when it runs past the cleanup's deadline (#797)", func() {
+		reinstall()
+		getFails, slowClose := atomic.Bool{}, atomic.Bool{}
+		getFails.Store(true)
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opGet && getFails.Load():
+				return fmt.Errorf("read: %w", providers.ErrRetryable)
+			case op == opClose && slowClose.Load():
+				closes.Add(1)
+				time.Sleep(300 * time.Millisecond)
+				return fmt.Errorf("close: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		r := reconciler()
+		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(notClosed(fetch())).NotTo(BeNil())
+		getFails.Store(false)
+		slowClose.Store(true)
+		r.CleanupTimeout = 100 * time.Millisecond
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(MatchError(ErrTimeout), "retried with the error backoff")
+		Expect(closes.Load()).To(Equal(int32(1)))
+		c := notClosed(fetch())
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal(ReasonGitFailed))
+		Expect(c.Message).To(ContainSubstring("the close of pull request"), "names the latest step")
+	})
+
+	// #797: the check right before the close that the request still owns its pull request (stillOwns) reads the
+	// request from the Kubernetes API, not from the Git host: an intent to hand it over written since the reconcile
+	// read it, or a failed read, is retried as before and never said in PullRequestNotClosed as a failure of the new
+	// installation.
+	DescribeTable("says nothing on PullRequestNotClosed for a Kubernetes failure of a cleanup through the new installation (#797)",
+		func(fail error, edit func(*remediationv1alpha1.RemediationRequest), want error) {
+			reinstall()
+			recorder := record.NewFakeRecorder(10)
+			armed := atomic.Bool{}
+			git.SetFail(func(op string) error {
+				switch op {
+				case opGet:
+					armed.Store(true)
+				case opClose:
+					closes.Add(1)
+				}
+				return nil
+			})
+			r := reconciler()
+			r.Recorder = recorder
+			r.APIReader = &armedRequestReader{Reader: k8sClient, armed: &armed, fail: fail, edit: edit}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(armed.Load()).To(BeTrue(), "the pull request was read before the check")
+			Expect(err).To(MatchError(want), "retried as before")
+			Expect(closes.Load()).To(BeZero())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not a final phase")
+			Expect(notClosed(got)).To(BeNil(), "not a failure of the Git host")
+			for len(recorder.Events) > 0 {
+				Expect(<-recorder.Events).NotTo(ContainSubstring(EventPullRequestNotClosed))
+			}
+		},
+		Entry("an intent to hand the pull request over", nil, func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Status.Handoff = &remediationv1alpha1.Handoff{To: &remediationv1alpha1.OutgoingHandoff{
+				Phase: remediationv1alpha1.HandoffIntent}}
+		}, errHandoffInFlight),
+		Entry("a failed read of the request", apierrors.NewServiceUnavailable("the server is unavailable"), nil,
+			apierrors.NewServiceUnavailable("the server is unavailable")),
+	)
 
 	It("closes nothing through the new installation when the pull request lacks this request's marker (#290)", func() {
 		reinstall()
@@ -2217,4 +2693,50 @@ func (b *bentAnswer) GetChangeRequest(ctx context.Context, n int64) (providers.C
 		b.bend(&cr)
 	}
 	return cr, err
+}
+
+// bumpBeforeStatusUpdate is a client whose status updates first call bump with the object about to be written, so
+// a test can change the stored object between the reconcile's read and its write.
+type bumpBeforeStatusUpdate struct {
+	client.Client
+	bump func(client.Object)
+}
+
+func (c *bumpBeforeStatusUpdate) Status() client.SubResourceWriter {
+	return &bumpingStatus{SubResourceWriter: c.Client.Status(), bump: c.bump}
+}
+
+type bumpingStatus struct {
+	client.SubResourceWriter
+	bump func(client.Object)
+}
+
+func (s *bumpingStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	s.bump(obj)
+	return s.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// armedRequestReader is a reader whose reads of a RemediationRequest, once armed, fail with fail or answer with the
+// stored request changed by edit, so a test can change what stillOwns reads without a write to the request.
+type armedRequestReader struct {
+	client.Reader
+	armed *atomic.Bool
+	fail  error
+	edit  func(*remediationv1alpha1.RemediationRequest)
+}
+
+func (a *armedRequestReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	rr, ok := obj.(*remediationv1alpha1.RemediationRequest)
+	if !ok || !a.armed.Load() {
+		return a.Reader.Get(ctx, key, obj, opts...)
+	}
+	if a.fail != nil {
+		return a.fail
+	}
+	if err := a.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	a.edit(rr)
+	return nil
 }

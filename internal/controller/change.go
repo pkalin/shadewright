@@ -89,6 +89,9 @@ type changeQuery struct {
 	// recordedBranch is the read of the recorded pull request after the target branch of the plan's repository
 	// changed (watchBranchChanged): every failed read sets condition PullRequestUnreadable (noteRead).
 	recordedBranch bool
+	// reinstalled is a read through a new installation of the GitHub App for the plan's repository (#290): every
+	// failed read that is not an answer of the Git host sets condition PullRequestUnreadable (noteRead, #797).
+	reinstalled bool
 }
 
 // changeVerdict is changeOf's answer.
@@ -699,6 +702,9 @@ const (
 //     request) removes it;
 //   - on the read after the target branch changed (q.recordedBranch), any other unknown verdict, an answered one
 //     included, sets it with reason TargetBranchChanged (branchChangedRead): the request waits on that read alone;
+//   - on a read through a new installation of the GitHub App (q.reinstalled, #797), any other failure that is not an
+//     answer listed below, but the caller's cancellation, sets it with reason GitNotFound (a 404) or GitFailed
+//     (reinstalledRead): such a read is retried every poll interval with no other bound (releaseReinstalled);
 //   - any other failure (a server error, a timeout) leaves it, except a reason about the repository of the plan
 //     (repositoryReasons), which the repository just opened disproves.
 //
@@ -716,8 +722,9 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 		want = ownListedRead(rr, ownListed)
 	case v.state == changeUnknown && q.recordedBranch:
 		want = branchChangedRead(rr)
-	case v.state != changeUnknown, errors.Is(v.err, errUnconfirmedNotFound), errors.Is(v.err, errConflictingReads),
-		errors.Is(v.err, errGoneUnconfirmed), providers.IsUntrustedAnswer(v.err):
+	case v.state != changeUnknown, answeredUnknown(v.err):
+	case q.reinstalled && !errors.Is(v.err, context.Canceled):
+		want = reinstalledRead(rr, v.err, n)
 	case cur != nil && repositoryReasons[cur.Reason]:
 	default:
 		return v
@@ -729,6 +736,39 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 		return unknownChange(err)
 	}
 	return v
+}
+
+// answeredUnknown reports whether err, the error of an unknown verdict, comes from answers the Git host gave (a 404
+// the branch does not confirm, contradicting reads, a first look that finds the number missing, an answer about
+// another pull request): the read worked, and only a later look can settle it.
+func answeredUnknown(err error) bool {
+	return errors.Is(err, errUnconfirmedNotFound) || errors.Is(err, errConflictingReads) ||
+		errors.Is(err, errGoneUnconfirmed) || providers.IsUntrustedAnswer(err)
+}
+
+// reinstalledRead is condition PullRequestUnreadable for a read through a new installation of the GitHub App for the
+// plan's repository (#290) that failed without a refusal (#797): reason GitNotFound for a 404, GitFailed for any
+// other failure. It names the read by its fixed operation text and the number, never the host's answer.
+func reinstalledRead(rr *remediationv1alpha1.RemediationRequest, err error, n int64) *metav1.Condition {
+	what := "read the pull requests of the request"
+	if pe, ok := errors.AsType[*freshness.ProviderError](err); ok {
+		what = pe.Op
+	}
+	if n > 0 {
+		what = fmt.Sprintf("%s (pull request #%d)", what, n)
+	}
+	reason, how := ReasonGitFailed, "failed"
+	if providers.IsNotFound(err) && !providers.IsRetryable(err) {
+		reason, how = ReasonGitNotFound, "was answered not found"
+	}
+	return &metav1.Condition{
+		Type:   remediationv1alpha1.ConditionPullRequestUnreadable,
+		Status: metav1.ConditionTrue,
+		Reason: reason,
+		Message: "The attempt to " + what + " through the new installation of the GitHub App for the plan's " +
+			"repository " + how + " (" + reason + "); it is read again, and nothing is decided on it until a read works",
+		ObservedGeneration: rr.Generation,
+	}
 }
 
 // refusedRead is condition PullRequestUnreadable for a read of the request's pull requests that the Git host

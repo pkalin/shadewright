@@ -182,6 +182,7 @@ var troubleshootingSections = map[string][]string{
 	"PullRequestDeadlineCleanupRefused": {secPullRequest},
 	"PullRequestOpened":                 {secPullRequest},
 	"PullRequestRewriteRefused":         {secPullRequest},
+	"RecoveryReadFailed":                {secPullRequest},
 	"RemoteCluster":                     {secFlux},
 	"RenderFailed":                      {secRender},
 	"RenderNeverFinished":               {secRender},

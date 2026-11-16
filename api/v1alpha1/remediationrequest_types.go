@@ -375,7 +375,7 @@ const (
 	// branch that settles the lock on its target fails through that installation (#797), and, on a replacement whose
 	// recovery of its handoff cannot read, with the refusal's reason (GitForbidden, GitRejected) or one of the three
 	// reasons about the repository while it waits, with no time limit, for a read that can show whether its commit was
-	// merged (#786). The message names the read;
+	// merged (#786), and with reason RecoveryReadFailed once that cause is gone and another read of the recovery fails. The message names the read;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,

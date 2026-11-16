@@ -253,8 +253,8 @@ func closedRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // recovering reports whether rr is a replacement whose handoff recovery runs on every look (recoverHandoff): in
-// PolicyChecked, with its incoming handoff Reserved. While it cannot read, only watchRecovery and the recovery's
-// removal write condition PullRequestUnreadable on it (#786), and the reconcile that wrote it returns its own delay.
+// PolicyChecked, with its incoming handoff Reserved. While it cannot read, only watchRecovery, its replacement of a
+// cause that is gone (nowUnreadable) and the recovery's removal write condition PullRequestUnreadable on it (#786), and the reconcile that wrote it returns its own delay.
 func recovering(rr *remediationv1alpha1.RemediationRequest) bool {
 	return rr.Spec.Replaces != nil && rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked &&
 		rr.Status.Handoff != nil && rr.Status.Handoff.From != nil &&

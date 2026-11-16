@@ -4242,7 +4242,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			c := stopped()
 			Expect(c).NotTo(BeNil(), "an hour after the first read of the same count")
 			Expect(c.Status).To(Equal(metav1.ConditionTrue))
-			Expect(c.Reason).To(Equal(ReasonIncidentCountUnchanged))
+			Expect(c.Reason).To(Equal(remediationv1alpha1.ReasonIncidentCountUnchanged))
 			got := fetch()
 			Expect(got.Status.PullRequest.IncidentStopped).NotTo(BeNil())
 			Expect(got.Status.PullRequest.IncidentStopped.Count).To(Equal(int64(3)))
@@ -4300,7 +4300,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(stopped()).NotTo(BeNil())
 		})
 
-		It("decides nothing while the read of the Incident fails, and keeps the mark when the Incident is gone", func() {
+		It("decides nothing while the read of the Incident fails, and removes the mark when the Incident is gone", func() {
 			apiReader = failingIncidentReader{Reader: k8sClient}
 			r := reconciler()
 			fullsUnmarked(r, 2*fullRechecksPerQuiet, "the Incident cannot be read")
@@ -4311,12 +4311,105 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			full(r)
 			Expect(stopped()).NotTo(BeNil())
 
-			Expect(k8sClient.Delete(ctx, inc)).To(Succeed())
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+
+			// A failed read after the mark keeps it: it is no sign that the Incident went on.
+			r.APIReader = failingIncidentReader{Reader: k8sClient}
 			version := fetch().ResourceVersion
 			full(r)
-			Expect(stopped()).NotTo(BeNil(), "a gone Incident decides nothing")
+			Expect(stopped()).NotTo(BeNil(), "a failed read decides nothing")
 			Expect(fetch().ResourceVersion).To(Equal(version))
+
+			r.APIReader = k8sClient
+			Expect(k8sClient.Delete(ctx, inc)).To(Succeed())
+			full(r)
+			Expect(stopped()).To(BeNil(), "the Incident is gone: the mark goes")
+			Expect(fetch().Status.PullRequest.IncidentStopped).To(BeNil())
 			waitingUnchanged()
+			Expect(recorder.Events).NotTo(Receive())
+			fullsUnmarked(r, 2*fullRechecksPerQuiet, "a gone Incident is never marked")
+		})
+
+		It("removes the mark and never marks again when the Incident is made again under the same name", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			full(r)
+			Expect(stopped()).NotTo(BeNil())
+
+			// The collector makes an Incident with the same name and the same count: another UID.
+			old := inc.UID
+			Expect(k8sClient.Delete(ctx, inc)).To(Succeed())
+			inc = &remediationv1alpha1.Incident{ObjectMeta: metav1.ObjectMeta{Namespace: inc.Namespace, Name: inc.Name},
+				Spec: inc.Spec}
+			Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+			Expect(inc.UID).NotTo(Equal(old))
+			setIncident(3)
+			full(r)
+			Expect(stopped()).To(BeNil(), "the request's Incident is gone")
+			Expect(fetch().Status.PullRequest.IncidentStopped).To(BeNil())
+			fullsUnmarked(r, 2*fullRechecksPerQuiet, "an Incident of another UID is never marked")
+			waitingUnchanged()
+		})
+
+		It("does not mark when the step of the full recheck stopped at a pause", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			// An hour after the first read, the render of a moved target branch meets the kill switch.
+			clock = clock.Add(FullRecheckInterval)
+			_, err = r.advanceAndWatch(ctx, fetch(), freshness.Result{Head: strings.Repeat("e", 40),
+				Git: pausedReads{Git: git}}, prOpen)
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).
+				NotTo(BeNil(), "the step stopped at the pause")
+			Expect(stopped()).To(BeNil(), "a paused executor does not mark")
+			Expect(got.Status.PullRequest.IncidentStopped).To(BeNil())
+		})
+
+		It("requeues shortly with a full recheck when the request was written meanwhile, and keeps the step's requeue otherwise", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			var hook func() error
+			r.Client = &statusPatchHook{Client: k8sClient, before: func() error { return hook() }}
+
+			// Another writer changes the request between the read and the mark's patch.
+			hook = func() error {
+				hook = func() error { return nil }
+				live := fetch()
+				base := live.DeepCopy()
+				live.Annotations = map[string]string{"example.invalid/written-meanwhile": "1"}
+				return k8sClient.Patch(ctx, live, client.MergeFrom(base))
+			}
+			clock = clock.Add(FullRecheckInterval)
+			res, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred(), "a conflict is no failed reconcile")
+			Expect(res.RequeueAfter).To(Equal(stepDelay))
+			Expect(stopped()).To(BeNil())
+			Expect(recorder.Events).NotTo(Receive())
+			// The next reconcile, with no time gone by, is a full recheck that reads the request again and marks.
+			_, err = r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stopped()).NotTo(BeNil())
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+
+			// A failed removal that is not a conflict keeps the step's requeue (the poll interval) and is tried
+			// again at the next full recheck.
+			setIncident(4)
+			hook = func() error { return apierrors.NewInternalError(errors.New("etcd unavailable")) }
+			clock = clock.Add(FullRecheckInterval)
+			res, err = r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(r.pullRequestPollInterval()))
+			Expect(stopped()).NotTo(BeNil(), "the removal failed")
+			hook = func() error { return nil }
+			full(r)
+			Expect(stopped()).To(BeNil())
 		})
 
 		It("decides nothing while writes are paused", func() {
@@ -6524,8 +6617,48 @@ func bodyRequest() *remediationv1alpha1.RemediationRequest {
 	return rr
 }
 
-// hangingIncidentReader is a reader whose get of an Incident blocks until its context ends, as a stalled API
-// server would, and counts those gets in hangs; reads of other kinds go to Reader.
+// pausedReads is a Git host whose file reads stop at the kill switch, as a render step that meets a pause.
+type pausedReads struct {
+	*fakegit.Git
+}
+
+func (pausedReads) ReadFile(context.Context, string, string, int) (providers.File, error) {
+	return providers.File{}, freshness.ErrPaused
+}
+
+// statusPatchHook calls before ahead of each status patch of a RemediationRequest that sets or removes condition
+// IncidentStopped; an error from it is the patch's answer, and nil lets the patch through.
+type statusPatchHook struct {
+	client.Client
+	before func() error
+}
+
+func (h *statusPatchHook) Status() client.SubResourceWriter {
+	return &statusPatchHookWriter{SubResourceWriter: h.Client.Status(), before: h.before}
+}
+
+type statusPatchHookWriter struct {
+	client.SubResourceWriter
+	before func() error
+}
+
+// patchesIncidentStopped reports whether the patch from the request's last read sets or removes IncidentStopped.
+func patchesIncidentStopped(rr *remediationv1alpha1.RemediationRequest, patch client.Patch) bool {
+	data, err := patch.Data(rr)
+	// The mark names the condition; the removal sets status.pullRequest.incidentStopped to null.
+	return err == nil && bytes.Contains(bytes.ToLower(data), []byte("incidentstopped"))
+}
+
+func (w *statusPatchHookWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch,
+	opts ...client.SubResourcePatchOption) error {
+	if rr, ok := obj.(*remediationv1alpha1.RemediationRequest); ok && patchesIncidentStopped(rr, patch) {
+		if err := w.before(); err != nil {
+			return err
+		}
+	}
+	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
+}
+
 // failingIncidentReader is a reader whose get of an Incident fails with a server error; every other read goes
 // through.
 type failingIncidentReader struct {
@@ -6540,6 +6673,8 @@ func (f failingIncidentReader) Get(ctx context.Context, key client.ObjectKey, ob
 	return f.Reader.Get(ctx, key, obj, opts...)
 }
 
+// hangingIncidentReader is a reader whose get of an Incident blocks until its context ends, as a stalled API
+// server would, and counts those gets in hangs; reads of other kinds go to Reader.
 type hangingIncidentReader struct {
 	client.Reader
 	hangs *atomic.Int32

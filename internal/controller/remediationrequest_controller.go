@@ -1276,15 +1276,40 @@ func (r *RemediationRequestReconciler) endBeforeFresh(ctx context.Context, rr *r
 }
 
 // advanceAndWatch is the end of recheck on a fresh plan: the next step (advance), then, when the look read the
-// pull request open and that step went through, the look at the Incident (watchIncidentStopped, #715). It rides
-// this full recheck, after the step's own writes, so its write wakes only a look at the pull request (pollOnly).
+// pull request open, that step went through and did not stop at a pause (WritesPaused), the look at the Incident
+// (watchIncidentStopped, #715). It rides this full recheck, after the step's own writes, so its write wakes only a
+// look at the pull request (pollOnly).
+//
+// The step's result stands whatever the look at the Incident gives, with one exception: a conflict on the status
+// write of the mark or of its removal (the request was written meanwhile) requeues after stepDelay, or sooner when
+// the step asked for that, and drops the note of this full recheck so that the next reconcile is a full one that
+// reads the request again. Any other failed write is logged and tried again at the next full recheck: returning it
+// would only retry a look at the pull request (pollOnly) and lose the step's requeue.
 func (r *RemediationRequestReconciler) advanceAndWatch(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	fresh freshness.Result, outcome prOutcome) (ctrl.Result, error) {
 	res, err := r.advance(ctx, rr, fresh)
-	if err != nil || outcome != prOpen {
+	if err != nil || outcome != prOpen ||
+		meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused) != nil {
 		return res, err
 	}
-	return res, r.watchIncidentStopped(ctx, rr)
+	switch err := r.watchIncidentStopped(ctx, rr); {
+	case err == nil:
+		return res, nil
+	case ctx.Err() != nil:
+		return ctrl.Result{}, err
+	case apierrors.IsConflict(err):
+		logf.FromContext(ctx).V(1).Info("RemediationRequest was written meanwhile; the look at its Incident "+
+			"runs again shortly", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		r.checked.Delete(client.ObjectKeyFromObject(rr))
+		if res.RequeueAfter <= 0 || res.RequeueAfter > stepDelay {
+			res.RequeueAfter = stepDelay
+		}
+		return res, nil
+	default:
+		logf.FromContext(ctx).Info("Could not write IncidentStopped of RemediationRequest; the next full "+
+			"recheck tries again", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return res, nil
+	}
 }
 
 // endStaleClosed ends a request whose stale plan's cleanup started (the mark) and whose pull request is closed:

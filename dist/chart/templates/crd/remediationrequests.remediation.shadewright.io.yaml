@@ -1206,9 +1206,10 @@ spec:
                     description: |-
                       incidentStopped is the reading of the Incident's status.count with which the executor found the Incident
                       stopped while the pull request waited for review: the same count, of spec.incidentRef.uid, read by one
-                      executor process over at least an hour (condition IncidentStopped, #715). It is set and removed together
-                      with that condition: a later read of another count removes both. Its readAt is only shown, never compared.
-                      Only the executor writes it.
+                      executor process over at least an hour. It is the source of condition IncidentStopped (#715), which is
+                      derived from it in the same status patch, and it is what a restarted executor reads so that it marks once.
+                      A later read of another count, or an Incident that is gone, removes both. Its readAt is only shown, never
+                      compared. Only the executor writes it.
                     properties:
                       count:
                         description: |-

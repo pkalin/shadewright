@@ -32,10 +32,6 @@ import (
 	"github.com/pkalin/shadewright/internal/incidents/quiet"
 )
 
-// ReasonIncidentCountUnchanged: condition IncidentStopped True, the Incident's count did not change for at least
-// quiet.BeforeResolved while the pull request waited for review (#715).
-const ReasonIncidentCountUnchanged = "IncidentCountUnchanged"
-
 // EventIncidentStopped is the reason of the one Event recorded when a request is marked IncidentStopped.
 const EventIncidentStopped = "IncidentStopped"
 
@@ -46,12 +42,16 @@ const messageIncidentStopped = "The Incident's count has not changed for at leas
 	"whether to merge or close it"
 
 // watchIncidentStopped is the look at the Incident of a request whose pull request waits for review (ADR-0030
-// section 4, amended 2026-11-15, #715). recheck calls it only after a full recheck that found the pull request
-// open with the recorded head and the plan fresh, which is never the case while writes are paused, so it rides
-// that recheck's period and adds no requeue of its own. It reads the Incident once (readIncident) and:
+// section 4, amended 2026-11-15, #715). advanceAndWatch calls it only after a full recheck that found the pull
+// request open and the plan fresh and whose step did not stop at a pause (WritesPaused), so it rides that
+// recheck's period and adds no requeue of its own. status.pullRequest.incidentStopped is the source of the mark;
+// condition IncidentStopped is derived from it in the same status patch. It reads the Incident once
+// (readIncidentOrGone) and:
 //
-//   - decides nothing on a failed read, an Incident that is gone or has another UID than spec.incidentRef.uid,
-//     or a request outside AwaitingApproval; the next full recheck reads again;
+//   - decides nothing on a failed read or on a request outside AwaitingApproval; the next full recheck reads
+//     again;
+//   - takes an Incident that is gone (NotFound) or made again under the same name (another UID than
+//     spec.incidentRef.uid) for the end of the request's Incident: it removes a mark and never marks;
 //   - with status.pullRequest.incidentStopped recorded, removes it and condition IncidentStopped when the count
 //     read differs from the recorded one, and otherwise leaves both; a condition without the field (dropped by
 //     an executor that predates it) is removed too;
@@ -62,26 +62,31 @@ const messageIncidentStopped = "The Incident's count has not changed for at leas
 //     lasting symptom state (quiet.LastingState), whose count does not move while it lasts, is never marked.
 //
 // The phase, the pull request and the lock on the target are never touched. A failed status write is returned
-// for a retry and records no Event; the next full recheck tries again.
+// and records no Event; advanceAndWatch decides when it is tried again. The Event is recorded only after a
+// status write that answered, so there is at most one per mark: a write that went through but whose answer was
+// lost records none, and the condition stays the signal.
 func (r *RemediationRequestReconciler) watchIncidentStopped(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	pr := rr.Status.PullRequest
 	if rr.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval || pr == nil || rr.Spec.IncidentRef.UID == "" {
 		return nil
 	}
-	inc, before, ok := r.readIncident(ctx, rr)
-	if !ok {
+	key := client.ObjectKeyFromObject(rr)
+	log := logf.FromContext(ctx)
+	inc, before, gone, ok := r.readIncidentOrGone(ctx, rr)
+	switch {
+	case gone:
+		return r.unmarkGone(ctx, rr, "The Incident of RemediationRequest is gone")
+	case !ok:
+		// readIncidentOrGone logged why; a failed read is no sign that the Incident stopped or went on.
+		log.V(1).Info("No count of the Incident of RemediationRequest; nothing is decided about IncidentStopped",
+			"remediationRequest", key, "incident", rr.Spec.IncidentRef.Name)
 		return nil
+	case inc.UID != types.UID(rr.Spec.IncidentRef.UID):
+		return r.unmarkGone(ctx, rr, "The Incident of RemediationRequest was made again under the same name")
 	}
 	after := r.now()
-	if inc.UID != types.UID(rr.Spec.IncidentRef.UID) {
-		logf.FromContext(ctx).V(1).Info("The Incident of RemediationRequest has another UID than the request names; "+
-			"nothing is decided about it", "remediationRequest", client.ObjectKeyFromObject(rr),
-			"incident", inc.Name)
-		return nil
-	}
 	count := inc.Status.Count
-	key := client.ObjectKeyFromObject(rr)
 	orphan := pr.IncidentStopped == nil &&
 		meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionIncidentStopped) != nil
 	if marked := pr.IncidentStopped; marked != nil || orphan {
@@ -90,14 +95,11 @@ func (r *RemediationRequestReconciler) watchIncidentStopped(ctx context.Context,
 		if marked != nil && types.UID(marked.UID) == inc.UID && marked.Count == count {
 			return nil
 		}
-		base := rr.DeepCopy()
-		pr.IncidentStopped = nil
-		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionIncidentStopped)
-		if err := r.Status().Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			return fmt.Errorf("remove IncidentStopped from RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		if err := r.unmarkIncidentStopped(ctx, rr); err != nil {
+			return err
 		}
 		r.incidentWatch.note(rr, inc.UID, count, after)
-		logf.FromContext(ctx).Info("The Incident of RemediationRequest counted again; removed IncidentStopped",
+		log.Info("The Incident of RemediationRequest counted again; removed IncidentStopped",
 			"remediationRequest", key, "incident", inc.Name, "count", count)
 		return nil
 	}
@@ -117,7 +119,7 @@ func (r *RemediationRequestReconciler) watchIncidentStopped(ctx context.Context,
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionIncidentStopped,
 		Status:             metav1.ConditionTrue,
-		Reason:             ReasonIncidentCountUnchanged,
+		Reason:             remediationv1alpha1.ReasonIncidentCountUnchanged,
 		Message:            messageIncidentStopped,
 		ObservedGeneration: rr.Generation,
 	})
@@ -125,9 +127,42 @@ func (r *RemediationRequestReconciler) watchIncidentStopped(ctx context.Context,
 		return fmt.Errorf("mark RemediationRequest %s/%s IncidentStopped: %w", rr.Namespace, rr.Name, err)
 	}
 	r.event(rr, EventIncidentStopped, messageIncidentStopped)
-	logf.FromContext(ctx).Info("The Incident of RemediationRequest stopped counting while its pull request waits "+
+	log.Info("The Incident of RemediationRequest stopped counting while its pull request waits "+
 		"for review; marked IncidentStopped", "remediationRequest", key, "incident", inc.Name, "count", count,
 		"unchangedFor", before.Sub(since))
+	return nil
+}
+
+// unmarkGone is watchIncidentStopped on a request whose Incident is gone: it forgets the wait and removes a mark,
+// logging why with msg. A request without a mark is not written.
+func (r *RemediationRequestReconciler) unmarkGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	msg string) error {
+	key := client.ObjectKeyFromObject(rr)
+	r.incidentWatch.forget(key)
+	if rr.Status.PullRequest.IncidentStopped == nil &&
+		meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionIncidentStopped) == nil {
+		logf.FromContext(ctx).V(1).Info(msg+"; it is not marked IncidentStopped", "remediationRequest", key,
+			"incident", rr.Spec.IncidentRef.Name)
+		return nil
+	}
+	if err := r.unmarkIncidentStopped(ctx, rr); err != nil {
+		return err
+	}
+	logf.FromContext(ctx).Info(msg+"; removed IncidentStopped", "remediationRequest", key,
+		"incident", rr.Spec.IncidentRef.Name)
+	return nil
+}
+
+// unmarkIncidentStopped removes status.pullRequest.incidentStopped and condition IncidentStopped in one status
+// patch, on the version read (optimistic lock).
+func (r *RemediationRequestReconciler) unmarkIncidentStopped(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	base := rr.DeepCopy()
+	rr.Status.PullRequest.IncidentStopped = nil
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionIncidentStopped)
+	if err := r.Status().Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("remove IncidentStopped from RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
 	return nil
 }
 

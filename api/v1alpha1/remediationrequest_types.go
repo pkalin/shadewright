@@ -341,9 +341,12 @@ const (
 	// whose Incident's status.count the executor read unchanged for at least an hour, the quiet time of the
 	// Incident's closure rules, while the pull request waited for review (ADR-0030 section 4, amended
 	// 2026-11-15, #715). It is a signal for the reviewer only: the phase stays AwaitingApproval, the pull request
-	// stays open and nothing is closed. It is written together with status.pullRequest.incidentStopped and
-	// removed with it when a later read finds another count. It stays as it was on a request that has left
-	// AwaitingApproval.
+	// stays open and nothing is closed. status.pullRequest.incidentStopped is the source: the condition is
+	// derived from it and written in the same status patch, with observedGeneration set, and removed with it
+	// when a later read finds another count or the request's Incident is gone (deleted, or made again with
+	// another UID). No CEL rule ties the two, because a rule over conditions would refuse the status of an
+	// object an older executor wrote; a condition without the field is removed at the next look. It stays as it
+	// was on a request that has left AwaitingApproval.
 	ConditionIncidentStopped = "IncidentStopped"
 	// ConditionQueued is True, with reason TargetLocked, ConcurrencyLimitReached, CircuitOpen or
 	// CircuitHalfOpen, while a limit of the executor holds back a request the policy check has not let through
@@ -427,6 +430,10 @@ const (
 	ConditionCancelPending = "CancelPending"
 )
 
+// ReasonIncidentCountUnchanged is the reason of condition IncidentStopped True: the Incident's count did not
+// change for at least the quiet time of its closure rules while the pull request waited for review (#715).
+const ReasonIncidentCountUnchanged = "IncidentCountUnchanged"
+
 // PullRequestStatus records the pull request that carries the plan.
 // +kubebuilder:validation:XValidation:rule="!has(self.appliedObservedAt) || has(self.mergeCommitSHA)",message="appliedObservedAt needs mergeCommitSHA"
 // +kubebuilder:validation:XValidation:rule="!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA",message="reviewCheck names the recorded head"
@@ -507,9 +514,10 @@ type PullRequestStatus struct {
 
 	// incidentStopped is the reading of the Incident's status.count with which the executor found the Incident
 	// stopped while the pull request waited for review: the same count, of spec.incidentRef.uid, read by one
-	// executor process over at least an hour (condition IncidentStopped, #715). It is set and removed together
-	// with that condition: a later read of another count removes both. Its readAt is only shown, never compared.
-	// Only the executor writes it.
+	// executor process over at least an hour. It is the source of condition IncidentStopped (#715), which is
+	// derived from it in the same status patch, and it is what a restarted executor reads so that it marks once.
+	// A later read of another count, or an Incident that is gone, removes both. Its readAt is only shown, never
+	// compared. Only the executor writes it.
 	// +optional
 	IncidentStopped *IncidentCountReading `json:"incidentStopped,omitempty"`
 }

@@ -133,7 +133,8 @@ const (
 	// it; an earlier triage call may have gone to another endpoint.
 	ReasonEndpointNotAllowed Reason = "EndpointNotAllowed"
 	// ReasonProviderNotConfigured: the deployment's provider needs something the analyzer was not started
-	// with, such as the API key file of an Anthropic deployment (ErrProviderNotConfigured), or the provider's
+	// with, such as the API key file of an Anthropic deployment or the endpoint allow-list and workload identity
+	// of a Foundry deployment (ErrProviderNotConfigured), or the provider's
 	// key file could not be read after the adapter's retries or is malformed, and the call sent no request
 	// (providers.ErrCredentialUnavailable with providers.ErrNotSent). Nothing went to that provider for the
 	// call it ended; an earlier triage call may have gone to another provider (ADR-0037).
@@ -159,7 +160,8 @@ const (
 var ErrEndpointNotAllowed = errors.New("the model endpoint is not allowed")
 
 // ErrProviderNotConfigured is what a [ModelFactory] returns, wrapped, for a deployment whose provider the
-// analyzer cannot call as started, such as an Anthropic deployment without the analyzer's key file flag; the
+// analyzer cannot call as started, such as an Anthropic deployment without the analyzer's key file flag or a
+// Foundry deployment without its --model-endpoint-suffixes; the
 // analysis hands off with ReasonProviderNotConfigured.
 var ErrProviderNotConfigured = errors.New("the model provider is not configured in the analyzer")
 

@@ -18,6 +18,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -336,6 +337,29 @@ func TestForceEscalationCheckedBeforeIdentity(t *testing.T) {
 	}
 }
 
+// A wrong inference API fails before the identity is built, and the escalation's needs its deployment.
+func TestInferenceAPICheckedBeforeIdentity(t *testing.T) {
+	for _, n := range []string{"AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE", envEscDep,
+		envForceEsc, envTriageAPI, envEscAPI} {
+		t.Setenv(n, "")
+	}
+	for _, n := range []string{envTriageAPI, envEscAPI} {
+		for _, v := range []string{"responses", "Completions", "Responses "} {
+			t.Setenv(n, v)
+			if _, err := newFoundrySource(); err == nil || !strings.Contains(err.Error(), n) {
+				t.Errorf("%s=%q: error %v", n, v, err)
+			}
+		}
+		t.Setenv(n, "")
+	}
+	for _, v := range []string{"", "ChatCompletions", "Responses"} {
+		t.Setenv(envTriageAPI, v)
+		if got, err := envInferenceAPI(envTriageAPI); err != nil || string(got) != v {
+			t.Errorf("%q: %q, %v", v, got, err)
+		}
+	}
+}
+
 // The replay refuses EVAL_FORCE_ESCALATION instead of ignoring it.
 func TestReplayRefusesForcedEscalation(t *testing.T) {
 	t.Setenv(envForceEsc, "")
@@ -345,5 +369,37 @@ func TestReplayRefusesForcedEscalation(t *testing.T) {
 	t.Setenv(envForceEsc, "1")
 	if err := replayEnvError(); err == nil {
 		t.Error("the replay accepted a forced escalation")
+	}
+}
+
+// A Foundry deployment's inferenceAPI is in the manifest, so a run through the Responses API has another
+// digest; left out, the manifest is the one a run had before the field (#501).
+func TestManifestNamesTheInferenceAPI(t *testing.T) {
+	s, err := loadSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(api remediationv1alpha1.InferenceAPI) manifest {
+		t.Helper()
+		triage, escalation := replaySource{}.deployments()
+		escalation.InferenceAPI = api
+		m, err := buildManifest(s, &foundrySource{triage: triage, escalation: escalation, triageModel: "gpt-5.4-mini",
+			escModel: "gpt-6.1-sol"}, nil, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	plain, responses := build(""), build(remediationv1alpha1.InferenceAPIResponses)
+	raw, err := json.Marshal(plain.Models)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "inferenceAPI") {
+		t.Errorf("a manifest without inferenceAPI names it: %s", raw)
+	}
+	if responses.Models["escalation"].InferenceAPI != "Responses" || responses.Models["triage"].InferenceAPI != "" ||
+		responses.Digest == plain.Digest {
+		t.Errorf("models %+v, digests %s and %s", responses.Models, plain.Digest, responses.Digest)
 	}
 }

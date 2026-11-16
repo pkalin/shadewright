@@ -144,7 +144,7 @@ eval-model: ## Evaluate a real model through EVAL_MODEL (foundry or anthropic; t
 
 # Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
 # new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.
-FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/redact:FuzzMonotonicAgainstMain internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/tools:FuzzArguments
+FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/redact:FuzzMonotonicAgainstMain internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponses internal/tools:FuzzArguments
 FUZZ ?= $(FUZZ_TARGETS)
 FUZZTIME ?= 30s
 
@@ -534,6 +534,10 @@ chart-ct-cluster: kind ## Create the Kind cluster of the chart-testing job and l
 .PHONY: test-chart-defaults
 test-chart-defaults: chart-ct-cluster ## Install the chart with the default values (plus image.allowTag) on the chart-testing Kind cluster, check what it may read and write, then run helm test.
 	hack/chart-default-install-test.sh "$(KUBECTL)" "$(HELM)" "$(CHART_CT_VALUES)"
+
+.PHONY: test-chart-anthropic
+test-chart-anthropic: chart-ct-cluster ## Install the chart with Anthropic-only values (test/chart/testdata/anthropic-only-values.yaml, a dummy key Secret) on the chart-testing Kind cluster and check the Deployments, the analyzer's restarts and log, and what the API server does with RemediationSettings.
+	hack/chart-anthropic-install-test.sh "$(KUBECTL)" "$(HELM)"
 
 .PHONY: test-chart-metrics-tls
 test-chart-metrics-tls: chart-ct-cluster ## Install the chart with the metrics TLS trust profile on the chart-testing Kind cluster and scrape the metrics Services of all three components with the right CA (200), a wrong CA and a wrong server name (TLS failure).

@@ -113,6 +113,18 @@ type CallReport struct {
 	Err error
 }
 
+// API names the inference API a [Provider] speaks to its deployment.
+type API string
+
+// The inference APIs.
+const (
+	// APIChatCompletions is the chat completions API, the default.
+	APIChatCompletions API = "ChatCompletions"
+	// APIResponses is the Responses API, with API version v1 only. A deployment whose model refuses function
+	// tools on chat completions (the gpt-6.1 models with reasoning, #501) needs it for the read tools.
+	APIResponses API = "Responses"
+)
+
 // Config configures a [Provider]. Endpoint, Deployment and APIVersion are the fields of one ModelDeployment
 // in RemediationSettings.
 type Config struct {
@@ -123,6 +135,9 @@ type Config struct {
 	Deployment string
 	// APIVersion is v1 or a dated version such as 2024-10-21, optionally with -preview.
 	APIVersion string
+	// API is the inference API: APIChatCompletions (empty means the same) or APIResponses, which needs
+	// APIVersion v1. It is the inferenceAPI field of a ModelDeployment.
+	API API
 	// Tokens returns the access tokens. Required.
 	Tokens TokenSource
 	// MaxOutputTokens is sent when a request leaves its own limit at zero. Zero means DefaultMaxOutputTokens;
@@ -158,6 +173,8 @@ type testHooks struct {
 type Provider struct {
 	url        string
 	deployment string
+	// api is the inference API: APIChatCompletions or APIResponses.
+	api API
 	// sendModel names the deployment in the body (API version v1).
 	sendModel      bool
 	tokens         TokenSource
@@ -205,7 +222,20 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	if !apiVersionPattern.MatchString(cfg.APIVersion) {
 		return nil, invalid("the API version is not v1 or a date")
 	}
-	u, err := chatURL(cfg.Endpoint, cfg.Deployment, cfg.APIVersion)
+	api := cfg.API
+	if api == "" {
+		api = APIChatCompletions
+	}
+	var u string
+	var err error
+	switch api {
+	case APIChatCompletions:
+		u, err = chatURL(cfg.Endpoint, cfg.Deployment, cfg.APIVersion)
+	case APIResponses:
+		u, err = responsesURL(cfg.Endpoint, cfg.APIVersion)
+	default:
+		return nil, invalid("the inference API is not ChatCompletions or Responses")
+	}
 	if err != nil {
 		return nil, invalid(err.Error())
 	}
@@ -225,6 +255,7 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	p := &Provider{
 		url:            u,
 		deployment:     cfg.Deployment,
+		api:            api,
 		sendModel:      cfg.APIVersion == "v1",
 		tokens:         cfg.Tokens,
 		client:         newHTTPClient(h.transport, cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout)),
@@ -290,22 +321,10 @@ func unbilledRefusalHost(endpoint string) bool {
 
 // chatURL builds the chat completions URL from typed parts. The returned error text is fixed.
 func chatURL(endpoint, deployment, apiVersion string) (string, error) {
-	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery ||
-		u.Fragment != "" || u.Opaque != "" || len(endpoint) > 256 {
-		return "", errors.New("the endpoint is not an HTTPS URL without user info, query or fragment")
+	u, base, v1Base, err := endpointBase(endpoint)
+	if err != nil {
+		return "", err
 	}
-	// A DNS host name only (threat model G3.9): an IP literal, or a numeric form some resolvers read as one,
-	// would skip the analyzer's host allow-list. The last label must start with a letter, as in the CRD pattern.
-	host := u.Hostname()
-	if _, err := netip.ParseAddr(host); err == nil {
-		return "", errors.New("the endpoint host is an IP address, not a DNS name")
-	}
-	if last := host[strings.LastIndexByte(host, '.')+1:]; last == "" || !isASCIILetter(last[0]) {
-		return "", errors.New("the endpoint host is not a DNS name")
-	}
-	base := strings.TrimSuffix(u.Path, "/")
-	v1Base := strings.HasSuffix(base, "/openai/v1")
 	switch {
 	case apiVersion == "v1" && v1Base:
 		u.Path = base + "/chat/completions"
@@ -317,8 +336,48 @@ func chatURL(endpoint, deployment, apiVersion string) (string, error) {
 		u.Path = base + "/openai/deployments/" + deployment + "/chat/completions"
 		u.RawQuery = url.Values{"api-version": {apiVersion}}.Encode()
 	}
-	u.RawPath = ""
 	return u.String(), nil
+}
+
+// responsesURL builds the Responses API URL, <endpoint>/openai/v1/responses (or <endpoint>/responses when the
+// endpoint already ends in /openai/v1). The Responses API is used with API version v1 only. The returned error
+// text is fixed.
+func responsesURL(endpoint, apiVersion string) (string, error) {
+	u, base, v1Base, err := endpointBase(endpoint)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case apiVersion != "v1":
+		return "", errors.New("the Responses API needs API version v1")
+	case v1Base:
+		u.Path = base + "/responses"
+	default:
+		u.Path = base + "/openai/v1/responses"
+	}
+	return u.String(), nil
+}
+
+// endpointBase checks an endpoint and returns it parsed, its path without a trailing slash, and whether that
+// path ends in /openai/v1. The returned error text is fixed.
+func endpointBase(endpoint string) (*url.URL, string, bool, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery ||
+		u.Fragment != "" || u.Opaque != "" || len(endpoint) > 256 {
+		return nil, "", false, errors.New("the endpoint is not an HTTPS URL without user info, query or fragment")
+	}
+	// A DNS host name only (threat model G3.9): an IP literal, or a numeric form some resolvers read as one,
+	// would skip the analyzer's host allow-list. The last label must start with a letter, as in the CRD pattern.
+	host := u.Hostname()
+	if _, err := netip.ParseAddr(host); err == nil {
+		return nil, "", false, errors.New("the endpoint host is an IP address, not a DNS name")
+	}
+	if last := host[strings.LastIndexByte(host, '.')+1:]; last == "" || !isASCIILetter(last[0]) {
+		return nil, "", false, errors.New("the endpoint host is not a DNS name")
+	}
+	base := strings.TrimSuffix(u.Path, "/")
+	u.RawPath = ""
+	return u, base, strings.HasSuffix(base, "/openai/v1"), nil
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -483,12 +542,12 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 			throttled++
 		}
 		if err == nil {
-			c, perr := parseResponse(data, offered, len(req.ResponseSchema) > 0)
+			c, perr := p.parse(data, offered, len(req.ResponseSchema) > 0)
 			return done(c, attempt+1, perr)
 		}
 		var c providers.Completion
 		if billed {
-			c = billedUsage(data)
+			c = p.billedUsage(data)
 		}
 		if !providers.IsRetryable(err) || attempt+1 >= p.attempts {
 			return done(c, attempt+1, err)
@@ -514,6 +573,22 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 			return done(providers.Completion{}, attempt+1, cerr)
 		}
 	}
+}
+
+// parse is parseResponse or parseResponses, after the Provider's API.
+func (p *Provider) parse(data []byte, offered map[string]bool, structured bool) (providers.Completion, error) {
+	if p.api == APIResponses {
+		return parseResponses(data, offered, structured)
+	}
+	return parseResponse(data, offered, structured)
+}
+
+// billedUsage is billedUsage or billedResponsesUsage, after the Provider's API.
+func (p *Provider) billedUsage(data []byte) providers.Completion {
+	if p.api == APIResponses {
+		return billedResponsesUsage(data)
+	}
+	return billedUsage(data)
 }
 
 // once sends one attempt and returns the body of a 200 reply. Every other outcome is a classified error with

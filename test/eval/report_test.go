@@ -366,6 +366,9 @@ type manifestModel struct {
 	Deployment string `json:"deployment"`
 	Model      string `json:"model"`
 	APIVersion string `json:"apiVersion"`
+	// InferenceAPI is the deployment's inferenceAPI, left out when it is (chat completions), so the digests of
+	// earlier runs stay the same.
+	InferenceAPI string `json:"inferenceAPI,omitempty"`
 }
 
 type manifestContextBuilder struct {
@@ -433,7 +436,7 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 	} {
 		if d != nil {
 			m.Models[string(role)] = manifestModel{Deployment: d.Deployment, Model: expectedModels[role],
-				APIVersion: d.APIVersion}
+				APIVersion: d.APIVersion, InferenceAPI: string(d.InferenceAPI)}
 		}
 	}
 	var err error

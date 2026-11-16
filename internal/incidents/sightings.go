@@ -18,6 +18,7 @@ package incidents
 
 import (
 	"container/list"
+	"slices"
 	"time"
 
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
@@ -66,6 +67,8 @@ type sighting struct {
 	fingerprint string
 	first       time.Time
 	held        []collector.Observation
+	// causes are the cause fingerprints of held that index it in sightings.byCause.
+	causes []string
 }
 
 // heldTotal is the highest total held for an occurrence, and the fingerprint whose first sighting holds it.
@@ -83,11 +86,15 @@ type sightings struct {
 	items map[string]*list.Element
 	// totals holds, per occurrence held, its highest total, so that Handled answers for it.
 	totals map[string]heldTotal
+	// byCause indexes the first sightings by the cause fingerprints their held observations name
+	// (collector.Observation.CauseFingerprint): per cause fingerprint, the fingerprints held for its
+	// consequences. It has one entry per pair, so at most maxHeldPerFingerprint per first sighting.
+	byCause map[string]map[string]struct{}
 }
 
 func newSightings(capacity int) *sightings {
 	return &sightings{max: max(capacity, 1), order: list.New(), items: map[string]*list.Element{},
-		totals: map[string]heldTotal{}}
+		totals: map[string]heldTotal{}, byCause: map[string]map[string]struct{}{}}
 }
 
 // admit decides what to count of an observation of a fingerprint without an Incident, seen at now: nothing
@@ -140,6 +147,53 @@ func (s *sightings) hold(h *sighting, o collector.Observation) {
 	}
 	h.held = append(h.held, o)
 	s.note(h.fingerprint, o.Occurrence, o.Total)
+	s.index(h)
+}
+
+// index files h under the cause fingerprints its held observations name now, and under no other. A merge in
+// hold keeps the held observation's cause fingerprint, so only an append or a take changes them.
+func (s *sightings) index(h *sighting) {
+	s.unindex(h)
+	for _, o := range h.held {
+		if o.CauseFingerprint == "" || slices.Contains(h.causes, o.CauseFingerprint) {
+			continue
+		}
+		h.causes = append(h.causes, o.CauseFingerprint)
+		set := s.byCause[o.CauseFingerprint]
+		if set == nil {
+			set = map[string]struct{}{}
+			s.byCause[o.CauseFingerprint] = set
+		}
+		set[h.fingerprint] = struct{}{}
+	}
+}
+
+// unindex removes h from byCause.
+func (s *sightings) unindex(h *sighting) {
+	for _, cause := range h.causes {
+		set := s.byCause[cause]
+		delete(set, h.fingerprint)
+		if len(set) == 0 {
+			delete(s.byCause, cause)
+		}
+	}
+	h.causes = nil
+}
+
+// consequencesOf returns, sorted, the fingerprints of the first sightings that hold an observation naming
+// cause as its cause fingerprint. It costs one map lookup and a copy of what it returns: the number of
+// consequence fingerprints held for that cause, never the number of first sightings held.
+func (s *sightings) consequencesOf(cause string) []string {
+	set := s.byCause[cause]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for fp := range set {
+		out = append(out, fp)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // note records total as held for occurrence by fingerprint, keeping the highest.
@@ -192,6 +246,7 @@ func (s *sightings) takeWhere(fingerprint string, keep func(collector.Observatio
 		return taken
 	}
 	h.held = left
+	s.index(h)
 	for _, o := range taken {
 		if t, ok := s.totals[o.Occurrence]; ok && t.fingerprint == fingerprint {
 			delete(s.totals, o.Occurrence)
@@ -212,6 +267,7 @@ func (s *sightings) remove(e *list.Element) {
 	h := e.Value.(*sighting)
 	s.order.Remove(e)
 	delete(s.items, h.fingerprint)
+	s.unindex(h)
 	for _, o := range h.held {
 		if t, ok := s.totals[o.Occurrence]; ok && t.fingerprint == h.fingerprint {
 			delete(s.totals, o.Occurrence)

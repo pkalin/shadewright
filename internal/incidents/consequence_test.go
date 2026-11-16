@@ -863,3 +863,173 @@ func TestRefusedCauseDropsTheEvidenceHeldForIt(t *testing.T) {
 		t.Fatalf("after the refused create: name kept %v, cause kept %v, pending %+v", named, cause, pending)
 	}
 }
+
+// newAt is a controller with no API server, at t0 on its own clock.
+func newAt(t *testing.T) (*Controller, *fakeClock) {
+	t.Helper()
+	clock := &fakeClock{now: t0}
+	c, err := New(Config{Namespace: "x", Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, clock
+}
+
+// heldOnce is a BackOff of container web in fingerprint fp(f), linked to the cause fingerprint fp(causeF), seen
+// once at at: its occurrence began when it was observed, so it is held as a first sighting.
+func heldOnce(f, causeF, i int, count int64, at time.Time) collector.Observation {
+	o := consequenceOf(f, causeF, "web", reasonBackOff, i, count, at)
+	o.Began = at
+	return o
+}
+
+// absorbedOn returns what the pending batch of fp holds as evidence under BackOff, and which occurrences.
+func absorbedOn(c *Controller, fp string) (int64, []string) {
+	b := c.pending[fp]
+	if b == nil {
+		return 0, nil
+	}
+	var ids []string
+	for id, o := range b.occurrences {
+		if o.absorbed != "" {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return b.absorbed[remediationv1alpha1.AbsorbedBackOff].count, ids
+}
+
+// TestHeldConsequenceIsAbsorbedWhenItsCauseOpensAlone (#820): a consequence seen once, just before its cause,
+// is held as a first sighting; the cause opens its Incident and the held consequence is counted there in the
+// same pass, with no later observation of it. Its record names the cause's Incident, so Handled answers for it.
+func TestHeldConsequenceIsAbsorbedWhenItsCauseOpensAlone(t *testing.T) {
+	c, _ := newAt(t)
+	c.consume(t.Context(), heldOnce(2, 1, 2, 3, t0))
+	if !c.sightings.holds(fp(2)) {
+		t.Fatal("the consequence is not held as a first sighting, so the test proves nothing")
+	}
+	if !c.consume(t.Context(), oomCause(1, t0.Add(time.Second))) {
+		t.Error("the cause's Incident is not due at once")
+	}
+	if n, ids := absorbedOn(c, fp(1)); n != 3 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 3 [%s]", n, ids, eventID(2))
+	}
+	if c.sightings.holds(fp(2)) || c.sightings.len() != 0 || len(c.sightings.byCause) != 0 {
+		t.Fatalf("still held: %d first sightings, index %v", c.sightings.len(), c.sightings.byCause)
+	}
+	if r := c.records[eventID(2)]; r.incident != Name(fp(1)) || r.total != 3 {
+		t.Fatalf("record %+v, want total 3 on %s", r, Name(fp(1)))
+	}
+	if _, ok := c.pending[fp(2)]; ok {
+		t.Fatal("the consequence opened an Incident of its own")
+	}
+}
+
+// TestHeldConsequenceIsAbsorbedWhenAWaitingCauseOpens (#820): a waiting cause held as a first sighting opens
+// its Incident when its repeat proves it recurs, with nothing new to count; the consequence held for it before
+// is counted there too.
+func TestHeldConsequenceIsAbsorbedWhenAWaitingCauseOpens(t *testing.T) {
+	c, clock := newAt(t)
+	wait := symptomOf(1, reasonConfig, waitingID(1), 1, fingerprint.SourcePodStatus, "web", collector.ClassCause, t0)
+	wait.Began = t0
+	c.consume(t.Context(), wait)
+	c.consume(t.Context(), heldOnce(2, 1, 2, 2, t0.Add(time.Second)))
+	if c.sightings.len() != 2 || len(c.pending) != 0 {
+		t.Fatalf("%d first sightings, %d pending batches; want the cause and the consequence held, nothing open",
+			c.sightings.len(), len(c.pending))
+	}
+	repeat := wait
+	repeat.Count, repeat.MayRepeat, repeat.ObservedAt = 0, true, t0.Add(RecurAfter)
+	clock.set(t0.Add(RecurAfter))
+	c.consume(t.Context(), repeat)
+	if b := c.pending[fp(1)]; b == nil || !b.cause || b.count != 1 {
+		t.Fatalf("the waiting cause did not open its Incident: %+v", b)
+	}
+	if n, ids := absorbedOn(c, fp(1)); n != 2 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 2 [%s]", n, ids, eventID(2))
+	}
+	if c.sightings.len() != 0 {
+		t.Fatalf("%d first sightings still held", c.sightings.len())
+	}
+}
+
+// TestHeldConsequenceIsAbsorbedWhenAnIncidentBecomesACause (#820): the Incident of the cause's fingerprint
+// exists but is not known as a cause (stored without status.cause), so a consequence seen then is held. The
+// cause reported again for that Incident makes it a cause and counts the held consequence there.
+func TestHeldConsequenceIsAbsorbedWhenAnIncidentBecomesACause(t *testing.T) {
+	c, _ := newAt(t)
+	c.names[Name(fp(1))] = struct{}{}
+	c.consume(t.Context(), heldOnce(2, 1, 2, 4, t0))
+	if !c.sightings.holds(fp(2)) {
+		t.Fatal("the consequence is not held, so the test proves nothing")
+	}
+	c.consume(t.Context(), oomCause(2, t0.Add(time.Second)))
+	if n, ids := absorbedOn(c, fp(1)); n != 4 || !slices.Equal(ids, []string{eventID(2)}) {
+		t.Fatalf("absorbed on the cause = %d %v, want 4 [%s]", n, ids, eventID(2))
+	}
+	if c.sightings.len() != 0 {
+		t.Fatalf("%d first sightings still held", c.sightings.len())
+	}
+}
+
+// TestHeldConsequenceStaysHeldWithoutItsCause pins what #820 leaves as it was: a held consequence whose cause
+// opens no Incident (the cause is itself held as a first sighting), or whose cause's Incident is of another
+// subject UID, or whose cause fingerprint is another one, stays held and is not counted anywhere. Seen again 2
+// to 15 minutes later it opens its own Incident through the gate, with what was held.
+func TestHeldConsequenceStaysHeldWithoutItsCause(t *testing.T) {
+	c, clock := newAt(t)
+	other := heldOnce(3, 1, 3, 1, t0)
+	other.Subject = subjectWith("other-pod-owner")
+	c.consume(t.Context(), other)
+	c.consume(t.Context(), heldOnce(4, 5, 4, 1, t0))
+	wait := symptomOf(6, reasonConfig, waitingID(6), 1, fingerprint.SourcePodStatus, "web", collector.ClassCause, t0)
+	wait.Began = t0
+	c.consume(t.Context(), wait)
+	c.consume(t.Context(), heldOnce(2, 6, 2, 2, t0))
+	if c.sightings.len() != 4 || len(c.pending) != 0 {
+		t.Fatalf("%d first sightings, %d pending batches; want 4 held and nothing open", c.sightings.len(),
+			len(c.pending))
+	}
+	// The cause fp(1) opens: only its own consequences of the same subject may be taken.
+	c.consume(t.Context(), oomCause(1, t0.Add(time.Second)))
+	if n, ids := absorbedOn(c, fp(1)); n != 0 || len(ids) != 0 {
+		t.Fatalf("absorbed on the cause = %d %v, want nothing (another subject UID)", n, ids)
+	}
+	for _, f := range []int{2, 3, 4, 6} {
+		if !c.sightings.holds(fp(f)) {
+			t.Errorf("fp(%d) is no longer held", f)
+		}
+	}
+	again := heldOnce(2, 6, 2, 3, t0.Add(RecurAfter))
+	again.Count = 1
+	clock.set(t0.Add(RecurAfter))
+	c.consume(t.Context(), again)
+	if b := c.pending[fp(2)]; b == nil || b.count != 3 || len(b.absorbed) != 0 {
+		t.Fatalf("the consequence seen again did not open its own Incident with what was held: %+v", b)
+	}
+}
+
+// TestConsequenceJustBeforeItsCauseIsCounted (#820, found by the eval case of #795): the collector releases a
+// kubelet consequence linked to its cause at the end of its hold (collector.ConsequenceGrace) a moment before
+// the pod reconciler's cause observation reaches the controller, and never sends it again. It is held as a
+// first sighting; the cause then opens its Incident, and the stored Incident shows the consequence in its
+// absorbed tally, with no Incident of the consequence's own.
+func TestConsequenceJustBeforeItsCauseIsCounted(t *testing.T) {
+	ns := namespace(t)
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	clock := &fakeClock{now: at}
+	r := start(t, ns, Config{Window: 100 * time.Millisecond, Now: clock.Now})
+	r.obs <- heldOnce(2, 1, 2, 5, at)
+	waitHeld(t, r, "the consequence held as a first sighting", func() bool { return r.sightings.len() == 1 })
+	clock.set(at.Add(time.Second))
+	r.obs <- oomCause(1, at.Add(time.Second))
+	w := &want{cause: true}
+	w.addOwn(1, at.Add(time.Second), terminationID(1), "web")
+	w.addAbsorbed(reasonBackOff, 5, at, eventID(2))
+	settledTo(t, ns, map[string]*want{Name(fp(1)): w})
+	// Past the first sighting's window: nothing is left held to open an Incident of its own later.
+	clock.set(at.Add(RecurWithin + time.Minute))
+	waitHeld(t, r, "no first sighting held", func() bool { return r.sightings.len() == 0 })
+	time.Sleep(300 * time.Millisecond)
+	settledTo(t, ns, map[string]*want{Name(fp(1)): w})
+}

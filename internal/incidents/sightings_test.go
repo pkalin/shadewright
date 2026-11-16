@@ -18,6 +18,8 @@ package incidents
 
 import (
 	"fmt"
+	"math/rand/v2"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -668,5 +670,71 @@ func TestLastingWaitKeepsItsIncidentOpen(t *testing.T) {
 	cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionLifecycle)
 	if inc.Status.Phase != remediationv1alpha1.IncidentResolved || cond == nil || cond.Reason != ReasonSymptomQuiet {
 		t.Fatalf("phase %s, Lifecycle %+v, want Resolved as quiet once the repeats stopped", inc.Status.Phase, cond)
+	}
+}
+
+// indexByScan is what sightings.byCause must hold, found by scanning every first sighting: per cause
+// fingerprint, the fingerprints whose held observations name it.
+func indexByScan(s *sightings) map[string][]string {
+	out := map[string][]string{}
+	for e := s.order.Front(); e != nil; e = e.Next() {
+		h := e.Value.(*sighting)
+		for _, o := range h.held {
+			if o.CauseFingerprint != "" && !slices.Contains(out[o.CauseFingerprint], h.fingerprint) {
+				out[o.CauseFingerprint] = append(out[o.CauseFingerprint], h.fingerprint)
+			}
+		}
+	}
+	for _, fps := range out {
+		slices.Sort(fps)
+	}
+	return out
+}
+
+// TestSightingsIndexByCauseMatchesAScan (#820): generated runs of every operation on the first sightings (admit
+// within, at and past the windows, take, takeWhere, expire, eviction at a small capacity, occurrences merged and
+// past maxHeldPerFingerprint, observations with no cause or several causes per fingerprint). After each step
+// the index by cause answers exactly what a scan of everything held answers, for every cause fingerprint.
+func TestSightingsIndexByCauseMatchesAScan(t *testing.T) {
+	for seed := range uint64(200) {
+		rng := rand.New(rand.NewPCG(seed, 820)) // #nosec G404 -- a seeded corpus, reproducible by design
+		s := newSightings(1 + rng.IntN(6))
+		now := t0
+		for step := range 300 {
+			f := 1 + rng.IntN(8)
+			o := observation(f, 1+rng.IntN(6), 1, 1, now)
+			if c := rng.IntN(4); c > 0 {
+				o.CauseFingerprint = fp(100 + c)
+			}
+			var op string
+			switch k := rng.IntN(10); {
+			case k < 6:
+				op = "admit"
+				s.admit(o, now)
+			case k < 7:
+				op = "take"
+				s.take(fp(f))
+			case k < 9:
+				op = "takeWhere"
+				cause := fp(100 + rng.IntN(4))
+				s.takeWhere(fp(f), func(h collector.Observation) bool { return h.CauseFingerprint == cause })
+			default:
+				op = "expire"
+				s.expire(now)
+			}
+			now = now.Add(time.Duration(rng.IntN(int(4 * time.Minute))))
+			want := indexByScan(s)
+			for c := range 5 {
+				cause := fp(100 + c)
+				if got := s.consequencesOf(cause); !slices.Equal(got, want[cause]) {
+					t.Fatalf("seed %d step %d after %s: consequencesOf(%s) = %v, a scan finds %v", seed, step, op,
+						cause, got, want[cause])
+				}
+			}
+			if len(s.byCause) != len(want) {
+				t.Fatalf("seed %d step %d after %s: the index has %d causes, a scan finds %d (empty entries kept)",
+					seed, step, op, len(s.byCause), len(want))
+			}
+		}
 	}
 }

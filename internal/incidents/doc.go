@@ -54,7 +54,8 @@ limitations under the License.
 // apart from the Incident's own count, lastSeen and occurrences, so it never makes the cause due, restarts no
 // cooldown, does not keep it from going quiet and takes no place under the cap. The cause's phase is not
 // read. A consequence whose cause has no Incident yet goes through the gate as any observation; one held as
-// a first sighting is counted on the cause in full once a later observation of it links there. A pod-status
+// a first sighting is counted on the cause in full once a later observation of it links there, or once the
+// cause's observation is consumed (#820), found through the first sightings' index by cause fingerprint. A pod-status
 // cause sets status.cause, and every counted observation adds its container (a DNS label, at most 8) to
 // status.containers. The drop mark of a cause's absorbed list answers Handled only for consequences linked to
 // that cause's fingerprint; a replay whose cause fingerprint changed or is empty is not recognised and goes

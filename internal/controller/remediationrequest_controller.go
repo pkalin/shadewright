@@ -1276,15 +1276,16 @@ func (r *RemediationRequestReconciler) endBeforeFresh(ctx context.Context, rr *r
 }
 
 // advanceAndWatch is the end of recheck on a fresh plan: the next step (advance), then, when the look read the
-// pull request open, that step went through and did not stop at a pause (WritesPaused), the look at the Incident
-// (watchIncidentStopped, #715). It rides this full recheck, after the step's own writes, so its write wakes only a
-// look at the pull request (pollOnly).
+// pull request open, the step returned no error and did not stop at a pause (WritesPaused), the look at the
+// Incident (watchIncidentStopped, #715). It rides this full recheck, after the step's own writes, so its write
+// wakes only a look at the pull request (pollOnly).
 //
-// The step's result stands whatever the look at the Incident gives, with one exception: a conflict on the status
-// write of the mark or of its removal (the request was written meanwhile) requeues after stepDelay, or sooner when
-// the step asked for that, and drops the note of this full recheck so that the next reconcile is a full one that
-// reads the request again. Any other failed write is logged and tried again at the next full recheck: returning it
-// would only retry a look at the pull request (pollOnly) and lose the step's requeue.
+// The step's result stands whatever the look at the Incident gives: its requeue may be a wait the Git host asked
+// for (Retry-After), which cannot be told from the regular poll, so the look never shortens it. A conflict on the
+// status write of the mark or of its removal (the request was written meanwhile) reads the request again from
+// the API server and tries the look once more in this reconcile; a second conflict, a failed read and any other failed write are
+// logged and tried again at the next full recheck: returning them would only retry a look at the pull request
+// (pollOnly) and lose the step's requeue.
 func (r *RemediationRequestReconciler) advanceAndWatch(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	fresh freshness.Result, outcome prOutcome) (ctrl.Result, error) {
 	res, err := r.advance(ctx, rr, fresh)
@@ -1292,22 +1293,29 @@ func (r *RemediationRequestReconciler) advanceAndWatch(ctx context.Context, rr *
 		meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused) != nil {
 		return res, err
 	}
-	switch err := r.watchIncidentStopped(ctx, rr); {
+	key := client.ObjectKeyFromObject(rr)
+	log := logf.FromContext(ctx)
+	err = r.watchIncidentStopped(ctx, rr)
+	if err != nil && ctx.Err() == nil && apierrors.IsConflict(err) {
+		log.V(1).Info("RemediationRequest was written meanwhile; reading it again for the look at its Incident",
+			"remediationRequest", key, "error", err.Error())
+		// From the API server: the cache may still hold the version the conflict was about.
+		var reader client.Reader = r.Client
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
+		if err = reader.Get(ctx, key, rr); err == nil {
+			err = r.watchIncidentStopped(ctx, rr)
+		}
+	}
+	switch {
 	case err == nil:
 		return res, nil
 	case ctx.Err() != nil:
 		return ctrl.Result{}, err
-	case apierrors.IsConflict(err):
-		logf.FromContext(ctx).V(1).Info("RemediationRequest was written meanwhile; the look at its Incident "+
-			"runs again shortly", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		r.checked.Delete(client.ObjectKeyFromObject(rr))
-		if res.RequeueAfter <= 0 || res.RequeueAfter > stepDelay {
-			res.RequeueAfter = stepDelay
-		}
-		return res, nil
 	default:
-		logf.FromContext(ctx).Info("Could not write IncidentStopped of RemediationRequest; the next full "+
-			"recheck tries again", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		log.Info("Could not write IncidentStopped of RemediationRequest; the next full recheck tries again",
+			"remediationRequest", key, "error", err.Error())
 		return res, nil
 	}
 }

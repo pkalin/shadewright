@@ -62,9 +62,9 @@ const messageIncidentStopped = "The Incident's count has not changed for at leas
 //     lasting symptom state (quiet.LastingState), whose count does not move while it lasts, is never marked.
 //
 // The phase, the pull request and the lock on the target are never touched. A failed status write is returned
-// and records no Event; advanceAndWatch decides when it is tried again. The Event is recorded only after a
-// status write that answered, so there is at most one per mark: a write that went through but whose answer was
-// lost records none, and the condition stays the signal.
+// and records no Event; advanceAndWatch tries it once more on a conflict and otherwise leaves it to the next full
+// recheck. The Event is recorded only after a status write that answered, so there is at most one per mark: a
+// write that went through but whose answer was lost records none, and the condition stays the signal.
 func (r *RemediationRequestReconciler) watchIncidentStopped(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	pr := rr.Status.PullRequest

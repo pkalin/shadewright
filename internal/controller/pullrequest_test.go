@@ -4370,44 +4370,99 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(got.Status.PullRequest.IncidentStopped).To(BeNil())
 		})
 
-		It("requeues shortly with a full recheck when the request was written meanwhile, and keeps the step's requeue otherwise", func() {
+		// writtenMeanwhile returns a hook that has another writer change the request between the read and the
+		// patch of the mark, for the first n patches, and lets the later ones through.
+		writtenMeanwhile := func(n int) func() error {
+			return func() error {
+				if n == 0 {
+					return nil
+				}
+				n--
+				live := fetch()
+				base := live.DeepCopy()
+				live.Annotations = map[string]string{"example.invalid/written-meanwhile": fmt.Sprint(n)}
+				return k8sClient.Patch(ctx, live, client.MergeFrom(base))
+			}
+		}
+
+		It("reads the request again and marks it in the same reconcile when it was written meanwhile", func() {
 			r := reconciler()
 			_, err := r.Reconcile(ctx, key())
 			Expect(err).NotTo(HaveOccurred())
 			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
-			var hook func() error
-			r.Client = &statusPatchHook{Client: k8sClient, before: func() error { return hook() }}
-
-			// Another writer changes the request between the read and the mark's patch.
-			hook = func() error {
-				hook = func() error { return nil }
-				live := fetch()
-				base := live.DeepCopy()
-				live.Annotations = map[string]string{"example.invalid/written-meanwhile": "1"}
-				return k8sClient.Patch(ctx, live, client.MergeFrom(base))
-			}
+			r.Client = &statusPatchHook{Client: k8sClient, before: writtenMeanwhile(1)}
 			clock = clock.Add(FullRecheckInterval)
 			res, err := r.Reconcile(ctx, key())
 			Expect(err).NotTo(HaveOccurred(), "a conflict is no failed reconcile")
-			Expect(res.RequeueAfter).To(Equal(stepDelay))
+			Expect(res.RequeueAfter).To(Equal(r.pullRequestPollInterval()), "the step's requeue stands")
+			Expect(stopped()).NotTo(BeNil(), "the retry after the conflict marks")
+			Expect(fetch().Annotations).To(HaveKey("example.invalid/written-meanwhile"))
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+			Expect(recorder.Events).NotTo(Receive(), "one Event")
+
+			// The removal is retried the same way.
+			setIncident(4)
+			r.Client = &statusPatchHook{Client: k8sClient, before: writtenMeanwhile(1)}
+			full(r)
+			Expect(stopped()).To(BeNil(), "the retry after the conflict removes the mark")
+			Expect(fetch().Status.PullRequest.IncidentStopped).To(BeNil())
+		})
+
+		It("leaves a second conflict to the next full recheck and keeps the step's requeue", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			r.Client = &statusPatchHook{Client: k8sClient, before: writtenMeanwhile(2)}
+			clock = clock.Add(FullRecheckInterval)
+			res, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(r.pullRequestPollInterval()), "no shorter requeue after a conflict")
 			Expect(stopped()).To(BeNil())
 			Expect(recorder.Events).NotTo(Receive())
-			// The next reconcile, with no time gone by, is a full recheck that reads the request again and marks.
+			// A reconcile with no time gone by is a look at the pull request only: it decides nothing.
 			_, err = r.Reconcile(ctx, key())
 			Expect(err).NotTo(HaveOccurred())
+			Expect(stopped()).To(BeNil(), "no forced full recheck")
+			full(r)
+			Expect(stopped()).NotTo(BeNil(), "the next full recheck marks")
+			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
+		})
+
+		It("keeps a wait the Git host asked for when the mark meets a conflict", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			r.Client = &statusPatchHook{Client: k8sClient, before: writtenMeanwhile(1)}
+			// An hour after the first read, the render of a moved target branch is rate limited by the Git host.
+			clock = clock.Add(FullRecheckInterval)
+			res, err := r.advanceAndWatch(ctx, fetch(), freshness.Result{Head: strings.Repeat("e", 40),
+				Git: rateLimitedReads{Git: git}}, prOpen)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(30*time.Second), "the Retry-After of the Git host stands")
+			Expect(stopped()).NotTo(BeNil(), "the retry after the conflict marks")
+		})
+
+		It("keeps the step's requeue when a write other than a conflict fails, and tries again at the next full recheck", func() {
+			r := reconciler()
+			_, err := r.Reconcile(ctx, key())
+			Expect(err).NotTo(HaveOccurred())
+			fullsUnmarked(r, fullRechecksPerQuiet-1, "less than an hour")
+			full(r)
 			Expect(stopped()).NotTo(BeNil())
 			Expect(recorder.Events).To(Receive(Equal(stopEvent)))
 
-			// A failed removal that is not a conflict keeps the step's requeue (the poll interval) and is tried
-			// again at the next full recheck.
 			setIncident(4)
-			hook = func() error { return apierrors.NewInternalError(errors.New("etcd unavailable")) }
+			r.Client = &statusPatchHook{Client: k8sClient, before: func() error {
+				return apierrors.NewInternalError(errors.New("etcd unavailable"))
+			}}
 			clock = clock.Add(FullRecheckInterval)
-			res, err = r.Reconcile(ctx, key())
+			res, err := r.Reconcile(ctx, key())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.RequeueAfter).To(Equal(r.pullRequestPollInterval()))
 			Expect(stopped()).NotTo(BeNil(), "the removal failed")
-			hook = func() error { return nil }
+			r.Client = k8sClient
 			full(r)
 			Expect(stopped()).To(BeNil())
 		})
@@ -6624,6 +6679,17 @@ type pausedReads struct {
 
 func (pausedReads) ReadFile(context.Context, string, string, int) (providers.File, error) {
 	return providers.File{}, freshness.ErrPaused
+}
+
+// rateLimitedReads is a Git provider whose file reads are refused by the host's rate limit, with a Retry-After
+// of 30 seconds.
+type rateLimitedReads struct {
+	*fakegit.Git
+}
+
+func (rateLimitedReads) ReadFile(context.Context, string, string, int) (providers.File, error) {
+	return providers.File{}, &providers.RetryableError{RetryAfter: 30 * time.Second,
+		Err: errors.New("secondary rate limit")}
 }
 
 // statusPatchHook calls before ahead of each status patch of a RemediationRequest that sets or removes condition

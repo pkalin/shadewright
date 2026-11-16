@@ -75,7 +75,7 @@ This ADR does not edit `AGENTS.md`.
 
 **Other costs.**
 - The key is the analyzer's second possible Secret mount, next to the TLS Secret for metrics.
-- Azure is still required: the workload identity token source, the `clientId` chart check and the analysis records in Blob stay. Making the token source conditional on a Foundry deployment is not part of this ADR.
+- Azure is still required: the workload identity token source, the `clientId` chart check and the analysis records in Blob stay. Making the token source conditional on a Foundry deployment is not part of this ADR. *Amended 2026-11-16, see [Amendments](#amendments).*
 - The chart gets a value for an existing Secret name or a volume source, and a render check as a convenience; the kustomize manifests in `config/` get no mount, so this provider is Helm only until someone asks.
 - The adapter and the analyzer need a test that no error path holds the key.
 - There are now two sets of evaluation results per model family, and a model comparison must say which provider produced a row.
@@ -99,4 +99,4 @@ None. The question of training on API data is answered under Vendor terms and th
 
 ## Amendments
 
-None.
+- 2026-11-16 ([#814](https://github.com/pkalin/shadewright/issues/814)): the token source is conditional on a Foundry deployment. Without `--model-endpoint-suffixes` the analyzer reads no workload identity, builds no token source and refuses every `Foundry` deployment (`ProviderNotConfigured`). The chart does not read `settings.spec` (the settings object is created once and an upgrade never changes it, so the values cannot tell what the cluster holds): `analyzer.identity.azure.clientId` is required exactly when `endpointSuffixes` or a record store is set, and with a triage model at least one of `endpointSuffixes` and the Anthropic API key is required. The analyzer is the gate for the deployments. `apiVersion` may be left out only for provider `Anthropic`. The records in Blob still need the identity.

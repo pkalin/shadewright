@@ -8,13 +8,13 @@ The rule for everything below: no PATs, no client secrets, no long-lived API key
 
 ## 9.1. Analyzer
 
-**What it does.** The analyzer has its own managed identity. It holds only the inference role on the model deployment, and permission to create blobs in the analysis records container (ADR-0015). It asks Entra ID for a token of the Cognitive Services audience for the model and, only with a record store configured, one of the Storage audience for the records (`internal/providers/store/azureblob`, azidentity's workload identity credential).
+**What it does.** The analyzer has its own managed identity. It holds only the inference role on the model deployment, and permission to create blobs in the analysis records container (ADR-0015). It asks Entra ID for a token of the Cognitive Services audience for the model, only when a `Foundry` deployment can be configured (`--model-endpoint-suffixes` set), and, only with a record store configured, one of the Storage audience for the records (`internal/providers/store/azureblob`, azidentity's workload identity credential).
 
 In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-analyzer-permissions), the full list in [Configuration](../reference/configuration.md)). Of the RemediationPolicies it may only `get` the ones `--action-policies` names, by `resourceNames` (no `list` or `watch`, no rule without a name), so the context can show the model the bounds of the policy that will decide its proposal (3.3, [#493](https://github.com/pkalin/shadewright/issues/493)). Reading a policy decides nothing: the executor reads it again and decides (invariant 1).
 
 <span class="sw-status sw-built">built</span> (#537) It also reads the reviewer hints the executor stored in request status ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md)), never the pull request comment itself, and writes nothing new for them (its replacement request is the create it already has): it cannot write request status, so it cannot forge a hint. It records the ID of the hint it handled in the Incident status it already writes (`status.handledHint`), and the executor's `get` on that Incident reads the `Analyzed` condition and that ID to learn a refusal (<span class="sw-status sw-built">built</span>, #538, code merged, off by default, opt-in with `--reviewer-hints` (#631); the analyzer reads the condition to decide nothing).
 
-<span class="sw-status sw-built">built</span> ([#729](https://github.com/pkalin/shadewright/issues/729)) For a deployment with `provider: Anthropic` the analyzer authenticates with an API key instead of a token: it reads the file of `--anthropic-api-key-file` at every call, a read-only mount from a Secret or a CSI volume the cluster operator provides, never an environment variable or a field of a custom resource. It gets no RBAC on Secrets for it; the kubelet or the CSI driver mounts the file. The workload identity stays required.
+<span class="sw-status sw-built">built</span> ([#729](https://github.com/pkalin/shadewright/issues/729)) For a deployment with `provider: Anthropic` the analyzer authenticates with an API key instead of a token: it reads the file of `--anthropic-api-key-file` at every call, a read-only mount from a Secret or a CSI volume the cluster operator provides, never an environment variable or a field of a custom resource. It gets no RBAC on Secrets for it; the kubelet or the CSI driver mounts the file. Since [#814](https://github.com/pkalin/shadewright/issues/814) the workload identity is needed only with `--model-endpoint-suffixes` (a `Foundry` deployment) or a record store: an analyzer whose deployments are all `Anthropic` runs without it and builds no Azure token source.
 
 **Why.** The analyzer talks to a model and writes records.
 
@@ -70,7 +70,8 @@ The verifier (`shadewright-verifier`, #682) is the third ServiceAccount. It has 
 - a token request that gets no answer from Entra ID;
 - a token request that gets a successful answer that cannot be used;
 - a token request that runs into the per-try deadline;
-- a response from Key Vault or Entra ID that the HTTP client hands back only after the try's deadline has passed, when it has no body (an empty 200, for example) or its body was still being read (#447).
+- a response from Key Vault or Entra ID that the HTTP client hands back only after the try's deadline has passed, whatever its status, Key Vault challenge or declared size: nothing of it is checked before the deadline is (#447, #781);
+- a response whose body was still being read when the try's deadline passed (#447), unless more than 64 KiB of it had arrived by then, which is final.
 
 **Final (reported as permanent; the caller does not retry):**
 
@@ -79,7 +80,8 @@ The verifier (`shadewright-verifier`, #682) is the third ServiceAccount. It has 
 - a token request Entra ID refuses;
 - a federated token file that cannot be read (see 9.6);
 - a token failure the signer cannot see into, from a credential it did not build;
-- a caller that cancels.
+- a Key Vault challenge the SDK cannot parse safely, or a response body larger than 64 KiB, when the response arrives before the deadline;
+- a caller that cancels, also when a response arrives after the cancellation (#781).
 
 **Limits.** When Entra ID's answer reaches the signer before the try's deadline, its status decides, even if the deadline passes before the token request returns, unless the caller cancelled. Errors keep only fixed text, the status code and the class.
 

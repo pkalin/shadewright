@@ -255,18 +255,40 @@ func TestSignTryTimeoutWithCleanlyEndedBody(t *testing.T) {
 }
 
 // TestSignOversizedBodyAtTryDeadlineIsFinal covers an oversized chunked body whose read ends as the per-try
-// deadline passes: it stays the final response too large error, not a retryable timeout.
+// deadline passes: it stays the final response too large error, not a retryable timeout, and is not sent
+// again. The first Sign learns the challenge under a generous try timeout; the timed Sign then holds no
+// network round trip (the answer comes from the wrapper), so the try's deadline passes only while the body
+// is read. Before #781 the challenge and the authorized round trip ran inside a 50 ms try, which a loaded
+// machine could outlast, giving the try's own retryable deadline instead of the oversized body.
 func TestSignOversizedBodyAtTryDeadlineIsFinal(t *testing.T) {
 	kid := "https://" + testHost + "/keys/github-app/" + testVersion
-	s, v := setupWith(t, kid, Options{Timeout: 30 * time.Second, MaxRetries: 2}, &fakeCredential{},
-		cutAuthorized(strings.Repeat("a", maxResponseBody+1), nil), clientConfig{tryTimeout: 50 * time.Millisecond})
+	var armed atomic.Bool
+	var answered atomic.Int32
+	wrap := func(inner policy.Transporter) policy.Transporter {
+		return transporterFunc(func(req *http.Request) (*http.Response, error) {
+			if !armed.Load() || req.Header.Get("Authorization") == "" {
+				return inner.Do(req)
+			}
+			answered.Add(1)
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Request: req, ContentLength: -1,
+				Body: &cutBody{ctx: req.Context(), data: strings.NewReader(strings.Repeat("a", maxResponseBody+1))}}, nil
+		})
+	}
+	s, v := setupWith(t, kid, Options{Timeout: time.Minute, MaxRetries: 2}, &fakeCredential{}, wrap,
+		clientConfig{tryTimeout: 30 * time.Second})
 	v.respond = v.signOK(kid)
-	_, err := s.Sign(context.Background(), digestOf("x"))
+	if _, err := s.Sign(context.Background(), digestOf("x")); err != nil {
+		t.Fatalf("first Sign: %v", err)
+	}
+	armed.Store(true)
+	ctx := policy.WithRetryOptions(context.Background(),
+		policy.RetryOptions{TryTimeout: time.Second, MaxRetries: 2, RetryDelay: time.Millisecond})
+	_, err := s.Sign(ctx, digestOf("x"))
 	if !errors.Is(err, errResponseTooLarge) || providers.IsRetryable(err) {
 		t.Errorf("err = %v, want the final response too large error", err)
 	}
 	assertCleanChain(t, "oversized body at the try deadline", err)
-	if n := len(v.authorized()); n != 1 {
+	if n := answered.Load(); n != 1 {
 		t.Errorf("%d authorized requests, want 1 (no retry)", n)
 	}
 }

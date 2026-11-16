@@ -2027,6 +2027,90 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
 			})
 
+			// #809: a close that goes through while the check is still pending removes PullRequestNotClosed of an
+			// earlier refused close in the same write that records the close, so the end says Shadewright closed it.
+			// refusedThenPending makes the plan stale with the close and the check refused, then lets the close
+			// through while the check stays refused; it returns the request as stored before that look.
+			refusedThenPending := func(closeRefused *atomic.Bool) *remediationv1alpha1.RemediationRequest {
+				GinkgoHelper()
+				green()
+				closeRefused.Store(true)
+				git.SetFail(func(op string) error {
+					switch op {
+					case opClose:
+						closes.Add(1)
+						if closeRefused.Load() {
+							return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+						}
+					case opCreateCheckRun:
+						return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+					}
+					return nil
+				})
+				events = record.NewFakeRecorder(20)
+				policy.Spec.Actions[0].SetContainerMemoryLimit.MaxIncreasePercent = 50
+				Expect(k8sClient.Update(ctx, policy)).To(Succeed())
+				_, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(notClosed(fetch())).NotTo(BeNil(), "the refused close is said")
+				closeRefused.Store(false)
+				return fetch()
+			}
+
+			It("records the close while the check is pending after a refused close (#809)", func() {
+				closeRefused := atomic.Bool{}
+				before := refusedThenPending(&closeRefused)
+				res, err := watcher()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval), "the poll interval is kept")
+				Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "the check is pending")
+				Expect(notClosed(got)).To(BeNil(), "removed by the close that went through")
+				opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+				Expect(opened.Reason).To(Equal(ReasonPullRequestClosed), "the close is recorded in the same write")
+				Expect(skipOwnMarks.Update(crevent.UpdateEvent{ObjectOld: before, ObjectNew: got})).To(BeFalse(),
+					"the write wakes no reconcile of its own, so the poll interval stands")
+
+				git.SetFail(nil)
+				_, err = watcher()
+				Expect(err).NotTo(HaveOccurred())
+				got = fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+				opened = meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+				Expect(opened.Reason).To(Equal(ReasonPullRequestClosed))
+				Expect(opened.Message).NotTo(ContainSubstring("not known whether"), "Shadewright closed it")
+			})
+
+			It("records the close while the check is pending again after a write that lost to another one (#809)", func() {
+				closeRefused := atomic.Bool{}
+				refusedThenPending(&closeRefused)
+				r := reconciler()
+				r.Recorder = events
+				r.ReviewerHints = hints
+				bumps := atomic.Int32{}
+				r.Client = &bumpBeforeStatusUpdate{Client: k8sClient, bump: func(obj client.Object) {
+					rr := obj.(*remediationv1alpha1.RemediationRequest)
+					if notClosed(rr) != nil || bumps.Add(1) > 1 {
+						return
+					}
+					live := &remediationv1alpha1.RemediationRequest{}
+					Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), live)).To(Succeed())
+					base := live.DeepCopy()
+					live.Annotations = map[string]string{"example.com/edited": "809"}
+					Expect(k8sClient.Patch(ctx, live, client.MergeFrom(base))).To(Succeed())
+				}}
+				res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+				Expect(bumps.Load()).To(BeNumerically(">=", 1), "the write met a change")
+				got := fetch()
+				Expect(got.Annotations).To(HaveKeyWithValue("example.com/edited", "809"))
+				Expect(notClosed(got)).To(BeNil(), "written again after the conflict")
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened).Reason).
+					To(Equal(ReasonPullRequestClosed))
+			})
+
 			It("clears a reason of Approved about the check once it records Stale", func() {
 				green()
 				checkRefused := fmt.Errorf("status 403: %w", providers.ErrForbidden)

@@ -391,7 +391,7 @@ Policies and requests refer to repositories by name only.
 
 - An escalation model without a triage model is refused.
 - So are two that name the same endpoint (ignoring a trailing `/`) and deployment (ignoring case), so the escalation cap cannot become a second budget for the triage model.
-- Each names an `endpoint`, a `deployment` name and an `apiVersion` (`v1` or a valid-looking date, optionally `-preview`). The endpoint rules are in 5.5.
+- Each names an `endpoint`, a `deployment` name and an `apiVersion` (`v1` or a valid-looking date, optionally `-preview`). A CEL rule lets only provider `Anthropic` leave `apiVersion` out; every other provider needs it, and a value there is accepted but not sent ([#814](https://github.com/pkalin/shadewright/issues/814)). The endpoint rules are in 5.5.
 - Each must set a daily cap `maxTokensPerDay`. It has no default, so the admin chooses it per deployment. Range 0 to 1,000,000,000, and 0 stops calls to it.
 - Each may name a `provider`: `Foundry` (the default) or `Anthropic`, the API the adapter speaks ([ADR-0037](../adr/0037-the-anthropic-api-as-a-second-model-provider.md)). Two CEL rules: an `Anthropic` deployment must have the endpoint `https://api.anthropic.com`, and a `Foundry` deployment may not name that host.
 - A `Foundry` deployment may name an `inferenceAPI`: `ChatCompletions` (used when it is left out) or `Responses`, for a model that refuses function tools on chat completions, such as the `gpt-6.1` models with escalation's read tools ([#501](https://github.com/pkalin/shadewright/issues/501)). Two CEL rules: the field is only for provider `Foundry`, and `Responses` needs `apiVersion: v1`. Objects stored without it keep chat completions.
@@ -467,7 +467,7 @@ Conditions of other types are kept as they are. Like the others, these appear on
 | Target branch | Starts with a letter or digit; at most 200 characters; does not end with `.` |
 | Key ID | Follows the Key Vault naming rules: vault name 3 to 24 characters with no consecutive hyphens; key name 1 to 127 characters |
 | Model endpoint | HTTPS only; at most 256 characters; host name of lower-case DNS labels; port 1 to 65535 if any; no IP address, user info, query, fragment or dot segment |
-| Model `apiVersion` | `v1` or a valid-looking date, optionally `-preview` |
+| Model `apiVersion` | `v1` or a valid-looking date, optionally `-preview`; only provider `Anthropic` may leave it out |
 | Model `inferenceAPI` | `ChatCompletions` or `Responses`; provider `Foundry` only; `Responses` needs `apiVersion: v1` |
 | `maxTokensPerDay` | No default; 0 to 1,000,000,000; 0 stops calls |
 | `maxAnalysesPerDay` | Default 100; 0 to 10000; 0 disables the model |

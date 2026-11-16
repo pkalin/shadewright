@@ -51,6 +51,9 @@ const maxResponseBody = 64 << 10
 //     prints transport errors, sees the request URL or the network stack's text.
 //   - On the credential's client (entra), it records the outcome of each exchange for the token request
 //     in the request's context (tokenRequest), because azidentity passes on only an error's text.
+//   - An answer the HTTP client returns after the request's context ended is that context error, checked
+//     before anything else of the answer, so neither a refusal (challenge, size) nor a status is taken
+//     from an answer that raced the end (#781).
 //   - It gives each attempt its own copy of the request body (ownBody), because the HTTP transport may still
 //     read a body after it returned the response while azcore rewinds it for the next attempt.
 //
@@ -89,6 +92,13 @@ func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 	if resp == nil {
 		return nil, final{errRequestSDK}
 	}
+	// net/http can return an answer that raced the end of the request's context (#767, #779, #781). The
+	// context ended first: the try reports that, whatever the answer was, and nothing of it is classified,
+	// neither the challenge nor the size.
+	if ctxErr := req.Context().Err(); ctxErr != nil {
+		closeBody(resp)
+		return nil, ctxErr
+	}
 	if !g.entra && resp.StatusCode == http.StatusUnauthorized && !safeChallenge(resp.Header.Get("WWW-Authenticate"), req.URL.Host) {
 		closeBody(resp)
 		return nil, final{errMalformedChallenge}
@@ -102,8 +112,8 @@ func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 		}
 		body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 		closeBody(resp)
-		// An oversized body is final whenever the read ended: a try that runs out while it is read must not
-		// turn it into a retryable timeout.
+		// An oversized body is final whenever the read ended: the answer arrived before the context ended
+		// (checked above), and a try that runs out while it is read must not turn it into a retryable timeout.
 		if len(body) > maxResponseBody {
 			return nil, final{errResponseTooLarge}
 		}

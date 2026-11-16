@@ -353,3 +353,39 @@ func TestModelFactoryLogsAnthropicCallFailures(t *testing.T) {
 		t.Errorf("the log line holds the key or the key file: %q", lines[0])
 	}
 }
+
+// Without an allow-list and a token source the factory still builds Anthropic providers, and refuses every
+// Foundry deployment as not configured, naming the missing flag; half of the Foundry settings is refused (#814).
+func TestModelFactoryWithoutFoundry(t *testing.T) {
+	const keyFile = "/var/run/shadewright/anthropic/api-key"
+	expected := map[analysis.Role]string{analysis.RoleTriage: anthropicModel}
+	f, err := NewModelFactory(ModelsConfig{AnthropicKeyFile: keyFile, Expected: expected, Log: logr.Discard()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []remediationv1alpha1.ModelProvider{"", remediationv1alpha1.ModelProviderFoundry} {
+		d := remediationv1alpha1.ModelDeployment{Provider: provider, Endpoint: "https://lab" + foundrySuffix + "/",
+			Deployment: smallModel, APIVersion: "v1"}
+		p, err := f(analysis.RoleTriage, d)
+		if !errors.Is(err, analysis.ErrProviderNotConfigured) || p != nil ||
+			!strings.Contains(err.Error(), "--model-endpoint-suffixes") {
+			t.Errorf("provider %q: %v, %v", provider, p, err)
+		}
+	}
+	// apiVersion left out, as the docs ask for an Anthropic deployment.
+	d := remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderAnthropic,
+		Endpoint: remediationv1alpha1.AnthropicEndpoint, Deployment: anthropicModel}
+	if p, err := f(analysis.RoleTriage, d); err != nil || p == nil {
+		t.Errorf("an Anthropic deployment: %v, %v", p, err)
+	}
+
+	for name, cfg := range map[string]ModelsConfig{
+		"suffixes without tokens": {Suffixes: []string{foundrySuffix}, AnthropicKeyFile: keyFile},
+		"tokens without suffixes": {Tokens: failingTokens{t}, AnthropicKeyFile: keyFile},
+		"nothing at all":          {},
+	} {
+		if _, err := NewModelFactory(cfg); err == nil {
+			t.Errorf("%s: a factory was built", name)
+		}
+	}
+}

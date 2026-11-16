@@ -230,6 +230,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom`, `statefulset-oom` and `keda-at-ceiling` have one (and the `oom/rollout` variant, below) |
 | `policy.yaml` | The RemediationPolicies of the scenario's cluster (#493): the lab's `demo-memory`, its spec copied from the fleet repository (the file names the commit), and a synthetic `demo-keda` (the lab has no KEDA policy yet). The context shows their bounds and a plan they refuse fails |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |
+| `grouping.yaml` | Optional. The kubelet events of the scenario's fault that the grouping case adds to `objects.yaml` ([below](#the-grouping-cases)). Only `oom` has one. The analysis does not read it |
 | `variants/<name>/` | Optional. Variants of the scenario, below |
 
 **Variants.** A variant is a state of a fleet scenario that the lab met and the scenario's own recording does not
@@ -366,6 +367,42 @@ to the tools or the context.
 
 The analyzer cannot yet compute the same digest at run time (it does not know the rubric, the threshold or the
 repeats, which ADR-0025 checks when the list of passing results is built); that check is the planned follow-up.
+
+## The grouping cases
+
+Two cases of [ADR-0039](adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) count what a lab run
+counts, and need no model to decide: `oom` gives one Incident, one analysis and at most one request for `demo/web`,
+and `startup-probe` opens nothing ([#795](https://github.com/pkalin/shadewright/issues/795)). `test/eval/grouping_test.go`
+runs them in `make test` on a real API server (envtest): it creates the scenario's objects (with `grouping.yaml` for
+`oom`), their times moved so that the fault happened seconds ago, and runs the analyzer's pipeline on them as
+`cmd/analyzer` wires it: the collector, the Incident controller with its analysis trigger, and the analysis controller
+with the context builder, the read tools and the scenario's recorded replies. It counts the subject's Incidents, the
+analyses (units taken from the daily budget, and model calls) and the requests.
+
+- `TestGroupingOOMOpensOneIncident`: the cause first, as in the lab. The pod status shows the OOM kill, and the
+  kubelet's `BackOff` and readiness probe events of the `web` container end at or after it. One Incident opens, the
+  `OOMKilled` cause's, with both consequences in its `status.absorbed`; it is analyzed once and gives exactly one
+  request. Without the rule each event is an observation of its own, which the gate opens once it recurs, as
+  the lab saw (#432); the case fails then, since the cause's tally stays empty. The case pins that order: it
+  creates the kubelet events only once the cause's Incident exists. The collector delivers pod and event
+  observations from separate reconcilers, and a consequence seen once that reaches the Incident controller just
+  before its cause is held as a first sighting and never counted on the cause unless it is seen again, so the
+  order is not left to chance.
+- `TestGroupingOOMFoldsALateCause`: an `Unhealthy` Incident of the `web` container opened before the kill and not
+  analyzed yet. When the cause's Incident opens, it is folded into it (`Resolved`, `status.foldedInto`); one
+  Incident stays open, analyzed once. The case holds back every analysis until it has seen the fold, so a slow
+  run cannot analyze the `Unhealthy` Incident first: the analysis controller's reads of the API wait on a gate
+  the case opens. No case covers a consequence held by the collector (ADR-0039 point 19) whose cause appears
+  during the hold: its release and the cause reach the Incident controller in either order. A consequence Incident that already has a request with no pull request is
+  the executor's to cancel ([#794](https://github.com/pkalin/shadewright/issues/794)); this case does not cover it.
+- `TestGroupingStartupProbeOpensNothing`: the readiness probe failure of the new `demo/worker` pod. The collector
+  skips it as part of the pod's start (its counter
+  `shadewright_analyzer_settled_probe_failures_skipped_total{probe="Readiness"}` rises, design 3.1, #726), and no
+  Incident, analysis or request follows. Its fixture names the probed container in the event's
+  `regarding.fieldPath`, as the kubelet writes it: without it the collector cannot tell when that container started.
+
+The model cases of the same scenarios still run in `TestEvalReplay`: they show what the model concludes from the
+evidence, the grouping cases what reaches it.
 
 ## The injection and outage corpus
 

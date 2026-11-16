@@ -1,7 +1,8 @@
 # Synthetic: the objects the context builder and the read tools read for this case, from the lab run of
 # 2026-11-14 (pkalin/shadewright#726), not recorded. KEDA scaled the worker from 1 to 2 replicas; the new pod
 # failed its readiness probe once while it started (connection refused) and was Ready 8 seconds after it was
-# created. It has not restarted, and no container was OOMKilled. The limit is 64Mi, the lab's.
+# created. It has not restarted, and no container was OOMKilled. The limit is 64Mi, the lab's. The event names the
+# probed container (regarding.fieldPath), as the kubelet writes it; the grouping case (grouping_test.go) needs it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -176,3 +177,4 @@ regarding:
   namespace: demo
   name: worker-5d9f7c6b8-x7q2n
   uid: 00000000-0000-4000-8000-0000000007a4
+  fieldPath: spec.containers{worker}

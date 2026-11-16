@@ -1539,11 +1539,13 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 	case err == nil && checkErr != nil:
 		// Closed, but the check may still be green: a person could reopen the pull request and merge on it. The end
 		// waits for the failed check, tried again on the next look, which finds the pull request closed
-		// (endStaleClosed). A pause is reported as one.
+		// (endStaleClosed). A pause is reported as one. Either way the close went through: a PullRequestNotClosed of
+		// an earlier look is removed with the close recorded, so the end says Shadewright closed it (#809).
+		wait := errStaleCheckPending
 		if errors.Is(checkErr, freshness.ErrPaused) {
-			return checkErr
+			wait = checkErr
 		}
-		return errStaleCheckPending
+		return withErr(wait, r.recordStaleClosed(ctx, rr, staleErr.Reason))
 	case err == nil:
 		// Closed through a new installation (#290): the lock is settled before the end, which reads nothing more.
 		// While it waits, a PullRequestNotClosed of an earlier look is removed with the close recorded (#797).
@@ -1683,15 +1685,16 @@ func (r *RemediationRequestReconciler) noteNotReached(ctx context.Context, rr *r
 var errStaleMarkGone = errors.New("the request no longer carries the mark of a stale plan")
 
 // recordStaleClosed removes condition PullRequestNotClosed from rr, a stale plan's request whose pull request
-// Shadewright has just closed through a new installation while its end waits for the target lock
-// (releaseReinstalled: a look that failed, another open pull request, a pause), and records the close in
-// PullRequestOpened (closedByUs) in the same status write, so that endStaleClosed does not take it for a retried
-// close whose answer was lost (#797). It writes nothing when the condition is not set, or when the reconcile was
-// cancelled. A conflict reads the request again from the API server and writes there, as long as it is the same
-// request with the mark; rr is then the request as written. A write that still fails is logged and returned with the
-// caller's answer (which refuseOrWait may turn into a requeue); the condition then stays, and the end says, as for a lost answer, that it is not known
-// who closed the pull request. The write changes nothing but those two conditions, so it wakes no reconcile of its
-// own (skipOwnMarks) and the caller's delay stands.
+// Shadewright has just closed while its end waits: for the failed review check (errStaleCheckPending, #809) or,
+// through a new installation, for the target lock (releaseReinstalled: a look that failed, another open pull
+// request, a pause), and records the close in PullRequestOpened (closedByUs) in the same status write, so that
+// endStaleClosed does not take it for a retried close whose answer was lost (#797). It writes nothing when the
+// condition is not set, or when the reconcile was cancelled. A conflict reads the request again from the API server
+// and writes there, as long as it is the same request with the mark; rr is then the request as written. A write that
+// still fails is logged and returned with the caller's answer (which refuseOrWait may turn into a requeue); the
+// condition then stays, and the end says, as for a lost answer, that it is not known who closed the pull request.
+// The write changes nothing but those two conditions, so it wakes no reconcile of its own (skipOwnMarks) and the
+// caller's delay stands.
 func (r *RemediationRequestReconciler) recordStaleClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	staleReason string) error {
 	if ctx.Err() != nil || notClosed(rr) == nil {
@@ -1769,7 +1772,8 @@ var errStaleLockPending = errors.New("the target lock of the stale plan's closed
 // checkHeld settles that one after the end, as for any stale plan.
 //
 // Otherwise the request does not end: a pause is returned as freshness.ErrPaused and a cancelled reconcile as its
-// error; anything else (a failed or refused read, which changeOf reports with PullRequestUnreadable, another open
+// error; anything else (a failed or refused read, which changeOf reports with PullRequestUnreadable unless it is a
+// read of the Kubernetes API (a *clusterError, #812), another open
 // pull request of the branch, which is recorded in condition TargetHeld, or a failed write of that condition) is
 // logged and returned as errStaleLockPending, and the next look closes nothing more and tries again.
 func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
@@ -1963,7 +1967,8 @@ func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remedi
 }
 
 // clusterError is a failure of a cleanup on the Kubernetes side (stillOwns: a failed read of the request, a request
-// handed over or gone, an intent to hand it over that stands), not of a step of the Git host. It wraps the error and
+// handed over or gone, an intent to hand it over that stands; ownsMarker: a failed read of a request of the supersede
+// chain, #812), not of a step of the Git host. It wraps the error and
 // adds no text. A cleanup through a new installation (#290) returns it as it is, outside a *reinstalledError, so it
 // is never said in PullRequestNotClosed as a failure of the Git host (#797).
 type clusterError struct{ err error }

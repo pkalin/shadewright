@@ -74,7 +74,8 @@ const (
 	// stepClose is the close call itself.
 	stepClose
 	// stepOther is a failure of the cleanup outside the steps above (the read of the settings, the check that the
-	// request still owns the pull request, the cleanup's deadline).
+	// request still owns the pull request, the cleanup's deadline). Through a new installation (#290) it is only a
+	// failure on the Git host's side or the deadline: the Kubernetes side (a *clusterError) is never wrapped there.
 	stepOther
 )
 

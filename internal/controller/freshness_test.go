@@ -1101,6 +1101,46 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(c.Message).To(ContainSubstring("the close of pull request"), "names the latest step")
 	})
 
+	// #797: the check right before the close that the request still owns its pull request (stillOwns) reads the
+	// request from the Kubernetes API, not from the Git host: an intent to hand it over written since the reconcile
+	// read it, or a failed read, is retried as before and never said in PullRequestNotClosed as a failure of the new
+	// installation.
+	DescribeTable("says nothing on PullRequestNotClosed for a Kubernetes failure of a cleanup through the new installation (#797)",
+		func(fail error, edit func(*remediationv1alpha1.RemediationRequest), want error) {
+			reinstall()
+			recorder := record.NewFakeRecorder(10)
+			armed := atomic.Bool{}
+			git.SetFail(func(op string) error {
+				switch op {
+				case opGet:
+					armed.Store(true)
+				case opClose:
+					closes.Add(1)
+				}
+				return nil
+			})
+			r := reconciler()
+			r.Recorder = recorder
+			r.APIReader = &armedRequestReader{Reader: k8sClient, armed: &armed, fail: fail, edit: edit}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(armed.Load()).To(BeTrue(), "the pull request was read before the check")
+			Expect(err).To(MatchError(want), "retried as before")
+			Expect(closes.Load()).To(BeZero())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not a final phase")
+			Expect(notClosed(got)).To(BeNil(), "not a failure of the Git host")
+			for len(recorder.Events) > 0 {
+				Expect(<-recorder.Events).NotTo(ContainSubstring(EventPullRequestNotClosed))
+			}
+		},
+		Entry("an intent to hand the pull request over", nil, func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Status.Handoff = &remediationv1alpha1.Handoff{To: &remediationv1alpha1.OutgoingHandoff{
+				Phase: remediationv1alpha1.HandoffIntent}}
+		}, errHandoffInFlight),
+		Entry("a failed read of the request", apierrors.NewServiceUnavailable("the server is unavailable"), nil,
+			apierrors.NewServiceUnavailable("the server is unavailable")),
+	)
+
 	It("closes nothing through the new installation when the pull request lacks this request's marker (#290)", func() {
 		reinstall()
 		Expect(git.SetBody(cr.Number, "Someone else's pull request")).To(Succeed())
@@ -2674,4 +2714,29 @@ type bumpingStatus struct {
 func (s *bumpingStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 	s.bump(obj)
 	return s.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// armedRequestReader is a reader whose reads of a RemediationRequest, once armed, fail with fail or answer with the
+// stored request changed by edit, so a test can change what stillOwns reads without a write to the request.
+type armedRequestReader struct {
+	client.Reader
+	armed *atomic.Bool
+	fail  error
+	edit  func(*remediationv1alpha1.RemediationRequest)
+}
+
+func (a *armedRequestReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	rr, ok := obj.(*remediationv1alpha1.RemediationRequest)
+	if !ok || !a.armed.Load() {
+		return a.Reader.Get(ctx, key, obj, opts...)
+	}
+	if a.fail != nil {
+		return a.fail
+	}
+	if err := a.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	a.edit(rr)
+	return nil
 }

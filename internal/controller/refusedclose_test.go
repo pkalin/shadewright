@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -39,5 +41,24 @@ func TestBoundLeftNeverShortensABound(t *testing.T) {
 				t.Errorf("%s, bound %v: %v left a second after the persisted second plus one, want none", name, bound, left)
 			}
 		}
+	}
+}
+
+// TestReinstalledDeadlineOfAnotherStepIsSaid (#797): a cleanup through a new installation whose answer from the Git
+// host names no step (here a pull request read as gone) and that ran past the deadline is still a failure of the new
+// installation: the deadline keeps the *reinstalledError, and PullRequestNotClosed says it with GitFailed.
+func TestReinstalledDeadlineOfAnotherStepIsSaid(t *testing.T) {
+	timeout := fmt.Errorf("cleanup of the change request: %w", ErrTimeout)
+	stepErr := &reinstalledError{err: fmt.Errorf("%w: pull request #7 lacks this request's marker", errChangeRequestNotOurs)}
+	err := reinstalledTimeout(stepErr, timeout)
+	if _, ok := errors.AsType[*reinstalledError](err); !ok {
+		t.Fatalf("reinstalledTimeout = %v, want it inside a *reinstalledError", err)
+	}
+	if !errors.Is(err, ErrTimeout) || errors.Is(err, errChangeRequestNotOurs) {
+		t.Errorf("reinstalledTimeout = %v, want the deadline and not the answer it replaced", err)
+	}
+	s, ok := reinstalledCloseFailure(err)
+	if !ok || s.step != stepOther || s.reason != ReasonGitFailed {
+		t.Errorf("reinstalledCloseFailure = %+v, %v, want stepOther with %s", s, ok, ReasonGitFailed)
 	}
 }

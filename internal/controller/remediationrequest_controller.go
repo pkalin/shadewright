@@ -1943,23 +1943,34 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 // request: the copy the reconcile holds may predate a handoff (a predecessor suspended after its render check
 // that resumes after its replacement took the pull request over), and a close is the one write that cannot be
 // undone. A request handed over meanwhile, or with an intent that stands, never closes; a request gone or
-// recreated under its name returns errChangeRequestNotOurs too. A read that fails is returned for a retry.
+// recreated under its name returns errChangeRequestNotOurs too. A read that fails is returned for a retry. Every
+// error is a *clusterError: none is a step of the Git host.
 func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	fresh := &remediationv1alpha1.RemediationRequest{}
 	switch err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), fresh); {
 	case apierrors.IsNotFound(err):
-		return errChangeRequestNotOurs
+		return &clusterError{err: errChangeRequestNotOurs}
 	case err != nil:
-		return fmt.Errorf("get RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		return &clusterError{err: fmt.Errorf("get RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)}
 	}
 	switch {
 	case fresh.UID != rr.UID, handedOff(fresh):
-		return errChangeRequestNotOurs
+		return &clusterError{err: errChangeRequestNotOurs}
 	case intent(fresh) != nil:
-		return errHandoffInFlight
+		return &clusterError{err: errHandoffInFlight}
 	}
 	return nil
 }
+
+// clusterError is a failure of a cleanup on the Kubernetes side (stillOwns: a failed read of the request, a request
+// handed over or gone, an intent to hand it over that stands), not of a step of the Git host. It wraps the error and
+// adds no text. A cleanup through a new installation (#290) returns it as it is, outside a *reinstalledError, so it
+// is never said in PullRequestNotClosed as a failure of the Git host (#797).
+type clusterError struct{ err error }
+
+func (e *clusterError) Error() string { return e.err.Error() }
+
+func (e *clusterError) Unwrap() error { return e.err }
 
 // closeChangeRequest closes the request's change request, if it has one, in the repository the plan was made
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
@@ -2022,6 +2033,9 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 			return &reinstalledError{err: &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}}
 		}
 		if err := r.closeFound(ctx, git, rr, false); err != nil {
+			if _, ok := errors.AsType[*clusterError](err); ok {
+				return err
+			}
 			return &reinstalledError{err: err}
 		}
 		return nil
@@ -2057,7 +2071,8 @@ func reinstalledTimeout(stepErr, timeout error) error {
 
 // reinstalledError is closeOwn's failure of a cleanup that reached the plan's repository through a new
 // installation of the GitHub App (#290). It wraps the failure and adds no text, so cleanUpStale can report a step
-// that installation is refused (keepWatchingStale) instead of ending the request.
+// that installation is refused (keepWatchingStale) instead of ending the request. A failure on the Kubernetes side
+// (a *clusterError) is never wrapped in it (#797).
 type reinstalledError struct{ err error }
 
 func (e *reinstalledError) Error() string { return e.err.Error() }

@@ -210,10 +210,25 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- end -}}
 {{- if eq .component "analyzer" -}}
 {{- $a := $c.analysis | default dict -}}
-{{- if and $a.triageModel (not $c.identity.azure.clientId) -}}
+{{- /* The Azure model settings are needed unless settings.spec names its model deployments and all of them are
+Anthropic (#814). Without settings.spec the chart cannot tell, so it asks for them as before; the analyzer is the
+gate either way: without --model-endpoint-suffixes it refuses every Foundry deployment. */ -}}
+{{- $foundry := true -}}
+{{- $named := (((($v.settings | default dict).spec | default dict).analysis | default dict).models | default dict) -}}
+{{- $roles := list -}}
+{{- range $role := list "triage" "escalation" -}}
+{{- if get $named $role -}}{{- $roles = append $roles $role -}}{{- end -}}
+{{- end -}}
+{{- if $roles -}}
+{{- $foundry = false -}}
+{{- range $role := $roles -}}
+{{- if ne ((get $named $role).provider | default "Foundry") "Anthropic" -}}{{- $foundry = true -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and $a.triageModel $foundry (not $c.identity.azure.clientId) -}}
 {{- fail "analyzer.analysis.triageModel needs analyzer.identity.azure.clientId: the model call authenticates with the analyzer's Azure workload identity" -}}
 {{- end -}}
-{{- if and $a.triageModel (not $a.endpointSuffixes) -}}
+{{- if and $a.triageModel $foundry (not $a.endpointSuffixes) -}}
 {{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com" -}}
 {{- end -}}
 {{- if and $a.escalationModel (not $a.triageModel) -}}
@@ -222,6 +237,9 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- $blob := (($a.recordStore | default dict).azureBlob | default dict) -}}
 {{- if and $blob.account (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.analysis.triageModel: records are written only by the analysis" -}}
+{{- end -}}
+{{- if and $blob.account (not $c.identity.azure.clientId) -}}
+{{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.identity.azure.clientId: records are written with the analyzer's Azure workload identity" -}}
 {{- end -}}
 {{- if and $blob.account (not $blob.container) -}}
 {{- fail "analyzer.analysis.recordStore.azureBlob.account needs analyzer.analysis.recordStore.azureBlob.container" -}}

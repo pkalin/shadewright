@@ -37,9 +37,9 @@ const (
 
 // keySources are the ways to put the model API key file in the analyzer (ADR-0037 decision 3).
 var keySources = map[string][]string{
-	"secret": {"analyzer.analysis.anthropic.apiKey.secretName=model-key"},
+	"secret": {keySecret},
 	"secret, key": {
-		"analyzer.analysis.anthropic.apiKey.secretName=model-key",
+		keySecret,
 		"analyzer.analysis.anthropic.apiKey.secretKey=token",
 	},
 	"csi volume": {
@@ -244,5 +244,87 @@ func TestAnthropicDeploymentNeedsAKeySource(t *testing.T) {
 		if err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"); err != "" {
 			t.Errorf("%s: with a volume: %s", role, err)
 		}
+	}
+}
+
+// settingsFile writes a values file that renders RemediationSettings with the given models block (YAML lines
+// under spec.analysis.models, indented by six spaces) and returns it.
+func settingsFile(t *testing.T, models string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "settings.yaml")
+	body := "settings:\n  create: true\n  spec:\n    analysis:\n      models:\n" + models
+	if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// modelLine is one deployment of the models block of settingsFile.
+func modelLine(role, fields string) string { return "        " + role + ": {" + fields + "}\n" }
+
+const (
+	anthropicFields = "provider: Anthropic, endpoint: https://api.anthropic.com, deployment: claude-haiku-5-5"
+	foundryFields   = "endpoint: https://lab.services.ai.azure.com/, deployment: big, apiVersion: v1"
+	keySecret       = "analyzer.analysis.anthropic.apiKey.secretName=model-key"
+	claudeTriage    = "analyzer.analysis.triageModel=claude-haiku-5-5"
+)
+
+// An install whose model deployments in settings.spec are all Anthropic renders without
+// analyzer.identity.azure.clientId and analyzer.analysis.endpointSuffixes, with no Azure identity on the
+// analyzer and no --model-endpoint-suffixes; one Foundry deployment, or no deployments named at all, brings
+// back both refusals with their messages (#814).
+func TestAnthropicOnlyInstallNeedsNoAzureSettings(t *testing.T) {
+	anthropicOnly := []string{"-f", testValues(t), "-f",
+		settingsFile(t, modelLine("triage", anthropicFields)+modelLine("escalation", anthropicFields))}
+	set := []string{keySecret, claudeTriage, "analyzer.analysis.escalationModel=claude-haiku-5-5"}
+	if err := helmTemplate(t, anthropicOnly, set...); err != "" {
+		t.Fatalf("an Anthropic-only install did not render: %s", err)
+	}
+	a := deployment(t, renderArgs(t, helmArgsWith(t, anthropicOnly, set...)), analyzerDeployment)
+	if _, ok := a.Spec.Template.Labels["azure.workload.identity/use"]; ok {
+		t.Error("the analyzer Pod has the Azure workload identity label")
+	}
+	args := a.Spec.Template.Spec.Containers[0].Args
+	if slices.ContainsFunc(args, func(s string) bool { return strings.HasPrefix(s, "--model-endpoint-suffixes") }) {
+		t.Errorf("args %v hold --model-endpoint-suffixes", args)
+	}
+	for _, want := range []string{"--triage-model=claude-haiku-5-5", "--escalation-model=claude-haiku-5-5",
+		"--anthropic-api-key-file=" + anthropicMount + "/api-key"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("args %v lack %s", args, want)
+		}
+	}
+	// A record store is written with the workload identity, so it needs the client ID even then.
+	withStore := append(slices.Clone(set), "analyzer.analysis.recordStore.azureBlob.account=stswanabc")
+	if err := helmTemplate(t, anthropicOnly, withStore...); !strings.Contains(err,
+		"recordStore.azureBlob.account needs analyzer.identity.azure.clientId") {
+		t.Errorf("a record store without the client ID: %q", err)
+	}
+
+	const (
+		noClientID = "analyzer.analysis.triageModel needs analyzer.identity.azure.clientId"
+		noSuffixes = "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes"
+	)
+	for name, models := range map[string]string{
+		"mixed":             modelLine("triage", anthropicFields) + modelLine("escalation", foundryFields),
+		"Foundry named":     modelLine("triage", "provider: Foundry, "+foundryFields),
+		"provider left out": modelLine("escalation", foundryFields),
+		"no settings.spec":  "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := []string{"-f", testValues(t)}
+			if models != "" {
+				files = append(files, "-f", settingsFile(t, models))
+			}
+			if err := helmTemplate(t, files, keySecret, claudeTriage, labSuffix); !strings.Contains(err, noClientID) {
+				t.Errorf("without the client ID: %q", err)
+			}
+			if err := helmTemplate(t, files, keySecret, claudeTriage, analyzerClientID); !strings.Contains(err, noSuffixes) {
+				t.Errorf("without suffixes: %q", err)
+			}
+			if err := helmTemplate(t, files, keySecret, claudeTriage, analyzerClientID, labSuffix); err != "" {
+				t.Errorf("with both: %s", err)
+			}
+		})
 	}
 }

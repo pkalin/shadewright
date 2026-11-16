@@ -369,7 +369,10 @@ const (
 	// that waits cannot be read on the recorded target branch after the entry named another one (#754), and with
 	// reason RecordedMissingOtherListed while the Git
 	// host has no pull request of this request with the recorded number but the request's branch lists another one
-	// with its marker (the message names both numbers and what ends it). The message names the read;
+	// with its marker (the message names both numbers and what ends it), and, on a stale plan whose repository the
+	// settings reach only through a new installation of the GitHub App, with reason GitNotFound (a 404) or GitFailed
+	// (any other failure that is not an answer) while the read of its branch that settles the lock on its target
+	// fails through that installation (#797). The message names the read;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,
@@ -386,7 +389,12 @@ const (
 	// with PROpened saying that it is not known whether Shadewright's retried close or a person closed it; it is no
 	// failure for the circuit breaker. A failed read is never a refusal of the close
 	// (PullRequestUnreadable says so). One Warning Event, PullRequestNotClosed, is recorded when it is set or its
-	// reason changes. A deleted request's cleanup uses CleanupRefused instead.
+	// reason changes. A deleted request's cleanup uses CleanupRefused instead. When the settings reach the stale plan's
+	// repository only through a new installation of the GitHub App (#290), it is also set when that installation fails
+	// a step before the close (the token, the read of the recorded pull request, the listing of its branch): with the
+	// refusal's reason, with GitNotFound for a 404, or with GitFailed for any other failure (#797); the message names
+	// the step, and a step that failed without a refusal is retried with the error backoff or the delay the host
+	// asked for.
 	ConditionPullRequestNotClosed = "PullRequestNotClosed"
 	// ConditionCleanupRefused is True, with reason GitForbidden or GitRejected, once the Git host refused for good
 	// (403 or 422) a step of the cleanup of a deleted request: the access token for the plan's repository, the

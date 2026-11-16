@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crevent "sigs.k8s.io/controller-runtime/pkg/event"
@@ -191,29 +192,37 @@ func (r *RemediationRequestReconciler) unmarkFresh(ctx context.Context, rr *reme
 	return nil
 }
 
-// skipRenderMarks drops the watch events of an update that changed nothing of a request but
-// status.unfinishedRenders (and the metadata every write changes). Those are the executor's own writes of the
-// mark and of its removal around a render; without the filter each would queue the request again at once,
-// before the error backoff, the step delay or a Git host's Retry-After that the reconcile returned, so a step
-// that fails after a render (a commit the host refuses) would render again with no delay (#714).
-var skipRenderMarks = predicate.Funcs{UpdateFunc: func(e crevent.UpdateEvent) bool {
-	return !onlyRenderMarkChanged(e.ObjectOld, e.ObjectNew)
+// skipOwnMarks drops the watch events of an update that changed nothing of a request but status.unfinishedRenders
+// and condition PullRequestNotClosed (and the metadata every write changes). Those are the executor's own writes:
+// the mark and its removal around a render, and the condition that says why a stale plan's pull request is not
+// closed (keepWatchingStale, noteNotReached), and each such reconcile returns its own delay. Without the filter
+// each would queue the request again at once, before the error backoff, the step delay or a Git host's Retry-After
+// that the reconcile returned, so a step that fails after a render (a commit the host refuses) would render again
+// with no delay (#714), and a cleanup the host asked to wait would be tried again at once (#797).
+var skipOwnMarks = predicate.Funcs{UpdateFunc: func(e crevent.UpdateEvent) bool {
+	return !onlyOwnMarksChanged(e.ObjectOld, e.ObjectNew)
 }}
 
-// onlyRenderMarkChanged reports whether newObj differs from oldObj in status.unfinishedRenders and otherwise
-// only in the resource version and managed fields. Anything that is not a request is never such an update.
-func onlyRenderMarkChanged(oldObj, newObj client.Object) bool {
+// onlyOwnMarksChanged reports whether newObj differs from oldObj, and only in status.unfinishedRenders, condition
+// PullRequestNotClosed, the resource version and the managed fields. Anything that is not a request is never such
+// an update.
+func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	o, ok1 := oldObj.(*remediationv1alpha1.RemediationRequest)
 	n, ok2 := newObj.(*remediationv1alpha1.RemediationRequest)
-	if !ok1 || !ok2 || o == nil || n == nil ||
-		equality.Semantic.DeepEqual(o.Status.UnfinishedRenders, n.Status.UnfinishedRenders) {
+	if !ok1 || !ok2 || o == nil || n == nil {
 		return false
 	}
 	o, n = o.DeepCopy(), n.DeepCopy()
 	for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 		rr.ResourceVersion = ""
 		rr.ManagedFields = nil
+	}
+	if equality.Semantic.DeepEqual(o, n) {
+		return false
+	}
+	for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 		rr.Status.UnfinishedRenders = nil
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 	}
 	return equality.Semantic.DeepEqual(o, n)
 }

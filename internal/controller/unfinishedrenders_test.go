@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -416,9 +418,9 @@ func TestUnfinishedRendersLostRemovalOfALiveProcess(t *testing.T) {
 	}
 }
 
-// TestOnlyRenderMarkChanged checks which updates of a request the controller's event filter drops: only those
-// that change status.unfinishedRenders and nothing a reconcile reads besides.
-func TestOnlyRenderMarkChanged(t *testing.T) {
+// TestOnlyOwnMarksChanged checks which updates of a request the controller's event filter drops: only those
+// that change status.unfinishedRenders or condition PullRequestNotClosed and nothing a reconcile reads besides.
+func TestOnlyOwnMarksChanged(t *testing.T) {
 	base := renderEndsRequest("a", "uid-a", digestA)
 	base.ResourceVersion = "1"
 	marked := base.DeepCopy()
@@ -429,6 +431,21 @@ func TestOnlyRenderMarkChanged(t *testing.T) {
 	annotated.Annotations = map[string]string{"example.com/note": "x"}
 	passed := base.DeepCopy()
 	passed.Status.ObservedGeneration = 3
+	notClosed := base.DeepCopy()
+	notClosed.ResourceVersion = "3"
+	meta.SetStatusCondition(&notClosed.Status.Conditions, metav1.Condition{
+		Type: remediationv1alpha1.ConditionPullRequestNotClosed, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
+		Message: "m"})
+	notFound := notClosed.DeepCopy()
+	meta.SetStatusCondition(&notFound.Status.Conditions, metav1.Condition{
+		Type: remediationv1alpha1.ConditionPullRequestNotClosed, Status: metav1.ConditionTrue, Reason: ReasonGitNotFound,
+		Message: "m"})
+	notClosedAndPhase := notClosed.DeepCopy()
+	notClosedAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
+	notClosedAndOther := notClosed.DeepCopy()
+	meta.SetStatusCondition(&notClosedAndOther.Status.Conditions, metav1.Condition{
+		Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
+		Message: "m"})
 	for name, tc := range map[string]struct {
 		old, new *remediationv1alpha1.RemediationRequest
 		want     bool
@@ -438,11 +455,16 @@ func TestOnlyRenderMarkChanged(t *testing.T) {
 		"the mark and an annotation": {base, annotated, false},
 		"the removal and a pass":     {marked, passed, false},
 		"no change of the mark":      {base, base, false},
+		"PullRequestNotClosed set":   {base, notClosed, true},
+		"its reason":                 {notClosed, notFound, true},
+		"it and a phase":             {notClosed, notClosedAndPhase, false},
+		"it and another condition":   {base, notClosedAndOther, false},
+		"it and the render mark":     {marked, notClosed, true},
 	} {
-		if got := onlyRenderMarkChanged(tc.old, tc.new); got != tc.want {
+		if got := onlyOwnMarksChanged(tc.old, tc.new); got != tc.want {
 			t.Errorf("%s: got %v, want %v", name, got, tc.want)
 		}
-		if got := skipRenderMarks.Update(crevent.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got == tc.want {
+		if got := skipOwnMarks.Update(crevent.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got == tc.want {
 			t.Errorf("%s: the filter let it through: %v", name, got)
 		}
 	}

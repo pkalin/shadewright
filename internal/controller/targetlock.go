@@ -329,11 +329,11 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 	if rr.Status.PlanRepository == nil {
 		return changeVerdict{}, nil, errRepositoryGone
 	}
-	git, err := r.openPlanRepository(ctx, rr)
+	git, _, reinstalled, err := r.openPlanRepositoryFor(ctx, rr)
 	if err != nil {
 		return changeVerdict{}, nil, err
 	}
-	v := r.changeOf(ctx, git, rr, changeQuery{marker: !closedOnly(rr), openOnBranch: true})
+	v := r.changeOf(ctx, git, rr, changeQuery{marker: !closedOnly(rr), openOnBranch: true, reinstalled: reinstalled})
 	if lockRule[v.state] != lockReleaseUnlessOpen {
 		return v, nil, nil
 	}

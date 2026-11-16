@@ -1124,9 +1124,9 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		For(&remediationv1alpha1.RemediationRequest{}).
 		// A change of a request wakes the requests queued behind its lock on the same target.
 		Watches(&remediationv1alpha1.RemediationRequest{}, handler.EnqueueRequestsFromMapFunc(r.lockWaiters)).
-		// The executor's writes of the render mark alone wake nothing: they would cut short the delay the
-		// reconcile that wrote them returned (#714).
-		WithEventFilter(skipRenderMarks).
+		// The executor's writes of the render mark or of PullRequestNotClosed alone wake nothing: they would cut
+		// short the delay the reconcile that wrote them returned (#714, #797).
+		WithEventFilter(skipOwnMarks).
 		Named("remediationrequest").
 		Complete(countErrors{r})
 }
@@ -1583,11 +1583,16 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			// person is recorded; the close is tried again on every look, and nothing else is written to it.
 			return r.keepWatchingStale(ctx, rr, notClosedCondition(rr, cf, refused), cf.number, refused)
 		}
-		if s, ok := refusedReinstalled(err); ok && rr.Status.PullRequest != nil {
-			// The new installation of the plan's repository (#290) is refused the token, the read or the listing for
-			// good: the same as a refused close, the request keeps its phase and the mark, and every look tries
-			// again, so a later grant, a merge or a close by a person is recorded.
-			return r.keepWatchingStale(ctx, rr, notReachedCondition(rr, s), rr.Status.PullRequest.Number, s.reason)
+		if s, refused, ok := reinstalledFailure(err); ok && rr.Status.PullRequest != nil {
+			if refused {
+				// The new installation of the plan's repository (#290) is refused the token, the read or the listing
+				// for good: the same as a refused close, the request keeps its phase and the mark, and every look tries
+				// again, so a later grant, a merge or a close by a person is recorded.
+				return r.keepWatchingStale(ctx, rr, notReachedCondition(rr, s), rr.Status.PullRequest.Number, s.reason)
+			}
+			// Any other failure of those steps (a 404, a server error, an unclassified one, #797) is said in the same
+			// condition and retried as before, with the backoff or the delay the host asked for.
+			return r.noteNotReached(ctx, rr, notReachedCondition(rr, s), err)
 		}
 		if isUnknownChange(err) {
 			// A failed read of the change request, a refused one included (PullRequestUnreadable names it), is
@@ -1637,6 +1642,28 @@ func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr
 		"watching it", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", number,
 		"reason", refused)
 	return errStaleNotClosed
+}
+
+// noteNotReached records condition PullRequestNotClosed (want) for a stale plan whose cleanup through a new
+// installation of its repository (#290) failed at a step before the close without a refusal (#797), in one status
+// write when it changes, with one Warning Event when it is set or its reason changes, and returns err, the failure,
+// so the caller retries it as before (waitOrFail: the backoff, or the delay the host asked for). The write wakes
+// no reconcile of its own (skipOwnMarks). A failed write is returned with err.
+func (r *RemediationRequestReconciler) noteNotReached(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	want metav1.Condition, err error) error {
+	changed, event := r.setRefused(rr, want)
+	if changed {
+		if werr := r.Status().Update(ctx, rr); werr != nil {
+			return errors.Join(err, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, werr))
+		}
+		if event {
+			r.refusedEvent(rr, EventPullRequestNotClosed, want)
+		}
+	}
+	logf.FromContext(ctx).Info("Could not close the pull request of a stale RemediationRequest through the new "+
+		"installation of its repository; trying again", "remediationRequest", client.ObjectKeyFromObject(rr),
+		"pullRequest", rr.Status.PullRequest.Number, "reason", want.Reason, "error", err.Error())
+	return err
 }
 
 // errStaleLockPending is the answer of a stale plan's cleanup that closed its pull request through a new

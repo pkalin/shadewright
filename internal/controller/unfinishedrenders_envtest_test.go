@@ -99,7 +99,7 @@ var _ = Describe("RemediationRequest render mark events", func() {
 		// The backoff after the first failure is an hour, so any second reconcile within the window below was
 		// woken by an event, not by the backoff.
 		Expect(ctrl.NewControllerManagedBy(mgr).For(&remediationv1alpha1.RemediationRequest{}).
-			WithEventFilter(skipRenderMarks).
+			WithEventFilter(skipOwnMarks).
 			WithOptions(controller.Options{RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Hour, time.Hour)}).
 			Named("render-mark-events").Complete(step)).To(Succeed())
 		mctx, cancel := context.WithCancel(sctx)

@@ -1145,6 +1145,38 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(condition(rr, remediationv1alpha1.ConditionPlanFresh).Reason).To(Equal(freshness.ReasonTargetFileChanged))
 	})
 
+	// #797: a stale plan merged before the cleanup through a new installation of the GitHub App closed it keeps the
+	// old installation in its receipt. The delivery check reads the same URL through the new one, so the request is
+	// not told its repository is gone.
+	reinstallSettings := func() {
+		GinkgoHelper()
+		s := &remediationv1alpha1.RemediationSettings{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, s)).To(Succeed())
+		s.Spec.Repositories[0].GitHub.InstallationID++
+		Expect(k8sClient.Update(ctx, s)).To(Succeed())
+	}
+	It("checks the delivery of a merged stale plan through the repository's new installation (#797)", func() {
+		w := newWorld(nil)
+		markStalePlan(w)
+		reinstallSettings()
+		var opened []int64
+		open := w.r.OpenRepository
+		w.r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			opened = append(opened, repo.GitHub.InstallationID)
+			return open(ctx, repo)
+		}
+		next := later(w, "apps/other.yaml")
+		w.reader.ks = kustomization(ksStatus{applied: next})
+		mustReconcileAt(w, w.merged.Add(2*time.Minute))
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		Expect(rr.Status.Rollout.AppliedRevision).To(Equal(next))
+		Expect(opened).NotTo(BeEmpty())
+		Expect(opened).To(HaveEach(w.settingsRepo.InstallationID+1), "read through the new installation only")
+		Expect(rr.Status.MergeReceipt.Repository.InstallationID).To(Equal(w.settingsRepo.InstallationID),
+			"the receipt is not rewritten")
+	})
+
 	It("still ends a merged stale plan Failed when the change fails (#199)", func() {
 		w := newWorld(nil)
 		markStalePlan(w)

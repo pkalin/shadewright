@@ -18,9 +18,11 @@ package incidentcontext
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -54,55 +56,102 @@ func stamp(t metav1.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// summaryBlock describes the Incident, most relevant first.
+// summaryBlock describes the Incident, most relevant first. A cause Incident with a non-empty absorbed tally
+// gets the tally last and always whole (#796, decided 2026-11-16): the summary keeps room for the longest
+// tally ([longestTally]) and fits its other lines in what is left by shortening the symptom text, then the
+// reporting controller, never by removing a line. Without a tally the summary is what it always was.
 func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
-	s := inc.Spec
-	var l lines
-	l.add("subject: %s %s/%s", l.data(b.value(s.Subject.Kind)), l.data(b.value(s.Subject.Namespace)), l.data(b.value(s.Subject.Name)))
-	l.add("reason: %s (%s)", l.data(b.value(s.Reason)), l.data(b.value(s.Type)))
-	if s.ReportingController != "" {
-		l.add("reported by: %s", l.data(b.value(s.ReportingController)))
-	}
+	s, st := inc.Spec, inc.Status
+	var symptom, controller string
 	if s.Symptom != "" {
-		l.add("symptom: %s", l.data(b.value(s.Symptom)))
+		symptom = b.value(s.Symptom)
 	}
-	st := inc.Status
-	l.add("occurrences: %d", st.Count)
-	if st.FirstSeen != nil {
-		l.add("first seen: %s", stamp(*st.FirstSeen))
+	if s.ReportingController != "" {
+		controller = b.value(s.ReportingController)
 	}
-	if st.LastSeen != nil {
-		l.add("last seen: %s", stamp(*st.LastSeen))
-	}
-	if st.Phase != "" {
-		// The phase is written by the analyzer itself, never evidence.
-		l.add("phase: %s", b.value(string(st.Phase)))
+	render := func(controller, controllerCut, symptom, symptomCut string) *lines {
+		var l lines
+		l.add("subject: %s %s/%s", l.data(b.value(s.Subject.Kind)), l.data(b.value(s.Subject.Namespace)),
+			l.data(b.value(s.Subject.Name)))
+		l.add("reason: %s (%s)", l.data(b.value(s.Reason)), l.data(b.value(s.Type)))
+		if s.ReportingController != "" {
+			l.add("reported by: %s%s", l.data(controller), controllerCut)
+		}
+		if s.Symptom != "" {
+			l.add("symptom: %s%s", l.data(symptom), symptomCut)
+		}
+		l.add("occurrences: %d", st.Count)
+		if st.FirstSeen != nil {
+			l.add("first seen: %s", stamp(*st.FirstSeen))
+		}
+		if st.LastSeen != nil {
+			l.add("last seen: %s", stamp(*st.LastSeen))
+		}
+		if st.Phase != "" {
+			// The phase is written by the analyzer itself, never evidence.
+			l.add("phase: %s", b.value(string(st.Phase)))
+		}
+		return &l
 	}
 	blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident, Availability: Available}
-	b.finish(&blk, &l, b.limits.Summary)
-	var tally lines
-	absorbedLines(&tally, st.Absorbed)
-	b.appendWhole(&blk, tally.String(), b.limits.Summary)
+	var t lines
+	absorbedLines(&t, st.Absorbed)
+	if t.Len() == 0 {
+		b.finish(&blk, render(controller, "", symptom, ""), b.limits.Summary)
+		return blk
+	}
+	tally := b.redact(t.String())
+	budget := b.limits.Summary - max(len(tally), longestTally)
+	l := render(controller, "", symptom, "")
+	// Measured before the redaction of the whole text, which never makes text longer, so the redacted lines
+	// fit in what they are measured to fit in.
+	if over := l.Len() - budget; over > 0 {
+		sym, symCut, saved := shorten(symptom, over)
+		ctl, ctlCut, _ := shorten(controller, over-saved)
+		l = render(ctl, ctlCut, sym, symCut)
+		blk.addLabel(LabelSectionCut)
+	}
+	// Only values beyond the schema's limits can leave the lines longer than the budget here; the section's
+	// own cut then removes lines from the end, never the tally.
+	b.finish(&blk, l, budget)
+	blk.unitAt = len(blk.Text)
+	blk.Text += tally
 	return blk
 }
 
-// appendWhole adds unit, lines code wrote, after the finished text of blk as one piece (#796, decided
-// 2026-11-16): redacted first, then written whole when it fits in what is left of the section bound n, or
-// not at all, marking the block cut. Nothing is added after a block that was already cut, so the unit never
-// displaces a line written before it, and an empty unit leaves the block as it was. The total bound later
-// cuts the unit whole too ([Block.unitAt]).
-func (b *Builder) appendWhole(blk *Block, unit string, n int) {
-	if unit == "" {
-		return
+// shorten cuts v, a rendered value, so that it, followed by the note of the cut it returns, is by bytes
+// shorter, or as short as it can be; it returns what it saved. A value the note would not make shorter is
+// left whole. It cuts at a rune boundary and only removes text: v was redacted whole before.
+func shorten(v string, by int) (string, string, int) {
+	if by <= 0 || v == "" {
+		return v, "", 0
 	}
-	unit = b.redact(unit)
-	if slices.Contains(blk.Labels, LabelSectionCut) || len(blk.Text)+len(unit) > n {
-		blk.addLabel(LabelSectionCut)
-		return
+	note := func(n int) string { return fmt.Sprintf(" (%d bytes cut)", n) }
+	keep := max(len(v)-by-len(note(len(v))), 0)
+	for keep > 0 && !utf8.RuneStart(v[keep]) {
+		keep--
 	}
-	blk.unitAt = len(blk.Text)
-	blk.Text += unit
+	n := note(len(v) - keep)
+	saved := len(v) - keep - len(n)
+	if saved <= 0 {
+		return v, "", 0
+	}
+	return v[:keep], n, saved
 }
+
+// longestTally is the length of the longest tally [absorbedLines] can write: every reason of the table, the
+// largest count and a time of the longest form. The summary keeps this much room whatever the tally holds,
+// so where its other lines are cut does not move with the counts.
+var longestTally = func() int {
+	tally := make([]remediationv1alpha1.AbsorbedTally, 0, len(absorbedReasons))
+	at := metav1.NewTime(time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC))
+	for _, r := range absorbedReasons {
+		tally = append(tally, remediationv1alpha1.AbsorbedTally{Reason: r, Count: math.MaxInt64, LastSeen: at})
+	}
+	var l lines
+	absorbedLines(&l, tally)
+	return l.Len()
+}()
 
 // statusBlock describes the target, its owners and its current pods, most relevant first.
 func (b *Builder) statusBlock(t *target) Block {
@@ -330,8 +379,8 @@ var absorbedReasons = []remediationv1alpha1.AbsorbedReason{
 	remediationv1alpha1.AbsorbedUnhealthy,
 }
 
-// absorbedLines writes the absorbed tally of a cause Incident, the last thing in the summary and cut whole
-// ([Builder.appendWhole]; ADR-0039 point 18, #796): a heading, then one line per reason of [absorbedReasons]
+// absorbedLines writes the absorbed tally of a cause Incident, the last thing in the summary and always whole
+// ([Builder.summaryBlock]; ADR-0039 point 18, #796): a heading, then one line per reason of [absorbedReasons]
 // that the tally holds, in that order, with its count and the time of its latest observation. Only the reason
 // (a code constant), a number and a time are written, and none of it is quotable: it is what the analyzer
 // counted, not evidence from a source. An empty tally writes nothing, so the summary of every other Incident

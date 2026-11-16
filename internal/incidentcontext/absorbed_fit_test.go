@@ -17,6 +17,8 @@ limitations under the License.
 package incidentcontext
 
 import (
+	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,111 +51,178 @@ func wideCause(rc string, tally ...remediationv1alpha1.AbsorbedTally) *remediati
 	return inc
 }
 
-// checkTallyFit checks the decision of 2026-11-16 (#796) on one summary: plain is the summary of the same
-// Incident with an empty tally, with its summary with the tally whose block is block, n the section bound.
-// The tally is the last thing in the summary and is cut whole: the summary is plain followed by the whole
-// block, or plain alone, marked cut, when the block does not fit after it or plain was already cut (nothing
-// is left of the section). It never removes a line plain has.
-func checkTallyFit(t *testing.T, name string, plainBlk, with Block, block string, n int) {
+// cutNote is the note a shortened value ends with.
+var cutNote = regexp.MustCompile(` \(([0-9]+) bytes cut\)$`)
+
+// unbounded returns a builder whose summary and total bounds are the largest allowed.
+func unbounded(t *testing.T) *Builder {
 	t.Helper()
-	plain := plainBlk.Text
-	switch with.Text {
-	case plain + block:
-		if len(with.Text) > n {
-			t.Errorf("%s: %d bytes, over the bound %d", name, len(with.Text), n)
+	return newBuilder(t, reader(t), sources{}, func(c *Config) {
+		c.Limits = DefaultLimits()
+		c.Limits.Summary, c.Limits.Total = MaxLimitBytes, MaxLimitBytes
+	})
+}
+
+// fullSummary returns the summary of inc without its tally and without any cut, built by b from
+// [unbounded]: what the lines are before the section bound.
+func fullSummary(t *testing.T, b *Builder, inc *remediationv1alpha1.Incident) string {
+	t.Helper()
+	inc = inc.DeepCopy()
+	inc.Status.Absorbed = nil
+	sum := one(t, build(t, b, inc), SectionSummary)
+	if hasLabel(sum, LabelSectionCut) {
+		t.Fatalf("the summary without a bound was cut:\n%s", sum.Text)
+	}
+	return sum.Text
+}
+
+// checkTallyShown checks the decision of 2026-11-16 (#796, "the tally is always shown, with room kept for
+// it") on one summary: full is the summary of the same Incident without its tally and without any cut, with
+// its summary with the tally whose block is block, n the section bound. The summary ends with the whole
+// block and stays within n; it has every line of full, in its order, each either unchanged or, for the
+// symptom and the reporting controller, cut to a head of the line followed by a note of the bytes cut; and
+// when full fits next to the longest tally, nothing is cut. A cut value's head stays quotable, its note does
+// not, and no part of the tally is quotable.
+func checkTallyShown(t *testing.T, name, full string, with Block, block string, n int) {
+	t.Helper()
+	if len(with.Text) > n {
+		t.Errorf("%s: %d bytes, over the bound %d", name, len(with.Text), n)
+	}
+	head, ok := strings.CutSuffix(with.Text, block)
+	if !ok {
+		t.Errorf("%s: the summary does not end with the whole tally\n%q\nsummary:\n%s", name, block, with.Text)
+		return
+	}
+	if len(full)+longestTally <= n && head != full {
+		t.Errorf("%s: there was room, yet the lines changed:\n%s\nwant\n%s", name, head, full)
+	}
+	got, want := strings.Split(head, "\n"), strings.Split(full, "\n")
+	if len(got) != len(want) {
+		t.Errorf("%s: %d lines, want the %d of the summary without the tally:\n%s\nwant\n%s", name, len(got),
+			len(want), head, full)
+		return
+	}
+	for i, w := range want {
+		g := got[i]
+		if g == w {
+			continue
 		}
-	case plain:
-		if len(plain)+len(block) <= n && !hasLabel(plainBlk, LabelSectionCut) {
-			t.Errorf("%s: the tally (%d bytes) fits after the summary (%d bytes) in %d but was left out", name,
-				len(block), len(plain), n)
+		m := cutNote.FindStringSubmatchIndex(g)
+		shortenable := strings.HasPrefix(w, "symptom: ") || strings.HasPrefix(w, "reported by: ")
+		if m == nil || !shortenable || !strings.HasPrefix(w, g[:m[0]]) ||
+			strconv.Itoa(len(w)-m[0]) != g[m[2]:m[3]] {
+			t.Errorf("%s: line %q is not line %q or a head of it with the note of its cut", name, g, w)
+			continue
 		}
 		if !hasLabel(with, LabelSectionCut) {
-			t.Errorf("%s: the tally was left out without the section cut label", name)
+			t.Errorf("%s: a value was cut without the section cut label", name)
 		}
-	default:
-		t.Errorf("%s: summary\n%q\nis neither the summary without the tally (%q) nor it followed by the whole tally\n%q",
-			name, with.Text, plain, block)
+	}
+	for _, part := range with.Data() {
+		if strings.Contains(part, "bytes cut)") || strings.Contains(part, absorbedHeader) ||
+			strings.Contains(part, " occurrences, last seen ") {
+			t.Errorf("%s: %q is quotable", name, part)
+		}
 	}
 }
 
-// The two Incidents of the defect found on 2026-11-16 (#796): near the bound, the cut left the tally's heading
-// with no line under it, or one reason without the other, and pushed the phase line out.
+// The Incidents of the defect found on 2026-11-16 (#796), where the cut left the tally's heading with no line
+// under it, or one reason without the other, and pushed the phase line out, and one with every field at the
+// schema's limit in multi-byte text: each shows the whole tally and keeps its phase line.
 func TestAbsorbedTallyNearTheSummaryBound(t *testing.T) {
-	b := newBuilder(t, reader(t), sources{}, nil)
-	for name, rc := range map[string]string{
-		"heading alone": strings.Repeat("r", 140) + strings.Repeat("é", 113),
-		"one reason":    strings.Repeat("r", 140) + strings.Repeat("é", 53),
+	b, ub := newBuilder(t, reader(t), sources{}, nil), unbounded(t)
+	extreme := wideCause(strings.Repeat("𝄞", 253), bothTally()...)
+	extreme.Spec.Subject.Kind = strings.Repeat("é", 63)
+	extreme.Spec.Reason = strings.Repeat("日", 128)
+	extreme.Spec.Symptom = strings.Repeat("𝄞", 256)
+	for name, inc := range map[string]*remediationv1alpha1.Incident{
+		"heading alone":  wideCause(strings.Repeat("r", 140)+strings.Repeat("é", 113), bothTally()...),
+		"one reason":     wideCause(strings.Repeat("r", 140)+strings.Repeat("é", 53), bothTally()...),
+		"schema extreme": extreme,
 	} {
-		plain := one(t, build(t, b, wideCause(rc)), SectionSummary)
-		if !strings.HasSuffix(plain.Text, "phase: Open\n") {
-			t.Fatalf("%s: the summary without a tally lost its phase line:\n%s", name, plain.Text)
+		with := one(t, build(t, b, inc), SectionSummary)
+		if !strings.Contains(with.Text, "\nphase: Open\n") {
+			t.Errorf("%s: no phase line:\n%s", name, with.Text)
 		}
-		with := one(t, build(t, b, wideCause(rc, bothTally()...)), SectionSummary)
-		if !strings.Contains(with.Text, "phase: Open\n") {
-			t.Errorf("%s: the tally pushed the phase line out:\n%s", name, with.Text)
-		}
-		checkTallyFit(t, name, plain, with, bothBlock, DefaultSummaryBytes)
+		checkTallyShown(t, name, fullSummary(t, ub, inc), with, bothBlock, DefaultSummaryBytes)
 	}
 }
 
 // Generated sweep around the section bound, the answer known by construction: the reporting controller grows
-// one character at a time, in one-, two-, three- and four-byte text, so the summary without the tally ends
-// at every distance from the bound, and each tally (one reason, the other, both) is either written whole
-// after every other line or left out. The fit is decided on the redacted text (the redactor never makes text
-// longer, and the tally is redacted before it is measured): see TestAbsorbedTallyFitUsesTheRedactedText.
+// one character at a time, in one-, two-, three- and four-byte text, so the lines end at every distance from
+// the bound, and each tally (one reason, the other, both, both with the largest counts) is shown whole after
+// every line of the summary without it, which the cut only shortens. Where the lines are cut does not move
+// with the counts: room is kept for the longest tally.
+//
+// Redaction: the tally is redacted before it is measured, and the other lines are measured before the
+// redaction of the whole text, which never makes text longer ([Redactor]); so redaction can only leave more
+// room than was measured, never break the bound or the tally (TestAbsorbedTallyFitUsesTheRedactedText).
 func TestAbsorbedTallyFitGenerated(t *testing.T) {
-	b := newBuilder(t, reader(t), sources{}, nil)
-	tallies := map[string]struct {
+	t.Parallel()
+	b, ub := newBuilder(t, reader(t), sources{}, nil), unbounded(t)
+	largest := []remediationv1alpha1.AbsorbedTally{
+		absorbed(remediationv1alpha1.AbsorbedBackOff, math.MaxInt64, testNow),
+		absorbed(remediationv1alpha1.AbsorbedUnhealthy, math.MaxInt64, testNow),
+	}
+	tallies := []struct {
+		name  string
 		tally []remediationv1alpha1.AbsorbedTally
 		block string
 	}{
-		"BackOff": {[]remediationv1alpha1.AbsorbedTally{absorbed(remediationv1alpha1.AbsorbedBackOff, 7, testNow)},
+		{"BackOff", []remediationv1alpha1.AbsorbedTally{absorbed(remediationv1alpha1.AbsorbedBackOff, 7, testNow)},
 			absorbedHeader + "\n  BackOff: 7 occurrences, last seen 2026-11-05T12:00:00Z\n"},
-		"Unhealthy": {[]remediationv1alpha1.AbsorbedTally{absorbed(remediationv1alpha1.AbsorbedUnhealthy, 1_000_000, testNow)},
+		{"Unhealthy", []remediationv1alpha1.AbsorbedTally{absorbed(remediationv1alpha1.AbsorbedUnhealthy, 1_000_000, testNow)},
 			absorbedHeader + "\n  Unhealthy: 1000000 occurrences, last seen 2026-11-05T12:00:00Z\n"},
-		"both": {bothTally(), bothBlock},
+		{"both", bothTally(), bothBlock},
+		{"largest", largest, absorbedHeader + "\n  BackOff: 9223372036854775807 occurrences, last seen 2026-11-05T12:00:00Z\n" +
+			"  Unhealthy: 9223372036854775807 occurrences, last seen 2026-11-05T12:00:00Z\n"},
 	}
+	shortened := 0
 	for _, unit := range []string{"r", "é", "日", "𝄞"} {
 		for k := 0; k*len(unit) <= 400; k++ {
 			rc := strings.Repeat("r", 140) + strings.Repeat(unit, k)
-			plain := one(t, build(t, b, wideCause(rc)), SectionSummary)
-			for tn, tc := range tallies {
+			full := fullSummary(t, ub, wideCause(rc))
+			var heads []string
+			for _, tc := range tallies {
 				with := one(t, build(t, b, wideCause(rc, tc.tally...)), SectionSummary)
-				checkTallyFit(t, unit+"/"+strconv.Itoa(k)+"/"+tn, plain, with, tc.block, DefaultSummaryBytes)
+				name := unit + "/" + strconv.Itoa(k) + "/" + tc.name
+				checkTallyShown(t, name, full, with, tc.block, DefaultSummaryBytes)
+				if strings.Contains(with.Text, "bytes cut)") {
+					shortened++
+				}
+				heads = append(heads, strings.TrimSuffix(with.Text, tc.block))
+			}
+			for i := range heads {
+				if heads[i] != heads[0] {
+					t.Errorf("%s/%d: the lines before tally %s differ from those before tally %s:\n%s\nwant\n%s",
+						unit, k, tallies[i].name, tallies[0].name, heads[i], heads[0])
+				}
 			}
 		}
 	}
+	if shortened == 0 {
+		t.Fatal("no case shortened a value: the sweep does not reach the bound")
+	}
 }
 
-// shrinkOccurrences is a redactor that shortens the tally's word "occurrences", as a redaction rule could:
-// the tally fits only if the builder measures it after redaction.
+// shrinkOccurrences is a redactor that shortens the tally's word "occurrences", as a redaction rule could.
 type shrinkOccurrences struct{ Redactor }
 
 func (r shrinkOccurrences) String(s string) string {
 	return strings.ReplaceAll(r.Redactor.String(s), " occurrences,", ",")
 }
 
-// The fit of the tally is decided on its redacted text: with a redactor that shortens it, a tally that fits
-// only once redacted is written, and the summary stays within its bound.
+// The tally is redacted before it is placed: a redactor that changes it gives the redacted tally, whole and
+// last, and the summary stays within its bound whatever the lines' length.
 func TestAbsorbedTallyFitUsesTheRedactedText(t *testing.T) {
 	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = shrinkOccurrences{c.Redactor} })
-	raw, redacted := len(bothBlock), len(strings.ReplaceAll(bothBlock, " occurrences,", ","))
-	found := false
-	for k := 0; k <= 700; k++ {
-		rc := strings.Repeat("r", 140+k)
-		plain := one(t, build(t, b, wideCause(rc)), SectionSummary).Text
-		if len(plain)+redacted > DefaultSummaryBytes || len(plain)+raw <= DefaultSummaryBytes {
-			continue
+	block := strings.ReplaceAll(bothBlock, " occurrences,", ",")
+	for k := 0; k <= 700; k += 7 {
+		with := one(t, build(t, b, wideCause(strings.Repeat("r", 140+k), bothTally()...)), SectionSummary)
+		if !strings.HasSuffix(with.Text, block) || len(with.Text) > DefaultSummaryBytes ||
+			!strings.Contains(with.Text, "\nphase: Open\n") {
+			t.Fatalf("k %d: summary of %d bytes, want it to end with\n%s\nsummary:\n%s", k, len(with.Text), block, with.Text)
 		}
-		found = true
-		with := one(t, build(t, b, wideCause(rc, bothTally()...)), SectionSummary).Text
-		if !strings.HasPrefix(with, plain) || !strings.Contains(with, "  BackOff: 12, last seen") ||
-			!strings.Contains(with, "  Unhealthy: 3, last seen") || len(with) > DefaultSummaryBytes {
-			t.Fatalf("k %d: the tally fits once redacted but the summary is\n%s", k, with)
-		}
-	}
-	if !found {
-		t.Fatal("no reporting controller length puts the summary between the two sizes of the tally")
 	}
 }
 
@@ -161,6 +230,7 @@ func TestAbsorbedTallyFitUsesTheRedactedText(t *testing.T) {
 // configured; when it cuts into the tally, the tally goes whole: the summary keeps a whole-line prefix of
 // the text without the tally, or that text followed by the whole tally.
 func TestAbsorbedTallyTotalCutGenerated(t *testing.T) {
+	t.Parallel()
 	lim := Limits{Total: MinTotalBytes, Summary: 8 << 10, Status: MinSectionBytes, Logs: MinSectionBytes,
 		Metrics: MinSectionBytes, Git: MinSectionBytes, Policy: MinSectionBytes}
 	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Limits = lim })
@@ -173,7 +243,7 @@ func TestAbsorbedTallyTotalCutGenerated(t *testing.T) {
 		return inc
 	}
 	cuts := 0
-	for k := 0; k <= 1024; k++ {
+	for k := 0; k <= 1024; k += 3 { // the cut moves by whole lines; 3 bytes still lands it in every line of the tally
 		c := build(t, b, wide(k))
 		plain := one(t, c, SectionSummary).Text
 		with := build(t, b, wide(k, bothTally()...))

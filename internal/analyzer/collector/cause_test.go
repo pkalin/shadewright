@@ -53,7 +53,11 @@ func causeHarness(t *testing.T, setPod func(*corev1.Pod)) (*harness, *corev1.Pod
 	if setPod != nil {
 		setPod(pod)
 	}
-	return newHarness(t, Config{}, d, rs, pod), pod
+	h := newHarness(t, Config{}, d, rs, pod)
+	// These tests read the fields of the observation; the hold of a consequence with no cause is tested in
+	// hold_test.go.
+	h.c.holdOff = true
+	return h, pod
 }
 
 // consequence returns a kubelet event about the web pod's container named by fieldPath, with the reason

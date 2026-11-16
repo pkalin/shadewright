@@ -64,6 +64,9 @@ func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 	replacedTemplateCheckErrors.WithLabelValues(kindStatefulSet).Add(0)
 	probeSettledSkipped.WithLabelValues("Readiness").Add(0)
 	probeSettledSkipped.WithLabelValues("Startup").Add(0)
+	for _, o := range []string{holdOpened, holdNotOpened, holdOverflow} {
+		heldConsequences.WithLabelValues(o).Add(0)
+	}
 	byKind := func(groups, kinds []string) metricguard.Labels {
 		return metricguard.Labels{kindLabels[0]: groups, kindLabels[1]: kinds}
 	}
@@ -78,6 +81,8 @@ func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 		},
 		"shadewright_analyzer_settled_probe_failures_skipped_total": {labelProbe: {"Readiness", "Startup"}},
 		"shadewright_analyzer_probe_decisions_pending":              {},
+		"shadewright_analyzer_held_consequences_total":              {"outcome": {holdOpened, holdNotOpened, holdOverflow}},
+		"shadewright_analyzer_consequences_held":                    {},
 	}
 	// Registered by package analyzer, which the envtest harness imports; checked there.
 	all := map[string]metricguard.Labels{"shadewright_analyzer_watched_namespaces": {}}

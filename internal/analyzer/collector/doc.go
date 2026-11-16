@@ -34,7 +34,10 @@ limitations under the License.
 // pod) and a Class. Only a pod-status OOM kill or waiting cause is a cause; a kubelet BackOff or Unhealthy event
 // on a named container is a consequence, and its CauseFingerprint is the cause its pod's status shows for that
 // container: a current waiting cause, else an OOM kill that finished at most KillCauseWindow before the
-// event's own time. Nothing acts on these fields yet.
+// event's own time. A consequence with no cause is held (hold.go, ADR-0039 point 19): it is emitted only when,
+// ConsequenceGrace after the collector first saw it, its pod has the same UID and the container is still
+// failing and was seen failing at least twice; otherwise it is handled without an observation. The holds are
+// bounded (DefaultMaxHeldConsequences, a quarter per namespace); over the bound a consequence is emitted at once.
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the

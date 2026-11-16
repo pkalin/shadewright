@@ -65,6 +65,18 @@ const (
 // the same write, and the next reconcile ends the request Inconclusive (settleReceipt): the write that sets
 // Merged always carries the receipt or that mark, never neither. A receipt already recorded is never replaced.
 func recordMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) {
+	var branch remediationv1alpha1.GitBranch
+	if rr.Status.Source != nil {
+		branch = rr.Status.Source.TargetBranch
+	}
+	recordMergeInto(ctx, rr, cr, branch)
+}
+
+// recordMergeInto is recordMerge for a merge into branch: the recorded target branch (recordMerge), or, for a pull
+// request a person moved to the target branch the settings name after a change, that branch (#771). The receipt
+// then names branch, so delivery is checked on the branch the merge went into.
+func recordMergeInto(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest,
+	branch remediationv1alpha1.GitBranch) {
 	if rr.Status.MergeReceipt != nil {
 		return
 	}
@@ -72,7 +84,7 @@ func recordMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest
 		logf.FromContext(ctx).V(1).Info("Refused the merge commit of RemediationRequest, which is not a full commit ID",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "length", len(cr.MergeCommit))
 	}
-	if receipt := mergeReceipt(rr, cr); receipt != nil {
+	if receipt := mergeReceipt(rr, cr, branch); receipt != nil {
 		rr.Status.PullRequest.MergeCommitSHA = receipt.MergeCommitSHA
 		rr.Status.MergeReceipt = receipt
 		return
@@ -196,21 +208,22 @@ func noReceiptMerge(rr *remediationv1alpha1.RemediationRequest) bool {
 // mergeReceipt builds the receipt of the merge of cr from the recorded state and cr, without mergedAt (setPhase
 // sets it in the status write that sets Merged), or returns nil when the merge cannot be bound to one: cr not
 // merged, no pull request, plan repository or source recorded, a pull request that is not the recorded one
-// (number, head, target branch), a merge commit that is not a full commit ID, or one other than a merge commit
-// already recorded.
-func mergeReceipt(rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) *remediationv1alpha1.MergeReceipt {
+// (number, head), a merge into another branch than branch, a merge commit that is not a full commit ID, or one
+// other than a merge commit already recorded.
+func mergeReceipt(rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest,
+	branch remediationv1alpha1.GitBranch) *remediationv1alpha1.MergeReceipt {
 	st := rr.Status
 	pr := st.PullRequest
 	switch {
 	case cr.State != providers.ChangeRequestMerged, st.PlanRepository == nil, st.Source == nil, pr == nil,
 		!shaPattern.MatchString(cr.MergeCommit), pr.MergeCommitSHA != "" && pr.MergeCommitSHA != cr.MergeCommit,
 		cr.Number != pr.Number, cr.HeadSHA != pr.HeadSHA, !shaPattern.MatchString(pr.HeadSHA),
-		cr.BaseBranch != string(st.Source.TargetBranch):
+		branch == "", cr.BaseBranch != string(branch):
 		return nil
 	}
 	return &remediationv1alpha1.MergeReceipt{
 		Repository:     *st.PlanRepository,
-		TargetBranch:   st.Source.TargetBranch,
+		TargetBranch:   branch,
 		PullRequest:    pr.Number,
 		HeadSHA:        pr.HeadSHA,
 		MergeCommitSHA: cr.MergeCommit,

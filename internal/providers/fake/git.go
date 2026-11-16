@@ -541,11 +541,16 @@ func (g *Git) ListChangeRequests(ctx context.Context, headBranch string, openOnl
 	if err := g.before("ListChangeRequests"); err != nil {
 		return nil, err
 	}
+	return g.listFor(headBranch, openOnly, g.target)
+}
+
+// listFor is ListChangeRequests to the target branch target.
+func (g *Git) listFor(headBranch string, openOnly bool, target string) ([]providers.ChangeRequest, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var out []providers.ChangeRequest
 	for _, cr := range slices.Backward(g.crs) {
-		if cr.HeadBranch != headBranch || cr.BaseBranch != g.target || (openOnly && cr.State != providers.ChangeRequestOpen) {
+		if cr.HeadBranch != headBranch || cr.BaseBranch != target || (openOnly && cr.State != providers.ChangeRequestOpen) {
 			continue
 		}
 		if out = append(out, *cr); len(out) > providers.MaxBranchChangeRequests {
@@ -583,18 +588,66 @@ func (g *Git) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRe
 	if err := g.before("GetChangeRequest"); err != nil {
 		return providers.ChangeRequest{}, err
 	}
+	return g.getFor(n, g.target)
+}
+
+// getFor is GetChangeRequest to the target branch target.
+func (g *Git) getFor(n int64, target string) (providers.ChangeRequest, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	cr, err := g.get(n)
 	if err != nil {
 		return providers.ChangeRequest{}, err
 	}
-	if !strings.HasPrefix(cr.HeadBranch, "shadewright/") || cr.BaseBranch != g.target {
+	if !strings.HasPrefix(cr.HeadBranch, "shadewright/") || cr.BaseBranch != target {
 		return providers.ChangeRequest{}, fmt.Errorf("change request %d is not a Shadewright one: %w", n, providers.ErrNotFound)
 	}
 	found := *cr
 	found.Conflicted = cr.Conflicted && cr.State == providers.ChangeRequestOpen
 	return found, nil
+}
+
+// SetBase moves change request n to the base branch base, as a person who edits its base on the host does.
+func (g *Git) SetBase(n int64, base string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return err
+	}
+	if _, ok := g.branches[base]; !ok {
+		return fmt.Errorf("branch %q: %w", base, providers.ErrNotFound)
+	}
+	cr.BaseBranch = base
+	return nil
+}
+
+// ForTarget returns the repository as a provider opened for the target branch target sees it: GetChangeRequest
+// and ListChangeRequests answer about change requests to target, and every other call is the repository's own.
+func (g *Git) ForTarget(target string) *TargetView {
+	return &TargetView{Git: g, target: target}
+}
+
+// TargetView is the repository seen through a provider opened for another target branch (ForTarget).
+type TargetView struct {
+	*Git
+	target string
+}
+
+// GetChangeRequest is Git.GetChangeRequest to the view's target branch.
+func (v *TargetView) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	if err := v.before("GetChangeRequest"); err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	return v.getFor(n, v.target)
+}
+
+// ListChangeRequests is Git.ListChangeRequests to the view's target branch.
+func (v *TargetView) ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) ([]providers.ChangeRequest, error) {
+	if err := v.before("ListChangeRequests"); err != nil {
+		return nil, err
+	}
+	return v.listFor(headBranch, openOnly, v.target)
 }
 
 // SetConflicted sets whether the host reports change request n in conflict with its base, as GitHub's

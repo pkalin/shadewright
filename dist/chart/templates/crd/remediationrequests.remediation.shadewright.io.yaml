@@ -1074,8 +1074,10 @@ spec:
                     - url
                     type: object
                   targetBranch:
-                    description: targetBranch is the branch the pull request merged
-                      into, copied from status.source.targetBranch.
+                    description: |-
+                      targetBranch is the branch the pull request merged into: status.source.targetBranch, or, for a pull request a
+                      person moved to the target branch RemediationSettings names after a change and merged there, that branch
+                      (#771).
                     maxLength: 255
                     minLength: 1
                     pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$

@@ -366,7 +366,8 @@ const (
 	// that keeps the lock on its target, with reason RepositoryUnavailable while the repository of the plan is not
 	// in RemediationSettings any more, TargetBranchChanged while its entry names another target branch, or
 	// RepositoryUnusable while its entry cannot be used, with reason TargetBranchChanged also while a pull request
-	// that waits cannot be read on the recorded target branch after the entry named another one (#754), and with
+	// that waits cannot be read on the recorded target branch, or on the one the entry names, after the entry named
+	// another one (#754, #771), and with
 	// reason RecordedMissingOtherListed while the Git
 	// host has no pull request of this request with the recorded number but the request's branch lists another one
 	// with its marker (the message names both numbers and what ends it), and, on a stale plan whose repository the
@@ -732,7 +733,9 @@ type MergeReceipt struct {
 	// +required
 	Repository PlanRepository `json:"repository"`
 
-	// targetBranch is the branch the pull request merged into, copied from status.source.targetBranch.
+	// targetBranch is the branch the pull request merged into: status.source.targetBranch, or, for a pull request a
+	// person moved to the target branch RemediationSettings names after a change and merged there, that branch
+	// (#771).
 	// +required
 	TargetBranch GitBranch `json:"targetBranch"`
 

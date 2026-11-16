@@ -193,7 +193,8 @@ func (r *RemediationRequestReconciler) unmarkFresh(ctx context.Context, rr *reme
 }
 
 // skipOwnMarks drops the watch events of an update that changed nothing of a request but status.unfinishedRenders,
-// condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound, set or
+// condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound, or with
+// any reason on a replacement whose handoff recovery waits (recovering, #786), set or
 // removed, PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
 // the metadata every write changes. Those are the executor's own writes: the mark and its removal
 // around a render, the condition that says why a stale plan's pull request is not closed (keepWatchingStale,
@@ -208,7 +209,8 @@ var skipOwnMarks = predicate.Funcs{UpdateFunc: func(e crevent.UpdateEvent) bool 
 
 // onlyOwnMarksChanged reports whether newObj differs from oldObj, and only in status.unfinishedRenders, condition
 // PullRequestNotClosed, condition PullRequestUnreadable while neither side has another reason than GitFailed or
-// GitNotFound (reinstalledUnreadable), the resource version and the managed fields. Anything that is not a request
+// GitNotFound (reinstalledUnreadable) or both sides are a replacement recovering its handoff (recovering), the
+// resource version and the managed fields. Anything that is not a request
 // is never such an update.
 func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	o, ok1 := oldObj.(*remediationv1alpha1.RemediationRequest)
@@ -233,7 +235,7 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 		rr.Status.UnfinishedRenders = nil
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 	}
-	if reinstalledUnreadable(o) && reinstalledUnreadable(n) {
+	if (reinstalledUnreadable(o) && reinstalledUnreadable(n)) || (recovering(o) && recovering(n)) {
 		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 		}
@@ -248,6 +250,15 @@ func closedRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(n.Status.Conditions, remediationv1alpha1.ConditionPROpened)
 	return notClosed(o) != nil && meta.FindStatusCondition(n.Status.Conditions,
 		remediationv1alpha1.ConditionPullRequestNotClosed) == nil && c != nil && c.Reason == ReasonPullRequestClosed
+}
+
+// recovering reports whether rr is a replacement whose handoff recovery runs on every look (recoverHandoff): in
+// PolicyChecked, with its incoming handoff Reserved. While it cannot read, only watchRecovery and the recovery's
+// removal write condition PullRequestUnreadable on it (#786), and the reconcile that wrote it returns its own delay.
+func recovering(rr *remediationv1alpha1.RemediationRequest) bool {
+	return rr.Spec.Replaces != nil && rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked &&
+		rr.Status.Handoff != nil && rr.Status.Handoff.From != nil &&
+		rr.Status.Handoff.From.Phase == remediationv1alpha1.HandoffReserved
 }
 
 // reinstalledUnreadable reports whether rr has no condition PullRequestUnreadable, or one with reason GitFailed or

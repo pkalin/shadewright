@@ -94,24 +94,6 @@ func TestRecoveryHonoursRetryAfterPastTheDeadline(t *testing.T) {
 	}
 }
 
-// A recovery that ends through retry (here settings that cannot reach the repository) aborts the handoff.
-func TestRecoveryEndedThroughRetryAbortsTheHandoff(t *testing.T) {
-	r, _, _, rr, _, _ := gateWorld(t)
-	ctx := context.Background()
-	r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
-		return nil, fmt.Errorf("the key is not a PEM key: %w", providers.ErrInvalidConfig)
-	}
-	if _, err := r.recheck(ctx, rr); err != nil {
-		t.Fatal(err)
-	}
-	if rr.Status.Phase != api.PhaseNeedsIntervention {
-		t.Fatalf("phase %s", rr.Status.Phase)
-	}
-	if got := rr.Status.Handoff.From.Phase; got != api.HandoffAborted {
-		t.Fatalf("the handoff of an ended replacement is %s", got)
-	}
-}
-
 // failRewriteRecord makes every status write that records the rewrite after the handoff fail.
 func failRewriteRecord(r *RemediationRequestReconciler) client.Client {
 	base := r.Client

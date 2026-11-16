@@ -372,7 +372,10 @@ const (
 	// with its marker (the message names both numbers and what ends it), and, on a stale plan whose repository the
 	// settings reach only through a new installation of the GitHub App, with reason GitNotFound (a 404) or GitFailed
 	// (any other failure that is not an answer, the token and the cleanup's deadline included) while the read of its
-	// branch that settles the lock on its target fails through that installation (#797). The message names the read;
+	// branch that settles the lock on its target fails through that installation (#797), and, on a replacement whose
+	// recovery of its handoff cannot read, with the refusal's reason (GitForbidden, GitRejected) or one of the three
+	// reasons about the repository while it waits, with no time limit, for a read that can show whether its commit was
+	// merged (#786). The message names the read;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,

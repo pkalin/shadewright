@@ -1581,28 +1581,29 @@ func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
 // closing bracket (ctx is the escape level of the key's quotes); a quoted value may run over line ends; and
 // in free text (boundaryWhitespace) a value is the whole shell word, glued quoted pieces and "$(" included.
 // A quoted string crosses a line end only to a line indented deeper than the key that starts at keyPos
-// (groupEnd). Where the extent rule gives no extent, the value is valueSpan's.
-func extendedValueSpan(s string, pos, boundary, keyCol, ctx, keyPos int) (int, int) {
+// (groupEnd). Where the extent rule gives no extent, the value is valueSpan's. With wide false the extents
+// #769 widens are read as on main before it (keyValueSpans).
+func extendedValueSpan(s string, pos, boundary, keyCol, ctx, keyPos int, wide bool) (int, int) {
 	if pos >= len(s) {
 		return pos, pos
 	}
 	if boundary == boundaryFlow {
 		if v := commentEnd(s, pos); v > pos {
-			_, end := extendedValueSpan(s, v, boundary, keyCol, ctx, keyPos)
+			_, end := extendedValueSpan(s, v, boundary, keyCol, ctx, keyPos, wide)
 			return pos, max(end, v)
 		}
 	}
-	if start, end, ok := bracketSpan(s, pos, ctx); ok {
+	if start, end, ok := bracketSpan(s, pos, ctx, wide); ok {
 		return start, end
 	}
 	if boundary == boundaryWhitespace && escapeLevel(s, pos) == 0 && !opensGroup(s, pos) {
-		if end := plainWordEnd(s, pos, extentLimit(s, pos), keyPos); end > pos {
+		if end := plainWordEnd(s, pos, extentLimit(s, pos), keyPos, wide); end > pos {
 			return pos, end
 		}
 	}
 	if escapeLevel(s, pos) == 0 && opensGroup(s, pos) {
 		if boundary == boundaryWhitespace {
-			if start, end, ok := quotedWordSpan(s, pos, keyPos, s[keyPos] == '-'); ok {
+			if start, end, ok := quotedWordSpan(s, pos, keyPos, s[keyPos] == '-', wide); ok {
 				return start, end
 			}
 		} else if c := s[pos]; c == '"' || c == '\'' {
@@ -1635,10 +1636,10 @@ func keyQuoteLevel(s string, pos int) int {
 // single quotes are literal). It returns 0 for any other key, or when the value opens with the argument's own
 // quote, or the argument does not close. A value that opens with a backslash runs to the closing quote too
 // (#769): a backslash escaped as the argument's level is literal text, and a quote escaped deeper than the
-// argument does not close it.
-func argumentEnd(s string, m []int) int {
+// argument does not close it. With wide false such a value gives 0, as on main before #769 (keyValueSpans).
+func argumentEnd(s string, m []int, wide bool) int {
 	pos := m[1]
-	if s[m[2]] != '-' || strings.IndexByte(s[m[3]:pos], '=') < 0 || pos >= len(s) {
+	if s[m[2]] != '-' || strings.IndexByte(s[m[3]:pos], '=') < 0 || pos >= len(s) || !wide && s[pos] == '\\' {
 		return 0
 	}
 	level, ok := enclosingQuote(s, m[2])
@@ -1764,10 +1765,10 @@ func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
-// keyValueSpan returns the span function of a key-value rule whose regex matches the key (group 1) and its
+// keyValueSpans returns the spans function of a key-value rule whose regex matches the key (group 1) and its
 // separator; the value is found by valueSpan with the given boundary. Keys that are references are left
 // alone without reading their value, so a reference never hides a neighbouring secret. A key inside a value
-// already redacted is skipped, so each byte is scanned once. A bare YAML block scalar indicator is left to
+// already read is skipped, so each byte is scanned once. A bare YAML block scalar indicator is left to
 // the block scalar rule, and a YAML comment over a block on the following lines to the next-line rule
 // (commentOverBlock). A bare short key followed by a colon counts only with a value that looks like a
 // secret (bareShortColon); a quoted value may hold blanks (looksLikeQuotedSecret), and in flow form an
@@ -1775,13 +1776,17 @@ func isSpace(c byte) bool {
 // leaves prevEnd where it was. Any other key takes the union of valueSpan's value and the extent rule's
 // (extendedValueSpan, argumentEnd, #708), and after ":=" also the value main read from its "=", so the
 // value is never shorter than main's (TestExtentStillRedactsWhatMainRedacted).
-func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd int) (int, int, bool) {
-	return func(s string, m []int, prevEnd int) (int, int, bool) {
+//
+// The extents #769 widens never hide a key (TestMonotonicAgainstMain): the end returned, before which later
+// keys of the rule are skipped, is the end of the value read without them (wide false), as on main. A key in
+// the part they add is matched as on main, and its own value redacted.
+func keyValueSpans(boundary int, envName bool) func(s string, m []int, prevEnd int, add func(start, end int)) int {
+	return func(s string, m []int, prevEnd int, add func(start, end int)) int {
 		if m[2] < prevEnd || keepReference(s, m) || sasRefused(s, m, !envName) {
-			return 0, 0, false
+			return prevEnd
 		}
 		if isBlockHeader(s, m[1]) || commentOverBlock(s, m) {
-			return 0, 0, false
+			return prevEnd
 		}
 		bare := bareShortColon(s, m)
 		b := boundary
@@ -1789,23 +1794,40 @@ func keyValueSpan(boundary int, envName bool) func(s string, m []int, prevEnd in
 			b = boundaryFlowWord
 		}
 		start, end := valueSpan(s, m[1], b, m[2]-m[0])
-		if !bare {
-			if i := strings.Index(s[m[3]:m[1]], ":="); i >= 0 {
-				// Main read Go's ":=" as ":" and a value that opens with "=": that value stays redacted.
-				ms, me := valueSpan(s, m[3]+i+1, b, m[2]-m[0])
-				start, end = min(start, ms), max(end, me)
-			}
-			xs, xe := extendedValueSpan(s, m[1], b, m[2]-m[0], keyQuoteLevel(s, m[2]), m[2])
-			xs, xe = clampToString(xs, xe, enclosingStringEnd(s, m[2], m[1]))
-			start, end = min(start, xs), max(end, xe, argumentEnd(s, m))
-		}
 		if bare {
 			if v := s[start:end]; start > m[1] && !looksLikeQuotedSecret(v) || start == m[1] && !looksLikeSecret(v) {
-				return 0, 0, false
+				return prevEnd
 			}
+			add(start, end)
+			return skipEnd(prevEnd, start, end)
 		}
-		return start, end, true
+		if i := strings.Index(s[m[3]:m[1]], ":="); i >= 0 {
+			// Main read Go's ":=" as ":" and a value that opens with "=": that value stays redacted.
+			ms, me := valueSpan(s, m[3]+i+1, b, m[2]-m[0])
+			start, end = min(start, ms), max(end, me)
+		}
+		ws, we := keyValueExtent(s, m, b, start, end, true)
+		add(ws, we)
+		ms, me := keyValueExtent(s, m, b, start, end, false)
+		return skipEnd(prevEnd, ms, me)
 	}
+}
+
+// keyValueExtent returns the union of the value start, end and the extent rule's value after the key of m,
+// with the extents #769 widens when wide is true.
+func keyValueExtent(s string, m []int, boundary, start, end int, wide bool) (int, int) {
+	xs, xe := extendedValueSpan(s, m[1], boundary, m[2]-m[0], keyQuoteLevel(s, m[2]), m[2], wide)
+	xs, xe = clampToString(xs, xe, enclosingStringEnd(s, m[2], m[1]))
+	return min(start, xs), max(end, xe, argumentEnd(s, m, wide))
+}
+
+// skipEnd returns the end a value from start to end gives the matches after it: its end when it is not
+// empty, else prevEnd, as a rule's span does.
+func skipEnd(prevEnd, start, end int) int {
+	if end > start {
+		return end
+	}
+	return prevEnd
 }
 
 // flagValueSpan is the span function of the command-line flag rule: a secret-named flag ("--client-secret",
@@ -2125,7 +2147,7 @@ func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int
 func flagWordSpan(s string, pos int, ext extentMode) (int, int, bool) {
 	if !opensGroup(s, pos) {
 		if ext == extShell {
-			if end := plainWordEnd(s, pos, extentLimit(s, pos), noKey); end > pos {
+			if end := plainWordEnd(s, pos, extentLimit(s, pos), noKey, true); end > pos {
 				return pos, end, true
 			}
 		}
@@ -2134,7 +2156,7 @@ func flagWordSpan(s string, pos int, ext extentMode) (int, int, bool) {
 	c := s[pos]
 	switch {
 	case ext == extShell:
-		if start, end, ok := quotedWordSpan(s, pos, noKey, true); ok {
+		if start, end, ok := quotedWordSpan(s, pos, noKey, true, true); ok {
 			return start, end, true
 		}
 	case c == '"' || c == '\'':
@@ -2341,7 +2363,7 @@ func builtinRules() []rule {
 		// Key-value pairs whose key names a secret, one rule per format so each value ends at its own
 		// format's boundary. Env files, logfmt and free text: the value runs to the next whitespace.
 		// Go's ":=" is one separator.
-		{kind: KindCredential, span: keyValueSpan(boundaryWhitespace, false), re: regexp.MustCompile(
+		{kind: KindCredential, spans: keyValueSpans(boundaryWhitespace, false), re: regexp.MustCompile(
 			`(?i)(` + bareKeyExpr + `)[ \t]*(?::=|[:=])[ \t]*`)},
 		// Command-line flags whose name holds a secret, with the value after blanks or line ends, in an
 		// argument list (JSON, escaped JSON or a YAML list) or after a shell line continuation:
@@ -2355,16 +2377,16 @@ func builtinRules() []rule {
 			`(?i)(` + bareKeyExpr + `)[ \t]+`)},
 		// JSON and YAML flow mappings: a field after "{" or ",", ending at its closing quote or at , } ].
 		// JSON whitespace, newlines included and also escaped, may surround the key and the colon.
-		{kind: KindCredential, span: keyValueSpan(boundaryFlow, false), re: regexp.MustCompile(
+		{kind: KindCredential, spans: keyValueSpans(boundaryFlow, false), re: regexp.MustCompile(
 			`(?i)[{,]` + jsonSpaceExpr + `(` + flowKeyExpr + `)` + jsonSpaceExpr + `:` + jsonSpaceExpr)},
 		// Kubernetes environment variables in JSON and YAML flow form: the value after a name that holds a
 		// secret, {"name":"DB_PASSWORD","value":"..."}.
-		{kind: KindCredential, span: keyValueSpan(boundaryFlow, true), re: regexp.MustCompile(
+		{kind: KindCredential, spans: keyValueSpans(boundaryFlow, true), re: regexp.MustCompile(
 			`(?i)\\*["']?\bname\\*["']?` + jsonSpaceExpr + `:` + jsonSpaceExpr + `\\*["']?(` + bareKeyExpr + `)\\*["']?` +
 				jsonSpaceExpr + `,` + jsonSpaceExpr + `\\*["']?value\\*["']?` + jsonSpaceExpr + `:` + jsonSpaceExpr)},
 		// YAML block mappings: a key at the start of a line, its value to the line end plus continuation
 		// lines indented deeper than the key.
-		{kind: KindCredential, span: keyValueSpan(boundaryLine, false), re: regexp.MustCompile(
+		{kind: KindCredential, spans: keyValueSpans(boundaryLine, false), re: regexp.MustCompile(
 			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]+`)},
 		// YAML literal and folded block scalars under a secret key, with chomping and indentation indicators.
 		{kind: KindCredential, span: blockScalarSpan, re: regexp.MustCompile(

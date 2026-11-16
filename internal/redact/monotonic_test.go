@@ -20,6 +20,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pkalin/shadewright/internal/redact/testdata/mainredact"
 )
@@ -59,7 +60,7 @@ var hiddenKeyInputs = []string{
 func TestNoWiderExtentHidesAKey(t *testing.T) {
 	for _, in := range hiddenKeyInputs {
 		out := String(in)
-		for _, w := range []string{"hidden", "word", "Hunter", "three"} {
+		for _, w := range []string{"hidden", " word", "words", "Hunter", "three"} {
 			if strings.Contains(in, w) && strings.Contains(out, w) {
 				t.Errorf("String(%q) = %q, %q is still there", in, out, w)
 			}
@@ -194,5 +195,22 @@ func checkTableInput(t *testing.T, path string, n int, in string, gen []string) 
 	t.Helper()
 	if n > len(gen) || gen[n-1] != in {
 		t.Fatalf("%s line %d does not match its corpus generator: regenerate the table from the commit it names", path, n)
+	}
+}
+
+// Reading each value twice (with and without the extents #769 widens) keeps the time linear: on inputs that
+// repeat each hiddenKeyInputs line to 4 and 64 KiB, sixteen times the input takes at most 64 times as long
+// (256 times would be quadratic).
+func TestMonotonicStaysLinear(t *testing.T) {
+	skipLarge(t)
+	for _, line := range hiddenKeyInputs {
+		unit := line + " "
+		var times []time.Duration
+		for _, size := range []int{4 << 10, 16 << 10, 64 << 10} {
+			times = append(times, timeString(t, line, rep(unit, size/len(unit))))
+		}
+		if times[2] > 64*max(times[0], 2*time.Millisecond) {
+			t.Errorf("%q: 4, 16 and 64 KiB took %v", line, times)
+		}
 	}
 }

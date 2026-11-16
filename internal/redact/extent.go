@@ -402,8 +402,9 @@ func opensGroup(s string, pos int) bool {
 // close; after a flag (flag is true) a comma does not end it ("$(echo),abc" is one argument). A run of
 // ")", "]" and "}" belongs to the word when more of the word follows it ("$(cat pw)}x"), and
 // ends it otherwise ("[\"abc\"], next"). last is true when the word ends with a quoted group, so its closing
-// quote is at end-1. ok is false when the first group does not close. keyPos is as in groupEnd.
-func shellWordEnd(s string, pos, limit, keyPos int, flag bool) (end int, last bool, ok bool) {
+// quote is at end-1. ok is false when the first group does not close. keyPos is as in groupEnd. With wide
+// false an escaped punctuation byte and a comma end the word, as on main before #769 (keyValueSpans).
+func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, last bool, ok bool) {
 	end, ok = groupEnd(s, pos, limit, 0, keyPos, true)
 	if !ok {
 		return 0, false, false
@@ -420,7 +421,7 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag bool) (end int, last bo
 			end = e
 			continue
 		}
-		if c == '\\' && end+1 < limit && (s[end+1] == ' ' || s[end+1] == '\t' || strings.IndexByte(shellEscapedPunct, s[end+1]) >= 0) {
+		if c == '\\' && end+1 < limit && (s[end+1] == ' ' || s[end+1] == '\t' || wide && strings.IndexByte(shellEscapedPunct, s[end+1]) >= 0) {
 			last = false
 			end += 2
 			continue
@@ -437,7 +438,7 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag bool) (end int, last bo
 			}
 			break
 		}
-		if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 && (c != ',' || !flag && fieldAfterComma(s, end, limit)) {
+		if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 && (c != ',' || !flag && (!wide || fieldAfterComma(s, end, limit))) {
 			break
 		}
 		last = false
@@ -483,8 +484,9 @@ var commaSecretKey = regexp.MustCompile(`(?i)^(?:` + bareKeyExpr + `)(?:[ \t]*[:
 // "a,b\\ c"): the word runs on through those groups, plain text and backslash escapes, and ends at
 // whitespace, one of ";|&<>()", a quote, or a group that does not close. A quote ends it because an unquoted
 // value in free text that meets a quote is often inside a JSON or logfmt string, whose fields after it stay
-// (tokenEnd). It returns pos when no group or escaped blank is glued to the text.
-func plainWordEnd(s string, pos, limit, keyPos int) int {
+// (tokenEnd). It returns pos when no group or escaped blank is glued to the text. With wide false any quote
+// ends it, as on main before #769 (keyValueSpans).
+func plainWordEnd(s string, pos, limit, keyPos int, wide bool) int {
 	end, glued := pos, false
 	for end < limit {
 		c := s[end]
@@ -499,7 +501,7 @@ func plainWordEnd(s string, pos, limit, keyPos int) int {
 			end, glued = end+2, true
 		case c == '\\' && end+1 < limit && !isSpace(s[end+1]) && s[end+1] != '"' && s[end+1] != '\'':
 			end += 2
-		case (c == '"' || c == '\'') && end > pos:
+		case wide && (c == '"' || c == '\'') && end > pos:
 			e := gluedQuoteEnd(s, end, limit, keyPos)
 			if e < 0 {
 				return wordEnd(pos, end, glued)
@@ -570,10 +572,10 @@ func unclosedQuoteEnd(s string, pos int) int {
 // quotedWordSpan returns the value of a shell word that opens with a group at pos, for a value after a key
 // name: for a word that opens with a quote, the text after that quote up to the closing quote of the last
 // quoted piece, or the word's end; for one that opens with "$(" or a backtick, the whole word. ok is false
-// when the first group does not close within maxValueExtent. keyPos is as in groupEnd, flag as in
+// when the first group does not close within maxValueExtent. keyPos is as in groupEnd, flag and wide as in
 // shellWordEnd.
-func quotedWordSpan(s string, pos, keyPos int, flag bool) (int, int, bool) {
-	end, last, ok := shellWordEnd(s, pos, extentLimit(s, pos), keyPos, flag)
+func quotedWordSpan(s string, pos, keyPos int, flag, wide bool) (int, int, bool) {
+	end, last, ok := shellWordEnd(s, pos, extentLimit(s, pos), keyPos, flag, wide)
 	if !ok {
 		return 0, 0, false
 	}
@@ -589,8 +591,9 @@ func quotedWordSpan(s string, pos, keyPos int, flag bool) (int, int, bool) {
 
 // bracketSpan returns the value that opens with "[" or "{" at pos (an array or object under a secret key, plain
 // or escaped as JSON inside a string at escape level ctx), through its closing bracket. ok is false when it
-// does not close within maxValueExtent.
-func bracketSpan(s string, pos, ctx int) (int, int, bool) {
+// does not close within maxValueExtent. With wide false a YAML node property opens no string, as on main
+// before #769 (keyValueSpans).
+func bracketSpan(s string, pos, ctx int, wide bool) (int, int, bool) {
 	if pos >= len(s) || s[pos] != '[' && s[pos] != '{' {
 		return 0, 0, false
 	}
@@ -598,6 +601,9 @@ func bracketSpan(s string, pos, ctx int) (int, int, bool) {
 	// A quoted scalar behind a YAML node property is read as a string (#769) in a second scan; the value is
 	// the longer of the two scans that close, so it is never shorter than without the property rule.
 	end, ok := groupEnd(s, pos, limit, ctx, noKey, false)
+	if !wide {
+		return pos, end, ok
+	}
 	if pe, pok := groupScanEnd(groupScan{s: s, limit: limit, ctx: ctx, props: true}, pos, noKey); pok {
 		end, ok = max(end, pe), true
 	}

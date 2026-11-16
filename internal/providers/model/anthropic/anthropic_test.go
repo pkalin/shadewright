@@ -926,10 +926,16 @@ func TestCompleteReachedTheTransportIsSent(t *testing.T) {
 		}
 	})
 	t.Run("the server hangs past the attempt deadline", func(t *testing.T) {
+		seen := make(chan struct{})
 		h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.Copy(io.Discard, r.Body)
+			close(seen)
 			<-r.Context().Done()
 		})
+		// The attempt deadline is real, but the request it ends is abandoned only once the server has seen it:
+		// on a loaded machine the deadline can pass before the request reaches the server (#815), and the
+		// result must not depend on which comes first.
+		h.p.client.Transport = heldUntilSeen{inner: h.p.client.Transport, seen: seen}
 		h.p.attemptTimeout = 20 * time.Millisecond
 		h.p.attempts = 1
 		_, err := h.p.Complete(context.Background(), structuredRequest())
@@ -937,4 +943,38 @@ func TestCompleteReachedTheTransportIsSent(t *testing.T) {
 			t.Errorf("err = %v (not sent %v), %d requests", err, providers.IsNotSent(err), h.requests.Load())
 		}
 	})
+}
+
+// heldUntilSeen is a transport whose requests outlive their context until the test server has seen them (seen
+// is closed): only then does the end of the request's context abandon the request, and RoundTrip returns that
+// context's error, as net/http does.
+type heldUntilSeen struct {
+	inner http.RoundTripper
+	seen  <-chan struct{}
+}
+
+func (h heldUntilSeen) RoundTrip(r *http.Request) (*http.Response, error) {
+	// ctx ends only after seen closed and r's context ended; a response's body stays readable until then.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	go func() {
+		select {
+		case <-h.seen:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	resp, err := h.inner.RoundTrip(r.WithContext(ctx))
+	if err != nil {
+		cancel()
+		if cerr := r.Context().Err(); cerr != nil {
+			return nil, cerr
+		}
+		return nil, err
+	}
+	return resp, nil
 }

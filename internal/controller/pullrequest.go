@@ -2063,7 +2063,7 @@ func carriesMarker(body, want string, uids ...types.UID) bool {
 // whose own rewrite was done (the body holds its marker, or a later one) or that has no incoming handoff (it
 // opened the pull request). A request of another chain, or one the chain does not reach, is never accepted, so
 // the pull request of another chain or Incident is never claimed. A link that no longer exists ends the walk,
-// failing closed; a read that fails is returned for a retry.
+// failing closed; a read that fails is returned for a retry, as a *clusterError.
 func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body string,
 	rr *remediationv1alpha1.RemediationRequest) (bool, error) {
 	if ok := hasMarker(body, rr); ok || !inheritsMarker(rr) {
@@ -2085,7 +2085,10 @@ func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body stri
 			break
 		}
 		if err != nil {
-			return false, fmt.Errorf("get RemediationRequest %s of the supersede chain of %s: %w", from.Name, rr.Name, err)
+			// A read of the Kubernetes API, not of the Git host: a cleanup through a new installation retries it
+			// without saying it in PullRequestNotClosed (#812).
+			return false, &clusterError{err: fmt.Errorf("get RemediationRequest %s of the supersede chain of %s: %w",
+				from.Name, rr.Name, err)}
 		}
 		ho := pred.Status.Handoff
 		if pred.UID != types.UID(from.UID) || chainRootOf(pred) != root || ho == nil || ho.To == nil ||

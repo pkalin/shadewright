@@ -212,7 +212,9 @@ func release(rr *remediationv1alpha1.RemediationRequest) {
 //
 // A request that ended Cancelled because of its Incident (cancelledForIncident) is the one exception to open and
 // merged: its own pull request, found open, is recorded and closed, and found merged, its merge is recorded as a
-// stale plan's (settleCancelled, ADR-0039 points 21 and 22, amended 2026-11-16).
+// stale plan's (settleCancelled, ADR-0039 points 21 and 22, amended 2026-11-16). For such a request, a pause found
+// before the read sets WritesPaused (waitWhilePaused), and a closed or gone verdict removes it with
+// PullRequestNotClosed: no close is left for either to speak of.
 //
 // TargetHeld is written when it changes. Every outcome but unknown is looked at again after heldRecheckInterval
 // while the lock is kept, and so is unknown; only the caller's cancellation and a failed write of
@@ -241,6 +243,12 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err
 	}
+	if _, ok := cancelledForIncident(rr); ok && errors.Is(err, freshness.ErrPaused) {
+		// Writes are paused before the read: a close of its own may be left to make, and the kill switch holds it.
+		// WritesPaused says so, as when the pause comes between the read and the close (closeCancelled); the read
+		// after the pause removes it (settleCancelled, or the release below).
+		return r.waitWhilePaused(ctx, rr)
+	}
 	if c := repositoryRead(rr, err); c != nil {
 		// No read can be made: the lock is kept, and condition PullRequestUnreadable says why as the settings stand
 		// now (once per reason), until the repository can be opened again (changeOf removes it then) or the
@@ -263,8 +271,10 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	}
 	before := rr.Status.DeepCopy()
 	if _, ok := cancelledForIncident(rr); ok {
-		// Closed (by Shadewright, its answer lost, or by a person) or not this request's: no close is left to make.
+		// Closed (by Shadewright, its answer lost, or by a person) or not this request's: no close is left to make,
+		// so neither a failed close nor a pause that held it is left to say.
 		clearNotClosed(rr)
+		resume(rr)
 	}
 	if v.state != changeGone {
 		recordFound(rr, v.pr)

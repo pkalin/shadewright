@@ -229,6 +229,8 @@ func (r *RemediationRequestReconciler) recordCancelledOpen(ctx context.Context,
 			"cancelled (%s); Shadewright closes it, and the target stays locked until it is closed or merged", n, reason),
 		ObservedGeneration: rr.Generation,
 	})
+	// The read went through, so writes are not paused now; a pause found before an earlier read is over.
+	resume(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
@@ -241,7 +243,9 @@ func (r *RemediationRequestReconciler) recordCancelledOpen(ctx context.Context,
 // close through the provider the kill switch gates).
 //   - closed: PullRequestOpened says Shadewright closed it (closedByUs), PullRequestNotClosed and WritesPaused go,
 //     and the next read of the branch releases the lock (closedOnly, checkHeld).
-//   - paused (spec.paused): nothing is closed, WritesPaused says so, and it is tried again (waitWhilePaused).
+//   - paused (spec.paused): nothing is closed, WritesPaused says so, and it is tried again (waitWhilePaused). A pause
+//     found before the read sets it too (checkHeld); the first read after the pause removes it (here, in
+//     recordCancelledOpen, or with the release when the pull request is found closed or gone).
 //   - not this request's any more (no marker, or the request gone or replaced): nothing is closed, and the read after
 //     heldRecheckInterval settles the lock by the usual rule.
 //   - a step of the Git host that failed (the token, the read, the close, a refusal included): condition

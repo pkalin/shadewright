@@ -68,6 +68,15 @@ const (
 	readmePath = "README.yaml"
 )
 
+// pausedFind is what the read after a pause finds on the branch of a request cancelled because of its Incident.
+type pausedFind int
+
+const (
+	findNone     pausedFind = iota // no pull request
+	findOpen                       // its own pull request open, not recorded yet
+	findRecorded                   // its own pull request recorded, to be closed
+)
+
 var _ = Describe("RemediationRequest pull request step", func() {
 	ctx := context.Background()
 	var (
@@ -2447,6 +2456,14 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(meta.FindStatusCondition(next.Status.Conditions, remediationv1alpha1.ConditionQueued)).To(BeNil())
 		})
 
+		// pauseWrites sets or clears spec.paused of RemediationSettings.
+		pauseWrites := func(on bool) {
+			GinkgoHelper()
+			live := &remediationv1alpha1.RemediationSettings{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, live)).To(Succeed())
+			live.Spec.Paused = new(on)
+			Expect(k8sClient.Update(ctx, live)).To(Succeed())
+		}
 		// lostOpen opens the pull request of an earlier open of got, with its marker, that no status recorded and that
 		// the look-up before the open did not list yet.
 		lostOpen := func(got *remediationv1alpha1.RemediationRequest) providers.ChangeRequest {
@@ -2546,7 +2563,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				return nil
 			})
 			cancelled(remediationv1alpha1.ReasonIncidentFolded)
-			Expect(after).NotTo(ContainElements(opOpen, opClose, opCommit, opCreateBranch, opComment, opCreateCheckRun),
+			Expect(after).NotTo(ContainElement(BeElementOf(opOpen, opClose, opCommit, opCreateBranch, opComment, opCreateCheckRun)),
 				"the cancel writes nothing to the Git host")
 		})
 
@@ -2741,6 +2758,110 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).To(BeNil())
 			closedAndReleased(own, remediationv1alpha1.ReasonIncidentGone, reconcileSecond)
 		})
+
+		It("removes WritesPaused when a person closes the pull request whose close the pause held", func() {
+			naming()
+			afterCommit(remove)
+			got := cancelled(remediationv1alpha1.ReasonIncidentGone)
+			own := lostOpen(got)
+			recordedOpen(own, remediationv1alpha1.ReasonIncidentGone)
+			// The pause starts between the read of the branch and the close.
+			gets := 0
+			git.SetFail(func(op string) error {
+				if op == opGet {
+					if gets++; gets == 2 {
+						pauseWrites(true)
+					}
+				}
+				return nil
+			})
+			Expect(reconcileOnce()).To(Succeed(), "a pause is a wait")
+			git.SetFail(nil)
+			Expect(meta.IsStatusConditionTrue(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).
+				To(BeTrue())
+			// A person closes it, and the pause ends: the next read finds it closed and releases the lock.
+			Expect(git.CloseChangeRequest(ctx, own.Number)).To(Succeed())
+			pauseWrites(false)
+			Expect(reconcileOnce()).To(Succeed())
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).
+				To(BeNil(), "no close is left for the pause to hold")
+		})
+
+		It("removes PullRequestNotClosed when a person closes the pull request whose close failed", func() {
+			naming()
+			afterCommit(fold)
+			got := cancelled(remediationv1alpha1.ReasonIncidentFolded)
+			own := lostOpen(got)
+			recordedOpen(own, remediationv1alpha1.ReasonIncidentFolded)
+			git.SetFail(func(op string) error {
+				if op == opClose {
+					return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+				}
+				return nil
+			})
+			Expect(reconcileOnce()).To(Succeed())
+			Expect(meta.IsStatusConditionTrue(fetch().Status.Conditions,
+				remediationv1alpha1.ConditionPullRequestNotClosed)).To(BeTrue())
+			git.SetFail(nil)
+			Expect(git.CloseChangeRequest(ctx, own.Number)).To(Succeed())
+			_, reconcileSecond := second()
+			Expect(reconcileOnce()).To(Succeed())
+			got = fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "closed by a person: the lock goes")
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
+				To(BeNil(), "no close is left to fail")
+			Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+		})
+
+		DescribeTable("says writes are paused when the pause comes before the read, and removes it after the pause",
+			func(found pausedFind) {
+				naming()
+				afterCommit(remove)
+				got := cancelled(remediationv1alpha1.ReasonIncidentGone)
+				var own providers.ChangeRequest
+				if found != findNone {
+					own = lostOpen(got)
+				}
+				if found == findRecorded {
+					recordedOpen(own, remediationv1alpha1.ReasonIncidentGone)
+				}
+				pauseWrites(true)
+				for range 2 {
+					res, err := reconcileResult()
+					Expect(err).NotTo(HaveOccurred(), "a pause is a wait")
+					Expect(res.RequeueAfter).To(Equal(freshRecheckDelay), "looked at again as any paused request")
+				}
+				got = fetch()
+				paused := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)
+				Expect(paused).NotTo(BeNil(), "the pause that holds the read and the close is visible")
+				Expect(paused.Status).To(Equal(metav1.ConditionTrue))
+				Expect(paused.Reason).To(Equal(ReasonWritesPaused))
+				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+				if found != findNone {
+					Expect(stateOf(own.Number)).To(Equal(providers.ChangeRequestOpen))
+				}
+				pauseWrites(false)
+				Expect(reconcileOnce()).To(Succeed())
+				got = fetch()
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).
+					To(BeNil(), "the read after the pause removes it")
+				switch found {
+				case findNone:
+					Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+				case findRecorded:
+					Expect(stateOf(own.Number)).To(Equal(providers.ChangeRequestClosed))
+				default:
+					Expect(got.Status.PullRequest).NotTo(BeNil(), "recorded, and closed next")
+				}
+			},
+			Entry("with no pull request on the branch", findNone),
+			Entry("with its own pull request found open, not recorded yet", findOpen),
+			Entry("with its own pull request recorded, to be closed", findRecorded),
+		)
 
 		DescribeTable("follows its own pull request found merged after the cancel as a merged stale plan",
 			func(recordFirst bool, reason string) {

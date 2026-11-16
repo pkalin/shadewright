@@ -328,3 +328,38 @@ func TestAnthropicOnlyInstallNeedsNoAzureSettings(t *testing.T) {
 		})
 	}
 }
+
+// Suffixes without the analyzer's client ID render an analyzer that builds an Azure token source and has no
+// workload identity, so it refuses to start: the render fails whatever the deployments are (#814).
+func TestEndpointSuffixesNeedTheAnalyzerClientID(t *testing.T) {
+	anthropicOnly := []string{"-f", testValues(t), "-f",
+		settingsFile(t, modelLine("triage", anthropicFields)+modelLine("escalation", anthropicFields))}
+	set := []string{keySecret, claudeTriage, "analyzer.analysis.escalationModel=claude-haiku-5-5", labSuffix}
+	err := helmTemplate(t, anthropicOnly, set...)
+	if !strings.Contains(err, "analyzer.analysis.endpointSuffixes needs analyzer.identity.azure.clientId") {
+		t.Errorf("suffixes without the client ID: %q", err)
+	}
+	if err := helmTemplate(t, anthropicOnly, append(set, analyzerClientID)...); err != "" {
+		t.Errorf("suffixes with the client ID: %s", err)
+	}
+}
+
+// With settings.create false the chart renders no RemediationSettings, so a settings.spec of Anthropic
+// deployments is not applied and must not lift the Azure checks (#814).
+func TestAnthropicSpecWithoutSettingsCreateKeepsTheAzureChecks(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "settings.yaml")
+	body := "settings:\n  create: false\n  spec:\n    analysis:\n      models:\n" +
+		modelLine("triage", anthropicFields) + modelLine("escalation", anthropicFields)
+	if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{"-f", testValues(t), "-f", f}
+	if err := helmTemplate(t, files, keySecret, claudeTriage, labSuffix); !strings.Contains(err,
+		"analyzer.analysis.triageModel needs analyzer.identity.azure.clientId") {
+		t.Errorf("settings.create false, no client ID: %q", err)
+	}
+	if err := helmTemplate(t, files, keySecret, claudeTriage, analyzerClientID); !strings.Contains(err,
+		"analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes") {
+		t.Errorf("settings.create false, no suffixes: %q", err)
+	}
+}

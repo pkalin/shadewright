@@ -210,11 +210,15 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- end -}}
 {{- if eq .component "analyzer" -}}
 {{- $a := $c.analysis | default dict -}}
-{{- /* The Azure model settings are needed unless settings.spec names its model deployments and all of them are
-Anthropic (#814). Without settings.spec the chart cannot tell, so it asks for them as before; the analyzer is the
-gate either way: without --model-endpoint-suffixes it refuses every Foundry deployment. */ -}}
+{{- /* The Azure model settings are needed unless the chart renders the RemediationSettings (settings.create) and its
+spec names the model deployments and all of them are Anthropic (#814). With settings.create false the spec is not
+applied, and without a spec the chart cannot tell, so it asks for them as before; the analyzer is the gate either
+way: without --model-endpoint-suffixes it refuses every Foundry deployment. */ -}}
 {{- $foundry := true -}}
-{{- $named := (((($v.settings | default dict).spec | default dict).analysis | default dict).models | default dict) -}}
+{{- $named := dict -}}
+{{- if ($v.settings | default dict).create -}}
+{{- $named = (((($v.settings | default dict).spec | default dict).analysis | default dict).models | default dict) -}}
+{{- end -}}
 {{- $roles := list -}}
 {{- range $role := list "triage" "escalation" -}}
 {{- if get $named $role -}}{{- $roles = append $roles $role -}}{{- end -}}
@@ -230,6 +234,9 @@ gate either way: without --model-endpoint-suffixes it refuses every Foundry depl
 {{- end -}}
 {{- if and $a.triageModel $foundry (not $a.endpointSuffixes) -}}
 {{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com" -}}
+{{- end -}}
+{{- if and $a.triageModel $a.endpointSuffixes (not $c.identity.azure.clientId) -}}
+{{- fail "analyzer.analysis.endpointSuffixes needs analyzer.identity.azure.clientId: with a triage model and suffixes the analyzer builds an Azure token source, which needs the analyzer's workload identity" -}}
 {{- end -}}
 {{- if and $a.escalationModel (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.escalationModel needs analyzer.analysis.triageModel" -}}

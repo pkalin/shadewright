@@ -29,6 +29,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -43,6 +44,13 @@ import (
 // Kubernetes API and to the Git host, in each of its paths, with each kind of failure, and checks the outcome the
 // rule gives. The calls of each path are listed by hand: a call the recovery makes that the list lacks, or a listed
 // call it no longer makes, fails the test, so a new call site gets its row.
+//
+// This holds for the call sites a path runs. A call site in a branch that no path runs is never counted: the log
+// sees calls, not code, and telling which call sites exist would need the code's own coverage or a parse of the
+// source, which the test does not do. So each branch of the recovery that makes a call has a path here: the
+// takeover of an open, a closed and a merged pull request (with the check at the merge, its wait and the count of
+// the Incident), a 404 for the branch with a closed and with a merged pull request, hints turned off and a
+// predecessor that is gone. A new branch with a call needs its path.
 
 // failureKind is a kind of failure the table injects at one call.
 type failureKind string
@@ -119,9 +127,15 @@ type callLog struct {
 	target string
 	kind   failureKind
 	cancel context.CancelFunc
+	// failing fails with a status error at every look, unless it is the target.
+	failing string
 }
 
 func (l *callLog) call(ctx context.Context, cluster bool, name string) error {
+	if cluster && ctx.Err() != nil {
+		// A real client sends nothing on an ended context; the fake client would write all the same.
+		return ctx.Err()
+	}
 	side := "git"
 	if cluster {
 		side = "k8s"
@@ -137,6 +151,9 @@ func (l *callLog) call(ctx context.Context, cluster bool, name string) error {
 	hit := key == l.target
 	l.mu.Unlock()
 	if !hit {
+		if key == l.failing {
+			return injected(ctx, cluster, kindStatus, l.cancel)
+		}
 		return nil
 	}
 	return injected(ctx, cluster, l.kind, l.cancel)
@@ -375,6 +392,100 @@ type recoveryPath struct {
 		cr providers.ChangeRequest)
 	calls []string
 	ended func(rr *api.RemediationRequest) bool
+	// rows, when set, limits the rows of the path to these calls (the others have their rows in another path).
+	rows []string
+	// bestEffort holds the calls whose failure the look logs and goes on without: the look then ends as their
+	// afterFailure says. A cancellation of the caller is still returned (the write after them fails).
+	bestEffort map[string]afterFailure
+	// failing is a call that fails with a status error on every look of the path, its row included.
+	failing string
+	// stepTimeout replaces waitStepTimeout for the path.
+	stepTimeout time.Duration
+}
+
+// The calls of a merged takeover, and the end it gives (ADR-0041: the plan is checked at the merge).
+const (
+	callSettings3 = "k8s get RemediationSettings/" + api.SettingsName + "#3"
+	callPolicy    = "k8s get RemediationPolicy/keda-capacity#1"
+	callIncident  = "k8s get Incident/" + tableIncident + "#1"
+	tableIncident = "inc"
+)
+
+var mergedTakeoverCalls = []string{
+	"k8s get RemediationRequest/" + oldName + "#1",
+	"k8s get RemediationSettings/" + api.SettingsName + "#1",
+	callOpen,
+	callBranchHead,
+	callParents,
+	callCheckChain,
+	"git CheckCommit#1",
+	callReadFile1,
+	callReadFile2,
+	callGetChange1,
+	"k8s get RemediationSettings/" + api.SettingsName + "#2",
+	callSettings3,
+	callPolicy,
+	"k8s update status RemediationRequest/" + newName + "#1",
+}
+
+// afterFailure is how a look ends when a call whose failure it logs and goes on without fails: end tells the
+// look, and stepWide says that the call runs on the step's own context, so that the step's deadline fails the
+// write after it too, which then goes to the error backoff like any failed write.
+type afterFailure struct {
+	end      func(rr *api.RemediationRequest) bool
+	stepWide bool
+	// onDeadline, when set, replaces end for a call that runs into the deadline of its context.
+	onDeadline func(rr *api.RemediationRequest) bool
+}
+
+// checkAtMergeReads are the reads of the check at the merge (checkAtMerge, within half of the step): the policy
+// that allowed the plan is gone in this world, so a look that reads it ends Merged with the plan marked stale,
+// whatever the read of the settings before it gave (loadPlanOf decides on the policy first), unless the read of
+// the settings used up the check's time. A failed read of the policy records the start of the wait for the check
+// and the takeover like an open pull request, whose next look checks the plan again.
+var checkAtMergeReads = map[string]afterFailure{
+	callSettings3: {end: mergedEnd, onDeadline: takenOverUnchecked},
+	callPolicy:    {end: takenOverUnchecked},
+}
+
+func takenOverUnchecked(rr *api.RemediationRequest) bool {
+	return rr.Status.Phase == api.PhasePRCreated && rr.Status.MergeCommitAwaitedSince != nil
+}
+
+func mergedEnd(rr *api.RemediationRequest) bool {
+	return rr.Status.Phase == api.PhaseMerged && rr.Status.MergeReceipt != nil
+}
+
+func countAtMergeOf(rr *api.RemediationRequest) *api.IncidentCountReading {
+	if v := rr.Status.Verification; v != nil && v.IncidentCount != nil {
+		return v.IncidentCount.AtMerge
+	}
+	return nil
+}
+
+// mergedWithIncident merges the pull request of a predecessor and replacement that name an Incident, so the write
+// that sets Merged reads its count.
+func mergedWithIncident(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git, p *api.RemediationRequest,
+	cr providers.ChangeRequest) {
+	ctx := context.Background()
+	inc := &api.Incident{ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: tableIncident, UID: "inc-uid"}}
+	if err := r.Create(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{oldName, newName} {
+		rr := &api.RemediationRequest{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: name}, rr); err != nil {
+			t.Fatal(err)
+		}
+		rr.Spec.IncidentRef = api.IncidentRef{Name: tableIncident, UID: "inc-uid"}
+		if err := r.Update(ctx, rr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.IncidentReadTimeout = waitStepTimeout
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // resourceRemediationRequests is the resource of a RemediationRequest, for the API errors the table injects.
@@ -468,6 +579,92 @@ var recoveryPaths = []recoveryPath{
 		ended: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhaseCancelled },
 	},
 	{
+		name: "takeover of the merged pull request",
+		arrange: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, _ *api.RemediationRequest,
+			cr providers.ChangeRequest) {
+			if _, err := g.MergeWithCommit(cr.Number); err != nil {
+				t.Fatal(err)
+			}
+		},
+		calls:      mergedTakeoverCalls,
+		bestEffort: checkAtMergeReads,
+		ended:      mergedEnd,
+	},
+	{
+		name:    "takeover of the merged pull request, with its Incident",
+		arrange: mergedWithIncident,
+		calls:   append(slices.Clone(mergedTakeoverCalls[:13]), callIncident, mergedTakeoverCalls[13]),
+		rows:    []string{callIncident},
+		bestEffort: map[string]afterFailure{
+			// The count at the merge is read for the write that sets Merged and holds nothing back: a failed read
+			// leaves it absent (recordCountAtMerge).
+			callIncident: {end: func(rr *api.RemediationRequest) bool { return mergedEnd(rr) && countAtMergeOf(rr) == nil }},
+		},
+		// The read of the Incident needs a minute of the step left for the write after it (countWriteReserve):
+		// this path runs only the row of that read, whose deadline is its own (IncidentReadTimeout), so no row
+		// waits for the step's. Every other call of this look has its rows in the path above.
+		stepTimeout: countWriteReserve + 10*time.Second,
+		ended:       func(rr *api.RemediationRequest) bool { return mergedEnd(rr) && countAtMergeOf(rr) != nil },
+	},
+	{
+		name: "takeover of the merged pull request whose check at the merge cannot read",
+		arrange: func(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git, p *api.RemediationRequest,
+			cr providers.ChangeRequest) {
+			if _, err := g.MergeWithCommit(cr.Number); err != nil {
+				t.Fatal(err)
+			}
+		},
+		// The policy cannot be read on any look of this path, so the check records the start of its wait before the
+		// takeover is recorded like an open pull request.
+		failing: callPolicy,
+		bestEffort: map[string]afterFailure{
+			callSettings3: {end: takenOverUnchecked},
+			callPolicy:    {end: takenOverUnchecked},
+			// A failed start of the wait is logged with the check's failure; the takeover is recorded all the same.
+			"k8s patch status RemediationRequest/" + newName + "#1": {stepWide: true,
+				end: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhasePRCreated }},
+		},
+		calls: append(slices.Clone(mergedTakeoverCalls[:13]), "k8s patch status RemediationRequest/"+newName+"#1",
+			mergedTakeoverCalls[13]),
+		ended: func(rr *api.RemediationRequest) bool {
+			return rr.Status.Phase == api.PhasePRCreated && rr.Status.MergeCommitAwaitedSince != nil
+		},
+	},
+	{
+		name: "branch answers 404 and the pull request is merged",
+		arrange: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, _ *api.RemediationRequest,
+			cr providers.ChangeRequest) {
+			if _, err := g.MergeWithCommit(cr.Number); err != nil {
+				t.Fatal(err)
+			}
+			g.SetFail(func(op string) error {
+				if op == opBranchHead {
+					return fmt.Errorf("status 404: %w", providers.ErrNotFound)
+				}
+				return nil
+			})
+		},
+		calls: []string{
+			"k8s get RemediationRequest/" + oldName + "#1",
+			"k8s get RemediationSettings/" + api.SettingsName + "#1",
+			callOpen,
+			callBranchHead,
+			callGetChange1,
+			callParents,
+			callCheckChain,
+			"git CheckCommit#1",
+			callReadFile1,
+			callReadFile2,
+			"git GetChangeRequest#2",
+			"k8s get RemediationSettings/" + api.SettingsName + "#2",
+			callSettings3,
+			callPolicy,
+			"k8s update status RemediationRequest/" + newName + "#1",
+		},
+		bestEffort: checkAtMergeReads,
+		ended:      mergedEnd,
+	},
+	{
 		name: "reviewer hints turned off",
 		arrange: func(_ *testing.T, r *RemediationRequestReconciler, _ *fakegit.Git, _ *api.RemediationRequest,
 			_ providers.ChangeRequest) {
@@ -526,6 +723,10 @@ func waitingWorld(t *testing.T, path recoveryPath, l *callLog) (*RemediationRequ
 	c := logClient(r.Client.(client.WithWatch), l)
 	r.Client, r.APIReader = c, c
 	r.WriteTimeout = waitStepTimeout
+	if path.stepTimeout > 0 {
+		r.WriteTimeout = path.stepTimeout
+	}
+	l.failing = path.failing
 	r.OpenRepository = func(ctx context.Context, _ api.GitRepository) (providers.GitProvider, error) {
 		if err := l.call(ctx, false, "open"); err != nil {
 			return nil, err
@@ -583,7 +784,11 @@ func TestRecoveryWaitSortsEachFailureByItsSource(t *testing.T) {
 					rr.Status.Phase, rr.Status.Conditions)
 			}
 
-			for _, call := range path.calls {
+			rows := path.calls
+			if path.rows != nil {
+				rows = path.rows
+			}
+			for _, call := range rows {
 				for _, kind := range failureKinds {
 					t.Run(call+"/"+string(kind), func(t *testing.T) {
 						recoveryWaitRow(t, path, call, kind)
@@ -608,6 +813,17 @@ func recoveryWaitRow(t *testing.T, path recoveryPath, call string, kind failureK
 	got := &api.RemediationRequest{}
 	if err := base.Get(context.Background(), client.ObjectKeyFromObject(rr), got); err != nil {
 		t.Fatal(err)
+	}
+	if after, ok := path.bestEffort[call]; ok && kind != kindCancel && (kind != kindStepDeadline || !after.stepWide) {
+		end := after.end
+		if kind == kindStepDeadline && after.onDeadline != nil {
+			end = after.onDeadline
+		}
+		if err != nil || !end(got) {
+			t.Fatalf("a failed read that holds nothing back changed the look: err %v, phase %q, conditions %+v",
+				err, got.Status.Phase, got.Status.Conditions)
+		}
+		return
 	}
 	if got.Status.Phase != api.PhasePolicyChecked || got.Status.Handoff.From.Phase != api.HandoffReserved {
 		t.Fatalf("a failure ended a waiting recovery: phase %q, handoff %q, conditions %+v (err %v)",

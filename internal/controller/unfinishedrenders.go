@@ -194,9 +194,10 @@ func (r *RemediationRequestReconciler) unmarkFresh(ctx context.Context, rr *reme
 
 // skipOwnMarks drops the watch events of an update that changed nothing of a request but status.unfinishedRenders,
 // condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound, set or
-// removed (and the metadata every write changes). Those are the executor's own writes: the mark and its removal
+// removed, PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
+// the metadata every write changes. Those are the executor's own writes: the mark and its removal
 // around a render, the condition that says why a stale plan's pull request is not closed (keepWatchingStale,
-// noteNotReached), and the one that says a read through a new installation of the GitHub App failed (noteRead,
+// noteNotReached) and its removal with the close (recordStaleClosed), and the one that says a read through a new installation of the GitHub App failed (noteRead,
 // noteLockUnreadable), and each such reconcile returns its own delay. Without the filter
 // each would queue the request again at once, before the error backoff, the step delay or a Git host's Retry-After
 // that the reconcile returned, so a step that fails after a render (a commit the host refuses) would render again
@@ -223,6 +224,11 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	if equality.Semantic.DeepEqual(o, n) {
 		return false
 	}
+	if closedRecorded(o, n) {
+		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
+			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+		}
+	}
 	for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 		rr.Status.UnfinishedRenders = nil
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
@@ -233,6 +239,15 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 		}
 	}
 	return equality.Semantic.DeepEqual(o, n)
+}
+
+// closedRecorded reports whether n is recordStaleClosed's write over o: PullRequestNotClosed True in o and gone in
+// n, and PullRequestOpened with reason PullRequestClosed in n. Only that write removes the condition and records the
+// close without ending the request (#797); an end changes the phase too, which the caller still compares.
+func closedRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
+	c := meta.FindStatusCondition(n.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+	return notClosed(o) != nil && meta.FindStatusCondition(n.Status.Conditions,
+		remediationv1alpha1.ConditionPullRequestNotClosed) == nil && c != nil && c.Reason == ReasonPullRequestClosed
 }
 
 // reinstalledUnreadable reports whether rr has no condition PullRequestUnreadable, or one with reason GitFailed or

@@ -225,7 +225,15 @@ func reinstalledFailure(err error) (s refusedStep, refused, ok bool) {
 	if s.step == stepClose || s.step == stepOther {
 		return refusedStep{}, false, false
 	}
-	reason, _, refused := refusal(err)
+	s.reason, refused = reinstalledReason(err)
+	return s, refused, true
+}
+
+// reinstalledReason is the reason of PullRequestNotClosed for err, a failed step of a cleanup through a new
+// installation: the refusal's (GitForbidden, GitRejected; refused is true), GitNotFound for an answer 404, or
+// GitFailed for any other failure.
+func reinstalledReason(err error) (reason string, refused bool) {
+	reason, _, refused = refusal(err)
 	switch {
 	case refused:
 	case providers.IsNotFound(err) && !providers.IsRetryable(err):
@@ -233,8 +241,29 @@ func reinstalledFailure(err error) (s refusedStep, refused, ok bool) {
 	default:
 		reason = ReasonGitFailed
 	}
+	return reason, refused
+}
+
+// reinstalledCloseFailure returns the failed step in err when err is a failure of a cleanup through a new
+// installation of the plan's repository (#290) that reinstalledFailure leaves out and that is no refusal: the close
+// call (a 5xx, a timeout, a rate limit, a 404, an unclassified failure) or a step no other class names (#797), with
+// GitNotFound or GitFailed. A refused close is refusedClose's, a refused other step ends the request
+// (cleanUpStale), and a pause or the caller's cancellation is not a failure of a step.
+func reinstalledCloseFailure(err error) (refusedStep, bool) {
+	if _, ok := errors.AsType[*reinstalledError](err); !ok || errors.Is(err, context.Canceled) ||
+		errors.Is(err, freshness.ErrPaused) {
+		return refusedStep{}, false
+	}
+	s := stepOf(err)
+	if s.step != stepClose && s.step != stepOther {
+		return refusedStep{}, false
+	}
+	reason, refused := reinstalledReason(err)
+	if refused {
+		return refusedStep{}, false
+	}
 	s.reason = reason
-	return s, refused, true
+	return s, true
 }
 
 // notReachedCondition is condition PullRequestNotClosed for the stale plan of rr whose recorded pull request could

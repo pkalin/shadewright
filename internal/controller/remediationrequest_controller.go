@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1545,8 +1546,9 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		return errStaleCheckPending
 	case err == nil:
 		// Closed through a new installation (#290): the lock is settled before the end, which reads nothing more.
+		// While it waits, a PullRequestNotClosed of an earlier look is removed with the close recorded (#797).
 		if err := r.releaseReinstalled(ctx, rr); err != nil {
-			return err
+			return withErr(err, r.recordStaleClosed(ctx, rr, staleErr.Reason))
 		}
 		closedByUs(rr, staleClosed(staleErr.Reason))
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
@@ -1599,6 +1601,11 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 			// condition and retried as before, with the backoff or the delay the host asked for.
 			return r.noteNotReached(ctx, rr, notReachedCondition(rr, s), err)
 		}
+		if s, ok := reinstalledCloseFailure(err); ok && rr.Status.PullRequest != nil {
+			// The close itself, or a step no other case names, failed through the new installation without a
+			// refusal (#797): said in the same condition, so it names the latest step, and retried as before.
+			return r.noteNotReached(ctx, rr, notReachedCondition(rr, s), err)
+		}
 		if isUnknownChange(err) {
 			// A failed read of the change request, a refused one included (PullRequestUnreadable names it), is
 			// retried with the mark kept, never an end.
@@ -1633,7 +1640,7 @@ var errStaleNotClosed = errors.New("the Git host refused to close the stale plan
 // checked again and nothing but the close is written for it.
 func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	want metav1.Condition, number int64, refused string) error {
-	changed, event := r.setRefused(rr, want)
+	changed, event := r.setNotClosed(rr, want)
 	if !changed {
 		return errStaleNotClosed
 	}
@@ -1656,7 +1663,7 @@ func (r *RemediationRequestReconciler) keepWatchingStale(ctx context.Context, rr
 // no reconcile of its own (skipOwnMarks). A failed write is returned with err.
 func (r *RemediationRequestReconciler) noteNotReached(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	want metav1.Condition, err error) error {
-	changed, event := r.setRefused(rr, want)
+	changed, event := r.setNotClosed(rr, want)
 	if changed {
 		if werr := r.Status().Update(ctx, rr); werr != nil {
 			return errors.Join(err, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, werr))
@@ -1669,6 +1676,81 @@ func (r *RemediationRequestReconciler) noteNotReached(ctx context.Context, rr *r
 		"installation of its repository; trying again", "remediationRequest", client.ObjectKeyFromObject(rr),
 		"pullRequest", rr.Status.PullRequest.Number, "reason", want.Reason, "error", err.Error())
 	return err
+}
+
+// errStaleMarkGone is recordStaleClosed's answer when the request read again after a conflict is another one or
+// no longer carries the mark of a stale plan: the close is not recorded there.
+var errStaleMarkGone = errors.New("the request no longer carries the mark of a stale plan")
+
+// recordStaleClosed removes condition PullRequestNotClosed from rr, a stale plan's request whose pull request
+// Shadewright has just closed through a new installation while its end waits for the target lock
+// (releaseReinstalled: a look that failed, another open pull request, a pause), and records the close in
+// PullRequestOpened (closedByUs) in the same status write, so that endStaleClosed does not take it for a retried
+// close whose answer was lost (#797). It writes nothing when the condition is not set, or when the reconcile was
+// cancelled. A conflict reads the request again from the API server and writes there, as long as it is the same
+// request with the mark; rr is then the request as written. A write that still fails is logged and returned with the
+// caller's answer (which refuseOrWait may turn into a requeue); the condition then stays, and the end says, as for a lost answer, that it is not known
+// who closed the pull request. The write changes nothing but those two conditions, so it wakes no reconcile of its
+// own (skipOwnMarks) and the caller's delay stands.
+func (r *RemediationRequestReconciler) recordStaleClosed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	staleReason string) error {
+	if ctx.Err() != nil || notClosed(rr) == nil {
+		return nil
+	}
+	why := staleClosed(staleReason)
+	clearNotClosed(rr)
+	closedByUs(rr, why)
+	err := r.Status().Update(ctx, rr)
+	if apierrors.IsConflict(err) {
+		var reader client.Reader = r.Client
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
+		err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			fresh := &remediationv1alpha1.RemediationRequest{}
+			if err := reader.Get(ctx, client.ObjectKeyFromObject(rr), fresh); err != nil {
+				return fmt.Errorf("read the request again: %w", err)
+			}
+			if fresh.UID != rr.UID || staleMark(fresh) == nil {
+				return errStaleMarkGone
+			}
+			clearNotClosed(fresh)
+			closedByUs(fresh, why)
+			if err := r.Status().Update(ctx, fresh); err != nil {
+				return err
+			}
+			fresh.DeepCopyInto(rr)
+			return nil
+		})
+	}
+	if err != nil {
+		logf.FromContext(ctx).Info("Could not record the close of the pull request of a stale RemediationRequest",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return fmt.Errorf("record the close of the pull request of RemediationRequest %s/%s: %w",
+			rr.Namespace, rr.Name, err)
+	}
+	return nil
+}
+
+// withErr is err, joined with werr when that is not nil.
+func withErr(err, werr error) error {
+	if werr == nil {
+		return err
+	}
+	return errors.Join(err, werr)
+}
+
+// setNotClosed is setRefused for condition PullRequestNotClosed of a stale plan, whose message names the failed step
+// and the pull request and nothing that changes between two looks: the Event is also due when the message changes
+// while the reason stays, so a failure that moves to another step (a token, then the close) is said once more.
+func (r *RemediationRequestReconciler) setNotClosed(rr *remediationv1alpha1.RemediationRequest,
+	want metav1.Condition) (changed, event bool) {
+	var was string
+	if c := notClosed(rr); c != nil {
+		was = c.Message // a copy: setRefused changes the condition in place
+	}
+	changed, event = r.setRefused(rr, want)
+	return changed, event || (changed && was != "" && was != want.Message)
 }
 
 // errStaleLockPending is the answer of a stale plan's cleanup that closed its pull request through a new
@@ -1955,10 +2037,11 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 }
 
 // reinstalledTimeout is the deadline error timeout of a stale plan's cleanup whose step failed with stepErr. When
-// stepErr is a failure of the token, the read or the listing through a new installation of the GitHub App (#290),
-// the deadline keeps that step and the *reinstalledError around it, so cleanUpStale says it in
-// PullRequestNotClosed with reason GitFailed (reinstalledFailure) like any other failure of that step (#797), and
-// the retry is not left without a condition. Any other stepErr, nil included, leaves timeout as it is.
+// stepErr is a failure of any step through a new installation of the GitHub App (#290): the token, the read, the
+// listing, the close or another, the deadline keeps that step and the *reinstalledError around it, so cleanUpStale
+// says it in PullRequestNotClosed with reason GitFailed (reinstalledFailure, reinstalledCloseFailure) like any other
+// failure of that step (#797), and the retry is not left without a condition or with one that names an earlier
+// step. Any other stepErr, nil included, and the caller's cancellation leave timeout as it is.
 func reinstalledTimeout(stepErr, timeout error) error {
 	if _, ok := errors.AsType[*reinstalledError](stepErr); !ok || errors.Is(timeout, context.Canceled) {
 		return timeout
@@ -1966,8 +2049,10 @@ func reinstalledTimeout(stepErr, timeout error) error {
 	switch s := stepOf(stepErr); s.step {
 	case stepToken, stepRead, stepListing:
 		return &reinstalledError{err: &stepFailure{step: s.step, err: timeout}}
+	case stepClose:
+		return &reinstalledError{err: &closeFailure{number: s.closed.number, url: s.closed.url, err: timeout}}
 	}
-	return timeout
+	return &reinstalledError{err: timeout}
 }
 
 // reinstalledError is closeOwn's failure of a cleanup that reached the plan's repository through a new

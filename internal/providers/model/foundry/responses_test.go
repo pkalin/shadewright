@@ -211,6 +211,7 @@ func TestResponsesMalformedOutput(t *testing.T) {
 		{name: "not the assistant", body: responseJSON(`{"type":"message","role":"user","content":[{"type":"output_text","text":"{}"}]}`), withUsage: true},
 		{name: "unknown item", body: responseJSON(`{"type":"web_search_call","id":"ws_1","status":"completed"}`), withUsage: true},
 		{name: "built-in tool call", body: responseJSON(`{"type":"code_interpreter_call","id":"ci_1"}`), withUsage: true},
+		{name: "unknown item beside a valid text", body: responseJSON(okText + `,{"type":"mcp_call","id":"m_1"}`), withUsage: true},
 		{name: "not an object", body: responseJSON(textItem(replyMark)), withUsage: true},
 		{name: "tool not offered", body: responseJSON(callItem("c1", "delete_pod", `{}`)), withUsage: true},
 		{name: "tool id invalid", body: responseJSON(callItem("c 1", logsTool, `{}`)), withUsage: true},

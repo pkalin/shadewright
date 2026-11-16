@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // lines collects the lines of a section; every value from the cluster goes through Builder.value first, and
@@ -56,29 +57,59 @@ func stamp(t metav1.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+// The values of the summary that can be shortened, in the order they are shortened (#796, decided
+// 2026-11-16): the free text first, the subject's name last.
+const (
+	cutSymptom = iota
+	cutController
+	cutReason
+	cutName
+	cutValues
+)
+
 // summaryBlock describes the Incident, most relevant first. A cause Incident with a non-empty absorbed tally
 // gets the tally last and always whole (#796, decided 2026-11-16): the summary keeps room for the longest
-// tally ([longestTally]) and fits its other lines in what is left by shortening the symptom text, then the
-// reporting controller, never by removing a line. Without a tally the summary is what it always was.
+// tally ([longestTally]) and fits its other lines in what is left. They fit by shortening values, never by
+// removing a line: the symptom, then the reporting controller, then the reason, then the subject's name, each
+// cut at a character boundary and followed by a note of the bytes cut ([fitSummary]). This holds at every
+// summary bound the settings allow: with every value cut to nothing, the lines of an Incident at the schema's
+// limits and the longest tally take 575 bytes, within the smallest bound, [MinSectionBytes]. Without a tally the same fit applies to
+// the whole bound, and a summary that fits is what it always was.
 func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	s, st := inc.Spec, inc.Status
-	var symptom, controller string
+	var vals [cutValues]string
 	if s.Symptom != "" {
-		symptom = b.value(s.Symptom)
+		vals[cutSymptom] = b.value(s.Symptom)
 	}
 	if s.ReportingController != "" {
-		controller = b.value(s.ReportingController)
+		vals[cutController] = b.value(s.ReportingController)
 	}
-	render := func(controller, controllerCut, symptom, symptomCut string) *lines {
+	vals[cutReason], vals[cutName] = b.value(s.Reason), b.value(s.Subject.Name)
+	kind, namespace, typ := b.value(s.Subject.Kind), b.value(s.Subject.Namespace), b.value(s.Type)
+	render := func(keep [cutValues]int) (*lines, [cutValues]summaryTail) {
 		var l lines
-		l.add("subject: %s %s/%s", l.data(b.value(s.Subject.Kind)), l.data(b.value(s.Subject.Namespace)),
-			l.data(b.value(s.Subject.Name)))
-		l.add("reason: %s (%s)", l.data(b.value(s.Reason)), l.data(b.value(s.Type)))
+		var tails [cutValues]summaryTail
+		n := 0
+		// add writes the line of value i: label, the value's head as quotable, its note, then rest(), which
+		// records its own quotable values after the head, in the order of the line.
+		add := func(i int, label string, rest func() string) {
+			head, note := cutOf(vals[i], keep[i])
+			head = l.data(head)
+			tail := head + note + rest()
+			if note != "" {
+				tails[i] = summaryTail{line: n, text: tail}
+			}
+			l.add("%s%s", label, tail)
+			n++
+		}
+		none := func() string { return "" }
+		add(cutName, "subject: "+l.data(kind)+" "+l.data(namespace)+"/", none)
+		add(cutReason, "reason: ", func() string { return " (" + l.data(typ) + ")" })
 		if s.ReportingController != "" {
-			l.add("reported by: %s%s", l.data(controller), controllerCut)
+			add(cutController, "reported by: ", none)
 		}
 		if s.Symptom != "" {
-			l.add("symptom: %s%s", l.data(symptom), symptomCut)
+			add(cutSymptom, "symptom: ", none)
 		}
 		l.add("occurrences: %d", st.Count)
 		if st.FirstSeen != nil {
@@ -91,52 +122,176 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 			// The phase is written by the analyzer itself, never evidence.
 			l.add("phase: %s", b.value(string(st.Phase)))
 		}
-		return &l
+		return &l, tails
 	}
 	blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident, Availability: Available}
 	var t lines
 	absorbedLines(&t, st.Absorbed)
 	if t.Len() == 0 {
-		b.finish(&blk, render(controller, "", symptom, ""), b.limits.Summary)
+		b.fitSummary(&blk, vals, render, b.limits.Summary)
 		return blk
 	}
 	tally := b.redact(t.String())
-	budget := b.limits.Summary - max(len(tally), longestTally)
-	l := render(controller, "", symptom, "")
-	// Measured before the redaction of the whole text, which never makes text longer, so the redacted lines
-	// fit in what they are measured to fit in.
-	if over := l.Len() - budget; over > 0 {
-		sym, symCut, saved := shorten(symptom, over)
-		ctl, ctlCut, _ := shorten(controller, over-saved)
-		l = render(ctl, ctlCut, sym, symCut)
-		blk.addLabel(LabelSectionCut)
-	}
-	// Only values beyond the schema's limits can leave the lines longer than the budget here; the section's
-	// own cut then removes lines from the end, never the tally.
-	b.finish(&blk, l, budget)
+	b.fitSummary(&blk, vals, render, b.limits.Summary-max(len(tally), longestTally))
 	blk.unitAt = len(blk.Text)
 	blk.Text += tally
 	return blk
 }
 
-// shorten cuts v, a rendered value, so that it, followed by the note of the cut it returns, is by bytes
-// shorter, or as short as it can be; it returns what it saved. A value the note would not make shorter is
-// left whole. It cuts at a rune boundary and only removes text: v was redacted whole before.
-func shorten(v string, by int) (string, string, int) {
-	if by <= 0 || v == "" {
-		return v, "", 0
+// summaryTail is where a shortened value stands in the rendered summary: its line, and the text from the start
+// of the value to the end of that line (the head, the note of the cut and what follows on the line).
+type summaryTail struct {
+	line int
+	text string
+}
+
+// fitSummary fits the summary lines render writes into n bytes of redacted text and sets them as blk's text.
+// The fit is decided on the text after the redaction of the whole text, which stays as it is: it is the text
+// the model sees. While that text is longer than n, values are shortened in the order of vals (cutSymptom
+// first). While the redaction changes a shortened value or its note, that value's cut backs off to the start
+// of the word it ends in: a note right after "token=" or "Authorization:" is read as the secret's value, and the
+// note must stand intact in the final text, its number counting the bytes cut from the value as rendered. A
+// cut never lands inside a redaction marker.
+//
+// The loop is bounded: each pass either lowers the kept length of one value, which starts at most at
+// maxValueBytes and never goes below zero, or settles a value whose note the redaction changes even with
+// nothing of it kept (text before the line, not the cut, is then taking it: a value of the line above), which
+// happens at most once per value, or ends. So it ends after at most cutValues*(maxValueBytes+1) passes;
+// in practice a handful. Only values beyond the schema's limits (Kind, namespace and type are not shortened)
+// can leave the lines longer than n once nothing more can be shortened: the section's own cut then removes
+// lines from the end, as for any other section.
+func (b *Builder) fitSummary(blk *Block, vals [cutValues]string, render func([cutValues]int) (*lines, [cutValues]summaryTail), n int) {
+	var keep [cutValues]int
+	for i, v := range vals {
+		keep[i] = len(v)
 	}
-	note := func(n int) string { return fmt.Sprintf(" (%d bytes cut)", n) }
-	keep := max(len(v)-by-len(note(len(v))), 0)
-	for keep > 0 && !utf8.RuneStart(v[keep]) {
-		keep--
+	var settled [cutValues]bool
+	for {
+		l, tails := render(keep)
+		text := b.redact(l.String())
+		if d := damagedCut(l.String(), text, keep, vals, tails, settled); d >= 0 {
+			if keep[d] == 0 {
+				settled[d] = true
+			} else {
+				keep[d] = backOff(vals[d], keep[d])
+			}
+			continue
+		}
+		over := len(text) - n
+		if over <= 0 {
+			b.setSummary(blk, l, text, n, keep != lengths(vals))
+			return
+		}
+		shortened := false
+		for i := 0; i < cutValues && over > 0; i++ {
+			k := shortenBy(vals[i], keep[i], over)
+			if k < keep[i] {
+				over -= segment(vals[i], keep[i]) - segment(vals[i], k)
+				keep[i], shortened = k, true
+			}
+		}
+		if !shortened {
+			b.setSummary(blk, l, text, n, true)
+			return
+		}
 	}
-	n := note(len(v) - keep)
-	saved := len(v) - keep - len(n)
-	if saved <= 0 {
-		return v, "", 0
+}
+
+// setSummary sets text, the redacted lines of l, as blk's text, cut to n bytes in whole lines when it is
+// still longer, and marks blk cut when it is, or when cut says a value was shortened.
+func (b *Builder) setSummary(blk *Block, l *lines, text string, n int, cut bool) {
+	text, whole := keepHead(text, n)
+	if cut || whole {
+		blk.addLabel(LabelSectionCut)
 	}
-	return v[:keep], n, saved
+	blk.Text, blk.Values = text, l.values
+}
+
+// lengths returns the length of each value: the kept lengths of values none of which is cut.
+func lengths(vals [cutValues]string) [cutValues]int {
+	var out [cutValues]int
+	for i, v := range vals {
+		out[i] = len(v)
+	}
+	return out
+}
+
+// damagedCut returns the first value that is cut and whose head, note or the rest of its line the redaction of
+// the whole text changed, or -1. A redaction that changes the number of lines is taken as damage of the first
+// cut value not settled. Values in settled are not checked again.
+func damagedCut(plain, text string, keep [cutValues]int, vals [cutValues]string, tails [cutValues]summaryTail, settled [cutValues]bool) int {
+	if plain == text {
+		return -1
+	}
+	got := strings.Split(text, "\n")
+	same := len(got) == strings.Count(plain, "\n")+1
+	for i := range cutValues {
+		if keep[i] == len(vals[i]) || settled[i] {
+			continue
+		}
+		if !same || !strings.HasSuffix(got[tails[i].line], tails[i].text) {
+			return i
+		}
+	}
+	return -1
+}
+
+// cutNote is the note that follows a value of which n bytes were cut.
+func cutNote(n int) string { return fmt.Sprintf(" (%d bytes cut)", n) }
+
+// cutOf returns the head of v that keep bytes leave, and the note of the cut, empty when nothing is cut.
+func cutOf(v string, keep int) (string, string) {
+	if keep >= len(v) {
+		return v, ""
+	}
+	return v[:keep], cutNote(len(v) - keep)
+}
+
+// segment is the length of v as the summary shows it with keep bytes kept: the head and its note.
+func segment(v string, keep int) int {
+	head, note := cutOf(v, keep)
+	return len(head) + len(note)
+}
+
+// shortenBy returns how many bytes of v to keep so that v, kept to keep bytes so far, is shown by bytes
+// shorter, or as short as it can be. The cut is at a rune boundary and outside any redaction marker. A cut
+// that would not make v shorter, because of its note, returns keep: v stays as it is.
+func shortenBy(v string, keep, by int) int {
+	k := max(segment(v, keep)-by-len(cutNote(len(v))), 0)
+	k = outsideMarkers(v, k)
+	if segment(v, k) >= segment(v, keep) {
+		return keep
+	}
+	return k
+}
+
+// backOff returns a cut of v shorter than keep, which is above zero: before the blanks keep ends in and the
+// word before them, so that no key a secret's value follows ("token=", "Authorization:") is left right before
+// the note.
+func backOff(v string, keep int) int {
+	k := keep
+	for k > 0 && v[k-1] == ' ' {
+		k--
+	}
+	for k > 0 && v[k-1] != ' ' {
+		k--
+	}
+	return outsideMarkers(v, k)
+}
+
+// outsideMarkers moves a cut at k of v, which may fall inside a character, to the start of that character,
+// and a cut inside a redaction marker, or anything shaped like one ([redact.MarkerShapes]), to the start of
+// the marker.
+func outsideMarkers(v string, k int) int {
+	for k > 0 && k < len(v) && !utf8.RuneStart(v[k]) {
+		k--
+	}
+	for _, m := range redact.MarkerShapes(v) {
+		if m[0] < k && k < m[1] {
+			return m[0]
+		}
+	}
+	return k
 }
 
 // longestTally is the length of the longest tally [absorbedLines] can write: every reason of the table, the

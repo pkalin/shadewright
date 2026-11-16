@@ -826,6 +826,88 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			To(BeNil(), "removed by the read that worked")
 	})
 
+	// #797: a token, read or listing of the new installation that runs past the cleanup's deadline is said in
+	// PullRequestNotClosed (GitFailed) as any other failure of that step, not left as a bare timeout.
+	It("says why on PullRequestNotClosed when the new installation runs past the cleanup's deadline (#797)", func() {
+		reinstall()
+		recorder := record.NewFakeRecorder(10)
+		git.SetFail(func(op string) error {
+			switch op {
+			case opClose:
+				closes.Add(1)
+			case opGet, opList:
+				time.Sleep(300 * time.Millisecond)
+				return fmt.Errorf("listing: %w", providers.ErrRetryable)
+			}
+			return nil
+		})
+		r := reconciler()
+		r.Recorder = recorder
+		r.CleanupTimeout = 50 * time.Millisecond
+		for range 2 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).To(MatchError(ErrTimeout), "retried with the error backoff")
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not a final phase")
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
+			Expect(c).NotTo(BeNil(), "the retry is visible")
+			Expect(c.Reason).To(Equal(ReasonGitFailed))
+			Expect(c.Message).To(Or(ContainSubstring("the read of the recorded pull request"),
+				ContainSubstring("the listing of the pull requests of branch")), "names the step")
+		}
+		Expect(closes.Load()).To(BeZero())
+		events := 0
+		for len(recorder.Events) > 0 {
+			if strings.HasPrefix(<-recorder.Events, corev1.EventTypeWarning+" "+EventPullRequestNotClosed+" ") {
+				events++
+			}
+		}
+		Expect(events).To(Equal(1))
+	})
+
+	// #797: the token of the new installation that settles the target lock after the close fails: the wait is said
+	// in PullRequestUnreadable, as a failed read there is.
+	It("says why the lock waits while the new installation's token fails after the close (#797)", func() {
+		reinstall()
+		tokenFails := atomic.Bool{}
+		tokenFails.Store(true)
+		git.SetFail(func(op string) error {
+			if op == opClose {
+				closes.Add(1)
+			}
+			return nil
+		})
+		r := reconciler()
+		open := r.OpenRepository
+		r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+			if tokenFails.Load() && closes.Load() > 0 {
+				return nil, fmt.Errorf("installation token: %w", providers.ErrRetryable)
+			}
+			return open(ctx, repo)
+		}
+		for range 2 {
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not ended yet")
+			Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()))
+			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+			Expect(c).NotTo(BeNil(), "the wait is visible")
+			Expect(c.Reason).To(Equal(ReasonGitFailed))
+			Expect(c.Message).To(ContainSubstring("open the repository"))
+			Expect(c.Message).To(ContainSubstring("new installation of the GitHub App"))
+		}
+		Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+
+		tokenFails.Store(false)
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		got := fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+			To(BeNil(), "removed by the read that worked")
+	})
+
 	It("closes nothing through the new installation when the pull request lacks this request's marker (#290)", func() {
 		reinstall()
 		Expect(git.SetBody(cr.Number, "Someone else's pull request")).To(Succeed())

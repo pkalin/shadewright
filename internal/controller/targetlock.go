@@ -320,7 +320,8 @@ func frees(v changeVerdict, holding *providers.ChangeRequest) bool {
 // for and nowhere else, and for a closed or gone one the open pull request that holds the lock (openHolding).
 // A status that says the recorded pull request is closed (closedOnly) was written from a read of it, or from
 // Shadewright's own close by its number: the read by number then needs no marker, which a person may have edited
-// out of the description since. err is a failure outside the verdict (no repository, the list of requests).
+// out of the description since. err is a failure outside the verdict (no repository, the list of requests); a failure
+// to open the repository is a *stepFailure with stepToken.
 func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	changeVerdict, *providers.ChangeRequest, error) {
 	if r.OpenRepository == nil {
@@ -329,9 +330,14 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 	if rr.Status.PlanRepository == nil {
 		return changeVerdict{}, nil, errRepositoryGone
 	}
-	git, _, reinstalled, err := r.openPlanRepositoryFor(ctx, rr)
+	repo, reinstalled, err := r.planEntry(ctx, rr)
 	if err != nil {
 		return changeVerdict{}, nil, err
+	}
+	git, _, err := r.openPlanEntry(ctx, rr, repo, reinstalled)
+	if err != nil {
+		// The token step, named so releaseReinstalled can say a failure of the new installation (#797).
+		return changeVerdict{}, nil, &stepFailure{step: stepToken, err: err}
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: !closedOnly(rr), openOnBranch: true, reinstalled: reinstalled})
 	if lockRule[v.state] != lockReleaseUnlessOpen {

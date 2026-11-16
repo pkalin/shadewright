@@ -192,10 +192,12 @@ func (r *RemediationRequestReconciler) unmarkFresh(ctx context.Context, rr *reme
 	return nil
 }
 
-// skipOwnMarks drops the watch events of an update that changed nothing of a request but status.unfinishedRenders
-// and condition PullRequestNotClosed (and the metadata every write changes). Those are the executor's own writes:
-// the mark and its removal around a render, and the condition that says why a stale plan's pull request is not
-// closed (keepWatchingStale, noteNotReached), and each such reconcile returns its own delay. Without the filter
+// skipOwnMarks drops the watch events of an update that changed nothing of a request but status.unfinishedRenders,
+// condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound, set or
+// removed (and the metadata every write changes). Those are the executor's own writes: the mark and its removal
+// around a render, the condition that says why a stale plan's pull request is not closed (keepWatchingStale,
+// noteNotReached), and the one that says a read through a new installation of the GitHub App failed (noteRead,
+// noteLockUnreadable), and each such reconcile returns its own delay. Without the filter
 // each would queue the request again at once, before the error backoff, the step delay or a Git host's Retry-After
 // that the reconcile returned, so a step that fails after a render (a commit the host refuses) would render again
 // with no delay (#714), and a cleanup the host asked to wait would be tried again at once (#797).
@@ -204,8 +206,9 @@ var skipOwnMarks = predicate.Funcs{UpdateFunc: func(e crevent.UpdateEvent) bool 
 }}
 
 // onlyOwnMarksChanged reports whether newObj differs from oldObj, and only in status.unfinishedRenders, condition
-// PullRequestNotClosed, the resource version and the managed fields. Anything that is not a request is never such
-// an update.
+// PullRequestNotClosed, condition PullRequestUnreadable while neither side has another reason than GitFailed or
+// GitNotFound (reinstalledUnreadable), the resource version and the managed fields. Anything that is not a request
+// is never such an update.
 func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	o, ok1 := oldObj.(*remediationv1alpha1.RemediationRequest)
 	n, ok2 := newObj.(*remediationv1alpha1.RemediationRequest)
@@ -224,5 +227,17 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 		rr.Status.UnfinishedRenders = nil
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 	}
+	if reinstalledUnreadable(o) && reinstalledUnreadable(n) {
+		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
+			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		}
+	}
 	return equality.Semantic.DeepEqual(o, n)
+}
+
+// reinstalledUnreadable reports whether rr has no condition PullRequestUnreadable, or one with reason GitFailed or
+// GitNotFound: only a read through a new installation of the GitHub App sets those (reinstalledRead, #797).
+func reinstalledUnreadable(rr *remediationv1alpha1.RemediationRequest) bool {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	return c == nil || c.Reason == ReasonGitFailed || c.Reason == ReasonGitNotFound
 }

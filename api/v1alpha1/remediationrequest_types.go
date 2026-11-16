@@ -371,8 +371,8 @@ const (
 	// host has no pull request of this request with the recorded number but the request's branch lists another one
 	// with its marker (the message names both numbers and what ends it), and, on a stale plan whose repository the
 	// settings reach only through a new installation of the GitHub App, with reason GitNotFound (a 404) or GitFailed
-	// (any other failure that is not an answer) while the read of its branch that settles the lock on its target
-	// fails through that installation (#797). The message names the read;
+	// (any other failure that is not an answer, the token and the cleanup's deadline included) while the read of its
+	// branch that settles the lock on its target fails through that installation (#797). The message names the read;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,
@@ -392,7 +392,8 @@ const (
 	// reason changes. A deleted request's cleanup uses CleanupRefused instead. When the settings reach the stale plan's
 	// repository only through a new installation of the GitHub App (#290), it is also set when that installation fails
 	// a step before the close (the token, the read of the recorded pull request, the listing of its branch): with the
-	// refusal's reason, with GitNotFound for a 404, or with GitFailed for any other failure (#797); the message names
+	// refusal's reason, with GitNotFound for a 404, or with GitFailed for any other failure, a step still running at
+	// the cleanup's deadline included (#797); the message names
 	// the step, and a step that failed without a refusal is retried with the error backoff or the delay the host
 	// asked for.
 	ConditionPullRequestNotClosed = "PullRequestNotClosed"

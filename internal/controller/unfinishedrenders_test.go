@@ -444,8 +444,21 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 	notClosedAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
 	notClosedAndOther := notClosed.DeepCopy()
 	meta.SetStatusCondition(&notClosedAndOther.Status.Conditions, metav1.Condition{
-		Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
+		Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: ReasonGitForbidden,
 		Message: "m"})
+	unreadable := func(from *remediationv1alpha1.RemediationRequest, reason string) *remediationv1alpha1.RemediationRequest {
+		rr := from.DeepCopy()
+		rr.ResourceVersion = "4"
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+			Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: reason,
+			Message: "m"})
+		return rr
+	}
+	unreadableFailed := unreadable(base, ReasonGitFailed)
+	unreadableNotFound := unreadable(base, ReasonGitNotFound)
+	unreadableRefused := unreadable(base, ReasonGitForbidden)
+	unreadableAndPhase := unreadableFailed.DeepCopy()
+	unreadableAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
 	for name, tc := range map[string]struct {
 		old, new *remediationv1alpha1.RemediationRequest
 		want     bool
@@ -460,6 +473,15 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 		"it and a phase":             {notClosed, notClosedAndPhase, false},
 		"it and another condition":   {base, notClosedAndOther, false},
 		"it and the render mark":     {marked, notClosed, true},
+		// #797: a read through a new installation that fails sets PullRequestUnreadable with these reasons on
+		// every poll; its write, a change of reason and its removal must not wake the request before its delay.
+		"PullRequestUnreadable GitFailed set":  {base, unreadableFailed, true},
+		"its reason GitNotFound":               {unreadableFailed, unreadableNotFound, true},
+		"the unreadable removal":               {unreadableNotFound, base, true},
+		"it and the not-closed condition":      {notClosed, unreadable(notClosed, ReasonGitFailed), true},
+		"unreadable and a phase":               {unreadableFailed, unreadableAndPhase, false},
+		"PullRequestUnreadable with a refusal": {base, unreadableRefused, false},
+		"from a refusal to GitFailed":          {unreadableRefused, unreadableFailed, false},
 	} {
 		if got := onlyOwnMarksChanged(tc.old, tc.new); got != tc.want {
 			t.Errorf("%s: got %v, want %v", name, got, tc.want)

@@ -1526,8 +1526,13 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 	cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	closeErr := r.closeChangeRequest(cleanCtx, rr)
 	// Every result, nil and errRepositoryGone included, is checked against the deadline before a final phase
-	// is written from it.
+	// is written from it. A step of the new installation that ran past it is still that step's failure (#797).
+	timedOut := ctx.Err() == nil && cleanCtx.Err() != nil
+	stepErr := closeErr
 	closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
+	if timedOut {
+		closeErr = reinstalledTimeout(stepErr, closeErr)
+	}
 	cleanCancel()
 	switch err := closeErr; {
 	case err == nil && checkErr != nil:
@@ -1704,6 +1709,7 @@ func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
 	}
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	v, holding, err := r.lookHeld(lookCtx, rr)
+	timedOut := ctx.Err() == nil && lookCtx.Err() != nil
 	err = boundErr(ctx, lookCtx, "look-up of the change request", err)
 	cancel()
 	switch {
@@ -1712,6 +1718,11 @@ func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
 	case errors.Is(err, freshness.ErrPaused):
 		return err
 	case err != nil:
+		if s := stepOf(err); timedOut || s.step == stepToken {
+			// The token of the new installation, or a look that ran past the deadline (whose own status write,
+			// if any, could not be made): said in PullRequestUnreadable like a failed read there (#797).
+			err = r.noteLockUnreadable(ctx, rr, err)
+		}
 		return r.lockPending(ctx, rr, err)
 	case v.state == changeUnknown:
 		return r.lockPending(ctx, rr, v.err)
@@ -1739,6 +1750,26 @@ func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
 		}
 	}
 	return r.lockPending(ctx, rr, fmt.Errorf("pull request #%d is open on the request's branch", holding.Number))
+}
+
+// noteLockUnreadable sets condition PullRequestUnreadable for err, a failure of releaseReinstalled's look through the
+// new installation outside the read itself (the token, the deadline): reinstalledRead's GitNotFound or GitFailed,
+// or repositoryRead's reason for an entry that cannot be used. It returns err, joined with a failed write of the
+// condition.
+func (r *RemediationRequestReconciler) noteLockUnreadable(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, err error) error {
+	var n int64
+	if pr := rr.Status.PullRequest; pr != nil {
+		n = pr.Number
+	}
+	want := repositoryRead(rr, err)
+	if want == nil {
+		want = reinstalledRead(rr, err, n)
+	}
+	if werr := r.setUnreadable(ctx, rr, want); werr != nil {
+		return errors.Join(err, werr)
+	}
+	return err
 }
 
 // lockPending logs why releaseReinstalled could not settle the lock of rr yet and returns errStaleLockPending.
@@ -1921,6 +1952,22 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		return &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}
 	}
 	return r.closeFound(ctx, git, rr, deleting)
+}
+
+// reinstalledTimeout is the deadline error timeout of a stale plan's cleanup whose step failed with stepErr. When
+// stepErr is a failure of the token, the read or the listing through a new installation of the GitHub App (#290),
+// the deadline keeps that step and the *reinstalledError around it, so cleanUpStale says it in
+// PullRequestNotClosed with reason GitFailed (reinstalledFailure) like any other failure of that step (#797), and
+// the retry is not left without a condition. Any other stepErr, nil included, leaves timeout as it is.
+func reinstalledTimeout(stepErr, timeout error) error {
+	if _, ok := errors.AsType[*reinstalledError](stepErr); !ok || errors.Is(timeout, context.Canceled) {
+		return timeout
+	}
+	switch s := stepOf(stepErr); s.step {
+	case stepToken, stepRead, stepListing:
+		return &reinstalledError{err: &stepFailure{step: s.step, err: timeout}}
+	}
+	return timeout
 }
 
 // reinstalledError is closeOwn's failure of a cleanup that reached the plan's repository through a new

@@ -34,21 +34,21 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpat
 # Distroless static, nonroot: no shell or package manager, and it runs as 65532, so the pod can set
 # runAsNonRoot and readOnlyRootFilesystem (the binaries write nothing to disk).
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS executor
+FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS executor
 WORKDIR /
 COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 COPY --from=builder /workspace/manager .
 USER 65532:65532
 ENTRYPOINT ["/manager"]
 
-FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS analyzer
+FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS analyzer
 WORKDIR /
 COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 COPY --from=builder /workspace/analyzer .
 USER 65532:65532
 ENTRYPOINT ["/analyzer"]
 
-FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS verifier
+FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS verifier
 WORKDIR /
 COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 COPY --from=builder /workspace/verifier .
@@ -56,7 +56,7 @@ USER 65532:65532
 ENTRYPOINT ["/verifier"]
 
 # All binaries, for config/manager (the analyzer and verifier Deployments set their own command). Last, so it is the default target.
-FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS local
+FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS local
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/analyzer .

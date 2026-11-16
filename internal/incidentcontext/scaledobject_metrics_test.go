@@ -320,3 +320,21 @@ func TestHPAMatchesTheDefaultKindOfTheScaleTarget(t *testing.T) {
 		t.Fatalf("queries %v, metrics %s:\n%s", src.queries, blk.Availability, blk.Text)
 	}
 }
+
+// kube-state-metrics marks the target series EXPERIMENTAL: when it is missing, the block says so in fixed text,
+// keeps the current metric, and is no failed source.
+func TestMissingHPATargetSeriesIsFixedText(t *testing.T) {
+	src := &recordedQueries{series: map[string][]providers.Series{tHPACurrent: hpaSeries(6.5)}}
+	c := build(t, newBuilder(t, reader(t, scaledObject(soUID, readyConditions()), kedaHPA(soHPA, soUID, "Deployment", "worker")), sources{}, withMetrics(src)),
+		incident(scaledObjectRef()))
+	blk := one(t, c, SectionMetrics)
+	if c.Escalate() {
+		t.Fatalf("a missing target series escalated:\n%s", blk.Text)
+	}
+	if !strings.Contains(blk.Text, tHPATarget+fixedNoSeries) {
+		t.Errorf("no fixed no-series line for %s:\n%s", tHPATarget, blk.Text)
+	}
+	if !strings.Contains(blk.Text, tHPACurrent+"{horizontalpodautoscaler="+soHPA) {
+		t.Errorf("the current metric line is gone:\n%s", blk.Text)
+	}
+}

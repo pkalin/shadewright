@@ -301,7 +301,8 @@ func TestTriageModelNeedsSuffixesOrAKey(t *testing.T) {
 	}
 
 	// A key from a volume counts as well.
-	if err := helmTemplate(t, files, claudeTriage, "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"); err != "" {
+	memoryKey := "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"
+	if err := helmTemplate(t, files, claudeTriage, memoryKey); err != "" {
 		t.Errorf("key volume only: %s", err)
 	}
 
@@ -342,7 +343,8 @@ func TestTriageModelNeedsSuffixesOrAKey(t *testing.T) {
 // settings.spec naming a Foundry deployment does not fail the render when only the key is set: the chart cannot
 // know what the cluster holds, and the analyzer refuses the Foundry deployment (ProviderNotConfigured) (#814).
 func TestSettingsSpecDoesNotChangeTheChartChecks(t *testing.T) {
-	foundry := []string{"-f", testValues(t), "-f", settingsFile(t, modelLine("triage", "provider: Foundry, "+foundryFields))}
+	foundrySettings := settingsFile(t, modelLine("triage", "provider: Foundry, "+foundryFields))
+	foundry := []string{"-f", testValues(t), "-f", foundrySettings}
 	if err := helmTemplate(t, foundry, keySecret, claudeTriage); err != "" {
 		t.Errorf("Foundry in settings.spec, only the key set: %s", err)
 	}

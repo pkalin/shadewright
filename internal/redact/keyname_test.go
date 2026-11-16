@@ -386,6 +386,9 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		// A verbatim tag ("!<...>") is read as no tag, so the quote after it opens no string and the value ends
 		// at the first "]".
 		"verbatim tag before a quoted scalar": `{password: [!<tag:yaml.org,2002:str> "a]` + k + `", b], u: x}`,
+		// A quoted value that never closes before the next key's value opens runs to that quote: the next key
+		// is inside it, so its value is read from the middle and loses only its first token.
+		"unclosed quote before the next key": `token="x DB_PASSWORD="hidden ` + k + `"`,
 	} {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",

@@ -191,7 +191,7 @@ func TestAnthropicKeyNeedsNoRBAC(t *testing.T) {
 func TestAnthropicKeyRefusals(t *testing.T) {
 	both := []string{
 		"analyzer.analysis.anthropic.apiKey.secretName=k",
-		"analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory",
+		memoryKey,
 	}
 	if out := helmFails(t, both...); !strings.Contains(out, "sets both secretName and volume") {
 		t.Errorf("both sources: %s", out)
@@ -205,7 +205,7 @@ func TestAnthropicKeyRefusals(t *testing.T) {
 	}
 	named := []string{
 		"analyzer.analysis.anthropic.apiKey.volume.name=x",
-		"analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory",
+		memoryKey,
 	}
 	if out := helmFails(t, named...); !strings.Contains(out, "may not set name") {
 		t.Errorf("a named volume: %s", out)
@@ -241,7 +241,7 @@ func TestAnthropicDeploymentNeedsAKeySource(t *testing.T) {
 		if err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.secretName=k"); err != "" {
 			t.Errorf("%s: with a Secret: %s", role, err)
 		}
-		if err := helmTemplate(t, files, "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"); err != "" {
+		if err := helmTemplate(t, files, memoryKey); err != "" {
 			t.Errorf("%s: with a volume: %s", role, err)
 		}
 	}
@@ -267,6 +267,8 @@ const (
 	foundryFields   = "endpoint: https://lab.services.ai.azure.com/, deployment: big, apiVersion: v1"
 	keySecret       = "analyzer.analysis.anthropic.apiKey.secretName=model-key"
 	claudeTriage    = "analyzer.analysis.triageModel=claude-haiku-5-5"
+	// memoryKey mounts the Anthropic API key from a volume the chart names itself.
+	memoryKey = "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"
 )
 
 // The chart checks only what it renders itself, never settings.spec (the RemediationSettings is created once
@@ -301,7 +303,6 @@ func TestTriageModelNeedsSuffixesOrAKey(t *testing.T) {
 	}
 
 	// A key from a volume counts as well.
-	memoryKey := "analyzer.analysis.anthropic.apiKey.volume.emptyDir.medium=Memory"
 	if err := helmTemplate(t, files, claudeTriage, memoryKey); err != "" {
 		t.Errorf("key volume only: %s", err)
 	}

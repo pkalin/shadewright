@@ -70,8 +70,8 @@ import (
 const groupingFile = "grouping.yaml"
 
 // Times of the pipeline under test. The debounce is short, so an Incident is analyzed seconds after its last
-// observation; it is still longer than a fold takes, so a consequence Incident that opened first is folded
-// before it is due (ADR-0039 point 23 covers a fold during an analysis).
+// observation. No case relies on it to order two steps of the pipeline: a case that needs an order waits for
+// the first step, or holds back the analyses (startGrouping's gate).
 const (
 	groupingDebounce = 8 * time.Second
 	groupingWait     = 60 * time.Second
@@ -91,9 +91,27 @@ type groupingEnv struct {
 	uids map[string]string
 }
 
+// gatedClient is the analysis controller's client while a case holds back the analyses: every Get waits until
+// the gate is closed. A reconcile of the analysis controller starts with a Get of its Incident, so no analysis
+// claims an Incident before the case opens the gate, and each one then reads the Incident as it is by then.
+type gatedClient struct {
+	client.Client
+	gate <-chan struct{}
+}
+
+func (c gatedClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	select {
+	case <-c.gate:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
 // startGrouping starts an API server and the pipeline. model replays the scenario's replies; every analysis
-// is one model call, so its requests count the analyses too.
-func startGrouping(t *testing.T, s *scenario) *groupingEnv {
+// is one model call, so its requests count the analyses too. A non-nil gate holds back every analysis until
+// the case closes it.
+func startGrouping(t *testing.T, s *scenario, gate <-chan struct{}) *groupingEnv {
 	t.Helper()
 	logOnce.Do(func() { ctrllog.SetLogger(logr.Discard()) })
 	scheme := runtime.NewScheme()
@@ -217,7 +235,11 @@ func startGrouping(t *testing.T, s *scenario) *groupingEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ac := &analysis.Controller{Client: mgr.GetClient(), Namespace: evalRequestNamespace, Analyzer: a}
+	acClient := mgr.GetClient()
+	if gate != nil {
+		acClient = gatedClient{Client: acClient, gate: gate}
+	}
+	ac := &analysis.Controller{Client: acClient, Namespace: evalRequestNamespace, Analyzer: a}
 	if err := ac.SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
@@ -453,12 +475,12 @@ func (c counts) open() []remediationv1alpha1.Incident {
 	return out
 }
 
-// waitFor polls until done holds, or fails the test with the last counts.
-func (g *groupingEnv) waitFor(t *testing.T, subject, what string, done func(counts) bool) {
+// waitFor polls the counts of the oom subject until done holds, or fails the test with the last counts.
+func (g *groupingEnv) waitFor(t *testing.T, what string, done func(counts) bool) {
 	t.Helper()
 	deadline := time.Now().Add(groupingWait)
 	for {
-		c := g.counts(t, subject)
+		c := g.counts(t, oomSubject)
 		if done(c) {
 			return
 		}
@@ -478,22 +500,23 @@ func absorbedOf(inc remediationv1alpha1.Incident) map[remediationv1alpha1.Absorb
 	return out
 }
 
-// oomFixture is the oom scenario's cluster with the kubelet events of its fault, its times moved so that the
-// kill (finishedAt 11:56:00 in the fixture) happened half a minute ago.
-func oomFixture(t *testing.T) (*scenario, []*unstructured.Unstructured, time.Duration) {
+// oomFixture is the oom scenario's cluster (objects.yaml: the Deployment, its ReplicaSet and the pod whose
+// status shows the kill) and the kubelet events of its fault (grouping.yaml), with the shift that moves their
+// times so that the kill (finishedAt 11:56:00 in the fixture) happened half a minute ago.
+func oomFixture(t *testing.T) (s *scenario, cluster, events []*unstructured.Unstructured, shift time.Duration) {
 	t.Helper()
 	scheme, err := newScheme()
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := loadScenario(scheme, "oom")
+	s, err = loadScenario(scheme, "oom")
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(scenariosDir, "oom")
-	objs := append(readFixture(t, filepath.Join(dir, "objects.yaml")), readFixture(t, filepath.Join(dir, groupingFile))...)
 	kill := time.Date(2026, 11, 4, 11, 56, 0, 0, time.UTC)
-	return s, objs, time.Now().Add(-30 * time.Second).Sub(kill).Truncate(time.Second)
+	return s, readFixture(t, filepath.Join(dir, "objects.yaml")), readFixture(t, filepath.Join(dir, groupingFile)),
+		time.Now().Add(-30 * time.Second).Sub(kill).Truncate(time.Second)
 }
 
 // oomWorkload is the Deployment of the oom scenario, and the name of its container.
@@ -530,14 +553,28 @@ func checkOneAnalysis(t *testing.T, c counts) remediationv1alpha1.Incident {
 // TestGroupingOOMOpensOneIncident is the oom case of ADR-0039 when the cause comes first, as in the lab: the
 // pod status shows the OOM kill, and the kubelet's BackOff and readiness probe events of the web container
 // follow it. One Incident opens, the cause's, and counts both consequences in its absorbed tally; it is
-// analyzed once and gives at most one request. Before the rule the lab opened three Incidents (OOMKilled,
+// analyzed once and gives exactly one request. Before the rule the lab opened three Incidents (OOMKilled,
 // BackOff, Unhealthy), each analyzed (#432).
+//
+// The case pins that order: the events are created only once the cause's Incident exists. The collector's pod
+// and event reconcilers deliver concurrently, and a consequence seen once that reaches the Incident controller
+// just before its cause is held as a first sighting there, never counted on the cause unless it is seen again,
+// so with both created at once the tally stayed empty in some runs.
 func TestGroupingOOMOpensOneIncident(t *testing.T) {
-	s, objs, shift := oomFixture(t)
-	g := startGrouping(t, s)
-	g.create(t, objs, shift)
+	s, cluster, events, shift := oomFixture(t)
+	g := startGrouping(t, s, nil)
+	g.create(t, cluster, shift)
+	g.waitFor(t, "the cause's Incident opened", func(c counts) bool {
+		for _, inc := range c.incidents {
+			if inc.Status.Cause {
+				return true
+			}
+		}
+		return false
+	})
+	g.create(t, events, shift)
 
-	g.waitFor(t, oomSubject, "the cause analyzed, with both consequences counted on it", func(c counts) bool {
+	g.waitFor(t, "the cause analyzed, with both consequences counted on it", func(c counts) bool {
 		for _, inc := range c.incidents {
 			abs := absorbedOf(inc)
 			if inc.Status.Cause && abs[remediationv1alpha1.AbsorbedBackOff] > 0 &&
@@ -554,7 +591,7 @@ func TestGroupingOOMOpensOneIncident(t *testing.T) {
 	}
 	checkOneAnalysis(t, c)
 	if len(c.requests) != 1 {
-		t.Fatalf("the recorded reply proposes 48Mi to 64Mi, want its request:\n%s", c)
+		t.Fatalf("the oom fault gave %d requests, want the one of the recorded reply:\n%s", len(c.requests), c)
 	}
 }
 
@@ -562,11 +599,19 @@ func TestGroupingOOMOpensOneIncident(t *testing.T) {
 // (ADR-0039 points 12 to 14): an Unhealthy Incident of the web container, opened from the probe failures
 // before the kill and not analyzed yet, is folded into the OOMKilled Incident when that opens. One Incident
 // stays open and is analyzed once, and the folded one has no analysis and no request.
+//
+// The analyses wait until the case has seen the fold (the gate of startGrouping): the Unhealthy Incident is
+// due a debounce after its last seen, and a run slow to open the cause analyzed it first, with the one
+// recorded reply.
 func TestGroupingOOMFoldsALateCause(t *testing.T) {
-	s, objs, shift := oomFixture(t)
-	g := startGrouping(t, s)
+	s, cluster, events, shift := oomFixture(t)
+	gate := make(chan struct{})
+	var opened sync.Once
+	open := func() { opened.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	g := startGrouping(t, s, gate)
 	// The owners first: the consequence Incident names the Deployment's UID.
-	g.create(t, objs[:2], shift)
+	g.create(t, cluster[:2], shift)
 	ctx := t.Context()
 	fp := fmt.Sprintf("sha256:%064x", 0x795)
 	late := &remediationv1alpha1.Incident{
@@ -595,16 +640,21 @@ func TestGroupingOOMFoldsALateCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Then the kill: the pod and the kubelet's events.
-	g.create(t, objs[2:], shift)
+	g.create(t, append(cluster[2:], events...), shift)
 
-	g.waitFor(t, oomSubject, "the Unhealthy Incident folded and the cause analyzed", func(c counts) bool {
+	g.waitFor(t, "the Unhealthy Incident folded", func(c counts) bool {
 		for _, inc := range c.incidents {
-			if inc.Name == late.Name && inc.Status.FoldedInto == nil {
-				return false
+			if inc.Name == late.Name {
+				return inc.Status.FoldedInto != nil
 			}
 		}
-		return c.analyses > 0
+		return false
 	})
+	if c := g.counts(t, oomSubject); c.analyses != 0 || c.calls != 0 {
+		t.Fatalf("an analysis ran while the gate was closed:\n%s", c)
+	}
+	open()
+	g.waitFor(t, "the cause analyzed", func(c counts) bool { return c.analyses > 0 })
 	time.Sleep(groupingSettle)
 	c := g.counts(t, oomSubject)
 	cause := checkOneAnalysis(t, c)
@@ -637,7 +687,7 @@ func TestGroupingStartupProbeOpensNothing(t *testing.T) {
 	objs := readFixture(t, filepath.Join(scenariosDir, "startup-probe", "objects.yaml"))
 	failure := time.Date(2026, 11, 14, 15, 29, 44, 0, time.UTC)
 	shift := time.Now().Add(-10 * time.Second).Sub(failure).Truncate(time.Second)
-	g := startGrouping(t, s)
+	g := startGrouping(t, s, nil)
 	skipped := settledReadinessSkipped(t)
 	g.create(t, objs, shift)
 

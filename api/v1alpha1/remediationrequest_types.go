@@ -227,6 +227,17 @@ type RemediationRequestSpec struct {
 	Cancel bool `json:"cancel,omitempty"`
 }
 
+// Reasons of a request that ends Cancelled because of its Incident (ADR-0039 points 21 and 22). They are
+// declared for the executor's live read of the Incident before the pull request; nothing sets them yet.
+const (
+	// ReasonIncidentFolded: the request ended Cancelled before its pull request because its Incident has
+	// status.foldedInto: it was folded into the Incident of its cause.
+	ReasonIncidentFolded = "IncidentFolded"
+	// ReasonIncidentGone: the request ended Cancelled before its pull request because the Incident it names is
+	// gone: the live read returned NotFound, or found an Incident of the same name with another UID.
+	ReasonIncidentGone = "IncidentGone"
+)
+
 // RemediationPhase summarizes where a request is. Conditions carry the reasons.
 // +kubebuilder:validation:Enum=Pending;PolicyChecked;PRCreated;AwaitingApproval;AutoMergeQueued;Merged;WaitingForDelivery;Verifying;Succeeded;Denied;Failed;Expired;Cancelled;Superseded;NeedsIntervention;Inconclusive
 type RemediationPhase string

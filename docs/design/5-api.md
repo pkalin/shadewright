@@ -167,7 +167,8 @@ A recorded pull request found closed while the mark is set was closed by that cl
 A namespaced CR in the operator namespace, next to the requests that point at it ([ADR-0007](../adr/0007-incident-state-in-crds.md)). It holds:
 
 - the fingerprint, counters, first and last seen, and the correlated owner;
-- references to analyses and requests.
+- references to analyses and requests;
+- <span class="sw-status sw-planned">planned</span> the state of the cause rule ([ADR-0039](../adr/0039-consequence-symptoms-attach-to-their-causes-incident.md)): the containers it counted, whether a pod-status cause opened it, the tally of absorbed consequences and the cause Incident it was folded into. The fields and their bounds are in the API ([#790](https://github.com/pkalin/shadewright/issues/790)); nothing writes them yet.
 
 Large data (log excerpts, full model transcripts) lives outside etcd, or is dropped after analysis in the MVP.
 

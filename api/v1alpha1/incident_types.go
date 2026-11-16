@@ -135,6 +135,46 @@ type OccurrenceRecord struct {
 	Began *metav1.Time `json:"began,omitempty"`
 }
 
+// MaxIncidentContainers is the most container names an Incident's status.containers keeps (ADR-0039 point 8).
+const MaxIncidentContainers = 8
+
+// MaxAbsorbedReasons is the most entries an Incident's status.absorbed keeps, one per consequence reason
+// (ADR-0039 point 16). Two reasons are used now.
+const MaxAbsorbedReasons = 8
+
+// AbsorbedReason is a consequence reason whose observations count on the Incident of their cause instead of
+// opening one of their own (ADR-0039 point 16). The values come from the fixed table of the rule, never from
+// the cluster, so the tally carries no text an Event or a pod writes.
+// +kubebuilder:validation:Enum=BackOff;Unhealthy
+type AbsorbedReason string
+
+// The consequence reasons of ADR-0039, one per value of the AbsorbedReason enum.
+const (
+	// AbsorbedBackOff is a kubelet BackOff of a container whose pod status shows a cause.
+	AbsorbedBackOff AbsorbedReason = "BackOff"
+	// AbsorbedUnhealthy is a kubelet probe failure of a container whose pod status shows a cause.
+	AbsorbedUnhealthy AbsorbedReason = "Unhealthy"
+)
+
+// AbsorbedTally counts the observations of one consequence reason that a cause's Incident took as evidence
+// (ADR-0039 point 16). It holds no event text.
+type AbsorbedTally struct {
+	// reason is the consequence reason counted.
+	// +required
+	Reason AbsorbedReason `json:"reason"`
+
+	// count is the number of occurrences of the reason counted on this Incident, counting event series
+	// increments like status.count. It saturates at 1,000,000.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000000
+	// +required
+	Count int64 `json:"count"`
+
+	// lastSeen is when the latest observation of the reason arrived.
+	// +required
+	LastSeen metav1.Time `json:"lastSeen"`
+}
+
 // IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)",message="resolvedTime cannot change while the phase stays Resolved"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.revertsProposed) || (has(self.revertsProposed) && oldSelf.revertsProposed.all(o, self.revertsProposed.exists(n, n.uid == o.uid && n.name == o.name && (o.state == 'Pending' || (n.state == o.state && (!has(o.reason) || (has(n.reason) && n.reason == o.reason)))))))",message="revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes"
@@ -172,6 +212,48 @@ type IncidentStatus struct {
 	// one twice.
 	// +optional
 	OccurrencesDroppedThrough *metav1.Time `json:"occurrencesDroppedThrough,omitempty"`
+
+	// containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039
+	// point 8). The late-cause fold compares them between a consequence Incident and its cause's Incident.
+	// Nothing writes them yet.
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Containers []Name `json:"containers,omitempty"`
+
+	// cause is true when the Incident was opened or counted by a pod-status observation of class cause, an OOM
+	// kill or a waiting reason the kubelet wrote (ADR-0039 point 8). Only such an Incident takes the evidence of
+	// a consequence or folds a consequence Incident. An Event never sets it. Nothing writes it yet.
+	// +optional
+	Cause bool `json:"cause,omitempty"`
+
+	// absorbed is the tally of the consequence observations this Incident took as evidence of its cause, one
+	// entry per reason, at most 8 (ADR-0039 point 16). They change neither count nor lastSeen, and the analysis
+	// trigger and the quiet rule do not read them. Nothing writes it yet.
+	// +listType=map
+	// +listMapKey=reason
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Absorbed []AbsorbedTally `json:"absorbed,omitempty"`
+
+	// absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart
+	// from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point
+	// 16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped.
+	// Nothing writes them yet.
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	// +optional
+	AbsorbedOccurrences []OccurrenceRecord `json:"absorbedOccurrences,omitempty"`
+
+	// absorbedOccurrencesDroppedThrough is when the newest occurrence dropped from absorbedOccurrences began,
+	// the drop mark of occurrencesDroppedThrough for the absorbed list. Nothing writes it yet.
+	// +optional
+	AbsorbedOccurrencesDroppedThrough *metav1.Time `json:"absorbedOccurrencesDroppedThrough,omitempty"`
+
+	// foldedInto names the cause's Incident, by name and UID, when this consequence Incident was folded into it
+	// and closed Resolved with the Lifecycle reason FoldedIntoCause (ADR-0039 point 14). Nothing writes it yet.
+	// +optional
+	FoldedInto *IncidentRef `json:"foldedInto,omitempty"`
 
 	// resolvedTime is when the Incident moved to phase Resolved, written in the same status update (design
 	// 3.2). It cannot change while the phase stays Resolved. A symptom seen again within 24 hours of it, or with it missing, moves the Incident to Escalated

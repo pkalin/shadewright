@@ -211,7 +211,7 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- if eq .component "analyzer" -}}
 {{- $a := $c.analysis | default dict -}}
 {{- $key := (($a.anthropic | default dict).apiKey | default dict) -}}
-{{- /* The chart checks only what it renders itself. It does not read settings.spec: the RemediationSettings is
+{{- /* The chart checks only what it renders itself. For the identity and suffix checks it does not read settings.spec: the RemediationSettings is
 created once and never changed by an upgrade, so the values cannot tell which deployments the cluster holds. The
 analyzer is the gate for them: without --model-endpoint-suffixes it builds no token source and refuses every
 Foundry deployment (#814). */ -}}

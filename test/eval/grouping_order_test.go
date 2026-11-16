@@ -275,7 +275,9 @@ func runConsequenceFirst(t *testing.T, r *consequenceFirst) {
 }
 
 // oomConsequences are the reasons of the kubelet events in the oom scenario's grouping.yaml.
-var oomConsequences = []string{string(remediationv1alpha1.AbsorbedBackOff), string(remediationv1alpha1.AbsorbedUnhealthy)}
+var oomConsequences = []string{
+	string(remediationv1alpha1.AbsorbedBackOff), string(remediationv1alpha1.AbsorbedUnhealthy),
+}
 
 // TestGroupingOOMConsequenceFirst is the oom case with the kubelet's BackOff and readiness probe events, each
 // seen once, consumed before the OOM kill that causes them (#820). Each is held as a first sighting, and the

@@ -703,7 +703,8 @@ const (
 //   - on the read after the target branch changed (q.recordedBranch), any other unknown verdict, an answered one
 //     included, sets it with reason TargetBranchChanged (branchChangedRead): the request waits on that read alone;
 //   - on a read through a new installation of the GitHub App (q.reinstalled, #797), any other failure that is not an
-//     answer listed below, but the caller's cancellation, sets it with reason GitNotFound (a 404) or GitFailed
+//     answer listed below, but the caller's cancellation and a failed read of the Kubernetes API (a *clusterError:
+//     ownsMarker's read of the supersede chain, #812), sets it with reason GitNotFound (a 404) or GitFailed
 //     (reinstalledRead): such a read is retried every poll interval with no other bound (releaseReinstalled);
 //   - any other failure (a server error, a timeout) leaves it, except a reason about the repository of the plan
 //     (repositoryReasons), which the repository just opened disproves.
@@ -723,7 +724,7 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 	case v.state == changeUnknown && q.recordedBranch:
 		want = branchChangedRead(rr)
 	case v.state != changeUnknown, answeredUnknown(v.err):
-	case q.reinstalled && !errors.Is(v.err, context.Canceled):
+	case q.reinstalled && !errors.Is(v.err, context.Canceled) && !isClusterError(v.err):
 		want = reinstalledRead(rr, v.err, n)
 	case cur != nil && repositoryReasons[cur.Reason]:
 	default:
@@ -736,6 +737,12 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 		return unknownChange(err)
 	}
 	return v
+}
+
+// isClusterError reports whether err is a failure on the Kubernetes side (a *clusterError), not of the Git host.
+func isClusterError(err error) bool {
+	_, ok := errors.AsType[*clusterError](err)
+	return ok
 }
 
 // answeredUnknown reports whether err, the error of an unknown verdict, comes from answers the Git host gave (a 404

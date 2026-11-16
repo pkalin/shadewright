@@ -70,7 +70,8 @@ The verifier (`shadewright-verifier`, #682) is the third ServiceAccount. It has 
 - a token request that gets no answer from Entra ID;
 - a token request that gets a successful answer that cannot be used;
 - a token request that runs into the per-try deadline;
-- a response from Key Vault or Entra ID that the HTTP client hands back only after the try's deadline has passed, when it has no body (an empty 200, for example) or its body was still being read (#447).
+- a response from Key Vault or Entra ID that the HTTP client hands back only after the try's deadline has passed, whatever its status, Key Vault challenge or declared size: nothing of it is checked before the deadline is (#447, #781);
+- a response whose body was still being read when the try's deadline passed (#447), unless more than 64 KiB of it had arrived by then, which is final.
 
 **Final (reported as permanent; the caller does not retry):**
 
@@ -79,7 +80,8 @@ The verifier (`shadewright-verifier`, #682) is the third ServiceAccount. It has 
 - a token request Entra ID refuses;
 - a federated token file that cannot be read (see 9.6);
 - a token failure the signer cannot see into, from a credential it did not build;
-- a caller that cancels.
+- a Key Vault challenge the SDK cannot parse safely, or a response body larger than 64 KiB, when the response arrives before the deadline;
+- a caller that cancels, also when a response arrives after the cancellation (#781).
 
 **Limits.** When Entra ID's answer reaches the signer before the try's deadline, its status decides, even if the deadline passes before the token request returns, unless the caller cancelled. Errors keep only fixed text, the status code and the class.
 

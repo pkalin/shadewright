@@ -387,9 +387,9 @@ const (
 	// request keeps its phase, its pull request is still watched and the close is tried again on every look. The
 	// message names the pull request; lastTransitionTime is the first refusal. A failed call never removes it,
 	// also not a close whose answer was lost: only a close that went through, or a read that finds the pull request
-	// closed or merged, does, and so does the request's end. A close through a new installation that goes through
-	// while the end still waits for the target lock removes it in the status write that records the
-	// close in PROpened (#797). A pull request found closed (not merged) while it is
+	// closed or merged, does, and so does the request's end. A close that goes through while the end still waits,
+	// for the failed review check (#809) or, through a new installation, for the target lock (#797), removes it in
+	// the status write that records the close in PROpened. A pull request found closed (not merged) while it is
 	// True ends the request as a stale plan Shadewright closed does (Superseded, the stale reason kept on PlanFresh),
 	// with PROpened saying that it is not known whether Shadewright's retried close or a person closed it; it is no
 	// failure for the circuit breaker. A failed read is never a refusal of the close

@@ -1,0 +1,52 @@
+# Synthetic: the kubelet's events of the oom fault that the grouping case (grouping_test.go, ADR-0039, #795) adds
+# to objects.yaml, written from the lab runs where one OOM of demo/web opened OOMKilled, BackOff and Unhealthy
+# Incidents (pkalin/shadewright#432), not recorded. Both name the web container (regarding.fieldPath) of the pod
+# objects.yaml holds. Their last occurrences are at or after the kill objects.yaml shows (finishedAt 11:56:00)
+# and within 10 minutes of it, so both link to it and count on its Incident; without the cause rule each is an
+# observation of its own, which the gate opens once it recurs, as in the lab. The analysis does not read this
+# file: the context of the oom scenario stays objects.yaml alone.
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: web-8d4c6b9f7-t5r9k.backoff
+  namespace: demo
+eventTime: "2026-11-04T11:51:40.000000Z"
+series:
+  count: 5
+  lastObservedTime: "2026-11-04T11:56:10.000000Z"
+type: Warning
+reason: BackOff
+action: Restarting
+reportingController: kubelet
+reportingInstance: node-1
+note: Back-off restarting failed container web in pod web-8d4c6b9f7-t5r9k_demo(00000000-0000-4000-8000-0000000003c3)
+regarding:
+  apiVersion: v1
+  kind: Pod
+  namespace: demo
+  name: web-8d4c6b9f7-t5r9k
+  uid: 00000000-0000-4000-8000-0000000003c3
+  fieldPath: spec.containers{web}
+---
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: web-8d4c6b9f7-t5r9k.unhealthy
+  namespace: demo
+eventTime: "2026-11-04T11:52:20.000000Z"
+series:
+  count: 4
+  lastObservedTime: "2026-11-04T11:56:00.000000Z"
+type: Warning
+reason: Unhealthy
+action: Probing
+reportingController: kubelet
+reportingInstance: node-1
+note: 'Readiness probe failed: Get "http://10.244.0.15:9898/readyz": dial tcp 10.244.0.15:9898: connect: connection refused'
+regarding:
+  apiVersion: v1
+  kind: Pod
+  namespace: demo
+  name: web-8d4c6b9f7-t5r9k
+  uid: 00000000-0000-4000-8000-0000000003c3
+  fieldPath: spec.containers{web}

@@ -57,14 +57,20 @@ const minHoldRestarts = 2
 const (
 	holdOpened    = "opened"
 	holdNotOpened = "not_opened"
+	holdReleased  = "released"
+	holdDropped   = "dropped"
 	holdOverflow  = "overflow"
 )
 
 // heldConsequences counts the ends of consequence holds: opened (emitted for the gate), not_opened (the
-// container recovered, or its pod is gone or replaced), or overflow (no room to hold, emitted at once).
+// container recovered, or its pod is gone or replaced), released (a cause appeared during the wait, emitted with
+// it), dropped (the event ended the hold itself: deleted, no longer a Warning, replaced by another event of the
+// name, or handled without an observation for another reason), so that these four add up to the holds started;
+// and overflow (no room to hold, emitted at once), a consequence that was never held.
 var heldConsequences = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_analyzer_held_consequences_total",
-	Help: "Consequence symptoms with no cause held by the collector, by outcome: opened, not_opened or overflow.",
+	Help: "Consequence symptoms with no cause held by the collector, by outcome: opened, not_opened, released, " +
+		"dropped or overflow.",
 }, []string{"outcome"})
 
 // consequencesHeld is the number of consequences held now, summed over the collectors of the process.
@@ -110,6 +116,10 @@ type consequenceHolds struct {
 	// byPod indexes the holds by the UID of their pod, for the samples an update of the pod makes. It has an
 	// entry per hold and no other, so it is bounded as holds is.
 	byPod map[types.UID]map[types.NamespacedName]struct{}
+	// overflowed keeps, by event key, the UID of an event emitted at once for want of room until its delivery
+	// ends, so that a delivery retry emits it again instead of holding it once room has freed. At most max
+	// entries: past that an overflow is not remembered, and its retry may be held.
+	overflowed map[types.NamespacedName]types.UID
 }
 
 func newConsequenceHolds(capacity int) *consequenceHolds {
@@ -117,7 +127,8 @@ func newConsequenceHolds(capacity int) *consequenceHolds {
 	return &consequenceHolds{
 		max: capacity, share: max(capacity/holdShareDivisor, 1),
 		holds: map[types.NamespacedName]consequenceHold{}, perNS: map[string]int{},
-		byPod: map[types.UID]map[types.NamespacedName]struct{}{},
+		byPod:      map[types.UID]map[types.NamespacedName]struct{}{},
+		overflowed: map[types.NamespacedName]types.UID{},
 	}
 }
 
@@ -150,16 +161,41 @@ func (h *consequenceHolds) unindex(pod types.UID, key types.NamespacedName) {
 	}
 }
 
-// get returns the hold of the event, dropping the hold of an older event of the same name.
+// get returns the hold of the event, dropping the hold (counted dropped) or the overflow mark of an older event
+// of the same name.
 func (h *consequenceHolds) get(key types.NamespacedName, uid types.UID) (consequenceHold, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if o, ok := h.overflowed[key]; ok && o != uid {
+		delete(h.overflowed, key)
+	}
 	s, ok := h.holds[key]
 	if ok && s.event != uid {
-		h.remove(key)
+		h.dropLocked(key)
 		return consequenceHold{}, false
 	}
 	return s, ok
+}
+
+// wasOverflow reports whether the event with this UID was emitted at once for want of room and its delivery has
+// not ended yet.
+func (h *consequenceHolds) wasOverflow(key types.NamespacedName, uid types.UID) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	o, ok := h.overflowed[key]
+	return ok && o == uid
+}
+
+// markOverflow remembers that the event with this UID was emitted at once, and reports false when there is no
+// room to remember it.
+func (h *consequenceHolds) markOverflow(key types.NamespacedName, uid types.UID) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.overflowed[key]; !ok && len(h.overflowed) >= h.max {
+		return false
+	}
+	h.overflowed[key] = uid
+	return true
 }
 
 // put stores s under key, and reports false when key is new and there is no room, in all or in its namespace.
@@ -195,11 +231,36 @@ func (h *consequenceHolds) remove(key types.NamespacedName) {
 	}
 }
 
-// done forgets the event's hold.
+// done forgets the event's hold and overflow mark once its observation is delivered or its verdict counted.
 func (h *consequenceHolds) done(key types.NamespacedName) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.remove(key)
+	delete(h.overflowed, key)
+}
+
+// drop forgets the event's hold and overflow mark at an end the hold did not decide (the event deleted, no
+// longer a Warning, or handled without an observation for another reason). A hold not decided yet is counted
+// dropped; one decided to open was counted opened already.
+func (h *consequenceHolds) drop(key types.NamespacedName) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.dropLocked(key)
+	delete(h.overflowed, key)
+}
+
+// dropLocked counts and removes an undecided hold of key. Called with mu held.
+func (h *consequenceHolds) dropLocked(key types.NamespacedName) {
+	if s, ok := h.holds[key]; ok && !s.opened {
+		heldConsequences.WithLabelValues(holdDropped).Inc()
+	}
+	h.remove(key)
+}
+
+func (h *consequenceHolds) overflowLen() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.overflowed)
 }
 
 func (h *consequenceHolds) len() int {
@@ -241,14 +302,15 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 //   - A hold whose decision to open is not delivered yet: holdEmit.
 //   - A held event whose pod is gone or replaced: holdDrop.
 //   - A held event whose pod now shows a cause: the hold is released, holdEmit.
-//   - No room to hold a new one: holdEmit at once, without a verdict, so it goes through the gate.
+//   - No room to hold a new one: holdEmit at once, without a verdict, so it goes through the gate. The event is
+//     remembered until its delivery ends, so a delivery retry emits it again even once room has freed.
 //   - Otherwise the reconcile is a sample of the container. Before the end of ConsequenceGrace: holdWait. At
 //     the end (amended 2026-11-16): holdEmit when at least minHoldSamples samples were failing and either this
 //     last one is failing or the container restarted at least minHoldRestarts times during the hold, else
 //     holdDrop.
 func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event,
 	obs Observation, pod *corev1.Pod) (holdVerdict, time.Duration) {
-	if c.holdOff {
+	if c.holdOff || c.holds.wasOverflow(key, ev.UID) {
 		return holdEmit, 0
 	}
 	s, held := c.holds.get(key, ev.UID)
@@ -266,6 +328,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 	}
 	if held && obs.CauseFingerprint != "" {
 		// A cause appeared during the wait: the consequence goes to the gate with it.
+		heldConsequences.WithLabelValues(holdReleased).Inc()
 		c.holds.done(key)
 		return holdEmit, 0
 	}
@@ -291,6 +354,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 	}
 	if left := s.since.Add(ConsequenceGrace).Sub(now); left > 0 {
 		if !c.holds.put(key, s) {
+			c.holds.markOverflow(key, ev.UID)
 			heldConsequences.WithLabelValues(holdOverflow).Inc()
 			logf.FromContext(ctx).V(1).Info("Emitted consequence at once, too many held",
 				"limit", c.holds.max, "namespaceShare", c.holds.share)

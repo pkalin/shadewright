@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -446,7 +447,7 @@ func TestHoldDecisionStandsAcrossADeliveryRetry(t *testing.T) {
 		consequence("ev-hold", reasonBackOff, appPath, t0))
 	h.reconcileEvent("ev-hold")
 	select {
-	case h.c.out <- Observation{Fingerprint: "filler"}:
+	case h.c.out <- Observation{Fingerprint: fillerFingerprint}:
 	default:
 		t.Fatal("emitted before the end of the hold")
 	}
@@ -470,7 +471,7 @@ func TestCauseDuringTheHoldReleasesIt(t *testing.T) {
 	h := holdHarness(t, reasonBackOff, sampleFailing)
 	h.reconcileEvent("ev-hold")
 	cur := readPod(t, h, webPod)
-	cur.Status.ContainerStatuses[0].State.Waiting.Reason = "CreateContainerConfigError"
+	cur.Status.ContainerStatuses[0].State.Waiting.Reason = reasonConfig
 	h.update(cur)
 	h.clock.add(time.Second)
 	h.reconcileEvent("ev-hold")
@@ -624,7 +625,7 @@ func TestHoldOfAnOlderEventOfTheNameIsDropped(t *testing.T) {
 	h := holdHarness(t, reasonBackOff, sampleFailing)
 	h.reconcileEvent("ev-hold")
 	old := &eventsv1.Event{}
-	key := types.NamespacedName{Namespace: testNS, Name: "ev-hold"}
+	key := reqFor("ev-hold").NamespacedName
 	if err := h.cl.Get(t.Context(), key, old); err != nil {
 		t.Fatal(err)
 	}
@@ -641,3 +642,207 @@ func TestHoldOfAnOlderEventOfTheNameIsDropped(t *testing.T) {
 	}
 	h.none()
 }
+
+// holdOutcomeCounts reads shadewright_analyzer_held_consequences_total by outcome.
+func holdOutcomeCounts() map[string]float64 {
+	out := map[string]float64{}
+	for _, o := range []string{holdOpened, holdNotOpened, holdReleased, holdDropped, holdOverflow} {
+		out[o] = testutil.ToFloat64(heldConsequences.WithLabelValues(o))
+	}
+	return out
+}
+
+// outcomesSince returns the outcomes counted since before, leaving out those that did not change.
+func outcomesSince(before map[string]float64) map[string]float64 {
+	d := map[string]float64{}
+	for o, v := range holdOutcomeCounts() {
+		if v != before[o] {
+			d[o] = v - before[o]
+		}
+	}
+	return d
+}
+
+func wantOutcomes(t *testing.T, before map[string]float64, want map[string]float64) {
+	t.Helper()
+	if got := outcomesSince(before); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("outcomes counted %v, want %v", got, want)
+	}
+}
+
+// TestOverflowStandsAcrossADeliveryRetry: overflow, full channel, room, retry. A consequence emitted at once for
+// want of room whose delivery is retried is emitted at the retry, even when a hold has ended meanwhile and left
+// room; it is counted once, as overflow, and its mark is gone once delivered. An update of its pod enqueues it
+// not.
+func TestOverflowStandsAcrossADeliveryRetry(t *testing.T) {
+	d, rs, _ := workload()
+	// A total of 4 gives a namespace share of 1.
+	h := newHarness(t, Config{MaxHeldConsequences: 4, Buffer: 1}, d, rs, holdPod(reasonBackOff, sampleFailing, 0),
+		consequence("ev-0", reasonBackOff, appPath, t0), consequence("ev-1", reasonBackOff, appPath, t0))
+	before := holdOutcomeCounts()
+	if res := h.reconcileEvent("ev-0"); res.RequeueAfter != ConsequenceGrace {
+		t.Fatalf("ev-0 not held: %+v", res)
+	}
+	h.c.out <- Observation{Fingerprint: fillerFingerprint}
+	if res := h.reconcileEvent("ev-1"); res.RequeueAfter != retryAfter {
+		t.Fatalf("ev-1: requeue after %s, want the delivery retry", res.RequeueAfter)
+	}
+	if reqs := h.c.heldEventsOf(t.Context(), readPod(t, h, webPod)); len(reqs) != 1 || reqs[0] != reqFor("ev-0") {
+		t.Fatalf("an update of the pod enqueued %v, want ev-0 alone", reqs)
+	}
+	// ev-0 ends (its event is deleted), which leaves room in the namespace, and the channel frees.
+	ev0 := &eventsv1.Event{}
+	if err := h.cl.Get(t.Context(), reqFor("ev-0").NamespacedName, ev0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.cl.Delete(t.Context(), ev0); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcileEvent("ev-0")
+	h.drain()
+	h.clock.add(retryAfter)
+	if res := h.reconcileEvent("ev-1"); res != (ctrl.Result{}) {
+		t.Fatalf("the retry returned %+v, want the observation delivered", res)
+	}
+	if o := h.one(); o.Occurrence != "event:ev-ev-1" || o.Count != 1 {
+		t.Fatalf("emitted %+v", o)
+	}
+	if h.c.holds.len() != 0 || h.c.holds.overflowLen() != 0 {
+		t.Fatalf("%d held, %d overflow marks after the delivery, want none", h.c.holds.len(),
+			h.c.holds.overflowLen())
+	}
+	wantOutcomes(t, before, map[string]float64{holdOverflow: 1, holdDropped: 1})
+}
+
+// TestOverflowMarksAreBounded: no more overflow marks than holds are kept; one past the bound is not remembered
+// and the consequence is still emitted at once.
+func TestOverflowMarksAreBounded(t *testing.T) {
+	hs := newConsequenceHolds(4)
+	for i := range 4 {
+		key := types.NamespacedName{Namespace: testNS, Name: fmt.Sprintf("ev-%d", i)}
+		if !hs.markOverflow(key, types.UID(key.Name)) {
+			t.Fatalf("%s refused below the bound", key)
+		}
+	}
+	key := types.NamespacedName{Namespace: testNS, Name: "one-more"}
+	if hs.markOverflow(key, "one-more") || hs.wasOverflow(key, "one-more") {
+		t.Fatal("remembered one over the bound")
+	}
+	// The mark is of the event's UID: an event created again under the name is not one.
+	first := reqFor("ev-0").NamespacedName
+	if hs.wasOverflow(first, "another") {
+		t.Fatal("the mark of an older event of the name counts for a new one")
+	}
+	hs.get(first, "another")
+	if hs.overflowLen() != 3 {
+		t.Fatalf("%d marks, want the older event's dropped", hs.overflowLen())
+	}
+	hs.drop(types.NamespacedName{Namespace: testNS, Name: "ev-1"})
+	hs.done(types.NamespacedName{Namespace: testNS, Name: "ev-2"})
+	if hs.overflowLen() != 1 {
+		t.Fatalf("%d marks, want 1 after a drop and a delivery", hs.overflowLen())
+	}
+}
+
+// TestHoldOutcomesAddUp: every hold started ends in exactly one of opened, not_opened, released and dropped.
+func TestHoldOutcomesAddUp(t *testing.T) {
+	getEvent := func(t *testing.T, h *harness) *eventsv1.Event {
+		ev := &eventsv1.Event{}
+		if err := h.cl.Get(t.Context(), reqFor("ev-hold").NamespacedName, ev); err != nil {
+			t.Fatal(err)
+		}
+		return ev
+	}
+	for _, tc := range []struct {
+		name string
+		end  func(t *testing.T, h *harness)
+		want string
+	}{
+		{"opened", func(t *testing.T, h *harness) {
+			h.clock.add(ConsequenceGrace)
+			h.reconcileEvent("ev-hold")
+		}, holdOpened},
+		{"not opened", func(t *testing.T, h *harness) {
+			h.clock.add(ConsequenceGrace)
+			h.setPodState(reasonBackOff, sampleFine, 0)
+			h.reconcileEvent("ev-hold")
+		}, holdNotOpened},
+		{"released by a cause", func(t *testing.T, h *harness) {
+			cur := readPod(t, h, webPod)
+			cur.Status.ContainerStatuses[0].State.Waiting.Reason = reasonConfig
+			h.update(cur)
+			h.reconcileEvent("ev-hold")
+		}, holdReleased},
+		{"event deleted", func(t *testing.T, h *harness) {
+			if err := h.cl.Delete(t.Context(), getEvent(t, h)); err != nil {
+				t.Fatal(err)
+			}
+			h.reconcileEvent("ev-hold")
+		}, holdDropped},
+		{"no longer a Warning", func(t *testing.T, h *harness) {
+			ev := getEvent(t, h)
+			ev.Type = corev1.EventTypeNormal
+			h.update(ev)
+			h.reconcileEvent("ev-hold")
+		}, holdDropped},
+		{"replaced by another event of the name", func(t *testing.T, h *harness) {
+			if err := h.cl.Delete(t.Context(), getEvent(t, h)); err != nil {
+				t.Fatal(err)
+			}
+			ev := consequence("ev-hold", reasonBackOff, appPath, h.clock.Now())
+			ev.UID = "ev-hold-second"
+			h.create(ev)
+			h.reconcileEvent("ev-hold")
+			// The new event's own hold ends too, so that the count of holds started is two.
+			if err := h.cl.Delete(t.Context(), getEvent(t, h)); err != nil {
+				t.Fatal(err)
+			}
+			h.reconcileEvent("ev-hold")
+		}, holdDropped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := holdHarness(t, reasonBackOff, sampleFailing)
+			before := holdOutcomeCounts()
+			h.reconcileEvent("ev-hold")
+			h.clock.add(time.Second)
+			h.reconcileEvent("ev-hold")
+			tc.end(t, h)
+			h.drain()
+			want := 1.0
+			if tc.name == "replaced by another event of the name" {
+				want = 2
+			}
+			wantOutcomes(t, before, map[string]float64{tc.want: want})
+			if h.c.holds.len() != 0 {
+				t.Fatalf("%d held after the end", h.c.holds.len())
+			}
+		})
+	}
+}
+
+// TestOpenedHoldDeletedBeforeDeliveryIsNotDropped: a hold decided to open is counted opened once; its event
+// deleted during the delivery retry adds no dropped.
+func TestOpenedHoldDeletedBeforeDeliveryIsNotDropped(t *testing.T) {
+	d, rs, _ := workload()
+	h := newHarness(t, Config{Buffer: 1}, d, rs, holdPod(reasonBackOff, sampleFailing, 0),
+		consequence("ev-hold", reasonBackOff, appPath, t0))
+	before := holdOutcomeCounts()
+	h.reconcileEvent("ev-hold")
+	h.c.out <- Observation{Fingerprint: fillerFingerprint}
+	h.clock.add(ConsequenceGrace)
+	if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != retryAfter {
+		t.Fatalf("requeue after %s, want the delivery retry", res.RequeueAfter)
+	}
+	ev := &eventsv1.Event{}
+	if err := h.cl.Get(t.Context(), reqFor("ev-hold").NamespacedName, ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.cl.Delete(t.Context(), ev); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcileEvent("ev-hold")
+	wantOutcomes(t, before, map[string]float64{holdOpened: 1})
+}
+
+// fillerFingerprint marks the observation a test puts in the channel to fill it.
+const fillerFingerprint = "filler"

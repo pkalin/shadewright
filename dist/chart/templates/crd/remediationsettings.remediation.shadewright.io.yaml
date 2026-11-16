@@ -204,9 +204,10 @@ spec:
                         type: object
                         x-kubernetes-validations:
                         - fieldPath: .apiVersion
-                          message: a deployment with provider Foundry needs apiVersion
+                          message: a deployment with a provider other than Anthropic
+                            needs apiVersion
                           rule: has(self.apiVersion) || (has(self.provider) && self.provider
-                            != 'Foundry')
+                            == 'Anthropic')
                         - message: a deployment with provider Anthropic must have
                             the endpoint https://api.anthropic.com
                           rule: '!has(self.provider) || self.provider != ''Anthropic''
@@ -298,9 +299,10 @@ spec:
                         type: object
                         x-kubernetes-validations:
                         - fieldPath: .apiVersion
-                          message: a deployment with provider Foundry needs apiVersion
+                          message: a deployment with a provider other than Anthropic
+                            needs apiVersion
                           rule: has(self.apiVersion) || (has(self.provider) && self.provider
-                            != 'Foundry')
+                            == 'Anthropic')
                         - message: a deployment with provider Anthropic must have
                             the endpoint https://api.anthropic.com
                           rule: '!has(self.provider) || self.provider != ''Anthropic''

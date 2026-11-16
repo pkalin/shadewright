@@ -266,8 +266,8 @@ Used by: [AnalysisSettings](#analysissettings).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `triage` | [ModelDeployment](#modeldeployment) | No | triage is the small model for the one structured call on the prepared context, without tools. Left out, no model is called: an incident no runbook matches is handed off to a person, and no unit of spec.analysis.maxAnalysesPerDay is used for it.<br>Rule: a deployment with provider Foundry needs apiVersion<br>Rule: a deployment with provider Anthropic must have the endpoint https://api.anthropic.com<br>Rule: the host api.anthropic.com is only for a deployment with provider Anthropic |
-| `escalation` | [ModelDeployment](#modeldeployment) | No | escalation is the stronger model, called with read tools only on the deterministic escalation signals of ADR-0023. Left out, an escalation trigger hands the incident off to a person.<br>Rule: a deployment with provider Foundry needs apiVersion<br>Rule: a deployment with provider Anthropic must have the endpoint https://api.anthropic.com<br>Rule: the host api.anthropic.com is only for a deployment with provider Anthropic |
+| `triage` | [ModelDeployment](#modeldeployment) | No | triage is the small model for the one structured call on the prepared context, without tools. Left out, no model is called: an incident no runbook matches is handed off to a person, and no unit of spec.analysis.maxAnalysesPerDay is used for it.<br>Rule: a deployment with a provider other than Anthropic needs apiVersion<br>Rule: a deployment with provider Anthropic must have the endpoint https://api.anthropic.com<br>Rule: the host api.anthropic.com is only for a deployment with provider Anthropic |
+| `escalation` | [ModelDeployment](#modeldeployment) | No | escalation is the stronger model, called with read tools only on the deterministic escalation signals of ADR-0023. Left out, an escalation trigger hands the incident off to a person.<br>Rule: a deployment with a provider other than Anthropic needs apiVersion<br>Rule: a deployment with provider Anthropic must have the endpoint https://api.anthropic.com<br>Rule: the host api.anthropic.com is only for a deployment with provider Anthropic |
 
 ### AnalysisSettings
 
@@ -904,7 +904,7 @@ ModelDeployment is one model deployment behind an inference endpoint, for exampl
 
 Validation rules:
 
-- a deployment with provider Foundry needs apiVersion: `has(self.apiVersion) || (has(self.provider) && self.provider != 'Foundry')`
+- a deployment with a provider other than Anthropic needs apiVersion: `has(self.apiVersion) || (has(self.provider) && self.provider == 'Anthropic')`
 - a deployment with provider Anthropic must have the endpoint https://api.anthropic.com: `!has(self.provider) || self.provider != 'Anthropic' || self.endpoint == 'https://api.anthropic.com'`
 - the host api.anthropic.com is only for a deployment with provider Anthropic: `(has(self.provider) && self.provider == 'Anthropic') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.anthropic.com'`
 

@@ -2012,7 +2012,7 @@ var _ = Describe("RemediationSettings", func() {
 						expectAccepted(s)
 						return
 					}
-					expectRefused(s, "a deployment with provider Foundry needs apiVersion")
+					expectRefused(s, "a deployment with a provider other than Anthropic needs apiVersion")
 				},
 				Entry("Foundry with apiVersion", v1alpha1.ModelProviderFoundry, "2024-10-21", true),
 				Entry("Foundry without apiVersion", v1alpha1.ModelProviderFoundry, "", false),
@@ -2049,7 +2049,7 @@ var _ = Describe("RemediationSettings", func() {
 					"https://example.services.ai.azure.com/", "small-model"
 				err := k8sClient.Update(ctx, got)
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("a deployment with provider Foundry needs apiVersion"))
+				Expect(err.Error()).To(ContainSubstring("a deployment with a provider other than Anthropic needs apiVersion"))
 			})
 
 			It("refuses an unknown provider", func() {

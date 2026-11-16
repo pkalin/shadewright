@@ -300,10 +300,13 @@ const AnthropicEndpoint = "https://api.anthropic.com"
 // Anthropic, not for Foundry only: a provider added later inherits the ban on purpose, so no credential of
 // another provider can be sent to that host. TestAnthropicEndpointInRules checks that the rules name
 // AnthropicEndpoint and its host.
+//
+// The first rule is written the same way: apiVersion may be left out only for provider Anthropic, so a provider
+// added later needs it until its own rule says otherwise.
 
 // ModelDeployment is one model deployment behind an inference endpoint, for example in Microsoft Foundry
 // (ADR-0016), or a model of the Anthropic API (ADR-0037). It holds no key, token or other credential.
-// +kubebuilder:validation:XValidation:rule="has(self.apiVersion) || (has(self.provider) && self.provider != 'Foundry')",message="a deployment with provider Foundry needs apiVersion",fieldPath=".apiVersion"
+// +kubebuilder:validation:XValidation:rule="has(self.apiVersion) || (has(self.provider) && self.provider == 'Anthropic')",message="a deployment with a provider other than Anthropic needs apiVersion",fieldPath=".apiVersion"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'Anthropic' || self.endpoint == 'https://api.anthropic.com'",message="a deployment with provider Anthropic must have the endpoint https://api.anthropic.com"
 // +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider == 'Anthropic') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.anthropic.com'",message="the host api.anthropic.com is only for a deployment with provider Anthropic"
 type ModelDeployment struct {

@@ -111,6 +111,7 @@ func TestBlanksStillRedactsWhatMainRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
+	gen := blanksCorpus(3000)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1<<16), 1<<20)
 	cases, redacted := 0, 0
@@ -120,6 +121,7 @@ func TestBlanksStillRedactsWhatMainRedacted(t *testing.T) {
 			t.Fatalf("line %d: %v", cases+1, err)
 		}
 		cases++
+		checkTableInput(t, blanksMainTable, cases, c.In, gen)
 		if len(c.Spans) > 0 {
 			redacted++
 		}
@@ -136,6 +138,9 @@ func TestBlanksStillRedactsWhatMainRedacted(t *testing.T) {
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
+	}
+	if cases != len(gen) {
+		t.Fatalf("%s has %d lines, its corpus generator %d inputs", blanksMainTable, cases, len(gen))
 	}
 	if cases < 3000 || redacted < 2000 {
 		t.Fatalf("table too small: %d cases, %d redacted on main", cases, redacted)

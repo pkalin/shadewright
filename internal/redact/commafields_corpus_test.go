@@ -122,6 +122,7 @@ func TestCommaFieldsStillRedactWhatMainRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
+	gen := commaFieldsCorpus(3000)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1<<16), 1<<20)
 	cases, redacted, failed := 0, 0, 0
@@ -131,6 +132,7 @@ func TestCommaFieldsStillRedactWhatMainRedacted(t *testing.T) {
 			t.Fatalf("line %d: %v", cases+1, err)
 		}
 		cases++
+		checkTableInput(t, commaFieldsMainTable, cases, c.In, gen)
 		if len(c.Spans) > 0 {
 			redacted++
 		}
@@ -151,6 +153,9 @@ func TestCommaFieldsStillRedactWhatMainRedacted(t *testing.T) {
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
+	}
+	if cases != len(gen) {
+		t.Fatalf("%s has %d lines, its corpus generator %d inputs", commaFieldsMainTable, cases, len(gen))
 	}
 	if failed > 0 {
 		t.Errorf("%d of %d inputs lost bytes main redacted", failed, cases)

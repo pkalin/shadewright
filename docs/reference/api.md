@@ -266,8 +266,8 @@ Used by: [AnalysisSettings](#analysissettings).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `triage` | [ModelDeployment](#modeldeployment) | No | triage is the small model for the one structured call on the prepared context, without tools. Left out, no model is called: an incident no runbook matches is handed off to a person, and no unit of spec.analysis.maxAnalysesPerDay is used for it.<br>Rule: a deployment with provider Anthropic must have the endpoint https://api.anthropic.com<br>Rule: the host api.anthropic.com is only for a deployment with provider Anthropic |
-| `escalation` | [ModelDeployment](#modeldeployment) | No | escalation is the stronger model, called with read tools only on the deterministic escalation signals of ADR-0023. Left out, an escalation trigger hands the incident off to a person.<br>Rule: a deployment with provider Anthropic must have the endpoint https://api.anthropic.com<br>Rule: the host api.anthropic.com is only for a deployment with provider Anthropic |
+| `triage` | [ModelDeployment](#modeldeployment) | No | triage is the small model for the one structured call on the prepared context, without tools. Left out, no model is called: an incident no runbook matches is handed off to a person, and no unit of spec.analysis.maxAnalysesPerDay is used for it.<br>Rule: a deployment with provider Anthropic must have the endpoint https://api.anthropic.com<br>Rule: the host api.anthropic.com is only for a deployment with provider Anthropic<br>Rule: inferenceAPI is only for a deployment with provider Foundry<br>Rule: inferenceAPI Responses needs apiVersion v1 |
+| `escalation` | [ModelDeployment](#modeldeployment) | No | escalation is the stronger model, called with read tools only on the deterministic escalation signals of ADR-0023. Left out, an escalation trigger hands the incident off to a person.<br>Rule: a deployment with provider Anthropic must have the endpoint https://api.anthropic.com<br>Rule: the host api.anthropic.com is only for a deployment with provider Anthropic<br>Rule: inferenceAPI is only for a deployment with provider Foundry<br>Rule: inferenceAPI Responses needs apiVersion v1 |
 
 ### AnalysisSettings
 
@@ -817,6 +817,20 @@ Used by: [Handoff](#handoff).
 | `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
 | `pullRequestUpdate` | [HandoffStep](#handoffstep) | No | pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for good. Until it is Done the body carries the predecessor's marker, or after refused rewrites further up the chain an earlier request's, which this request accepts as its own while its chain reaches that request.<br>One of `Done`, `Refused` |
 
+### InferenceAPI
+
+InferenceAPI names the inference API a Foundry deployment is called through (#501).
+
+- Underlying type: string
+- One of `ChatCompletions`, `Responses`
+
+Used by: [ModelDeployment](#modeldeployment).
+
+| Value | Description |
+| --- | --- |
+| `ChatCompletions` | InferenceAPIChatCompletions is the chat completions API, used when inferenceAPI is left out. |
+| `Responses` | InferenceAPIResponses is the Responses API, with apiVersion v1 only. |
+
 ### IntegrationStatus
 
 IntegrationStatus reports one integration module that is enabled, detected or both. It is a report only:
@@ -906,6 +920,8 @@ Validation rules:
 
 - a deployment with provider Anthropic must have the endpoint https://api.anthropic.com: `!has(self.provider) || self.provider != 'Anthropic' || self.endpoint == 'https://api.anthropic.com'`
 - the host api.anthropic.com is only for a deployment with provider Anthropic: `(has(self.provider) && self.provider == 'Anthropic') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.anthropic.com'`
+- inferenceAPI is only for a deployment with provider Foundry: `!has(self.inferenceAPI) || !has(self.provider) || self.provider == 'Foundry'`
+- inferenceAPI Responses needs apiVersion v1: `!has(self.inferenceAPI) || self.inferenceAPI != 'Responses' || self.apiVersion == 'v1'`
 
 Used by: [AnalysisModels](#analysismodels).
 
@@ -915,6 +931,7 @@ Used by: [AnalysisModels](#analysismodels).
 | `endpoint` | string | Yes | endpoint is the HTTPS base URL of the inference endpoint, for example https://&lt;resource>.services.ai.azure.com/ or https://&lt;resource>.openai.azure.com/openai/v1. At most 256 characters: a host name of lower-case DNS labels whose last label starts with a letter (so no IP address and no single-label host such as localhost), an optional port from 1 to 65535 and an optional path whose segments do not start with '.'. No user info, query or fragment. The schema is vendor-neutral (ADR-0013). The endpoint decides where the analyzer's Entra ID token and the redacted context go: the analyzer refuses a host outside the allow-list of suffixes of its --model-endpoint-suffixes flag (not in this object) or a port other than 443, refuses private, loopback and link-local addresses when it dials, and requests a token for the Cognitive Services audience only. For provider Anthropic it must be https://api.anthropic.com, the adapter's fixed host, and the allow-list does not apply; for Foundry that host is refused whatever the allow-list says.<br>Maximum length: 256<br>Minimum length: 1<br>Pattern: <code>^https://(&#91;a-z0-9](&#91;a-z0-9-]{0,61}&#91;a-z0-9])?\.)+&#91;a-z](&#91;a-z0-9-]{0,61}&#91;a-z0-9])?(:(&#91;1-9]&#91;0-9]{0,3}&#124;&#91;1-5]&#91;0-9]{4}&#124;6&#91;0-4]&#91;0-9]{3}&#124;65&#91;0-4]&#91;0-9]{2}&#124;655&#91;0-2]&#91;0-9]&#124;6553&#91;0-5]))?(/&#91;A-Za-z0-9_~-]&#91;A-Za-z0-9._~-]*)*/?$</code> |
 | `deployment` | string | Yes | deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting with a letter or digit. For provider Anthropic it is the model ID exactly as the replies name it, such as claude-haiku-5-5.<br>Maximum length: 64<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9][A-Za-z0-9._-]*$` |
 | `apiVersion` | string | Yes | apiVersion is the inference API version the adapter sends: v1, or a date such as 2024-10-21 (month 01 to 12, day 01 to 31), optionally followed by -preview. For provider Anthropic it is required too but not sent: that adapter's API version is fixed in code.<br>Maximum length: 32<br>Minimum length: 2<br>Pattern: <code>^(v1&#124;&#91;0-9]{4}-(0&#91;1-9]&#124;1&#91;0-2])-(0&#91;1-9]&#124;&#91;12]&#91;0-9]&#124;3&#91;01])(-preview)?)$</code> |
+| `inferenceAPI` | [InferenceAPI](#inferenceapi) | No | inferenceAPI is the API a Foundry deployment is called through: ChatCompletions (used when it is left out) or Responses, which needs apiVersion v1 and posts to &lt;endpoint>/openai/v1/responses. Both carry the same redacted context, tool definitions, response schema and output limit; the Responses request asks the service to store nothing. Set Responses for a model that refuses function tools on chat completions, such as the gpt-6.1 models, whose escalation calls need the read tools (#501). Only for provider Foundry.<br>One of `ChatCompletions`, `Responses` |
 | `maxTokensPerDay` | integer | Yes | maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not) plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input estimate plus maxOutputTokens), except a call the adapter marks as refused by its host before processing (a 429 on every attempt from a Microsoft-operated Azure OpenAI or Foundry host), counted as 0. Required, with no default, so the admin chooses the cap of each deployment. It is a count of tokens, not an amount of money, because tokens are what the provider reports and bills, they are whole numbers, and a money cap would need a price list in this object that goes stale. It is per deployment because the triage and escalation models differ in price. The spend it allows is at most this count times the deployment's highest price per token (design 12.1) only because the counter reserves a call's upper bound before calling, under one lock for concurrent analyses (planned, #208). 0 to 1,000,000,000; 0, or a cap that is spent, stops calls to this deployment and hands the incident off.<br>Maximum: 1000000000<br>Minimum: 0 |
 
 ### ModelProvider

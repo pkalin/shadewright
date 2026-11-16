@@ -297,6 +297,9 @@ func TestModelFactoryLogsAdapterRefusals(t *testing.T) {
 		{Provider: remediationv1alpha1.ModelProviderAnthropic, Endpoint: remediationv1alpha1.AnthropicEndpoint,
 			Deployment: "Claude_Haiku", APIVersion: "v1"},
 		{Endpoint: "https://a" + foundrySuffix + "/", Deployment: smallModel, APIVersion: "latest"},
+		// The Responses API with a dated version: the adapter refuses it only when the factory passes inferenceAPI.
+		{Endpoint: "https://a" + foundrySuffix + "/", Deployment: smallModel, APIVersion: "2024-10-21",
+			InferenceAPI: remediationv1alpha1.InferenceAPIResponses},
 	} {
 		lines = nil
 		p, err := f(analysis.RoleTriage, d)

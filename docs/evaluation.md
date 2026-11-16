@@ -124,6 +124,7 @@ Before the first run, the maintainer sets up:
 | `EVAL_ESCALATION_DEPLOYMENT` | no | Name of the escalation deployment; without it an escalation is handed off |
 | `EVAL_ESCALATION_MODEL` | with the above | Model ID and version of the escalation replies, as `--escalation-model` |
 | `EVAL_API_VERSION` | no | Inference API version, `v1` by default |
+| `EVAL_TRIAGE_INFERENCE_API`, `EVAL_ESCALATION_INFERENCE_API` | no | `inferenceAPI` of the triage or escalation deployment: unset (chat completions), `ChatCompletions` or `Responses` (needs `EVAL_API_VERSION` `v1`). Set `Responses` for a model that refuses function tools on chat completions, such as `gpt-6.1-sol` on escalation ([#501](https://github.com/pkalin/shadewright/issues/501)). Any other value is an error before the identity is used; the escalation one needs `EVAL_ESCALATION_DEPLOYMENT` |
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
 | `EVAL_ESCALATION_PRICE_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_OUTPUT_PER_MTOK` | no | The escalation deployment's own prices: all three or none, and only with the ones above and `EVAL_ESCALATION_DEPLOYMENT`. Without them the escalation calls are priced as the triage ones |
 | `EVAL_FORCE_ESCALATION` | no | `1` sends every run to the escalation model with its read tools (below); needs `EVAL_ESCALATION_DEPLOYMENT`. Any other value is an error, checked before the identity is used, and `make eval` (the replay) refuses it |
@@ -165,7 +166,7 @@ another Claude model.
 | `EVAL_ANTHROPIC_THINKING_ALLOWANCE` | no | Tokens added to the run's output limit in `max_tokens`, as room for thinking; default 4096, at most 32768 |
 | `EVAL_PRICE_*`, `EVAL_ESCALATION_PRICE_*`, `EVAL_REPEATS`, `EVAL_MIN_PASS_RATE`, `EVAL_FORCE_ESCALATION` | no | As in the table above (`EVAL_FORCE_ESCALATION=1` needs `EVAL_ESCALATION_MODEL`); take the prices from Anthropic's price list |
 
-`EVAL_ENDPOINT`, `EVAL_ENDPOINT_SUFFIXES`, `EVAL_API_VERSION` and the `*_DEPLOYMENT` variables apply to Foundry
+`EVAL_ENDPOINT`, `EVAL_ENDPOINT_SUFFIXES`, `EVAL_API_VERSION`, the `*_INFERENCE_API` and the `*_DEPLOYMENT` variables apply to Foundry
 only, and a run with one of them set fails before any call. The adapter posts to `https://api.anthropic.com` only (a
 constant, not a setting) and follows no redirect. The manifest names the provider (`provider: anthropic`) and its
 settings (`anthropic.effort`, `anthropic.thinkingAllowance`, also on the report's first lines), and each role's
@@ -345,7 +346,7 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | --- | --- |
 | `provider` | `anthropic` with the Anthropic API; left out for fake and Foundry runs, so their digests are those they had before the field |
 | `anthropic` | With the Anthropic API only: `effort` and `thinkingAllowance` (tokens added to the output limit in `max_tokens`) |
-| `models` | Per role: `deployment` (with `anthropic`, the model ID), `model` (the ID and version replies must name), `apiVersion` |
+| `models` | Per role: `deployment` (with `anthropic`, the model ID), `model` (the ID and version replies must name), `apiVersion`, and `inferenceAPI` when it is set (left out for chat completions, so earlier digests stay the same) |
 | `promptVersion` | `analysis.PromptVersion()`: the prompt templates, the generated schema and the catalog |
 | `toolDefinitions` | Hash of the tool definitions offered on escalation, `query_metrics` included; a scenario without `metrics.yaml` is offered them without it |
 | `outputSchema` | Hash of the generated output schema and the action catalog |

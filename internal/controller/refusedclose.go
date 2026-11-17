@@ -474,7 +474,7 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 		wait := min(refusedLeft, closeRefusedRetry, failingLeft)
 		return reconcile.Result{RequeueAfter: wait}, nil, nil
 	}
-	res, werr := r.waitOrFail(ctx, rr, err, readBoundIn(failingLeft))
+	res, werr := r.waitOrFail(ctx, rr, err, paceWithin(failingLeft))
 	if res.RequeueAfter > failingLeft {
 		res.RequeueAfter = failingLeft
 	}

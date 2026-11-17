@@ -708,7 +708,10 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 	if from := rr.Status.Handoff.From; from.Phase == remediationv1alpha1.HandoffReserved {
 		from.Phase = remediationv1alpha1.HandoffAborted
 	}
-	release(rr)
+	// Without the proof (a pull request of its own recorded), the lock stays for the read that settles it (checkHeld).
+	if s, ok := settleHandoffAborted(rr); ok {
+		release(rr, s)
+	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, reason, message)
 }
 
@@ -936,7 +939,9 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 	if h := hintByRef(pred, to.Hint); h != nil {
 		h.State = remediationv1alpha1.HintConsumed
 	}
-	release(pred)
+	if s, ok := settleHandedOver(to, rr); ok {
+		release(pred, s)
+	}
 	err := r.stop(ctx, pred, remediationv1alpha1.PhaseSuperseded, remediationv1alpha1.ReasonHandedOff,
 		fmt.Sprintf("RemediationRequest %s took over the pull request and its branch with a new plan", rr.Name))
 	if !errors.Is(err, errStopped) {
@@ -1004,17 +1009,17 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 		errors.Is(err, errTargetBranchChanged) || errors.Is(err, errRepositoryGone) {
 		return r.retry(ctx, rr, err)
 	}
+	if gitReadFailure(err) {
+		// Retried visibly within the grace (waitHandoffGrace): the check at the start of a reconcile past its end
+		// ends the request (endPassedWait, endRecoveryFailed), so no failed read, timeout or early return skips it.
+		return r.retryGitRead(ctx, rr, err, boundBy(waitHandoffGrace))
+	}
 	left := rr.Status.Deadline.Add(handoffRecoveryGrace).Sub(r.now())
 	if left <= 0 {
+		// Any other failure is no Git wait: it ends the request here, on its own retry.
 		logf.FromContext(ctx).Info("Could not recover the handoff of RemediationRequest before the grace ended",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
-			ReasonHandoffRecoveryFailed, "The deadline passed and the branch could not be read to learn whether "+
-				"this request's commit is on the pull request it replaces; check the branch and the pull request"))
-	}
-	if gitReadFailure(err) {
-		// Retried visibly, and looked at again by the end of the grace at the latest.
-		return r.retryGitRead(ctx, rr, err, readBoundAt(rr.Status.Deadline.Add(handoffRecoveryGrace)))
+		return reconcile.Result{}, r.endRecoveryFailed(ctx, rr)
 	}
 	d := retryAfterOf(err)
 	if d <= 0 {
@@ -1024,6 +1029,22 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 	logf.FromContext(ctx).Info("Waiting before retrying the recovery of the handoff of RemediationRequest",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)
 	return reconcile.Result{RequeueAfter: d}, nil
+}
+
+// endRecoveryFailed ends a request whose handoff could not be recovered before handoffRecoveryGrace after its
+// deadline: NeedsIntervention with ReasonHandoffRecoveryFailed (its handoff is aborted with the end, declineOnEnd).
+func (r *RemediationRequestReconciler) endRecoveryFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+		ReasonHandoffRecoveryFailed, "The deadline passed and the branch could not be read to learn whether "+
+			"this request's commit is on the pull request it replaces; check the branch and the pull request"))
+}
+
+// recoveringHandoff reports whether rr is a replacement whose handoff recoverHandoff still recovers: the
+// predecessor reserved, the request in PolicyChecked, no stale plan's cleanup started.
+func recoveringHandoff(rr *remediationv1alpha1.RemediationRequest) bool {
+	ho := rr.Status.Handoff
+	return rr.Spec.Replaces != nil && ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffReserved &&
+		rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && staleMark(rr) == nil
 }
 
 // recoverStep is the look of recoverHandoff.

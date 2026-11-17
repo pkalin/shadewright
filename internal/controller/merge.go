@@ -120,7 +120,8 @@ var errMergeCheck = errors.New("the pull request was merged, and its merge is no
 // run within half of what is left of ctx (mergeCheckContext), so a check that runs out of time still records
 // the start and lets the caller write, in every path.
 func (r *RemediationRequestReconciler) checkAtMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	if staleMark(rr) != nil {
+	if staleMark(rr) != nil || markedStale(rr) {
+		// Marked already (a stale plan, or not shown fresh after the wait for the merge): nothing to check.
 		return nil
 	}
 	checkCtx, cancel := r.mergeCheckContext(ctx)
@@ -152,9 +153,16 @@ func (r *RemediationRequestReconciler) mergeCheckContext(ctx context.Context) (c
 	return context.WithTimeout(ctx, time.Until(deadline)/2)
 }
 
-// mergeCheckFailed handles a check at the merge that did not answer (checkAtMerge): it records the start of the
-// wait when there is none and the context still allows a write, and returns the failure wrapped in errMergeCheck
-// for a retry, or, once the wait is over, marks the plan as not shown fresh and returns nil.
+// mergeCheckFailed handles a check at the merge that did not answer (checkAtMerge). It records the start of the wait
+// for the merge (status.mergeCommitAwaitedSince) when there is none and the context still allows a write, as the
+// check of any kind of failure is bounded by that wait:
+//   - a failed Git read is one of the wait (readOfKind waitMergeCheck), returned wrapped in errMergeCheck for a
+//     retry: retryGitRead starts the clock too when it could not be started here, and the check at the start of a
+//     reconcile past its end marks the plan not shown fresh (endPassedWait), after which the merge is recorded with
+//     that mark. Nothing here looks at the end of that wait;
+//   - any other failure (a Kubernetes read, a timeout of one) is no Git wait and goes to the error backoff: it is
+//     returned wrapped in errMergeCheck while the wait lasts, and once it is over the plan is marked not shown fresh
+//     here (markNotShownFresh) and nil is returned, so the merge is recorded.
 func (r *RemediationRequestReconciler) mergeCheckFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	checkErr error) error {
 	if rr.Status.MergeCommitAwaitedSince == nil && ctx.Err() == nil {
@@ -162,23 +170,33 @@ func (r *RemediationRequestReconciler) mergeCheckFailed(ctx context.Context, rr 
 			return fmt.Errorf("%w: %w (%w)", errMergeCheck, checkErr, err)
 		}
 	}
+	if gitReadFailure(checkErr) {
+		return fmt.Errorf("%w: %w", errMergeCheck, readOfKind(waitMergeCheck, checkErr))
+	}
 	since := rr.Status.MergeCommitAwaitedSince
-	if since == nil {
+	if since == nil || mergeCommitWaitRemaining(since.Time, r.now()) > 0 {
 		return fmt.Errorf("%w: %w", errMergeCheck, checkErr)
 	}
-	if mergeCommitWaitRemaining(since.Time, r.now()) > 0 {
-		// A failed Git read of the check is looked at again by the end of the wait at the latest.
-		return fmt.Errorf("%w: %w", errMergeCheck, withReadBound(checkErr, readBoundAt(since.Add(mergeCommitWait))))
-	}
-	msg := "The plan could not be checked at the merge within the wait for the merge (" + checkErr.Error() +
-		"), so it is not shown fresh"
-	markStaleAtMerge(rr, freshness.ReasonPlanChanged, msg)
+	markNotShownFresh(rr, checkErr.Error())
 	logf.FromContext(ctx).Error(checkErr, "Recorded the merge of RemediationRequest with a plan not shown fresh: "+
 		"the check at the merge did not answer within the wait", "remediationRequest", client.ObjectKeyFromObject(rr))
 	if r.Recorder != nil {
-		r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonStalePlanMerged, msg)
+		r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonStalePlanMerged, notShownFreshMessage(checkErr.Error()))
 	}
 	return nil
+}
+
+// notShownFreshMessage is the PlanFresh message of a plan whose check at the merge did not answer within the wait
+// for the merge, why saying how it failed.
+func notShownFreshMessage(why string) string {
+	return "The plan could not be checked at the merge within the wait for the merge (" + why +
+		"), so it is not shown fresh"
+}
+
+// markNotShownFresh marks the plan of rr not shown fresh at the merge (PlanChanged) in the status about to be
+// written: the check at the merge did not answer within the wait for the merge (waitMergeCheck).
+func markNotShownFresh(rr *remediationv1alpha1.RemediationRequest, why string) {
+	markStaleAtMerge(rr, freshness.ReasonPlanChanged, notShownFreshMessage(why))
 }
 
 // markStaleAtMerge sets the stale mark (PlanFresh False with a stale reason) in the status about to be written.
@@ -315,7 +333,7 @@ func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alph
 // merge commit or the wait ends) and prMergeUnchecked (the plan could not be checked at the merge: Git reads use the common visible poll, while Kubernetes errors are returned). The full freshness check never runs on a merged change, which makes the plan
 // look stale.
 func (r *RemediationRequestReconciler) mergeNotRecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, outcome prOutcome,
-	lookErr error, bound gitReadBound) (res ctrl.Result, merged bool, err error) {
+	lookErr error, bound waitBound) (res ctrl.Result, merged bool, err error) {
 	switch outcome {
 	case prMergeCommitPending:
 		return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, true, nil

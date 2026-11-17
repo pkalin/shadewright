@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -326,6 +327,14 @@ func TestRecoverHandoffRetriesARefusedReadUntilTheGraceEnds(t *testing.T) {
 	}
 	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
 	if _, err := r.recheck(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	// The failed read past the grace is a Git wait whose end has passed: the check at the start of the next
+	// reconcile ends the request (endPassedWait), before any read.
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
 	if rr.Status.Phase != api.PhaseNeedsIntervention {

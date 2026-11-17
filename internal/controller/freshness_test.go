@@ -3258,7 +3258,11 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.MergeReceipt).To(BeNil())
 		Expect(breakerOutcome(got)).To(Equal(outcomeNone))
 		Expect(revert.Revertible(got)).To(BeFalse())
-		Expect(holdsLock(got)).To(BeFalse())
+		// The end keeps the lock: the settlement's read of the branch, at the next reconcile, releases it on the
+		// recorded end (decision of 2026-11-17 on #771: no release without a verdict of its read).
+		Expect(holdsLock(got)).To(BeTrue())
+		at(mergeContentWait + 2*time.Second)
+		Expect(holdsLock(fetch())).To(BeFalse())
 		Expect(closes.Load()).To(BeZero())
 	})
 

@@ -91,9 +91,9 @@ func cancelRequested(rr *remediationv1alpha1.RemediationRequest) bool {
 // so a check that decided the request meanwhile makes it a conflict, retried with backoff.
 func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
-	if rr.Status.HoldsTarget == nil {
+	if s, ok := settleNeverHeld(rr); ok && rr.Status.HoldsTarget == nil {
 		// As for a refusal: false keeps it out of the limits' lock list (limitsSelectors).
-		release(rr)
+		release(rr, s)
 	}
 	rr.Status.ObservedGeneration = rr.Generation
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
@@ -310,7 +310,7 @@ func (r *RemediationRequestReconciler) cancelFailed(ctx context.Context, rr *rem
 	if werr := r.setCancelPending(ctx, rr, ReasonCancelFailing, why, false); werr != nil {
 		return reconcile.Result{}, werr
 	}
-	res, werr := r.waitOrFail(ctx, rr, err, readBoundIn(left))
+	res, werr := r.waitOrFail(ctx, rr, err, paceWithin(left))
 	if res.RequeueAfter > left {
 		res.RequeueAfter = left
 	}

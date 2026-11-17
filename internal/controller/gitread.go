@@ -48,14 +48,21 @@ type gitReadError struct {
 func (e *gitReadError) Error() string { return e.op + " failed" }
 func (e *gitReadError) Unwrap() error { return e.err }
 
-// gitReadBound is the latest time the retry of a failed Git read may wait until: the end of the wait, grace or
-// deadline of the path that made the read, from the request's recorded state. A path without such an end says why
-// (unboundedRead). retryGitRead takes one with every call, so a call site cannot leave it out.
-type gitReadBound struct {
-	// until is a deadline on the executor's clock; zero for none.
-	until time.Time
-	// within is a duration from the moment the wait is computed; zero for none.
-	within time.Duration
+// waitBound is what bounds the retry of a failed Git read, given by the path that made the read with every call of
+// retryGitRead, so a call site cannot leave it out. It names, never computes, the end of the wait:
+//   - a kind (boundBy): a wait whose end is recorded state of the request (waitKind). The kind is recorded with the
+//     wait, as the reason of condition GitReadRetry, and the check at the start of every reconcile (endPassedWait)
+//     ends a wait past its end before any read or step runs. The site does not look at the end itself.
+//   - a time to look again (paceAt, paceWithin), which ends nothing: the step that runs then reads again and
+//     decides (the end of a delivery window, the full recheck's period, the bound of a cancel or a cleanup that its
+//     own condition records).
+//   - no end at all (unboundedRead), for the reason why.
+//
+// The retry is never later than the end of the kind nor the time to look again.
+type waitBound struct {
+	kind   waitKind
+	paceAt time.Time
+	paceIn time.Duration
 	why    noBoundReason
 }
 
@@ -75,107 +82,100 @@ const (
 	noBoundRefusedWatch noBoundReason = "a refused freshness check is watched without an end"
 )
 
-// boundPassedWait is the wait of a retry whose bound passed while the reconcile's reads ran: the path's own end
-// runs at once, at the next reconcile.
+// boundPassedWait is the wait of a retry whose end passed while the reconcile's reads ran: the check at the start
+// of the next reconcile (endPassedWait) ends the wait at once.
 const boundPassedWait = time.Nanosecond
 
-// readsStartKey is the context key of the time a reconcile began, on the executor's clock (withReadsStart).
-type readsStartKey struct{}
+// boundBy is the bound of kind k, whose end the request's recorded state holds (waitKind.end).
+func boundBy(k waitKind) waitBound { return waitBound{kind: k} }
 
-// withReadsStart records start, the executor's clock when the reconcile began, before any of its reads.
-func withReadsStart(ctx context.Context, start time.Time) context.Context {
-	return context.WithValue(ctx, readsStartKey{}, start)
-}
+// paceAt is a time to look again at t, which ends nothing.
+func paceAt(t time.Time) waitBound { return waitBound{paceAt: t} }
 
-// readsStart is the time the reconcile of ctx began (withReadsStart), zero when none is recorded.
-func readsStart(ctx context.Context) time.Time {
-	start, _ := ctx.Value(readsStartKey{}).(time.Time)
-	return start
-}
-
-// readBoundAt is a bound at t.
-func readBoundAt(t time.Time) gitReadBound { return gitReadBound{until: t} }
-
-// readBoundIn is a bound of d from when the wait is computed: what is left of a wait the caller just computed, or
-// a period such as the full recheck's.
-func readBoundIn(d time.Duration) gitReadBound { return gitReadBound{within: max(d, time.Nanosecond)} }
+// paceWithin is a time to look again d from when the wait is computed (a period such as the full recheck's, or
+// what is left of a bound a condition of the path records), which ends nothing.
+func paceWithin(d time.Duration) waitBound { return waitBound{paceIn: max(d, time.Nanosecond)} }
 
 // unboundedRead is no bound, for the reason why.
-func unboundedRead(why noBoundReason) gitReadBound { return gitReadBound{why: why} }
+func unboundedRead(why noBoundReason) waitBound { return waitBound{why: why} }
 
-// earlierBound is the earlier of b and o on each form; a bound beats none.
-func earlierBound(b, o gitReadBound) gitReadBound {
-	out := b
-	if !o.until.IsZero() && (out.until.IsZero() || o.until.Before(out.until)) {
-		out.until = o.until
-	}
-	if o.within > 0 && (out.within == 0 || o.within < out.within) {
-		out.within = o.within
-	}
-	if out.bounded() {
-		out.why = ""
-	}
-	return out
+// at adds a time to look again at t to b.
+func (b waitBound) at(t time.Time) waitBound {
+	b.paceAt = t
+	return b
 }
 
-func (b gitReadBound) bounded() bool { return !b.until.IsZero() || b.within > 0 }
-
-// cap returns d, shortened to what is left of b at now, so a retry is never later than its bound. A deadline that
-// passed after start, the time the reconcile began (readsStart; zero when not known), so while its reads ran,
-// leaves boundPassedWait: the path's own end runs at once, at the next reconcile. A deadline that had passed
-// before the reconcile began leaves d: the read is one of the path that runs after the bound (an expiry that
-// reads the branch), which the bound no longer paces, so it never retries at once in a loop. No bound leaves d.
-func (b gitReadBound) cap(start, now time.Time, d time.Duration) time.Duration {
-	if !b.until.IsZero() {
-		switch left := b.until.Sub(now); {
-		case left > 0:
-			d = min(d, left)
-		case start.IsZero() || b.until.After(start):
-			d = boundPassedWait
-		}
-	}
-	if b.within > 0 {
-		d = min(d, max(b.within, boundPassedWait))
-	}
-	return d
+// within adds a time to look again d from when the wait is computed to b.
+func (b waitBound) within(d time.Duration) waitBound {
+	b.paceIn = max(d, time.Nanosecond)
+	return b
 }
 
-// readBoundOf is the earlier of bound and the one err carries (withReadBound).
-func readBoundOf(err error, bound gitReadBound) gitReadBound {
-	if e, ok := errors.AsType[*boundedReadError](err); ok {
-		return earlierBound(bound, e.bound)
+// lookBy is the earliest of the end of b's kind for rr and its times to look again, from now; ok is false when
+// nothing bounds b.
+func (b waitBound) lookBy(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
+	by, ok := b.kind.end(rr, now)
+	if !b.paceAt.IsZero() && (!ok || b.paceAt.Before(by)) {
+		by, ok = b.paceAt, true
 	}
-	return bound
+	if b.paceIn > 0 && (!ok || now.Add(b.paceIn).Before(by)) {
+		by, ok = now.Add(b.paceIn), true
+	}
+	return by, ok
 }
 
-// requestBound is the bound of a request's own deadline: a request in PolicyChecked expires at status.deadline,
-// unless the cleanup of its stale plan has started (staleMark), which never expires.
-func requestBound(rr *api.RemediationRequest) gitReadBound {
+// requestBound is the bound of a request's own deadline: a request in PolicyChecked expires at status.deadline
+// (waitRequestDeadline), unless the cleanup of its stale plan has started (staleMark), which never expires.
+func requestBound(rr *api.RemediationRequest) waitBound {
 	if rr.Status.Phase == api.PhasePolicyChecked && rr.Status.Deadline != nil {
-		if staleMark(rr) != nil {
+		switch {
+		case staleMark(rr) != nil:
 			return unboundedRead(noBoundStaleCleanup)
+		case recoveringHandoff(rr):
+			// Past the deadline the recovery has its grace (retryRecovery); before it, the deadline is looked at.
+			return boundBy(waitHandoffGrace).at(rr.Status.Deadline.Time)
+		case intent(rr) != nil:
+			// A handoff in flight is not expired by the deadline (waitHandedOver): it is looked at then.
+			return paceAt(rr.Status.Deadline.Time)
 		}
-		return readBoundAt(rr.Status.Deadline.Time)
+		return boundBy(waitRequestDeadline)
 	}
 	return unboundedRead(noBoundAfterStop)
 }
 
-// boundedReadError is a failed Git read that carries the bound of the path that made it, for a caller that returns
-// an error rather than a result (checkRetargeted): retryGitRead keeps the earlier of it and its own argument.
-type boundedReadError struct {
-	err   error
-	bound gitReadBound
+// kindedReadError is a failed Git read that names the kind of wait it belongs to, for a read made below the path
+// that calls retryGitRead (what a retargeted merge brought, the check at the merge): retryGitRead records that kind,
+// or the caller's when its end comes first.
+type kindedReadError struct {
+	kind waitKind
+	err  error
 }
 
-func (e *boundedReadError) Error() string { return e.err.Error() }
-func (e *boundedReadError) Unwrap() error { return e.err }
+func (e *kindedReadError) Error() string { return e.err.Error() }
+func (e *kindedReadError) Unwrap() error { return e.err }
 
-// withReadBound attaches bound to err, a failed Git read.
-func withReadBound(err error, bound gitReadBound) error {
+// readOfKind marks err, a failed Git read, as one of a wait of kind k.
+func readOfKind(k waitKind, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &boundedReadError{err: err, bound: bound}
+	return &kindedReadError{kind: k, err: err}
+}
+
+// keepGitRead is boundErr for a step that ended on a failed Git read: a read that ran out of the step's time is
+// still that read (with the kind of its wait, readOfKind), retried as one, so its wait is started, paced and ended
+// like any other failure of it. Only a step whose own error is a failed Git read keeps it; a step that failed
+// otherwise (a Kubernetes read, a write), and the caller's cancellation, get boundErr's answer as it is.
+func keepGitRead(parent, phase context.Context, name string, err error) error {
+	bounded := boundErr(parent, phase, name, err)
+	if bounded == err || parent.Err() != nil || !gitReadFailure(err) {
+		return bounded
+	}
+	read := readFailure(readOp(err), bounded)
+	if e, ok := errors.AsType[*kindedReadError](err); ok {
+		return &kindedReadError{kind: e.kind, err: read}
+	}
+	return read
 }
 
 func readFailure(op string, err error) error {
@@ -214,30 +214,53 @@ func gitReadFailure(err error) bool {
 	return false
 }
 
-// retryGitRead is the common result of a failed Git read, called by the path that made the read: a visible retry
-// (condition GitReadRetry) after the poll interval or the delay the host asked for, whichever is longer, and never
-// later than bound (or a bound err carries, withReadBound), so the path's own end (a wait, a grace, a deadline) runs
-// on time. A bound that passed while the reconcile's reads ran ends the wait now (boundPassedWait), so the
-// caller's expiry path runs at the next reconcile; one that had passed before the reconcile began does not
-// shorten the wait, since the read is then one of that expiry path (cap). Any error that is not a failed Git read (a Kubernetes read or
-// write, the cancellation of the reconcile) is returned unchanged, for the error backoff.
+// readOp is the fixed name of the read err failed, for the condition and the log.
+func readOp(err error) string {
+	if e, ok := errors.AsType[*gitReadError](err); ok {
+		return e.op
+	} else if e, ok := errors.AsType[*freshness.ProviderError](err); ok {
+		return e.Op
+	} else if e, ok := errors.AsType[*sourcemap.TransientError](err); ok {
+		return e.Op
+	} else if e, ok := errors.AsType[*sourcemap.RefusedError](err); ok {
+		return e.Op
+	}
+	return "read the Git host"
+}
+
+// retryGitRead is the common result of a failed Git read, called by the path that made the read. It starts or
+// continues a wait and never decides whether one is over (endPassedWait does, at the start of the next reconcile):
+//   - the kind of the wait is the caller's (bound), or the one err names (readOfKind) when its end comes first; in
+//     the path that ends a wait (expiring) there is none;
+//   - a kind with a clock of its own (waitKind.startClock) gets its start recorded when it has none;
+//   - condition GitReadRetry says what is retried, with the kind as its reason and its lastTransitionTime the start
+//     on the executor's clock (kept while the kind stays);
+//   - the retry comes after the poll interval or the delay the host asked for, whichever is longer, and never later
+//     than the end of the kind or the time to look again; an end that passed while the reads ran leaves
+//     boundPassedWait, so the next reconcile ends the wait first.
+//
+// A failed status write (the clock, the condition) is returned for a retry with the error backoff: a wait is never
+// left unrecorded. Any error that is not a failed Git read (a Kubernetes read or write, the cancellation of the
+// reconcile) is returned unchanged, for the error backoff.
 func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api.RemediationRequest, err error,
-	bound gitReadBound) (reconcile.Result, error) {
+	bound waitBound) (reconcile.Result, error) {
 	if ctx.Err() != nil || !gitReadFailure(err) {
 		return reconcile.Result{}, err
 	}
-	op := "read the Git host"
-	if e, ok := errors.AsType[*gitReadError](err); ok {
-		op = e.op
-	} else if e, ok := errors.AsType[*freshness.ProviderError](err); ok {
-		op = e.Op
-	} else if e, ok := errors.AsType[*sourcemap.TransientError](err); ok {
-		op = e.Op
-	} else if e, ok := errors.AsType[*sourcemap.RefusedError](err); ok {
-		op = e.Op
+	now := r.now()
+	kind := bound.kind
+	if e, ok := errors.AsType[*kindedReadError](err); ok {
+		kind = earlierKind(rr, now, kind, e.kind)
 	}
-	want := &metav1.Condition{Type: api.ConditionGitReadRetry, Status: metav1.ConditionTrue, Reason: api.ReasonGitReadFailed,
-		Message: "Retrying Git read: " + op, ObservedGeneration: rr.Generation, LastTransitionTime: metav1.NewTime(r.now())}
+	if expiring(ctx) {
+		kind = waitNone
+	}
+	if werr := r.startClock(ctx, rr, kind); werr != nil {
+		return reconcile.Result{}, werr
+	}
+	op := readOp(err)
+	want := &metav1.Condition{Type: api.ConditionGitReadRetry, Status: metav1.ConditionTrue, Reason: kind.reason(),
+		Message: "Retrying Git read: " + op, ObservedGeneration: rr.Generation, LastTransitionTime: metav1.NewTime(now)}
 	if e := r.putGitReadRetry(ctx, rr, want); e != nil {
 		return reconcile.Result{}, e
 	}
@@ -246,8 +269,12 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	if hostDelay, ok := providers.RetryAfter(err); ok {
 		d = max(d, hostDelay)
 	}
-	d = readBoundOf(err, bound).cap(readsStart(ctx), r.now(), d)
-	logf.FromContext(ctx).Info("Retried a Git read of RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr), "operation", op, "retryAfter", d)
+	bound.kind = kind
+	if by, ok := bound.lookBy(rr, now); ok {
+		d = min(d, max(by.Sub(now), boundPassedWait))
+	}
+	logf.FromContext(ctx).Info("Retried a Git read of RemediationRequest", "remediationRequest",
+		client.ObjectKeyFromObject(rr), "operation", op, "wait", kind.reason(), "retryAfter", d)
 	return reconcile.Result{RequeueAfter: d}, nil
 }
 
@@ -342,7 +369,8 @@ func (r *RemediationRequestReconciler) putGitReadRetry(ctx context.Context, rr *
 			changed = meta.RemoveStatusCondition(&live.Status.Conditions, api.ConditionGitReadRetry)
 		} else {
 			c := want.DeepCopy()
-			if old := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); old != nil && old.Message == c.Message {
+			if old := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); old != nil && old.Status == c.Status && old.Reason == c.Reason {
+				// The start of the wait is kept while its kind stays, whatever read fails now.
 				c.LastTransitionTime = old.LastTransitionTime
 			} else {
 				meta.RemoveStatusCondition(&live.Status.Conditions, api.ConditionGitReadRetry)

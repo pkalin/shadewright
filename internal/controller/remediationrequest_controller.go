@@ -439,7 +439,7 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 // (retryGitRead); Kubernetes failures and other retryable errors keep their error path.
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.gitRetries().take(req.NamespacedName)
-	res, err := r.reconcile(withReadsStart(ctx, r.now()), req)
+	res, err := r.reconcile(ctx, req)
 	if m := r.gitRetries().take(req.NamespacedName); err == nil && ctx.Err() == nil && m.shown && !m.retried {
 		// The reads of this reconcile worked, or were decided on for good: the retry the request showed is over.
 		if clearErr := r.clearGitReadRetry(ctx, req.NamespacedName); clearErr != nil {
@@ -501,6 +501,21 @@ func (r *RemediationRequestReconciler) afterStop(ctx context.Context, rr *remedi
 	return orStepErr(earlier(res, after), err, stepErr)
 }
 
+// endWaitFirst runs the check at the start of a reconcile that ends a Git wait past its end (endPassedWait). stop is
+// true when the reconcile ends there, with res and err as its answer; a request that no longer progresses is
+// forgotten.
+func (r *RemediationRequestReconciler) endWaitFirst(ctx context.Context, req ctrl.Request,
+	rr *remediationv1alpha1.RemediationRequest) (ctrl.Result, bool, error) {
+	res, done, err := r.endPassedWait(ctx, rr)
+	if !done && err == nil {
+		return res, false, nil
+	}
+	if !progresses(rr) {
+		r.forget(req.NamespacedName)
+	}
+	return res, true, err
+}
+
 // reconcile is Reconcile before its handling of a cancellation.
 func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -538,6 +553,10 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{RequeueAfter: backfillRetryDelay}, nil
 		}
 		return ctrl.Result{}, err
+	}
+	// A Git wait past its bound ends here, before any read or step (gitwait.go).
+	if res, stop, err := r.endWaitFirst(ctx, req, rr); stop {
+		return res, err
 	}
 	if rr.Status.Phase != "" && rr.Status.Phase != remediationv1alpha1.PhasePending {
 		// A step after the handoff whose status write failed does not hold back the look at the pull request,
@@ -626,7 +645,8 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		reserveOnAdmission(rr)
 	} else if rr.Status.HoldsTarget == nil {
 		// A refusal never takes the lock; false keeps it out of the limits' lock list (limitsSelectors).
-		release(rr)
+		s, _ := settleNeverHeld(rr)
+		release(rr, s)
 	}
 
 	rr.Status.ObservedGeneration = rr.Generation
@@ -1214,7 +1234,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		return ctrl.Result{}, err
 	}
 	// The look at an open pull request is never later than the full recheck's period, nor the request's deadline.
-	lookBound := earlierBound(requestBound(rr), readBoundIn(freshRecheckInterval))
+	lookBound := requestBound(rr).within(freshRecheckInterval)
 	if res, unsettled, err := r.lookUnsettled(ctx, rr, outcome, lookErr, lookBound); unsettled {
 		return res, err
 	}
@@ -1252,7 +1272,13 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	waited.RequeueAfter = readBoundOf(lookErr, lookBound).cap(readsStart(ctx), r.now(), max(waited.RequeueAfter, res.RequeueAfter))
+	// The steps' own wait may be longer (a poll); the look's retry, which retryGitRead bounded, comes first.
+	d := max(waited.RequeueAfter, res.RequeueAfter)
+	now := r.now()
+	if by, ok := lookBound.lookBy(rr, now); ok {
+		d = min(d, max(by.Sub(now), boundPassedWait))
+	}
+	waited.RequeueAfter = d
 	return waited, nil
 }
 

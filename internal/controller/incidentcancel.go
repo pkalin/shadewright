@@ -182,7 +182,7 @@ func (r *RemediationRequestReconciler) followCancelledMerge(ctx context.Context,
 	if err == nil {
 		err = r.endMerged(cleanCtx, git, rr, cr)
 	}
-	err = boundErr(ctx, cleanCtx, "check of the merged change request", err)
+	err = keepGitRead(ctx, cleanCtx, "check of the merged change request", err)
 	if errors.Is(err, errStopped) {
 		// The end is written; the lock is settled by the one decision that releases it, as followHeldMerge does.
 		return r.checkHeld(ctx, rr)

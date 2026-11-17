@@ -225,11 +225,11 @@ func (r *RemediationRequestReconciler) mergedForeignInto(ctx context.Context, rr
 	branch remediationv1alpha1.GitBranch, ref *renderRefusal) error {
 	message := fmt.Sprintf("Pull request #%d was merged into %s, the target branch the settings name now, and the "+
 		"merge did not bring the planned change alone: %s. Nothing after the merge is checked; review what the merge "+
-		"brought", rr.Status.PullRequest.Number, branch, ref.message)
+		"brought", recordedNumber(rr), branch, ref.message)
 	if ref.reason == ReasonMergeContentUnreadable {
 		message = fmt.Sprintf("Pull request #%d was merged into %s, the target branch the settings name now, and what "+
 			"the merge brought could not be read: %s. Nothing after the merge is checked; review what the merge brought",
-			rr.Status.PullRequest.Number, branch, ref.message)
+			recordedNumber(rr), branch, ref.message)
 	}
 	markClosed(rr, ReasonChangeRequestMerged, "was merged into "+string(branch)+
 		" without being shown to bring the planned change alone")
@@ -258,20 +258,20 @@ func mergedForeignStale(rr *remediationv1alpha1.RemediationRequest) bool {
 		(c.Reason == ReasonMergedWithForeignChange || c.Reason == ReasonMergeContentUnreadable)
 }
 
-// mergeContentWait is how long checkRetargeted retries reads of what a merge into the target branch the settings
-// name now brought, from status.mergeContentUnreadSince, before the request ends MergeContentUnreadable.
+// mergeContentWait is how long the reads of what a merge into the target branch the settings name now brought are
+// retried, from status.mergeContentUnreadSince, before the request ends MergeContentUnreadable (waitMergeContent).
 const mergeContentWait = mergeCommitWait
 
 // checkRetargeted reports whether the merge of cr into branch (git is opened for it) brought that branch the
 // planned change and nothing else (#771, retargetedContent). The answer is nil when the merge counts, a
-// *renderRefusal otherwise: reason MergedWithForeignChange when the merge brought more or its shape does not show
-// what it brought, MergeContentUnreadable when the reads kept failing. A merge commit that is not a full commit ID
-// cannot be checked (MergedWithForeignChange).
+// *renderRefusal with reason MergedWithForeignChange otherwise (the merge brought more, or its shape does not show
+// what it brought). A merge commit that is not a full commit ID cannot be checked (MergedWithForeignChange).
 //
-// A read that fails is an error for a retry. The first failure records its start, on the executor's clock, in
-// status.mergeContentUnreadSince (fixed while failing and cleared after a successful content read, so a later failure
-// starts a new wait and the wait for the merge commit cannot have used it up), and the reads are retried until mergeContentWait from it is over; a failure after that is the
-// refusal MergeContentUnreadable. A failed write of the start is an error for a retry.
+// A read that fails is an error of the content wait (readOfKind waitMergeContent), for a retry: retryGitRead starts
+// its clock (status.mergeContentUnreadSince) with the parent context when there is none, so a read that runs out of
+// the step's time starts it too (keepGitRead), and the check at the start of a reconcile past its end ends the
+// request MergeContentUnreadable (endPassedWait). A successful content read clears the clock, so a later failure
+// starts a new wait.
 func (r *RemediationRequestReconciler) checkRetargeted(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, branch remediationv1alpha1.GitBranch) (
 	*renderRefusal, error) {
@@ -280,31 +280,18 @@ func (r *RemediationRequestReconciler) checkRetargeted(ctx context.Context, git 
 			"commit ID, so what the merge brought cannot be checked"}, nil
 	}
 	ref, err := retargetedContent(ctx, git, rr, cr, branch)
-	if err == nil {
-		return ref, r.clearContentWait(ctx, rr)
-	}
-	if ctx.Err() != nil {
-		return nil, err
-	}
-	if rr.Status.MergeContentUnreadSince == nil {
-		if werr := r.startContentWait(ctx, rr); werr != nil {
-			return nil, &clusterError{err: werr}
-		}
-	}
-	if since := rr.Status.MergeContentUnreadSince.Time; mergeCommitWaitRemaining(since, r.now()) > 0 {
+	if err != nil {
 		logf.FromContext(ctx).Info("Could not read what the merge of the pull request of RemediationRequest brought; "+
 			"tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		// The retry is looked at again by the end of the wait, which then ends the request (below).
-		return nil, withReadBound(err, readBoundAt(since.Add(mergeContentWait)))
+		return nil, readOfKind(waitMergeContent, err)
 	}
-	logf.FromContext(ctx).Info("Could not read what the merge of the pull request of RemediationRequest brought "+
-		"within the wait", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-	return &renderRefusal{reason: ReasonMergeContentUnreadable, message: "the reads of the Git host kept failing " +
-		"for " + mergeContentWait.String()}, nil
+	return ref, r.clearContentWait(ctx, rr)
 }
 
 // startContentWait records the start of the reads of what a retargeted merge brought (checkRetargeted) in
-// status.mergeContentUnreadSince, alone in a patch with the resourceVersion read, as startMergeWait does.
+// status.mergeContentUnreadSince, in a patch with the resourceVersion read, as startMergeWait does. A pull request the
+// read found by the request's marker and checked (adopted, checkAdoptedHead) is recorded in the same patch, so the end
+// of the wait (endContentUnreadable) can name it.
 func (r *RemediationRequestReconciler) startContentWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	return r.contentWait(ctx, rr, true)
 }
@@ -487,9 +474,18 @@ func (r *RemediationRequestReconciler) branchChangedOpenFailed(ctx context.Conte
 // (branchChangedRead) otherwise.
 func branchChangedOpenRead(rr *remediationv1alpha1.RemediationRequest, err error) *metav1.Condition {
 	if reason, _, refused := refusal(err); refused {
-		return refusedRead(rr, reason, err, rr.Status.PullRequest.Number)
+		// No pull request may be recorded yet (its status write was lost): the message then names none.
+		return refusedRead(rr, reason, err, recordedNumber(rr))
 	}
 	return branchChangedRead(rr)
+}
+
+// recordedNumber is the number of the recorded pull request, zero when none is recorded.
+func recordedNumber(rr *remediationv1alpha1.RemediationRequest) int64 {
+	if rr.Status.PullRequest == nil {
+		return 0
+	}
+	return rr.Status.PullRequest.Number
 }
 
 // stoppedForBranchChange reports whether rr stopped in NeedsIntervention because the target branch of its plan's
@@ -504,7 +500,10 @@ func stoppedForBranchChange(rr *remediationv1alpha1.RemediationRequest) bool {
 	if rr.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention || rr.Status.Source == nil {
 		return false
 	}
-	for _, t := range []string{remediationv1alpha1.ConditionPlanFresh, remediationv1alpha1.ConditionApproved} {
+	// PullRequestOpened holds the reason while no pull request is recorded (stop): a pull request opened while the
+	// status write that would record it was lost (#827).
+	for _, t := range []string{remediationv1alpha1.ConditionPlanFresh, remediationv1alpha1.ConditionApproved,
+		remediationv1alpha1.ConditionPROpened} {
 		c := meta.FindStatusCondition(rr.Status.Conditions, t)
 		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonTargetBranchChanged {
 			return true
@@ -523,6 +522,16 @@ func stoppedForBranchChange(rr *remediationv1alpha1.RemediationRequest) bool {
 // recordMergeSeen returns.
 func (r *RemediationRequestReconciler) recordHeldMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, adopted bool) error {
+	if pr := rr.Status.PullRequest; !adopted && pr != nil && cr.HeadSHA != pr.HeadSHA {
+		// Merged with a head Shadewright did not push: recorded as such, with no receipt.
+		markStaleForBranchChange(rr)
+		err := r.mergedForeign(ctx, rr, &renderRefusal{reason: ReasonHeadMoved,
+			message: "The merged head is not the head Shadewright pushed"})
+		if err != nil && !errors.Is(err, errStopped) {
+			return fmt.Errorf("%w: %w", errMergeCheck, err)
+		}
+		return err
+	}
 	switch left, err := r.awaitMergeCommit(ctx, rr, cr); {
 	case err != nil:
 		return fmt.Errorf("%w: %w", errMergeCheck, err)
@@ -542,6 +551,8 @@ func (r *RemediationRequestReconciler) recordHeldMerge(ctx context.Context, rr *
 		if err != nil {
 			return fmt.Errorf("%w: %w", errMergeCheck, err)
 		}
+		// Checked: the pull request is the request's own, and is recorded in the write that ends it.
+		recordFound(rr, cr)
 		if ref != nil {
 			if !markedStale(rr) {
 				markStaleAtMerge(rr, freshness.ReasonSettingsChanged, "The plan was stale when the merge was seen: "+
@@ -569,6 +580,15 @@ func (r *RemediationRequestReconciler) recordHeldMerge(ctx context.Context, rr *
 	return err
 }
 
+// markStaleForBranchChange gives the plan of a request stoppedForBranchChange the stale mark with reason
+// SettingsChanged at its merge, unless it carries one.
+func markStaleForBranchChange(rr *remediationv1alpha1.RemediationRequest) {
+	if !markedStale(rr) {
+		markStaleAtMerge(rr, freshness.ReasonSettingsChanged, "The plan was stale when the merge was seen: the "+
+			"target branch of its repository changed in the settings after the pull request was opened")
+	}
+}
+
 // followHeldMerge runs record, the record of a merge that counts of a request stoppedForBranchChange, within the
 // cleanup's deadline, as checkHeld's answer: the end written (errStopped) is done; a merge commit not reported yet
 // is looked at again when what is left of its wait is over; failed Git reads use retryGitRead; a failed Kubernetes read or write remains an error. No failed read
@@ -580,7 +600,9 @@ func (r *RemediationRequestReconciler) followHeldMerge(ctx context.Context, rr *
 	record func(context.Context) error) (reconcile.Result, error) {
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := record(cleanCtx)
-	err = boundErr(ctx, cleanCtx, "record of the merge", err)
+	// A read of the content wait or of the check at the merge that ran out of the cleanup's time is still that read:
+	// retryGitRead starts its clock with ctx and the check at the start of a reconcile ends it (finding of #827).
+	err = keepGitRead(ctx, cleanCtx, "record of the merge", err)
 	cancel()
 	switch {
 	case errors.Is(err, errStopped):
@@ -593,7 +615,7 @@ func (r *RemediationRequestReconciler) followHeldMerge(ctx context.Context, rr *
 	}
 	logf.FromContext(ctx).Info("Could not record the merge of the pull request of a stopped RemediationRequest "+
 		"yet; tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest",
-		rr.Status.PullRequest.Number, "error", err.Error())
+		recordedNumber(rr), "error", err.Error())
 	res, err := r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 	return res, err
 }
@@ -634,7 +656,7 @@ func (r *RemediationRequestReconciler) openRecordedBranch(ctx context.Context, r
 // what recheck returns then: a merge seen and not recorded (mergeNotRecorded), or a pull request not read after
 // its target branch changed (prBranchUnread), which is read again and never ended on the failed read.
 func (r *RemediationRequestReconciler) lookUnsettled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	outcome prOutcome, lookErr error, bound gitReadBound) (ctrl.Result, bool, error) {
+	outcome prOutcome, lookErr error, bound waitBound) (ctrl.Result, bool, error) {
 	if res, merged, err := r.mergeNotRecorded(ctx, rr, outcome, lookErr, bound); merged {
 		return res, true, err
 	}

@@ -188,9 +188,18 @@ func testSettlementContentClock(t *testing.T, operation string) {
 		}
 		return nil
 	})
-	if _, err := r.checkRetargeted(ctx, g, rr, cr, freshOtherBranch); err == nil {
-		t.Fatal("wanted first failure")
+	// A failed content read starts its wait where it is retried (retryGitRead), not in the read.
+	failContent := func() {
+		t.Helper()
+		_, err := r.checkRetargeted(ctx, g, rr, cr, freshOtherBranch)
+		if err == nil {
+			t.Fatal("wanted a failed content read")
+		}
+		if _, err := r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock)); err != nil {
+			t.Fatal(err)
+		}
 	}
+	failContent()
 	g.SetFail(nil)
 	if ref, err := r.checkRetargeted(ctx, g, rr, cr, freshOtherBranch); err != nil || ref != nil {
 		t.Fatalf("recovered: %v %v", ref, err)
@@ -205,9 +214,7 @@ func testSettlementContentClock(t *testing.T, operation string) {
 		}
 		return nil
 	})
-	if ref, err := r.checkRetargeted(ctx, g, rr, cr, freshOtherBranch); err == nil || ref != nil {
-		t.Fatalf("new failure ended request: %v %v", ref, err)
-	}
+	failContent()
 	if rr.Status.MergeContentUnreadSince == nil || !rr.Status.MergeContentUnreadSince.Equal(&metav1.Time{Time: now}) {
 		t.Fatal("new failure reused old clock")
 	}

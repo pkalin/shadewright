@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -146,59 +147,52 @@ func heldForVerification(rr *remediationv1alpha1.RemediationRequest, verify bool
 		(rr.Status.Phase == remediationv1alpha1.PhaseMerged && rr.Status.MergeReceipt != nil)
 }
 
-// settleStopException handles checkHeld's two exceptions to the rule per verdict, once a read worked: a request
-// stoppedForBranchChange whose own pull request is found merged with the head Shadewright pushed moves on to
-// Merged (#771), and a request cancelledForIncident whose own pull request is found open or merged is settled by
-// settleCancelled (#794). The phases differ (NeedsIntervention, Cancelled), so at most one applies. done is false
-// when neither does, and checkHeld goes on with the rule per verdict.
+// settleStopException handles, once a read worked, what checkHeld must record before the lock may be settled:
+//   - a merge of the request's own pull request that the status does not record (mergeRecorded): it is recorded
+//     first, through followHeldMerge, so no verdict releases the lock on it (settleByRead needs the record). A
+//     request stoppedForBranchChange or cancelledForIncident whose pull request was merged into the target branch
+//     the settings name now records it as #771 decided (recordRetargetedMerge, or MergedWithForeignChange for a head
+//     Shadewright did not push); one merged into the recorded branch records it as #754 (recordHeldMerge) or, when
+//     cancelled, as #794 (settleCancelled); any other stopped holder records it as a stale plan's merge
+//     (recordStoppedMerge, decision of 2026-11-17 on #808);
+//   - a request cancelledForIncident whose own pull request is found open is settled by settleCancelled (#794).
+//
+// A pull request found by the request's marker with none recorded (its status write was lost, #827) is adopted only
+// after its head is proven to be one Shadewright pushed for this request (checkAdoptedHead, or checkMerged on the
+// recorded branch): the marker is text of the pull request's body and proves nothing. done is false when nothing
+// applies, and checkHeld goes on with the verdict.
 func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) (res reconcile.Result, done bool, err error) {
-	adopted := heldMergeFollows(rr, v) && rr.Status.PullRequest == nil
-	if adopted {
-		// Its pull request was opened while the status write that would record it was lost (#827): the read
-		// found it by the request's marker, and it is recorded before its merge is, as the merge's own.
-		recordFound(rr, v.pr)
-	}
-	if v.state == changeMerged && rr.Status.Source != nil && v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
-		cancelReason, cancelled := cancelledForIncident(rr)
-		if stoppedForBranchChange(rr) || cancelled {
-			if cancelled {
-				markStaleAtMerge(rr, cancelReason, "The request was cancelled for its Incident before its pull request was found merged")
-			}
-			recordFound(rr, v.pr)
-			if cancelled {
-				keepCancelReason(rr, cancelReason, "found merged on the configured branch afterwards")
-			}
-			if retargetedMergeCounts(rr, v) {
-				res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error {
-					repo, _, err := r.planEntry(ctx, rr)
-					if err != nil && !errors.Is(err, errTargetBranchChanged) {
-						return err
-					}
-					git, err := r.openRecordedBranch(ctx, repo, remediationv1alpha1.GitBranch(v.pr.BaseBranch))
-					if err != nil {
-						return freshness.WrapProvider("open the repository", err)
-					}
-					return r.recordRetargetedMerge(ctx, git, rr, v.pr, remediationv1alpha1.GitBranch(v.pr.BaseBranch))
-				})
-				return res, true, err
-			}
-			if cancelled {
-				res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error {
-					return r.mergedForeignInto(ctx, rr, remediationv1alpha1.GitBranch(v.pr.BaseBranch), &renderRefusal{
-						reason: ReasonMergedWithForeignChange, message: "The merged head differs from the approved head",
-					})
-				})
-				return res, true, err
-			}
+	// Read before anything changes the status in memory: recordFound rewrites PullRequestOpened, where a stop
+	// without a recorded pull request keeps its reason.
+	branchStop := stoppedForBranchChange(rr)
+	cancelReason, cancelled := cancelledForIncident(rr)
+	// A request handing its pull request over (an outgoing handoff) leaves the merge to the handoff, which gives it
+	// to the replacement when the merged head is the replacement's commit (followHandoff).
+	handingOver := rr.Status.Handoff != nil && rr.Status.Handoff.To != nil
+	if v.state == changeMerged && !mergeRecorded(rr) && rr.Status.Source != nil && !handingOver {
+		if v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
+			// Moved to the target branch the settings name now and merged there: recorded as #771 decided, whatever
+			// the stop (a request stopped for another reason is read on both branches too, lookHeld).
+			res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error {
+				return r.recordMergeOnConfigured(ctx, rr, v.pr, cancelReason, cancelled)
+			})
+			return res, true, err
+		}
+		switch {
+		case branchStop:
+			res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error {
+				return r.recordHeldMerge(ctx, rr, v.pr, rr.Status.PullRequest == nil)
+			})
+			return res, true, err
+		case !cancelled:
+			res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error {
+				return r.recordStoppedMerge(ctx, rr, v.pr)
+			})
+			return res, true, err
 		}
 	}
-	if pr := rr.Status.PullRequest; stoppedForBranchChange(rr) && v.state == changeMerged && pr != nil &&
-		v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA {
-		res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error { return r.recordHeldMerge(ctx, rr, v.pr, adopted) })
-		return res, true, err
-	}
-	if reason, ok := cancelledForIncident(rr); ok && (v.state == changeOpen || v.state == changeMerged) {
+	if cancelled && (v.state == changeOpen || v.state == changeMerged && !mergeRecorded(rr)) {
 		// A branch change permits reads only. Keep an open PR, and follow a recorded-branch merge read-only.
 		if repo, _, err := r.planEntry(ctx, rr); errors.Is(err, errTargetBranchChanged) {
 			if v.state == changeOpen {
@@ -216,10 +210,121 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 			return reconcile.Result{}, true, err
 		}
 		// Its own pull request, from an open whose answer was lost.
-		res, err := r.settleCancelled(ctx, rr, v, reason)
+		res, err := r.settleCancelled(ctx, rr, v, cancelReason)
 		return res, true, err
 	}
 	return reconcile.Result{}, false, nil
+}
+
+// recordMergeOnConfigured records cr, the request's pull request found merged into the target branch the settings
+// name now, for a request stoppedForBranchChange or cancelled (cancelled, with the reason of the cancel): the merge
+// counts (recordRetargetedMerge) only for the head Shadewright pushed, which is the recorded head or, with no pull
+// request recorded, a head checkAdoptedHead proves; any other head ends NeedsIntervention with
+// MergedWithForeignChange and no receipt. It returns what recordRetargetedMerge or mergedForeignInto returns.
+func (r *RemediationRequestReconciler) recordMergeOnConfigured(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, cancelReason string, cancelled bool) error {
+	branch := remediationv1alpha1.GitBranch(cr.BaseBranch)
+	repo, _, err := r.planEntry(ctx, rr)
+	if err != nil && !errors.Is(err, errTargetBranchChanged) {
+		return err
+	}
+	var foreign *renderRefusal
+	if rr.Status.PullRequest == nil {
+		if foreign, err = r.checkAdoptedHead(ctx, repo, rr, cr); err != nil {
+			return err
+		}
+	} else if cr.Number != rr.Status.PullRequest.Number || cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
+		foreign = &renderRefusal{reason: ReasonMergedWithForeignChange, message: "The merged head differs from the approved head"}
+	}
+	if cancelled {
+		markStaleAtMerge(rr, cancelReason, "The request was cancelled for its Incident before its pull request was found merged")
+	}
+	recordFound(rr, cr)
+	if cancelled {
+		keepCancelReason(rr, cancelReason, "found merged on the configured branch afterwards")
+	}
+	if foreign != nil {
+		markStaleForBranch(rr, branch)
+		return r.mergedForeignInto(ctx, rr, branch, foreign)
+	}
+	git, err := r.openRecordedBranch(ctx, repo, branch)
+	if err != nil {
+		return freshness.WrapProvider("open the repository", err)
+	}
+	return r.recordRetargetedMerge(ctx, git, rr, cr, branch)
+}
+
+// checkAdoptedHead checks the head of cr, a pull request found by the request's marker with none recorded, against
+// what the executor pushes for this request, independently of the pull request's own claims (#827): on the recorded
+// target branch (repo opened for it, reads only), the head is one commit that changes only the target file on top of
+// that branch's history (CheckBranch), and the target file there is byte for byte the planned change of the file
+// its parent holds, which holds the plan's previous value. A head that fails is returned as a refusal with reason
+// MergedWithForeignChange; a read that fails as an error.
+func (r *RemediationRequestReconciler) checkAdoptedHead(ctx context.Context, repo remediationv1alpha1.GitRepository,
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) (*renderRefusal, error) {
+	foreign := &renderRefusal{reason: ReasonMergedWithForeignChange, message: "the head of the pull request found " +
+		"by the request's marker is not a commit Shadewright pushed for this request: one change of the target file " +
+		"to the planned value, on the target branch the plan was made for"}
+	if !shaPattern.MatchString(cr.HeadSHA) {
+		return foreign, nil
+	}
+	git, err := r.openRecordedBranch(ctx, repo, rr.Status.Source.TargetBranch)
+	if err != nil {
+		return nil, freshness.WrapProvider("open the repository", err)
+	}
+	path := string(rr.Status.Source.Path)
+	switch state, err := git.CheckBranch(ctx, cr.HeadSHA, path); {
+	case err != nil:
+		return nil, freshness.WrapProvider("check the head of the pull request found by the marker", err)
+	case state != providers.BranchOneChange:
+		return foreign, nil
+	}
+	parents, err := git.Parents(ctx, cr.HeadSHA)
+	switch {
+	case err != nil:
+		return nil, freshness.WrapProvider("read the parents of the head of the pull request", err)
+	case len(parents) != 1:
+		return foreign, nil
+	}
+	to, err := git.ReadFile(ctx, cr.HeadSHA, path, providers.MaxFileBytes)
+	if err != nil {
+		return nil, freshness.WrapProvider("read the file of the pull request", err)
+	}
+	from, err := git.ReadFile(ctx, parents[0], path, providers.MaxFileBytes)
+	if err != nil {
+		return nil, freshness.WrapProvider("read the target file the pull request was made on", err)
+	}
+	if want, state, err := planned(from.Data, rr); err != nil || state != fileHoldsPrevious || !bytes.Equal(want, to.Data) {
+		return foreign, nil
+	}
+	return nil, nil
+}
+
+// recordStoppedMerge records the merge of cr, the request's own pull request (recorded, or found by its marker),
+// for a stopped holder that is neither stoppedForBranchChange nor cancelledForIncident (expired, superseded, stopped
+// for another reason): as a stale plan's merge (decision of 2026-11-17 on #808), so the outcome is capped and the
+// breaker counts nothing. The plan gets the stale mark with reason PlanChanged unless it carries one; a head that is
+// not the recorded one, or that checkMerged does not prove the planned change alone, ends NeedsIntervention with
+// MergedWithForeignChange and no receipt (endMerged). It returns what endMerged returns.
+func (r *RemediationRequestReconciler) recordStoppedMerge(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
+	repo, _, err := r.planEntry(ctx, rr)
+	if err != nil && !errors.Is(err, errTargetBranchChanged) {
+		return err
+	}
+	git, err := r.openRecordedBranch(ctx, repo, rr.Status.Source.TargetBranch)
+	if err != nil {
+		return freshness.WrapProvider("open the repository", err)
+	}
+	if !markedStale(rr) {
+		markStaleAtMerge(rr, freshness.ReasonPlanChanged, fmt.Sprintf("The plan was stale when the merge was seen: "+
+			"the request had stopped (%s) before its pull request was merged", rr.Status.Phase))
+	}
+	if pr := rr.Status.PullRequest; pr != nil && cr.HeadSHA != pr.HeadSHA {
+		return r.mergedForeign(ctx, rr, &renderRefusal{reason: ReasonHeadMoved,
+			message: "The merged head is not the head Shadewright pushed"})
+	}
+	return r.endMerged(ctx, git, rr, cr)
 }
 
 // closedOnly reports whether the status says no pull request of the request is open only because its recorded
@@ -238,12 +343,112 @@ func closedOnly(rr *remediationv1alpha1.RemediationRequest) bool {
 	return c != nil && (c.Reason == ReasonPullRequestClosed || c.Reason == ReasonChangeRequestClosed)
 }
 
-// release clears the lock in the status about to be written, with the condition that said why it was kept. It is
-// the one place that writes status.holdsTarget false (TestLockClearedInOnePlace): the release on a pull request's
-// account is made by settleTargetLock alone; the
-// other callers are a request that never took the lock (a refusal, a queued duplicate) and the two ends of a
-// handoff, whose pull request the replacement holds.
-func release(rr *remediationv1alpha1.RemediationRequest) {
+// lockSettlement is the verdict a release of the target lock takes (decision of 2026-11-17 on #771): the proof that
+// no pull request of the request can still merge into its target, or that the request never held the lock or
+// handed it over. Its field is unexported and only the constructors below build one, each from what proves it
+// (TestLockSettlementBuiltByItsProofs): a release without a verdict cannot be written.
+type lockSettlement struct {
+	proof settlementProof
+}
+
+// settlementProof is what a lockSettlement proves.
+type settlementProof int
+
+const (
+	// proofNone is the zero value: no proof, and release does nothing with it.
+	proofNone settlementProof = iota
+	// proofMergeRecorded: the read found the request's pull request merged, and the status records that merge
+	// (with its receipt, or the end that says it brought another change than the plan's, mergeRecorded).
+	proofMergeRecorded
+	// proofClosedOrGone: the read found the recorded pull request closed without a merge, or gone as #688
+	// requires (missing by its number and from the listing of its branch for confirmWait, settleGone).
+	proofClosedOrGone
+	// proofNoPullRequest: no pull request is recorded, and the search of the branch by the request's marker
+	// found none (confirmed as above).
+	proofNoPullRequest
+	// proofNeverHeld: the request never took the lock (a refusal, a cancel before the decision, a queued request).
+	proofNeverHeld
+	// proofHandedOver: the request's pull request was taken over by its replacement, which holds the lock.
+	proofHandedOver
+	// proofHandoffAborted: a replacement whose handoff did not happen, which never had a pull request of its own.
+	proofHandoffAborted
+)
+
+// settleByRead is the verdict of the read of a stopped holder's pull requests (settleTargetLock): v what the read
+// of its branch found, holding an open pull request of the branch that may still deliver the change (nil when none
+// may). ok is false when the read proves nothing (open, unknown, another pull request open, or a merge the status
+// does not record yet: the caller records it first, settleStopException).
+func settleByRead(rr *remediationv1alpha1.RemediationRequest, v changeVerdict, holding *providers.ChangeRequest) (
+	lockSettlement, bool) {
+	if holding != nil {
+		return lockSettlement{}, false
+	}
+	switch v.state {
+	case changeMerged:
+		if mergeRecorded(rr) {
+			return lockSettlement{proof: proofMergeRecorded}, true
+		}
+	case changeClosed:
+		return lockSettlement{proof: proofClosedOrGone}, true
+	case changeGone:
+		if rr.Status.PullRequest == nil {
+			return lockSettlement{proof: proofNoPullRequest}, true
+		}
+		return lockSettlement{proof: proofClosedOrGone}, true
+	}
+	return lockSettlement{}, false
+}
+
+// settleNeverHeld is the verdict of a request that never took the lock: status.holdsTarget not set, or false. A
+// request that holds it gets none.
+func settleNeverHeld(rr *remediationv1alpha1.RemediationRequest) (lockSettlement, bool) {
+	if ptr.Deref(rr.Status.HoldsTarget, false) {
+		return lockSettlement{}, false
+	}
+	return lockSettlement{proof: proofNeverHeld}, true
+}
+
+// settleHandedOver is the verdict of pred, whose intent to hands its pull request over to by: to is Done and names
+// by, and by holds the lock, so the target stays locked through the pull request.
+func settleHandedOver(to *remediationv1alpha1.OutgoingHandoff, by *remediationv1alpha1.RemediationRequest) (
+	lockSettlement, bool) {
+	if to == nil || to.Phase != remediationv1alpha1.HandoffDone || to.UID != remediationv1alpha1.UID(by.UID) || !holdsLock(by) {
+		return lockSettlement{}, false
+	}
+	return lockSettlement{proof: proofHandedOver}, true
+}
+
+// settleHandoffAborted is the verdict of a replacement whose handoff did not happen: it reserved a predecessor and
+// has no pull request of its own (it only ever takes the predecessor's over).
+func settleHandoffAborted(rr *remediationv1alpha1.RemediationRequest) (lockSettlement, bool) {
+	if rr.Status.Handoff == nil || rr.Status.Handoff.From == nil || rr.Status.PullRequest != nil {
+		return lockSettlement{}, false
+	}
+	return lockSettlement{proof: proofHandoffAborted}, true
+}
+
+// mergeRecorded reports whether the status records the merge of the request's pull request: a merge receipt, a
+// phase only a recorded merge reaches (Merged and after it, Inconclusive), Failed with a receipt, or the end of a
+// merge that brought another change than the plan's (MergedWithForeignChange, MergeContentUnreadable: no receipt by
+// design). PullRequestOpened with reason ChangeRequestMerged alone is not one: recordFound sets it on what a read
+// found, before anything records the merge.
+func mergeRecorded(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.MergeReceipt != nil || slices.Contains(successPhases, rr.Status.Phase) || undecided(rr.Status.Phase) ||
+		rr.Status.Phase == remediationv1alpha1.PhaseInconclusive || mergedAndEnded(rr) {
+		return true
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	return rr.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention && c != nil && c.Status == metav1.ConditionFalse &&
+		(c.Reason == ReasonMergedWithForeignChange || c.Reason == ReasonMergeContentUnreadable)
+}
+
+// release clears the lock in the status about to be written, with the condition that said why it was kept, for the
+// verdict s. It is the one place that writes status.holdsTarget false (TestLockClearedInOnePlace), and it releases
+// nothing without a verdict (a zero lockSettlement).
+func release(rr *remediationv1alpha1.RemediationRequest, s lockSettlement) {
+	if s.proof == proofNone {
+		return
+	}
 	rr.Status.HoldsTarget = new(false)
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
 }
@@ -261,7 +466,13 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	before := rr.Status.DeepCopy()
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	v, holding, err := r.settleTargetLock(lookCtx, rr)
-	err = boundErr(ctx, lookCtx, "look-up of the change request", err)
+	if stepErr := err; lookCtx.Err() != nil {
+		if stepErr == nil && v.state == changeUnknown {
+			stepErr = v.err
+		}
+		// A read of the pull request that ran out of the look's time is still a failed Git read: a paced wait.
+		err = keepGitRead(ctx, lookCtx, "look-up of the change request", stepErr)
+	}
 	cancel()
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err
@@ -355,29 +566,6 @@ func (r *RemediationRequestReconciler) heldUnsettled(ctx context.Context, rr *re
 	return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 }
 
-// lockOutcome is what checkHeld does with the lock for a verdict.
-type lockOutcome int
-
-const (
-	lockKeep lockOutcome = iota
-	lockRelease
-	lockReleaseUnlessOpen
-)
-
-// lockRule is checkHeld's rule per verdict: unknown and open keep the lock, merged, closed and gone
-// release it only when no open pull request of the branch may still deliver the change.
-var lockRule = map[changeState]lockOutcome{
-	changeOpen: lockKeep, changeMerged: lockRelease, changeClosed: lockReleaseUnlessOpen,
-	changeGone: lockReleaseUnlessOpen, changeUnknown: lockKeep,
-}
-
-// frees reports whether lockRule releases the lock for verdict v, with holding the open pull request of the branch
-// that may still deliver the change (openHolding), nil when none may.
-func frees(v changeVerdict, holding *providers.ChangeRequest) bool {
-	rule := lockRule[v.state]
-	return (rule == lockRelease || rule == lockReleaseUnlessOpen) && holding == nil
-}
-
 // settleTargetLock is the only decision that releases a lock held for Git work.
 // Both branches must answer, and no open pull request may still deliver the change.
 // It changes only the in-memory lock and TargetHeld; the caller persists its phase and these fields together.
@@ -387,10 +575,8 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 	if err != nil || v.state == changeUnknown {
 		return v, holding, err
 	}
-	_, cancelled := cancelledForIncident(rr)
-	followsMerge := v.state == changeMerged && (cancelled || heldMergeFollows(rr, v))
-	if frees(v, holding) && !heldForVerification(rr, r.VerifyOutcomes) && !followsMerge {
-		release(rr)
+	if s, ok := settleByRead(rr, v, holding); ok && !heldForVerification(rr, r.VerifyOutcomes) {
+		release(rr, s)
 	} else if holding != nil {
 		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 			Type: remediationv1alpha1.ConditionTargetHeld, Status: metav1.ConditionTrue, Reason: ReasonOpenOnBranch,
@@ -410,7 +596,7 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 	if r.OpenRepository == nil {
 		return changeVerdict{}, nil, errRepositoryGone
 	}
-	if rr.Status.PlanRepository == nil {
+	if rr.Status.PlanRepository == nil || rr.Status.Source == nil {
 		return changeVerdict{}, nil, errRepositoryGone
 	}
 	repo, reinstalled, err := r.planEntry(ctx, rr)
@@ -527,20 +713,6 @@ func (r *RemediationRequestReconciler) openHolding(ctx context.Context, rr *reme
 		}
 	}
 	return nil, nil
-}
-
-// heldMergeFollows reports whether v is a merge that a request stoppedForBranchChange records before its lock may
-// go (settleStopException): its recorded pull request merged with the head Shadewright pushed, or, when no pull
-// request is recorded (opened while the status write that would record it was lost), the pull request the read
-// found by the request's marker, which is recorded first (recordFound) and whose content the record checks.
-func heldMergeFollows(rr *remediationv1alpha1.RemediationRequest, v changeVerdict) bool {
-	if !stoppedForBranchChange(rr) || v.state != changeMerged {
-		return false
-	}
-	if rr.Status.PullRequest == nil {
-		return recordable(v.pr)
-	}
-	return retargetedMergeCounts(rr, v)
 }
 
 // recordable reports whether cr passes the schema of status.pullRequest (recordFound).

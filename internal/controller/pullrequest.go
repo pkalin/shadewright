@@ -1052,7 +1052,7 @@ func (r *RemediationRequestReconciler) mergedForeign(ctx context.Context, rr *re
 	markClosed(rr, ReasonChangeRequestMerged, "was merged although it failed a check")
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonMergedWithForeignChange,
 		fmt.Sprintf("Pull request #%d was merged although it failed a check (%s): "+
-			"%s. Review the merged change", rr.Status.PullRequest.Number, ref.reason, ref.message))
+			"%s. Review the merged change", recordedNumber(rr), ref.reason, ref.message))
 }
 
 // recordPullRequest writes PRCreated with the pull request in one status write.
@@ -1228,7 +1228,9 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	look, err := r.watchStep(stepCtx, rr)
 	mergeSeen, timedOut := errors.Is(err, errMergeCheck), stepCtx.Err() != nil
 	branchUnread := errors.Is(err, errBranchChangedUnread)
-	err = boundErr(ctx, stepCtx, "pull request check", err)
+	// A read of a wait of its own (the content of a retargeted merge, the check at the merge) that ran out of the
+	// step's time is still that read, so its wait starts and ends as for any other failure of it.
+	err = keepGitRead(ctx, stepCtx, "pull request check", err)
 	cancel()
 	if branchUnread {
 		// boundErr may replace the error, as for a merge seen: the pull request is still unread.
@@ -1651,6 +1653,8 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 // meantime, whose status write failed, is closed first.
 func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
+	// The deadline has passed: a read of the expiry that fails is retried at the poll interval (expiringCtx).
+	ctx = expiringCtx(ctx)
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := r.closeChangeRequest(cleanCtx, rr)
 	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
@@ -1849,7 +1853,7 @@ func retryAfterOf(err error) time.Duration {
 // commit or pull request. A request whose cleanup of a stale plan has started (staleMark) never expires, so it
 // waits as long as the host asked.
 func (r *RemediationRequestReconciler) waitOrFail(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	err error, bound gitReadBound) (reconcile.Result, error) {
+	err error, bound waitBound) (reconcile.Result, error) {
 	if gitReadFailure(err) {
 		return r.retryGitRead(ctx, rr, err, bound)
 	}
@@ -1857,12 +1861,11 @@ func (r *RemediationRequestReconciler) waitOrFail(ctx context.Context, rr *remed
 	if d <= 0 {
 		return reconcile.Result{}, err
 	}
-	if !bound.until.IsZero() {
-		// A bound already passed (during a long step) still needs a positive requeue to reach the expiry.
-		d = min(d, max(bound.until.Sub(r.now()), stepDelay))
-	}
-	if bound.within > 0 {
-		d = min(d, max(bound.within, stepDelay))
+	now := r.now()
+	if by, ok := bound.lookBy(rr, now); ok {
+		// No Git wait is recorded for this failure, so the step's own end runs at its next look: a bound
+		// already passed (during a long step) still gets a positive requeue, never a loop.
+		d = min(d, max(by.Sub(now), stepDelay))
 	}
 	logf.FromContext(ctx).Info("Waiting before retrying RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)

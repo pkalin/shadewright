@@ -332,7 +332,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 	}
 	if !back && now.Before(windowEnd) {
 		if err != nil {
-			return r.deliveryRetry(ctx, rr, err, readBoundAt(windowEnd))
+			return r.deliveryRetry(ctx, rr, err, paceAt(windowEnd))
 		}
 		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, nil, nil
 	}
@@ -360,7 +360,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 		return reconcile.Result{}, nil, r.endDeliveryNotChecked(ctx, rr, "it could not be read until the end of the "+
 			"delivery window and its grace ("+why+")")
 	}
-	return r.deliveryRetry(ctx, rr, err, readBoundAt(windowEnd.Add(finalGrace)))
+	return r.deliveryRetry(ctx, rr, err, paceAt(windowEnd.Add(finalGrace)))
 }
 
 // deliveryRetry handles err, a failed read of the delivery before its verdict: a lasting cause shows in condition
@@ -368,7 +368,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 // later than bound, the end of the window or of its grace, so the verdict is not late; any other failure is
 // returned for the error backoff.
 func (r *RemediationRequestReconciler) deliveryRetry(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	err error, bound gitReadBound) (reconcile.Result, client.Object, error) {
+	err error, bound waitBound) (reconcile.Result, client.Object, error) {
 	if failed := r.deliveryReadFailed(ctx, rr, err); failed != err {
 		// The status write failed: a Kubernetes failure, for the error backoff.
 		return reconcile.Result{}, nil, failed

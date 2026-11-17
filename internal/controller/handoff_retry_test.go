@@ -60,6 +60,14 @@ func TestRecoveryEndsOnceTheGraceAfterTheDeadlinePassed(t *testing.T) {
 	if _, err := r.recheck(ctx, rr); err != nil {
 		t.Fatal(err)
 	}
+	// The failed read past the grace is a Git wait whose end has passed: the check at the start of the next
+	// reconcile ends the request (endPassedWait), before any read.
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
 	if rr.Status.Phase != api.PhaseNeedsIntervention {
 		t.Fatalf("a recovery failing past the grace left the request %s", rr.Status.Phase)
 	}

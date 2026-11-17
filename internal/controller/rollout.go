@@ -270,7 +270,7 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 	if now.Before(windowEnd) {
 		if err != nil {
 			// A cause that lasts shows in condition Delivered, as with --verify-outcomes (#771).
-			return r.deliveryRetry(ctx, rr, err, readBoundAt(windowEnd))
+			return r.deliveryRetry(ctx, rr, err, paceAt(windowEnd))
 		}
 		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, nil, nil
 	}
@@ -299,7 +299,7 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 				rr.Status.PullRequest.MergeCommitSHA+" could not be checked until the end of the check ("+why+")",
 			corev1.EventTypeWarning)
 	}
-	return r.deliveryRetry(ctx, rr, err, readBoundAt(windowEnd.Add(finalGrace)))
+	return r.deliveryRetry(ctx, rr, err, paceAt(windowEnd.Add(finalGrace)))
 }
 
 // trackPause records in rr when writes were first seen paused, and on the resume adds the paused time to

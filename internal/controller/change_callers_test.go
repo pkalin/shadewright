@@ -25,6 +25,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	api "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
 // pullRequestReads are the GitProvider methods that read pull requests, or a branch (BranchHead), with the
@@ -178,6 +180,33 @@ func TestLockClearedInOnePlace(t *testing.T) {
 	})
 }
 
+// settlementBuilders are the only functions that may build a lockSettlement with a proof: each is called by the read
+// or the state that proves it.
+var settlementBuilders = map[string]bool{
+	"settleByRead": true, "settleNeverHeld": true, "settleHandedOver": true, "settleHandoffAborted": true,
+}
+
+// TestLockSettlementBuiltByItsProofs fails when a function outside settlementBuilders builds a lockSettlement with
+// a field set, or sets its proof: a release of the target lock takes a verdict only the proving reads build
+// (decision of 2026-11-17 on #771).
+func TestLockSettlementBuiltByItsProofs(t *testing.T) {
+	forEachSource(t, func(fset *token.FileSet, owner string, n ast.Node) {
+		switch n := n.(type) {
+		case *ast.CompositeLit:
+			if id, ok := n.Type.(*ast.Ident); ok && id.Name == "lockSettlement" && len(n.Elts) > 0 &&
+				!settlementBuilders[owner] {
+				t.Errorf("%s: %q builds a lockSettlement; only its proving reads do", fset.Position(n.Pos()), owner)
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "proof" {
+					t.Errorf("%s: %q sets the proof of a lockSettlement", fset.Position(sel.Pos()), owner)
+				}
+			}
+		}
+	})
+}
+
 // writesFalse reports whether e is a literal false or new(false), ptr.To(false) and the like.
 func writesFalse(e ast.Expr) bool {
 	switch e := e.(type) {
@@ -217,12 +246,16 @@ func TestEveryRuleCoversEveryVerdict(t *testing.T) {
 			t.Errorf("%s does not retry or keep on unknown", name)
 		}
 	}
-	check("lockRule", len(lockRule), lockRule[changeUnknown] == lockKeep)
+	for _, state := range []changeState{changeUnknown, changeOpen} {
+		if _, ok := settleByRead(&api.RemediationRequest{}, changeVerdict{state: state}, nil); ok {
+			t.Errorf("settleByRead gives a verdict for %v", state)
+		}
+	}
 	check("adoptRule", len(adoptRule), adoptRule[changeUnknown] == adoptRetry)
 	check("finalizeRule", len(finalizeRule), finalizeRule[changeUnknown] == finalizeRetry)
 	check("recoverRule", len(recoverRule), recoverRule[changeUnknown] == recoverRetry)
 	// The zero value of each outcome is the safe one, so a verdict missing from a table keeps and retries.
-	if lockKeep != 0 || adoptRetry != 0 || finalizeRetry != 0 || recoverRetry != 0 {
+	if proofNone != 0 || adoptRetry != 0 || finalizeRetry != 0 || recoverRetry != 0 {
 		t.Error("the zero outcome of a rule must keep and retry")
 	}
 }

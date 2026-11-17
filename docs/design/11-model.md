@@ -68,7 +68,10 @@ and a rounded-up 10% margin; complete usage costs at least the input estimate.
 The raw body and joined decoded strings, numbers and object keys are scanned
 for credential echoes before any completion is returned, in a view that keeps
 only ASCII letters, digits and the key's punctuation, so no character inserted
-into the key hides it; a reply
+into the key hides it. Model text is stored without control characters (Unicode
+Cc except newline and tab, [#852](https://github.com/pkalin/shadewright/issues/852)),
+and the view drops a superset of them, so a key contiguous in stored text is
+refused; the provider must not ship before #852. A reply
 whose content or argument fields have a wrong JSON type is refused as malformed
 output with its own fixed text. Re-encoded keys (base64,
 percent encoding, homoglyphs) and splits across replies remain outside this check:

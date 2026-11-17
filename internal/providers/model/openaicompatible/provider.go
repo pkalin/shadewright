@@ -38,7 +38,6 @@ import (
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
-	"github.com/pkalin/shadewright/internal/termtext"
 )
 
 // Defaults and bounds of [Config].
@@ -751,18 +750,20 @@ const maxNestedJSON = 3
 // Every decoded string value of the reply, in document order, is one stream, so a key split across fields,
 // parts or tool-call arguments is found too. A second stream adds the object keys in their place. JSON text
 // inside a string (up to maxNestedJSON levels) is decoded and its values take the string's place in both
-// streams; its text as written is searched on its own as well. Each stream is kept twice: as is, and with
-// whole terminal escape sequences left out ([termtext.EscapeEnd]), because a terminal shows the characters
-// around a sequence such as ESC [0m as one word while the sequence's own letters stay in the first view.
+// streams; its text as written is searched on its own as well.
+//
+// Terminal escape sequences are not treated apart. Model text is stored without control characters (every
+// Unicode Cc code point except newline and tab, #852), so the visible remains of a sequence such as ESC [0m
+// stay in stored text, and the view keeps the same letters and digits. The view drops a superset of what
+// storage removes, so a key that is contiguous in stored text is contiguous in the view.
 //
 // A key that comes back re-encoded (base64, percent encoding, homoglyphs, reordered) is not found, and no
 // check of this kind can find it: the endpoint is given the key at install and is trusted with it.
 type keyScan struct {
 	key   []byte
 	allow [utf8.RuneSelf]bool
-	// streams: values as is, values without escape sequences, values and keys as is, values and keys
-	// without escape sequences (these two hold decoded text until result views them).
-	streams [4][]byte
+	// streams: the views of the values, and of the values and object keys.
+	streams [2][]byte
 	scratch []byte
 	found   bool
 	work    int
@@ -796,62 +797,38 @@ func keyIn(data []byte, key string) (bool, int) {
 
 // result searches the streams and reports whether the key was found in them or on its own before.
 func (k *keyScan) result() bool {
-	for i, stream := range k.streams {
-		if i%2 == 1 {
-			stream = k.view(nil, string(stream), true)
-		}
+	for _, stream := range k.streams {
 		k.work += len(stream)
 		k.found = k.found || bytes.Contains(stream, k.key)
 	}
 	return k.found
 }
 
-// view appends the allow-list view of s to dst, without whole escape sequences when escapes is set.
-func (k *keyScan) view(dst []byte, s string, escapes bool) []byte {
-	for i := 0; i < len(s); {
-		c := s[i]
-		if escapes && (c == 0x1b || c == 0xc2) {
-			if end, ok := termtext.EscapeEnd(s, i); ok {
-				k.work += end - i
-				i = end
-				continue
-			}
-		}
-		if c < utf8.RuneSelf && k.allow[c] {
+// view appends the allow-list view of s to dst.
+func (k *keyScan) view(dst []byte, s string) []byte {
+	for i := range len(s) {
+		if c := s[i]; c < utf8.RuneSelf && k.allow[c] {
 			dst = append(dst, c)
 		}
-		k.work++
-		i++
 	}
+	k.work += len(s)
 	return dst
 }
 
-// searchAlone searches the views of s on their own, outside the streams.
+// searchAlone searches the view of s on its own, outside the streams.
 func (k *keyScan) searchAlone(s string) {
-	for _, escapes := range []bool{false, true} {
-		k.scratch = k.view(k.scratch[:0], s, escapes)
-		k.work += len(k.scratch)
-		k.found = k.found || bytes.Contains(k.scratch, k.key)
-	}
+	k.scratch = k.view(k.scratch[:0], s)
+	k.work += len(k.scratch)
+	k.found = k.found || bytes.Contains(k.scratch, k.key)
 }
 
-// add appends s to the streams: to the two of values and keys only when objectKey is set, to all four
-// otherwise. The streams without escape sequences keep the text as decoded until result views it, so a
-// sequence that starts in one string and ends in the next is left out whole, as a terminal printing the
-// two together would.
+// add appends the view of s to the streams: to the stream of values and keys only when objectKey is set,
+// to both otherwise.
 func (k *keyScan) add(s string, objectKey bool) {
-	from := 0
-	if objectKey {
-		from = 2
+	if !objectKey {
+		k.streams[0] = k.view(k.streams[0], s)
 	}
-	for i := from; i < len(k.streams); i++ {
-		if i%2 == 1 {
-			k.streams[i] = append(k.streams[i], s...)
-			k.work += len(s)
-			continue
-		}
-		k.streams[i] = k.view(k.streams[i], s, false)
-	}
+	k.streams[1] = k.view(k.streams[1], s)
 }
 
 // walk adds every string value, object key and number of the valid JSON text in document order.

@@ -120,12 +120,22 @@ arguments is found too; a second stream adds the object keys in their place, and
 the fields the completion parser reads (text parts, content, arguments) are
 joined once more on their own. JSON text inside a string, such as tool-call
 arguments and structured content, is decoded up to three levels and takes the
-string's place in the streams; its text as written is searched as well. Each
-stream is also searched with whole terminal escape sequences left out (the
-grammar the kubectl plugin uses), because a terminal prints the characters on
-both sides of a sequence such as `ESC [0m` as one word while the view keeps the
-sequence's own letters. The raw bytes are searched the same way, and a reply that
-is not JSON is scanned only as raw bytes. Every pass is linear in the size of the
+string's place in the streams; its text as written is searched as well. The raw
+bytes are searched the same way, and a reply that is not JSON is scanned only as
+raw bytes.
+
+The check does not model terminal escape sequences. Model text is stored without
+control characters: every code point of Unicode category Cc (C0, DEL, C1) except
+newline and tab is removed where model output enters the analysis loop, for every
+provider ([#852](https://github.com/pkalin/shadewright/issues/852)). What is
+stored is then what any terminal shows, and the view drops a superset of what
+storage removes, so a key that is contiguous in stored text is contiguous in the
+view and is refused. A sequence with visible parameters inside the key, such as
+`ESC [0m`, is not refused: storage removes the `ESC`, and the stored text shows
+`[0m` between the key's characters, so no reader sees the key whole. A grammar
+of terminal behaviour in the scan was tried and dropped: it is a list of what a
+screen hides again, and it diverged from what a reader sees field by field. This
+provider must not ship before #852. Every pass is linear in the size of the
 reply; the tests bound the work at a fixed multiple of it.
 
 The key must be printable ASCII and at least 16 bytes; anything else is refused
@@ -142,7 +152,10 @@ encoding, homoglyphs, reordered characters) or split across two replies is not
 found, and no check of this kind can find it. The endpoint is given the key at
 install and is trusted with it: the check stops an echo from reaching status,
 Events, logs and pull requests in a form a reader can use, and is not a defence
-against an endpoint that hides the key. Outputs remain untrusted: the redactor
+against an endpoint that hides the key. The check covers terminal tricks only
+together with #852: without that change, control characters and escape sequences
+inserted into the key could hide letters from a raw terminal that the view keeps.
+Outputs remain untrusted: the redactor
 checks records and telemetry, typed result and tool argument validation and
 deterministic policy constrain proposals, and credentials never authorize a
 remediation. Operators must trust the endpoint with its dedicated,
@@ -186,7 +199,7 @@ Two trust assumptions remain:
 | Redirect or proxy steals a key | No redirects of any status and no environment proxy |
 | Public DNS rebinds into the cluster or metadata | Address checks on each connection; private addresses only for explicitly named Service hosts, never metadata or loopback |
 | Service impersonation | Verified TLS with the Service DNS name; cluster operators own certificates and Service routing. Pod creation in the Service's namespace, or edits of the Service or its EndpointSlices, bypass it (a pod can mount the serving certificate): only cluster administrators may create pods there |
-| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; before a completion is returned, search an allow-list view of the reply (ASCII letters, digits and the key's punctuation, every other character dropped) over the raw body and over every decoded string, number and object key in document order, with nested JSON decoded and with terminal escape sequences left out; a wrong-typed decoy field fails closed with its own fixed text. A re-encoded key (base64, percent encoding, homoglyphs) is not found: the endpoint is trusted with the key |
+| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; before a completion is returned, search an allow-list view of the reply (ASCII letters, digits and the key's punctuation, every other character dropped) over the raw body and over every decoded string, number and object key in document order, with nested JSON decoded; control characters are removed from model text before storage (#852), so a key whole in stored text is whole in the view; a wrong-typed decoy field fails closed with its own fixed text. A re-encoded key (base64, percent encoding, homoglyphs) is not found: the endpoint is trusted with the key |
 | Server ignores schema or invents a tool | Shared parser, typed argument/result validation, closed catalog and deterministic policy; no output repair |
 | Server omits usage or returns 429 | Unknown usage costs the upper bound; no compatible-host unbilled exception |
 | Key rotation races a call | Read per attempt, bounded retry, no cached key; update source before revoking old key |

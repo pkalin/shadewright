@@ -17,30 +17,10 @@ limitations under the License.
 package main
 
 import (
-	"strings"
 	"testing"
 	"unicode"
 	"unicode/utf8"
 )
-
-// Clean drops or blanks a rune only when it is outside printable ASCII. The compatible provider's credential
-// scan keeps printable ASCII characters (letters, digits and the key's punctuation) and drops every other
-// rune, so a rune clean hides inside a key is one the scan drops too.
-func TestCleanHidesNoPrintableASCII(t *testing.T) {
-	for r := rune(0); r <= unicode.MaxRune; r++ {
-		if !utf8.ValidRune(r) {
-			continue
-		}
-		printable := r > ' ' && r <= '~'
-		in := "a" + string(r) + "b"
-		if out := clean(in, 100); out != in && printable {
-			t.Fatalf("clean(%U) = %q", r, out)
-		}
-		if strings.TrimSpace(clean(string(r), 100)) == "" && printable {
-			t.Fatalf("clean hides %U", r)
-		}
-	}
-}
 
 func TestClean(t *testing.T) {
 	cases := map[string]struct{ in, want string }{

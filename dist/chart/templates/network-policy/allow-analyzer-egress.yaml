@@ -54,6 +54,18 @@ spec:
           {{- toYaml .podLabels | nindent 10 }}
   {{- end }}
   {{- end }}
+  {{- range .Values.analyzer.analysis.openAICompatible.serviceHosts }}
+  - ports:
+    - port: {{ .port }}
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .namespace | quote }}
+      podSelector:
+        matchLabels:
+          {{- toYaml .podSelector | nindent 10 }}
+  {{- end }}
   podSelector:
     matchLabels:
       app.kubernetes.io/component: analyzer

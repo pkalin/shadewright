@@ -338,7 +338,7 @@ type ModelDeployment struct {
 	// deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
 	// started without them refuses it (ProviderNotConfigured). A Foundry deployment may
 	// not name the host api.anthropic.com. There is no fallback between providers.
-	// OpenAICompatible uses the same endpoint suffix allow-list, no Azure identity, and an optional API key
+	// OpenAICompatible uses --openai-compatible-endpoint-suffixes, its separate endpoint allow-list, no Azure identity, and an optional API key
 	// read from its own mounted file. The key is bound to one install-time host, never an Azure model host
 	// or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.
 	// +kubebuilder:default=Foundry
@@ -356,7 +356,8 @@ type ModelDeployment struct {
 	// and link-local addresses when it dials, and requests a token for the Cognitive Services audience only.
 	// For provider Anthropic it must be https://api.anthropic.com, the adapter's fixed host, and the allow-list
 	// does not apply; for Foundry that host is refused whatever the allow-list says. OpenAICompatible also
-	// requires HTTPS and this allow-list. It permits private addresses only for exact Service DNS names in
+	// requires HTTPS and its own --openai-compatible-endpoint-suffixes allow-list. Neither provider
+	// may call a host covered by the other provider's list. It permits private addresses only for exact Service DNS names in
 	// --openai-compatible-service-hosts, never loopback or link-local. The optional key goes only to the exact
 	// --openai-compatible-api-key-host. No redirects or environment proxy are used.
 	// +kubebuilder:validation:MinLength=1

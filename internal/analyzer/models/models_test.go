@@ -19,6 +19,7 @@ package models
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -35,6 +36,8 @@ import (
 )
 
 // foundrySuffix is the Microsoft Foundry host suffix of these tests.
+const gatewaySuffix = ".gateway.example.com"
+
 const foundrySuffix = ".services.ai.azure.com"
 
 func TestParseEndpointSuffixes(t *testing.T) {
@@ -386,6 +389,49 @@ func TestModelFactoryWithoutFoundry(t *testing.T) {
 	} {
 		if _, err := NewModelFactory(cfg); err == nil {
 			t.Errorf("%s: a factory was built", name)
+		}
+	}
+}
+
+// Generate destinations and the expected provider from disjoint installation lists.
+func TestProviderHostMatrix(t *testing.T) {
+	cfg := ModelsConfig{Suffixes: []string{foundrySuffix}, CompatibleSuffixes: []string{gatewaySuffix}, Tokens: failingTokens{t},
+		AnthropicKeyFile: "/key", Expected: map[analysis.Role]string{analysis.RoleTriage: anthropicModel}}
+	factory, err := NewModelFactory(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []remediationv1alpha1.ModelProvider{"", remediationv1alpha1.ModelProviderFoundry, remediationv1alpha1.ModelProviderAnthropic, remediationv1alpha1.ModelProviderOpenAICompatible} {
+		for i := range 20 {
+			for _, suffix := range []string{foundrySuffix, gatewaySuffix, ".unlisted.example.com"} {
+				host := fmt.Sprintf("host%d%s", i, suffix)
+				d := remediationv1alpha1.ModelDeployment{Provider: provider, Endpoint: "https://" + host + "/v1", Deployment: anthropicModel}
+				want := (provider == "" || provider == remediationv1alpha1.ModelProviderFoundry) && suffix == foundrySuffix || provider == remediationv1alpha1.ModelProviderOpenAICompatible && suffix == gatewaySuffix
+				if provider == "" || provider == remediationv1alpha1.ModelProviderFoundry {
+					d.APIVersion = "v1"
+				}
+				p, err := factory(analysis.RoleTriage, d)
+				if (err == nil && p != nil) != want {
+					t.Errorf("provider %q host %s: %v, want allowed %v", provider, host, err, want)
+				}
+			}
+		}
+	}
+}
+
+func TestProviderListOverlap(t *testing.T) {
+	cfg := ModelsConfig{Suffixes: []string{gatewaySuffix}, CompatibleSuffixes: []string{".llm.gateway.example.com"}, Tokens: failingTokens{t}}
+	factory, err := NewModelFactory(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []remediationv1alpha1.ModelProvider{remediationv1alpha1.ModelProviderFoundry, remediationv1alpha1.ModelProviderOpenAICompatible} {
+		d := remediationv1alpha1.ModelDeployment{Provider: provider, Endpoint: "https://llm.gateway.example.com/v1", Deployment: "m"}
+		if provider == remediationv1alpha1.ModelProviderFoundry {
+			d.APIVersion = "v1"
+		}
+		if _, err := factory(analysis.RoleTriage, d); !errors.Is(err, analysis.ErrEndpointNotAllowed) {
+			t.Errorf("overlapping host accepted by %s: %v", provider, err)
 		}
 	}
 }

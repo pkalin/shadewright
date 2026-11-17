@@ -393,7 +393,7 @@ Policies and requests refer to repositories by name only.
 - So are two that name the same endpoint (ignoring a trailing `/`) and deployment (ignoring case), so the escalation cap cannot become a second budget for the triage model.
 - Each names an `endpoint`, a `deployment` name and an `apiVersion` (`v1` or a valid-looking date, optionally `-preview`). Foundry requires `apiVersion`; Anthropic may leave it out (a value is accepted but not sent), and OpenAICompatible forbids it ([#814](https://github.com/pkalin/shadewright/issues/814)). OpenAICompatible appends its inference route to the endpoint API base without an Azure prefix. The endpoint rules are in 5.5.
 - Each must set a daily cap `maxTokensPerDay`. It has no default, so the admin chooses it per deployment. Range 0 to 1,000,000,000, and 0 stops calls to it.
-- Each may name a `provider`: `Foundry` (the default), `Anthropic` or `OpenAICompatible`, the API the adapter speaks ([ADR-0037](../adr/0037-the-anthropic-api-as-a-second-model-provider.md)). Two CEL rules: an `Anthropic` deployment must have the endpoint `https://api.anthropic.com`, and a `Foundry` deployment may not name that host.
+- Each may name a `provider`: `Foundry` (the default), `Anthropic` or `OpenAICompatible`, the API the adapter speaks ([ADR-0037](../adr/0037-the-anthropic-api-as-a-second-model-provider.md)). The eight deployment CEL rules are: Foundry requires `apiVersion`; Anthropic requires exactly `https://api.anthropic.com`; that host is refused for all other providers; `inferenceAPI` is allowed only for Foundry and OpenAICompatible; Foundry Responses requires `apiVersion: v1`; OpenAICompatible forbids `apiVersion`; OpenAICompatible refuses Azure model hosts; and Foundry refuses `api.openai.com`.
 - A `Foundry` or `OpenAICompatible` deployment may name an `inferenceAPI`: `ChatCompletions` (used when it is left out) or `Responses`, for a model that refuses function tools on chat completions, such as the `gpt-6.1` models with escalation's read tools ([#501](https://github.com/pkalin/shadewright/issues/501)). Two CEL rules: the field is refused for Anthropic, and `Responses` needs `apiVersion: v1` on Foundry only. Objects stored without it keep chat completions.
 - There is no field for a key or any other credential. The analyzer authenticates to Foundry with its workload identity (11.1) and reads an Anthropic API key from the file of its `--anthropic-api-key-file` flag. OpenAICompatible uses its own optional file and exact install-time host binding (ADR-0042). It never receives an Entra token or the Anthropic key.
 
@@ -477,8 +477,15 @@ Conditions of other types are kept as they are. Like the others, these appear on
 | `status.integrations` | At most 64 entries (32 enabled, at most 32 more detected) |
 | Paused request recheck | Every minute |
 
-For OpenAICompatible, the endpoint suffix allow-list still applies. Exact Service
+For OpenAICompatible, its independent endpoint suffix allow-list applies. Exact Service
 DNS hosts additionally named at install time may use private unicast addresses,
 with verified HTTPS on 443. HTTP, metadata addresses and redirects are refused.
 Its optional key is bound to one exact install-time host; a settings edit cannot
-send it to another allowed host. See [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md), Proposed.
+send it to another allowed host. See [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md).
+
+OpenAICompatible has its own install-time `--openai-compatible-endpoint-suffixes`
+allow-list. Both providers refuse hosts covered by the other provider's list.
+Its optional key binds one exact host, so another host is refused even if allowed.
+Reported usage is charged at least the input estimate and no more than input plus
+output bound with a rounded-up 10% margin. Above that ceiling the reply is refused
+and charged the ceiling, as is unknown usage ([ADR-0042](../adr/0042-openai-compatible-model-endpoints.md)).

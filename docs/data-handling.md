@@ -61,7 +61,7 @@ A hint author already has write access to the repository, so a hint gives them n
 
 ## What is sent to the model
 
-**Nothing unless the analyzer runs with `--triage-model`** (off by default, also in the Helm chart: `analyzer.analysis.triageModel`). Without it the analysis loop does not start, no model is called and no Azure token is requested. With it ([#76](https://github.com/pkalin/shadewright/issues/76), [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md)), the analyzer calls the deployments named in `spec.analysis.models` through the Microsoft Foundry adapter ([#75](https://github.com/pkalin/shadewright/issues/75)), with its own Azure workload identity (an Entra ID token for the Cognitive Services audience only, no API key), and only after the endpoint passed the host allow-list of `--model-endpoint-suffixes`, or through the Anthropic adapter (below). Without `--model-endpoint-suffixes` no Cognitive Services token is requested and every `Foundry` deployment is refused. Until the evaluation gate exists ([#78](https://github.com/pkalin/shadewright/issues/78)), turn it on only for an evaluation run in the lab.
+**Nothing unless the analyzer runs with `--triage-model`** (off by default, also in the Helm chart: `analyzer.analysis.triageModel`). Without it the analysis loop does not start, no model is called and no Azure token is requested. With it ([#76](https://github.com/pkalin/shadewright/issues/76), [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md)), the analyzer calls the deployments named in `spec.analysis.models` through the Microsoft Foundry adapter ([#75](https://github.com/pkalin/shadewright/issues/75)), with its own Azure workload identity (an Entra ID token for the Cognitive Services audience only, no API key), and only after the endpoint passed the host allow-list of `--model-endpoint-suffixes`, or through the Anthropic or OpenAICompatible adapters (below). Without `--model-endpoint-suffixes` no Cognitive Services token is requested and every `Foundry` deployment is refused. Until the evaluation gate exists ([#78](https://github.com/pkalin/shadewright/issues/78)), turn it on only for an evaluation run in the lab.
 
 ### Where the context goes, per provider
 
@@ -138,4 +138,4 @@ retention policy. Check the server's retention, geography and opt-in training
 terms before allowing it. Settings writers can select among allowed hosts, so
 use narrow suffixes. A separate exact host binding keeps the optional key from
 moving with a settings edit. No redirects, HTTP or environment proxy are used.
-See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md), Proposed.
+See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md).

@@ -26,7 +26,7 @@ import (
 )
 
 func TestCompatibleFactory(t *testing.T) {
-	cfg := ModelsConfig{DisableFoundry: true, Suffixes: []string{".api.openai.com", ".gateway.example.com", ".api.anthropic.com", ".services.ai.azure.com"}}
+	cfg := ModelsConfig{DisableFoundry: true, CompatibleSuffixes: []string{".api.openai.com", gatewaySuffix, ".api.anthropic.com", ".services.ai.azure.com"}}
 	factory, err := NewModelFactory(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +57,7 @@ func TestCompatibleFactory(t *testing.T) {
 		t.Fatal("key moved to another allowed host")
 	}
 	cfg.DisableFoundry, cfg.Tokens = false, failingTokens{t}
+	cfg.Suffixes = []string{foundrySuffix}
 	factory, err = NewModelFactory(cfg)
 	if err != nil {
 		t.Fatal(err)

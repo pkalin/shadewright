@@ -4,9 +4,7 @@ The adapter supports Chat Completions and Responses. Servers differ in schema,
 tool and usage support. Qualify the exact model, server version and API with the
 [evaluation harness](../evaluation.md#openai-compatible-models-and-servers) before
 using it in a lab. A successful HTTP request is not qualification.
-[ADR-0042](../adr/0042-openai-compatible-model-endpoints.md) is Proposed; acceptance,
-a passing live gpt-6.x scenario run and the Kind installation below are merge
-prerequisites.
+[ADR-0042](../adr/0042-openai-compatible-model-endpoints.md) defines the provider boundary.
 
 ## Configuration
 
@@ -20,8 +18,8 @@ analyzer:
   analysis:
     disableFoundry: true
     triageModel: gpt-6.1-sol
-    endpointSuffixes: [.api.openai.com]
     openAICompatible:
+      endpointSuffixes: [.api.openai.com]
       apiKey:
         host: api.openai.com
         secretName: compatible-model-key
@@ -47,18 +45,35 @@ suffix. Set it from a recorded response before qualification. `deployment` is th
 server's request model name. Do not set `apiVersion`. The API base includes `/v1`;
 this adapter adds only `/responses` or `/chat/completions`.
 
+`openAICompatible.endpointSuffixes` is independent of Foundry's `endpointSuffixes`.
+Keep the lists disjoint: hosts matching both are refused by both providers.
+One compatible key binds one host. A second endpoint on another host is refused
+even if that host is allowed. Use a separate analyzer installation for that key.
+For `apiKey.volume`, only `secret` or `csi` sources are allowed.
+
 For a keyless Service use its verified HTTPS base, for example
-`https://model.inference.svc.cluster.local/v1`, and set both:
+`https://model.inference.svc.cluster.local/v1`, and name its destination pods:
 
 ```yaml
 analyzer:
   analysis:
     disableFoundry: true
     triageModel: local-model
-    endpointSuffixes: [.model.inference.svc.cluster.local]
     openAICompatible:
-      serviceHosts: [model.inference.svc.cluster.local]
+      endpointSuffixes: [.model.inference.svc.cluster.local]
+      serviceHosts:
+        - host: model.inference.svc.cluster.local
+          namespace: inference
+          podSelector:
+            app: model
+          port: 8443
 ```
+
+The Service exposes TLS on port 443 and routes it to the selected pods on target
+port 8443 in this example. The chart renders one egress rule per entry, with both
+the namespace and pod selectors in the same peer. Cilium CIDR rules may exclude
+in-cluster pods, so the public HTTPS rule alone is insufficient. Verify the
+Service selector and target port against your deployment.
 
 Leave `apiKey` empty for no Authorization header. Provision a serving certificate
 trusted by the analyzer's system roots and valid for that Service DNS name.

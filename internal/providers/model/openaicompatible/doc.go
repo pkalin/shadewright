@@ -18,7 +18,8 @@ limitations under the License.
 // formats (ADR-0042). It receives no token source. A separate optional key is read from a bounded regular
 // file per attempt and bound to an exact install-time host. No key means no Authorization header. Redirects
 // and proxies are disabled. Only named cluster Services may resolve to private unicast addresses; all other
-// endpoints require public addresses. The analyzer enforces the suffix allow-list before construction.
-// Responses without usable usage are refused and charged at the loop's upper bound, never zero.
+// endpoints require public addresses. The analyzer enforces the independent compatible suffix allow-list and excludes Foundry-listed hosts before construction.
+// Responses without usable usage, or reporting more than input estimate plus output bound with a 10%
+// margin, are refused and charged that ceiling. Complete usage costs at least the loop's input estimate.
 // Errors and call reports contain fixed text, never credentials, paths, prompts or server-controlled text.
 package openaicompatible

@@ -45,8 +45,8 @@ For an `Anthropic` deployment the host is fixed in code, `api.anthropic.com`, an
 
 ### OpenAI-compatible endpoints
 
-<span class="sw-status sw-built">built</span> `OpenAICompatible` uses the same
-install-time suffix allow-list and the shared `internal/providers/model/openaiwire`
+<span class="sw-status sw-built">built</span> `OpenAICompatible` uses its own
+install-time `--openai-compatible-endpoint-suffixes` allow-list and the shared `internal/providers/model/openaiwire`
 Chat Completions and Responses code. Its endpoint includes the API prefix, its
 `deployment` is the model name and `apiVersion` is forbidden. There is no fallback.
 The optional key is read at each attempt, bound to one exact install-time host,
@@ -60,8 +60,8 @@ no redirects and uses no environment proxy. Missing or incomplete usage is a
 malformed reply with unknown usage charged at the upper bound. A compatible 429
 is never marked unbilled. The same typed validators refuse invalid proposals and
 tool arguments, including when the server ignores the requested schemas.
-[ADR-0042](../adr/0042-openai-compatible-model-endpoints.md) is Proposed; its
-acceptance, live evaluation and Kind installation remain merge prerequisites.
+[ADR-0042](../adr/0042-openai-compatible-model-endpoints.md) defines this built provider.
+Qualify each model and server version with the evaluation harness before use.
 The [harness](../evaluation.md#openai-compatible-models-and-servers) qualifies a
 model and server together, including the Responses tool path of #501.
 

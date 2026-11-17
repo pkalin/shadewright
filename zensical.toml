@@ -3,7 +3,7 @@
 
 [project]
 site_name = "Shadewright"
-site_description = "A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect"
+site_description = "A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect, with Microsoft Foundry, Anthropic and OpenAICompatible model adapters"
 site_url = "https://shadewright.io/"
 repo_url = "https://github.com/pkalin/shadewright"
 repo_name = "pkalin/shadewright"
@@ -129,8 +129,8 @@ nav = [
       { "0038 Control plane mode" = "adr/0038-control-plane-mode-a-hub-that-many-clusters-report-to.md" },
       { "0039 Cause rule" = "adr/0039-consequence-symptoms-attach-to-their-causes-incident.md" },
       { "0040 Sizing from metrics" = "adr/0040-code-sizes-a-memory-proposal-from-the-metrics.md" },
-      { "0042 OpenAI-compatible endpoints" = "adr/0042-openai-compatible-model-endpoints.md" },
       { "0041 Merge-time freshness check" = "adr/0041-a-freshness-check-at-the-merge-of-a-pull-request.md" },
+      { "0042 OpenAI-compatible endpoints" = "adr/0042-openai-compatible-model-endpoints.md" },
       { "Template" = "adr/template.md" },
     ] },
   ] },

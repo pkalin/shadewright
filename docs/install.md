@@ -168,11 +168,9 @@ The same settings object and checks as above apply (`--set settings.create=true`
 ## OpenAI-compatible inference
 
 For an analyzer using only OpenAI-compatible endpoints, set
-`analyzer.analysis.disableFoundry=true`, choose narrow `endpointSuffixes`, and
+`analyzer.analysis.disableFoundry=true`, choose narrow `openAICompatible.endpointSuffixes`, and
 leave `analyzer.identity.azure.clientId` empty unless Blob records are enabled.
 The optional key is an existing Secret or CSI file mounted in the analyzer only;
 set its exact host binding too. A keyless cluster Service needs verified HTTPS,
 an exact entry in `openAICompatible.serviceHosts`, and the suffix allow-list.
 Plain HTTP is refused. Follow the [installation and qualification runbook](how-to/qualify-openai-compatible.md).
-Acceptance of Proposed [ADR-0042](adr/0042-openai-compatible-model-endpoints.md),
-a live gpt-6.x evaluation and a Kind install remain prerequisites before merge.

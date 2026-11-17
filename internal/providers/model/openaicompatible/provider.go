@@ -291,10 +291,11 @@ func (p *Provider) Complete(ctx context.Context, req providers.CompletionRequest
 func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest) (providers.Completion, int, error) {
 	body, offered, err := (openaiwire.Codec{API: p.api, Deployment: p.deployment, SendModel: true, MaxOutput: p.maxOutput}).Encode(req)
 	if err != nil {
-		return providers.Completion{}, 0, providers.NotSent(err)
+		return providers.Completion{}, 0, providers.NotSent(compatibleWireError(err))
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	usageCeiling := providers.CompatibleUsageCeiling(providers.EstimateInputTokens(req), int64(cmpOr(req.MaxOutputTokens, p.maxOutput)))
 	// unknown stays set once an attempt was billed without a usage that reaches the caller.
 	unknown := false
 	sent := false
@@ -310,7 +311,7 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 		sent = sent || attemptSent
 		if err == nil {
 			c, perr := p.parse(data, offered, len(req.ResponseSchema) > 0)
-			if !completeUsage(data, p.api) {
+			if !completeUsage(data, p.api) || c.Usage.InputTokens > usageCeiling || c.Usage.OutputTokens > usageCeiling-c.Usage.InputTokens {
 				c = providers.Completion{UsageUnknown: true}
 				perr = fmt.Errorf("openai-compatible: the reply has no complete bounded usage: %w", providers.ErrMalformedOutput)
 			}
@@ -319,6 +320,9 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 		var c providers.Completion
 		if billed {
 			c = p.billedUsage(data)
+			if c.Usage.InputTokens > usageCeiling || c.Usage.OutputTokens > usageCeiling-c.Usage.InputTokens {
+				c = providers.Completion{UsageUnknown: true}
+			}
 		}
 		if !providers.IsRetryable(err) || attempt+1 >= p.attempts {
 			return done(c, attempt+1, err)
@@ -344,9 +348,11 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 // parse is parseResponse or parseResponses, after the Provider's API.
 func (p *Provider) parse(data []byte, offered map[string]bool, structured bool) (providers.Completion, error) {
 	if p.api == APIResponses {
-		return openaiwire.ParseResponses(data, offered, structured)
+		c, err := openaiwire.ParseResponses(data, offered, structured)
+		return c, compatibleWireError(err)
 	}
-	return openaiwire.ParseResponse(data, offered, structured)
+	c, err := openaiwire.ParseResponse(data, offered, structured)
+	return c, compatibleWireError(err)
 }
 
 // billedUsage is billedUsage or billedResponsesUsage, after the Provider's API.
@@ -675,33 +681,69 @@ func replyContainsKey(data []byte, api API, key string) bool {
 	if json.Unmarshal(data, &r) != nil {
 		return false
 	}
+	var joined, rawJoined, messageText strings.Builder
+	matched := false
+	appendText := func(text string) {
+		rawJoined.WriteString(text)
+		matched = matched || containsKey([]byte(text), key)
+		if json.Valid([]byte(text)) {
+			appendJSONStrings(&joined, json.NewDecoder(strings.NewReader(text)))
+		} else {
+			joined.WriteString(text)
+		}
+	}
+
 	if api == APIResponses {
-		var text strings.Builder
 		for _, item := range r.Output {
-			switch item.Type {
-			case "message":
-				for _, part := range item.Content {
-					if part.Type == "output_text" {
-						text.WriteString(part.Text)
-					}
+			for _, part := range item.Content {
+				if item.Type == "message" && part.Type == "output_text" {
+					messageText.WriteString(part.Text)
 				}
-			case "function_call":
-				if containsKey([]byte(item.Arguments), key) {
-					return true
-				}
+				appendText(part.Text)
 			}
+			appendText(item.Arguments)
 		}
-		return containsKey([]byte(text.String()), key)
-	}
-	for _, choice := range r.Choices {
-		if containsKey([]byte(choice.Message.Content), key) {
-			return true
-		}
-		for _, call := range choice.Message.ToolCalls {
-			if containsKey([]byte(call.Function.Arguments), key) {
-				return true
+	} else {
+		for _, choice := range r.Choices {
+			appendText(choice.Message.Content)
+			for _, call := range choice.Message.ToolCalls {
+				appendText(call.Function.Arguments)
 			}
 		}
 	}
-	return false
+	return matched || containsKey([]byte(rawJoined.String()), key) ||
+		containsKey([]byte(joined.String()), key) || containsKey([]byte(messageText.String()), key)
 }
+
+// appendJSONStrings joins decoded string values in wire order without JSON punctuation.
+// The caller validates the JSON first, so Token cannot fail here.
+func appendJSONStrings(dst *strings.Builder, dec *json.Decoder) {
+	token, _ := dec.Token()
+	switch v := token.(type) {
+	case string:
+		dst.WriteString(v)
+	case json.Delim:
+		for dec.More() {
+			if v == '{' {
+				_, _ = dec.Token()
+			}
+			appendJSONStrings(dst, dec)
+		}
+		_, _ = dec.Token()
+	}
+}
+
+// compatibleWireError attributes the shared codec's fixed error text without changing its classification.
+func compatibleWireError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &wireError{err: err}
+}
+
+type wireError struct{ err error }
+
+func (e *wireError) Error() string {
+	return strings.ReplaceAll(e.err.Error(), "foundry:", "openai-compatible:")
+}
+func (e *wireError) Unwrap() error { return errors.Unwrap(e.err) }

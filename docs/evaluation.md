@@ -210,7 +210,7 @@ escalation to cover read tools and multi-turn Responses calls.
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `EVAL_ENDPOINT` | yes | HTTPS API base, such as `https://api.openai.com/v1`; the adapter appends `/responses` or `/chat/completions` |
-| `EVAL_ENDPOINT_SUFFIXES` | yes | Same install-time allow-list as the analyzer, for example `.api.openai.com` |
+| `EVAL_COMPATIBLE_ENDPOINT_SUFFIXES` | yes | Independent allow-list as --openai-compatible-endpoint-suffixes, for example `.api.openai.com` |
 | `EVAL_COMPATIBLE_SERVER_ID` | yes | Operator-recorded server release or dated service identifier, using model-name characters. Included in the qualification digest along with an endpoint hash, never the endpoint URL |
 | `EVAL_TRIAGE_DEPLOYMENT`, `EVAL_TRIAGE_MODEL` | yes | Request model name and exact model ID replies must name |
 | `EVAL_TRIAGE_INFERENCE_API` | no | `ChatCompletions` (default) or `Responses` |
@@ -224,7 +224,7 @@ live run with an inference key already held in a private file:
 
 ```bash
 EVAL_MODEL=openaicompatible \
-EVAL_ENDPOINT=https://api.openai.com/v1 EVAL_ENDPOINT_SUFFIXES=.api.openai.com \
+EVAL_ENDPOINT=https://api.openai.com/v1 EVAL_COMPATIBLE_ENDPOINT_SUFFIXES=.api.openai.com \
 EVAL_COMPATIBLE_SERVER_ID=openai-2026-11-16 \
 EVAL_COMPATIBLE_KEY_FILE="$MODEL_KEY_FILE" EVAL_COMPATIBLE_KEY_HOST=api.openai.com \
 EVAL_TRIAGE_DEPLOYMENT=gpt-6.1-sol EVAL_TRIAGE_MODEL=gpt-6.1-sol \
@@ -235,15 +235,16 @@ Set the expected ID to the exact snapshot the service reports. For the tool path
 also set the escalation fields, `EVAL_ESCALATION_INFERENCE_API=Responses` and
 `EVAL_FORCE_ESCALATION=1`. Retain both reports. The observation of 2026-11-16 that
 three gpt-6.x models returned one schema-conforming required tool call is a smoke
-observation only, not a passing scenario evaluation. The live run required by
-#834 and #501 has not been recorded by this change.
+observation only, not a passing scenario evaluation.
 
 Reports include elapsed seconds per scenario, and total elapsed seconds, charged
 tokens and estimated cost divided by the number of passed runs. Failed attempts
 remain in the numerator. With no passed runs the per-passed fields are absent,
 never zero or infinity. With no prices cost is absent. Missing or incomplete
 usage is refused, sets `UsageUnknown` and charges the input estimate plus the
-output bound; it never gives a zero-token success. A compatible server's 429 is
+output bound with a rounded-up 10% margin. Complete reported usage is charged
+at least the input estimate; reports above that ceiling are refused and charged
+the ceiling. A compatible server's 429 is
 not marked unbilled. The persistent cross-analysis daily token counter remains
 planned (#208), as for the existing providers.
 
@@ -347,7 +348,7 @@ fix any rubric the harness then refuses.
 | `mode` | `fake` (recorded replies), `foundry`, `anthropic` or `openaicompatible` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
 | `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `seconds` (elapsed time), `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reply` and `error` (set when the run could not start; it fails) |
-| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out) |
+| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (OpenAICompatible has an input-estimate floor and a ceiling of input plus output bound with a rounded-up 10% margin, and refuses above-ceiling reports; a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out) |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |

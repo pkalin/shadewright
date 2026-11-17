@@ -272,39 +272,50 @@ analyzer:
     # @section -- Analyzer
     endpoint: ""
   analysis:
-    # -- Model ID and version the triage deployment of `RemediationSettings` serves, as its replies name it, such as `gpt-5.4-mini-2026-03-17` (`--triage-model`). A reply naming another model is refused (ADR-0023). Empty (the default) passes no analysis flag: the analysis is off, no model is called and no Azure token is requested. Set, it needs at least one of `analyzer.analysis.endpointSuffixes` (for `Foundry` deployments) and `analyzer.analysis.anthropic.apiKey` (for `Anthropic` deployments): the chart refuses to render without either. It does not read `settings.spec`; the analyzer refuses a Foundry deployment it has no suffixes for (`ProviderNotConfigured`). Until the evaluation gate (#78) exists, turn it on only for an evaluation run in the lab.
+    # -- Model ID and version the triage deployment of `RemediationSettings` serves, as its replies name it, such as `gpt-5.4-mini-2026-03-17` (`--triage-model`). A reply naming another model is refused (ADR-0023). Empty (the default) passes no analysis flag: the analysis is off, no model is called and no Azure token is requested. Set, it needs `analyzer.analysis.endpointSuffixes` (Foundry), `analyzer.analysis.openAICompatible.endpointSuffixes` (OpenAICompatible), or `analyzer.analysis.anthropic.apiKey` (Anthropic): the chart refuses to render without any provider configured. It does not read `settings.spec`; the analyzer refuses a Foundry deployment it has no suffixes for (`ProviderNotConfigured`). Until the evaluation gate (#78) exists, turn it on only for an evaluation run in the lab.
     # @section -- Analyzer
     triageModel: ""
     # -- Model ID and version the escalation deployment serves (`--escalation-model`). Empty: escalation is off whatever `RemediationSettings` names, and an escalation signal hands the incident off. Used only with `triageModel`.
     # @section -- Analyzer
     escalationModel: ""
-    # -- Host suffixes a model endpoint in `RemediationSettings` must end with or, without the leading dot, equal (`--model-endpoint-suffixes`), each a dot and two or more lower-case DNS labels, at most 16. For Foundry and OpenAICompatible. With `triageModel` needed unless the Anthropic API key is set: there is no default, so no Azure AI host is allowed unless listed. Empty, the analyzer builds no Azure token source and refuses every Foundry deployment. When it is set together with `triageModel` and `disableFoundry` is false, it needs `analyzer.identity.azure.clientId` (the chart refuses to render without it). Any resource under an allowed suffix may receive redacted context (and a token on the Foundry path), so list your own resource, such as `.<resource>.services.ai.azure.com`, which allows that host only.
+    # -- Host suffixes a model endpoint in `RemediationSettings` must end with or, without the leading dot, equal (`--model-endpoint-suffixes`), each a dot and two or more lower-case DNS labels, at most 16. For Foundry only. With `triageModel` needed unless the Anthropic API key is set: there is no default, so no Azure AI host is allowed unless listed. Empty, the analyzer builds no Azure token source and refuses every Foundry deployment. When it is set together with `triageModel` and `disableFoundry` is false, it needs `analyzer.identity.azure.clientId` (the chart refuses to render without it). Any resource under an allowed suffix may receive redacted context (and a token on the Foundry path), so list your own resource, such as `.<resource>.services.ai.azure.com`, which allows that host only.
     # @section -- Analyzer
     endpointSuffixes: []
     # -- The RemediationPolicy a proposed RemediationRequest of each action type refers to (`--action-policies`), a map from `AdjustKedaMaxReplicas` or `SetContainerMemoryLimit` to a policy name, such as `{SetContainerMemoryLimit: memory-limits}`. An action type without one is never proposed. Used only with `triageModel`. With at least one name, the chart grants the analyzer `get` on exactly these RemediationPolicies (ClusterRole and ClusterRoleBinding `analyzer-policy-reader`, `resourceNames` set to the names, no `list` or `watch`), so the context shows the model the bounds of the policy that will decide its proposal; the policy still decides. Without a name there is no such rule.
     # @section -- Analyzer
     actionPolicies: {}
     # -- Disable the Foundry provider and its Azure token source (`--disable-foundry`). Set true for compatible-only endpoints. Blob records still need Azure identity.
+    # @section -- Analyzer
     # @default -- false
     disableFoundry: false
     openAICompatible:
-      # -- Exact Service DNS hosts allowed private unicast addresses (`--openai-compatible-service-hosts`). HTTPS on 443 and endpointSuffixes still apply. Empty allows public addresses only.
+      # -- Independent OpenAICompatible host suffix allow-list (`--openai-compatible-endpoint-suffixes`). Foundry's endpointSuffixes stays Foundry-only. Hosts covered by both lists are refused by both providers.
+      # @section -- Analyzer
+      # @default -- []
+      endpointSuffixes: []
+      # -- Exact Service destinations with host, namespace, nonempty podSelector labels and pod target port. Adds one egress rule per host. The Service serves HTTPS on 443 and openAICompatible.endpointSuffixes still applies. Empty allows public addresses only.
+      # @section -- Analyzer
       # @default -- []
       serviceHosts: []
       apiKey:
         # -- Exact DNS host allowed to receive this optional key. Required with a source below. Kept outside RemediationSettings so a settings edit cannot move a key to another host.
+        # @section -- Analyzer
         # @default -- empty
         host: ""
         # -- Existing Secret holding the separate compatible API key. Mounted whole and read-only in the analyzer only, with no new RBAC. With no source no Authorization header is sent.
+        # @section -- Analyzer
         # @default -- empty
         secretName: ""
         # -- Key in that Secret, also the mounted file name.
+        # @section -- Analyzer
         # @default -- api-key
         secretKey: api-key
-        # -- Alternative CSI or other Pod volume source, without name. Not with secretName. The operator provides the source; the chart never creates a Secret.
+        # -- Alternative Secret or CSI Pod volume source only, without name. Not with secretName. The operator provides the source; the chart never creates a Secret.
+        # @section -- Analyzer
         # @default -- {}
         volume: {}
         # -- File inside a volume source, read at every attempt for rotation without restart.
+        # @section -- Analyzer
         # @default -- api-key
         fileName: api-key
     anthropic:

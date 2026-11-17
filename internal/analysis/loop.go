@@ -880,6 +880,9 @@ func (r *run) call(model providers.ModelProvider, role Role, d *remediationv1alp
 		ResponseSchema: ResponseSchema(),
 	}
 	upper := estimateInput(req) + outputBound(model, r.limits.MaxOutputTokens)
+	if d.ProviderName() == remediationv1alpha1.ModelProviderOpenAICompatible {
+		upper = providers.CompatibleUsageCeiling(estimateInput(req), outputBound(model, r.limits.MaxOutputTokens))
+	}
 	key := d.Endpoint + "\x00" + d.Deployment
 	for attempt := 0; ; attempt++ {
 		if err := r.parent.Err(); err != nil {
@@ -932,6 +935,10 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		attrAttempt.Int(attempt+1), attrMaxOutputTokens.Int(req.MaxOutputTokens)))
 	defer func() { endModelCall(span, res) }()
 	c, err := model.Complete(ctx, req)
+	if d.ProviderName() == remediationv1alpha1.ModelProviderOpenAICompatible && compatibleUsageOutsideBound(c, upper) {
+		c = providers.Completion{UsageUnknown: true}
+		err = fmt.Errorf("openai-compatible: reported usage exceeds the request bound: %w", providers.ErrMalformedOutput)
+	}
 	notSent := providers.IsNotSent(err)
 	if !notSent {
 		r.a.sent(r.parent, r.inc, role, d.ProviderName())
@@ -939,7 +946,7 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 	// Fail closed: a call that failed, or whose usage is unknown, is charged its upper bound. Whether and
 	// how much the service billed it cannot be told (a timeout may come after the reply was generated), so
 	// the analysis and deployment bounds count the most it could have cost. A malformed reply was billed
-	// and reports its usage, which is charged as reported. A call the adapter marks as having sent no request
+	// and reports its usage, which is charged as reported (with the compatible input floor and ceiling). A call the adapter marks as having sent no request
 	// on any attempt (providers.ErrNotSent) cannot have been billed and is charged nothing, as is a call the
 	// adapter marks as refused by its host before processing on every attempt (providers.ErrNotProcessed, a
 	// Foundry 429, #725). Which refusals are free is the adapter's fact about its host, not decided here. Such a
@@ -952,6 +959,9 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		charge = 0
 	case billed:
 		charge = c.Usage.InputTokens + c.Usage.OutputTokens
+		if d.ProviderName() == remediationv1alpha1.ModelProviderOpenAICompatible {
+			charge = max(charge, estimateInput(req))
+		}
 		span.SetAttributes(attrInputTokens.Int64(c.Usage.InputTokens), attrOutputTokens.Int64(c.Usage.OutputTokens))
 	}
 	span.SetAttributes(attrCharged.Int64(charge), attrUsageUnknown.Bool(c.UsageUnknown))
@@ -1036,19 +1046,7 @@ func outputBound(model providers.ModelProvider, limit int) int64 {
 // estimateInput is a conservative estimate of a request's input tokens: one token per two bytes of
 // everything sent, the provider blocks a message carries back included, which overestimates the tokenisers in
 // use for English text and JSON.
-func estimateInput(req providers.CompletionRequest) int64 {
-	n := len(req.ResponseSchema)
-	for _, m := range req.Messages {
-		n += len(m.Content) + len(m.ToolCallID) + m.ProviderBlocks.Len()
-		for _, c := range m.ToolCalls {
-			n += len(c.ID) + len(c.Name) + len(c.Arguments)
-		}
-	}
-	for _, t := range req.Tools {
-		n += len(t.Name) + len(t.Description) + len(t.Parameters)
-	}
-	return int64(n+1) / 2
-}
+func estimateInput(req providers.CompletionRequest) int64 { return providers.EstimateInputTokens(req) }
 
 // finish turns a valid result into the outcome: a hand-off without a proposal, or a plan once the proposal
 // has evidence found in the blocks the model saw, may target the subject and has a policy configured. action
@@ -1265,4 +1263,10 @@ func (a *Analyzer) accept(inc *remediationv1alpha1.Incident, out Outcome, reason
 	p.PolicyRef = ref
 	out.Reason, out.Plan = reason, &p
 	return out, nil
+}
+
+// compatibleUsageOutsideBound checks without adding untrusted counts, which could overflow.
+func compatibleUsageOutsideBound(c providers.Completion, upper int64) bool {
+	return !c.UsageUnknown && (c.Usage.InputTokens < 0 || c.Usage.OutputTokens < 0 ||
+		c.Usage.InputTokens > upper || c.Usage.OutputTokens > upper-c.Usage.InputTokens)
 }

@@ -52,7 +52,7 @@ analyzer:
     url: ""         # --prometheus-url, when set
     cluster: ""     # --prometheus-cluster, when set
   analysis:         # off unless triageModel is set; an evaluation run in the lab only until #78
-    triageModel: "" # --triage-model; needs endpointSuffixes or the Anthropic API key (or both)
+    triageModel: "" # --triage-model; needs a provider allow-list or the Anthropic API key
 ```
 
 Each component also takes the standard Pod values, bounded by the schema: `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`, `priorityClassName`, `imagePullSecrets` (added to the global list) and `podAnnotations`. Every object carries the `app.kubernetes.io/*` labels and `helm.sh/chart`. The chart passes `ct lint` and `ct install` (chart-testing, with the default values on Kind) and `helm lint --strict` in CI.
@@ -160,22 +160,24 @@ repaired into proposals. Qualify each server and model with the
 
 | Install setting | Meaning |
 | --- | --- |
-| `analyzer.analysis.endpointSuffixes` / `--model-endpoint-suffixes` | Shared destination allow-list for Foundry and OpenAICompatible. Use an exact host suffix such as `.api.openai.com`. No default |
+| `analyzer.analysis.endpointSuffixes` / `--model-endpoint-suffixes` | Foundry-only destination allow-list, unchanged for existing installs. No default |
+| `analyzer.analysis.openAICompatible.endpointSuffixes` / `--openai-compatible-endpoint-suffixes` | Independent compatible destination allow-list. Use an exact host suffix such as `.api.openai.com`. No default. A host matching both providers' lists is refused by both |
 | `analyzer.analysis.disableFoundry` / `--disable-foundry` | Default false. Set true for an install with no Foundry deployments: no Entra token source is built and no Azure client ID is needed for inference. Foundry then ends `ProviderNotConfigured`. Blob records still need an identity |
 | `analyzer.analysis.openAICompatible.apiKey.secretName` | Optional existing Secret, mounted read-only and whole in the analyzer only. The chart creates no Secret and grants no new RBAC. Without a source, no Authorization header is sent |
 | `analyzer.analysis.openAICompatible.apiKey.secretKey` | Key inside that Secret, default `api-key` |
-| `analyzer.analysis.openAICompatible.apiKey.volume`, `fileName` | Alternative CSI or other volume source without `name`, and file name (default `api-key`). Do not set both `volume` and `secretName` |
+| `analyzer.analysis.openAICompatible.apiKey.volume`, `fileName` | Alternative Secret or CSI volume source only without `name`, and file name (default `api-key`). Do not set both `volume` and `secretName` |
 | `analyzer.analysis.openAICompatible.apiKey.host` / `--openai-compatible-api-key-host` | Exact DNS host bound to the key, required with a key source. A settings edit to a different allowed host is refused |
 | `--openai-compatible-api-key-file` | Absolute clean path of the optional key. The chart uses `/var/run/secrets/shadewright/openai-compatible/<fileName>`. Read per attempt, not at startup. Unavailable or empty files are retryable; a non-regular file, more than 4 KiB, or a key over 512 bytes or with non-header characters is refused. Errors never quote the key or path |
-| `analyzer.analysis.openAICompatible.serviceHosts` / `--openai-compatible-service-hosts` | Exact `service.namespace.svc` or `service.namespace.svc.cluster.local` names allowed private unicast addresses. Empty by default. HTTPS on 443, a trusted serving certificate and the suffix allow-list still apply. Loopback, metadata/link-local and reserved addresses remain refused |
+| `analyzer.analysis.openAICompatible.serviceHosts` / `--openai-compatible-service-hosts` | Objects with `host` (exact `service.namespace.svc` or `service.namespace.svc.cluster.local`), `namespace`, nonempty `podSelector` labels and pod target `port`. The chart adds one egress rule per entry; only `host` is passed to the flag for private unicast address access. Empty by default. HTTPS on 443, a trusted serving certificate and the suffix allow-list still apply. Loopback, metadata/link-local and reserved addresses remain refused |
 
 The key is separate from the Anthropic key. It is never sent to Foundry or
 Anthropic hosts, and no Entra token reaches this adapter. The client uses no
 proxy and follows no redirects, including to another allowed host. Missing or
 incomplete usage is refused with `UsageUnknown` and charged at the input estimate
-plus the output limit. A compatible server's 429 is never assumed unbilled.
-See [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md), currently Proposed,
-and the [installation runbook](../how-to/qualify-openai-compatible.md).
+plus the output limit with a rounded-up 10% margin. Complete reports cost at least
+the input estimate. Above-ceiling usage is refused and charged that ceiling.
+One key binds one host, so a second endpoint on another host is refused. A compatible server's 429 is never assumed unbilled.
+See [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md), and the [installation runbook](../how-to/qualify-openai-compatible.md).
 
 ## Analyzer only
 

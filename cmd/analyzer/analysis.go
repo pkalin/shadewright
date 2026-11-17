@@ -60,6 +60,7 @@ type analysisFlags struct {
 	anthropicKeyFile                                             string
 	disableFoundry                                               bool
 	compatibleKeyFile, compatibleKeyHost, compatibleServiceHosts string
+	compatibleSuffixes                                           string
 	actionPolicies                                               string
 	// storeAccount and storeContainer name the Blob Storage container of the analysis records (ADR-0015).
 	storeAccount, storeContainer string
@@ -77,7 +78,8 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 		"The model ID and version the triage deployment of RemediationSettings serves, as its replies name it, "+
 			"such as gpt-5.4-mini-2026-03-17. A reply that names another model is refused (ADR-0023). Empty (the "+
 			"default) starts no analysis: no model is called, no Azure token is requested, and the analyzer behaves "+
-			"as without a model. Set, it needs --model-endpoint-suffixes (Foundry or OpenAICompatible), "+
+			"as without a model. Set, it needs --model-endpoint-suffixes (Foundry), "+
+			"--openai-compatible-endpoint-suffixes (OpenAICompatible), "+
 			"--anthropic-api-key-file "+
 			"(Anthropic) or both. With endpoint suffixes and Foundry enabled, it needs its Azure workload identity "+
 			"(AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE) or it refuses to start.")
@@ -91,7 +93,7 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 			"for one resource. There is no default, so no model host is allowed unless named. An endpoint outside "+
 			"them, or on a port other than 443, is refused before any token is requested (EndpointNotAllowed). "+
 			"Empty: no Azure token source is built and every Foundry deployment is refused (ProviderNotConfigured), "+
-			"for an analyzer that only calls the Anthropic API; then --anthropic-api-key-file is required.")
+			"for an analyzer using other providers, configure their own allow-list or key.")
 	fs.StringVar(&f.anthropicKeyFile, "anthropic-api-key-file", "",
 		"The path of a file that holds the Anthropic API key, mounted read-only from a Secret or a CSI volume "+
 			"the cluster operator provides (ADR-0037). It is read at every call, so a rotated key needs no restart; "+
@@ -102,6 +104,8 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&f.disableFoundry, "disable-foundry", false,
 		"Disable the Foundry provider and its Entra token source. "+
 			"Set for a compatible-only install; endpoint suffixes still apply.")
+	fs.StringVar(&f.compatibleSuffixes, "openai-compatible-endpoint-suffixes", "",
+		"Comma-separated endpoint host suffixes for OpenAICompatible only, separate from the Foundry list. No default.")
 	fs.StringVar(&f.compatibleKeyFile, "openai-compatible-api-key-file", "",
 		"Optional key file, mounted read-only and read per attempt. "+
 			"Requires --openai-compatible-api-key-host. Without it no Authorization header is sent.")
@@ -222,9 +226,10 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if err != nil {
 		return nil, fmt.Errorf("invalid --escalation-model: %w", err)
 	}
-	if f.endpointSuffixes == "" && f.anthropicKeyFile == "" {
+	if f.endpointSuffixes == "" && f.compatibleSuffixes == "" && f.anthropicKeyFile == "" {
 		return nil, errors.New("--triage-model needs --model-endpoint-suffixes (a Foundry deployment) or " +
-			"--anthropic-api-key-file (an Anthropic deployment): no model endpoint host is allowed by default")
+			"--openai-compatible-endpoint-suffixes (OpenAICompatible) or --anthropic-api-key-file (Anthropic): " +
+			"no model endpoint host is allowed by default")
 	}
 	if k := f.anthropicKeyFile; k != "" && (!filepath.IsAbs(k) || filepath.Clean(k) != k) {
 		return nil, errors.New("--anthropic-api-key-file must be an absolute, clean path")
@@ -251,7 +256,15 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if escalation != "" {
 		expected[analysis.RoleEscalation] = escalation
 	}
-	factory, err := models.NewModelFactory(models.ModelsConfig{Suffixes: suffixes, Tokens: tokens,
+	var compatibleSuffixes []string
+	if f.compatibleSuffixes != "" {
+		compatibleSuffixes, err = models.ParseEndpointSuffixes(f.compatibleSuffixes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --openai-compatible-endpoint-suffixes: %w", err)
+		}
+	}
+	factory, err := models.NewModelFactory(models.ModelsConfig{
+		Suffixes: suffixes, CompatibleSuffixes: compatibleSuffixes, Tokens: tokens,
 		DisableFoundry: f.disableFoundry, CompatibleKeyFile: f.compatibleKeyFile, CompatibleKeyHost: f.compatibleKeyHost,
 		CompatibleServiceHosts: services, AnthropicKeyFile: f.anthropicKeyFile,
 		Expected: expected, Log: d.log.WithName("models")})
@@ -365,7 +378,8 @@ func setupAnalysis(mgr ctrl.Manager, inc *incidents.Controller, f analysisFlags,
 }
 
 func (f analysisFlags) compatibleFlagsSet() bool {
-	return f.compatibleKeyFile != "" || f.compatibleKeyHost != "" || f.compatibleServiceHosts != "" || f.disableFoundry
+	return f.compatibleSuffixes != "" || f.compatibleKeyFile != "" || f.compatibleKeyHost != "" ||
+		f.compatibleServiceHosts != "" || f.disableFoundry
 }
 
 func (f analysisFlags) modelCredentials(

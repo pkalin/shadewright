@@ -29,6 +29,7 @@ import (
 )
 
 const providerCompatible = "openaicompatible"
+const envCompatibleSuffixes = "EVAL_COMPATIBLE_ENDPOINT_SUFFIXES"
 const envCompatibleKey = "EVAL_COMPATIBLE_KEY_FILE"
 const envCompatibleKeyHost = "EVAL_COMPATIBLE_KEY_HOST"
 const envCompatibleServices = "EVAL_COMPATIBLE_SERVICE_HOSTS"
@@ -49,12 +50,12 @@ func openaicompatibleServiceHosts() ([]string, error) {
 }
 
 func newCompatibleSource() (*compatibleSource, error) {
-	for _, name := range []string{envAPI, envKeyFile, envEffort, envAllowance} {
+	for _, name := range []string{envAPI, envKeyFile, envEffort, envAllowance, envSuffixes} {
 		if os.Getenv(name) != "" {
 			return nil, fmt.Errorf("%s does not apply to OpenAICompatible", name)
 		}
 	}
-	suffixes, err := models.ParseEndpointSuffixes(os.Getenv(envSuffixes))
+	suffixes, err := models.ParseEndpointSuffixes(os.Getenv(envCompatibleSuffixes))
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +63,7 @@ func newCompatibleSource() (*compatibleSource, error) {
 	if err != nil {
 		return nil, err
 	}
-	factory, err := models.NewModelFactory(models.ModelsConfig{Suffixes: suffixes, DisableFoundry: true,
+	factory, err := models.NewModelFactory(models.ModelsConfig{CompatibleSuffixes: suffixes, DisableFoundry: true,
 		CompatibleKeyFile: os.Getenv(envCompatibleKey), CompatibleKeyHost: os.Getenv(envCompatibleKeyHost),
 		CompatibleServiceHosts: services})
 	if err != nil {
@@ -151,7 +152,7 @@ func TestCompatibleSourceWithoutAzure(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	t.Setenv(envEndpoint, "https://api.openai.com/v1")
-	t.Setenv(envSuffixes, ".api.openai.com")
+	t.Setenv(envCompatibleSuffixes, ".api.openai.com")
 	t.Setenv(envTriageDep, "gpt-6.1-sol")
 	t.Setenv(envTriageMod, "gpt-6.1-sol")
 	t.Setenv(envTriageAPI, "Responses")

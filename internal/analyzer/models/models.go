@@ -18,7 +18,7 @@ limitations under the License.
 // model endpoint host suffixes, the model names the replies must give, the policy per action type, and the
 // factory that builds the provider of a deployment of RemediationSettings by its provider field: Microsoft
 // Foundry only after its endpoint passed the allow-list, the Anthropic API only at its fixed host and with the
-// analyzer's key file (ADR-0037), and OpenAICompatible after the same allow-list with its own optional
+// analyzer's key file (ADR-0037), and OpenAICompatible after its own allow-list with its own optional
 // host-bound key (ADR-0042). It is apart from package analyzer so that the collector's tests, which import
 // that package, do not import the analysis.
 package models
@@ -153,7 +153,9 @@ type ModelsConfig struct {
 	CompatibleKeyHost string
 	// CompatibleServiceHosts permits private unicast addresses for these exact cluster Service names.
 	CompatibleServiceHosts []string
-	// Suffixes is the allow-list of endpoint host suffixes for Foundry and OpenAICompatible deployments.
+	// CompatibleSuffixes is the independent allow-list for OpenAICompatible deployments.
+	CompatibleSuffixes []string
+	// Suffixes is the allow-list of endpoint host suffixes for Foundry deployments only.
 	// Set together with Tokens unless DisableFoundry is true. Empty refuses every Foundry deployment
 	// (analysis.ErrProviderNotConfigured): an analyzer that only calls the Anthropic API needs no Azure
 	// settings (#814).
@@ -187,7 +189,7 @@ type ModelsConfig struct {
 //     deployment is not the model its role expects (analysis.ErrDeploymentNotExpected); the allow-list is not
 //     consulted. It then builds an Anthropic provider for that model that reads the key file at every attempt
 //     and logs every failed call.
-//   - OpenAICompatible: it checks the same endpoint allow-list and builds the shared-wire adapter with no
+//   - OpenAICompatible: it checks its independent endpoint allow-list and builds the shared-wire adapter with no
 //     token source, an optional key bound to one exact install-time host, and the explicitly named Service
 //     hosts allowed private addresses. Azure model hosts and the Anthropic API are refused. No key means
 //     no Authorization header; API versions are refused and the API prefix is part of the endpoint.
@@ -197,8 +199,8 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	if foundryOn != (cfg.Tokens != nil) {
 		return nil, errors.New("the model factory needs an endpoint allow-list and a token source together, or neither")
 	}
-	if len(cfg.Suffixes) == 0 && cfg.AnthropicKeyFile == "" {
-		return nil, errors.New("the model factory needs an endpoint allow-list and a token source, or an Anthropic key file")
+	if !foundryOn && len(cfg.CompatibleSuffixes) == 0 && cfg.AnthropicKeyFile == "" {
+		return nil, errors.New("the model factory needs a Foundry allow-list and token source, a compatible allow-list, or an Anthropic key file")
 	}
 	if (cfg.CompatibleKeyFile == "") != (cfg.CompatibleKeyHost == "") {
 		return nil, errors.New("the compatible key file and its exact host must be set together")
@@ -218,11 +220,7 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 				return nil, refused(role, d, fmt.Errorf("the analyzer has Foundry disabled or runs without --model-endpoint-suffixes and its "+
 					"Azure workload identity: %w", analysis.ErrProviderNotConfigured))
 			}
-			if u, err := url.Parse(d.Endpoint); err == nil &&
-				(strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") == anthropicHost ||
-					strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") == "api.openai.com" ||
-					strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") == cfg.CompatibleKeyHost ||
-					slices.Contains(cfg.CompatibleServiceHosts, strings.TrimSuffix(strings.ToLower(u.Hostname()), "."))) {
+			if cfg.separateProviderHost(d.Endpoint) {
 				return nil, refused(role, d, fmt.Errorf("model endpoint host belongs to a separate provider, not a Foundry "+
 					"resource: %w", analysis.ErrEndpointNotAllowed))
 			}
@@ -236,7 +234,13 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			}
 			return p, nil
 		case remediationv1alpha1.ModelProviderOpenAICompatible:
-			if err := CheckEndpoint(d.Endpoint, cfg.Suffixes); err != nil {
+			if len(cfg.CompatibleSuffixes) == 0 {
+				return nil, refused(role, d, fmt.Errorf("the analyzer runs without --openai-compatible-endpoint-suffixes: %w", analysis.ErrProviderNotConfigured))
+			}
+			if CheckEndpoint(d.Endpoint, cfg.Suffixes) == nil {
+				return nil, refused(role, d, fmt.Errorf("model endpoint belongs to the Foundry allow-list: %w", analysis.ErrEndpointNotAllowed))
+			}
+			if err := CheckEndpoint(d.Endpoint, cfg.CompatibleSuffixes); err != nil {
 				return nil, refused(role, d, err)
 			}
 			if d.APIVersion != "" {
@@ -288,4 +292,15 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			return nil, refused(role, d, fmt.Errorf("unknown model provider: %w", analysis.ErrProviderNotConfigured))
 		}
 	}, nil
+}
+
+// separateProviderHost keeps the Foundry token away from every other provider's destinations.
+func (cfg ModelsConfig) separateProviderHost(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == anthropicHost || host == "api.openai.com" || host == cfg.CompatibleKeyHost ||
+		slices.Contains(cfg.CompatibleServiceHosts, host) || CheckEndpoint(endpoint, cfg.CompatibleSuffixes) == nil
 }

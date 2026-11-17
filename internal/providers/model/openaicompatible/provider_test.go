@@ -37,6 +37,15 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+const echoNameField = "name"
+
+const echoFunctionCallType = "function_call"
+const echoToolCallsField = "tool_calls"
+const echoFunctionField = "function"
+
+const echoChoicesField = "choices"
+const echoArgumentsField = "arguments"
+
 const secretKey = "sk-FAKE-CREDENTIAL-834" // #nosec G101 -- synthetic marker used to prove credential non-disclosure
 const compatibleHost = "api.openai.com"
 const testModel = "gpt-6.1-sol"
@@ -174,11 +183,23 @@ func TestErrorsNeverExposeTheKey(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var report CallReport
 			calls := 0
-			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: keyFile(t, secretKey), KeyHost: compatibleHost, MaxAttempts: 1, MaxResponseBytes: 1024, OnCall: func(r CallReport) { report = r }}, testHooks{transport: roundTrip(func(r *http.Request) (*http.Response, error) { calls++; return handler(r) })})
+			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: keyFile(t, secretKey), KeyHost: compatibleHost, MaxAttempts: 1, Timeout: time.Second, AttemptTimeout: time.Second, MaxResponseBytes: 1024, OnCall: func(r CallReport) { report = r }}, testHooks{transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.Context().Err() != nil {
+					return nil, r.Context().Err()
+				}
+				if calls > 1 {
+					return nil, errors.New("unexpected redirect")
+				}
+				return handler(r)
+			})})
 			if err != nil {
 				t.Fatal(err)
 			}
-			c, err := p.Complete(t.Context(), request())
+			p.client.Timeout = time.Second
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			c, err := p.Complete(ctx, request())
 			if err == nil {
 				t.Fatal("hostile reply accepted")
 			}
@@ -324,17 +345,32 @@ func TestSplitAndNestedCredentialEchoIsRefused(t *testing.T) {
 			map[string]any{echoTypeField: echoOutputText, echoTextField: plain[split:]},
 		}}}}
 	chat := map[string]any{echoModelField: testModel,
-		echoUsageField: map[string]int64{"prompt_tokens": 30, "completion_tokens": 5},
-		"choices":      []any{map[string]any{"finish_reason": "stop", echoMessageType: map[string]any{echoContentField: inner}}}}
+		echoUsageField:   map[string]int64{"prompt_tokens": 30, "completion_tokens": 5},
+		echoChoicesField: []any{map[string]any{"finish_reason": "stop", echoMessageType: map[string]any{echoContentField: inner}}}}
 	tools := map[string]any{echoModelField: testModel, echoStatusField: echoCompleted, echoUsageField: usage,
-		echoOutputField: []any{map[string]any{echoTypeField: "function_call", "call_id": "c1", "name": "t", "arguments": inner}}}
+		echoOutputField: []any{map[string]any{echoTypeField: echoFunctionCallType, "call_id": "c1", echoNameField: "t", echoArgumentsField: inner}}}
+	splitChat := map[string]any{echoModelField: testModel,
+		echoUsageField: map[string]int64{"prompt_tokens": 30, "completion_tokens": 5},
+		echoChoicesField: []any{map[string]any{"finish_reason": echoToolCallsField, echoMessageType: map[string]any{
+			echoContentField: secretKey[:len(secretKey)/2], echoToolCallsField: []any{map[string]any{"id": "c1", echoTypeField: echoFunctionField, echoFunctionField: map[string]string{
+				echoNameField: "t", echoArgumentsField: `{"a":"` + secretKey[len(secretKey)/2:] + `"}`,
+			}}},
+		}}}}
+	interleaved := map[string]any{echoModelField: testModel, echoStatusField: echoCompleted, echoUsageField: usage,
+		echoOutputField: []any{
+			map[string]any{echoTypeField: echoMessageType, echoContentField: []any{map[string]string{echoTypeField: echoOutputText, echoTextField: plain[:split]}}},
+			map[string]string{echoTypeField: echoFunctionCallType, "call_id": "c1", echoNameField: "t", echoArgumentsField: `{"a":"neighbor"}`},
+			map[string]any{echoTypeField: echoMessageType, echoContentField: []any{map[string]string{echoTypeField: echoOutputText, echoTextField: plain[split:]}}},
+		}}
 	for name, tc := range map[string]struct {
 		api  API
 		body any
 	}{
-		"split Responses text":            {APIResponses, responses},
-		"escaped structured Chat content": {APIChatCompletions, chat},
-		"escaped tool arguments":          {APIResponses, tools},
+		"joined Chat content and arguments": {APIChatCompletions, splitChat},
+		"text split around arguments":       {APIResponses, interleaved},
+		"split Responses text":              {APIResponses, responses},
+		"escaped structured Chat content":   {APIChatCompletions, chat},
+		"escaped tool arguments":            {APIResponses, tools},
 	} {
 		t.Run(name, func(t *testing.T) {
 			data, err := json.Marshal(tc.body)
@@ -355,5 +391,152 @@ func TestSplitAndNestedCredentialEchoIsRefused(t *testing.T) {
 				t.Fatalf("credential-bearing reply accepted: error class %v, content bytes %d, calls %d", err, len(c.Content), len(c.ToolCalls))
 			}
 		})
+	}
+}
+
+func TestUsageCeiling(t *testing.T) {
+	for _, api := range []API{APIChatCompletions, APIResponses} {
+		body := chatOK
+		if api == APIResponses {
+			body = responsesOK
+		}
+		body = strings.Replace(body, ":30", ":1099511627776", 1)
+		p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, API: api}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) { return response(200, "application/json", body), nil })})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := p.Complete(t.Context(), request())
+		if !providers.IsMalformedOutput(err) || !c.UsageUnknown || c.Usage.InputTokens != 0 {
+			t.Errorf("%s: unbounded usage accepted: %+v %v", api, c, err)
+		}
+	}
+}
+
+func TestJoinedReplyKeyCorpus(t *testing.T) {
+	checkJoinedReplyBaseline(t)
+	// Raw text parts must survive even when one part is also a valid JSON number.
+	for cut := 1; cut < len(secretKey); cut++ {
+		data, _ := json.Marshal(map[string]any{echoOutputField: []any{map[string]any{
+			echoTypeField: echoMessageType, echoContentField: []any{
+				map[string]string{echoTypeField: echoOutputText, echoTextField: secretKey[:cut]},
+				map[string]string{echoTypeField: echoOutputText, echoTextField: secretKey[cut:]},
+			},
+		}}})
+		if !baselineReplyContainsKey(data, APIResponses, secretKey) {
+			t.Fatal("corpus lacks a baseline match")
+		}
+		if !replyContainsKey(data, APIResponses, secretKey) {
+			t.Errorf("lost raw text at split %d", cut)
+		}
+	}
+	// Adding arguments or other part types must not hide a key the text-only matcher found.
+	for cut := 1; cut < len(secretKey); cut++ {
+		first := map[string]string{echoTypeField: echoOutputText, echoTextField: secretKey[:cut]}
+		last := map[string]string{echoTypeField: echoOutputText, echoTextField: secretKey[cut:]}
+		message := func(parts ...any) any { return map[string]any{echoTypeField: echoMessageType, echoContentField: parts} }
+		for _, output := range [][]any{
+			{message(first, map[string]string{echoTypeField: "refusal", echoTextField: "adjacent text"}, last)},
+			{message(first), map[string]string{echoTypeField: echoFunctionCallType, echoArgumentsField: `{"a":"adjacent argument"}`}, message(last)},
+		} {
+			data, _ := json.Marshal(map[string]any{echoOutputField: output})
+			before := string(data)
+			if !baselineReplyContainsKey(data, APIResponses, secretKey) {
+				t.Fatal("corpus lacks a baseline match")
+			}
+			if !replyContainsKey(data, APIResponses, secretKey) {
+				t.Errorf("neighbor hid a baseline match at split %d", cut)
+			}
+			if string(data) != before {
+				t.Fatal("matcher changed the neighbor")
+			}
+		}
+	}
+	// Known-positive split secrets, including every boundary, escape layer and API.
+	for split := 1; split < len(secretKey); split++ {
+		for _, api := range []API{APIChatCompletions, APIResponses} {
+			for _, escaped := range []bool{false, true} {
+				left, right := secretKey[:split], secretKey[split:]
+				args, _ := json.Marshal(map[string]string{"a": right})
+				if escaped {
+					args = []byte(strings.ReplaceAll(string(args), "4", `\u0034`))
+				}
+				var body any
+				if api == APIResponses {
+					body = map[string]any{"output": []any{map[string]any{echoTypeField: echoMessageType, echoContentField: []any{map[string]string{echoTypeField: "output_text", "text": left}}}, map[string]string{echoTypeField: echoFunctionCallType, echoArgumentsField: string(args)}}}
+				} else {
+					body = map[string]any{echoChoicesField: []any{map[string]any{echoMessageType: map[string]any{echoContentField: left, echoToolCallsField: []any{map[string]any{echoFunctionField: map[string]string{echoArgumentsField: string(args)}}}}}}}
+				}
+				data, _ := json.Marshal(body)
+				if !replyContainsKey(data, api, secretKey) {
+					t.Errorf("%s split %d escaped %v: joined key missed", api, split, escaped)
+				}
+			}
+		}
+	}
+	// Every previously matched field still matches, beside an adversarial neighbour.
+	for _, value := range []string{secretKey, "before" + secretKey + "after", secretKey + secretKey} {
+		data, _ := json.Marshal(map[string]any{echoChoicesField: []any{map[string]any{echoMessageType: map[string]string{"content": value}}}})
+		if !replyContainsKey(data, APIChatCompletions, secretKey) {
+			t.Fatal("lost a previous match")
+		}
+	}
+}
+
+func TestWireErrorsNameCompatibleProvider(t *testing.T) {
+	for _, api := range []API{APIChatCompletions, APIResponses} {
+		for _, requestError := range []bool{false, true} {
+			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, API: api}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
+				body := chatOK
+				if api == APIResponses {
+					body = responsesOK
+				}
+				return response(200, "application/json", strings.ReplaceAll(body, testModel, "invalid model")), nil
+			})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := request()
+			if requestError {
+				req.Messages = nil
+			}
+			_, err = p.Complete(t.Context(), req)
+			if err == nil {
+				t.Fatal("invalid wire data accepted")
+			}
+			for e := err; e != nil; e = errors.Unwrap(e) {
+				if strings.Contains(e.Error(), "foundry:") {
+					t.Errorf("wrong provider: %v", e)
+				}
+			}
+			if !strings.Contains(err.Error(), "openai-compatible:") {
+				t.Errorf("missing provider: %v", err)
+			}
+		}
+	}
+}
+
+func TestReportedUsageBoundary(t *testing.T) {
+	req := request()
+	ceiling := providers.CompatibleUsageCeiling(providers.EstimateInputTokens(req), int64(req.MaxOutputTokens))
+	for _, api := range []API{APIChatCompletions, APIResponses} {
+		for _, n := range []int64{0, ceiling, ceiling + 1} {
+			body := strings.ReplaceAll(chatOK, `"cached_tokens":10`, `"cached_tokens":0`)
+			if api == APIResponses {
+				body = strings.ReplaceAll(responsesOK, `"cached_tokens":10`, `"cached_tokens":0`)
+			}
+			body = strings.Replace(body, ":30", fmt.Sprintf(":%d", n), 1)
+			body = strings.Replace(body, ":5", ":0", 1)
+			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, API: api}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) { return response(200, "application/json", body), nil })})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := p.Complete(t.Context(), req)
+			if n <= ceiling && (err != nil || c.UsageUnknown) {
+				t.Errorf("bounded usage %d refused: %v", n, err)
+			}
+			if n > ceiling && (!providers.IsMalformedOutput(err) || !c.UsageUnknown) {
+				t.Errorf("usage above ceiling accepted: %+v %v", c, err)
+			}
+		}
 	}
 }

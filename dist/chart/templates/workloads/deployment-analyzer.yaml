@@ -88,7 +88,10 @@ spec:
         - --disable-foundry=true
         {{- end }}
         {{- with $c.analysis.openAICompatible.serviceHosts }}
-        - --openai-compatible-service-hosts={{ join "," . }}
+        - --openai-compatible-service-hosts={{ join "," (include "shadewright.compatibleServiceHosts" . | fromJsonArray) }}
+        {{- end }}
+        {{- with $c.analysis.openAICompatible.endpointSuffixes }}
+        - --openai-compatible-endpoint-suffixes={{ join "," . }}
         {{- end }}
         {{- with $c.analysis.endpointSuffixes }}
         - --model-endpoint-suffixes={{ join "," . }}

@@ -116,3 +116,24 @@ type ModelProvider interface {
 	// that nothing of the call was billed.
 	Complete(ctx context.Context, req CompletionRequest) (Completion, error)
 }
+
+// EstimateInputTokens conservatively counts one token per two bytes of model input, including tool schemas and provider blocks.
+func EstimateInputTokens(req CompletionRequest) int64 {
+	n := len(req.ResponseSchema)
+	for _, m := range req.Messages {
+		n += len(m.Content) + len(m.ToolCallID) + m.ProviderBlocks.Len()
+		for _, c := range m.ToolCalls {
+			n += len(c.ID) + len(c.Name) + len(c.Arguments)
+		}
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description) + len(t.Parameters)
+	}
+	return int64(n+1) / 2
+}
+
+// CompatibleUsageCeiling bounds untrusted reported usage by input plus output, with a rounded-up ten percent margin.
+func CompatibleUsageCeiling(input, output int64) int64 {
+	bound := input + output
+	return bound + (bound+9)/10
+}

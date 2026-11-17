@@ -11,7 +11,7 @@ inference cost =
   + output tokens         / 1,000,000 * output price
 ```
 
-Count every call of an analysis: tool steps, retries and escalations. Check how reasoning tokens and long context are billed for the chosen model. A call with unknown usage is counted at its upper bound, except a call the host refused before processing it, such as a Foundry 429, which is counted as 0 tokens (12.3).
+Count every call of an analysis: tool steps, retries and escalations. OpenAICompatible usage is untrusted: charge at least the input estimate, with a ceiling of input plus output bound and a rounded-up 10% margin. Above-ceiling reports are refused and charged that ceiling ([ADR-0042](../adr/0042-openai-compatible-model-endpoints.md)). Check how reasoning tokens and long context are billed for the chosen model. A call with unknown usage is counted at its upper bound, except a call the host refused before processing it, such as a Foundry 429, which is counted as 0 tokens (12.3).
 
 ## 12.2. Illustration (made-up prices, not a quote)
 

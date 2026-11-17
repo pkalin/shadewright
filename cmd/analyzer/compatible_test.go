@@ -25,7 +25,8 @@ import (
 func TestCompatibleOnlyDoesNotReadAzureIdentity(t *testing.T) {
 	f := validFlags()
 	f.disableFoundry = true
-	f.endpointSuffixes = ".api.openai.com"
+	f.endpointSuffixes = ""
+	f.compatibleSuffixes = ".api.openai.com"
 	asked := false
 	c, err := buildAnalysis(f, testDeps(t), func() (foundry.TokenSource, error) { asked = true; return noTokens{}, nil })
 	if err != nil || c == nil || asked {

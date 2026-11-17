@@ -269,5 +269,7 @@ Provision any optional key outside Git, name its existing Secret or CSI source
 and exact host under `analyzer.analysis.openAICompatible.apiKey`, then follow the
 [qualification runbook](how-to/qualify-openai-compatible.md). No RBAC changes or
 key migrations are needed. Uninstall removes the mount; it does not revoke a key
-in the server account. Revoke that key separately. ADR-0042 remains Proposed
-until accepted, with live evaluation and Kind installation required before merge.
+in the server account. Revoke that key separately. The Foundry `endpointSuffixes` list keeps its existing meaning. Compatible
+endpoints use `openAICompatible.endpointSuffixes`; move compatible hosts out of
+the Foundry list when upgrading an experimental installation. Each named Service
+now needs `host`, `namespace`, `podSelector` and `port` for its egress rule.

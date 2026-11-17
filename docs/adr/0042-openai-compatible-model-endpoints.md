@@ -1,6 +1,6 @@
 # ADR-0042: OpenAI-compatible model endpoints and an optional API key
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-16
 
 ## Context
@@ -21,7 +21,7 @@ The decision of 2026-11-16 is one configurable provider, not one fixed vendor ho
    server's API prefix, for example `https://api.openai.com/v1`. The adapter appends
    `/chat/completions` or `/responses` using a parsed URL. Existing Foundry requests,
    recorded scenarios and goldens keep their exact bytes and semantics.
-2. The same install-time `--model-endpoint-suffixes` bounds the destination of
+2. The separate install-time `--openai-compatible-endpoint-suffixes` bounds the destination of
    redacted context. HTTPS, a lower-case DNS host, port 443, no credentials, query,
    fragment or dot path segments are required. No proxy and no redirects, including
    same-host redirects. TLS verification stays on, with TLS 1.2 or newer.
@@ -35,6 +35,10 @@ The decision of 2026-11-16 is one configurable provider, not one fixed vendor ho
    Only `service.namespace.svc` or `service.namespace.svc.cluster.local` names qualify.
    This grants private unicast addresses only, never loopback, link-local, multicast,
    unspecified or reserved addresses. HTTPS and the suffix allow-list still apply.
+   Each chart `openAICompatible.serviceHosts` entry names `host`, `namespace`,
+   a nonempty `podSelector` and the pod target `port`. One NetworkPolicy egress rule
+   selects those pods in that namespace on that TCP port. The Service exposes 443;
+   its target port may differ. No other selector-based access is added.
    The operator must provision a trusted serving certificate and access controls.
 5. Authentication is optional. No key file means no Authorization header. With a
    key, `--openai-compatible-api-key-file` and an exact
@@ -43,22 +47,36 @@ The decision of 2026-11-16 is one configurable provider, not one fixed vendor ho
    A Secret or CSI volume is mounted whole and read-only in the analyzer only, with
    no Secret API reads, new RBAC, environment credential or custom resource field.
    The bounded regular file is read at every attempt; rotation needs no restart.
+   One key binds one host: a second compatible endpoint on a different host is
+   refused even when both hosts are allow-listed. The chart permits only `secret`
+   or `csi` volume sources and checks key-host coverage and provider exclusions.
    Unavailable or empty files are retryable, malformed files are refused. Errors
    and call reports contain fixed text, never keys, paths, headers or response text.
 6. Provider credentials are separate. Foundry never receives either static key;
    OpenAICompatible never receives a token source or the Anthropic key. Anthropic's
    fixed host and Microsoft's Azure model host suffixes are refused by the new
-   provider. Foundry additionally refuses `api.openai.com` and the install-time
+   provider. The Foundry list (`--model-endpoint-suffixes`) remains Foundry-only.
+   Each provider refuses any host matching the other provider's list, including
+   overlaps. Foundry additionally refuses `api.openai.com` and the install-time
    compatible key host and Service hosts. No fallback between providers exists.
    `--disable-foundry` prevents Azure token-source creation;
    the existing Foundry installation remains supported, while compatible-only
    installations set it and need no Azure client ID. Blob records still require Azure identity.
-7. Missing or unusable usage is refused as malformed output with `UsageUnknown`, as
-   in Foundry. It is never a zero-token success. The loop charges its conservative
-   input estimate (one token per two bytes sent) plus the output bound. The compatible
-   adapter never marks a host refusal as unbilled: a gateway may bill a 429. Valid
-   reported input, cached input and output usage map to the existing token budget.
-   Persistent daily token reservation across analyses remains #208, not a new claim.
+7. Usage is untrusted. Let `I` be the loop's conservative input estimate (one token
+   per two bytes of messages, tool schemas, response schema and provider blocks),
+   `O` the request's output bound, and `C = I + O + ceil((I + O) / 10)` the ceiling.
+   The 10% margin allows tokenizer variation without accepting an unbounded report.
+   For complete, nonnegative reported usage `R = input + output` at or below `C`,
+   charge `max(I, R)`, including a zero-token report and malformed output carrying
+   usable usage. Cached input is part of input, never added twice. A report above
+   `C` is refused as malformed output, its usage discarded (`UsageUnknown`), and
+   charged `C`. Missing, negative, incomplete or otherwise unusable usage is also
+   refused with `UsageUnknown` and charged `C`. Other failed sent calls, including
+   throttling, cost `C`; compatible hosts never mark a refusal unbilled. A call
+   whose every attempt sent nothing costs zero. Retried attempts with lost usage
+   keep `UsageUnknown` and cost `C`. Foundry and Anthropic accounting is unchanged.
+   Persistent daily token reservation across analyses remains #208.
+
 8. Responses and tool calls remain untrusted. Strict response schemas are requested,
    and the same typed result and tool argument validators refuse invalid answers.
    Existing Foundry tool strictness is preserved byte for byte. A server that ignores
@@ -69,8 +87,9 @@ The decision of 2026-11-16 is one configurable provider, not one fixed vendor ho
 
 ## Consequences
 
-On acceptance this amends ADR-0037 decision 2 and its 2026-11-16 amendment:
-the suffix list is shared and Foundry may be disabled. Anthropic retains its fixed
+This extends [ADR-0037](0037-the-anthropic-api-as-a-second-model-provider.md) through its dated
+2026-11-17 amendment: a third provider has a separate list, the Foundry list stays
+Foundry-only, and Foundry may be disabled. Anthropic retains its fixed
 host and separate key. Invariants 1 through 5 keep their validation, authorization
 and Git boundaries.
 Invariant 6 registers the analyzer's optional OpenAI-compatible API key under this
@@ -103,9 +122,9 @@ provider fallback, credential discovery, Azure tokens on compatible endpoints an
 new permissions and chart-managed custom CA mounts are excluded. Cluster Service
 certificates need a trusted root, provisioned in an operator-built analyzer image
 when using an internal CA. The runtime qualification gate and persistent daily
-token counter remain planned. Acceptance of this Proposed ADR, a passing live
-OpenAI gpt-6.x scenario evaluation (also #501), and a Kind install with a dummy key
-are merge prerequisites. Offline tests do not stand in for those observations.
+token counter remain planned. Qualify each model and server with the evaluation
+harness and test the key mount in an isolated Kind install with a dummy key.
+Offline transport tests do not replace scenario qualification.
 
 ## Alternatives considered
 
@@ -120,4 +139,8 @@ are merge prerequisites. Offline tests do not stand in for those observations.
 
 ## Amendments
 
-None.
+- 2026-11-17: accepted with the decision on #834: separate per-provider allow-lists,
+  an input-estimate floor and a ceiling with a 10% margin on untrusted usage,
+  and one selector-based egress rule per named Service. Joined reply text is checked
+  for key echoes, compatible errors name their provider, and key volume sources
+  are restricted to Secret or CSI.

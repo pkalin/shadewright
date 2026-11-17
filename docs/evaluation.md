@@ -382,8 +382,8 @@ example how a tool reads or how a result is checked) needs a new evaluation by h
 to the tools or the context.
 
 **The absorbed tally and the digest.** The tally block ([#796](https://github.com/pkalin/shadewright/issues/796))
-changes `contextBuilder.source`, since it is code in `internal/incidentcontext`, and `scenarios`, since it adds the
-`oom/absorbed` variant. So every manifest digest changes, for every Incident, with or without a tally: a real-model
+changes `contextBuilder.source`, since it is code in `internal/incidentcontext`, `redaction.builtInRules`, since
+`MarkerShapes` in `internal/redact` is hashed, and `scenarios`, since it adds the `oom/absorbed` variant. So every manifest digest changes, for every Incident, with or without a tally: a real-model
 result recorded before it no longer matches. No passing result is stored in this repository yet (planned), so
 nothing stored is lost; a real-model evaluation run after this change, `oom/absorbed` included, is the one that
 counts. In CI the fake model replays the recorded replies, which do not depend on the prompt: every scenario, `oom`

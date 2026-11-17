@@ -186,11 +186,11 @@ func (o Observation) Increase(handled int64) int64 {
 type HandledFunc func(ctx context.Context, o Observation) (handled int64, found bool, err error)
 
 // CauseSeenFunc reports whether the Incident controller has seen the cause a consequence names (ADR-0039 point
-// 7, decided 2026-11-17): it holds an observation of o.CauseFingerprint as a first sighting, or has an Incident
-// of it that counts a cause. It answers from memory, in the same process, and an error (the Incidents not
-// loaded within the deadline) is no answer: the collector asks again. The Incident controller (package
-// incidents) supplies it, and tells the collector of each cause it sees later through
-// [Collector.ReleaseCause].
+// 7, decided 2026-11-17 three times): it has an Incident of o.CauseFingerprint that counts a cause and that it
+// would count o on. A cause it holds only as a first sighting is not seen. It answers from memory, in the same
+// process, and an error (the Incidents not loaded within the deadline) is no answer: the collector asks again.
+// The Incident controller (package incidents) supplies it, and tells the collector of each cause it sees later
+// through [Collector.ReleaseCause].
 type CauseSeenFunc func(ctx context.Context, o Observation) (bool, error)
 
 // Config configures a [Collector]. Zero values take the defaults above.

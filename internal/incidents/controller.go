@@ -260,7 +260,7 @@ type Controller struct {
 	// analysisRequest selects, of hintRequests, those whose hints count for an Incident (SetAnalysisRequests).
 	analysisRequest func(*remediationv1alpha1.Incident, *remediationv1alpha1.RemediationRequest) bool
 	// onCauseSeen, when set (OnCauseSeen), is told each cause fingerprint that an observation of it, once
-	// consumed, makes seen for its subject (causeHeldFor).
+	// consumed, makes seen for its subject (causeOpenedFor).
 	onCauseSeen func(fp string)
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
@@ -429,9 +429,10 @@ func (c *Controller) SetAnalysisRequests(f func(*remediationv1alpha1.Incident, *
 }
 
 // OnCauseSeen sets the function the controller calls with the fingerprint of a cause each time it has consumed an
-// observation of it that makes it seen for a consequence of the same subject ([Controller.causeHeldFor]): the
+// observation of it that makes it seen for a consequence of the same subject ([Controller.causeOpenedFor]): the
 // collector's collector.Collector.ReleaseCause, which wakes the consequences held for that cause, each of which
-// then asks [Controller.CauseSeen] with its own observation (ADR-0039 point 7, decided 2026-11-17 twice). It is
+// then asks [Controller.CauseSeen] with its own observation (ADR-0039 point 7, decided 2026-11-17 three times).
+// A cause held by the gate as a first sighting is not told; the observation that opens its Incident is. It is
 // called from the goroutine that consumes observations, after the observation is consumed and with no lock of the
 // controller held, so it may call CauseSeen; it must not block. Call it before the manager starts.
 func (c *Controller) OnCauseSeen(f func(fp string)) {
@@ -502,7 +503,7 @@ func (c *Controller) Start(ctx context.Context) error {
 }
 
 // handle consumes o, wakes the writer when a batch is due, and then, for a cause that is now seen for its subject
-// ([Controller.causeHeldFor]), tells the collector (OnCauseSeen). The cause is recorded under mu before the
+// ([Controller.causeOpenedFor]), tells the collector (OnCauseSeen). The cause is recorded under mu before the
 // call, and mu is not held across it.
 func (c *Controller) handle(ctx context.Context, o collector.Observation) {
 	if c.consume(ctx, o) {
@@ -512,7 +513,7 @@ func (c *Controller) handle(ctx context.Context, o collector.Observation) {
 		return
 	}
 	c.mu.Lock()
-	seen := c.causeHeldFor(o)
+	seen := c.causeOpenedFor(o)
 	c.mu.Unlock()
 	if seen {
 		c.onCauseSeen(o.Fingerprint)
@@ -739,9 +740,11 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 	// A consequence whose cause has an Incident is counted there as evidence and opens none of its own
 	// (ADR-0039 point 6), with what is held for it as a first sighting from before the cause's Incident was
 	// opened. One whose cause has no Incident yet goes through the gate below, as any observation: the collector
-	// holds it until this controller has seen the cause (point 7, CauseSeen and OnCauseSeen), so it comes here
-	// for a cause held as a first sighting, which counts it once the cause's Incident opens (absorbHeldFor), or
-	// when it left that hold first (over its bound, or at its end).
+	// holds it until the cause's Incident links it (point 7, CauseSeen and OnCauseSeen), so it comes here with
+	// no Incident for its cause only when it left that hold first: over its bound, or at its end
+	// (cause_unseen). A first sighting is then counted on the cause once the cause's Incident opens
+	// (absorbHeldFor); one that recurs opens its own Incident, which the late-cause fold closes in favour of the
+	// cause (fold.go).
 	name, spec, reason, linked := c.causeFor(o)
 	heldDue := false
 	if linked {

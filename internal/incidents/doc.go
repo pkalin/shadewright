@@ -55,8 +55,8 @@ limitations under the License.
 // cooldown, does not keep it from going quiet and takes no place under the cap. The cause's phase is not
 // read. The collector holds a consequence whose cause the controller has not seen until it has, at most
 // collector.ConsequenceGrace: it asks [Controller.CauseSeen] at each sample, which answers true only for a cause the consequence
-// would be counted on (the same test as the link, [Controller.causeIncident], or a first sighting of the cause
-// for its subject), and the controller wakes it for each cause it sees later through the function set by
+// would be counted on (the same test as the link, [Controller.causeIncident]; a cause held by the gate as a
+// first sighting is not seen), and the controller wakes it for each cause it sees later through the function set by
 // [Controller.OnCauseSeen] (ADR-0039 point 7, #828); one that reaches the
 // controller before its cause's Incident exists goes through the gate as any observation; one held as
 // a first sighting is counted on the cause in full once a later observation of it links there, or once the

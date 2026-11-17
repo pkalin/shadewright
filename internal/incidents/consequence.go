@@ -124,7 +124,7 @@ func (c *Controller) causeIncident(fp string, uid remediationv1alpha1.UID, at ti
 	return name, cause.spec, true
 }
 
-// CauseSeen answers the collector (collector.CauseSeenFunc, ADR-0039 point 7, decided 2026-11-17 twice): whether
+// CauseSeen answers the collector (collector.CauseSeenFunc, ADR-0039 point 7, decided 2026-11-17 three times): whether
 // the controller has seen a cause that consequence o would be counted on ([Controller.causeSeen]). The Incidents
 // loaded at start count, so the hold the collector rebuilds after a restart is answered from the stored
 // Incidents. A consequence whose container name is not a DNS label is answered true: consume leaves that name
@@ -145,29 +145,27 @@ func (c *Controller) CauseSeen(ctx context.Context, o collector.Observation) (bo
 	return c.causeSeen(o), nil
 }
 
-// causeSeen reports whether the controller has seen a cause consequence o would be counted on (decided
-// 2026-11-17, second, on #828): [Controller.causeFor] links it now, or an observation of its cause fingerprint
-// for its subject UID is held as a first sighting, which links it once that Incident opens
-// ([Controller.absorbHeldFor]). The second is [Controller.causeHeldFor], what [Controller.handle] tells the
-// collector by. A cause refused at the cap, not counted for want of room, of another subject UID, or whose
-// Incident was Resolved more than RecurrenceWindow before o was observed, is not seen. The caller holds mu.
+// causeSeen reports whether the controller has seen a cause consequence o would be counted on: exactly when
+// [Controller.causeFor] links it now (decided 2026-11-17, third, on #828). A cause that is only a first sighting
+// held by the gate is not seen: a consequence released on it would not be linked, could open an Incident of its
+// own, and would not be counted when the cause opens later. Its hold waits until the cause's Incident opens, or
+// until ConsequenceGrace ends (cause_unseen), when the late-cause fold takes over. A cause refused at the cap,
+// not counted for want of room, of another subject UID, or whose Incident was Resolved more than
+// RecurrenceWindow before o was observed, is not seen either. The caller holds mu.
 func (c *Controller) causeSeen(o collector.Observation) bool {
-	if _, _, _, ok := c.causeFor(o); ok {
-		return true
-	}
-	return c.sightings.holdsCause(o.CauseFingerprint, o.Subject.UID)
+	_, _, _, ok := c.causeFor(o)
+	return ok
 }
 
-// causeHeldFor reports whether cause observation o, just consumed, makes its fingerprint seen for a consequence
-// of the same subject observed at the same time ([Controller.causeIncident], or a first sighting held for it):
-// the test [Controller.handle] tells the collector by. The collector then asks [Controller.CauseSeen] for each
+// causeOpenedFor reports whether cause observation o, just consumed, has an Incident that a consequence of the
+// same subject observed at the same time would be counted on ([Controller.causeIncident]): the test
+// [Controller.handle] tells the collector by. A cause held by the gate as a first sighting tells nothing; it is
+// told when an observation of it opens its Incident. The collector then asks [Controller.CauseSeen] for each
 // hold of that cause, so a hold of another subject, or observed at another time, is decided by its own answer.
 // The caller holds mu.
-func (c *Controller) causeHeldFor(o collector.Observation) bool {
-	if _, _, ok := c.causeIncident(o.Fingerprint, o.Subject.UID, o.ObservedAt); ok {
-		return true
-	}
-	return c.sightings.holdsCause(o.Fingerprint, o.Subject.UID)
+func (c *Controller) causeOpenedFor(o collector.Observation) bool {
+	_, _, ok := c.causeIncident(o.Fingerprint, o.Subject.UID, o.ObservedAt)
+	return ok
 }
 
 // absorbHeld counts on the cause's Incident name, as evidence, the observations of consequence fingerprint

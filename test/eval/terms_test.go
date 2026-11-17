@@ -256,14 +256,19 @@ func TestTermInRubricTermsRefuseGluedForms(t *testing.T) {
 // Each rule of termIn with its true forms and its near misses, hand-picked (#848): each term is in every text of
 // in, and in no text of out.
 func TestTermIn(t *testing.T) {
+	const (
+		cache, mi96, mi48    = "cache", "96Mi", "48Mi"
+		openUnit, openPhrase = "right letter open, unit", "right letter open, phrase"
+		openRight            = "right letter open"
+	)
 	for _, c := range []struct {
 		rule, term string
 		in, out    []string
 	}{
-		{"left strict", "cache",
+		{"left strict", cache,
 			[]string{"the key cache.yaml", "(cache)", "a cache"},
 			[]string{"itemcache", "ITEMCACHE", "7cache", "dcache"}},
-		{"left camel case", "cache",
+		{"left camel case", cache,
 			[]string{"the itemCache map", "itemCaches"},
 			[]string{"ItemcACHE"}},
 		{"left camel case, upper-case term", "OOMKilled",
@@ -287,7 +292,7 @@ func TestTermIn(t *testing.T) {
 			[]string{"404s from /healthz"},
 			[]string{"4040", "404.1"}},
 		// A term that ends in a letter is open on the right, so a unit term takes a longer unit too: write the
-		// full unit ("48Mi", not "48M").
+		// full unit (mi48, not "48M").
 		{"right letter open, unit term", "256m", []string{"cpu: 256m", "cpu: 256Mi"}, []string{"cpu: 256m0", "1256m"}},
 		{"right digit, address", "10.0.0.1",
 			[]string{"dial tcp 10.0.0.1:5432: connection refused"},
@@ -296,22 +301,22 @@ func TestTermIn(t *testing.T) {
 			[]string{"image ghcr.io/stefanprodan/podinfo:6.17.99 not found"},
 			[]string{"image podinfo:6.17.990", "image podinfo:6.17.99.1"}},
 		{"right digit, decimal term", "6.5", []string{"6.5 per replica"}, []string{"16.5 per replica", "6.55 per replica"}},
-		{"right letter open, unit", "96Mi",
-			[]string{"a limit of 96MiB", "96Mi", "96Mi,"},
+		{openUnit, mi96,
+			[]string{"a limit of 96MiB", mi96, "96Mi,"},
 			[]string{"196Mi", "96Mi5", "96Mi_x"}},
-		{"right letter open, unit", "64Mi", []string{"64MiB"}, []string{"164Mi"}},
-		{"right letter open, unit", "48Mi", []string{"48MiB", "limit: 48Mi,"}, []string{"148Mi"}},
+		{openUnit, "64Mi", []string{"64MiB"}, []string{"164Mi"}},
+		{openUnit, mi48, []string{"48MiB", "limit: 48Mi,"}, []string{"148Mi"}},
 		{"right letter open, word forms", "restart",
 			[]string{"restarts: 3", "restarted", "restarting", "restartCount 4", "_restart_"},
 			[]string{"restart7", "restart_count"}},
-		{"right letter open, phrase", "no oom", []string{"no OOMKills", "no OOM"}, []string{"no oom7"}},
-		{"right letter open, phrase", "insufficient cpu", []string{"3 Insufficient CPUs."}, nil},
-		{"right letter open, phrase", "readiness probe", []string{"readiness probes failed"}, nil},
+		{openPhrase, "no oom", []string{"no OOMKills", "no OOM"}, []string{"no oom7"}},
+		{openPhrase, "insufficient cpu", []string{"3 Insufficient CPUs."}, nil},
+		{openPhrase, "readiness probe", []string{"readiness probes failed"}, nil},
 		{"right letter open, hyphen", "dry-run", []string{"two dry-runs failed"}, []string{"xdry-run"}},
-		{"right letter open", "liveness", []string{"the liveness probe", "livenessProbe failed"}, nil},
-		{"right letter open", "app=web", []string{"selector app=web,tier=front", "app=webhook"},
+		{openRight, "liveness", []string{"the liveness probe", "livenessProbe failed"}, nil},
+		{openRight, "app=web", []string{"selector app=web,tier=front", "app=webhook"},
 			[]string{"app=web2"}},
-		{"right letter open", "/healthz",
+		{openRight, "/healthz",
 			[]string{"GET /healthz returned 404", `"path": "/healthz"`, "/healthzcheck"},
 			[]string{"/healthz2"}},
 		{"emphasis", "OOMKilled", []string{"_OOMKilled_", "**OOMKilled**", "*OOMKilled*", "`OOMKilled`"}, nil},

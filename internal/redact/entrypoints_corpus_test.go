@@ -55,7 +55,15 @@ var entryPoints = map[string]func(in string) []string{
 	tools.NameListEvents: toolText(tools.NameListEvents,
 		map[string]any{argNamespace: toolNS, argKind: toolKind, argName: toolPod, "limit": 5}),
 	tools.NameGetPodLogs: toolText(tools.NameGetPodLogs,
-		map[string]any{argNamespace: toolNS, "pod": toolPod, "container": toolContainer}),
+		map[string]any{argNamespace: toolNS, argPod: toolPod, argContainer: toolContainer}),
+	// The text as the value of a metric label, as a delivery object's message, and as the note of an Event the
+	// reference check reads (#845: every tool that shows text from a source, TestEveryToolIsAnEntryPoint).
+	tools.NameQueryMetrics: toolText(tools.NameQueryMetrics,
+		map[string]any{argNamespace: toolNS, argPod: toolPod, argTemplate: toolTemplate}),
+	tools.NameGetDeliveryStatus: toolText(tools.NameGetDeliveryStatus,
+		map[string]any{argKind: "Kustomization", argNamespace: toolNS, argName: toolDelivery}),
+	tools.NameCheckMissingReference: toolText(tools.NameCheckMissingReference,
+		map[string]any{argNamespace: toolNS, argPod: toolPod, argKind: "Secret", argName: "db-creds"}),
 	// The log excerpt, whole and cut after each of its lines: a cut that drops the key's line must not
 	// leave its block bare.
 	"kube.Excerpt": func(in string) []string {

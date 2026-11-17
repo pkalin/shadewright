@@ -359,6 +359,13 @@ func flatten(s string) string {
 
 // finish cuts s to MaxSymptomLength and redacts again until nothing changes, because a substitution or a
 // cut can create a new match. If that does not settle, the whole symptom is withheld.
+//
+// The note was redacted as it was read before anything here (#845); this pass works on the flattened symptom,
+// not on that note, and it stays because two of the 709 recorded fingerprints (fingerprint-main.jsonl) come
+// from it: the notes "credentials:\n  user: s3cr3tValue99" and "password: |\n  s3cr3tValue99" flatten to
+// "credentials: user: <redacted>" and "password: | <redacted>", which this pass makes "credentials: <redacted>"
+// and "password: <redacted>". Without it both fingerprints change, and so do three symptoms of
+// TestNormalizeRedacts and the placeholder test (checked 2026-11-17).
 func finish(s string) string {
 	for range 4 {
 		s = truncate(s, MaxSymptomLength)

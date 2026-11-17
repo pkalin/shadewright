@@ -297,7 +297,7 @@ func (s *Set) queryMetrics(ctx context.Context, t metricTemplate, a queryMetrics
 	for _, se := range res.Series {
 		var lb []string
 		for _, k := range slices.Sorted(maps.Keys(se.Labels)) {
-			lb = append(lb, s.value(k)+"="+s.value(se.Labels[k]))
+			lb = append(lb, s.label(k, se.Labels[k]))
 		}
 		// A series line is the source's answer.
 		l.add("%s", l.data("{"+strings.Join(lb, ", ")+"} "+summary(se.Samples, t.overWindow)))

@@ -153,7 +153,7 @@ func connEntryPoints() map[string]func(in string) []string {
 		tools.NameListEvents: toolText(tools.NameListEvents,
 			map[string]any{argNamespace: toolNS, argKind: toolKind, argName: toolPod, "limit": 5}),
 		tools.NameGetPodLogs: toolText(tools.NameGetPodLogs,
-			map[string]any{argNamespace: toolNS, "pod": toolPod, "container": toolContainer}),
+			map[string]any{argNamespace: toolNS, argPod: toolPod, argContainer: toolContainer}),
 	}
 }
 

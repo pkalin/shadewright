@@ -183,9 +183,12 @@ func readLine(s string, pos int) viewLine {
 
 // viewLines returns the lines from pos on that pred takes, and blank lines between them: the start of the
 // first one's text, the end of the last one, and the start of the line after it; start is -1 when pred takes
-// none.
-func viewLines(s string, pos int, pred func(col) bool) (start, end, next int) {
+// none. A comment line that pred does not take (a "#" at column 0 inside a block, #845) is read like a blank
+// line: the block goes on after it when a line pred takes follows, and its text is added to holes, which the
+// block keeps.
+func viewLines(s string, pos int, pred func(col) bool, holes *[][2]int) (start, end, next int) {
 	start, end, next = -1, -1, pos
+	var comments [][2]int
 	for pos < len(s) {
 		tick(1)
 		l := readLine(s, pos)
@@ -194,11 +197,18 @@ func viewLines(s string, pos int, pred func(col) bool) (start, end, next int) {
 			continue
 		}
 		if !pred(l.ind) {
+			if s[l.text] == '#' {
+				comments = append(comments, [2]int{l.text, l.end})
+				continue
+			}
 			break
 		}
 		if start < 0 {
 			start = l.text
+		} else if holes != nil {
+			*holes = append(*holes, comments...)
 		}
+		comments = comments[:0]
 		end, next = l.end, l.next
 	}
 	return start, end, next
@@ -207,8 +217,9 @@ func viewLines(s string, pos int, pred func(col) bool) (start, end, next int) {
 // viewBlock returns the block under a header line whose next line starts at pos, of a key at column key: after
 // any "---" or "..." lines at column 0, the lines deeper than the key; with none, the lines from the next one
 // that is indented less than the key but not at column 0. It returns the start of the block's text, its end,
-// and the start of the line after it, or -1, -1, pos.
-func viewBlock(s string, pos int, key col) (start, end, next int) {
+// and the start of the line after it, or -1, -1, pos; the comment lines inside it that it keeps go to holes
+// (viewLines).
+func viewBlock(s string, pos int, key col, holes *[][2]int) (start, end, next int) {
 	first := pos
 	for pos < len(s) {
 		tick(1)
@@ -222,7 +233,7 @@ func viewBlock(s string, pos int, key col) (start, end, next int) {
 		}
 		pos = l.next
 	}
-	if start, end, next := viewLines(s, pos, func(c col) bool { return c.deeper(key) }); start >= 0 {
+	if start, end, next := viewLines(s, pos, func(c col) bool { return c.deeper(key) }, holes); start >= 0 {
 		return start, end, next
 	}
 	for p := pos; p < len(s); {
@@ -235,9 +246,19 @@ func viewBlock(s string, pos int, key col) (start, end, next int) {
 		if l.ind.n == 0 || l.ind.atLeast(key) && pos == first {
 			break
 		}
-		return viewLines(s, pos, func(c col) bool { return c.atLeast(l.ind) })
+		return viewLines(s, pos, func(c col) bool { return c.atLeast(l.ind) }, holes)
 	}
 	return -1, -1, first
+}
+
+// addHoles calls add for start to end without the holes, sorted ranges inside it.
+func addHoles(start, end int, holes [][2]int, add func(start, end int)) {
+	for _, h := range holes {
+		tick(1)
+		add(start, h[0])
+		start = h[1]
+	}
+	add(start, end)
 }
 
 // viewLooksLikeSecret reports whether any line of the block s[start:end], or a word of one, looks like a secret
@@ -341,7 +362,8 @@ func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), re
 		}
 		keys = append(keys, readViewKey(s, l, ctx, br, m))
 	}
-	bStart, bEnd, bNext, accepted := viewLineBlock(s, l, keys, refused)
+	var holes [][2]int
+	bStart, bEnd, bNext, accepted := viewLineBlock(s, l, keys, refused, &holes)
 	covered := -1
 	for i, k := range keys {
 		if !k.block && !k.plain && !k.word || k.after > k.valueEnd || k.m[0] < covered {
@@ -359,7 +381,7 @@ func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), re
 		return 0
 	}
 	if accepted {
-		addAround(s, bStart, bEnd, true, add)
+		addHoles(bStart, bEnd, holes, func(start, end int) { addAround(s, start, end, true, add) })
 		return bNext
 	}
 	*refusedOut = max(*refusedOut, bEnd)
@@ -434,7 +456,7 @@ func plainValueStart(s string, m []int, end int) int {
 // its start, end and the start of the line after it (bStart < 0 when there is none) and whether a key takes
 // it: any key that is no bare short key, or a bare one when the block looks like a secret. A line whose keys
 // are all bare short keys and that lies inside a block refused before it (up to refused) reads no block.
-func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int) (bStart, bEnd, bNext int, accepted bool) {
+func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[][2]int) (bStart, bEnd, bNext int, accepted bool) {
 	bStart, bEnd = -1, -1
 	claim, allBare := -1, true
 	for i, k := range keys {
@@ -452,7 +474,7 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int) (bStart,
 	if firstKey := l.text + dashes(s[l.text:l.end]); keys[claim].m[2] == firstKey {
 		key = colOf(s, l.start, firstKey)
 	}
-	bStart, bEnd, bNext = viewBlock(s, l.next, key)
+	bStart, bEnd, bNext = viewBlock(s, l.next, key, holes)
 	if bStart < 0 {
 		return bStart, bEnd, bNext, false
 	}
@@ -654,49 +676,30 @@ func (b *bracketCursor) at(pos, from int) []byte {
 	return out
 }
 
-// sequenceKey matches, at the end of a double-quoted string, a secret key and what makes the next string its
-// value: a colon, with a block indicator and a comment after it if there are any, or "=" ("password: |",
-// "token:", "--password="); then the closing quote, the separator of a sequence (a comma or a line break, plain
-// or escaped, with blanks and a YAML list dash), and the opening quote of the next string. Groups: 1 the key,
-// 2 the backslashes before the closing quote, 3 the separator, 4 the backslashes before the opening quote.
-var sequenceKey = regexp.MustCompile(`(?i)(` + bareKeyExpr + `)(?:` + keySpaceExpr + `*:(?:` + keySpaceExpr +
-	`*[|>][1-9+-]{0,2}(?:` + keySpaceExpr + `+#[^"\\\r\n]*)?)?|=)` + keySpaceExpr + `*(\\*)"((?:[ \t,]|\r\n?|\n|\\+[nrt]|-[ \t])*)(\\*)"`)
-
-// sequenceSpan is the span function of the rule for a key in one string of a sequence and its value in the
-// next (#845): ["password: |", "  V"], ["--password=", "V"], "- \"token:\"\n- \"V\"". The two strings must be
-// written at the same escape level and separated by a comma or a line break; the value is the next string's
-// text after its indentation, up to its closing quote. A reference key keeps the value; under a bare short
-// key it counts only when a word of it looks like a secret.
-func sequenceSpan(s string, m []int, _ int) (int, int, bool) {
-	sep := s[m[6]:m[7]]
-	if m[5]-m[4] != m[9]-m[8] || !strings.ContainsAny(sep, ",\r\n") && !strings.Contains(sep, `\n`) ||
-		keepReference(s, m) {
-		return 0, 0, false
-	}
-	end := stringCloseFrom(s, m[1], '"', quoteLevel(m[9]-m[8]))
-	start := m[1]
-	for start < end && indentLen(s, start) > 0 {
-		tick(1)
-		start += indentLen(s, start)
-	}
-	if end <= start {
-		return 0, 0, false
-	}
-	if isBareShortKey(s[m[2]:m[3]]) && !wordsLookLikeSecret(s[start:end]) {
-		return 0, 0, false
-	}
-	return start, end, true
-}
-
 // viewEnvName matches the text of a line that names a Kubernetes environment variable holding a secret, in
 // block form ("- name: DB_PASSWORD"), up to the line's end; group 1 is the name.
 var viewEnvName = regexp.MustCompile(`(?i)^-[ \t]+name[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?$`)
 
+// viewEnvOwnName matches the text of a line, after its indentation, that is an environment entry's own "name"
+// key naming a secret (group 1), as it follows the entry's "value" key in block form.
+var viewEnvOwnName = regexp.MustCompile(`(?i)^name[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?$`)
+
 // viewEnvLine redacts, on the canonical view, the value of the environment variable that line l names
 // (viewEnvName), as envValueSpan does on lines that end at a line feed: the "value" key among the entry's own
-// keys on the following lines, at most envEntryLines of them, inline or in a block below it.
+// keys on the following lines, at most envEntryLines of them, inline or in a block below it. An entry whose
+// "value" comes first ("- value: x" and "name: DB_PASSWORD" below it, #845) is read from its value line: its own
+// keys on the following lines, as many, are looked through for the name.
 func viewEnvLine(s string, l viewLine, add func(start, end int)) {
 	text := trimIndent(s[l.text:l.end])
+	at := l.text + dashes(s[l.text:l.end])
+	if at == l.text {
+		return
+	}
+	entry := colOf(s, l.start, at)
+	if viewEnvValue(s, l, at, l.end, entry, nil) {
+		viewEnvValueFirst(s, l, at, entry, add)
+		return
+	}
 	m := viewEnvName.FindStringSubmatchIndex(counted(text))
 	if m == nil {
 		return
@@ -707,8 +710,6 @@ func viewEnvLine(s string, l viewLine, add func(start, end int)) {
 	if keepReference(s, m) || sasRefused(s, m, false) {
 		return
 	}
-	nameAt := l.text + dashes(s[l.text:l.end])
-	name := colOf(s, l.start, nameAt)
 	pos := l.next
 	for read := 0; pos < len(s) && read < envEntryLines; read++ {
 		tick(1)
@@ -717,39 +718,80 @@ func viewEnvLine(s string, l viewLine, add func(start, end int)) {
 		if e.blank() {
 			continue
 		}
-		if !e.ind.atLeast(name) {
+		if !e.ind.atLeast(entry) {
 			return
 		}
-		if e.ind != name {
-			continue
-		}
-		rest, ok := strings.CutPrefix(s[e.text:e.end], "value")
-		rest = strings.TrimLeft(rest, " \t")
-		if !ok || rest == "" || rest[0] != ':' {
-			continue
-		}
-		v := e.end - len(rest) + 1
-		for v < e.end && indentLen(s, v) > 0 {
-			tick(1)
-			v += indentLen(s, v)
-		}
-		if v >= e.end || isBlockHeader(s, v) {
-			if start, end, _ := viewBlock(s, e.next, name); start >= 0 {
-				add(start, end)
-			}
+		if e.ind == entry && viewEnvValue(s, e, e.text, e.end, entry, add) {
 			return
 		}
-		end := e.end
-		for end > v && lastIndentLen(s[:end], end) > 0 {
-			tick(1)
-			end -= lastIndentLen(s[:end], end)
+	}
+}
+
+// viewEnvValueFirst redacts the value on line l, whose "value" key starts at at, when one of the entry's own
+// keys on the following lines (at column entry, at most envEntryLines lines) names a secret (viewEnvOwnName).
+func viewEnvValueFirst(s string, l viewLine, at int, entry col, add func(start, end int)) {
+	pos := l.next
+	for read := 0; pos < len(s) && read < envEntryLines; read++ {
+		tick(1)
+		e := readLine(s, pos)
+		pos = e.next
+		if e.blank() {
+			continue
 		}
-		if c := s[v]; (c == '"' || c == '\'') && end-v >= 2 && s[end-1] == c {
-			v, end = v+1, end-1
+		if !e.ind.atLeast(entry) {
+			return
 		}
-		add(v, end)
+		if e.ind != entry {
+			continue
+		}
+		t := trimIndent(s[e.text:e.end])
+		m := viewEnvOwnName.FindStringSubmatchIndex(counted(t))
+		if m == nil {
+			continue
+		}
+		for i := range m {
+			m[i] += e.text
+		}
+		if !keepReference(s, m) && !sasRefused(s, m, false) {
+			viewEnvValue(s, l, at, l.end, entry, add)
+		}
 		return
 	}
+}
+
+// viewEnvValue reports whether s[from:end], on line e, is an environment entry's "value" key, and with add set
+// redacts its value: inline after the colon, without blanks and quotes around it, or the block below the line
+// (viewBlock) under a block indicator or nothing.
+func viewEnvValue(s string, e viewLine, from, end int, entry col, add func(start, end int)) bool {
+	rest, ok := strings.CutPrefix(s[from:end], "value")
+	rest = strings.TrimLeft(rest, " \t")
+	if !ok || rest == "" || rest[0] != ':' {
+		return false
+	}
+	if add == nil {
+		return true
+	}
+	v := end - len(rest) + 1
+	for v < end && indentLen(s, v) > 0 {
+		tick(1)
+		v += indentLen(s, v)
+	}
+	if v >= end || isBlockHeader(s, v) {
+		var holes [][2]int
+		if start, bEnd, _ := viewBlock(s, e.next, entry, &holes); start >= 0 {
+			addHoles(start, bEnd, holes, add)
+		}
+		return true
+	}
+	for end > v && lastIndentLen(s[:end], end) > 0 {
+		tick(1)
+		end -= lastIndentLen(s[:end], end)
+	}
+	if c := s[v]; (c == '"' || c == '\'') && end-v >= 2 && s[end-1] == c {
+		v, end = v+1, end-1
+	}
+	add(v, end)
+	return true
 }
 
 // envValueFirst matches a Kubernetes environment variable in flow form whose value comes before its name
@@ -785,51 +827,182 @@ func envValueFirstSpan(s string, m []int, _ int) (int, int, bool) {
 	return start, end, end > start
 }
 
-// itemKey matches the end of a string of a sequence whose next string is its value: a secret key and a colon,
-// with a block indicator and a comment after it if there are any, or "=" ("password: |", "token:",
-// "--password="), up to the string's end; group 1 is the key.
-var itemKey = regexp.MustCompile(`(?i)(` + bareKeyExpr + `)(?:` + keySpaceExpr + `*:(?:` + keySpaceExpr +
-	`*[|>][1-9+-]{0,2}(?:` + keySpaceExpr + `+#.*)?)?|=)` + keySpaceExpr + `*$`)
+// The strings of a sequence (#845, second round): a key in one string and its value in a later one, decided on
+// the sequence as a whole by one function (seqValues), for a caller that holds the strings ([Redactor.Strings])
+// and for a sequence written in a text (seqScan). Between the key and its value may stand blank strings, and the
+// colon or equals sign may stand in a string of its own; a flag may follow other words in its string, and a
+// key's string may end with a line break. What String finds in the strings joined by a blank or by a line break
+// is found in them apart (TestStringsDecidesAsTheJoinedText).
 
-// itemFlag matches a string of a sequence that is a secret-named flag alone ("--password", "-token"); group 1
-// is the name.
-var itemFlag = regexp.MustCompile(`(?i)^-{1,2}(` + bareKeyExpr + `)$`)
+// seqKeyEnd matches the end of a string whose next non-blank string is its value: a secret key and a colon,
+// with a block indicator (group 2) and a comment after it if there are any, or "=" (group 1 is the key).
+var seqKeyEnd = regexp.MustCompile(`(?i)(` + bareKeyExpr + `)(?:` + keySpaceExpr + `*:(?:` + keySpaceExpr +
+	`*([|>][1-9+-]{0,2})(?:` + keySpaceExpr + `+#.*)?)?|` + keySpaceExpr + `*=)$`)
 
-// Strings redacts the strings of a sequence, such as a container's arguments, as [Redactor.String] redacts
-// each, and decides on the sequence as a whole what no single string shows (#845): a string that ends with a
-// secret key and what makes the next string its value (itemKey), or is a secret-named flag alone (itemFlag),
-// has the next string redacted after its indentation. A reference key or flag keeps it, and under a bare short
-// key it counts only when a word of it looks like a secret. Callers that walk an object (the read tool
-// get_resource) call it for every sequence of strings instead of redacting the strings one by one.
-func (r *Redactor) Strings(items []string) []string {
-	out := make([]string, len(items))
-	takeNext := make([]bool, len(items))
-	for i, it := range items {
-		if i+1 >= len(items) {
+// seqFlagEnd matches a secret-named flag at the end of a string, alone or after other words; group 1 is the
+// name.
+var seqFlagEnd = regexp.MustCompile(`(?i)(?:^|\s)-{1,2}(` + bareKeyExpr + `)$`)
+
+// seqWordEnd matches a secret key at the end of a string with no colon after it, alone or after other words
+// (group 1): its colon or equals sign may come in a string of its own.
+var seqWordEnd = regexp.MustCompile(`(?i)(?:^|\s)(` + bareKeyExpr + `)$`)
+
+// seqSeparator matches a string that holds only a colon, with a block indicator (group 1) and a comment if
+// there are any, or an equals sign: the separator of a key in the string before it.
+var seqSeparator = regexp.MustCompile(`^(?::(?:` + keySpaceExpr + `*([|>][1-9+-]{0,2})(?:` + keySpaceExpr +
+	`+#.*)?)?|=)$`)
+
+// seqTrim returns t without blanks at either end: indentation characters (indentLen), line breaks, and line
+// breaks and tabs escaped with backslashes, as a string written inside another holds them.
+func seqTrim(t string) string {
+	for len(t) > 0 {
+		tick(1)
+		if n := indentLen(t, 0); n > 0 {
+			t = t[n:]
+			continue
+		}
+		if t[0] == '\n' || t[0] == '\r' {
+			t = t[1:]
+			continue
+		}
+		if n := escapedBlankAt(t, 0); n > 0 {
+			t = t[n:]
+			continue
+		}
+		break
+	}
+	for len(t) > 0 {
+		tick(1)
+		if c := t[len(t)-1]; c == '\n' || c == '\r' {
+			t = t[:len(t)-1]
+			continue
+		}
+		if c := t[len(t)-1]; (c == 'n' || c == 'r' || c == 't') && len(t) > 1 && t[len(t)-2] == '\\' {
+			j := len(t) - 2
+			for j > 0 && t[j-1] == '\\' {
+				tick(1)
+				j--
+			}
+			t = t[:j]
+			continue
+		}
+		if n := lastIndentLen(t, len(t)); n > 0 {
+			t = t[:len(t)-n]
+			continue
+		}
+		break
+	}
+	return t
+}
+
+// escapedBlankAt returns the length of a line break or tab escaped with backslashes at t[i], or 0.
+func escapedBlankAt(t string, i int) int {
+	j := i
+	for j < len(t) && t[j] == '\\' {
+		tick(1)
+		j++
+	}
+	if j > i && j < len(t) && (t[j] == 'n' || t[j] == 'r' || t[j] == 't') {
+		return j + 1 - i
+	}
+	return 0
+}
+
+// seqValueStart returns where the value in item starts: after its indentation characters and escaped blanks.
+func seqValueStart(item string) int {
+	i := 0
+	for i < len(item) {
+		tick(1)
+		n := indentLen(item, i)
+		if n == 0 {
+			n = escapedBlankAt(item, i)
+		}
+		if n == 0 {
 			break
 		}
-		t := trimIndent(it)
-		if m := itemFlag.FindStringSubmatchIndex(counted(t)); m != nil {
-			takeNext[i+1] = !referenceKey(t[m[2]:m[3]], true)
-			continue
-		}
-		m := itemKey.FindStringSubmatchIndex(counted(t))
-		if m == nil || isReference(t[m[2]:m[3]]) {
-			continue
-		}
-		v := trimIndent(items[i+1])
-		takeNext[i+1] = v != "" && (!isBareShortKey(t[m[2]:m[3]]) || wordsLookLikeSecret(v))
+		i += n
 	}
+	return i
+}
+
+// seqValues decides, for the strings of a sequence, which are the value of a secret key in an earlier string
+// (#845). A string is a value when the non-blank string before it, blank strings skipped, ends with a secret
+// key and ":" or "=" (seqKeyEnd), or with a secret-named flag (seqFlagEnd), or when a string that holds only
+// ":" or "=" (seqSeparator) stands between it and a string that ends with a secret key (seqWordEnd), or between
+// it and a key that already took it ("--password", "=", "V"). After a key and a colon, with a block indicator or
+// nothing after it, the strings that start with indentation after its value are the lines of its block.
+// A reference key or flag keeps its value, and under a bare short key the value counts only when a word of it
+// looks like a secret. Every string is also read as a key of its own, a value included ("--token",
+// "--password", "V").
+func seqValues(items []string) []bool {
+	const (
+		none = iota
+		value
+		word
+	)
+	out := make([]bool, len(items))
+	pending, bare, block, inBlock := none, false, false, false
 	for i, it := range items {
-		if !takeNext[i] {
+		tick(1)
+		t := seqTrim(it)
+		if t == "" {
+			continue
+		}
+		if inBlock && seqValueStart(it) > 0 {
+			out[i] = true
+			continue
+		}
+		inBlock = false
+		switch pending {
+		case value:
+			if seqSeparator.MatchString(counted(t)) {
+				// "--password", "=", "V": the separator in a string of its own.
+				block = block || t[0] == ':'
+				continue
+			}
+			out[i] = !bare || wordsLookLikeSecret(t)
+			inBlock = block && out[i]
+			pending = none
+		case word:
+			pending = none
+			if seqSeparator.MatchString(counted(t)) {
+				pending, block = value, t[0] == ':'
+				continue
+			}
+		}
+		if m := seqKeyEnd.FindStringSubmatchIndex(counted(t)); m != nil {
+			if !isReference(t[m[2]:m[3]]) {
+				// A colon may have a block below it, with an indicator or with nothing after it.
+				pending, bare, block = value, isBareShortKey(t[m[2]:m[3]]), t[len(t)-1] != '='
+			}
+			continue
+		}
+		if m := seqFlagEnd.FindStringSubmatchIndex(counted(t)); m != nil {
+			if !referenceKey(t[m[2]:m[3]], true) {
+				pending, bare, block = value, false, false
+			}
+			continue
+		}
+		if m := seqWordEnd.FindStringSubmatchIndex(counted(t)); m != nil && !isReference(t[m[2]:m[3]]) {
+			pending, bare = word, isBareShortKey(t[m[2]:m[3]])
+		}
+	}
+	return out
+}
+
+// Strings redacts the strings of a sequence, such as a container's arguments, as [Redactor.String] redacts
+// each, and decides on the sequence as a whole what no single string shows (seqValues): a string that is the
+// value of a key in an earlier one is redacted after its indentation. Callers that walk an object (the read
+// tool get_resource) call it for every sequence of strings instead of redacting the strings one by one.
+func (r *Redactor) Strings(items []string) []string {
+	out := make([]string, len(items))
+	for i, take := range seqValues(items) {
+		it := items[i]
+		if !take {
 			out[i] = r.String(it)
 			continue
 		}
-		start := 0
-		for start < len(it) && indentLen(it, start) > 0 {
-			tick(1)
-			start += indentLen(it, start)
-		}
+		start := seqValueStart(it)
 		out[i] = r.String(it[:start]) + marker(KindCredential, len(it)-start)
 	}
 	return out
@@ -837,6 +1010,118 @@ func (r *Redactor) Strings(items []string) []string {
 
 // Strings is the package's Strings with the built-in rules.
 func Strings(items []string) []string { return defaultRedactor.Strings(items) }
+
+// seqBoundary matches the boundary between two double-quoted strings of a sequence written in a text: the
+// closing quote, a separator with a comma or a line break in it (plain or escaped, with blanks and a YAML list
+// dash), and the opening quote of the next string. Groups: 1 the backslashes before the closing quote, 2 those
+// before the opening quote.
+var seqBoundary = regexp.MustCompile(`(\\*)"(?:[ \t]|\\+[rt])*(?:,|\r\n?|\n|\\+n)(?:[ \t,]|\r\n?|\n|\\+[nrt]|-[ \t])*(\\*)"`)
+
+// seqScan is the rule for the strings of a sequence written in a text (#845): JSON or a YAML flow or block
+// sequence of double-quoted strings, plain or escaped inside another string. It reads each run of strings at
+// one escape level, joined by boundaries (seqBoundary), and redacts the strings seqValues takes, after their
+// indentation, up to their closing quote. The first string of a run is read back from its closing quote to its
+// opening one, no further than the end of the run before; the last one forward to its closing quote, on its
+// line and before the next boundary; so each byte is read a fixed number of times.
+func seqScan(s string, add func(start, end int)) {
+	ms := seqBoundary.FindAllStringSubmatchIndex(counted(s), -1)
+	floor := 0
+	for i := 0; i < len(ms); {
+		tick(1)
+		m := ms[i]
+		bs := m[3] - m[2]
+		if bs != m[5]-m[4] {
+			floor = m[1]
+			i++
+			continue
+		}
+		level := quoteLevel(bs)
+		var items [][2]int
+		if open := seqOpenBefore(s, m[2], floor, level); open >= 0 {
+			items = append(items, [2]int{open, m[2]})
+		}
+		j := i
+		for {
+			tick(1)
+			start := ms[j][1]
+			limit := len(s)
+			if j+1 < len(ms) {
+				limit = ms[j+1][2]
+			}
+			if j+1 < len(ms) && ms[j+1][3]-ms[j+1][2] == bs && ms[j+1][5]-ms[j+1][4] == bs &&
+				seqClosesAt(s, start, limit, level) < 0 {
+				items = append(items, [2]int{start, limit})
+				j++
+				continue
+			}
+			if end := seqClosesAt(s, start, limit, level); end >= 0 && end == seqLineEnd(s, start, end) {
+				items = append(items, [2]int{start, end})
+			}
+			break
+		}
+		texts := make([]string, len(items))
+		for k, it := range items {
+			texts[k] = s[it[0]:it[1]]
+		}
+		for k, take := range seqValues(texts) {
+			if take {
+				add(items[k][0]+seqValueStart(texts[k]), items[k][1])
+			}
+		}
+		floor = ms[j][1]
+		i = j + 1
+	}
+}
+
+// seqOpenBefore returns where the string whose closing quote's backslashes start at end begins: after the
+// opening double quote of the same escape level before it, read back no further than floor; or -1 when a
+// quote of a lower level comes first or there is none.
+func seqOpenBefore(s string, end, floor, level int) int {
+	for i := end - 1; i >= floor; i-- {
+		tick(1)
+		if s[i] != '"' {
+			continue
+		}
+		run := 0
+		for i-run-1 >= floor && s[i-run-1] == '\\' {
+			tick(1)
+			run++
+		}
+		switch l := quoteLevel(run); {
+		case l == level:
+			return i + 1
+		case l < level:
+			return -1
+		}
+	}
+	return -1
+}
+
+// seqClosesAt returns where the first double quote from start to limit that closes a string of the given
+// escape level starts (its backslashes), or -1: a quote escaped more deeply stands inside the string.
+func seqClosesAt(s string, start, limit, level int) int {
+	run := 0
+	for i := start; i < limit; i++ {
+		tick(1)
+		switch c := s[i]; {
+		case c == '\\':
+			run++
+			continue
+		case c == '"' && quoteLevel(run) <= level:
+			return i - run
+		}
+		run = 0
+	}
+	return -1
+}
+
+// seqLineEnd returns end, or the first line break from start before it.
+func seqLineEnd(s string, start, end int) int {
+	if i := indexAny(s[start:end], "\r\n"); i >= 0 {
+		return start + i
+	}
+	return end
+}
 
 // connStringSpan is the span function of the rule for a URL with user info: the whole match, except for a URL
 // in angle brackets whose closing bracket comes before the "@" (autolinkClosed), which is no URL with user

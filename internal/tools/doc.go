@@ -51,12 +51,13 @@ limitations under the License.
 // first, and every cut keeps the header and the newest lines. get_resource leaves out annotations, managed fields,
 // literal environment values, the metadata of volume claim templates and the containers' termination messages; it
 // redacts each string of the object as it was read (a list of strings, such as a container's arguments, as one
-// sequence, so a key in one item and its value in the next are seen together), before JSON
+// sequence, so a key in one item and its value in a later one are seen together), before JSON
 // escapes its line breaks, and encodes the object without HTML escapes, so that no escape hides what a rule
 // reads (a block scalar's lines, a folded indicator ">"). The error text of a failed read never reaches the result.
 // [Result.Content] puts the text in a delimited block that says it is data, never instructions, and that the
 // text cannot close: every angle bracket and look-alike in it is escaped.
 //
-// query_metrics names one pod (or, for the Deployment template, one Deployment) that the tool reads first in
+// query_metrics redacts each label of a series as its name with "=" and its value, a sequence of two strings
+// decided together, so a secret label name takes its value (#845). It names one pod (or, for the Deployment template, one Deployment) that the tool reads first in
 // the requested namespace, so a query only ever selects an object that exists there, never a name pattern.
 package tools

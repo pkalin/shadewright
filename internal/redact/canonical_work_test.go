@@ -73,3 +73,49 @@ func TestCanonCorpusWorkIsLinear(t *testing.T) {
 		}
 	}
 }
+
+// canonStairLines are the lines of the staircase inputs (#845): each line indented one space more than the one
+// before, so that every line opens a block holding all the lines after it. A bare short key refuses that block
+// (no line looks like a secret), and a rule that read the block again for each header inside it was quadratic.
+var canonStairLines = []string{
+	"pass: |", "pass: | pass: |", "pass: | x", "a: | pass: |", "- pass: |", "x pass: |", "pass: '|", "pass:",
+	"? pass", "- value: |", "pass\u200b: |", "pass\uff1a |",
+}
+
+// canonStair returns the staircase of line with at least n bytes.
+func canonStair(line string, n int) string {
+	var b strings.Builder
+	for i := 0; b.Len() < n; i++ {
+		b.WriteString(strings.Repeat(" ", i))
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// The staircases cost the same per byte at 64 KiB, 256 KiB and 1 MiB (the log read's bound; the first line
+// only, the others at the two smaller sizes, to keep the run short): at most maxWorkPerByte, and the larger
+// sizes at most an eighth and half a step more per byte than the smallest. On main "pass: |" cost 513, 996
+// and 1,961 steps per byte.
+func TestCanonStairWorkIsLinear(t *testing.T) {
+	for li, line := range canonStairLines {
+		sizes := []int{64 << 10, 256 << 10, 1 << 20}
+		if li > 0 {
+			sizes = sizes[:2]
+		}
+		per := make([]float64, 0, len(sizes))
+		for _, n := range sizes {
+			w, size := canonWork(t, canonStair(line, n))
+			per = append(per, float64(w)/float64(size))
+			if w > int64(maxWorkPerByte*size) {
+				t.Errorf("%q: %d steps for %d bytes, more than %d per byte", line, w, size, maxWorkPerByte)
+			}
+		}
+		t.Logf("%q: %.1f steps per byte at %v bytes", line, per, sizes)
+		for i, p := range per[1:] {
+			if p > 1.125*per[0]+0.5 {
+				t.Errorf("%q: %.1f steps per byte at %d bytes, %.1f at %d: more than linear", line, per[0], sizes[0], p, sizes[i+1])
+			}
+		}
+	}
+}

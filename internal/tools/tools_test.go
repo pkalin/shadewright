@@ -823,3 +823,29 @@ func TestGetResourceRedactsFoldedBlocks(t *testing.T) {
 		}
 	}
 }
+
+// A metric label is redacted as its name and value together (#845): a secret name takes its value, also next to
+// a second secret label, and a label that names nothing secret stays. Redacted apart, the name and the value were
+// two plain words and both values showed.
+func TestQueryMetricsRedactsALabelWithItsName(t *testing.T) {
+	e := newEnv(t, []client.Object{pod()})
+	e.metrics.Set(restartsTemplate, []providers.Series{{
+		Labels: map[string]string{
+			"password": leakPassword + "A", "api_token": leakPassword + "B", argContainer: container,
+		},
+		Samples: []providers.Sample{{Value: 4}},
+	}})
+	r := e.call(t, NameQueryMetrics, fmt.Sprintf(`{"%s":%q,"%s":%q,"%s":%q}`,
+		argTemplate, restartsTemplate, argNamespace, testNS, argPod, podName))
+	if r.Status != StatusOK {
+		t.Fatalf("status %s: %s", r.Status, r.Text)
+	}
+	if strings.Contains(r.Text, leakPassword) {
+		t.Errorf("a label value under a secret name shows:\n%s", r.Text)
+	}
+	for _, kept := range []string{"api_token=", "password=", argContainer + "=" + container} {
+		if !strings.Contains(r.Text, kept) {
+			t.Errorf("%q is missing:\n%s", kept, r.Text)
+		}
+	}
+}

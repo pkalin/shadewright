@@ -445,8 +445,8 @@ type sequenceRedactor interface {
 }
 
 // redactSequence redacts the strings of a sequence: with the redactor's Strings when it has one, so that a
-// key in one string and its value in the next are seen together, otherwise each string on its own. Each string
-// is then made valid UTF-8, as redact does.
+// key in one string and its value in a later one are seen together, otherwise each string on its own. Each
+// string is then made valid UTF-8, as redact does.
 func (s *Set) redactSequence(items []string) []string {
 	out := make([]string, len(items))
 	if sr, ok := s.redactor.(sequenceRedactor); ok {
@@ -459,6 +459,18 @@ func (s *Set) redactSequence(items []string) []string {
 		out[i] = s.redact(it)
 	}
 	return out
+}
+
+// label returns one label of a metric series as a result shows it, "name=value", redacted as one decision
+// (#845): with the redactor's Strings, the name with its "=" and the value are a sequence of two strings, so a
+// secret name takes its value and the value is also read on its own, as written; otherwise "name=value" is
+// redacted as one text. Redacted apart, "password" and its value were two plain words.
+func (s *Set) label(name, value string) string {
+	if sr, ok := s.redactor.(sequenceRedactor); ok {
+		out := sr.Strings([]string{name + "=", value})
+		return incidentcontext.Shown(strings.ToValidUTF8(out[0]+out[1], "?"))
+	}
+	return incidentcontext.Shown(s.redact(name + "=" + value))
 }
 
 // redact makes text valid UTF-8 and redacts it, as package incidentcontext does.

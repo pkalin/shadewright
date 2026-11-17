@@ -41,7 +41,12 @@ func Redact(r RedactFunc, s string) string {
 // paragraph separators become spaces, so a value never adds lines of its own, nor anything a reader could
 // take for a line break. Package internal/tools shows values the same way.
 func Value(r RedactFunc, s string) string {
-	v := Redact(r, s)
+	return Shown(Redact(r, s))
+}
+
+// Shown is [Value] for a value already redacted as it was read, and made valid UTF-8 ([Redact]): a caller that
+// redacts several values together (the name and value of a metric label, #845) shows each result with it.
+func Shown(v string) string {
 	if len(v) > maxValueBytes {
 		return "(" + strconv.Itoa(len(v)) + " bytes left out)"
 	}

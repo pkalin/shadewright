@@ -28,6 +28,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -247,8 +248,8 @@ func TestCauseNeverSeenEndsWithItsCause(t *testing.T) {
 // later step, or never, and the pod may stop showing the cause (the container recovers) at a random step. The
 // samples are made by updates of the pod, by the release's queue and by the requeue at the end of the hold, at
 // random steps of the clock. Whatever the order, the consequence is emitted exactly once, with its cause and its
-// count; at the step of the release, or at the end of ConsequenceGrace when there is none; and the outcome
-// counted says which.
+// count, at the step of the release, or at the end of ConsequenceGrace when there is none; or, with no release
+// and a container recovered by the end, not at all (decided 2026-11-17, fifth). The outcome counted says which.
 func TestCauseHoldOrderCorpus(t *testing.T) {
 	rng := rand.New(rand.NewPCG(828, 7)) // #nosec G404 -- a seeded corpus, not a secret
 	const (
@@ -304,14 +305,22 @@ func TestCauseHoldOrderCorpus(t *testing.T) {
 					got, emittedAt = append(got, out...), step
 				}
 			}
-			if len(got) != 1 || got[0].CauseFingerprint != fp || got[0].Count != 1 {
-				t.Fatalf("emitted %+v, want one observation with its cause and a count of 1", got)
-			}
-			if emittedAt != wantAt {
-				t.Fatalf("emitted at step %d, want %d", emittedAt, wantAt)
-			}
+			// Released: seen before the first sight, or before the step of the end of the hold. Otherwise the
+			// end judges the samples (decided 2026-11-17, fifth): a container that recovered by then is not
+			// emitted.
+			released := seeAt == seenFirst || (seeAt != never && (endAt < 0 || seeAt < endAt))
+			dropped := !released && endAt >= 0 && recoverAt <= endAt
 			want := map[string]float64{}
 			switch {
+			case dropped:
+				if len(got) != 0 {
+					t.Fatalf("emitted %+v, want nothing: the container recovered before the end", got)
+				}
+				want[holdNotOpened] = 1
+			case len(got) != 1 || got[0].CauseFingerprint != fp || got[0].Count != 1:
+				t.Fatalf("emitted %+v, want one observation with its cause and a count of 1", got)
+			case emittedAt != wantAt:
+				t.Fatalf("emitted at step %d, want %d", emittedAt, wantAt)
 			case seeAt == seenFirst:
 			case seeAt == emittedAt && endAt < 0:
 				want[holdReleased] = 1
@@ -327,7 +336,7 @@ func TestCauseHoldOrderCorpus(t *testing.T) {
 			}
 		})
 	}
-	if seen[holdReleased] == 0 || seen[holdCauseUnseen] == 0 {
+	if seen[holdReleased] == 0 || seen[holdCauseUnseen] == 0 || seen[holdNotOpened] == 0 {
 		t.Fatalf("the corpus misses an outcome: %v", seen)
 	}
 }
@@ -527,11 +536,13 @@ func TestCauseUnansweredDecidesNothing(t *testing.T) {
 }
 
 // TestRecoverDuringTheHoldKeepsTheCause: the container recovers during the hold, so the pod no longer shows the
-// cause: the hold keeps the last cause seen and emits the consequence with it, at the release or at the end of
-// the hold, never judged as a consequence with no cause (#828: the first build dropped it as not_opened).
+// cause, and the controller then sees the cause: the hold keeps the last cause seen and is released with it,
+// never judged as a consequence with no cause (#828: the first build dropped it as not_opened). A release is
+// delivered whether the container still fails or not: the controller links the consequence to its cause's
+// Incident, which counts it as evidence and opens nothing of its own, as main counted it.
 func TestRecoverDuringTheHoldKeepsTheCause(t *testing.T) {
-	for _, release := range []bool{false, true} {
-		t.Run(fmt.Sprintf("release%v", release), func(t *testing.T) {
+	for _, atEnd := range []bool{false, true} {
+		t.Run(fmt.Sprintf("atEnd%v", atEnd), func(t *testing.T) {
 			h, book, q := causeHoldHarness(t)
 			fp := h.causeShown()
 			before := holdOutcomeCounts()
@@ -542,19 +553,71 @@ func TestRecoverDuringTheHoldKeepsTheCause(t *testing.T) {
 				t.Fatalf("a sample of the recovered pod ended the hold: %+v", res)
 			}
 			h.none()
-			want := holdCauseUnseen
-			if release {
-				book.see(fp)
-				h.processQueue(q)
-				want = holdReleased
-			} else {
+			if atEnd {
+				// The release marks the hold, and its reconcile comes only after the end of the grace.
+				book.record(fp)
+				h.c.ReleaseCause(fp)
 				h.clock.add(ConsequenceGrace)
-				h.reconcileEvent("ev-hold")
+			} else {
+				book.see(fp)
 			}
+			h.processQueue(q)
 			if o := h.one(); o.CauseFingerprint != fp || o.Container != containerApp || o.Class != ClassConsequence {
 				t.Fatalf("emitted %+v, want it with the cause the pod showed", o)
 			}
-			wantOutcomes(t, before, map[string]float64{want: 1})
+			wantOutcomes(t, before, map[string]float64{holdReleased: 1})
+		})
+	}
+}
+
+// TestRecoveredCauseHoldIsNotOpened (decided 2026-11-17, fifth, on #828): the end of a hold with a cause uses
+// the test of a hold with none (ADR-0039 point 19). The container recovers during the hold and the controller
+// never sees the cause: at the end of ConsequenceGrace the consequence is not emitted (not_opened), and its
+// occurrences are handled, so the requeue that follows does not replay it. On the build before, it was emitted
+// as cause_unseen and could open an Incident and be analyzed.
+func TestRecoveredCauseHoldIsNotOpened(t *testing.T) {
+	h, _, _ := causeHoldHarness(t)
+	h.causeShown()
+	before := holdOutcomeCounts()
+	h.reconcileEvent("ev-hold")
+	h.clock.add(10 * time.Second)
+	h.setWaiting("")
+	h.sampleByPod()
+	h.clock.add(ConsequenceGrace)
+	if res := h.reconcileEvent("ev-hold"); res != (ctrl.Result{}) {
+		t.Fatalf("returned %+v at the end of the hold", res)
+	}
+	h.none()
+	wantOutcomes(t, before, map[string]float64{holdNotOpened: 1})
+	if h.c.holds.len() != 0 {
+		t.Fatal("the hold is kept")
+	}
+	h.clock.add(time.Minute)
+	if res := h.reconcileEvent("ev-hold"); res != (ctrl.Result{}) {
+		t.Fatalf("held again: %+v", res)
+	}
+	h.none()
+	wantOutcomes(t, before, map[string]float64{holdNotOpened: 1})
+}
+
+// TestFailingCauseHoldEndsWithItsCause: a hold with a cause whose container still fails at the end of the grace
+// is emitted with its cause (cause_unseen), whichever waiting state of the cause the last sample shows. A
+// container waiting in ErrImagePull is failing, though its reason is not a back-off.
+func TestFailingCauseHoldEndsWithItsCause(t *testing.T) {
+	for _, last := range []string{causePull, causePullErr} {
+		t.Run(last, func(t *testing.T) {
+			h, _, _ := causeHoldHarness(t)
+			h.causeShown()
+			before := holdOutcomeCounts()
+			h.reconcileEvent("ev-hold")
+			h.clock.add(ConsequenceGrace)
+			h.setWaiting(last)
+			want := h.causeShown()
+			h.reconcileEvent("ev-hold")
+			if o := h.one(); o.CauseFingerprint != want || o.Count != 1 {
+				t.Fatalf("emitted %+v, want it with the cause %s", o, last)
+			}
+			wantOutcomes(t, before, map[string]float64{holdCauseUnseen: 1})
 		})
 	}
 }
@@ -871,47 +934,93 @@ func TestRestartEventGone(t *testing.T) {
 	}
 }
 
-// TestRestartCauseChanged: the cause fingerprint changed at the replay (the pod now shows ErrImagePull, the
-// kubelet's other state of the same failing pull). The rebuilt hold waits for the cause the pod shows; when a
-// later sample shows the old cause again it waits for that one, and is released by whichever the controller sees
-// while the pod shows it.
-func TestRestartCauseChanged(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		backToOld bool // the pod shows ImagePullBackOff again before the controller sees it
-	}{
-		{"the new cause is seen", false},
-		{"the old cause is seen", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var old string
-			h, book := restartBetween(t, func(h *harness) {
-				old = h.causeShown()
-				h.setWaiting(causePullErr)
-			})
-			q := h.withQueue()
-			changed := h.causeShown()
-			if changed == old {
-				t.Fatalf("the cause did not change (%q), so the test proves nothing", old)
-			}
-			if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != ConsequenceGrace {
-				t.Fatalf("emitted at once at the replay, with the changed cause: %+v", res)
-			}
-			h.none()
-			want := changed
-			if tc.backToOld {
-				h.setWaiting(causePull)
-				h.clock.add(time.Second)
-				h.sampleByPod()
-				want = old
-			}
-			book.see(want)
-			h.processQueue(q)
-			if o := h.one(); o.CauseFingerprint != want {
-				t.Fatalf("emitted %+v, want it with the cause the controller saw", o)
-			}
-		})
+// setOOMKilled writes into the stored web pod an app container waiting in CrashLoopBackOff after an OOM kill
+// that finished just before the event's time t0: the pod shows the kill as the cause of the BackOff.
+func (h *harness) setOOMKilled() {
+	h.t.Helper()
+	cur := readPod(h.t, h, webPod)
+	cur.Status = holdPod(reasonBackOff, sampleFailing, 1).Status
+	cur.Status.ContainerStatuses[0].LastTerminationState = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{Reason: ReasonOOMKilled, ExitCode: 137,
+			FinishedAt: metav1.NewTime(t0.Add(-10 * time.Second))},
 	}
+	h.update(cur)
+}
+
+// causeObservation reconciles the web pod and returns the observation of the cause fingerprint fp it emits.
+func (h *harness) causeObservation(fp string) Observation {
+	h.t.Helper()
+	h.reconcilePod(webPod)
+	for _, o := range h.drain() {
+		if o.Fingerprint == fp {
+			return o
+		}
+	}
+	h.t.Fatalf("the pod emitted no observation of the cause %s", fp)
+	return Observation{}
+}
+
+// TestRestartCauseChanged: the cause fingerprint changed at the replay (the pod showed ImagePullBackOff, and
+// now shows an OOM kill). The rebuilt hold waits for the cause the pod shows now, and is released when the
+// controller sees it. The kill is a cause the Incident controller does see at once: the collector marks its
+// observation Immediate, so its Incident opens at the first sighting.
+func TestRestartCauseChanged(t *testing.T) {
+	var old string
+	h, book := restartBetween(t, func(h *harness) {
+		old = h.causeShown()
+		h.setOOMKilled()
+	})
+	q := h.withQueue()
+	changed := h.causeShown()
+	if changed == old {
+		t.Fatalf("the cause did not change (%q), so the test proves nothing", old)
+	}
+	if o := h.causeObservation(changed); !o.Immediate {
+		t.Fatalf("the kill's observation %+v is not Immediate, so the controller would not see it at once", o)
+	}
+	before := holdOutcomeCounts()
+	if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != ConsequenceGrace {
+		t.Fatalf("emitted at once at the replay, with the changed cause: %+v", res)
+	}
+	h.none()
+	book.see(changed)
+	h.processQueue(q)
+	if o := h.one(); o.CauseFingerprint != changed || !o.MayRepeat {
+		t.Fatalf("emitted %+v, want it with the cause the controller saw, marked MayRepeat", o)
+	}
+	wantOutcomes(t, before, map[string]float64{holdReleased: 1})
+}
+
+// TestRestartWaitingCauseChanged is the case left open under #849 (decided 2026-11-17, fifth, on #828): the
+// pod's waiting cause changed at the replay (ImagePullBackOff to ErrImagePull). The pod's observation of the
+// new cause is not Immediate, so the Incident controller holds it as a first sighting and does not see it
+// (incidents.TestRestartWaitingCauseIsNotSeen shows its answer): the book here never sees it either. The
+// rebuilt hold ends at the end of ConsequenceGrace, and the consequence of a pull still failing is emitted with
+// the new cause (cause_unseen), for the gate and the late-cause fold.
+func TestRestartWaitingCauseChanged(t *testing.T) {
+	var old string
+	h, _ := restartBetween(t, func(h *harness) {
+		old = h.causeShown()
+		h.setWaiting(causePullErr)
+	})
+	changed := h.causeShown()
+	if changed == old {
+		t.Fatalf("the cause did not change (%q), so the test proves nothing", old)
+	}
+	if o := h.causeObservation(changed); o.Immediate || o.Class != ClassCause {
+		t.Fatalf("the waiting cause's observation %+v is Immediate or not a cause, so the case proves nothing", o)
+	}
+	before := holdOutcomeCounts()
+	if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != ConsequenceGrace {
+		t.Fatalf("not held for the changed cause: %+v", res)
+	}
+	h.none()
+	h.clock.add(ConsequenceGrace)
+	h.reconcileEvent("ev-hold")
+	if o := h.one(); o.CauseFingerprint != changed || !o.MayRepeat {
+		t.Fatalf("emitted %+v, want it with the changed cause, marked MayRepeat", o)
+	}
+	wantOutcomes(t, before, map[string]float64{holdCauseUnseen: 1})
 }
 
 // TestRestartCauseNoLongerShown is the second case that remains after a restart (ADR-0039 #828 amendment): the

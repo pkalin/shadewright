@@ -71,10 +71,11 @@ const (
 )
 
 // heldConsequences counts the ends of consequence holds: opened (no cause shown, emitted for the gate),
-// not_opened (no cause shown, and the container recovered, or its pod is gone or replaced), released (the
+// not_opened (the container recovered: with no cause, or with a cause the controller had not seen when the wait
+// ended; or, with no cause shown, its pod is gone or replaced), released (the
 // Incident controller saw, during the wait, a cause the consequence would be counted on, or the pod of a hold
 // with no cause showed one it had seen: emitted with it at once), cause_unseen (the hold had a cause the
-// controller had not seen when the wait ended, or when the pod went, was replaced, or its template was retired: emitted with that cause), dropped (the event
+// controller had not seen when the wait ended with the container still failing, or when the pod went, was replaced, or its template was retired: emitted with that cause), dropped (the event
 // ended the hold itself: deleted, no longer a Warning, replaced by another event of the name, or handled without
 // an observation for another reason; for a hold with a cause only an event that no longer exists), so that these
 // five add up to the holds started; and overflow (no room to hold, emitted at once), a consequence that was
@@ -100,9 +101,10 @@ func init() {
 // at the first sight, and what the collector saw of that container since.
 type consequenceHold struct {
 	// cause is the last cause fingerprint a sample's pod status showed, empty while none did. A sample that
-	// shows no cause keeps it: a pod that recovers, is replaced or whose template is retired during the hold
-	// emits the consequence with it (ADR-0039 point 7, decided 2026-11-17). A hold with a cause waits for the
-	// Incident controller to see it; one without is judged by its samples (point 19).
+	// shows no cause keeps it: a pod that is replaced or whose template is retired during the hold emits the
+	// consequence with it, as does one that recovers when the controller sees the cause (ADR-0039 point 7,
+	// decided 2026-11-17). A hold with a cause waits for the Incident controller to see it; at the end of the
+	// wait it is judged by its samples (point 19), as one without is (decided 2026-11-17, fifth).
 	cause string
 	// obs is the observation of the last sample that showed cause, without its count: what a hold with a cause
 	// emits, whatever the pod or the owner chain look like at its end.
@@ -478,10 +480,11 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 //     controller is asked whether it has seen a cause the consequence would be counted on (Config.CauseSeen,
 //     with the hold's observation; ReleaseCause gives the order): seen at the first sight, the consequence is
 //     emitted at once and was never held; seen later, it is released. Before the end of ConsequenceGrace:
-//     holdWait until that end. At the end, a hold with a cause emits with it (cause_unseen, or released when
-//     causeOutcome confirms a release), even when the pod shows none now. With no cause ever shown (amended
-//     2026-11-16): holdEmit when at least minHoldSamples samples were failing and either this last one is failing or the container
-//     restarted at least minHoldRestarts times during the hold, else holdDrop.
+//     holdWait until that end. At the end (endOfHold), a hold with a cause that causeOutcome confirms released
+//     emits with it, even when the pod shows none now. Any other hold, with a cause or none (amended 2026-11-16
+//     and 2026-11-17, fifth): holdEmit, with the cause if any (cause_unseen), when at least minHoldSamples
+//     samples were failing and either this last one is failing or the container restarted at least
+//     minHoldRestarts times during the hold, else holdDrop (not_opened).
 //
 // A hold with a cause emits the observation of the last sample that showed it (consequenceHold.obs). A CauseSeen
 // call that does not answer within its deadline decides nothing: holdWait after retryAfter, the hold as it was.
@@ -569,17 +572,27 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 	return c.endWithCause(ctx, key, stored, obs, holdReleased, "the Incident controller saw its cause")
 }
 
-// endOfHold decides on a hold at the end of ConsequenceGrace: one with a cause is emitted with it, one with none
-// by its samples (point 19). failing is whether this last sample saw the container failing.
+// endOfHold decides on a hold at the end of ConsequenceGrace by its samples (point 19), with a cause or without
+// (decided 2026-11-17, fifth, on #828): a consequence whose container did not keep failing is not emitted
+// (not_opened), one that did is emitted, with its cause when it has one. failing is whether this last sample saw
+// the container failing.
+//
+// A hold with a cause the controller saw (causeOutcome is released: ReleaseCause marked it and CauseSeen
+// confirms) is emitted whether its container still fails or not, as a release before the end is: the controller
+// links the consequence to its cause's Incident, which counts it as evidence and opens nothing of its own.
 func (c *Collector) endOfHold(ctx context.Context, key types.NamespacedName, s consequenceHold, obs *Observation,
 	failing bool) (holdVerdict, time.Duration, error) {
+	keptFailing := s.failing >= minHoldSamples && (failing || s.restarted >= minHoldRestarts)
 	if s.cause != "" {
-		return c.endWithCause(ctx, key, s, obs, c.causeOutcome(ctx, s), "the hold ended")
+		if outcome := c.causeOutcome(ctx, s); outcome == holdReleased || keptFailing {
+			return c.endWithCause(ctx, key, s, obs, outcome, "the hold ended")
+		}
 	}
-	if s.failing < minHoldSamples || (!failing && s.restarted < minHoldRestarts) {
+	if !keptFailing {
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
 		logf.FromContext(ctx).V(1).Info("Dropped held consequence, its container did not keep failing",
-			"reason", s.reason, "container", s.container, "failingSamples", s.failing, "restarts", s.restarted)
+			"reason", s.reason, "container", s.container, "cause", s.cause != "", "failingSamples", s.failing,
+			"restarts", s.restarted)
 		return holdDrop, 0, nil
 	}
 	s.opened = true
@@ -609,7 +622,8 @@ func (c *Collector) endWithCause(ctx context.Context, key types.NamespacedName, 
 // heldCause ends the hold with a cause of the event with this UID, when it has one, as the event leaves the
 // collector by another path than the hold (its template retired, its owner chain no longer usable, its probe
 // settled, no longer a Warning): the consequence is emitted with its cause all the same, so a hold with a cause
-// never ends in a drop (ADR-0039 point 7, decided 2026-11-17). It returns the observation to emit, and false
+// ends in a drop only at the end of ConsequenceGrace with its container recovered (ADR-0039 point 7, decided
+// 2026-11-17). It returns the observation to emit, and false
 // when the event has no hold with a cause.
 func (c *Collector) heldCause(ctx context.Context, key types.NamespacedName, uid types.UID, why string) (Observation,
 	bool) {
@@ -642,7 +656,8 @@ func (c *Collector) causeOutcome(ctx context.Context, s consequenceHold) string 
 
 // failingNow reports whether the held container fails in st (ADR-0039 point 19, amended 2026-11-16): its restart
 // count went up since the previous sample of the hold, or it is not ready (Unhealthy) or waiting in a back-off
-// (BackOff). A container that restarted once and then runs fine is failing at that one sample only, and a
+// or in a reason of WaitingCauseReasons (BackOff; ErrImagePull is a failing pull, decided 2026-11-17, fifth, on
+// #828). A container that restarted once and then runs fine is failing at that one sample only, and a
 // liveness loop with no readiness probe, ready at each sample, is failing by its restarts.
 func (s consequenceHold) failingNow(st corev1.ContainerStatus) bool {
 	if st.RestartCount > s.restarts {
@@ -651,7 +666,8 @@ func (s consequenceHold) failingNow(st corev1.ContainerStatus) bool {
 	if s.reason == ReasonUnhealthy {
 		return !st.Ready
 	}
-	return st.State.Waiting != nil && strings.HasSuffix(st.State.Waiting.Reason, reasonBackOff)
+	w := st.State.Waiting
+	return w != nil && (strings.HasSuffix(w.Reason, reasonBackOff) || slices.Contains(WaitingCauseReasons, w.Reason))
 }
 
 // containerStatus returns the status of the named container (init or not) of pod.

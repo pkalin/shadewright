@@ -490,6 +490,42 @@ func TestGatedCauseKeepsTheHold(t *testing.T) {
 	}
 }
 
+// TestRestartWaitingCauseIsNotSeen is the restart case left open under #849 (decided 2026-11-17, fifth, on
+// #828), with the controller's own answer: before the restart the pod showed ImagePullBackOff, a waiting cause
+// the gate held as a first sighting, so no Incident was stored. After the restart the pod shows ErrImagePull,
+// another fingerprint, which the collector's replay rebuilds the hold for. The new cause's observation is not
+// Immediate and seen once, so the gate holds it too: CauseSeen answers false and the collector is not told, so
+// the rebuilt hold ends at the end of ConsequenceGrace (cause_unseen, collector.TestRestartWaitingCauseChanged).
+func TestRestartWaitingCauseIsNotSeen(t *testing.T) {
+	const pullBackOff, pullErr = "ImagePullBackOff", "ErrImagePull"
+	before := loadedAt(t)
+	old := symptomOf(heldCauseF, pullBackOff, waitingID(1), 1, fingerprint.SourcePodStatus, "web",
+		collector.ClassCause, t0)
+	before.handle(t.Context(), old)
+	if !before.sightings.holds(fp(heldCauseF)) || len(before.pending) != 0 {
+		t.Fatal("the old cause is not only a first sighting, so the case proves nothing")
+	}
+
+	c := loadedAt(t) // the new process: first sightings are memory, and no Incident was stored
+	var told []string
+	c.OnCauseSeen(func(f string) { told = append(told, f) })
+	const changedF = heldCauseF + 1
+	changed := symptomOf(changedF, pullErr, waitingID(2), 1, fingerprint.SourcePodStatus, "web",
+		collector.ClassCause, t0.Add(time.Minute))
+	c.handle(t.Context(), changed)
+	if !c.sightings.holds(fp(changedF)) {
+		t.Fatal("the changed cause is not held as a first sighting, so the case proves nothing")
+	}
+	o := heldOnce(changedF, 1, t0.Add(time.Minute))
+	o.MayRepeat = true
+	if seen, err := c.CauseSeen(t.Context(), o); err != nil || seen {
+		t.Fatalf("CauseSeen = %v, %v for a waiting cause changed at the replay; want false (#849)", seen, err)
+	}
+	if len(told) != 0 {
+		t.Fatalf("told %v, want nothing: the collector's hold is not released", told)
+	}
+}
+
 // TestGatedCauseAfterTheGraceIsFolded (envtest) follows the hold of TestGatedCauseKeepsTheHold to its end: the
 // cause is still only a first sighting when ConsequenceGrace ends, so the collector emits the consequence with
 // its cause (cause_unseen). Its series recurs, so it opens an Incident of its own. When the cause is reported

@@ -270,7 +270,8 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return r.settleCancelled(ctx, rr, v, reason)
 	}
 	before := rr.Status.DeepCopy()
-	if _, ok := cancelledForIncident(rr); ok {
+	reason, cancelled := cancelledForIncident(rr)
+	if cancelled {
 		// Closed (by Shadewright, its answer lost, or by a person) or not this request's: no close is left to make,
 		// so neither a failed close nor a pause that held it is left to say.
 		clearNotClosed(rr)
@@ -278,6 +279,11 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	}
 	if v.state != changeGone {
 		recordFound(rr, v.pr)
+		if cancelled {
+			// recordFound rewrote PullRequestOpened, where the reason of the cancel was while no pull request was
+			// recorded: it moves to Approved in the same write, as for one found open (recordCancelledOpen).
+			keepCancelReason(rr, reason, "found closed on the branch afterwards")
+		}
 	}
 	free := frees(v, holding)
 	switch {

@@ -77,6 +77,19 @@ const (
 	findRecorded                   // its own pull request recorded, to be closed
 )
 
+// cancelFind is what the read of the branch finds of a lost open's pull request of a request cancelled because of its
+// Incident.
+type cancelFind int
+
+const (
+	cancelFindOpen       cancelFind = iota // still open
+	cancelFindClosed                       // closed by a person
+	cancelFindClosedByUs                   // closed by Shadewright, the status write after the close lost
+	cancelFindMerged                       // merged
+	cancelFindForeign                      // merged with another change pushed to its branch
+	cancelFindGone                         // its marker removed: not this request's any more
+)
+
 var _ = Describe("RemediationRequest pull request step", func() {
 	ctx := context.Background()
 	var (
@@ -2903,6 +2916,139 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Entry("before it was recorded", false, remediationv1alpha1.ReasonIncidentGone),
 			Entry("after it was recorded, before the close", true, remediationv1alpha1.ReasonIncidentGone),
 			Entry("with IncidentFolded", false, remediationv1alpha1.ReasonIncidentFolded),
+		)
+
+		DescribeTable("keeps the reason of the cancel whatever the read of the branch finds of its own pull request",
+			func(found cancelFind, reason string, recordFirst bool) {
+				naming()
+				if reason == remediationv1alpha1.ReasonIncidentFolded {
+					afterCommit(fold)
+				} else {
+					afterCommit(remove)
+				}
+				got := cancelled(reason)
+				own := lostOpen(got)
+				if recordFirst {
+					recordedOpen(own, reason)
+				}
+				// kept checks the persisted status: Cancelled with the reason where cancelledForIncident looks for
+				// it, or, once a merge moved the request on, PlanFresh with that reason (markCancelledMerge).
+				kept := func() {
+					GinkgoHelper()
+					got := fetch()
+					if got.Status.Phase == remediationv1alpha1.PhaseCancelled {
+						r, ok := cancelledForIncident(got)
+						Expect(ok).To(BeTrue(), "the request keeps why it was cancelled: %v", got.Status.Conditions)
+						Expect(r).To(Equal(reason))
+						return
+					}
+					fresh := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+					Expect(fresh).NotTo(BeNil(), "the merge keeps why it was cancelled")
+					Expect(fresh.Status).To(Equal(metav1.ConditionFalse))
+					Expect(fresh.Reason).To(Equal(reason))
+				}
+				switch found {
+				case cancelFindClosed:
+					Expect(git.CloseChangeRequest(ctx, own.Number)).To(Succeed())
+				case cancelFindClosedByUs:
+					Expect(recordFirst).To(BeTrue(), "Shadewright closes only a recorded pull request")
+					// The close goes through, and the request changes before the write that records it.
+					git.SetAfter(func(op string) error {
+						if op == opClose {
+							live := fetch()
+							base := live.DeepCopy()
+							if live.Annotations == nil {
+								live.Annotations = map[string]string{}
+							}
+							live.Annotations["example.com/touched"] = fmt.Sprint(time.Now().UnixNano())
+							Expect(k8sClient.Patch(ctx, live, client.MergeFrom(base))).To(Succeed())
+						}
+						return nil
+					})
+					Expect(apierrors.IsConflict(reconcileOnce())).To(BeTrue())
+					git.SetAfter(nil)
+					Expect(stateOf(own.Number)).To(Equal(providers.ChangeRequestClosed))
+					kept()
+				case cancelFindMerged:
+					_, err := git.Merge(own.Number)
+					Expect(err).NotTo(HaveOccurred())
+				case cancelFindForeign:
+					_, err := git.Push(freshness.BranchName(got), readmePath, []byte("a: 3\n"))
+					Expect(err).NotTo(HaveOccurred())
+					_, err = git.Merge(own.Number)
+					Expect(err).NotTo(HaveOccurred())
+				case cancelFindGone:
+					Expect(git.SetBody(own.Number, "no marker")).To(Succeed())
+				}
+				for range 4 {
+					_ = reconcileOnce()
+					kept()
+				}
+				got = fetch()
+				switch found {
+				case cancelFindMerged:
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseInconclusive))
+				case cancelFindForeign:
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+					Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+						To(Equal(ReasonMergedWithForeignChange))
+				case cancelFindGone:
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+					Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "an open pull request of the branch may deliver it")
+				default:
+					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+					Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "the lock goes once nothing open may deliver it")
+				}
+				if found == cancelFindClosed || found == cancelFindClosedByUs || found == cancelFindOpen {
+					Expect(got.Status.PullRequest).NotTo(BeNil(), "the read records its own pull request")
+					Expect(got.Status.PullRequest.Number).To(Equal(own.Number))
+					approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+					Expect(approved).NotTo(BeNil())
+					Expect(approved.Status).To(Equal(metav1.ConditionFalse))
+					Expect(approved.Reason).To(Equal(reason), "the reason moved to Approved with the pull request")
+					Expect(approved.Message).To(ContainSubstring(fmt.Sprintf("#%d", own.Number)))
+					opened := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+					Expect(opened.Reason).To(BeElementOf(ReasonPullRequestClosed, ReasonChangeRequestClosed))
+				}
+			},
+			Entry("found closed by a person, not recorded, IncidentFolded", cancelFindClosed,
+				remediationv1alpha1.ReasonIncidentFolded, false),
+			Entry("found closed by a person, not recorded, IncidentGone", cancelFindClosed,
+				remediationv1alpha1.ReasonIncidentGone, false),
+			Entry("found closed by a person after it was recorded open, IncidentFolded", cancelFindClosed,
+				remediationv1alpha1.ReasonIncidentFolded, true),
+			Entry("found closed by a person after it was recorded open, IncidentGone", cancelFindClosed,
+				remediationv1alpha1.ReasonIncidentGone, true),
+			Entry("closed by Shadewright with the answer lost, IncidentFolded", cancelFindClosedByUs,
+				remediationv1alpha1.ReasonIncidentFolded, true),
+			Entry("closed by Shadewright with the answer lost, IncidentGone", cancelFindClosedByUs,
+				remediationv1alpha1.ReasonIncidentGone, true),
+			Entry("found open, not recorded, IncidentFolded", cancelFindOpen, remediationv1alpha1.ReasonIncidentFolded, false),
+			Entry("found open, not recorded, IncidentGone", cancelFindOpen, remediationv1alpha1.ReasonIncidentGone, false),
+			Entry("found open and recorded, IncidentFolded", cancelFindOpen, remediationv1alpha1.ReasonIncidentFolded, true),
+			Entry("found open and recorded, IncidentGone", cancelFindOpen, remediationv1alpha1.ReasonIncidentGone, true),
+			Entry("found merged, not recorded, IncidentFolded", cancelFindMerged, remediationv1alpha1.ReasonIncidentFolded, false),
+			Entry("found merged, not recorded, IncidentGone", cancelFindMerged, remediationv1alpha1.ReasonIncidentGone, false),
+			Entry("found merged after it was recorded, IncidentFolded", cancelFindMerged,
+				remediationv1alpha1.ReasonIncidentFolded, true),
+			Entry("found merged after it was recorded, IncidentGone", cancelFindMerged,
+				remediationv1alpha1.ReasonIncidentGone, true),
+			Entry("found merged with a foreign change, not recorded, IncidentFolded", cancelFindForeign,
+				remediationv1alpha1.ReasonIncidentFolded, false),
+			Entry("found merged with a foreign change, not recorded, IncidentGone", cancelFindForeign,
+				remediationv1alpha1.ReasonIncidentGone, false),
+			Entry("found merged with a foreign change after it was recorded, IncidentFolded", cancelFindForeign,
+				remediationv1alpha1.ReasonIncidentFolded, true),
+			Entry("found merged with a foreign change after it was recorded, IncidentGone", cancelFindForeign,
+				remediationv1alpha1.ReasonIncidentGone, true),
+			Entry("found not its own any more, not recorded, IncidentFolded", cancelFindGone,
+				remediationv1alpha1.ReasonIncidentFolded, false),
+			Entry("found not its own any more, not recorded, IncidentGone", cancelFindGone,
+				remediationv1alpha1.ReasonIncidentGone, false),
+			Entry("found not its own any more after it was recorded, IncidentFolded", cancelFindGone,
+				remediationv1alpha1.ReasonIncidentFolded, true),
+			Entry("found not its own any more after it was recorded, IncidentGone", cancelFindGone,
+				remediationv1alpha1.ReasonIncidentGone, true),
 		)
 
 		DescribeTable("keeps the lock while the read after the cancel fails, and releases it once the read answers",

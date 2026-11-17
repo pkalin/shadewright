@@ -127,7 +127,7 @@ func (r *RemediationRequestReconciler) endForIncident(ctx context.Context, rr *r
 
 // cancelledForIncident reports whether rr ended Cancelled because of its Incident (endForIncident), with the reason
 // of the cancel: on PullRequestOpened while no pull request is recorded, on Approved once the read of
-// the branch recorded one (recordCancelledOpen), as stop places the reason of an end.
+// the branch recorded one (keepCancelReason), as stop places the reason of an end.
 func cancelledForIncident(rr *remediationv1alpha1.RemediationRequest) (reason string, ok bool) {
 	if rr.Status.Phase != remediationv1alpha1.PhaseCancelled {
 		return "", false
@@ -209,18 +209,7 @@ func (r *RemediationRequestReconciler) recordCancelledOpen(ctx context.Context,
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 	}
 	n := rr.Status.PullRequest.Number
-	why := whyIncidentGone
-	if reason == remediationv1alpha1.ReasonIncidentFolded {
-		why = whyIncidentFolded
-	}
-	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
-		Type:   remediationv1alpha1.ConditionApproved,
-		Status: metav1.ConditionFalse,
-		Reason: reason,
-		Message: fmt.Sprintf("%s before a pull request was recorded; pull request #%d, from an earlier open whose "+
-			"answer was lost, was found on the branch afterwards and is closed", why, n),
-		ObservedGeneration: rr.Generation,
-	})
+	keepCancelReason(rr, reason, "found open on the branch afterwards and is closed")
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:   remediationv1alpha1.ConditionPROpened,
 		Status: metav1.ConditionTrue,
@@ -236,6 +225,34 @@ func (r *RemediationRequestReconciler) recordCancelledOpen(ctx context.Context,
 	}
 	log.Info("Recorded the open pull request of a cancelled RemediationRequest; it is closed next")
 	return reconcile.Result{RequeueAfter: stepDelay}, nil
+}
+
+// keepCancelReason moves the reason of a cancel because of the Incident from PullRequestOpened to Approved, in the
+// status write the caller makes, once a pull request is recorded: stop's place for it then, and where
+// cancelledForIncident finds it after PullRequestOpened says what the read found (recordFound) or that Shadewright
+// closed it. It is the one place that moves it: recordCancelledOpen for a pull request found open, checkHeld for
+// one found closed. found ends the message, after "was". Nothing changes without a recorded pull request (the reason
+// stays on PullRequestOpened, which recordFound then leaves alone) or when Approved has the reason already.
+func keepCancelReason(rr *remediationv1alpha1.RemediationRequest, reason, found string) {
+	if rr.Status.PullRequest == nil {
+		return
+	}
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved); c != nil &&
+		c.Status == metav1.ConditionFalse && c.Reason == reason {
+		return
+	}
+	why := whyIncidentGone
+	if reason == remediationv1alpha1.ReasonIncidentFolded {
+		why = whyIncidentFolded
+	}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:   remediationv1alpha1.ConditionApproved,
+		Status: metav1.ConditionFalse,
+		Reason: reason,
+		Message: fmt.Sprintf("%s before a pull request was recorded; pull request #%d, from an earlier open whose "+
+			"answer was lost, was %s", why, rr.Status.PullRequest.Number, found),
+		ObservedGeneration: rr.Generation,
+	})
 }
 
 // closeCancelled closes the recorded pull request of a request cancelled because of its Incident, with the cleanup

@@ -33,6 +33,17 @@ const overBoundVariant = "unschedulable/over-bound"
 // summaryOf builds s's context with the real builder and limits, and returns its summary block.
 func summaryOf(t *testing.T, s *scenario, limits incidentcontext.Limits) incidentcontext.Block {
 	t.Helper()
+	blocks := contextOf(t, s, limits)
+	if len(blocks) == 0 || blocks[0].Section != incidentcontext.SectionSummary {
+		t.Fatalf("the context's first block is not the summary: %+v", blocks)
+	}
+	return blocks[0]
+}
+
+// contextOf builds s's context with the real builder and limits, and returns its blocks, block i shown as
+// c<i+1>.
+func contextOf(t *testing.T, s *scenario, limits incidentcontext.Limits) []incidentcontext.Block {
+	t.Helper()
 	scheme, err := newScheme()
 	if err != nil {
 		t.Fatal(err)
@@ -51,10 +62,7 @@ func summaryOf(t *testing.T, s *scenario, limits incidentcontext.Limits) inciden
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Blocks) == 0 || c.Blocks[0].Section != incidentcontext.SectionSummary {
-		t.Fatalf("the context's first block is not the summary: %+v", c.Blocks)
-	}
-	return c.Blocks[0]
+	return c.Blocks
 }
 
 // TestOverBoundSummaryVariant checks that unschedulable/over-bound exercises the shortened summary of #796 for an

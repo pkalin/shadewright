@@ -165,8 +165,8 @@ reads only the namespace of the Incident's subject, so `namespace=` must name it
 error names the read and what is wrong. The parser and its generated tests are in `test/eval/reads_test.go` and
 `test/eval/reads_corpus_test.go`.
 
-A scenario run passes when all three parts pass and no quote of its result cites the summary outside the values it
-shows ([Quotes of the summary](#the-scenario-files), [#841](https://github.com/pkalin/shadewright/issues/841)). The run passes when the share of passing scenario runs reaches the
+A scenario run passes when all three parts pass and no quote of its result holds the cut note, a tally line or a
+part the summary cut ([Quotes of the summary](#the-scenario-files), [#841](https://github.com/pkalin/shadewright/issues/841)). The run passes when the share of passing scenario runs reaches the
 threshold (`EVAL_MIN_PASS_RATE`, 1 by default; CI always uses 1).
 
 ## Run it
@@ -391,15 +391,31 @@ the summary holds the cut part, a quote across the cut or the note.
 **Quotes of the summary.** The loop checks quotes only for a proposal, and passes one on any single quote found
 ([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)), so a quote of the part the
 summary cut, of the cut's note or of a tally line would pass unnoticed in a refusal, or next to a good quote in a
-proposal. The harness checks every result the loop accepted (all but `NoEvidence`, whose quotes the loop refused and
-`quoteFailures` classifies): each quote that cites the summary block must lie within one value the summary shows
-(`incidentcontext.Block.Data`, as the loop takes it). Otherwise the run fails and the report's `summaryQuotes` gives
-its kind, in this order: `cut-note` (holds the "(N bytes cut)" note), `tally-line` (takes in a line of the absorbed
-tally), `cut-part` (is in the Incident's own symptom, reporting controller, reason or subject name, but in a part the
-summary cut) or `not-shown` (anything else: a label, two values at once, a paraphrase). `TestSummaryQuoteCorpus`
-replays one reply per kind from `test/eval/testdata/summary-quotes/` (the cut part and the note of
-`unschedulable/over-bound`, a tally line of `oom/absorbed`), each otherwise passing, and checks that the run fails
-with that kind and that the report holds no quote.
+proposal. The harness checks every quote of every result the loop accepted (all but `NoEvidence`, whose quotes the
+loop refused and `quoteFailures` classifies), whatever block or tool result it cites, and skips a quote shorter than
+the loop's shortest (8 bytes). A quote within a value its cited block shows (`incidentcontext.Block.Data`, as the
+loop takes it; for a tool result, within the text of any tool result of the run) is never reported. Any other quote
+gets the first of these kinds that fits, in the report's `summaryQuotes`:
+
+| Kind | The quote | Run |
+| --- | --- | --- |
+| `cut-note` | holds the "(N bytes cut)" note of a shortened value | fails |
+| `tally-line` | takes in a line of the absorbed tally, or lies within one | fails |
+| `cut-part` | is in the Incident's own symptom, reporting controller, reason or subject name, in a part the summary cut | fails |
+| `near-miss` | cites the summary, and is within a value it shows once case, runs of white space and trailing punctuation are ignored | recorded |
+| `not-shown` | cites the summary and is none of the above: a label, two values at once, a paraphrase | recorded |
+
+The three failing kinds match through the same changes, and one character changed, added or removed, so a model that
+alters a tally line or a cut part a little still fails with its kind; a quote of the cut part cited from a block
+that shows that text (the pod's status in `unschedulable/over-bound`) is not reported. A recorded kind does not
+fail the run: the loop's own rules decide whether its result passes, as for any other block, since real models
+paraphrase and the pass rate keeps its meaning. `TestSummaryQuoteCorpus` replays the replies in
+`test/eval/testdata/summary-quotes/` (the cut part and the note of `unschedulable/over-bound`, cited from the summary
+and from another block and changed a little, a tally line of `oom/absorbed`, plain and changed, a near-miss and a
+quote not shown), each otherwise passing, and checks the kind, whether the run fails, and that the report holds no
+quote. `test/eval/summary_quotes_gen_test.go` checks the check with generated quotes: against the check as first
+built, nothing it failed passes now except a near-miss, and quotes of the cut, the note and the tally whose kind is
+known by construction get it under every small change.
 
 **The prompt of a scenario without a tally.** `TestPromptGolden` keeps, in `test/eval/testdata/prompt.golden`, the
 SHA-256 of the first model request (the system prompt and the context) of every scenario whose Incident has an empty
@@ -463,7 +479,7 @@ field the version does not know. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 7; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum. Version 6: rubric terms match on word boundaries ([Scoring](#scoring)), so diagnosis scores of version 5 or earlier are not comparable. Version 7: a run also fails when a quote of its accepted result cites the summary outside the values it shows (`summaryQuotes`), so pass rates of version 6 or earlier are not comparable |
+| `schemaVersion` | 7; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum. Version 6: rubric terms match on word boundaries ([Scoring](#scoring)), so diagnosis scores of version 5 or earlier are not comparable. Version 7: a run also fails when a quote of its accepted result holds the cut note, a tally line or a part the summary cut (`summaryQuotes`), so pass rates of version 6 or earlier are not comparable |
 | `mode` | `fake` (recorded replies), `foundry` or `anthropic` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
 | `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole`, `costIncomplete` and `costUnknown` (as in `totals`, for this run), `quoteFailures`, `summaryQuotes`, `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |
@@ -472,7 +488,7 @@ field the version does not know. The JSON fields:
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |
-| `scenarios[].summaryQuotes` | Only for a run whose result the loop accepted (not `NoEvidence`): one entry per quote that cites the summary and lies within no value it shows, with `source`, `kind` (`cut-note`, `tally-line`, `cut-part` or `not-shown`, [Quotes of the summary](#the-scenario-files)) and `quoteBytes`. Any entry fails the run. No text of the quote; it is in `reply`. The Markdown report lists them in a table after the runs |
+| `scenarios[].summaryQuotes` | Only for a run whose result the loop accepted (not `NoEvidence`): one entry per quote the summary check reports, with `source` (the cited ID), `kind` (`cut-note`, `tally-line`, `cut-part`, `near-miss` or `not-shown`, [Quotes of the summary](#the-scenario-files)), `fails` (true for the first three, which fail the run; the others are only recorded) and `quoteBytes`. No text of the quote; it is in `reply`. The Markdown report lists them in a table after the runs |
 | `scenarios[].reply` | Only for a run whose last reply decoded as a result, whether the loop then accepted it or refused it (`NoEvidence`) ([#600](https://github.com/pkalin/shadewright/issues/600)): the model's `summary`, `hypotheses` (their descriptions) and `evidence[]` (`source`, `quote`), so a missed fact can be traced to what the model wrote. Redacted as the analyzer redacts the result's text (built-in rules, the Incident's name kept) and capped: the summary at 1024 bytes, each hypothesis, source and quote at 512, at most 10 hypotheses and 10 quotes (the result's own bounds, so a decoded reply is kept whole today); a cut field ends with ` [truncated]` and `truncated` is then true. In `report.json` only, not in the Markdown |
 | `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `toolCalls`, `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), `incompleteRuns` (runs with a call of unknown usage or that stopped with an error), `costIncomplete` when there is any, so the estimate is a lower bound (the Markdown summary says so; compare `charged`), and `costPerPassedRunUSD`, the cost of every run, failed ones included, over the passed runs: left out without prices or when no run passed (the Markdown says "none, no run passed", never 0), and a lower bound when `costIncomplete` is set. A failed call is never priced as zero: it counts in `usageUnknownCalls` and makes the cost incomplete. The exception is a call the adapter marks as refused before processing (a Foundry 429), which was not billed and has a known usage of 0 (#725). A role that used tokens (or made a call of unknown usage) with no prices of its own, the escalation without `EVAL_ESCALATION_PRICE_*`, is never priced at another role's prices: `costUSD` and `costPerPassedRunUSD` are then left out, `costUnknown` says why, `costUSDByRole` keeps the priced roles, and the Markdown says "unknown" |
 

@@ -98,10 +98,9 @@ type tally struct {
 	// forced escalation (signalRecorder).
 	truncated     bool
 	failedSources []incidentcontext.Section
-	// summary is the summary block of the last context the builder built, and summaryID the ID the model saw it
-	// under (signalRecorder); nil when the context had none.
-	summary   *incidentcontext.Block
-	summaryID string
+	// blocks are the blocks of the last context the builder built, in order: block i is shown as c<i+1>
+	// (signalRecorder). The harness checks the quotes of a result against them (checkSummaryQuotes).
+	blocks []incidentcontext.Block
 }
 
 // roleUsage is what the calls of one role returned.
@@ -179,7 +178,7 @@ func (f forcedEscalation) Build(ctx context.Context,
 
 // signalRecorder records the escalation signals of the context the product's builder returns, before a forced
 // escalation adds its own (escalation_scenarios_test.go checks a scenario escalates on the product's signal),
-// and its summary block, which the harness checks the quotes of a result against (checkSummaryQuotes).
+// and its blocks, which the harness checks the quotes of a result against (checkSummaryQuotes).
 type signalRecorder struct {
 	inner analysis.ContextBuilder
 	t     *tally
@@ -193,14 +192,7 @@ func (r signalRecorder) Build(ctx context.Context,
 	}
 	r.t.mu.Lock()
 	r.t.truncated, r.t.failedSources = c.Truncated, slices.Clone(c.FailedSources)
-	r.t.summary, r.t.summaryID = nil, ""
-	if i := slices.IndexFunc(c.Blocks, func(b incidentcontext.Block) bool {
-		return b.Section == incidentcontext.SectionSummary
-	}); i >= 0 {
-		blk := c.Blocks[i]
-		// The ID analysis.contextMessage gives the block: its place in the context, from c1.
-		r.t.summary, r.t.summaryID = &blk, fmt.Sprintf("c%d", i+1)
-	}
+	r.t.blocks = slices.Clone(c.Blocks)
 	r.t.mu.Unlock()
 	return c, nil
 }
@@ -309,7 +301,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	calls := slices.Clone(t.reads)
 	res.prompt, res.toolText = t.first, slices.Clone(t.toolText)
 	res.truncated, res.failedSources = t.truncated, slices.Clone(t.failedSources)
-	summary, summaryID := t.summary, t.summaryID
+	blocks := t.blocks
 	t.mu.Unlock()
 	if aerr != nil {
 		return res, fmt.Errorf("the analysis stopped: %w", aerr)
@@ -337,10 +329,11 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		res.Reply = replyOf(accepted, func(t string) string { return redactor.StringKeeping(t, s.incident.Name) })
 		if out.Reason != analysis.ReasonNoEvidence {
 			// NoEvidence: the loop refused every quote already, and quoteFailures says how.
-			res.SummaryQuotes = checkSummaryQuotes(summary, summaryID, s.incident, accepted.Evidence)
+			res.SummaryQuotes = checkSummaryQuotes(blocks, res.toolText, s.incident, accepted.Evidence)
 		}
 	}
-	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass && res.Reads.Pass && len(res.SummaryQuotes) == 0
+	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass && res.Reads.Pass &&
+		!slices.ContainsFunc(res.SummaryQuotes, func(q summaryQuote) bool { return q.Fails })
 	return res, nil
 }
 

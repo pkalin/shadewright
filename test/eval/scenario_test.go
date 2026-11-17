@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -57,6 +58,9 @@ var watchedNamespaces = []string{nsDemo}
 
 // nsDemo is the namespace of the lab scenarios.
 const nsDemo = "demo"
+
+// nsOther is a namespace that is neither the scenarios' nor watched.
+const nsOther = "other"
 
 // source says where the vendored expected.yaml files come from: the rubric field of the manifest.
 type source struct {
@@ -113,7 +117,27 @@ const (
 // at all, with the reason.
 type rubric struct {
 	Facts []rubricFact `json:"facts"`
+	// Reads are the tool reads the model is expected to make (#505, reads_test.go); a read it makes that is not
+	// listed is counted, not failed.
+	Reads []rubricRead `json:"reads,omitempty"`
+	// Size is required for a proposal of an action whose number the model chooses (sizedByModel), and states the
+	// size the evidence supports (#505, decided 2026-11-17).
+	Size *rubricSize `json:"size,omitempty"`
 }
+
+// rubricSize states the size a scenario's evidence supports. Any proposal above it fails the run (checkSize),
+// even when it is below the policy maximum.
+type rubricSize struct {
+	// Supported is the largest value the recorded evidence supports, such as the replicas a load needs.
+	Supported int32 `json:"supported"`
+	// Why says how the recorded evidence gives Supported.
+	Why string `json:"why"`
+}
+
+// sizedByModel are the catalog actions whose number the model chooses inside the policy bounds, so the only
+// ones a rubric size applies to. SetContainerMemoryLimit is not one: ADR-0040 has code size it from the
+// metrics, and that rule's own tests cover it (decided 2026-11-16 on #505).
+var sizedByModel = []remediationv1alpha1.ActionType{remediationv1alpha1.ActionAdjustKedaMaxReplicas}
 
 // rubricFact scores one fact. It passes when every term of All, at least one of Any (when Any is set), and
 // every term of at least one group of AnyOf (when AnyOf is set) appears in the diagnosis text, and every term
@@ -178,9 +202,30 @@ type scenario struct {
 	// metrics is what the scenario's Prometheus holds (metrics.yaml); nil when the scenario has no metrics
 	// source.
 	metrics *metricsRecording
+	// metricsDown configures a metrics source that fails every query, a Prometheus that is down (an escalation
+	// scenario's metricsSource: down); metrics is then nil.
+	metricsDown bool
+	// logs is what the scenario's pod logs hold (logs.yaml); nil when the scenario has no log source.
+	logs *logsRecording
+	// limits are the context builder's bounds; the zero value is incidentcontext.DefaultLimits (an escalation
+	// scenario's contextBytes sets the total).
+	limits incidentcontext.Limits
 	// policies are the RemediationPolicies of the scenario's cluster (policy.yaml, #493): the context builder
 	// shows their bounds, and a proposal they refuse fails the scenario.
 	policies []*remediationv1alpha1.RemediationPolicy
+	// reads are the rubric's expected reads, parsed against the tools the scenario is offered (checkReads).
+	reads []readRule
+	// forceEscalation sends every run of the scenario to the escalation model with the read tools, whatever
+	// the model source: an escalation scenario (escalation_scenarios_test.go), whose facts only a read shows.
+	forceEscalation bool
+	// escalates says every run of the scenario goes to the escalation model: an escalation scenario, forced
+	// or through the product's own signal (escalation_scenarios_test.go).
+	escalates bool
+	// signal is the product's escalation signal an escalation scenario relies on; empty when it is forced.
+	signal escalationSignal
+	// behindReads are the rubric facts that only the expected reads show: not scored by the first request the
+	// product builds, scored by the tool results (TestEscalationFactsOnlyBehindReads).
+	behindReads []rubricFact
 }
 
 // policyFile holds a scenario's RemediationPolicies. Every scenario has one; a variant without its own takes
@@ -258,7 +303,11 @@ func loadScenarios(scheme *runtime.Scheme) ([]*scenario, error) {
 	if len(out) == 0 {
 		return nil, errors.New("no scenarios found")
 	}
-	return out, nil
+	escalation, err := loadEscalationScenarios(scheme)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, escalation...), nil
 }
 
 func loadScenario(scheme *runtime.Scheme, name string) (*scenario, error) {
@@ -267,7 +316,16 @@ func loadScenario(scheme *runtime.Scheme, name string) (*scenario, error) {
 
 // loadScenarioDir loads the scenario called name from dir.
 func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error) {
+	return loadScenarioFiles(scheme, dir, dir, name, name)
+}
+
+// loadScenarioFiles loads the scenario called name: its expected.yaml, incident.yaml, objects.yaml, policy.yaml,
+// metrics.yaml and logs.yaml from dataDir, whose expected.yaml must be named expectedName, and its rubric.yaml and
+// replies.yaml from ownDir. A fleet scenario has one directory for both; an escalation scenario may take its
+// data from a fleet scenario (escalation_scenarios_test.go).
+func loadScenarioFiles(scheme *runtime.Scheme, dataDir, ownDir, name, expectedName string) (*scenario, error) {
 	s := &scenario{name: name}
+	dir := dataDir
 	raw, err := os.ReadFile(filepath.Join(dir, "expected.yaml"))
 	if err != nil {
 		return nil, err
@@ -276,17 +334,17 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 	if err := yaml.Unmarshal(raw, &s.expected); err != nil {
 		return nil, fmt.Errorf("expected.yaml: %w", err)
 	}
-	if s.expected.APIVersion != "scenarios.shadewright.io/v1alpha1" || s.expected.Name != name {
+	if s.expected.APIVersion != "scenarios.shadewright.io/v1alpha1" || s.expected.Name != expectedName {
 		return nil, fmt.Errorf("expected.yaml: apiVersion %q and name %q do not match the scenario",
 			s.expected.APIVersion, s.expected.Name)
 	}
-	if err := readStrict(filepath.Join(dir, "rubric.yaml"), &s.rubric); err != nil {
+	if err := readStrict(filepath.Join(ownDir, "rubric.yaml"), &s.rubric); err != nil {
 		return nil, err
 	}
 	if err := s.checkRubric(); err != nil {
 		return nil, err
 	}
-	if err := readStrict(filepath.Join(dir, "replies.yaml"), &s.recording); err != nil {
+	if err := readStrict(filepath.Join(ownDir, "replies.yaml"), &s.recording); err != nil {
 		return nil, err
 	}
 	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
@@ -297,6 +355,12 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 		return nil, err
 	}
 	if err := s.loadMetrics(dir); err != nil {
+		return nil, err
+	}
+	if err := s.loadLogs(dir); err != nil {
+		return nil, err
+	}
+	if err := s.checkReads(); err != nil {
 		return nil, err
 	}
 	if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
@@ -371,6 +435,10 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 			return nil, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	// After the variant's own Incident, whose subject namespace the reads are checked against.
+	if err := s.checkReads(); err != nil {
 		return nil, err
 	}
 	if _, err := os.Stat(filepath.Join(dir, "objects.yaml")); err == nil {
@@ -516,6 +584,22 @@ func (s *scenario) checkRubric() error {
 	slices.Sort(got)
 	if !slices.Equal(want, got) {
 		return fmt.Errorf("rubric.yaml lists the facts %q, expected.yaml has %q", got, want)
+	}
+	o := s.expected.Outcome
+	if z := s.rubric.Size; z != nil {
+		switch {
+		case o.Type != outcomePullRequest ||
+			!slices.Contains(sizedByModel, remediationv1alpha1.ActionType(o.Action)):
+			return fmt.Errorf("rubric.yaml: a size applies only to a proposal of %v, expected.yaml has %s %s",
+				sizedByModel, o.Type, o.Action)
+		case z.Supported < 1 || z.Supported > 1000:
+			return fmt.Errorf("rubric.yaml: size supported %d is outside 1 to 1000", z.Supported)
+		case strings.TrimSpace(z.Why) == "":
+			return errors.New("rubric.yaml: size needs why, how the evidence gives it")
+		}
+	} else if o.Type == outcomePullRequest && slices.Contains(sizedByModel,
+		remediationv1alpha1.ActionType(o.Action)) {
+		return fmt.Errorf("rubric.yaml: expected proposal of %s requires size", o.Action)
 	}
 	return nil
 }

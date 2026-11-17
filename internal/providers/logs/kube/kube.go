@@ -108,7 +108,7 @@ type Config struct {
 type Source struct {
 	pods       PodsGetter
 	namespaces map[string]struct{}
-	redact     func(string) string
+	redactor   *redact.Redactor
 	timeout    time.Duration
 }
 
@@ -141,11 +141,14 @@ func New(cfg Config) (*Source, error) {
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
-	red := redact.String
-	if cfg.Redactor != nil {
-		red = cfg.Redactor.String
+	red := cfg.Redactor
+	if red == nil {
+		var err error
+		if red, err = redact.New(); err != nil {
+			return nil, fmt.Errorf("built-in redaction rules: %w", err)
+		}
 	}
-	return &Source{pods: cfg.Pods, namespaces: namespaces, redact: red, timeout: timeout}, nil
+	return &Source{pods: cfg.Pods, namespaces: namespaces, redactor: red, timeout: timeout}, nil
 }
 
 // Logs returns the newest, redacted lines of one container within the bounds of q and of the package. See
@@ -190,9 +193,9 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 		// instance checked before.
 		after = instance{}
 	}
-	text, truncated := cut(data, over, keep)
+	text, truncated := Excerpt(s.redactor, data, over, keep)
 	return providers.LogExcerpt{
-		Text:              s.redact(strings.ToValidUTF8(text, "?")),
+		Text:              text,
 		Truncated:         truncated,
 		EndMissing:        over,
 		Instance:          before.LogInstance,
@@ -344,6 +347,46 @@ func fewerLines(data []byte) int64 {
 	mean := float64(len(data)) / float64(lines)
 	n := int64(float64(MaxReadBytes) / mean * tailMargin)
 	return min(max(n, 1), TailLines-1)
+}
+
+// Excerpt returns the redacted text of an excerpt from data, the bytes a logs request answered, and whether
+// older lines were dropped: the newest whole lines that fit in keep bytes of data ([cut]), valid UTF-8.
+// Redaction runs first, on data as it was read (#840): a match that starts in a line the cut drops, such as a
+// block scalar under a key whose line is dropped, is still redacted in the lines kept, by the marker of the
+// part kept, which is never longer than that part. Invalid bytes are replaced after that, and the excerpt is
+// redacted again. The cut is counted in bytes of data, as before redaction, so the excerpt never holds more
+// lines than when it was redacted after the cut. Redacting all of data costs work linear in its size, which
+// the reads bound by MaxReadBytes (1 MiB): at most about 710 steps of redaction work per byte on the most
+// costly input known, so at most about 750 million steps, a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput).
+// It is the step [Source.Logs] takes after its reads, exported so that tests outside the package run the same
+// code.
+func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string, bool) {
+	if endMissing {
+		data = data[:bytes.LastIndexByte(data, '\n')+1]
+	}
+	kept, truncated := cut(data, false, keep)
+	from := len(data) - len(kept)
+	pos := 0
+	// part returns the part of the n bytes at pos that the cut keeps, through f, and moves pos past them.
+	part := func(n int, f func(start int) string) string {
+		start := pos
+		pos += n
+		if pos <= from {
+			return ""
+		}
+		return f(max(from-start, 0))
+	}
+	text := r.Replace(string(data),
+		func(kind, m string) string {
+			return part(len(m), func(skip int) string {
+				if skip == 0 {
+					return redact.Marker(kind, len(m))
+				}
+				return redact.Marker(kind, len(m)-skip)
+			})
+		},
+		func(seg string) string { return part(len(seg), func(skip int) string { return seg[skip:] }) })
+	return r.String(strings.ToValidUTF8(text, "?")), truncated
 }
 
 // cut returns the newest whole lines of data that fit in keep bytes. When endMissing, the last line, which

@@ -1,0 +1,11 @@
+# How the diagnosis of escalation/probe-path is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored).
+facts:
+  - fact: the liveness probe fails with HTTP status 404
+    all: ["liveness", "404"]
+  - fact: the container restarts after the failed probes
+    any: ["restart"]
+  - fact: the probe requests the path /healthz of the web container
+    all: ["/healthz"]
+reads:
+  - read: get_resource Deployment/web

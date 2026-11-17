@@ -53,7 +53,12 @@ limitations under the License.
 // status.cause for the same subject UID (ADR-0039, #791): in status.absorbed and status.absorbedOccurrences,
 // apart from the Incident's own count, lastSeen and occurrences, so it never makes the cause due, restarts no
 // cooldown, does not keep it from going quiet and takes no place under the cap. The cause's phase is not
-// read. A consequence whose cause has no Incident yet goes through the gate as any observation; one held as
+// read. The collector holds a consequence whose cause the controller has not seen until it has, at most
+// collector.ConsequenceGrace: it asks [Controller.CauseSeen] at each sample, which answers true only for a cause the consequence
+// would be counted on (the same test as the link, [Controller.causeIncident]; a cause held by the gate as a
+// first sighting is not seen), and the controller wakes it for each cause it sees later through the function set by
+// [Controller.OnCauseSeen] (ADR-0039 point 7, #828); one that reaches the
+// controller before its cause's Incident exists goes through the gate as any observation; one held as
 // a first sighting is counted on the cause in full once a later observation of it links there, or once the
 // cause's observation is consumed (#820), found through the first sightings' index by cause fingerprint. A
 // repeat of a held occurrence that names a cause fingerprint gives it to the held one and reindexes it. A pod-status

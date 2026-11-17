@@ -180,9 +180,12 @@ func normalize(o Observation, mode quantityMode) string {
 	if len(o.Note) > maxInputLength {
 		return placeholderRedacted
 	}
-	s := sanitize(o.Note)
+	// Redact the note as it was read, before any character is replaced: sanitize turns ">" into ")", which
+	// would hide a folded block scalar indicator from the rules (#840). Each match becomes its placeholder
+	// at once, and only the text between matches is sanitized.
+	s := redact.Replace(o.Note, rawPlaceholder, sanitize)
 	s = expandShortIPv6(s)
-	// Redact while line breaks and indentation are still there: YAML block scalars and continuation
+	// Redact again while line breaks and indentation are still there: YAML block scalars and continuation
 	// lines are recognized by their layout.
 	s = redactText(s)
 	s = flatten(s)
@@ -274,6 +277,17 @@ func applyOutsideQuotes(s string, f func(seg string, off int) string) string {
 	}
 	b.WriteString(f(s[pos:], pos))
 	return b.String()
+}
+
+// rawPlaceholder is the placeholder of a match the redactor finds in the note as it was read: the one
+// [redactText] gives the same match once the note is sanitized. An address is "<ip>" when its marker names
+// the kind ("[ip]" needs four bytes) or when it is a short IPv6 address that [expandShortIPv6] writes in full;
+// anything else is "<redacted>".
+func rawPlaceholder(kind, text string) string {
+	if kind == redact.KindIP && (len(text) >= len("[ip]") || expandShortIPv6(" "+text+" ") != " "+text+" ") {
+		return placeholderIP
+	}
+	return placeholderRedacted
 }
 
 // redactText redacts s and turns the markers into placeholders.

@@ -18,6 +18,8 @@ package incidents
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -74,35 +76,96 @@ type causeIncident struct {
 }
 
 // causeFor returns the Incident a consequence observation is counted on as evidence (ADR-0039 point 6): the
-// latest Incident of its CauseFingerprint, when the controller's own list has it as a cause (status.cause, or
-// a cause observation counted for it and not written yet) for the observation's subject UID. The Incident's
-// phase is never read: an Escalated, Proposed or Resolved cause takes the evidence for as long as the pod
-// status shows the cause, which the collector decided. Not linked are an observation that is not a
-// consequence, names no container or no cause, carries a reason outside the table, or whose cause has no such
-// Incident; and one more than RecurrenceWindow after its cause's Incident was Resolved, which a new cause
-// observation opens again as its next occurrence. The caller holds mu.
+// Incident [Controller.causeIncident] finds for its CauseFingerprint, subject UID and time. Not linked, besides,
+// is an observation that is not a consequence, names no container or no cause, or carries a reason outside the
+// table. The caller holds mu.
 func (c *Controller) causeFor(o collector.Observation) (string, remediationv1alpha1.IncidentSpec, remediationv1alpha1.AbsorbedReason, bool) {
 	none := remediationv1alpha1.IncidentSpec{}
-	if o.Class != collector.ClassConsequence || o.CauseFingerprint == "" || o.Container == "" ||
-		o.Subject.UID == "" {
+	if o.Class != collector.ClassConsequence || o.CauseFingerprint == "" || o.Container == "" {
 		return "", none, "", false
 	}
 	reason, ok := absorbedReason(o.Reason)
 	if !ok {
 		return "", none, "", false
 	}
-	name := c.nameOf(o.CauseFingerprint)
-	if _, ok := c.names[name]; !ok {
+	name, spec, ok := c.causeIncident(o.CauseFingerprint, o.Subject.UID, o.ObservedAt)
+	if !ok {
 		return "", none, "", false
+	}
+	return name, spec, reason, true
+}
+
+// causeIncident is the one place that decides whether a consequence of cause fingerprint fp, of the subject
+// with this UID and observed at, links to a cause's Incident (ADR-0039 point 6): the latest Incident of fp, when
+// the controller's own list has it as a cause (status.cause, or a cause observation counted for it and not
+// written yet) for that subject UID. The Incident's phase is never read: an Escalated, Proposed or Resolved
+// cause takes the evidence for as long as the pod status shows the cause, which the collector decided. Not
+// linked: no such Incident (refused at the cap, not counted for want of room, held as a first sighting), an
+// empty subject UID or another one, and an Incident Resolved more than RecurrenceWindow before at, which a new
+// cause observation opens again as its next occurrence. Both the link ([Controller.causeFor]) and the answer to
+// the collector's hold ([Controller.causeSeen], decided 2026-11-17 on #828) go through it, so the hold never
+// ends for a cause the consequence would not be counted on. The caller holds mu.
+func (c *Controller) causeIncident(fp string, uid remediationv1alpha1.UID, at time.Time) (string, remediationv1alpha1.IncidentSpec, bool) {
+	none := remediationv1alpha1.IncidentSpec{}
+	if fp == "" || uid == "" {
+		return "", none, false
+	}
+	name := c.nameOf(fp)
+	if _, ok := c.names[name]; !ok {
+		return "", none, false
 	}
 	cause, ok := c.causes[name]
-	if !ok || cause.spec.Fingerprint != o.CauseFingerprint || cause.spec.Subject.UID != o.Subject.UID {
-		return "", none, "", false
+	if !ok || cause.spec.Fingerprint != fp || cause.spec.Subject.UID != uid {
+		return "", none, false
 	}
-	if resolved, ok := c.resolvedAt[name]; ok && c.notFuture(o.ObservedAt).Sub(resolved) > RecurrenceWindow {
-		return "", none, "", false
+	if resolved, ok := c.resolvedAt[name]; ok && c.notFuture(at).Sub(resolved) > RecurrenceWindow {
+		return "", none, false
 	}
-	return name, cause.spec, reason, true
+	return name, cause.spec, true
+}
+
+// CauseSeen answers the collector (collector.CauseSeenFunc, ADR-0039 point 7, decided 2026-11-17 three times): whether
+// the controller has seen a cause that consequence o would be counted on ([Controller.causeSeen]). The Incidents
+// loaded at start count, so the hold the collector rebuilds after a restart is answered from the stored
+// Incidents. A consequence whose container name is not a DNS label is answered true: consume leaves that name
+// out (containerName) and then never links it to its cause, so holding it gains nothing. It reads nothing from
+// the API server: it costs one lock and a few map lookups. It waits until the Incidents are loaded, or ctx ends,
+// which is an error and no answer. A cause seen later is told to the collector through [Controller.OnCauseSeen].
+func (c *Controller) CauseSeen(ctx context.Context, o collector.Observation) (bool, error) {
+	select {
+	case <-c.ready:
+	case <-ctx.Done():
+		return false, fmt.Errorf("waiting for the Incidents to load: %w", ctx.Err())
+	}
+	if o.Container != "" && len(validation.IsDNS1123Label(o.Container)) > 0 {
+		return true, nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.causeSeen(o), nil
+}
+
+// causeSeen reports whether the controller has seen a cause consequence o would be counted on: exactly when
+// [Controller.causeFor] links it now (decided 2026-11-17, third, on #828). A cause that is only a first sighting
+// held by the gate is not seen: a consequence released on it would not be linked, could open an Incident of its
+// own, and would not be counted when the cause opens later. Its hold waits until the cause's Incident opens, or
+// until ConsequenceGrace ends (cause_unseen), when the late-cause fold takes over. A cause refused at the cap,
+// not counted for want of room, of another subject UID, or whose Incident was Resolved more than
+// RecurrenceWindow before o was observed, is not seen either. The caller holds mu.
+func (c *Controller) causeSeen(o collector.Observation) bool {
+	_, _, _, ok := c.causeFor(o)
+	return ok
+}
+
+// causeOpenedFor reports whether cause observation o, just consumed, has an Incident that a consequence of the
+// same subject observed at the same time would be counted on ([Controller.causeIncident]): the test
+// [Controller.handle] tells the collector by. A cause held by the gate as a first sighting tells nothing; it is
+// told when an observation of it opens its Incident. The collector then asks [Controller.CauseSeen] for each
+// hold of that cause, so a hold of another subject, or observed at another time, is decided by its own answer.
+// The caller holds mu.
+func (c *Controller) causeOpenedFor(o collector.Observation) bool {
+	_, _, ok := c.causeIncident(o.Fingerprint, o.Subject.UID, o.ObservedAt)
+	return ok
 }
 
 // absorbHeld counts on the cause's Incident name, as evidence, the observations of consequence fingerprint

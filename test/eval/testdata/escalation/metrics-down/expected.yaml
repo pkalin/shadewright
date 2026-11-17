@@ -1,0 +1,27 @@
+# Synthetic, not from the fleet repository: the expectation of the escalation scenario metrics-down (#504), in
+# the fleet's scenario schema. No lab run has observed it.
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: metrics-down
+summary: Revision 2 of the web Deployment lowered the web container's memory limit from 96Mi to 48Mi, and the container is OOMKilled since; Prometheus is down, so the working set is unknown.
+incident:
+  reason: OOMKilled
+  status: synthetic
+  source: The collector's pod watch, from the container's last termination, attributed to Deployment demo/web through ReplicaSet.
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: synthetic
+  evidence:
+    - fact: the web container is OOMKilled and restarts
+      source: the pod's container status in the context
+    - fact: the previous revision set the memory limit to 96Mi, and the rollout lowered it to 48Mi
+      source: the pod template of the previous ReplicaSet, read with get_resource
+outcome:
+  type: refusal
+  status: synthetic
+  reason: Without the working set no memory size is supported (the metrics source failed); a person is notified, with the lowered limit as the lead.
+  phase: NeedsIntervention

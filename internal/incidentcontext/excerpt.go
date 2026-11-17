@@ -29,9 +29,10 @@ import (
 // RedactFunc redacts text. Its output must never be longer than its input, as package redact guarantees.
 type RedactFunc func(string) string
 
-// Redact makes s valid UTF-8 (each invalid run becomes one "?", so it never grows) and redacts it with r.
+// Redact redacts s with r as it was read, makes the result valid UTF-8 (each invalid run becomes one "?", so
+// it never grows) and redacts it again: no character is replaced before redaction has seen the text (#840).
 func Redact(r RedactFunc, s string) string {
-	return r(strings.ToValidUTF8(s, "?"))
+	return r(strings.ToValidUTF8(r(s), "?"))
 }
 
 // Value redacts one value from the cluster for a result line: a value longer than maxValueBytes once redacted

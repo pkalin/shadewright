@@ -282,4 +282,4 @@ with a nonempty allowed `models` list under
 [qualification runbook](how-to/qualify-openai-compatible.md). The Foundry suffix list
 never authorizes a compatible endpoint. Removing the release removes its mounts
 but does not revoke server credentials; revoke each key separately. No Secret API
-permission or additional controller identity is introduced. ADR-0042 is Proposed.
+permission or additional controller identity is introduced. ADR-0042 is Accepted.

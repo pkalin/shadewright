@@ -1,6 +1,6 @@
 # ADR-0042: OpenAI-compatible model endpoints and an optional API key
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-16
 
 ## Context
@@ -205,9 +205,9 @@ spend-limited credential.
 
 ## Consequences
 
-This proposes an extension to [ADR-0037](0037-the-anthropic-api-as-a-second-model-provider.md).
-ADR-0042 remains Proposed. Anthropic keeps its fixed host and separate key;
-Foundry keeps its suffix boundary. Invariants 1 through 5 retain their validation,
+This extends [ADR-0037](0037-the-anthropic-api-as-a-second-model-provider.md).
+Anthropic keeps its fixed host and separate key; Foundry keeps its suffix
+boundary. Invariants 1 through 5 retain their validation,
 authorization and Git boundaries. Invariant 6 covers only the analyzer's optional
 endpoint-bound compatible keys under every existing static credential condition.
 Executor and verifier receive no key or new privilege. A settings editor can

@@ -273,7 +273,7 @@ These are recorded, not decided; each links the issue that tracks it, or is an o
 
 ## OpenAI-compatible endpoint boundary
 
-[ADR-0042](adr/0042-openai-compatible-model-endpoints.md) remains Proposed. Each
+[ADR-0042](adr/0042-openai-compatible-model-endpoints.md) is Accepted. Each
 installation declaration owns a complete base URL, inference API, nonempty allowed
 model list and optional key. Settings match the parsed base and API and a model
 name byte for byte; an undeclared alias ends `ModelNotAllowed` before any call.

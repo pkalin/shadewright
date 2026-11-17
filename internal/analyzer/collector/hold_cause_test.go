@@ -950,3 +950,62 @@ func TestRestartCauseNoLongerShown(t *testing.T) {
 		wantOutcomes(t, before, map[string]float64{})
 	})
 }
+
+// TestRetriedReleaseKeepsToItsCause (decided 2026-11-17, fourth, on #828): a hold released for cause A whose
+// delivery finds the channel full is retried after the pod shows an unseen cause B and the event's series has
+// grown from 1 to 3. The retry delivers for A only the occurrence released under A (the count at the release),
+// and the two later ones go back to the hold, for B: they are not committed as handled under A. On the first
+// build the retry emitted A's observation with the count 3 (total 3), so two occurrences skipped B's hold.
+func TestRetriedReleaseKeepsToItsCause(t *testing.T) {
+	book := &causeBook{}
+	d, rs, _ := workload()
+	h := newHarness(t, Config{CauseSeen: book.fn, Buffer: 1}, d, rs, causePod(causePull),
+		consequence("ev-hold", reasonBackOff, appPath, t0))
+	a := h.causeShown()
+	before := holdOutcomeCounts()
+	if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != ConsequenceGrace {
+		t.Fatalf("not held for its cause: %+v", res)
+	}
+	h.c.out <- Observation{Fingerprint: fillerFingerprint}
+	book.see(a)
+	if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != retryAfter {
+		t.Fatalf("requeue after %s, want the delivery retry", res.RequeueAfter)
+	}
+	h.setWaiting(causePullErr)
+	b := h.causeShown()
+	if a == b {
+		t.Fatal("the cause did not change, so the test proves nothing")
+	}
+	ev := &eventsv1.Event{}
+	key := reqFor("ev-hold").NamespacedName
+	if err := h.cl.Get(t.Context(), key, ev); err != nil {
+		t.Fatal(err)
+	}
+	ev.Series = &eventsv1.EventSeries{Count: 3, LastObservedTime: ev.EventTime}
+	h.update(ev)
+	h.drain()
+	h.clock.add(retryAfter)
+	res := h.reconcileEvent("ev-hold")
+	if o := h.one(); o.CauseFingerprint != a || o.Total != 1 || o.Count != 1 {
+		t.Fatalf("emitted cause=%s total=%d count=%d at the retry, want cause A, total 1, count 1",
+			o.CauseFingerprint, o.Total, o.Count)
+	}
+	if res.RequeueAfter != ConsequenceGrace {
+		t.Fatalf("requeue after %s, want the hold of the later occurrences for B", res.RequeueAfter)
+	}
+	if s, ok := h.c.holds.get(key, "ev-ev-hold"); !ok || s.cause != b || s.opened {
+		t.Fatalf("held %+v (%v), want the later occurrences held for B", s, ok)
+	}
+	wantOutcomes(t, before, map[string]float64{holdReleased: 1})
+	// B is seen: the two later occurrences are emitted with B, counted once more.
+	book.see(b)
+	h.reconcileEvent("ev-hold")
+	if o := h.one(); o.CauseFingerprint != b || o.Total != 3 || o.Count != 2 {
+		t.Fatalf("emitted cause=%s total=%d count=%d, want cause B, total 3, count 2",
+			o.CauseFingerprint, o.Total, o.Count)
+	}
+	wantOutcomes(t, before, map[string]float64{holdReleased: 2})
+	if h.c.holds.len() != 0 {
+		t.Fatal("the hold is kept")
+	}
+}

@@ -130,6 +130,10 @@ type consequenceHold struct {
 	failing int
 	// opened is set once the hold decided to emit, so a delivery retried later still emits.
 	opened bool
+	// total is the event's series total at the first delivery of the decision: the occurrences released under
+	// cause. A retried delivery whose pod shows another cause by then delivers only these, and holds the later
+	// ones again for the new cause (decided 2026-11-17, fourth, on #828). Zero until the first delivery.
+	total int64
 }
 
 // shareKey names the share of one namespace: holds first seen with a cause apart from those with none.
@@ -231,6 +235,23 @@ func (h *consequenceHolds) get(key types.NamespacedName, uid types.UID) (consequ
 		return consequenceHold{}, false
 	}
 	return s, ok
+}
+
+// decided returns the hold of the event with this UID when it has decided to emit, and records occurrences as
+// its total (consequenceHold.total) at the first call, the first delivery of the decision.
+func (h *consequenceHolds) decided(key types.NamespacedName, uid types.UID, occurrences int64) (consequenceHold,
+	bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.holds[key]
+	if !ok || s.event != uid || !s.opened {
+		return consequenceHold{}, false
+	}
+	if s.total == 0 {
+		s.total = occurrences
+		h.holds[key] = s
+	}
+	return s, true
 }
 
 // wasOverflow reports whether the event with this UID was emitted at once for want of room and its delivery has

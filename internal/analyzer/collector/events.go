@@ -148,10 +148,12 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// leave handles the event without an observation of its own; a consequence held with a cause is emitted with
 	// it all the same (hold.go, heldCause).
 	heldEmitted := false
+	// shown is the cause fingerprint the event's pod shows at this reconcile, once fromEvent has read it.
+	shown := ""
 	leave := func(why string, commit bool) (ctrl.Result, error) {
 		if o, ok := r.c.heldCause(ctx, key, ev.UID, why); ok && (delta > 0 || mayRepeat) {
 			heldEmitted = true
-			return r.emit(ctx, key, &ev, o, delta, mayRepeat)
+			return r.emit(ctx, key, &ev, o, shown, delta, mayRepeat)
 		}
 		r.c.probes.done(key)
 		r.c.holds.drop(key)
@@ -170,6 +172,7 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	shown = obs.CauseFingerprint
 	switch v {
 	case subjectRetired:
 		// About a pod whose template its workload has retired (#724): handled, counted once.
@@ -211,14 +214,28 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		r.c.series.commit(key, ev.UID, created, n)
 		return ctrl.Result{}, nil
 	}
-	return r.emit(ctx, key, &ev, obs, delta, mayRepeat)
+	return r.emit(ctx, key, &ev, obs, shown, delta, mayRepeat)
 }
 
 // emit delivers obs with the event's count, and once delivered marks the event's occurrences handled and ends
 // its hold. A delivery that found the channel full is tried again after retryAfter.
+//
+// A hold's decision belongs to the cause it was given for (decided 2026-11-17, fourth, on #828): its first
+// delivery records the series total (consequenceHolds.decided), and a retried one whose pod shows another cause
+// (shown, the cause fromEvent read at this reconcile, empty when none or not read) delivers only those
+// occurrences, with the cause of the decision. Once that is delivered, the event is reconciled again at once:
+// the later occurrences are a new consequence, held for the cause shown now.
 func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event, obs Observation,
-	delta int64, mayRepeat bool) (ctrl.Result, error) {
+	shown string, delta int64, mayRepeat bool) (ctrl.Result, error) {
 	n, created := occurrences(ev), ev.CreationTimestamp.Time
+	split := false
+	if s, ok := r.c.holds.decided(key, ev.UID, n); ok {
+		obs.CauseFingerprint = s.cause
+		if shown != "" && shown != s.cause && n > s.total {
+			delta = max(delta-(n-s.total), 0)
+			n, split = s.total, true
+		}
+	}
 	obs.Occurrence, obs.Began = "event:"+string(ev.UID), r.c.notFuture(created)
 	obs.Total, obs.Count, obs.MayRepeat = n, capCount(delta), mayRepeat
 	sent, err := r.c.deliver(ctx, obs)
@@ -231,6 +248,12 @@ func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev
 	r.c.probes.done(key)
 	r.c.holds.done(key)
 	r.c.series.commit(key, ev.UID, created, n)
+	if split {
+		// At most once: the hold is done, so the next pass has no decision to split.
+		logf.FromContext(ctx).V(1).Info("Held the later occurrences of a released consequence for its new cause",
+			"reason", ev.Reason, "released", n)
+		return r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	}
 	return ctrl.Result{}, nil
 }
 

@@ -37,7 +37,7 @@
 | [0033](0033-argo-cd-delivery-and-source-mapping.md) | Argo CD delivery verification and source mapping | Proposed |
 | [0034](0034-declarative-pack-format.md) | A declarative pack format, compiled in first | Proposed |
 | [0035](0035-render-check-in-a-limited-child-process.md) | The render check runs in a child process with operating system limits | Proposed |
-| [0036](0036-the-model-sees-the-scaledobject-of-a-keda-incident.md) | The model sees the ScaledObject of a KEDA incident | Proposed |
+| [0036](0036-the-model-sees-the-scaledobject-of-a-keda-incident.md) | The model sees the ScaledObject of a KEDA incident | Accepted |
 | [0037](0037-the-anthropic-api-as-a-second-model-provider.md) | The Anthropic API as a second model provider and its API key | Accepted |
 | [0038](0038-control-plane-mode-a-hub-that-many-clusters-report-to.md) | Control plane mode: a hub that many clusters report to | Proposed |
 | [0039](0039-consequence-symptoms-attach-to-their-causes-incident.md) | Consequence symptoms attach to their cause's Incident | Accepted, amended |

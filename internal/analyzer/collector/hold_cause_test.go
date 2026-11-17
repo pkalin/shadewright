@@ -1131,3 +1131,80 @@ func TestRetriedReleaseKeepsToItsCause(t *testing.T) {
 		t.Fatal("the hold is kept")
 	}
 }
+
+// noCauseHoldAtRetry opens a hold with no cause on ev-hold, ends it at the grace with the channel full so its
+// delivery is retried, and returns the harness, the book and the key, the channel drained and the retry due.
+func noCauseHoldAtRetry(t *testing.T) (*harness, *causeBook, types.NamespacedName) {
+	t.Helper()
+	book := &causeBook{}
+	d, rs, _ := workload()
+	h := newHarness(t, Config{CauseSeen: book.fn, Buffer: 1}, d, rs, holdPod(reasonBackOff, sampleFailing, 0),
+		consequence("ev-hold", reasonBackOff, appPath, t0))
+	h.reconcileEvent("ev-hold")
+	h.c.out <- Observation{Fingerprint: fillerFingerprint}
+	h.clock.add(ConsequenceGrace)
+	if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != retryAfter {
+		t.Fatalf("requeue after %s, want the delivery retry", res.RequeueAfter)
+	}
+	h.drain()
+	return h, book, reqFor("ev-hold").NamespacedName
+}
+
+// TestNoCauseHoldRetryCarriesTheCauseShownNow (decided 2026-11-17, fourth, on #828: a delivery retry rereads the
+// cause): a hold that ended at the grace with no cause, retried after the pod shows a cause the Incident
+// controller has seen, delivers with that cause, so the controller links the consequence to its cause's
+// Incident instead of sending it to the gate. Before the fix the retry put the hold's empty cause over it.
+func TestNoCauseHoldRetryCarriesTheCauseShownNow(t *testing.T) {
+	h, book, _ := noCauseHoldAtRetry(t)
+	h.setWaiting(causePull)
+	c := h.causeShown()
+	if c == "" {
+		t.Fatal("the pod shows no cause, so the test proves nothing")
+	}
+	book.record(c)
+	h.clock.add(retryAfter)
+	if res := h.reconcileEvent("ev-hold"); res != (ctrl.Result{}) {
+		t.Fatalf("returned %+v", res)
+	}
+	if o := h.one(); o.CauseFingerprint != c || o.Total != 1 || o.Count != 1 {
+		t.Fatalf("emitted cause=%q total=%d count=%d at the retry, want the cause shown now, total 1, count 1",
+			o.CauseFingerprint, o.Total, o.Count)
+	}
+	if h.c.holds.len() != 0 {
+		t.Fatal("the hold is kept")
+	}
+}
+
+// TestNoCauseHoldRetryHoldsLaterOccurrencesForAnUnseenCause: the neighbour of the test above. The pod shows a
+// cause the controller has not seen, and the series grew from 1 to 3 before the retry. The occurrence the hold
+// decided on is delivered, with the cause shown now; the two later ones do not skip the hold: they are held for
+// that cause and emitted with it once it is seen.
+func TestNoCauseHoldRetryHoldsLaterOccurrencesForAnUnseenCause(t *testing.T) {
+	h, book, key := noCauseHoldAtRetry(t)
+	h.setWaiting(causePull)
+	d := h.causeShown()
+	ev := &eventsv1.Event{}
+	if err := h.cl.Get(t.Context(), key, ev); err != nil {
+		t.Fatal(err)
+	}
+	ev.Series = &eventsv1.EventSeries{Count: 3, LastObservedTime: ev.EventTime}
+	h.update(ev)
+	h.clock.add(retryAfter)
+	res := h.reconcileEvent("ev-hold")
+	if o := h.one(); o.CauseFingerprint != d || o.Total != 1 || o.Count != 1 {
+		t.Fatalf("emitted cause=%q total=%d count=%d at the retry, want the cause shown now, total 1, count 1",
+			o.CauseFingerprint, o.Total, o.Count)
+	}
+	if res.RequeueAfter != ConsequenceGrace {
+		t.Fatalf("requeue after %s, want the later occurrences held", res.RequeueAfter)
+	}
+	if s, ok := h.c.holds.get(key, "ev-ev-hold"); !ok || s.cause != d || s.opened {
+		t.Fatalf("held %+v (%v), want the later occurrences held for the cause shown now", s, ok)
+	}
+	book.see(d)
+	h.reconcileEvent("ev-hold")
+	if o := h.one(); o.CauseFingerprint != d || o.Total != 3 || o.Count != 2 {
+		t.Fatalf("emitted cause=%q total=%d count=%d, want the cause, total 3, count 2",
+			o.CauseFingerprint, o.Total, o.Count)
+	}
+}

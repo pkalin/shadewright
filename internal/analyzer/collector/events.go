@@ -223,14 +223,18 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // A hold's decision belongs to the cause it was given for (decided 2026-11-17, fourth, on #828): its first
 // delivery records the series total (consequenceHolds.decided), and a retried one whose pod shows another cause
 // (shown, the cause fromEvent read at this reconcile, empty when none or not read) delivers only those
-// occurrences, with the cause of the decision. Once that is delivered, the event is reconciled again at once:
+// occurrences, with the cause of the decision. A hold that ended with no cause delivers them with the cause
+// shown now: a delivery retry rereads the cause. Once that is delivered, the event is reconciled again at once:
 // the later occurrences are a new consequence, held for the cause shown now.
 func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event, obs Observation,
 	shown string, delta int64, mayRepeat bool) (ctrl.Result, error) {
 	n, created := occurrences(ev), ev.CreationTimestamp.Time
 	split := false
 	if s, ok := r.c.holds.decided(key, ev.UID, n); ok {
-		obs.CauseFingerprint = s.cause
+		if s.cause != "" {
+			// A hold that ended with no cause keeps the cause read now, which the controller may have seen.
+			obs.CauseFingerprint = s.cause
+		}
 		if shown != "" && shown != s.cause && n > s.total {
 			delta = max(delta-(n-s.total), 0)
 			n, split = s.total, true

@@ -4,8 +4,9 @@ facts:
   - fact: OOMKilled from the container status (last state), not from an event reason
     all: ["OOMKilled"]
   - fact: the restart count of the web container
-    # The context builder's status block shows the restart count, so it is scored already.
-    all: ["restart"]
+    # The context builder's status block shows the restart count, so it is scored already. Terms match on word
+    # boundaries (#848), so each form of the word is listed.
+    any: ["restart", "restarts", "restarted", "restarting", "restartCount"]
   - fact: the memory working set from Prometheus (container_memory_working_set_bytes) near the 48Mi limit
     # metrics.yaml records the working set and the limit; the context builder's metrics block shows both, and
     # the pod template line shows the limit too. The value matters, not where it was read: the working set

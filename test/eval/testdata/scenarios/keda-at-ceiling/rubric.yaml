@@ -8,13 +8,14 @@ facts:
     subject: ["ScaledObject", "worker"]
   - fact: the backlog, the current external metric value (about 13 requests per second) against its target (5 per replica)
     # metrics.yaml records the HPA's metric through hpa_metric_current and hpa_metric_target (#480): 6.5 per
-    # replica against an average target of 5. The harness matches substrings only (case ignored), so every
-    # number carries a delimiter that "16.5", "130" and "50" lack: a leading space or "last " before the
-    # number, a trailing space, newline or punctuation after it. The current value counts per replica (6.5) or
+    # replica against an average target of 5. Every number carries a delimiter that "16.5", "130" and "50"
+    # lack: a leading space or "last " before the number, a trailing space, newline or punctuation after it.
+    # These terms predate word-boundary matching (#848) and are kept as they were; a term that ends in a letter
+    # ("13 req") now needs the word to end there too, so its longer forms are listed. The current value counts per replica (6.5) or
     # in all (13); the target must be cited with its value, in words or as the end of its metric line
     # ("} 5"), never by the metric name alone. A value at the very end of the text has no delimiter after it
     # and does not match; the reply's evidence quotes come last, so quote the line with its window or in words.
-    any: ["last 6.5", " 6.5 per", " 6.5,", " 6.5.", " 6.5)", " 6.5\n", " 13 req", " 13 in all", " 13 per", " 13 total", " 13,", " 13.", " 13)", " 13\n"]
+    any: ["last 6.5", " 6.5 per", " 6.5,", " 6.5.", " 6.5)", " 6.5\n", " 13 req", " 13 reqs", " 13 request", " 13 requests", " 13 in all", " 13 per", " 13 total", " 13,", " 13.", " 13)", " 13\n"]
     anyOf:
       - ["hpa_metric_target{", "} 5 "]
       - ["hpa_metric_target{", "} 5\n"]

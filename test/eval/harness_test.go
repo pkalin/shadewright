@@ -573,11 +573,11 @@ func subjectText(inc *remediationv1alpha1.Incident) string {
 }
 
 // scoreDiagnosis scores each fact of the rubric against the diagnosis text, and the subject terms against the
-// Incident's subject (subjectText).
+// Incident's subject (subjectText). Every term is matched by termIn: without case and on word boundaries, so a
+// "256" is not taken from a "256Mi" or a "sha256:" (#848).
 func scoreDiagnosis(r rubric, text, subject string) diagnosisScore {
 	s := diagnosisScore{Pass: true}
-	lower := strings.ToLower(text)
-	lowerSubject := strings.ToLower(subject)
+	in := func(term string) bool { return termIn(term, text) }
 	for _, f := range r.Facts {
 		if f.Unscored != "" {
 			s.Unscored = append(s.Unscored, unscoredFact{Fact: f.Fact, Why: f.Unscored})
@@ -585,26 +585,20 @@ func scoreDiagnosis(r rubric, text, subject string) diagnosisScore {
 		}
 		fs := factScore{Fact: f.Fact, Pass: true}
 		for _, term := range f.All {
-			if !strings.Contains(lower, strings.ToLower(term)) {
+			if !in(term) {
 				fs.Pass, fs.Missing = false, append(fs.Missing, term)
 			}
 		}
-		if len(f.Any) > 0 {
-			found := false
-			for _, term := range f.Any {
-				found = found || strings.Contains(lower, strings.ToLower(term))
-			}
-			if !found {
-				fs.Pass, fs.Missing = false, append(fs.Missing, "one of: "+strings.Join(f.Any, " | "))
-			}
+		if len(f.Any) > 0 && !slices.ContainsFunc(f.Any, in) {
+			fs.Pass, fs.Missing = false, append(fs.Missing, "one of: "+strings.Join(f.Any, " | "))
 		}
 		for _, term := range f.Subject {
-			if !strings.Contains(lowerSubject, strings.ToLower(term)) {
+			if !termIn(term, subject) {
 				fs.Pass, fs.Missing = false, append(fs.Missing, "subject: "+term)
 			}
 		}
 		if len(f.AnyOf) > 0 && !slices.ContainsFunc(f.AnyOf, func(group []string) bool {
-			return !slices.ContainsFunc(group, func(term string) bool { return !strings.Contains(lower, strings.ToLower(term)) })
+			return !slices.ContainsFunc(group, func(term string) bool { return !in(term) })
 		}) {
 			groups := make([]string, 0, len(f.AnyOf))
 			for _, g := range f.AnyOf {

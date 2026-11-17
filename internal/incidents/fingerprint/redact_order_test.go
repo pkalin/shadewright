@@ -52,7 +52,7 @@ func TestSymptomIsRedactedBeforeItIsFlattened(t *testing.T) {
 		if !strings.Contains(redact.String(flat), secret) {
 			t.Fatalf("%q: the flattened text loses %q too, so this input proves nothing about the order", in, secret)
 		}
-		o := Observation{Reason: "BackOff", Note: in}
+		o := Observation{Reason: reasonBackOff, Note: in}
 		for name, got := range map[string]string{"Normalize": Normalize(o), "Symptom": Symptom(o), "Value": Value(in)} {
 			if strings.Contains(got, secret) {
 				t.Errorf("%s(%q) = %q, leaks %q", name, in, got, secret)
@@ -205,5 +205,33 @@ func TestRecordedFingerprintsAreUnchanged(t *testing.T) {
 	}
 	if rows < 100 {
 		t.Fatalf("%s has %d rows: too few to say anything", fingerprintMainTable, rows)
+	}
+}
+
+// The note is redacted as it was read, before sanitize replaces a character (#840, decision of 2026-11-17,
+// second): sanitize turns ">" into ")", so a folded block scalar under a secret key passed when redaction ran
+// after it. The "|" forms were redacted already and show that only the order differs.
+func TestSymptomIsRedactedBeforeAnyCharacterIsReplaced(t *testing.T) {
+	for _, in := range []string{
+		"msg: password: >\n  opensesame\n",
+		"Back-off password: >-   opensesame",
+		"Back-off password: >+2 opensesame",
+		"msg: password: |\n  opensesame\n",
+	} {
+		o := Observation{Reason: reasonBackOff, Note: in}
+		for name, got := range map[string]string{"Normalize": Normalize(o), "Symptom": Symptom(o), "Value": Value(in)} {
+			if strings.Contains(got, "opensesame") {
+				t.Errorf("%s(%q) = %q, leaks the value", name, in, got)
+			}
+		}
+	}
+}
+
+// A marker can still not be forged: the text between the redactor's matches is sanitized, so "<redacted>"
+// and "[REDACTED]" written in the note stay text, while the placeholders of real matches are written whole.
+func TestRawRedactionKeepsPlaceholdersUnforgeable(t *testing.T) {
+	got := Symptom(Observation{Note: "fake <redacted> [REDACTED] *** password: >\n  opensesame\n"})
+	if want := "fake (redacted) (REDACTED) ### password: <redacted> <redacted>"; got != want {
+		t.Errorf("Symptom = %q, want %q", got, want)
 	}
 }

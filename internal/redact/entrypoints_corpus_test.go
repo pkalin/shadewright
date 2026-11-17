@@ -1,0 +1,109 @@
+/*
+Copyright 2026 The Shadewright Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package redact_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/pkalin/shadewright/internal/providers/logs/kube"
+	"github.com/pkalin/shadewright/internal/redact"
+)
+
+// entryPoints are the functions that turn text read from the cluster into text for the model, a status, an
+// Event or a log line. Each rewrites the text (characters replaced, lines joined, values or lines cut), so
+// each must redact the text as it was read first (#840, decision of 2026-11-17, second).
+var entryPoints = map[string]func(in string) []string{
+	"fingerprint.Normalize": func(in string) []string {
+		return []string{fingerprint.Normalize(fingerprint.Observation{Reason: "BackOff", Note: in})}
+	},
+	"fingerprint.Symptom": func(in string) []string {
+		return []string{fingerprint.Symptom(fingerprint.Observation{Reason: "BackOff", Note: in})}
+	},
+	"fingerprint.Value":  func(in string) []string { return []string{fingerprint.Value(in)} },
+	"modules.BoundValue": func(in string) []string { return []string{modules.BoundValue(in)} },
+	"incidentcontext.Value": func(in string) []string {
+		return []string{incidentcontext.Value(redact.String, in)}
+	},
+	// The context builder's summary shows the symptom an Incident stores through Value, then cuts it.
+	"incidentcontext.Value of the symptom": func(in string) []string {
+		return []string{incidentcontext.Value(redact.String, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
+	},
+	// The log excerpt, whole and cut after each of its lines: a cut that drops the key's line must not
+	// leave its block bare.
+	"kube.Excerpt": func(in string) []string {
+		out := []string{}
+		text, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in))
+		out = append(out, text)
+		for i := range len(in) {
+			if in[i] == '\n' && i+1 < len(in) {
+				text, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in)-i-1)
+				out = append(out, text)
+			}
+		}
+		return out
+	},
+}
+
+// Every input of both block corpora goes through every entry point, and no secret survives in any output.
+// A form closed in the redactor and open in a caller fails here. At 6ed30275 (the second build of #840) the
+// folded indicator ">" was replaced before redaction in the fingerprint's normalization, and the log excerpt
+// was cut before it was redacted; see the counts in the pull request of #840.
+func TestBlockCorporaThroughEveryEntryPoint(t *testing.T) {
+	cases := redact.EntryCorpus()
+	for name, f := range entryPoints {
+		t.Run(name, func(t *testing.T) {
+			leaked := 0
+			for _, c := range cases {
+				for _, out := range f(c.In) {
+					if s := leakedSecret(out, c.Secrets); s != "" {
+						leaked++
+						if leaked <= 5 {
+							t.Errorf("%s:\n  in: %q\n out: %q\n leaks %q", c.Name, c.In, out, s)
+						}
+						break
+					}
+				}
+			}
+			if leaked > 0 {
+				t.Errorf("%s: %d of %d inputs leak a secret", name, leaked, len(cases))
+			}
+		})
+	}
+}
+
+// leakedSecret returns the first of secrets found in out, or "".
+func leakedSecret(out string, secrets []string) string {
+	for _, s := range secrets {
+		if strings.Contains(out, s) {
+			return s
+		}
+	}
+	return ""
+}
+
+// defaultRedactor returns a redactor with the built-in rules, as the log source uses without extra patterns.
+func defaultRedactor() *redact.Redactor {
+	r, err := redact.New()
+	if err != nil {
+		panic(err)
+	}
+	return r
+}

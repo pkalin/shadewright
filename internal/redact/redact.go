@@ -31,8 +31,9 @@ limitations under the License.
 // a secret, and at most one short part of up to five characters on each side of it in a path), and every
 // scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"), the block under a
 // secret key and a block scalar indicator wherever the key stands ("msg: password: |", also inside a JSON or
-// logfmt string, with no blank or a Unicode space at the colon, after a "---" line or less indented than the
-// key's line), and the rest of the line after such an indicator when a block was flattened onto it (#840),
+// logfmt string, with no blank or a Unicode space at the colon, after "---" lines or less indented than the
+// key's line), and the rest of the line after such an indicator when a block was flattened onto it, inside a
+// flow collection up to its closing bracket (#840),
 // the value after a secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
 // argument lists and after a flag that took the flag as its value), however it reads or starts with
 // ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
@@ -416,6 +417,32 @@ func (r *Redactor) spans(s string) []span {
 	}
 	return merged
 }
+
+// Replace redacts s with the built-in rules as [String] does, but writes repl(kind, text) for each match in
+// place of its marker and between(text) for the text between matches. A caller that rewrites text before it
+// shows it (replaces characters, joins lines, cuts) uses it to redact the text as it was read first, and to
+// rewrite only what is left.
+func Replace(s string, repl func(kind, text string) string, between func(string) string) string {
+	return defaultRedactor.Replace(s, repl, between)
+}
+
+// Replace is the package's Replace with r's rules.
+func (r *Redactor) Replace(s string, repl func(kind, text string) string, between func(string) string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pos := 0
+	for _, cur := range r.spans(s) {
+		b.WriteString(between(s[pos:cur.start]))
+		b.WriteString(repl(cur.kind, s[cur.start:cur.end]))
+		pos = cur.end
+	}
+	b.WriteString(between(s[pos:]))
+	return b.String()
+}
+
+// Marker returns the marker a redactor writes for n bytes of the given kind, never longer than n. A caller
+// of [Redactor.Replace] that keeps only part of a match writes the marker of that part.
+func Marker(kind string, n int) string { return marker(kind, n) }
 
 // render returns s with each of the sorted, disjoint spans replaced by its marker.
 func render(s string, spans []span) string {
@@ -1026,12 +1053,12 @@ func anyKeySpans(s string, m []int, prevEnd int, add func(start, end int)) int {
 // of what it read: the line end, or the end of a block below the line. For each key, in order:
 //
 //   - A key inside a flow collection ("{", "[" closed on the line) is left to the flow rules, unless it is
-//     inside a quoted string there (a JSON or logfmt string value), which is read like any other text. A
-//     bracket that never closes on the line opens nothing.
+//     inside a quoted string there (a JSON or logfmt string value), which is read like any other text, or
+//     text follows its indicator (flowKey). A bracket that never closes on the line opens nothing.
 //   - The indicator must be followed by a blank or the end of the value: the line end, or the end of the
 //     quoted string the key stands in (where "\n", "\t" and "\r" count as blanks).
 //   - The block below: the lines indented deeper than the key (its own column when it is first on its line,
-//     otherwise the column of the line's text), after one "---" or "..." line if there is one; with none, the
+//     otherwise the column of the line's text), after any "---" or "..." lines at column 0; with none, the
 //     lines from the next one that is indented less than that column but not at column 0, if any. Its end is
 //     known, so only it goes. With no block, the indicator alone goes, as the key-value rules have it.
 //   - Text after the indicator, other than a comment over a block below: a block flattened onto the line.
@@ -1090,7 +1117,11 @@ func (r *anyKeyReader) key(km []int) {
 	}
 	strEnd := r.ctx.stringEnd(keyAt)
 	inStr := strEnd >= 0
-	if !inStr && r.ctx.inFlow(keyAt) || keepReference(s, km) || sasRefused(s, km, true) {
+	if !inStr && r.ctx.inFlow(keyAt) {
+		r.flowKey(km)
+		return
+	}
+	if keepReference(s, km) || sasRefused(s, km, true) {
 		return
 	}
 	valEnd := le
@@ -1127,6 +1158,23 @@ func (r *anyKeyReader) key(km []int) {
 			r.end = max(r.end, anyKeyNested(s, le, bEnd, r.add))
 		}
 	}
+}
+
+// flowKey reads a key inside a flow collection that closes on the line. Such a key is left to the flow rules,
+// except when its indicator is followed by text ("[password: | x]"): no flow value starts with "|" or ">", so
+// that is a block flattened onto the line, and the text up to the bracket that closes the innermost
+// collection goes, as rest has it. Nothing after that bracket is read for this key.
+func (r *anyKeyReader) flowKey(km []int) {
+	end := r.ctx.flowClose()
+	if end < 0 || keepReference(r.s, km) || sasRefused(r.s, km, true) {
+		return
+	}
+	after, ok := afterIndicator(r.s, km[5], end, false)
+	if !ok || after >= end {
+		return
+	}
+	r.cursor = end
+	r.rest(after, end, bareShortColon(r.s, km))
 }
 
 // rest redacts the text from after to valEnd that follows a block indicator: a block flattened onto the
@@ -1212,10 +1260,15 @@ func blankAt(s string, i, end int, inStr bool) int {
 // describes it: the start of its first line's text and the end of its last line, or -1, -1.
 func blockBelow(s string, le, keyCol int) (int, int) {
 	pos := le
-	if l, next, ok := nextBlockLine(s, pos, -1, blockScalar); ok {
-		if t := strings.TrimRight(s[l.text:l.end], " \t"); (t == "---" || t == "...") && l.indent() == 0 {
-			pos = next
+	for {
+		l, next, ok := nextBlockLine(s, pos, -1, blockScalar)
+		if !ok {
+			break
 		}
+		if t := strings.TrimRight(s[l.text:l.end], " \t"); (t != "---" && t != "...") || l.indent() != 0 {
+			break
+		}
+		pos = next
 	}
 	if start, end := indentedLines(s, pos, keyCol); start >= 0 {
 		return start, end
@@ -1232,10 +1285,12 @@ func blockBelow(s string, le, keyCol int) (int, int) {
 type lineContext struct {
 	// strs are the quoted strings, as the offsets of their opening and closing quotes, in order.
 	strs [][2]int
-	// flows are the offsets of the brackets of the flow collections that close on the line: +1 at an
-	// opening bracket, -1 at its closing one, in order.
-	flows         [][2]int
-	si, fi, depth int
+	// flows are the brackets of the flow collections that close on the line, in order: the offset, +1 at an
+	// opening bracket and -1 at its closing one, and the offset of the other bracket of the pair.
+	flows  [][3]int
+	si, fi int
+	// open holds the offsets of the closing brackets of the collections inFlow is inside, innermost last.
+	open []int
 }
 
 // newLineContext reads the line s[ls:le]. A double quote opens a string that runs to the next double quote
@@ -1269,12 +1324,12 @@ func newLineContext(s string, ls, le int) *lineContext {
 		case '}', ']':
 			if n := len(open); n > 0 && s[open[n-1]] == c-2 {
 				// '{' and '[' are two below '}' and ']'.
-				ctx.flows = append(ctx.flows, [2]int{open[n-1], 1}, [2]int{i, -1})
+				ctx.flows = append(ctx.flows, [3]int{open[n-1], 1, i}, [3]int{i, -1, open[n-1]})
 				open = open[:n-1]
 			}
 		}
 	}
-	slices.SortFunc(ctx.flows, func(a, b [2]int) int { return a[0] - b[0] })
+	slices.SortFunc(ctx.flows, func(a, b [3]int) int { return a[0] - b[0] })
 	return ctx
 }
 
@@ -1310,10 +1365,23 @@ func (c *lineContext) stringEnd(pos int) int {
 // in increasing order.
 func (c *lineContext) inFlow(pos int) bool {
 	for c.fi < len(c.flows) && c.flows[c.fi][0] < pos {
-		c.depth += c.flows[c.fi][1]
+		if f := c.flows[c.fi]; f[1] > 0 {
+			c.open = append(c.open, f[2])
+		} else if n := len(c.open); n > 0 {
+			c.open = c.open[:n-1]
+		}
 		c.fi++
 	}
-	return c.depth > 0
+	return len(c.open) > 0
+}
+
+// flowClose returns the offset of the bracket that closes the innermost flow collection the last position
+// given to inFlow is inside, or -1.
+func (c *lineContext) flowClose() int {
+	if n := len(c.open); n > 0 {
+		return c.open[n-1]
+	}
+	return -1
 }
 
 // wordsLookLikeSecret reports whether the text of a line, or any blank-separated word of it, looks like a

@@ -358,7 +358,16 @@ the pod Ready now, no restart, no `OOMKilled`; [#726](https://github.com/pkalin/
 `replaced-pod` (a healthy current template and one terminating pod of the previous ReplicaSet that still reports
 `OOMKilled`; [#724](https://github.com/pkalin/shadewright/issues/724)) come from lab runs where the model proposed a
 memory increase the evidence did not support. Both expect a refusal (`NoProposal` or `MissingData`), and a memory
-proposal of any value fails the case. The fixture of `replaced-pod` carries the pod's controller owner, its
+proposal of any value fails the case. The `startup-probe` fact that memory is ruled out ("no container was
+OOMKilled and nothing points at memory") is scored by a list of phrases. In the runs of 2026-11-14 and 2026-11-17
+five replies refused as expected and stated the fact in words the list did not hold ("not a memory issue", "not
+memory or scaling", "nothing points to memory", "memory limit is not implicated", "no evidence that the
+pod-template memory limit ... caused this failure"), so they failed on wording alone. Since
+[#843](https://github.com/pkalin/shadewright/issues/843) the list holds exactly those phrasings, each with a comment
+naming the run it comes from. A reply that says nothing about memory still fails the fact, and none of the added
+phrases matches a reply that blames memory ("it is a memory issue", "points to memory"); `TestStartupProbeMemoryFact`
+checks both. The context is unchanged. The change alters the hash of the scenario's `rubric.yaml`, so the manifest
+digest's `rubric.files` changes and results recorded before it no longer match. The fixture of `replaced-pod` carries the pod's controller owner, its
 `pod-template-hash` and its deletion timestamp, but the context builder shows only the owner (as "controlled by
 ReplicaSet ...") next to the Deployment's ReplicaSets with their revision and desired replicas. It leaves out the
 deletion timestamp and the hash and does not mark which ReplicaSet is current, so the model must infer it. The

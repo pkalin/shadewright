@@ -57,11 +57,10 @@ type analysisFlags struct {
 	endpointSuffixes             string
 	// anthropicKeyFile is the path of the Anthropic API key file (ADR-0037); empty refuses every Anthropic
 	// deployment.
-	anthropicKeyFile                                             string
-	disableFoundry                                               bool
-	compatibleKeyFile, compatibleKeyHost, compatibleServiceHosts string
-	compatibleSuffixes                                           string
-	actionPolicies                                               string
+	anthropicKeyFile    string
+	disableFoundry      bool
+	compatibleEndpoints string
+	actionPolicies      string
 	// storeAccount and storeContainer name the Blob Storage container of the analysis records (ADR-0015).
 	storeAccount, storeContainer string
 	// claimTimeout is the Incident trigger's AnalysisTimeout: how long a claim lasts (ADR-0025 decision 1).
@@ -79,7 +78,7 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 			"such as gpt-5.4-mini-2026-03-17. A reply that names another model is refused (ADR-0023). Empty (the "+
 			"default) starts no analysis: no model is called, no Azure token is requested, and the analyzer behaves "+
 			"as without a model. Set, it needs --model-endpoint-suffixes (Foundry), "+
-			"--openai-compatible-endpoint-suffixes (OpenAICompatible), "+
+			"--openai-compatible-endpoints (OpenAICompatible), "+
 			"--anthropic-api-key-file "+
 			"(Anthropic) or both. With endpoint suffixes and Foundry enabled, it needs its Azure workload identity "+
 			"(AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE) or it refuses to start.")
@@ -93,7 +92,8 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 			"for one resource. There is no default, so no model host is allowed unless named. An endpoint outside "+
 			"them, or on a port other than 443, is refused before any token is requested (EndpointNotAllowed). "+
 			"Empty: no Azure token source is built and every Foundry deployment is refused (ProviderNotConfigured), "+
-			"for an analyzer using other providers, configure their own allow-list or key.")
+			"for an analyzer using other providers, configure their endpoint declarations or key. "+
+			"The Foundry list never allows a compatible endpoint.")
 	fs.StringVar(&f.anthropicKeyFile, "anthropic-api-key-file", "",
 		"The path of a file that holds the Anthropic API key, mounted read-only from a Secret or a CSI volume "+
 			"the cluster operator provides (ADR-0037). It is read at every call, so a rotated key needs no restart; "+
@@ -103,18 +103,11 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 			"at start. Used only with --triage-model.")
 	fs.BoolVar(&f.disableFoundry, "disable-foundry", false,
 		"Disable the Foundry provider and its Entra token source. "+
-			"Set for a compatible-only install; endpoint suffixes still apply.")
-	fs.StringVar(&f.compatibleSuffixes, "openai-compatible-endpoint-suffixes", "",
-		"Comma-separated endpoint host suffixes for OpenAICompatible only, separate from the Foundry list. No default.")
-	fs.StringVar(&f.compatibleKeyFile, "openai-compatible-api-key-file", "",
-		"Optional key file, mounted read-only and read per attempt. "+
-			"Requires --openai-compatible-api-key-host. Without it no Authorization header is sent.")
-	fs.StringVar(&f.compatibleKeyHost, "openai-compatible-api-key-host", "",
-		"Exact endpoint DNS host allowed to receive the compatible key. "+
-			"Set together with its key file, outside RemediationSettings.")
-	fs.StringVar(&f.compatibleServiceHosts, "openai-compatible-service-hosts", "",
-		"Comma-separated exact service.namespace.svc or service.namespace.svc.cluster.local "+
-			"names allowed private unicast addresses. HTTPS and endpoint suffixes still apply.")
+			"Set for a compatible-only install. The Foundry list never allows a compatible endpoint.")
+	fs.StringVar(&f.compatibleEndpoints, "openai-compatible-endpoints", "",
+		"JSON array of exact HTTPS base URL declarations: url, inferenceAPI, optional keyFile and optional service "+
+			"(namespace, podSelector, port). Each key belongs only to its declared base. "+
+			"No compatible endpoint is allowed by the Foundry suffix list.")
 	fs.StringVar(&f.actionPolicies, "action-policies", "",
 		"Comma-separated ActionType=policy pairs: the RemediationPolicy a proposed RemediationRequest of each "+
 			"action type refers to, such as SetContainerMemoryLimit=memory-limits. An action type without one is "+
@@ -226,15 +219,15 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if err != nil {
 		return nil, fmt.Errorf("invalid --escalation-model: %w", err)
 	}
-	if f.endpointSuffixes == "" && f.compatibleSuffixes == "" && f.anthropicKeyFile == "" {
+	if f.endpointSuffixes == "" && f.compatibleEndpoints == "" && f.anthropicKeyFile == "" {
 		return nil, errors.New("--triage-model needs --model-endpoint-suffixes (a Foundry deployment) or " +
-			"--openai-compatible-endpoint-suffixes (OpenAICompatible) or --anthropic-api-key-file (Anthropic): " +
+			"--openai-compatible-endpoints (OpenAICompatible) or --anthropic-api-key-file (Anthropic): " +
 			"no model endpoint host is allowed by default")
 	}
 	if k := f.anthropicKeyFile; k != "" && (!filepath.IsAbs(k) || filepath.Clean(k) != k) {
 		return nil, errors.New("--anthropic-api-key-file must be an absolute, clean path")
 	}
-	services, err := f.compatibleServices()
+	endpoints, err := f.compatibleDeclarations()
 	if err != nil {
 		return nil, err
 	}
@@ -256,17 +249,9 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if escalation != "" {
 		expected[analysis.RoleEscalation] = escalation
 	}
-	var compatibleSuffixes []string
-	if f.compatibleSuffixes != "" {
-		compatibleSuffixes, err = models.ParseEndpointSuffixes(f.compatibleSuffixes)
-		if err != nil {
-			return nil, fmt.Errorf("invalid --openai-compatible-endpoint-suffixes: %w", err)
-		}
-	}
 	factory, err := models.NewModelFactory(models.ModelsConfig{
-		Suffixes: suffixes, CompatibleSuffixes: compatibleSuffixes, Tokens: tokens,
-		DisableFoundry: f.disableFoundry, CompatibleKeyFile: f.compatibleKeyFile, CompatibleKeyHost: f.compatibleKeyHost,
-		CompatibleServiceHosts: services, AnthropicKeyFile: f.anthropicKeyFile,
+		Suffixes: suffixes, CompatibleEndpoints: endpoints, Tokens: tokens,
+		DisableFoundry: f.disableFoundry, AnthropicKeyFile: f.anthropicKeyFile,
 		Expected: expected, Log: d.log.WithName("models")})
 	if err != nil {
 		return nil, err
@@ -378,8 +363,7 @@ func setupAnalysis(mgr ctrl.Manager, inc *incidents.Controller, f analysisFlags,
 }
 
 func (f analysisFlags) compatibleFlagsSet() bool {
-	return f.compatibleSuffixes != "" || f.compatibleKeyFile != "" || f.compatibleKeyHost != "" ||
-		f.compatibleServiceHosts != "" || f.disableFoundry
+	return f.compatibleEndpoints != "" || f.disableFoundry
 }
 
 func (f analysisFlags) modelCredentials(
@@ -401,12 +385,25 @@ func (f analysisFlags) modelCredentials(
 	return suffixes, tokens, nil
 }
 
-func (f analysisFlags) compatibleServices() ([]string, error) {
-	if k := f.compatibleKeyFile; k != "" && (!filepath.IsAbs(k) || filepath.Clean(k) != k) {
-		return nil, errors.New("--openai-compatible-api-key-file must be an absolute, clean path")
+// compatibleDeclarations checks every installation base before the token source is built.
+func (f analysisFlags) compatibleDeclarations() ([]openaicompatible.Endpoint, error) {
+	var endpoints []openaicompatible.Endpoint
+	var err error
+	if f.compatibleEndpoints != "" {
+		endpoints, err = openaicompatible.ParseEndpoints(f.compatibleEndpoints)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if (f.compatibleKeyFile == "") != (f.compatibleKeyHost == "") {
-		return nil, errors.New("--openai-compatible-api-key-file and --openai-compatible-api-key-host must be set together")
+	var suffixes []string
+	if f.endpointSuffixes != "" {
+		suffixes, err = models.ParseEndpointSuffixes(f.endpointSuffixes)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return openaicompatible.ParseServiceHosts(f.compatibleServiceHosts)
+	if err := openaicompatible.ValidateEndpoints(endpoints, suffixes); err != nil {
+		return nil, err
+	}
+	return endpoints, nil
 }

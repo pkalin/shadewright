@@ -12,6 +12,18 @@ spec:
   - ports:
     - port: 443
       protocol: TCP
+    {{- $ports := dict "443" true "6443" true }}
+    {{- range .Values.analyzer.analysis.openAICompatible.endpoints }}
+    {{- if not .service }}
+    {{- $authority := (urlParse .url).host }}
+    {{- $port := last (splitList ":" $authority) }}
+    {{- if and (contains ":" $authority) (not (hasKey $ports $port)) }}
+    {{- $_ := set $ports $port true }}
+    - port: {{ int $port }}
+      protocol: TCP
+    {{- end }}
+    {{- end }}
+    {{- end }}
     - port: 6443
       protocol: TCP
     to:
@@ -54,7 +66,8 @@ spec:
           {{- toYaml .podLabels | nindent 10 }}
   {{- end }}
   {{- end }}
-  {{- range .Values.analyzer.analysis.openAICompatible.serviceHosts }}
+  {{- range .Values.analyzer.analysis.openAICompatible.endpoints }}
+  {{- with .service }}
   - ports:
     - port: {{ .port }}
       protocol: TCP
@@ -65,6 +78,7 @@ spec:
       podSelector:
         matchLabels:
           {{- toYaml .podSelector | nindent 10 }}
+  {{- end }}
   {{- end }}
   podSelector:
     matchLabels:

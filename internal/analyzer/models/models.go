@@ -18,8 +18,8 @@ limitations under the License.
 // model endpoint host suffixes, the model names the replies must give, the policy per action type, and the
 // factory that builds the provider of a deployment of RemediationSettings by its provider field: Microsoft
 // Foundry only after its endpoint passed the allow-list, the Anthropic API only at its fixed host and with the
-// analyzer's key file (ADR-0037), and OpenAICompatible after its own allow-list with its own optional
-// host-bound key (ADR-0042). It is apart from package analyzer so that the collector's tests, which import
+// analyzer's key file (ADR-0037), and OpenAICompatible at a declared exact base with its own optional
+// endpoint-bound key (ADR-0042). It is apart from package analyzer so that the collector's tests, which import
 // that package, do not import the analysis.
 package models
 
@@ -147,14 +147,8 @@ const anthropicHost = "api.anthropic.com"
 type ModelsConfig struct {
 	// DisableFoundry prevents constructing or using an Entra token source, for compatible-only installs.
 	DisableFoundry bool
-	// CompatibleKeyFile is the separate optional OpenAI-compatible key, read at each attempt.
-	CompatibleKeyFile string
-	// CompatibleKeyHost binds that key to one exact DNS host outside settings.
-	CompatibleKeyHost string
-	// CompatibleServiceHosts permits private unicast addresses for these exact cluster Service names.
-	CompatibleServiceHosts []string
-	// CompatibleSuffixes is the independent allow-list for OpenAICompatible deployments.
-	CompatibleSuffixes []string
+	// CompatibleEndpoints are exact install-time bases with their own API and optional key.
+	CompatibleEndpoints []openaicompatible.Endpoint
 	// Suffixes is the allow-list of endpoint host suffixes for Foundry deployments only.
 	// Set together with Tokens unless DisableFoundry is true. Empty refuses every Foundry deployment
 	// (analysis.ErrProviderNotConfigured): an analyzer that only calls the Anthropic API needs no Azure
@@ -189,9 +183,8 @@ type ModelsConfig struct {
 //     deployment is not the model its role expects (analysis.ErrDeploymentNotExpected); the allow-list is not
 //     consulted. It then builds an Anthropic provider for that model that reads the key file at every attempt
 //     and logs every failed call.
-//   - OpenAICompatible: it checks its independent endpoint allow-list and builds the shared-wire adapter with no
-//     token source, an optional key bound to one exact install-time host, and the explicitly named Service
-//     hosts allowed private addresses. Azure model hosts and the Anthropic API are refused. No key means
+//   - OpenAICompatible: it matches an exact installation endpoint and builds the shared-wire adapter with no
+//     token source, an optional key bound to that exact base, and the declared Service endpoints allowed private addresses. Azure model hosts and the Anthropic API are refused. No key means
 //     no Authorization header; API versions are refused and the API prefix is part of the endpoint.
 //   - Any other provider is refused (analysis.ErrProviderNotConfigured).
 func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
@@ -199,15 +192,14 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	if foundryOn != (cfg.Tokens != nil) {
 		return nil, errors.New("the model factory needs an endpoint allow-list and a token source together, or neither")
 	}
-	if !foundryOn && len(cfg.CompatibleSuffixes) == 0 && cfg.AnthropicKeyFile == "" {
-		return nil, errors.New("the model factory needs a Foundry allow-list and token source, a compatible allow-list, or an Anthropic key file")
+	if !foundryOn && len(cfg.CompatibleEndpoints) == 0 && cfg.AnthropicKeyFile == "" {
+		return nil, errors.New("the model factory needs a Foundry allow-list and token source, declared compatible endpoints, or an Anthropic key file")
 	}
-	if (cfg.CompatibleKeyFile == "") != (cfg.CompatibleKeyHost == "") {
-		return nil, errors.New("the compatible key file and its exact host must be set together")
-	}
-	if _, err := openaicompatible.ParseServiceHosts(strings.Join(cfg.CompatibleServiceHosts, ",")); err != nil {
+	if err := openaicompatible.ValidateEndpoints(cfg.CompatibleEndpoints, cfg.Suffixes); err != nil {
 		return nil, err
 	}
+	// Freeze installation data: settings and caller mutations cannot move a credential.
+	cfg.CompatibleEndpoints = slices.Clone(cfg.CompatibleEndpoints)
 	refused := func(role analysis.Role, d remediationv1alpha1.ModelDeployment, err error) error {
 		cfg.Log.Info("Refused a model deployment from RemediationSettings", "role", role,
 			"provider", d.ProviderName(), "deployment", d.Deployment, "reason", err.Error())
@@ -234,22 +226,20 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			}
 			return p, nil
 		case remediationv1alpha1.ModelProviderOpenAICompatible:
-			if len(cfg.CompatibleSuffixes) == 0 {
-				return nil, refused(role, d, fmt.Errorf("the analyzer runs without --openai-compatible-endpoint-suffixes: %w", analysis.ErrProviderNotConfigured))
+			if len(cfg.CompatibleEndpoints) == 0 {
+				return nil, refused(role, d, fmt.Errorf("the analyzer declares no --openai-compatible-endpoints: %w", analysis.ErrEndpointNotAllowed))
 			}
-			if CheckEndpoint(d.Endpoint, cfg.Suffixes) == nil {
-				return nil, refused(role, d, fmt.Errorf("model endpoint belongs to the Foundry allow-list: %w", analysis.ErrEndpointNotAllowed))
-			}
-			if err := CheckEndpoint(d.Endpoint, cfg.CompatibleSuffixes); err != nil {
-				return nil, refused(role, d, err)
+			decl, ok := openaicompatible.MatchEndpoint(cfg.CompatibleEndpoints, d.Endpoint, openaicompatible.API(d.InferenceAPI))
+			if !ok {
+				return nil, refused(role, d, fmt.Errorf("model endpoint or API is not declared at installation: %w", analysis.ErrEndpointNotAllowed))
 			}
 			if d.APIVersion != "" {
 				return nil, refused(role, d, fmt.Errorf("OpenAICompatible does not allow apiVersion: %w", providers.ErrInvalidConfig))
 			}
 			log := cfg.Log.WithValues("role", role, "provider", d.ProviderName())
 			p, err := openaicompatible.New(openaicompatible.Config{
-				Endpoint: d.Endpoint, Deployment: d.Deployment, API: openaicompatible.API(d.InferenceAPI),
-				KeyFile: cfg.CompatibleKeyFile, KeyHost: cfg.CompatibleKeyHost, ServiceHosts: cfg.CompatibleServiceHosts,
+				Endpoint: decl.URL, Deployment: d.Deployment, API: decl.API,
+				KeyFile: decl.KeyFile, Service: decl.Service,
 				OnCall: func(r openaicompatible.CallReport) {
 					if r.Err != nil {
 						log.Info("A call to an OpenAI-compatible endpoint failed", "attempts", r.Attempts,
@@ -301,6 +291,15 @@ func (cfg ModelsConfig) separateProviderHost(endpoint string) bool {
 		return false
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	return host == anthropicHost || host == "api.openai.com" || host == cfg.CompatibleKeyHost ||
-		slices.Contains(cfg.CompatibleServiceHosts, host) || CheckEndpoint(endpoint, cfg.CompatibleSuffixes) == nil
+	if host == anthropicHost || host == "api.openai.com" {
+		return true
+	}
+	for _, e := range cfg.CompatibleEndpoints {
+		base, _ := openaicompatible.CanonicalBase(e.URL)
+		u, _ := url.Parse(base)
+		if u != nil && u.Hostname() == host {
+			return true
+		}
+	}
+	return false
 }

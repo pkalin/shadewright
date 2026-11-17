@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -73,7 +74,7 @@ func TestWireAndCredentialRotation(t *testing.T) {
 		t.Run(string(api), func(t *testing.T) {
 			path := keyFile(t, secretKey)
 			calls := 0
-			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, API: api, KeyFile: path, KeyHost: compatibleHost}, testHooks{transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, API: api, KeyFile: path}, testHooks{transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 				calls++
 				wantKey := secretKey
 				if calls > 1 {
@@ -124,20 +125,17 @@ func TestKeylessSendsNoAuthorization(t *testing.T) {
 
 func TestConfigurationRefusals(t *testing.T) {
 	for _, cfg := range []Config{
-		{Endpoint: endpoint, Deployment: "m", KeyFile: "/key"},
-		{Endpoint: endpoint, Deployment: "m", KeyHost: compatibleHost},
-		{Endpoint: endpoint, Deployment: "m", KeyFile: "/key", KeyHost: "other.example.com"},
-		{Endpoint: endpoint, Deployment: "m", KeyFile: "relative", KeyHost: compatibleHost},
+
+		{Endpoint: endpoint, Deployment: "m", KeyFile: "relative"},
 		{Endpoint: "http://model.demo.svc/v1", Deployment: "m"},
 		{Endpoint: "https://127.0.0.1/v1", Deployment: "m"},
-		{Endpoint: "https://api.openai.com:8443/v1", Deployment: "m"},
 		{Endpoint: "https://api.openai.com/../v1", Deployment: "m"},
 		{Endpoint: "https://api.anthropic.com", Deployment: "m"},
 		{Endpoint: "https://r.openai.azure.com", Deployment: "m"},
 		{Endpoint: "https://r.cognitiveservices.azure.com", Deployment: "m"},
 		{Endpoint: "https://r.services.ai.azure.com", Deployment: "m"},
 		{Endpoint: endpoint, Deployment: "m", API: "Other"},
-		{Endpoint: endpoint, Deployment: "m", ServiceHosts: []string{"*.svc.cluster.local"}},
+		{Endpoint: endpoint, Deployment: "m", Service: &Service{Namespace: "demo", Port: 8443}},
 	} {
 		if _, err := New(cfg); !providers.IsInvalidConfig(err) {
 			t.Errorf("configuration accepted: %+v, %v", cfg, err)
@@ -183,7 +181,7 @@ func TestErrorsNeverExposeTheKey(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var report CallReport
 			calls := 0
-			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: keyFile(t, secretKey), KeyHost: compatibleHost, MaxAttempts: 1, Timeout: time.Second, AttemptTimeout: time.Second, MaxResponseBytes: 1024, OnCall: func(r CallReport) { report = r }}, testHooks{transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: keyFile(t, secretKey), MaxAttempts: 1, Timeout: time.Second, AttemptTimeout: time.Second, MaxResponseBytes: 1024, OnCall: func(r CallReport) { report = r }}, testHooks{transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 				calls++
 				if r.Context().Err() != nil {
 					return nil, r.Context().Err()
@@ -223,7 +221,7 @@ func TestErrorsNeverExposeTheKey(t *testing.T) {
 
 func TestKeyFileErrorsAndCancellation(t *testing.T) {
 	for _, key := range []string{"", " ", "bad\nkey", strings.Repeat("k", 513), strings.Repeat("k", 4097)} {
-		p, err := New(Config{Endpoint: endpoint, Deployment: "m", KeyFile: keyFile(t, key), KeyHost: compatibleHost, MaxAttempts: 1})
+		p, err := New(Config{Endpoint: endpoint, Deployment: "m", KeyFile: keyFile(t, key), MaxAttempts: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -232,7 +230,7 @@ func TestKeyFileErrorsAndCancellation(t *testing.T) {
 			t.Fatalf("credential error %v", err)
 		}
 	}
-	p, err := New(Config{Endpoint: endpoint, Deployment: "m", KeyFile: "/does-not-exist", KeyHost: compatibleHost, MaxAttempts: 1})
+	p, err := New(Config{Endpoint: endpoint, Deployment: "m", KeyFile: "/does-not-exist", MaxAttempts: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +265,7 @@ func TestMissingUsageFailsClosed(t *testing.T) {
 
 func TestServiceAddressBoundary(t *testing.T) {
 	for _, host := range []string{"model.demo.svc", "model.demo.svc.cluster.local"} {
-		p, err := New(Config{Endpoint: "https://" + host + "/v1", Deployment: "m", ServiceHosts: []string{host}})
+		p, err := New(Config{Endpoint: "https://" + host + "/v1", Deployment: "m", Service: &Service{Namespace: "demo", PodSelector: map[string]string{"app": "model"}, Port: 8443}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +293,7 @@ func TestServiceAddressBoundary(t *testing.T) {
 func TestRetryRereadsKeyAndKeepsBounds(t *testing.T) {
 	path := keyFile(t, secretKey)
 	calls := 0
-	p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: path, KeyHost: compatibleHost, MaxAttempts: 2}, testHooks{
+	p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: path, MaxAttempts: 2}, testHooks{
 		sleep: func(context.Context, time.Duration) error { return os.WriteFile(path, []byte("rotated"), 0o600) },
 		transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 			calls++
@@ -378,7 +376,7 @@ func TestSplitAndNestedCredentialEchoIsRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 			p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, API: tc.api,
-				KeyFile: keyFile(t, secretKey), KeyHost: compatibleHost}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
+				KeyFile: keyFile(t, secretKey)}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
 				return response(200, "application/json", string(data)), nil
 			})})
 			if err != nil {
@@ -537,6 +535,41 @@ func TestReportedUsageBoundary(t *testing.T) {
 			if n > ceiling && (!providers.IsMalformedOutput(err) || !c.UsageUnknown) {
 				t.Errorf("usage above ceiling accepted: %+v %v", c, err)
 			}
+		}
+	}
+}
+
+func TestKeyEchoAcrossKeysAndNumbers(t *testing.T) {
+	const key = "sk-ABCDEF123456XYZ"
+	for _, arguments := range []string{`{"123456XYZ":1}`, `{"a":123456,"b":"XYZ"}`} {
+		data := `{"model":"m","choices":[{"message":{"content":"sk-ABCDEF","tool_calls":[{"function":{"arguments":` + strconv.Quote(arguments) + `}}]}}]}`
+		p, err := newProvider(Config{Endpoint: endpoint, Deployment: "m", KeyFile: keyFile(t, key)}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) { return response(200, "application/json", data), nil })})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _, _, err := p.once(t.Context(), []byte(`{}`))
+		if !errors.Is(err, providers.ErrMalformedOutput) || len(body) != 0 {
+			t.Fatalf("credential-bearing body escaped: %v", err)
+		}
+	}
+}
+func TestBilledFailedUsageCeilingBoundary(t *testing.T) {
+	req := request()
+	ceiling := providers.CompatibleUsageCeiling(providers.EstimateInputTokens(req), int64(req.MaxOutputTokens))
+	for _, n := range []int64{ceiling, ceiling + 1} {
+		p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, MaxAttempts: 1}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
+			body := fmt.Sprintf(`{"usage":{"prompt_tokens":%d,"completion_tokens":0}}`, n)
+			return response(200, "text/plain", body), nil
+		})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := p.Complete(t.Context(), req)
+		if !errors.Is(err, providers.ErrMalformedOutput) || c.UsageUnknown != (n > ceiling) {
+			t.Fatalf("boundary %d: %+v %v", n, c, err)
+		}
+		if n > ceiling && c.Usage.InputTokens != 0 {
+			t.Fatal("oversized billed failure retained usage")
 		}
 	}
 }

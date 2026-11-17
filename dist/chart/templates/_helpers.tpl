@@ -174,7 +174,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file disable-foundry openai-compatible-endpoint-suffixes openai-compatible-api-key-file openai-compatible-api-key-host openai-compatible-service-hosts analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file disable-foundry openai-compatible-endpoints analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
 {{- end }}
 
 {{/*
@@ -215,68 +215,48 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 created once and never changed by an upgrade, so the values cannot tell which deployments the cluster holds. The
 analyzer is the gate for them: without --model-endpoint-suffixes it builds no token source and refuses every
 Foundry deployment (#814). */ -}}
-{{- if and $a.triageModel (not $a.endpointSuffixes) (not (($a.openAICompatible | default dict).endpointSuffixes)) (not (or $key.secretName $key.volume)) -}}
-{{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes (Foundry deployments: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com) or analyzer.analysis.openAICompatible.endpointSuffixes (OpenAICompatible deployments) or analyzer.analysis.anthropic.apiKey (Anthropic deployments)" -}}
+{{- if and $a.triageModel (not $a.endpointSuffixes) (not (($a.openAICompatible | default dict).endpoints)) (not (or $key.secretName $key.volume)) -}}
+{{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes (Foundry deployments: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com) or analyzer.analysis.openAICompatible.endpoints (OpenAICompatible deployments) or analyzer.analysis.anthropic.apiKey (Anthropic deployments)" -}}
 {{- end -}}
 {{- if and $a.triageModel $a.endpointSuffixes (not $a.disableFoundry) (not $c.identity.azure.clientId) -}}
 {{- fail "analyzer.analysis.endpointSuffixes needs analyzer.identity.azure.clientId: with a triage model and suffixes the analyzer builds an Azure token source, which needs the analyzer's workload identity" -}}
 {{- end -}}
-{{- $compatibleKey := (($a.openAICompatible | default dict).apiKey | default dict) -}}
-{{- $compatibleSource := or $compatibleKey.secretName $compatibleKey.volume -}}
-{{- if ne (not (not $compatibleSource)) (not (not $compatibleKey.host)) -}}
-{{- fail "analyzer.analysis.openAICompatible.apiKey.host and a key source must be set together" -}}
-{{- end -}}
-{{- if and $compatibleKey.secretName $compatibleKey.volume -}}
-{{- fail "analyzer.analysis.openAICompatible.apiKey sets both secretName and volume" -}}
-{{- end -}}
 {{- $compatible := $a.openAICompatible | default dict -}}
-{{- if $compatibleKey.volume -}}
-{{- if or (ne (len $compatibleKey.volume) 1) (not (or (hasKey $compatibleKey.volume "secret") (hasKey $compatibleKey.volume "csi"))) -}}
-{{- fail "analyzer.analysis.openAICompatible.apiKey.volume must contain only a secret or csi source" -}}
-{{- end -}}
-{{- if hasKey $compatibleKey.volume "secret" -}}
-{{- if or (not (kindIs "map" $compatibleKey.volume.secret)) (not $compatibleKey.volume.secret.secretName) -}}
-{{- fail "analyzer.analysis.openAICompatible.apiKey.volume.secret needs secretName" -}}
-{{- end -}}
-{{- else -}}
-{{- if or (not (kindIs "map" $compatibleKey.volume.csi)) (not $compatibleKey.volume.csi.driver) -}}
-{{- fail "analyzer.analysis.openAICompatible.apiKey.volume.csi needs driver" -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- if $compatibleKey.host -}}
-{{- $allowed := false -}}
-{{- range $compatible.endpointSuffixes -}}
-{{- if or (eq $compatibleKey.host (trimPrefix "." .)) (hasSuffix . $compatibleKey.host) -}}{{- $allowed = true -}}{{- end -}}
-{{- end -}}
-{{- if not $allowed -}}{{- fail "analyzer.analysis.openAICompatible.apiKey.host must match openAICompatible.endpointSuffixes" -}}{{- end -}}
-{{- if or (eq $compatibleKey.host "api.anthropic.com") (regexMatch "(^|\\.)(openai\\.azure\\.com|cognitiveservices\\.azure\\.com|services\\.ai\\.azure\\.com)$" $compatibleKey.host) -}}
-{{- fail "analyzer.analysis.openAICompatible.apiKey.host may not name Azure or Anthropic" -}}
-{{- end -}}
-{{- range $a.endpointSuffixes -}}
-{{- if or (eq $compatibleKey.host (trimPrefix "." .)) (hasSuffix . $compatibleKey.host) -}}
-{{- fail "analyzer.analysis.openAICompatible.apiKey.host is covered by the Foundry endpointSuffixes" -}}
-{{- end -}}
-{{- end -}}
+{{- if and (or $a.disableFoundry $compatible.endpoints) (not $a.triageModel) -}}
+{{- fail "analyzer.analysis.openAICompatible and disableFoundry need triageModel" -}}
 {{- end -}}
 {{- $seen := dict -}}
-{{- range $compatible.serviceHosts -}}
-{{- if or (not (kindIs "map" .)) (not .host) (not .namespace) (not .podSelector) (not .port) -}}
-{{- fail "analyzer.analysis.openAICompatible.serviceHosts needs host, namespace, podSelector and port" -}}
+{{- range $compatible.endpoints -}}
+{{- $base := include "shadewright.compatibleBase" .url -}}
+{{- if hasKey $seen $base -}}{{- fail "openAICompatible.endpoints contains duplicate base URLs" -}}{{- end -}}
+{{- $_ := set $seen $base true -}}
+{{- $host := (urlParse $base).hostname -}}
+{{- if or (eq $host "api.anthropic.com") (regexMatch "(^|\\.)(openai\\.azure\\.com|cognitiveservices\\.azure\\.com|services\\.ai\\.azure\\.com)$" $host) -}}
+{{- fail "openAICompatible endpoint belongs to Azure or Anthropic" -}}{{- end -}}
+{{- range $a.endpointSuffixes -}}
+{{- if or (eq $host (trimPrefix "." .)) (hasSuffix . $host) -}}
+{{- fail "openAICompatible endpoint host matches Foundry endpointSuffixes" -}}{{- end -}}
 {{- end -}}
-{{- if or (not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.svc(\\.cluster\\.local)?$" .host)) (ne (index (splitList "." .host) 1) .namespace) (hasKey $seen .host) -}}
-{{- fail "analyzer.analysis.openAICompatible.serviceHosts needs unique Service hosts matching their namespace" -}}
+{{- if not (has .inferenceAPI (list "ChatCompletions" "Responses")) -}}{{- fail "openAICompatible endpoint needs inferenceAPI" -}}{{- end -}}
+{{- $key := .apiKey | default dict -}}
+{{- if and $key.secretName $key.volume -}}{{- fail "openAICompatible apiKey sets both secretName and volume" -}}{{- end -}}
+{{- if $key.volume -}}
+{{- if or (ne (len $key.volume) 1) (not (or (hasKey $key.volume "secret") (hasKey $key.volume "csi"))) -}}
+{{- fail "openAICompatible apiKey.volume must contain only secret or csi" -}}{{- end -}}
+{{- if hasKey $key.volume "secret" -}}
+{{- if or (not (kindIs "map" $key.volume.secret)) (not $key.volume.secret.secretName) -}}{{- fail "openAICompatible secret source needs secretName" -}}{{- end -}}
+{{- else -}}
+{{- if or (not (kindIs "map" $key.volume.csi)) (not $key.volume.csi.driver) -}}{{- fail "openAICompatible csi source needs driver" -}}{{- end -}}
 {{- end -}}
-{{- $_ := set $seen .host true -}}
-{{- $allowed := false -}}
-{{- $host := .host -}}
-{{- range $compatible.endpointSuffixes -}}
-{{- if or (eq $host (trimPrefix "." .)) (hasSuffix . $host) -}}{{- $allowed = true -}}{{- end -}}
 {{- end -}}
-{{- if not $allowed -}}{{- fail "analyzer.analysis.openAICompatible.serviceHosts must match openAICompatible.endpointSuffixes" -}}{{- end -}}
+{{- if or $key.secretName $key.volume -}}
+{{- $file := include "shadewright.compatibleKeyFile" . -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$" $file) -}}{{- fail "openAICompatible key filename is invalid" -}}{{- end -}}
 {{- end -}}
-{{- if and (or $a.disableFoundry $compatibleSource $compatible.serviceHosts $compatible.endpointSuffixes) (not $a.triageModel) -}}
-{{- fail "analyzer.analysis.openAICompatible and disableFoundry need triageModel" -}}
+{{- with .service -}}
+{{- if or (not .namespace) (not .podSelector) (lt (int .port) 1) (gt (int .port) 65535) (not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.svc(\\.cluster\\.local)?$" $host)) (ne (index (splitList "." $host) 1) .namespace) -}}
+{{- fail "openAICompatible service needs its DNS namespace, podSelector and target port" -}}{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if and $a.escalationModel (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.escalationModel needs analyzer.analysis.triageModel" -}}
@@ -494,8 +474,9 @@ secret:
 {{- if $key.secretName -}}{{ $key.secretKey | default "api-key" }}{{- else -}}{{ $key.fileName | default "api-key" }}{{- end -}}
 {{- end }}
 
+{{/* One endpoint's optional key volume. */}}
 {{- define "shadewright.compatibleKeyVolume" -}}
-{{- $key := ((.Values.analyzer.analysis.openAICompatible | default dict).apiKey | default dict) -}}
+{{- $key := .apiKey | default dict -}}
 {{- if $key.secretName -}}
 secret:
   secretName: {{ $key.secretName | quote }}
@@ -508,15 +489,38 @@ secret:
 {{- end -}}
 {{- end }}
 
-{{/* The file name inside the key volume: the Secret key, or fileName of a volume source. */}}
 {{- define "shadewright.compatibleKeyFile" -}}
-{{- $key := ((.Values.analyzer.analysis.openAICompatible | default dict).apiKey | default dict) -}}
+{{- $key := .apiKey | default dict -}}
 {{- if $key.secretName -}}{{ $key.secretKey | default "api-key" }}{{- else -}}{{ $key.fileName | default "api-key" }}{{- end -}}
 {{- end }}
 
-{{- /* Extract only hosts for the binary; selectors stay in installation NetworkPolicy. */ -}}
-{{- define "shadewright.compatibleServiceHosts" -}}
-{{- $hosts := list -}}
-{{- range . -}}{{- $hosts = append $hosts .host -}}{{- end -}}
-{{- toJson $hosts -}}
+{{/* Match the binary's parsed base comparison; never clean a dot segment into an allowed base. */}}
+{{- define "shadewright.compatibleBase" -}}
+{{- $u := urlParse . -}}
+{{- $host := lower ($u.hostname | default "") -}}
+{{- $authority := lower ($u.host | default "") -}}
+{{- $path := $u.path | default "" -}}
+{{- $port := trimPrefix $host $authority -}}
+{{- if or (gt (len .) 256) (ne (lower ($u.scheme | default "")) "https") $u.userinfo (contains "@" .) (contains "?" .) (contains "#" .) (contains "%2f" (lower .)) (contains "%5c" (lower .)) (not (regexMatch "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$" $host)) (not (regexMatch "^(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$" $path)) -}}
+{{- fail "openAICompatible endpoint must be an unambiguous HTTPS base without userinfo, query, fragment or dot segments" -}}
 {{- end -}}
+{{- if $port -}}
+{{- if or (not (regexMatch "^:[1-9][0-9]{0,4}$" $port)) (gt (int (trimPrefix ":" $port)) 65535) -}}{{- fail "openAICompatible endpoint port is invalid" -}}{{- end -}}
+{{- end -}}
+{{- if eq $port ":443" -}}{{- $port = "" -}}{{- end -}}
+{{- printf "https://%s%s%s" $host $port (trimSuffix "/" $path) -}}
+{{- end }}
+
+{{/* Only declared data reaches the process, with one mounted key path per endpoint. */}}
+{{- define "shadewright.compatibleEndpoints" -}}
+{{- $out := list -}}
+{{- range $i, $e := . -}}
+{{- $d := dict "url" $e.url "inferenceAPI" $e.inferenceAPI -}}
+{{- if include "shadewright.compatibleKeyVolume" $e -}}
+{{- $_ := set $d "keyFile" (printf "/var/run/secrets/shadewright/openai-compatible/%d/%s" $i (include "shadewright.compatibleKeyFile" $e)) -}}
+{{- end -}}
+{{- with $e.service -}}{{- $_ := set $d "service" . -}}{{- end -}}
+{{- $out = append $out $d -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end }}

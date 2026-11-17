@@ -376,108 +376,107 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "apiKey": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "secretName": {
-                      "type": "string",
-                      "maxLength": 253,
-                      "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)?$"
-                    },
-                    "secretKey": {
-                      "type": "string",
-                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
-                    },
-                    "volume": {
-                      "type": "object",
-                      "additionalProperties": false,
-                      "maxProperties": 1,
-                      "properties": {
-                        "secret": {
-                          "type": "object",
-                          "required": [
-                            "secretName"
-                          ],
-                          "properties": {
-                            "secretName": {
-                              "type": "string",
-                              "minLength": 1
-                            }
-                          }
-                        },
-                        "csi": {
-                          "type": "object",
-                          "required": [
-                            "driver"
-                          ],
-                          "properties": {
-                            "driver": {
-                              "type": "string",
-                              "minLength": 1
-                            }
-                          }
-                        }
-                      }
-                    },
-                    "fileName": {
-                      "type": "string",
-                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
-                    },
-                    "host": {
-                      "type": "string",
-                      "maxLength": 253,
-                      "pattern": "^(([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?)?$"
-                    }
-                  }
-                },
-                "serviceHosts": {
+                "endpoints": {
                   "type": "array",
                   "maxItems": 16,
-                  "uniqueItems": true,
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
                     "required": [
-                      "host",
-                      "namespace",
-                      "podSelector",
-                      "port"
+                      "url",
+                      "inferenceAPI"
                     ],
                     "properties": {
-                      "host": {
+                      "url": {
                         "type": "string",
-                        "maxLength": 253,
-                        "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.svc(\\.cluster\\.local)?$"
+                        "minLength": 1,
+                        "maxLength": 256
                       },
-                      "namespace": {
-                        "type": "string",
-                        "maxLength": 63,
-                        "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+                      "inferenceAPI": {
+                        "enum": [
+                          "ChatCompletions",
+                          "Responses"
+                        ]
                       },
-                      "podSelector": {
+                      "apiKey": {
                         "type": "object",
-                        "minProperties": 1,
-                        "additionalProperties": {
-                          "type": "string"
+                        "additionalProperties": false,
+                        "properties": {
+                          "secretName": {
+                            "type": "string",
+                            "maxLength": 253,
+                            "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)?$"
+                          },
+                          "secretKey": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
+                          },
+                          "volume": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "maxProperties": 1,
+                            "properties": {
+                              "secret": {
+                                "type": "object",
+                                "required": [
+                                  "secretName"
+                                ],
+                                "properties": {
+                                  "secretName": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                }
+                              },
+                              "csi": {
+                                "type": "object",
+                                "required": [
+                                  "driver"
+                                ],
+                                "properties": {
+                                  "driver": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "fileName": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
+                          }
                         }
                       },
-                      "port": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 65535
+                      "service": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "namespace",
+                          "podSelector",
+                          "port"
+                        ],
+                        "properties": {
+                          "namespace": {
+                            "type": "string",
+                            "maxLength": 63,
+                            "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+                          },
+                          "podSelector": {
+                            "type": "object",
+                            "minProperties": 1,
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                          }
+                        }
                       }
                     }
-                  }
-                },
-                "endpointSuffixes": {
-                  "type": "array",
-                  "maxItems": 16,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "maxLength": 253,
-                    "pattern": "^(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?){2,}$"
                   }
                 }
               }

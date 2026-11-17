@@ -77,13 +77,14 @@ The lab itself (AKS node, Key Vault, storage, Foundry) is priced in `shadewright
 | --- | --- |
 | Illustration volume | 100 analyses a day, 30 days, 6,000 input and 1,500 output tokens each |
 | Illustration escalation rate | 5% to variant B |
-| Failed or timed-out call | Charged at input estimate plus `MaxOutputTokens` (plus the thinking allowance with the Anthropic adapter) |
+| Failed or timed-out call | Charged at input estimate plus `MaxOutputTokens` (plus the thinking allowance with the Anthropic adapter); OpenAICompatible instead charges `C = I + O + ceil((I + O) / 10)` |
 | Throttled call (Foundry 429 on every attempt, Microsoft host suffixes only) | Charged 0 tokens, still uses its analysis's unit of `maxAnalysesPerDay` (#725); an Anthropic or OpenAICompatible 429 keeps the upper bound |
 | Spend limit unit | Tokens per model deployment and UTC day (`maxTokensPerDay`), no default |
 | Budget ConfigMap | `shadewright-analysis-budget`, operator namespace, writable by the analyzer and admins only |
 | Count unreadable, unwritable or missing | Refuse |
 
 For `OpenAICompatible`, missing or incomplete usage is refused with `UsageUnknown`
-and charged the input estimate plus `maxOutputTokens`. A gateway's 429 is not
+and charged the ceiling `C = I + O + ceil((I + O) / 10)`, where `I` is the input
+estimate and `O` is `maxOutputTokens`. A gateway's 429 is not
 assumed unbilled. These counts feed the existing per-analysis deployment token
 bounds; persistent daily reservation across analyses remains planned (#208).

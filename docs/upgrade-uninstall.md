@@ -259,18 +259,24 @@ A new `helm install` with `settings.create=true` over a leftover object keeps th
 
 ## OpenAI-compatible provider (#834)
 
-Apply the new CRDs before selecting `provider: OpenAICompatible`. Existing Foundry
-and Anthropic objects retain their meaning; no new field is defaulted onto them.
-Compatible deployments omit `apiVersion` and may set `inferenceAPI`. For a
-compatible-only analyzer set `analyzer.analysis.disableFoundry=true`; otherwise
-endpoint suffixes still enable the existing Foundry token source and require its
-Azure identity. Blob records retain their own identity requirement.
+Apply the new CRDs before selecting `provider: OpenAICompatible`. Compatible
+deployments omit `apiVersion`; their base and inference API must match an
+install-time endpoint declaration. Compatible-only installs set
+`analyzer.analysis.disableFoundry=true` and need no inference workload identity.
+Blob records still need Azure identity.
 
-Provision any optional key outside Git, name its existing Secret or CSI source
-and exact host under `analyzer.analysis.openAICompatible.apiKey`, then follow the
-[qualification runbook](how-to/qualify-openai-compatible.md). No RBAC changes or
-key migrations are needed. Uninstall removes the mount; it does not revoke a key
-in the server account. Revoke that key separately. The Foundry `endpointSuffixes` list keeps its existing meaning. Compatible
-endpoints use `openAICompatible.endpointSuffixes`; move compatible hosts out of
-the Foundry list when upgrading an experimental installation. Each named Service
-now needs `host`, `namespace`, `podSelector` and `port` for its egress rule.
+- This release refuses a Foundry deployment at `api.openai.com` through CEL, and a
+  Foundry deployment at any declared compatible host through the analyzer. The
+  previous release permitted them when its Foundry suffix list covered the host.
+  An existing stored settings object is not rewritten by upgrade: CEL refuses a
+  subsequent edit containing that OpenAI Foundry deployment, and the analyzer
+  refuses calls to either destination with `EndpointNotAllowed`. Declare its exact
+  compatible base and API and explicitly change that deployment's provider and
+  remove its `apiVersion`, or restore a permitted Foundry resource before resuming.
+
+Declare compatible endpoints and optional per-endpoint Secret or CSI key sources
+under `analyzer.analysis.openAICompatible.endpoints`, then follow the
+[qualification runbook](how-to/qualify-openai-compatible.md). The Foundry suffix list
+never authorizes a compatible endpoint. Removing the release removes its mounts
+but does not revoke server credentials; revoke each key separately. No Secret API
+permission or additional controller identity is introduced. ADR-0042 is Proposed.

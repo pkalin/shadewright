@@ -1017,3 +1017,22 @@ func TestCompatibleUsageFloorAndCeiling(t *testing.T) {
 		}
 	}
 }
+
+func TestCompatibleUnknownUsageChargesExactMargin(t *testing.T) {
+	f := newFixture()
+	limits := testLimits()
+	limits.Triage.Provider = remediationv1alpha1.ModelProviderOpenAICompatible
+	limits.Escalation = nil
+	first := reply(validResult)
+	first.c.UsageUnknown = true
+	f.triage.steps = []step{first, first}
+	out := f.analyze(t, limits)
+	var want int64
+	for _, req := range f.triage.reqs() {
+		base := estimateInput(req) + int64(req.MaxOutputTokens)
+		want += base + (base+9)/10
+	}
+	if want == 0 || out.Tokens != want {
+		t.Fatalf("charged %d, want exact ceiling %d", out.Tokens, want)
+	}
+}

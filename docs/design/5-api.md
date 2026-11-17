@@ -395,7 +395,7 @@ Policies and requests refer to repositories by name only.
 - Each must set a daily cap `maxTokensPerDay`. It has no default, so the admin chooses it per deployment. Range 0 to 1,000,000,000, and 0 stops calls to it.
 - Each may name a `provider`: `Foundry` (the default), `Anthropic` or `OpenAICompatible`, the API the adapter speaks ([ADR-0037](../adr/0037-the-anthropic-api-as-a-second-model-provider.md)). The eight deployment CEL rules are: Foundry requires `apiVersion`; Anthropic requires exactly `https://api.anthropic.com`; that host is refused for all other providers; `inferenceAPI` is allowed only for Foundry and OpenAICompatible; Foundry Responses requires `apiVersion: v1`; OpenAICompatible forbids `apiVersion`; OpenAICompatible refuses Azure model hosts; and Foundry refuses `api.openai.com`.
 - A `Foundry` or `OpenAICompatible` deployment may name an `inferenceAPI`: `ChatCompletions` (used when it is left out) or `Responses`, for a model that refuses function tools on chat completions, such as the `gpt-6.1` models with escalation's read tools ([#501](https://github.com/pkalin/shadewright/issues/501)). Two CEL rules: the field is refused for Anthropic, and `Responses` needs `apiVersion: v1` on Foundry only. Objects stored without it keep chat completions.
-- There is no field for a key or any other credential. The analyzer authenticates to Foundry with its workload identity (11.1) and reads an Anthropic API key from the file of its `--anthropic-api-key-file` flag. OpenAICompatible uses its own optional file and exact install-time host binding (ADR-0042). It never receives an Entra token or the Anthropic key.
+- There is no field for a key or any other credential. The analyzer authenticates to Foundry with its workload identity (11.1) and reads an Anthropic API key from the file of its `--anthropic-api-key-file` flag. OpenAICompatible uses its own optional file and exact install-time base URL binding (ADR-0042). It never receives an Entra token or the Anthropic key.
 
 **Why write access is security-relevant.** The schema is vendor-neutral ([ADR-0013](../adr/0013-adapters-for-every-external-system.md)), but the endpoint decides where the analyzer's Entra ID token and the redacted context go. This includes the `patch` right that the [emergency runbook](../emergency.md) hands out for the kill switch.
 
@@ -468,7 +468,7 @@ Conditions of other types are kept as they are. Like the others, these appear on
 | Key ID | Follows the Key Vault naming rules: vault name 3 to 24 characters with no consecutive hyphens; key name 1 to 127 characters |
 | Model endpoint | HTTPS only; at most 256 characters; host name of lower-case DNS labels; port 1 to 65535 if any; no IP address, user info, query, fragment or dot segment |
 | Model `apiVersion` | `v1` or a valid-looking date, optionally `-preview`; required for Foundry, optional for Anthropic and forbidden for OpenAICompatible |
-| Model `inferenceAPI` | `ChatCompletions` or `Responses`; provider `Foundry` only; `Responses` needs `apiVersion: v1` |
+| Model `inferenceAPI` | `ChatCompletions` or `Responses`; Foundry and OpenAICompatible; Foundry `Responses` needs `apiVersion: v1` |
 | `maxTokensPerDay` | No default; 0 to 1,000,000,000; 0 stops calls |
 | `maxAnalysesPerDay` | Default 100; 0 to 10000; 0 disables the model |
 | Planned analysis limits | `maxContextBytes` 32768 (4096 to 262144); `maxToolSteps` 4 (0 to 16); `maxOutputTokens` 2048 (256 to 16384); `maxConcurrentAnalyses` 1 (1 to 8) |
@@ -477,15 +477,14 @@ Conditions of other types are kept as they are. Like the others, these appear on
 | `status.integrations` | At most 64 entries (32 enabled, at most 32 more detected) |
 | Paused request recheck | Every minute |
 
-For OpenAICompatible, its independent endpoint suffix allow-list applies. Exact Service
-DNS hosts additionally named at install time may use private unicast addresses,
-with verified HTTPS on 443. HTTP, metadata addresses and redirects are refused.
-Its optional key is bound to one exact install-time host; a settings edit cannot
-send it to another allowed host. See [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md).
-
-OpenAICompatible has its own install-time `--openai-compatible-endpoint-suffixes`
-allow-list. Both providers refuse hosts covered by the other provider's list.
-Its optional key binds one exact host, so another host is refused even if allowed.
-Reported usage is charged at least the input estimate and no more than input plus
-output bound with a rounded-up 10% margin. Above that ceiling the reply is refused
-and charged the ceiling, as is unknown usage ([ADR-0042](../adr/0042-openai-compatible-model-endpoints.md)).
+For OpenAICompatible, the analyzer matches a parsed base and inference API against
+`--openai-compatible-endpoints` declarations, independently of the Foundry suffix
+list. Requests use only declared destination data. Each declaration owns an
+optional key and, for private dialing, its exact Service's namespace, selector
+and target port. Dot segments, userinfo, queries and fragments are refused.
+Duplicates and Foundry/Azure/Anthropic host overlap fail chart render and startup.
+Settings cannot move a key between hosts, ports or tenant paths. CEL remains a
+shape check, not installation authorization. Complete usage is charged at least
+the input estimate; unknown, above-ceiling usage and failed sent calls cost the
+input estimate plus output bound and a rounded-up 10% margin.
+See [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md).

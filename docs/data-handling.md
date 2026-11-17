@@ -136,6 +136,6 @@ the endpoint allowed at install time. It may be the OpenAI API, a gateway or a
 separately operated cluster Service; the provider name promises no residency or
 retention policy. Check the server's retention, geography and opt-in training
 terms before allowing it. Settings writers can select among allowed hosts, so
-use narrow suffixes. A separate exact host binding keeps the optional key from
+use narrow suffixes. A separate exact base URL binding keeps the optional key from
 moving with a settings edit. No redirects, HTTP or environment proxy are used.
 See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md).

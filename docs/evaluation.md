@@ -273,13 +273,11 @@ escalation to cover read tools and multi-turn Responses calls.
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `EVAL_ENDPOINT` | yes | HTTPS API base, such as `https://api.openai.com/v1`; the adapter appends `/responses` or `/chat/completions` |
-| `EVAL_COMPATIBLE_ENDPOINT_SUFFIXES` | yes | Independent allow-list as --openai-compatible-endpoint-suffixes, for example `.api.openai.com` |
+| `EVAL_COMPATIBLE_ENDPOINTS` | yes | JSON array as `--openai-compatible-endpoints`: each has `url`, `inferenceAPI`, optional `keyFile` and optional `service` (namespace, podSelector, port). Each key belongs only to its exact base |
 | `EVAL_COMPATIBLE_SERVER_ID` | yes | Operator-recorded server release or dated service identifier, using model-name characters. Included in the qualification digest along with an endpoint hash, never the endpoint URL |
 | `EVAL_TRIAGE_DEPLOYMENT`, `EVAL_TRIAGE_MODEL` | yes | Request model name and exact model ID replies must name |
 | `EVAL_TRIAGE_INFERENCE_API` | no | `ChatCompletions` (default) or `Responses` |
 | `EVAL_ESCALATION_DEPLOYMENT`, `EVAL_ESCALATION_MODEL`, `EVAL_ESCALATION_INFERENCE_API` | no | Same fields for escalation; a model or API needs its deployment |
-| `EVAL_COMPATIBLE_KEY_FILE`, `EVAL_COMPATIBLE_KEY_HOST` | together or neither | Optional private key file and its exact DNS host binding. Read per attempt; neither value reaches a report. Without both, no Authorization header is sent |
-| `EVAL_COMPATIBLE_SERVICE_HOSTS` | no | Comma-separated exact Service DNS names allowed private unicast addresses, still subject to verified HTTPS on 443 and the suffix list |
 | `EVAL_PRICE_*`, `EVAL_ESCALATION_PRICE_*`, `EVAL_REPEATS`, `EVAL_MIN_PASS_RATE`, `EVAL_FORCE_ESCALATION` | no | Existing harness controls. Prices are operator-supplied, not built in. Unknown usage makes the estimate a lower bound |
 
 Do not set `EVAL_API_VERSION` or Anthropic-only variables. Example for a future
@@ -287,9 +285,9 @@ live run with an inference key already held in a private file:
 
 ```bash
 EVAL_MODEL=openaicompatible \
-EVAL_ENDPOINT=https://api.openai.com/v1 EVAL_COMPATIBLE_ENDPOINT_SUFFIXES=.api.openai.com \
+EVAL_ENDPOINT=https://api.openai.com/v1 \
+EVAL_COMPATIBLE_ENDPOINTS='[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses","keyFile":"/mounted/model-key"}]' \
 EVAL_COMPATIBLE_SERVER_ID=openai-2026-11-16 \
-EVAL_COMPATIBLE_KEY_FILE="$MODEL_KEY_FILE" EVAL_COMPATIBLE_KEY_HOST=api.openai.com \
 EVAL_TRIAGE_DEPLOYMENT=gpt-6.1-sol EVAL_TRIAGE_MODEL=gpt-6.1-sol \
 EVAL_TRIAGE_INFERENCE_API=Responses make eval-model
 ```

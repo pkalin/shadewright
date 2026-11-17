@@ -19,11 +19,12 @@ analyzer:
     disableFoundry: true
     triageModel: gpt-6.1-sol
     openAICompatible:
-      endpointSuffixes: [.api.openai.com]
-      apiKey:
-        host: api.openai.com
-        secretName: compatible-model-key
-        secretKey: api-key
+      endpoints:
+        - url: https://api.openai.com/v1
+          inferenceAPI: Responses
+          apiKey:
+            secretName: compatible-model-key
+            secretKey: api-key
 ```
 
 Edit `RemediationSettings/default` with an authorized cluster-admin workflow:
@@ -45,11 +46,12 @@ suffix. Set it from a recorded response before qualification. `deployment` is th
 server's request model name. Do not set `apiVersion`. The API base includes `/v1`;
 this adapter adds only `/responses` or `/chat/completions`.
 
-`openAICompatible.endpointSuffixes` is independent of Foundry's `endpointSuffixes`.
-Keep the lists disjoint: hosts matching both are refused by both providers.
-One compatible key binds one host. A second endpoint on another host is refused
-even if that host is allowed. Use a separate analyzer installation for that key.
-For `apiKey.volume`, only `secret` or `csi` sources are allowed.
+`openAICompatible.endpoints` declares complete bases and their APIs. The Foundry
+`endpointSuffixes` list never authorizes a compatible endpoint. Each optional key
+belongs to its endpoint only. Two endpoints can have different keys, even when
+one gateway routes accounts by path. Settings must match a parsed declared base
+and API; another path, port or host is refused before a call. Duplicate bases,
+provider host overlap and malformed URLs fail chart rendering and startup.
 
 For a keyless Service use its verified HTTPS base, for example
 `https://model.inference.svc.cluster.local/v1`, and name its destination pods:
@@ -60,13 +62,14 @@ analyzer:
     disableFoundry: true
     triageModel: local-model
     openAICompatible:
-      endpointSuffixes: [.model.inference.svc.cluster.local]
-      serviceHosts:
-        - host: model.inference.svc.cluster.local
-          namespace: inference
-          podSelector:
-            app: model
-          port: 8443
+      endpoints:
+        - url: https://model.inference.svc.cluster.local/v1
+          inferenceAPI: Responses
+          service:
+            namespace: inference
+            podSelector:
+              app: model
+            port: 8443
 ```
 
 The Service exposes TLS on port 443 and routes it to the selected pods on target
@@ -149,7 +152,7 @@ kubectl --context kind-compatible-provider -n shadewright-system get deployment 
 ```
 
 Confirm the compatible key mount is whole and read-only, only the analyzer gets
-it, `--disable-foundry=true` is set, the key-host flag is exact and no Azure
+it, `--disable-foundry=true` is set, the endpoint declaration contains the exact base and its own key path and no Azure
 workload-identity label is present. The chart tests compare all RBAC objects
 before and after a key source and require them to be identical. Update the dummy
 Secret to exercise projected-file refresh; real rotation follows

@@ -17,153 +17,209 @@ limitations under the License.
 package chart
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
-	"slices"
-	"strconv"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
 )
 
-const compatibleKey = "analyzer.analysis.openAICompatible.apiKey.secretName=model-key"
-const compatibleHost = "analyzer.analysis.openAICompatible.apiKey.host=api.openai.com"
+const endpointPrefix = "analyzer.analysis.openAICompatible.endpoints[0]."
+const compatibleKey = endpointPrefix + "apiKey.secretName=model-key"
 
-func TestCompatibleKeyAndNoAzure(t *testing.T) {
-	base := render(t, false)
-	set := []string{compatibleKey, compatibleHost, "analyzer.analysis.disableFoundry=true",
-		"analyzer.analysis.openAICompatible.endpointSuffixes={.api.openai.com}", "analyzer.analysis.triageModel=gpt-6.1-sol"}
-	r := render(t, false, set...)
-	if !reflect.DeepEqual(rbacOnly(base.chart, false), rbacOnly(r.chart, false)) {
-		t.Fatal("key added RBAC")
-	}
-	for _, name := range []string{executorDeployment, verifierDeployment} {
-		if !reflect.DeepEqual(deployment(t, base, name), deployment(t, r, name)) {
-			t.Errorf("key changed %s", name)
+func compatibleSet() []string {
+	return []string{"analyzer.analysis.triageModel=m", "analyzer.analysis.disableFoundry=true",
+		endpointPrefix + "url=https://api.openai.com/v1", endpointPrefix + "inferenceAPI=Responses"}
+}
+
+// Compatible rendering needs Helm only. A missing Helm fails loudly.
+func compatibleRender(t *testing.T, set ...string) rendered {
+	t.Helper()
+	helm := os.Getenv("HELM")
+	if helm == "" {
+		local := filepath.Join(repoRoot(t), "bin", "helm")
+		if _, err := os.Stat(local); err == nil {
+			helm = local
+		} else {
+			helm, _ = exec.LookPath("helm")
 		}
+	}
+	if helm == "" {
+		t.Fatal("compatible chart tests require Helm")
+	}
+
+	r := rendered{chart: map[string]*unstructured.Unstructured{}, tests: map[string]*unstructured.Unstructured{}}
+	for _, u := range objects(t, run(t, repoRoot(t), helm, helmArgs(t, false, set...)...)) {
+		if isTestHook(u) {
+			r.tests[key(u)] = u
+		} else {
+			r.chart[key(u)] = u
+		}
+	}
+	if len(r.chart) == 0 {
+		t.Fatal("empty chart")
+	}
+	return r
+}
+
+func declaredArgs(t *testing.T, r rendered) []openaicompatible.Endpoint {
+	t.Helper()
+	for _, arg := range container(t, r, analyzerDeployment).Args {
+		if raw, ok := strings.CutPrefix(arg, "--openai-compatible-endpoints="); ok {
+			var out []openaicompatible.Endpoint
+			if err := json.Unmarshal([]byte(raw), &out); err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}
+	}
+	t.Fatal("no endpoint declarations")
+	return nil
+}
+
+func TestCompatibleDeclaredEndpointRender(t *testing.T) {
+	t.Setenv("KUSTOMIZE", "/unavailable-kustomize")
+	set := append(compatibleSet(), compatibleKey)
+	r := compatibleRender(t, set...)
+	got := declaredArgs(t, r)
+	if len(got) != 1 || got[0].URL != "https://api.openai.com/v1" ||
+		got[0].API != openaicompatible.APIResponses ||
+		got[0].KeyFile != "/var/run/secrets/shadewright/openai-compatible/0/api-key" {
+		t.Fatalf("declarations: %+v", got)
 	}
 	a := deployment(t, r, analyzerDeployment)
 	if a.Spec.Template.Labels["azure.workload.identity/use"] != "" {
-		t.Fatal("compatible-only install uses Azure")
+		t.Fatal("compatible-only deployment uses Azure")
 	}
-	c := a.Spec.Template.Spec.Containers[0]
-	for _, want := range []string{"--disable-foundry=true", "--openai-compatible-api-key-host=api.openai.com",
-		"--openai-compatible-api-key-file=/var/run/secrets/shadewright/openai-compatible/api-key",
-		"--openai-compatible-endpoint-suffixes=.api.openai.com"} {
-		if !slices.Contains(c.Args, want) {
-			t.Errorf("missing arg %s", want)
-		}
-	}
+	mounts := container(t, r, analyzerDeployment).VolumeMounts
 	found := false
-	for _, m := range c.VolumeMounts {
-		if m.Name == "openai-compatible-api-key" {
+	for _, m := range mounts {
+		if m.Name == "openai-compatible-key-0" {
 			found = true
 			if !m.ReadOnly || m.SubPath != "" || m.SubPathExpr != "" {
-				t.Fatal("key mount does not rotate")
+				t.Fatal("key mount cannot rotate")
 			}
 		}
 	}
 	if !found {
-		t.Fatal("no key mount")
+		t.Fatal("missing key mount")
 	}
-}
-
-func TestCompatibleChartKeyRefusals(t *testing.T) {
-	for name, set := range map[string][]string{
-		"no host":   {compatibleKey},
-		"no source": {compatibleHost},
-		"both sources": {compatibleKey, compatibleHost,
-			"analyzer.analysis.openAICompatible.apiKey.volume.emptyDir.medium=Memory"},
-		"unsafe filename":      {compatibleKey, compatibleHost, "analyzer.analysis.openAICompatible.apiKey.secretKey=../key"},
-		"reserved suffix flag": {"analyzer.extraArgs={--openai-compatible-endpoint-suffixes=.api.openai.com}"},
-		"reserved flag":        {"analyzer.extraArgs={--openai-compatible-api-key-file=/key}"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if out := helmFails(t, set...); !strings.Contains(out, "openAICompatible") &&
-				!strings.Contains(out, "openai-compatible") {
-				t.Fatalf("unexpected error: %s", out)
-			}
-		})
+	base := compatibleRender(t)
+	if !reflect.DeepEqual(rbacOnly(base.chart, false), rbacOnly(r.chart, false)) {
+		t.Fatal("key changed RBAC")
+	}
+	for _, name := range []string{executorDeployment, verifierDeployment} {
+		if !reflect.DeepEqual(deployment(t, base, name), deployment(t, r, name)) {
+			t.Fatal("key changed another identity")
+		}
 	}
 }
 
 func TestCompatibleWithoutKeyOrAzure(t *testing.T) {
-	r := render(t, false, "analyzer.analysis.disableFoundry=true",
-		"analyzer.analysis.openAICompatible.endpointSuffixes={.model.demo.svc.cluster.local}",
-		"analyzer.analysis.openAICompatible.serviceHosts[0].host=model.demo.svc.cluster.local",
-		"analyzer.analysis.openAICompatible.serviceHosts[0].namespace=demo",
-		"analyzer.analysis.openAICompatible.serviceHosts[0].podSelector.app=model",
-		"analyzer.analysis.openAICompatible.serviceHosts[0].port=8443",
-		"analyzer.analysis.triageModel=local-model")
-	c := container(t, r, analyzerDeployment)
-	for _, arg := range c.Args {
-		if strings.HasPrefix(arg, "--openai-compatible-api-key") {
-			t.Fatal("keyless install has key flags")
-		}
-	}
-	if !slices.Contains(c.Args, "--openai-compatible-service-hosts=model.demo.svc.cluster.local") {
-		t.Fatal("no Service host flag")
+	r := compatibleRender(t, compatibleSet()...)
+	if got := declaredArgs(t, r); len(got) != 1 || got[0].KeyFile != "" {
+		t.Fatal("keyless declaration gained a key")
 	}
 }
 
-// Key sources are restricted even when Helm's schema validation is disabled.
 func TestCompatibleVolumeSources(t *testing.T) {
-	for _, skipSchema := range []bool{false, true} {
+	for _, skip := range []bool{false, true} {
 		for _, source := range []string{
 			"emptyDir.medium=Memory", "hostPath.path=/tmp", "projected.sources[0].secret.name=key",
-			"secret.secretName=key,csi.driver=example.test",
+			"secret.secretName=key,csi.driver=example.test", "secret={}", "csi={}",
 		} {
-			args := helmArgs(t, false, compatibleHost, "analyzer.analysis.triageModel=m",
-				"analyzer.analysis.openAICompatible.endpointSuffixes={.api.openai.com}")
+			set := compatibleSet()
 			for field := range strings.SplitSeq(source, ",") {
-				args = append(args, "--set", "analyzer.analysis.openAICompatible.apiKey.volume."+field)
+				set = append(set, endpointPrefix+"apiKey.volume."+field)
 			}
-			if skipSchema {
+			args := helmArgs(t, false, set...)
+			if skip {
 				args = append(args, "--skip-schema-validation")
 			}
-			cmd := exec.Command(tool(t, "HELM", "helm"), args...)
-			if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "openAICompatible") {
-				t.Fatalf("source %s schema skipped %v: %v %s", source, skipSchema, err, out)
+			out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "openAICompatible") {
+				t.Fatalf("source %s skip schema %v: %v %s", source, skip, err, out[:min(len(out), 1024)])
 			}
 		}
 	}
 	for _, source := range []string{"secret.secretName=key", "csi.driver=example.test"} {
-		render(t, false, compatibleHost, "analyzer.analysis.triageModel=m",
-			"analyzer.analysis.openAICompatible.endpointSuffixes={.api.openai.com}",
-			"analyzer.analysis.openAICompatible.apiKey.volume."+source)
+		compatibleRender(t, append(compatibleSet(), endpointPrefix+"apiKey.volume."+source)...)
 	}
 }
 
-func TestCompatibleKeyHostAllowList(t *testing.T) {
-	for _, host := range []string{
-		"other.example.com", "api.anthropic.com", "r.services.ai.azure.com",
-		"r.openai.azure.com", "r.cognitiveservices.azure.com",
-	} {
-		set := []string{compatibleKey, "analyzer.analysis.triageModel=m",
-			"analyzer.analysis.openAICompatible.apiKey.host=" + host,
-			"analyzer.analysis.openAICompatible.endpointSuffixes={.api.openai.com}"}
-		if host != "other.example.com" {
-			set[len(set)-1] = "analyzer.analysis.openAICompatible.endpointSuffixes={." + host + "}"
+func TestCompatibleChartDeclarationRefusals(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		for _, raw := range []string{"https://user@api.openai.com/v1",
+			"https://@api.openai.com/v1",
+			"https://api.openai.com/v1?x",
+			"https://api.openai.com/v1?",
+			"https://api.openai.com/v1#x",
+			"https://api.openai.com/v1#",
+			"https://api.openai.com/a/../v1",
+			"https://api.openai.com/a/%2e%2e/v1",
+			"https://api.anthropic.com/v1",
+			"https://r.openai.azure.com/v1",
+			"https://r.services.ai.azure.com/v1",
+			"https://r.cognitiveservices.azure.com/v1"} {
+			args := helmArgs(t, false, append(compatibleSet(), endpointPrefix+"url="+raw)...)
+			if skip {
+				args = append(args, "--skip-schema-validation")
+			}
+			out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "openAICompatible") {
+				t.Fatalf("invalid URL %q skip %v: %v %s", raw, skip, err, out[:min(len(out), 1024)])
+			}
 		}
+	}
+	// This exact non-Azure host is in both boundaries; neither the schema nor vendor exclusion can catch it.
+	for _, key := range []bool{false, true} {
+		set := append(compatibleSet(), "analyzer.analysis.endpointSuffixes={.api.openai.com}")
+		if key {
+			set = append(set, compatibleKey)
+		}
+		if out := helmFails(t, set...); !strings.Contains(out, "matches Foundry endpointSuffixes") {
+			t.Fatalf("wrong overlap refusal: %s", out)
+		}
+	}
+	for _, duplicate := range []string{
+		"https://api.openai.com/v1", "HTTPS://API.OPENAI.COM:443/v1/", "https://api.openai.com/%76%31",
+	} {
+		set := append(compatibleSet(), "analyzer.analysis.openAICompatible.endpoints[1].url="+duplicate,
+			"analyzer.analysis.openAICompatible.endpoints[1].inferenceAPI=ChatCompletions")
+		if out := helmFails(t, set...); !strings.Contains(out, "duplicate") {
+			t.Fatalf("wrong duplicate refusal: %s", out)
+		}
+	}
+	for _, set := range [][]string{
+		append(compatibleSet(), compatibleKey, endpointPrefix+"apiKey.secretKey=../key"),
+		append(compatibleSet(), compatibleKey, endpointPrefix+"apiKey.volume.csi.driver=example.test"),
+		{"analyzer.extraArgs={--openai-compatible-endpoints=[]}"},
+	} {
 		helmFails(t, set...)
 	}
 }
 
 func TestCompatibleServiceEgress(t *testing.T) {
-	base := render(t, false)
-	set := make([]string, 0, 10)
-	set = append(set, "analyzer.analysis.triageModel=m",
-		"analyzer.analysis.openAICompatible.endpointSuffixes={.demo.svc.cluster.local}")
+	base := compatibleRender(t)
+	set := make([]string, 0, 16)
+	set = append(set, "analyzer.analysis.triageModel=m", "analyzer.analysis.disableFoundry=true")
 	for i, name := range []string{"model", "secondary-model"} {
-		prefix := fmt.Sprintf("analyzer.analysis.openAICompatible.serviceHosts[%d].", i)
-		set = append(set, prefix+"host="+name+".demo.svc.cluster.local", prefix+"namespace=demo",
-			prefix+"podSelector.app="+name, prefix+"port="+strconv.Itoa(8443+i))
+		p := fmt.Sprintf("analyzer.analysis.openAICompatible.endpoints[%d].", i)
+		set = append(set, p+"url=https://"+name+".demo.svc.cluster.local/v1", p+"inferenceAPI=Responses",
+			p+"service.namespace=demo", p+"service.podSelector.app="+name, fmt.Sprintf("%sservice.port=%d", p, 8443+i))
 	}
-	r := render(t, false, set...)
-	policyKey := "NetworkPolicy/" + operatorNS + "/shadewright-allow-analyzer-egress"
-	before, after := nonDNSRules(t, policyKey, base), nonDNSRules(t, policyKey, r)
+	r := compatibleRender(t, set...)
+	k := "NetworkPolicy/" + operatorNS + "/shadewright-allow-analyzer-egress"
+	before, after := nonDNSRules(t, k, base), nonDNSRules(t, k, r)
 	if len(after) != len(before)+2 || !reflect.DeepEqual(after[:len(before)], before) {
-		t.Fatal("Service hosts changed other egress")
+		t.Fatal("Service declarations changed other egress")
 	}
 	for i, name := range []string{"model", "secondary-model"} {
 		rule := after[len(before)+i]
@@ -171,17 +227,54 @@ func TestCompatibleServiceEgress(t *testing.T) {
 			rule.To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "demo" ||
 			!reflect.DeepEqual(rule.To[0].PodSelector.MatchLabels, map[string]string{"app": name}) ||
 			len(rule.Ports) != 1 || rule.Ports[0].Port.IntValue() != 8443+i {
-			t.Fatalf("rule %d does not select its exact pods and port: %+v", i, rule)
+			t.Fatalf("incorrect Service rule: %+v", rule)
 		}
 	}
-	for _, name := range []string{executorDeployment, verifierDeployment} {
-		if !reflect.DeepEqual(deployment(t, base, name), deployment(t, r, name)) {
-			t.Fatalf("Service host changed %s", name)
+	for _, bad := range []string{
+		"service.namespace=wrong", "service.port=0", "url=https://evil.example.com/v1", "service.podSelector=null",
+	} {
+		helmFails(t, append(set, endpointPrefix+bad)...)
+	}
+}
+
+func TestCompatibleTwoEndpointKeys(t *testing.T) {
+	set := append(compatibleSet(), compatibleKey,
+		"analyzer.analysis.openAICompatible.endpoints[1].url=https://api.openai.com/tenant-b/v1",
+		"analyzer.analysis.openAICompatible.endpoints[1].inferenceAPI=ChatCompletions",
+		"analyzer.analysis.openAICompatible.endpoints[1].apiKey.secretName=second-key")
+	r := compatibleRender(t, set...)
+	got := declaredArgs(t, r)
+	if len(got) != 2 || got[0].KeyFile == got[1].KeyFile {
+		t.Fatal("endpoint keys share a mount")
+	}
+	a := deployment(t, r, analyzerDeployment)
+	secrets := map[string]bool{}
+	for _, v := range a.Spec.Template.Spec.Volumes {
+		if v.Secret != nil {
+			secrets[v.Secret.SecretName] = true
 		}
 	}
-	for _, bad := range []string{"namespace=wrong", "port=0", "host=evil.example.com", "podSelector=null"} {
-		invalid := slices.Clone(set)
-		invalid = append(invalid, "analyzer.analysis.openAICompatible.serviceHosts[0]."+bad)
-		helmFails(t, invalid...)
+	if !secrets["model-key"] || !secrets["second-key"] {
+		t.Fatal("missing independent keys")
+	}
+}
+
+func TestCompatibleDeclaredPortEgress(t *testing.T) {
+	r := compatibleRender(t, append(compatibleSet(), endpointPrefix+"url=https://api.openai.com:8443/v1")...)
+	k := "NetworkPolicy/" + operatorNS + "/shadewright-allow-analyzer-egress"
+	rules := nonDNSRules(t, k, r)
+	found := false
+	for _, rule := range rules {
+		for _, port := range rule.Ports {
+			if port.Port != nil && port.Port.IntValue() == 8443 {
+				found = true
+				if len(rule.To) != 1 || rule.To[0].IPBlock == nil {
+					t.Fatal("public port lacks its IP peer")
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("declared public port is blocked")
 	}
 }

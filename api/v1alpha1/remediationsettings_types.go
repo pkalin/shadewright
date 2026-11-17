@@ -262,7 +262,7 @@ type AnalysisSettings struct {
 // AnalysisModels names the two model deployments of ADR-0023: a small model for the one structured triage
 // call, and a stronger one used only on escalation. There is no field for a key: the analyzer authenticates
 // to Foundry with its workload identity (Entra ID, design 11.1), reads an Anthropic API key from a mounted
-// file (ADR-0037), and optionally reads a separate host-bound OpenAI-compatible key (ADR-0042). No
+// file (ADR-0037), and optionally reads a separate endpoint-bound OpenAI-compatible key (ADR-0042). No
 // credential is ever stored in this object. The two
 // must be different deployments, so the escalation cap cannot be a second budget for the triage model.
 // +kubebuilder:validation:XValidation:rule="!has(self.escalation) || has(self.triage)",message="an escalation model needs a triage model"
@@ -338,8 +338,8 @@ type ModelDeployment struct {
 	// deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
 	// started without them refuses it (ProviderNotConfigured). A Foundry deployment may
 	// not name the host api.anthropic.com. There is no fallback between providers.
-	// OpenAICompatible uses --openai-compatible-endpoint-suffixes, its separate endpoint allow-list, no Azure identity, and an optional API key
-	// read from its own mounted file. The key is bound to one install-time host, never an Azure model host
+	// OpenAICompatible matches --openai-compatible-endpoints declarations, with no Azure identity and an optional API key
+	// read from its endpoint's own mounted file. The key is bound to its full install-time base URL, never an Azure model host
 	// or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.
 	// +kubebuilder:default=Foundry
 	// +optional
@@ -356,10 +356,10 @@ type ModelDeployment struct {
 	// and link-local addresses when it dials, and requests a token for the Cognitive Services audience only.
 	// For provider Anthropic it must be https://api.anthropic.com, the adapter's fixed host, and the allow-list
 	// does not apply; for Foundry that host is refused whatever the allow-list says. OpenAICompatible also
-	// requires HTTPS and its own --openai-compatible-endpoint-suffixes allow-list. Neither provider
-	// may call a host covered by the other provider's list. It permits private addresses only for exact Service DNS names in
-	// --openai-compatible-service-hosts, never loopback or link-local. The optional key goes only to the exact
-	// --openai-compatible-api-key-host. No redirects or environment proxy are used.
+	// requires HTTPS and an exact parsed base and API from --openai-compatible-endpoints. The request uses only
+	// declared destination data, never a settings path. Foundry refuses declared compatible hosts. Private
+	// addresses require a declared Service with egress fields, never loopback or link-local. Each optional
+	// key belongs to its declared base. No redirects or environment proxy are used.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern=`^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$`

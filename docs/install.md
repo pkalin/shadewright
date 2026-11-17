@@ -168,9 +168,9 @@ The same settings object and checks as above apply (`--set settings.create=true`
 ## OpenAI-compatible inference
 
 For an analyzer using only OpenAI-compatible endpoints, set
-`analyzer.analysis.disableFoundry=true`, choose narrow `openAICompatible.endpointSuffixes`, and
+`analyzer.analysis.disableFoundry=true`, declare exact bases and APIs under `openAICompatible.endpoints`, and
 leave `analyzer.identity.azure.clientId` empty unless Blob records are enabled.
 The optional key is an existing Secret or CSI file mounted in the analyzer only;
-set its exact host binding too. A keyless cluster Service needs verified HTTPS,
-an exact entry in `openAICompatible.serviceHosts`, and the suffix allow-list.
+attach its source to that endpoint. A keyless cluster Service needs verified HTTPS
+and `service` egress fields on its endpoint declaration.
 Plain HTTP is refused. Follow the [installation and qualification runbook](how-to/qualify-openai-compatible.md).

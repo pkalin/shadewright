@@ -29,10 +29,7 @@ import (
 )
 
 const providerCompatible = "openaicompatible"
-const envCompatibleSuffixes = "EVAL_COMPATIBLE_ENDPOINT_SUFFIXES"
-const envCompatibleKey = "EVAL_COMPATIBLE_KEY_FILE"
-const envCompatibleKeyHost = "EVAL_COMPATIBLE_KEY_HOST"
-const envCompatibleServices = "EVAL_COMPATIBLE_SERVICE_HOSTS"
+const envCompatibleEndpoints = "EVAL_COMPATIBLE_ENDPOINTS"
 const envCompatibleServer = "EVAL_COMPATIBLE_SERVER_ID"
 
 // compatibleSource uses the same factory and gates as the analyzer, with no Azure identity.
@@ -45,27 +42,17 @@ func (*compatibleSource) manifestProvider() (string, *manifestAnthropic) {
 	return providerCompatible, nil
 }
 
-func openaicompatibleServiceHosts() ([]string, error) {
-	return openaicompatible.ParseServiceHosts(os.Getenv(envCompatibleServices))
-}
-
 func newCompatibleSource() (*compatibleSource, error) {
 	for _, name := range []string{envAPI, envKeyFile, envEffort, envAllowance, envSuffixes} {
 		if os.Getenv(name) != "" {
 			return nil, fmt.Errorf("%s does not apply to OpenAICompatible", name)
 		}
 	}
-	suffixes, err := models.ParseEndpointSuffixes(os.Getenv(envCompatibleSuffixes))
+	endpoints, err := openaicompatible.ParseEndpoints(os.Getenv(envCompatibleEndpoints))
 	if err != nil {
 		return nil, err
 	}
-	services, err := openaicompatibleServiceHosts()
-	if err != nil {
-		return nil, err
-	}
-	factory, err := models.NewModelFactory(models.ModelsConfig{CompatibleSuffixes: suffixes, DisableFoundry: true,
-		CompatibleKeyFile: os.Getenv(envCompatibleKey), CompatibleKeyHost: os.Getenv(envCompatibleKeyHost),
-		CompatibleServiceHosts: services})
+	factory, err := models.NewModelFactory(models.ModelsConfig{CompatibleEndpoints: endpoints, DisableFoundry: true})
 	if err != nil {
 		return nil, err
 	}
@@ -148,11 +135,11 @@ func TestEvalOpenAICompatible(t *testing.T) {
 
 func TestCompatibleSourceWithoutAzure(t *testing.T) {
 	clearModelEnv(t)
-	for _, name := range []string{envCompatibleKey, envCompatibleKeyHost, envCompatibleServices, envCompatibleServer} {
+	for _, name := range []string{envCompatibleEndpoints, envCompatibleServer} {
 		t.Setenv(name, "")
 	}
 	t.Setenv(envEndpoint, "https://api.openai.com/v1")
-	t.Setenv(envCompatibleSuffixes, ".api.openai.com")
+	t.Setenv(envCompatibleEndpoints, `[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses"}]`)
 	t.Setenv(envTriageDep, "gpt-6.1-sol")
 	t.Setenv(envTriageMod, "gpt-6.1-sol")
 	t.Setenv(envTriageAPI, "Responses")
@@ -186,8 +173,8 @@ func TestCompatibleSourceWithoutAzure(t *testing.T) {
 	if err != nil || changed.Digest == m.Digest {
 		t.Fatal("server identity does not change qualification digest")
 	}
-	t.Setenv(envCompatibleKey, "/unread/key")
-	t.Setenv(envCompatibleKeyHost, "wrong.example.com")
+	t.Setenv(envCompatibleEndpoints, `[{"url":"https://other.example.com/v1","inferenceAPI":"Responses",`+
+		`"keyFile":"/unread/key"}]`)
 	if _, err := newCompatibleSource(); err == nil {
 		t.Fatal("misbound key accepted")
 	}

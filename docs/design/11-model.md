@@ -45,23 +45,28 @@ For an `Anthropic` deployment the host is fixed in code, `api.anthropic.com`, an
 
 ### OpenAI-compatible endpoints
 
-<span class="sw-status sw-built">built</span> `OpenAICompatible` uses its own
-install-time `--openai-compatible-endpoint-suffixes` allow-list and the shared `internal/providers/model/openaiwire`
-Chat Completions and Responses code. Its endpoint includes the API prefix, its
-`deployment` is the model name and `apiVersion` is forbidden. There is no fallback.
-The optional key is read at each attempt, bound to one exact install-time host,
-and never sent to Foundry or Anthropic hosts. No key means no Authorization header.
-Set `--disable-foundry` to build no Entra token source for a compatible-only install.
+<span class="sw-status sw-built">built</span> `OpenAICompatible` matches settings
+against exact install-time `--openai-compatible-endpoints` declarations. Each owns
+its base URL, inference API and optional key file; no settings path is used to
+construct a request. The shared `internal/providers/model/openaiwire` codec keeps
+Foundry wire behavior unchanged. No compatible suffix list exists. Scheme/host
+case, default port and one trailing slash normalize; dot segments, userinfo,
+queries and fragments are refused. Duplicate bases and Foundry/Azure/Anthropic
+host overlaps fail chart rendering and analyzer startup.
 
-HTTPS on 443 is mandatory, even for a Service. Private unicast addresses require
-an exact Service DNS name in `--openai-compatible-service-hosts` as well as the
-suffix list; loopback and metadata addresses remain refused. The client follows
-no redirects and uses no environment proxy. Missing or incomplete usage is a
-malformed reply with unknown usage charged at the upper bound. A compatible 429
-is never marked unbilled. The same typed validators refuse invalid proposals and
-tool arguments, including when the server ignores the requested schemas.
-[ADR-0042](../adr/0042-openai-compatible-model-endpoints.md) defines this built provider.
-Qualify each model and server version with the evaluation harness before use.
+Set `--disable-foundry` for compatible-only inference without an Entra token
+source. The Foundry suffix list remains Foundry-only. Every declared compatible
+host is refused for Foundry and Anthropic. Private addresses require a declared
+Service with namespace, pod selector and target port; HTTPS with trusted TLS and
+address guards remain required. No redirects or proxy are used. Missing or
+unusable usage and failed sent calls cost the input estimate plus output bound
+and a rounded-up 10% margin; complete usage costs at least the input estimate.
+The raw body and joined decoded strings, numbers and object keys are scanned
+for credential echoes before any completion is returned. Transformed keys and
+splits across replies remain outside this check. Output redaction, typed
+validation and deterministic policy still apply. [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md)
+remains Proposed.
+
 The [harness](../evaluation.md#openai-compatible-models-and-servers) qualifies a
 model and server together, including the Responses tool path of #501.
 

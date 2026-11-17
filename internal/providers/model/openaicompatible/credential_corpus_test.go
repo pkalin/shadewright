@@ -116,7 +116,7 @@ func TestSplitCredentialCorpus(t *testing.T) {
 	base := strings.Index(inner, secretKey)
 	var data []byte
 	p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, API: APIResponses,
-		KeyFile: keyFile(t, secretKey), KeyHost: compatibleHost}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
+		KeyFile: keyFile(t, secretKey)}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
 		return response(200, "application/json", string(data)), nil
 	})})
 	if err != nil {
@@ -238,6 +238,37 @@ func checkJoinedReplyBaseline(t *testing.T) {
 			}
 			if string(data) != before {
 				t.Fatal("matcher changed neighbouring text")
+			}
+		}
+	}
+}
+
+// Mix strings, numeric values and object keys in both APIs with known split boundaries.
+func TestGeneratedScalarEchoCorpus(t *testing.T) {
+	for i := range 100 {
+		digits := fmt.Sprintf("%06d", 123456+i)
+		key := "sk-ABCDEF" + digits + "XYZ"
+		for _, args := range []string{`{"` + digits + `XYZ":1}`, `{"a":` + digits + `,"b":"XYZ"}`} {
+			for _, api := range []API{APIChatCompletions, APIResponses} {
+				payload := map[string]any{echoChoicesField: []any{map[string]any{"message": map[string]any{echoContentField: "sk-ABCDEF", echoToolCallsField: []any{map[string]any{echoFunctionField: map[string]any{echoArgumentsField: args}}}}}}}
+				if api == APIResponses {
+					payload = map[string]any{echoOutputField: []any{map[string]any{echoTypeField: echoMessageType, echoContentField: []any{map[string]any{echoTypeField: echoOutputText, echoTextField: "sk-ABCDEF"}}}, map[string]any{echoTypeField: echoFunctionCallType, echoArgumentsField: args}}}
+				}
+				body, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				original := string(body)
+				if !replyContainsKey(body, api, key) {
+					t.Fatalf("scalar split %d %s missed", i, api)
+				}
+				if string(body) != original {
+					t.Fatal("echo matcher mutated reply")
+				}
+				clean := []byte(strings.ReplaceAll(original, "ABCDEF", "safe"))
+				if replyContainsKey(clean, api, key) {
+					t.Fatal("clean neighbour matched")
+				}
 			}
 		}
 	}

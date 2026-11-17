@@ -29,13 +29,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
@@ -107,18 +107,16 @@ const (
 	APIResponses       = openaiwire.APIResponses
 )
 
-// Config configures one endpoint and model, with an optional host-bound key (ADR-0042).
+// Config configures one endpoint and model, with an optional endpoint-bound key (ADR-0042).
 type Config struct {
-	// Endpoint is an HTTPS API base, for example https://api.openai.com/v1. The analyzer checks its allow-list.
+	// Endpoint is an HTTPS API base, for example https://api.openai.com/v1. This is the declared installation base, never a settings URL.
 	Endpoint string
 	// Deployment is the name of the model deployment.
 	Deployment string
 	// KeyFile is an optional API key file, read at each attempt; never a credential in settings.
 	KeyFile string
-	// KeyHost binds a configured key to one exact DNS host at install time.
-	KeyHost string
-	// ServiceHosts are exact Service DNS names allowed to connect to private unicast addresses.
-	ServiceHosts []string
+	// Service permits private unicast addresses for this declared Service endpoint.
+	Service *Service
 	// API is ChatCompletions (the default) or Responses.
 	API API
 	// MaxOutputTokens is sent when a request leaves its own limit at zero. Zero means DefaultMaxOutputTokens;
@@ -198,17 +196,10 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	if (cfg.KeyFile == "") != (cfg.KeyHost == "") {
-		return nil, invalid("key file and exact key host must be set together")
+	if err := ValidateEndpoints([]Endpoint{{URL: cfg.Endpoint, API: api, KeyFile: cfg.KeyFile, Service: cfg.Service}}, nil); err != nil {
+		return nil, invalid("the endpoint declaration is invalid")
 	}
-	if cfg.KeyFile != "" && (!filepath.IsAbs(cfg.KeyFile) || filepath.Clean(cfg.KeyFile) != cfg.KeyFile || cfg.KeyHost != u.Hostname()) {
-		return nil, invalid("the key needs a clean absolute path and the endpoint's exact host")
-	}
-	services, err := ParseServiceHosts(strings.Join(cfg.ServiceHosts, ","))
-	if err != nil {
-		return nil, err
-	}
-	allowPrivate := slices.Contains(services, u.Hostname())
+	allowPrivate := cfg.Service != nil
 	if cfg.MaxOutputTokens < 0 || cfg.MaxOutputTokens > MaxOutputTokens {
 		return nil, invalid("the output token limit is out of range")
 	}
@@ -497,52 +488,35 @@ func ctxError(ctx context.Context) error {
 	return fmt.Errorf("openai-compatible: model call: %w", context.Canceled)
 }
 
-// ParseServiceHosts validates the exact install-time Service DNS names allowed private unicast addresses.
-func ParseServiceHosts(flag string) ([]string, error) {
-	var hosts []string
-	for part := range strings.SplitSeq(flag, ",") {
-		host := strings.TrimSpace(part)
-		if host == "" {
-			continue
-		}
-		labels := strings.Split(host, ".")
-		service := len(labels) == 3 && labels[2] == "svc"
-		fullyQualified := len(labels) == 5 && strings.Join(labels[2:], ".") == "svc.cluster.local"
-		if !service && !fullyQualified || len(labels[0]) > 63 || len(labels[1]) > 63 ||
-			!dnsLabel.MatchString(labels[0]) || !dnsLabel.MatchString(labels[1]) {
-			return nil, fmt.Errorf("openai-compatible: service hosts must be exact Service DNS names: %w", providers.ErrInvalidConfig)
-		}
-		if !slices.Contains(hosts, host) {
-			hosts = append(hosts, host)
-		}
-	}
-	return hosts, nil
+// serviceHost recognizes the exact DNS forms permitted for a declared Service endpoint.
+func serviceHost(host string) bool {
+	labels := strings.Split(host, ".")
+	service := len(labels) == 3 && labels[2] == "svc"
+	fullyQualified := len(labels) == 5 && strings.Join(labels[2:], ".") == "svc.cluster.local"
+	return (service || fullyQualified) && len(labels[0]) <= 63 && len(labels[1]) <= 63 && dnsLabel.MatchString(labels[0]) && dnsLabel.MatchString(labels[1])
 }
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
-var endpointPattern = regexp.MustCompile(`^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:443)?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$`)
+var endpointHostPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
+var endpointPathPattern = regexp.MustCompile(`^(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$`)
 
 func endpointURL(endpoint string, api API) (*url.URL, error) {
-	invalid := func() (*url.URL, error) {
-		return nil, fmt.Errorf("openai-compatible: invalid endpoint or inference API: %w", providers.ErrInvalidConfig)
+	base, err := CanonicalBase(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("openai-compatible: invalid endpoint: %w", providers.ErrInvalidConfig)
 	}
-	if len(endpoint) > 256 || !endpointPattern.MatchString(endpoint) {
-		return invalid()
+	u, _ := url.Parse(base)
+	if ReservedHost(u.Hostname()) {
+		return nil, fmt.Errorf("openai-compatible: reserved endpoint host: %w", providers.ErrInvalidConfig)
 	}
-	u, err := url.Parse(endpoint)
-	if err != nil || ReservedHost(u.Hostname()) {
-		return invalid()
-	}
-	path := ""
 	switch api {
 	case APIChatCompletions:
-		path = "chat/completions"
+		return u.JoinPath("chat/completions"), nil
 	case APIResponses:
-		path = "responses"
+		return u.JoinPath("responses"), nil
 	default:
-		return invalid()
+		return nil, fmt.Errorf("openai-compatible: invalid inference API: %w", providers.ErrInvalidConfig)
 	}
-	return u.JoinPath(path), nil
 }
 
 // ReservedHost keeps compatible credentials away from Anthropic and Microsoft's model hosts.
@@ -681,15 +655,17 @@ func replyContainsKey(data []byte, api API, key string) bool {
 	if json.Unmarshal(data, &r) != nil {
 		return false
 	}
-	var joined, rawJoined, messageText strings.Builder
+	var joined, keyed, rawJoined, messageText strings.Builder
 	matched := false
 	appendText := func(text string) {
 		rawJoined.WriteString(text)
 		matched = matched || containsKey([]byte(text), key)
 		if json.Valid([]byte(text)) {
-			appendJSONStrings(&joined, json.NewDecoder(strings.NewReader(text)))
+			appendJSONValues(&joined, json.NewDecoder(strings.NewReader(text)), false)
+			appendJSONValues(&keyed, json.NewDecoder(strings.NewReader(text)), true)
 		} else {
 			joined.WriteString(text)
+			keyed.WriteString(text)
 		}
 	}
 
@@ -711,26 +687,47 @@ func replyContainsKey(data []byte, api API, key string) bool {
 			}
 		}
 	}
-	return matched || containsKey([]byte(rawJoined.String()), key) ||
-		containsKey([]byte(joined.String()), key) || containsKey([]byte(messageText.String()), key)
+	var all strings.Builder
+	appendJSONValues(&all, json.NewDecoder(bytes.NewReader(data)), true)
+	return strings.Contains(withoutWhitespace(all.String()), key) || strings.Contains(withoutWhitespace(keyed.String()), key) || matched || containsKey([]byte(rawJoined.String()), key) ||
+		strings.Contains(withoutWhitespace(joined.String()), key) || containsKey([]byte(messageText.String()), key)
 }
 
-// appendJSONStrings joins decoded string values in wire order without JSON punctuation.
-// The caller validates the JSON first, so Token cannot fail here.
-func appendJSONStrings(dst *strings.Builder, dec *json.Decoder) {
-	token, _ := dec.Token()
+// appendJSONValues joins scalar values in wire order, including object keys and numbers.
+// Embedded payload objects have field names that delimit arguments, so both their values
+// and their keys are scanned, in separate concatenations.
+func appendJSONValues(dst *strings.Builder, dec *json.Decoder, includeKeys bool) {
+	dec.UseNumber()
+	token, err := dec.Token()
+	if err != nil {
+		return
+	}
 	switch v := token.(type) {
 	case string:
 		dst.WriteString(v)
+	case json.Number:
+		dst.WriteString(v.String())
 	case json.Delim:
 		for dec.More() {
 			if v == '{' {
-				_, _ = dec.Token()
+				k, _ := dec.Token()
+				if includeKeys {
+					dst.WriteString(k.(string))
+				}
 			}
-			appendJSONStrings(dst, dec)
+			appendJSONValues(dst, dec, includeKeys)
 		}
 		_, _ = dec.Token()
 	}
+}
+
+func withoutWhitespace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // compatibleWireError attributes the shared codec's fixed error text without changing its classification.

@@ -88,18 +88,23 @@ In this order, because the first step is the one that stops the damage:
 
 ## OpenAI-compatible credential
 
-The optional compatible API key follows the same mounted-file rotation procedure
-as Anthropic, in a separate Secret or CSI volume. Use a dedicated inference key
-and a server-side spend cap. Set `analyzer.analysis.openAICompatible.apiKey.host`
-to the exact destination and `secretName` (or `volume`) to its source. The key is
-mounted only in the analyzer, whole and read-only, with no `subPath`, Secret API
-reads or RBAC changes. No source means no Authorization header.
+Each compatible endpoint declaration owns an optional key. Chart
+`analyzer.analysis.openAICompatible.endpoints[].apiKey` names an existing Secret
+(`secretName`, `secretKey`, default `api-key`) or a Secret/CSI `volume` with
+`fileName`. Each source mounts whole and read-only, without `subPath`, only in the
+analyzer, at `/var/run/secrets/shadewright/openai-compatible/<index>/`. The chart
+passes the derived `keyFile` in `--openai-compatible-endpoints`. No Secret RBAC,
+credential environment variable or custom resource field is added.
 
-Create a replacement key, update the source, wait for the kubelet or CSI refresh,
-confirm a successful call, then revoke the old key. Each attempt rereads the file,
-so no restart is required. A missing or empty file is retryable within the call's
-bounds; malformed files are refused and need an operator correction. No error
-quotes the key or file path. Changing only RemediationSettings cannot move the
-key to a different allowed host. When changing hosts, provision a separate key
-source so old pods cannot reread the new host's key during the rollout. See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md),
-Proposed, and the [qualification runbook](how-to/qualify-openai-compatible.md).
+The key is read on every attempt. Rotate the Secret or CSI source, allow its
+projection to update, and then revoke the old credential at the endpoint. A
+missing or empty file is retryable; malformed files are refused. Keys never reach
+errors, events or records. A declaration without a key sends no Authorization
+header. Separate endpoints, including different tenant paths on one host, can
+have separate keys. Settings cannot move a key away from its exact declared base
+URL. Foundry and Anthropic never receive these keys.
+
+Use credentials dedicated to inference and set server-side spend limits. A
+compromised analyzer can read its mounted keys. Removing the release does not
+revoke them. See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md), which
+remains Proposed, and the [qualification runbook](how-to/qualify-openai-compatible.md).

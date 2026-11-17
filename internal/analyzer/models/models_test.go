@@ -33,6 +33,7 @@ import (
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/anthropic"
+	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
 )
 
 // foundrySuffix is the Microsoft Foundry host suffix of these tests.
@@ -395,14 +396,17 @@ func TestModelFactoryWithoutFoundry(t *testing.T) {
 
 // Generate destinations and the expected provider from disjoint installation lists.
 func TestProviderHostMatrix(t *testing.T) {
-	cfg := ModelsConfig{Suffixes: []string{foundrySuffix}, CompatibleSuffixes: []string{gatewaySuffix}, Tokens: failingTokens{t},
+	cfg := ModelsConfig{Suffixes: []string{foundrySuffix}, Tokens: failingTokens{t},
 		AnthropicKeyFile: "/key", Expected: map[analysis.Role]string{analysis.RoleTriage: anthropicModel}}
+	for i := range 16 {
+		cfg.CompatibleEndpoints = append(cfg.CompatibleEndpoints, openaicompatible.Endpoint{URL: fmt.Sprintf("https://host%d%s/v1", i, gatewaySuffix), API: openaicompatible.APIChatCompletions})
+	}
 	factory, err := NewModelFactory(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, provider := range []remediationv1alpha1.ModelProvider{"", remediationv1alpha1.ModelProviderFoundry, remediationv1alpha1.ModelProviderAnthropic, remediationv1alpha1.ModelProviderOpenAICompatible} {
-		for i := range 20 {
+		for i := range 16 {
 			for _, suffix := range []string{foundrySuffix, gatewaySuffix, ".unlisted.example.com"} {
 				host := fmt.Sprintf("host%d%s", i, suffix)
 				d := remediationv1alpha1.ModelDeployment{Provider: provider, Endpoint: "https://" + host + "/v1", Deployment: anthropicModel}
@@ -420,18 +424,8 @@ func TestProviderHostMatrix(t *testing.T) {
 }
 
 func TestProviderListOverlap(t *testing.T) {
-	cfg := ModelsConfig{Suffixes: []string{gatewaySuffix}, CompatibleSuffixes: []string{".llm.gateway.example.com"}, Tokens: failingTokens{t}}
-	factory, err := NewModelFactory(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, provider := range []remediationv1alpha1.ModelProvider{remediationv1alpha1.ModelProviderFoundry, remediationv1alpha1.ModelProviderOpenAICompatible} {
-		d := remediationv1alpha1.ModelDeployment{Provider: provider, Endpoint: "https://llm.gateway.example.com/v1", Deployment: "m"}
-		if provider == remediationv1alpha1.ModelProviderFoundry {
-			d.APIVersion = "v1"
-		}
-		if _, err := factory(analysis.RoleTriage, d); !errors.Is(err, analysis.ErrEndpointNotAllowed) {
-			t.Errorf("overlapping host accepted by %s: %v", provider, err)
-		}
+	_, err := NewModelFactory(ModelsConfig{Suffixes: []string{gatewaySuffix}, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://llm.gateway.example.com/v1", API: openaicompatible.APIChatCompletions}}, Tokens: failingTokens{t}})
+	if err == nil {
+		t.Fatal("overlap survived startup")
 	}
 }

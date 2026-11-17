@@ -26,22 +26,43 @@ func TestCompatibleOnlyDoesNotReadAzureIdentity(t *testing.T) {
 	f := validFlags()
 	f.disableFoundry = true
 	f.endpointSuffixes = ""
-	f.compatibleSuffixes = ".api.openai.com"
+	f.compatibleEndpoints = `[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses"}]`
 	asked := false
 	c, err := buildAnalysis(f, testDeps(t), func() (foundry.TokenSource, error) { asked = true; return noTokens{}, nil })
 	if err != nil || c == nil || asked {
 		t.Fatalf("compatible-only start: %v, identity read %v", err, asked)
 	}
-	for _, mutate := range []func(*analysisFlags){
-		func(f *analysisFlags) { f.compatibleKeyFile = "/key" },
-		func(f *analysisFlags) { f.compatibleKeyHost = "api.openai.com" },
-		func(f *analysisFlags) { f.compatibleServiceHosts = "*.svc.cluster.local" },
-		func(f *analysisFlags) { f.compatibleKeyFile, f.compatibleKeyHost = "relative", "api.openai.com" },
+	for _, raw := range []string{
+		`[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses","keyFile":"relative"}]`,
+		`[{"url":"https://api.openai.com/v1?x","inferenceAPI":"Responses"}]`,
+		`[{"url":"https://api.anthropic.com/v1","inferenceAPI":"Responses"}]`,
+		`[{"url":"https://model.demo.svc/v1","inferenceAPI":"Responses",` +
+			`"service":{"namespace":"wrong","port":8443,"podSelector":{"app":"model"}}}]`,
 	} {
 		bad := f
-		mutate(&bad)
+		bad.compatibleEndpoints = raw
 		if _, err := buildAnalysis(bad, testDeps(t), nil); err == nil {
-			t.Fatal("invalid compatible flags accepted")
+			t.Fatal("invalid declaration survived startup")
+		}
+	}
+}
+
+func TestCompatibleInvalidDeclarationStopsBeforeIdentity(t *testing.T) {
+	for _, raw := range []string{
+		`[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses"}]`,
+		`[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses"},` +
+			`{"url":"HTTPS://API.OPENAI.COM:443/v1/","inferenceAPI":"ChatCompletions"}]`,
+		`[{"url":"https://api.openai.com/a/../v1","inferenceAPI":"Responses"}]`,
+		`[{"url":"https://api.openai.com/v1#","inferenceAPI":"Responses"}]`,
+		`[{"url":"https://@api.openai.com/v1","inferenceAPI":"Responses"}]`,
+	} {
+		f := validFlags()
+		f.endpointSuffixes = ".api.openai.com"
+		f.compatibleEndpoints = raw
+		asked := false
+		_, err := buildAnalysis(f, testDeps(t), func() (foundry.TokenSource, error) { asked = true; return noTokens{}, nil })
+		if err == nil || asked {
+			t.Fatalf("invalid declarations reached identity: %v requested=%v", err, asked)
 		}
 	}
 }

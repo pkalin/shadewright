@@ -97,13 +97,19 @@ func classifyBreaker(rr *remediationv1alpha1.RemediationRequest) {
 }
 
 // backfill writes, in one status write, the fields a request decided before they existed lacks:
-// status.holdsTarget from derivedHold (so the requests of an older release keep the lock their status gives
+// status.holdsTarget from derivedHold, through acquire or release with its verdict (so the requests of an older release keep the lock their status gives
 // them; one refused then gets false, so the lock's list stops reading it), and on a request that ended,
 // status.breakerCounts from classifyBreaker (so the breaker's list stops reading one it never needs).
 func (r *RemediationRequestReconciler) backfill(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	changed := false
 	if rr.Status.HoldsTarget == nil && (rr.Status.PlanDigest != "" || ended(rr.Status.Phase)) {
-		rr.Status.HoldsTarget = new(derivedHold(rr))
+		// The lock holdsLock reads now (derivedHold) is recorded as it is: taken when held, released only with the
+		// verdict that the status shows it free, so the backfill never clears a held lock.
+		if s, ok := settleReleasedBeforeField(rr); ok {
+			release(rr, s)
+		} else {
+			acquire(rr)
+		}
 		changed = true
 	}
 	if rr.Status.BreakerCounts == nil && ended(rr.Status.Phase) {

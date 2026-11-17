@@ -3170,19 +3170,37 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(holdsLock(fetch())).To(BeTrue())
 	})
 
-	It("allows a recovered merge content clock to clear, but refuses moving a running clock (#771)", func() {
+	It("allows a recovered Git wait to be removed, but refuses moving a standing one or a content wait without its pull request (#771)", func() {
 		got := fetch()
 		first := metav1.NewTime(time.Now().Truncate(time.Second))
-		got.Status.MergeContentUnreadSince = &first
+		setContentWait(got, &first)
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 		moved := metav1.NewTime(first.Add(time.Minute))
-		got.Status.MergeContentUnreadSince = &moved
-		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, got))).To(BeTrue())
+		setContentWait(got, &moved)
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, got))).To(BeTrue(), "a standing wait cannot move")
 		got = fetch()
-		got.Status.MergeContentUnreadSince = nil
+		other := got.DeepCopy()
+		other.Status.GitWaits[0].PullRequest.Number++
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, other))).To(BeTrue(),
+			"a standing content wait keeps its pull request")
+		setContentWait(got, nil)
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
-		got.Status.MergeContentUnreadSince = &moved
-		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		setContentWait(got, &moved)
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a removed wait starts again")
+		got = fetch()
+		bare := got.DeepCopy()
+		bare.Status.GitWaits[0].PullRequest = nil
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, bare))).To(BeTrue(),
+			"a content wait names its pull request")
+		paced := got.DeepCopy()
+		paced.Status.GitWaits = append(paced.Status.GitWaits, remediationv1alpha1.GitWait{
+			Kind: remediationv1alpha1.GitWaitPaced, Since: first, Operation: "read",
+			PullRequest: got.Status.GitWaits[0].PullRequest})
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, paced))).To(BeTrue(),
+			"only a content wait names a pull request")
+		twice := got.DeepCopy()
+		twice.Status.GitWaits = append(twice.Status.GitWaits, twice.Status.GitWaits[0])
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, twice))).To(BeTrue(), "one entry per kind")
 	})
 
 	// The reads of what a retargeted merge brought have their own wait: a wait for the merge commit that is over
@@ -3211,14 +3229,14 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			Expect(retry.Message).To(ContainSubstring("read the parents"), "names the read")
 			got = fetch()
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "nothing is decided on a failed read")
-			Expect(got.Status.MergeContentUnreadSince).NotTo(BeNil())
-			Expect(got.Status.MergeContentUnreadSince.Time).To(BeTemporally("~", time.Now(), 5*time.Second))
+			Expect(contentWaitSince(got)).NotTo(BeNil())
+			Expect(contentWaitSince(got).Time).To(BeTemporally("~", time.Now(), 5*time.Second))
 			git.Fail = nil
 			Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
 			got = fetch()
 			Expect(got.Status.MergeReceipt).NotTo(BeNil(), "a read that works records the merge")
 			Expect(got.Status.MergeReceipt.MergeCommitSHA).To(Equal(sha))
-			Expect(got.Status.MergeContentUnreadSince).To(BeNil())
+			Expect(contentWaitSince(got)).To(BeNil())
 		})
 
 	// Reads that keep failing end the request MergeContentUnreadable once their own wait is over: no claim about the
@@ -3243,8 +3261,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			at(after)
 			got := fetch()
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-			Expect(got.Status.MergeContentUnreadSince).NotTo(BeNil())
-			Expect(got.Status.MergeContentUnreadSince.Time).To(BeTemporally("~", start, time.Second))
+			Expect(contentWaitSince(got)).NotTo(BeNil())
+			Expect(contentWaitSince(got).Time).To(BeTemporally("~", start, time.Second))
 			Expect(holdsLock(got)).To(BeTrue())
 		}
 		at(mergeContentWait + time.Second)

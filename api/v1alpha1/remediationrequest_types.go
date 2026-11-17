@@ -447,17 +447,84 @@ const (
 	// is set or its reason changes. A pull request known closed never keeps it: the request ends Cancelled, also when
 	// the failed review check cannot be written. The write that ends the request removes it.
 	ConditionCancelPending = "CancelPending"
-	// ConditionGitReadRetry is True, with reason GitReadFailed, while the executor retries a read of the Git host
-	// that failed (#771). The message names the read, never the host's answer; lastTransitionTime is when the
-	// retry of that read began, on the executor's clock. The read is made again after the pull request poll
-	// interval, or the longer delay the host asked for, and never later than the bound of the step that made it
-	// (a deadline, a wait or a grace); once that bound has passed the step's own end runs at once. A failure of the
-	// Kubernetes API never sets it. The condition is removed after a reconcile that ends with no failed Git read.
+	// ConditionGitReadRetry is True while status.gitWaits holds an entry: the executor retries a read of the Git host
+	// that failed (#771). It summarizes the entries: the reason is that of the entry that ends first
+	// (GitReadFailedBeforeDeadline, GitReadFailedBeforeHandoffGrace, GitReadFailedBeforeMergeWait,
+	// GitReadFailedBeforeContentWait), or GitReadFailed when only a Paced entry stands; the message names the
+	// reads, never the host's answer; lastTransitionTime is the start of that entry. The read is made again after
+	// the pull request poll interval, or the longer delay the host asked for, and never later than the end of an
+	// entry; an entry past its end is ended at the start of the next reconcile. A failure of the Kubernetes API
+	// never sets it. It is removed with the last entry.
 	ConditionGitReadRetry = "GitReadRetry"
 )
 
 // ReasonGitReadFailed is the reason of condition GitReadRetry True: a read of the Git host failed and is retried.
 const ReasonGitReadFailed = "GitReadFailed"
+
+// GitWaitKind is the kind of bound of a Git wait (status.gitWaits).
+// +kubebuilder:validation:Enum=Paced;RequestDeadline;HandoffGrace;MergeCheck;MergeContent
+type GitWaitKind string
+
+// Kinds of Git wait.
+const (
+	// GitWaitPaced has no end of its own: the read is retried at the poll interval until it works, for a reason the
+	// executor names in code (a request that has no deadline at that step, or a target lock kept until a read
+	// settles it).
+	GitWaitPaced GitWaitKind = "Paced"
+	// GitWaitRequestDeadline ends at status.deadline of a request in PolicyChecked: the request expires.
+	GitWaitRequestDeadline GitWaitKind = "RequestDeadline"
+	// GitWaitHandoffGrace ends a grace after status.deadline of a replacement recovering a handoff: the request ends
+	// NeedsIntervention with HandoffRecoveryFailed.
+	GitWaitHandoffGrace GitWaitKind = "HandoffGrace"
+	// GitWaitMergeCheck ends five minutes after status.mergeCommitAwaitedSince (or its own start when that is
+	// unset): the merge is recorded with the plan not shown fresh.
+	GitWaitMergeCheck GitWaitKind = "MergeCheck"
+	// GitWaitMergeContent ends five minutes after its start: the request ends NeedsIntervention with
+	// MergeContentUnreadable. It names the pull request whose merge it reads.
+	GitWaitMergeContent GitWaitKind = "MergeContent"
+)
+
+// GitWait is one wait on a read of the Git host that failed (status.gitWaits).
+// +kubebuilder:validation:XValidation:rule="(self.kind == 'MergeContent') == has(self.pullRequest)",message="a MergeContent wait names its pull request, and no other kind names one"
+type GitWait struct {
+	// kind is the kind of bound of the wait.
+	// +required
+	Kind GitWaitKind `json:"kind"`
+
+	// since is when the wait began, on the executor's clock. It does not move while the entry stands.
+	// +required
+	Since metav1.Time `json:"since"`
+
+	// operation is the fixed name of the read that failed last, never the Git host's answer.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +required
+	Operation string `json:"operation"`
+
+	// pullRequest is, for a MergeContent wait only, the pull request whose merge the reads are about: the recorded
+	// one, or one found by the request's marker whose head was checked, so the end of the wait can record it.
+	// +optional
+	PullRequest *GitWaitPullRequest `json:"pullRequest,omitempty"`
+}
+
+// GitWaitPullRequest is the pull request a MergeContent wait is about.
+type GitWaitPullRequest struct {
+	// number of the pull request.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	Number int64 `json:"number"`
+
+	// url of the pull request.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https://`
+	// +required
+	URL string `json:"url"`
+
+	// headSHA is the head of the pull request, one Shadewright pushed.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +required
+	HeadSHA string `json:"headSHA"`
+}
 
 // ReasonIncidentCountUnchanged is the reason of condition IncidentStopped True: the Incident's count did not
 // change for at least the quiet time of its closure rules while the pull request waited for review (#715).
@@ -952,14 +1019,21 @@ type RemediationRequestStatus struct {
 	// +optional
 	MergeCommitAwaitedSince *metav1.Time `json:"mergeCommitAwaitedSince,omitempty"`
 
-	// mergeContentUnreadSince is when the executor first failed to read what a merge brought, on its own clock: a
-	// pull request merged into the target branch the settings name now after the plan's branch changed (#771),
-	// whose merge counts only when it brought the planned change alone. The reads are retried for five minutes
-	// from it; after that the request ends NeedsIntervention with reason MergeContentUnreadable. The clock cannot
-	// move while set. A successful content read removes it, so a later failure starts its own wait; neither a
-	// restart nor the wait for the merge commit moves or uses up an uninterrupted failure wait.
+	// gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of
+	// bound: Paced (no end of its own), RequestDeadline, HandoffGrace, MergeCheck and MergeContent. Starting or ending
+	// one kind never touches another, and an entry holds everything needed to end it. At the start of every
+	// reconcile the executor ends each entry whose bound has passed, before any read: RequestDeadline expires the
+	// request, HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed, MergeCheck records the merge with
+	// the plan not shown fresh, and MergeContent (five minutes from its start) ends it NeedsIntervention with
+	// MergeContentUnreadable, recording the pull request the entry names when the status holds none. An entry whose
+	// kind no longer applies to the request is removed. A successful read of what a merge brought removes the
+	// MergeContent entry, and a reconcile with no failed Git read removes the others. Condition GitReadRetry
+	// summarizes the entries for people.
+	// +listType=map
+	// +listMapKey=kind
+	// +kubebuilder:validation:MaxItems=5
 	// +optional
-	MergeContentUnreadSince *metav1.Time `json:"mergeContentUnreadSince,omitempty"`
+	GitWaits []GitWait `json:"gitWaits,omitempty"`
 
 	// rollout is what the check after the merge keeps between reconciles (the RolledOut condition).
 	// +optional
@@ -1056,7 +1130,7 @@ type RemediationRequestStatus struct {
 // is neither added, removed nor changed (#748).
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck) == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck) || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))",message="status.pullRequest.reviewCheck does not change once status.mergeReceipt exists"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)",message="status.mergeCommitAwaitedSince is set once and never changed"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeContentUnreadSince) || !has(self.status) || !has(self.status.mergeContentUnreadSince) || self.status.mergeContentUnreadSince == oldSelf.status.mergeContentUnreadSince",message="status.mergeContentUnreadSince cannot move while set; clear it after a successful read"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status) || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o, o.kind != w.kind || (o.since == w.since && has(o.pullRequest) == has(w.pullRequest) && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))",message="a Git wait keeps its start and its pull request while it stands; remove it to start another"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))",message="status.mergeReceipt is set only in Merged or a phase after it"
 // WaitingForDelivery and Verifying are measured from the receipt (ADR-0030 section 2), and Verifying from the
 // applied time, which the executor writes in the same status write that sets Verifying.

@@ -372,6 +372,11 @@ const (
 	proofHandedOver
 	// proofHandoffAborted: a replacement whose handoff did not happen, which never had a pull request of its own.
 	proofHandoffAborted
+	// proofReleasedBeforeField: a request decided before status.holdsTarget existed, whose status alone shows the
+	// lock released as the release before the field decided it (derivedHold false: not deleted with the finalizer,
+	// not moved on any more, and no recorded pull request that may be open). Its lock was already free: holdsLock
+	// reads derivedHold for it, so recording false changes no lock (backfill).
+	proofReleasedBeforeField
 )
 
 // settleByRead is the verdict of the read of a stopped holder's pull requests (settleTargetLock): v what the read
@@ -440,6 +445,23 @@ func mergeRecorded(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
 	return rr.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention && c != nil && c.Status == metav1.ConditionFalse &&
 		(c.Reason == ReasonMergedWithForeignChange || c.Reason == ReasonMergeContentUnreadable)
+}
+
+// settleReleasedBeforeField is the verdict of a request decided before status.holdsTarget existed whose status
+// shows the lock free (derivedHold false). A request with the field set, or one derivedHold holds, gets none, so it
+// can never clear a held lock.
+func settleReleasedBeforeField(rr *remediationv1alpha1.RemediationRequest) (lockSettlement, bool) {
+	if rr.Status.HoldsTarget != nil || derivedHold(rr) {
+		return lockSettlement{}, false
+	}
+	return lockSettlement{proof: proofReleasedBeforeField}, true
+}
+
+// acquire takes the lock on the request's target in the status about to be written: the policy decision that
+// admits it (reconcile), or the backfill of a request decided before status.holdsTarget existed that derivedHold
+// holds. With release it is the only writer of status.holdsTarget (TestLockClearedInOnePlace).
+func acquire(rr *remediationv1alpha1.RemediationRequest) {
+	rr.Status.HoldsTarget = new(true)
 }
 
 // release clears the lock in the status about to be written, with the condition that said why it was kept, for the
@@ -558,7 +580,8 @@ func (r *RemediationRequestReconciler) heldUnsettled(ctx context.Context, rr *re
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		res.RequeueAfter = max(res.RequeueAfter, heldRecheckInterval)
+		// The pace of a stopped holder's looks, never past the end of a wait it records (the content wait).
+		res.RequeueAfter = r.withinWaits(rr, max(res.RequeueAfter, heldRecheckInterval))
 		return res, nil
 	case !said && err != nil:
 		return reconcile.Result{}, err

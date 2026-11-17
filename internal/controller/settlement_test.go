@@ -204,7 +204,7 @@ func testSettlementContentClock(t *testing.T, operation string) {
 	if ref, err := r.checkRetargeted(ctx, g, rr, cr, freshOtherBranch); err != nil || ref != nil {
 		t.Fatalf("recovered: %v %v", ref, err)
 	}
-	if rr.Status.MergeContentUnreadSince != nil {
+	if contentWaitSince(rr) != nil {
 		t.Fatal("successful content read kept its failure clock")
 	}
 	now = now.Add(2 * mergeContentWait)
@@ -215,7 +215,7 @@ func testSettlementContentClock(t *testing.T, operation string) {
 		return nil
 	})
 	failContent()
-	if rr.Status.MergeContentUnreadSince == nil || !rr.Status.MergeContentUnreadSince.Equal(&metav1.Time{Time: now}) {
+	if contentWaitSince(rr) == nil || !contentWaitSince(rr).Equal(&metav1.Time{Time: now}) {
 		t.Fatal("new failure reused old clock")
 	}
 }
@@ -369,10 +369,10 @@ func TestSettlementRetryMarksDoNotWakeTheWatch(t *testing.T) {
 			_, err := r.retryGitRead(ctx, rr, readFailure(opParents, errors.New("outage")), unboundedRead(noBoundHeldLock))
 			return err
 		},
-		func() error { return r.startContentWait(ctx, rr) },
+		func() error { return startContentWait(ctx, r, rr) },
 		func() error { return r.startMergeWait(ctx, rr) },
 		func() error { return r.clearContentWait(ctx, rr) },
-		func() error { return r.putGitReadRetry(ctx, rr, nil) },
+		func() error { return r.dropGitWaits(ctx, rr, func(api.GitWait) bool { return true }) },
 	} {
 		before := rr.DeepCopy()
 		if err := write(); err != nil {
@@ -422,7 +422,7 @@ func TestSettlementRetryWritesSurviveConflict(t *testing.T) {
 			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 			ctx := context.Background()
 			if operation == clockClear {
-				if err := r.startContentWait(ctx, rr); err != nil {
+				if err := startContentWait(ctx, r, rr); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -447,7 +447,7 @@ func TestSettlementRetryWritesSurviveConflict(t *testing.T) {
 			var err error
 			switch operation {
 			case clockStart:
-				err = r.startContentWait(ctx, rr)
+				err = startContentWait(ctx, r, rr)
 			case clockClear:
 				err = r.clearContentWait(ctx, rr)
 			default:
@@ -463,10 +463,10 @@ func TestSettlementRetryWritesSurviveConflict(t *testing.T) {
 			if live.Annotations["example.test/touched"] != racedAnnotation {
 				t.Fatal("concurrent annotation lost")
 			}
-			if operation == clockClear && live.Status.MergeContentUnreadSince != nil {
+			if operation == clockClear && contentWaitSince(live) != nil {
 				t.Fatal("clear lost")
 			}
-			if operation == clockStart && live.Status.MergeContentUnreadSince == nil {
+			if operation == clockStart && contentWaitSince(live) == nil {
 				t.Fatal("start lost")
 			}
 			if operation == retryMark && meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) == nil {
@@ -770,7 +770,7 @@ func TestGitReadRetryClearIgnoresARequestGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.APIReader = clientfake.NewClientBuilder().WithScheme(r.Scheme).Build()
-	if err := r.clearGitReadRetry(ctx, client.ObjectKeyFromObject(rr)); err != nil {
+	if _, err := r.clearGitReadRetry(ctx, client.ObjectKeyFromObject(rr), true); err != nil {
 		t.Fatalf("clearGitReadRetry() = %v; want nil for a request gone from the API server", err)
 	}
 }

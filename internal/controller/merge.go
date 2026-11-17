@@ -156,7 +156,7 @@ func (r *RemediationRequestReconciler) mergeCheckContext(ctx context.Context) (c
 // mergeCheckFailed handles a check at the merge that did not answer (checkAtMerge). It records the start of the wait
 // for the merge (status.mergeCommitAwaitedSince) when there is none and the context still allows a write, as the
 // check of any kind of failure is bounded by that wait:
-//   - a failed Git read is one of the wait (readOfKind waitMergeCheck), returned wrapped in errMergeCheck for a
+//   - a failed Git read is one of the wait (readOfMergeCheck), returned wrapped in errMergeCheck for a
 //     retry: retryGitRead starts the clock too when it could not be started here, and the check at the start of a
 //     reconcile past its end marks the plan not shown fresh (endPassedWait), after which the merge is recorded with
 //     that mark. Nothing here looks at the end of that wait;
@@ -171,7 +171,7 @@ func (r *RemediationRequestReconciler) mergeCheckFailed(ctx context.Context, rr 
 		}
 	}
 	if gitReadFailure(checkErr) {
-		return fmt.Errorf("%w: %w", errMergeCheck, readOfKind(waitMergeCheck, checkErr))
+		return fmt.Errorf("%w: %w", errMergeCheck, readOfMergeCheck(checkErr))
 	}
 	since := rr.Status.MergeCommitAwaitedSince
 	if since == nil || mergeCommitWaitRemaining(since.Time, r.now()) > 0 {

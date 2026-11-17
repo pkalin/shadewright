@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -143,27 +141,39 @@ func requestBound(rr *api.RemediationRequest) waitBound {
 	return unboundedRead(noBoundAfterStop)
 }
 
-// kindedReadError is a failed Git read that names the kind of wait it belongs to, for a read made below the path
-// that calls retryGitRead (what a retargeted merge brought, the check at the merge): retryGitRead records that kind,
-// or the caller's when its end comes first.
+// kindedReadError is a failed Git read that belongs to a wait of its own, for a read made below the path that
+// calls retryGitRead (what a retargeted merge brought, the check at the merge): retryGitRead records that wait
+// besides the caller's. It carries the whole entry (readOfMergeCheck, readOfContent), so the wait is recorded with
+// everything its end needs.
 type kindedReadError struct {
-	kind waitKind
+	wait api.GitWait
 	err  error
 }
 
 func (e *kindedReadError) Error() string { return e.err.Error() }
 func (e *kindedReadError) Unwrap() error { return e.err }
 
-// readOfKind marks err, a failed Git read, as one of a wait of kind k.
-func readOfKind(k waitKind, err error) error {
+// readOfMergeCheck marks err, a failed Git read of the check at the merge, as one of the merge wait.
+func readOfMergeCheck(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &kindedReadError{kind: k, err: err}
+	return &kindedReadError{wait: api.GitWait{Kind: api.GitWaitMergeCheck}, err: err}
+}
+
+// readOfContent marks err, a failed read of what the merge of cr brought, as one of the content wait about cr: the
+// pull request the read is about, recorded or found by the request's marker and checked. It is the only way a
+// content wait is built, so none is recorded without its pull request.
+func readOfContent(cr providers.ChangeRequest, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &kindedReadError{err: err, wait: api.GitWait{Kind: api.GitWaitMergeContent,
+		PullRequest: &api.GitWaitPullRequest{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}}}
 }
 
 // keepGitRead is boundErr for a step that ended on a failed Git read: a read that ran out of the step's time is
-// still that read (with the kind of its wait, readOfKind), retried as one, so its wait is started, paced and ended
+// still that read (with the wait it belongs to, readOfMergeCheck or readOfContent), retried as one, so its wait is started, paced and ended
 // like any other failure of it. Only a step whose own error is a failed Git read keeps it; a step that failed
 // otherwise (a Kubernetes read, a write), and the caller's cancellation, get boundErr's answer as it is.
 func keepGitRead(parent, phase context.Context, name string, err error) error {
@@ -173,7 +183,7 @@ func keepGitRead(parent, phase context.Context, name string, err error) error {
 	}
 	read := readFailure(readOp(err), bounded)
 	if e, ok := errors.AsType[*kindedReadError](err); ok {
-		return &kindedReadError{kind: e.kind, err: read}
+		return &kindedReadError{wait: e.wait, err: read}
 	}
 	return read
 }
@@ -229,39 +239,49 @@ func readOp(err error) string {
 }
 
 // retryGitRead is the common result of a failed Git read, called by the path that made the read. It starts or
-// continues a wait and never decides whether one is over (endPassedWait does, at the start of the next reconcile):
-//   - the kind of the wait is the caller's (bound), or the one err names (readOfKind) when its end comes first; in
-//     the path that ends a wait (expiring) there is none;
-//   - a kind with a clock of its own (waitKind.startClock) gets its start recorded when it has none;
-//   - condition GitReadRetry says what is retried, with the kind as its reason and its lastTransitionTime the start
-//     on the executor's clock (kept while the kind stays);
+// continues waits and never decides whether one is over (endPassedWait does, at the start of the next reconcile):
+//   - the caller's kind (bound) gets its entry in status.gitWaits, and so does the wait err belongs to
+//     (readOfMergeCheck, readOfContent), each its own: an entry that stands keeps its start, and no other entry is
+//     touched. In the path that ends a wait (expiring) only a Paced entry is recorded;
+//   - the merge wait gets its clock (status.mergeCommitAwaitedSince) when it has none (startClock);
+//   - condition GitReadRetry summarizes the entries (gitWaitSummary);
 //   - the retry comes after the poll interval or the delay the host asked for, whichever is longer, and never later
-//     than the end of the kind or the time to look again; an end that passed while the reads ran leaves
+//     than the end of any entry nor the time to look again; an end that passed while the reads ran leaves
 //     boundPassedWait, so the next reconcile ends the wait first.
 //
-// A failed status write (the clock, the condition) is returned for a retry with the error backoff: a wait is never
-// left unrecorded. Any error that is not a failed Git read (a Kubernetes read or write, the cancellation of the
-// reconcile) is returned unchanged, for the error backoff.
+// A failed status write is returned for a retry with the error backoff: a wait is never left unrecorded. Any error
+// that is not a failed Git read (a Kubernetes read or write, the cancellation of the reconcile) is returned
+// unchanged, for the error backoff.
 func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api.RemediationRequest, err error,
 	bound waitBound) (reconcile.Result, error) {
 	if ctx.Err() != nil || !gitReadFailure(err) {
 		return reconcile.Result{}, err
 	}
 	now := r.now()
-	kind := bound.kind
-	if e, ok := errors.AsType[*kindedReadError](err); ok {
-		kind = earlierKind(rr, now, kind, e.kind)
-	}
-	if expiring(ctx) {
-		kind = waitNone
-	}
-	if werr := r.startClock(ctx, rr, kind); werr != nil {
-		return reconcile.Result{}, werr
-	}
 	op := readOp(err)
-	want := &metav1.Condition{Type: api.ConditionGitReadRetry, Status: metav1.ConditionTrue, Reason: kind.reason(),
-		Message: "Retrying Git read: " + op, ObservedGeneration: rr.Generation, LastTransitionTime: metav1.NewTime(now)}
-	if e := r.putGitReadRetry(ctx, rr, want); e != nil {
+	since := metav1.NewTime(now.Truncate(time.Second))
+	var adds []api.GitWait
+	if expiring(ctx) {
+		// The path that ends a wait: nothing it reads starts a bounded wait, and its caller's bound has passed.
+		w, _ := newWait(waitNone, op, now)
+		adds = append(adds, w)
+		bound.kind = waitNone
+	} else {
+		if e, ok := errors.AsType[*kindedReadError](err); ok {
+			w := *e.wait.DeepCopy()
+			w.Since, w.Operation = since, op
+			adds = append(adds, w)
+		}
+		if w, ok := newWait(bound.kind, op, now); ok {
+			adds = append(adds, w)
+		}
+	}
+	for _, w := range adds {
+		if werr := r.startClock(ctx, rr, kindOfEntry(w)); werr != nil {
+			return reconcile.Result{}, werr
+		}
+	}
+	if e := r.putGitWaits(ctx, rr, adds); e != nil {
 		return reconcile.Result{}, e
 	}
 	r.gitRetries().mark(client.ObjectKeyFromObject(rr))
@@ -269,12 +289,17 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	if hostDelay, ok := providers.RetryAfter(err); ok {
 		d = max(d, hostDelay)
 	}
-	bound.kind = kind
-	if by, ok := bound.lookBy(rr, now); ok {
+	by, ok := bound.lookBy(rr, now)
+	for _, w := range rr.Status.GitWaits {
+		if end, has := kindOfEntry(w).end(rr, now); has && (!ok || end.Before(by)) {
+			by, ok = end, true
+		}
+	}
+	if ok {
 		d = min(d, max(by.Sub(now), boundPassedWait))
 	}
 	logf.FromContext(ctx).Info("Retried a Git read of RemediationRequest", "remediationRequest",
-		client.ObjectKeyFromObject(rr), "operation", op, "wait", kind.reason(), "retryAfter", d)
+		client.ObjectKeyFromObject(rr), "operation", op, "waits", len(rr.Status.GitWaits), "retryAfter", d)
 	return reconcile.Result{RequeueAfter: d}, nil
 }
 
@@ -335,59 +360,37 @@ func (r *RemediationRequestReconciler) gitRetries() *gitRetryMarks {
 	return r.gitRetryMarks
 }
 
-// clearGitReadRetry removes condition GitReadRetry after a reconcile that ended without an error and scheduled no
-// Git read retry.
-func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, key types.NamespacedName) error {
-	// The cache tells whether there is anything to remove; putGitReadRetry reads the request again before it writes.
+// clearGitReadRetry runs after a reconcile that ended without an error and saw or recorded a Git wait. With clear
+// (the reconcile scheduled no Git read retry) it removes every wait but the content wait, which only a successful
+// read of what the merge brought removes (clearContentWait): a reconcile that did not make that read says nothing
+// about it. left is how long until the earliest end of the waits that stand, zero when none has an end: the
+// reconcile is looked at again by then, whatever pace it chose, so a wait that stands always reaches its end.
+func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, key types.NamespacedName, clear bool) (
+	time.Duration, error) {
+	// The cache tells whether there is anything to remove; dropGitWaits reads the request again before it writes,
+	// and a wait this reconcile recorded has its retry bounded already (retryGitRead).
 	rr := &api.RemediationRequest{}
 	if err := r.Get(ctx, key, rr); err != nil {
-		return client.IgnoreNotFound(err)
+		return 0, client.IgnoreNotFound(err)
 	}
-	if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
-		return nil
+	if !rr.DeletionTimestamp.IsZero() {
+		return 0, nil
 	}
-	// A request gone from the API server (its finalizer removed after the cache read) has nothing left to clear.
-	if err := r.putGitReadRetry(ctx, rr, nil); err != nil && !apierrors.IsNotFound(err) {
-		return err
+	shown := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) != nil
+	onlyContent := len(rr.Status.GitWaits) == 1 && rr.Status.GitWaits[0].Kind == api.GitWaitMergeContent
+	if clear && (len(rr.Status.GitWaits) > 0 || shown) && (!onlyContent || !shown) {
+		// A request gone from the API server (its finalizer removed after the read) has nothing left to clear.
+		err := r.dropGitWaits(ctx, rr, func(w api.GitWait) bool { return w.Kind != api.GitWaitMergeContent })
+		if apierrors.IsNotFound(err) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
 	}
-	return nil
-}
-
-// putGitReadRetry writes only the retry condition and retries conflicts from a fresh API read.
-func (r *RemediationRequestReconciler) putGitReadRetry(ctx context.Context, rr *api.RemediationRequest, want *metav1.Condition) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		live := &api.RemediationRequest{}
-		if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
-			return &clusterError{err: err}
-		}
-		if live.UID != rr.UID {
-			return &clusterError{err: errors.New("RemediationRequest was replaced")}
-		}
-		base := live.DeepCopy()
-		changed := false
-		if want == nil {
-			changed = meta.RemoveStatusCondition(&live.Status.Conditions, api.ConditionGitReadRetry)
-		} else {
-			c := want.DeepCopy()
-			if old := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); old != nil && old.Status == c.Status && old.Reason == c.Reason {
-				// The start of the wait is kept while its kind stays, whatever read fails now.
-				c.LastTransitionTime = old.LastTransitionTime
-			} else {
-				meta.RemoveStatusCondition(&live.Status.Conditions, api.ConditionGitReadRetry)
-			}
-			changed = meta.SetStatusCondition(&live.Status.Conditions, *c)
-		}
-		if changed {
-			if err := r.Status().Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-				return fmt.Errorf("record Git read retry: %w", err)
-			}
-		}
-		rr.ResourceVersion = live.ResourceVersion
-		if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); c != nil {
-			meta.SetStatusCondition(&rr.Status.Conditions, *c)
-		} else {
-			meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionGitReadRetry)
-		}
-		return nil
-	})
+	const none = time.Duration(1<<63 - 1)
+	if left := r.withinWaits(rr, none); left < none {
+		return left, nil
+	}
+	return 0, nil
 }

@@ -86,7 +86,7 @@ func TestRetargetedContentReadKeepsItsBound(t *testing.T) {
 			ctx := context.Background()
 			now := time.Now().Truncate(time.Second)
 			r.Now = func() time.Time { return now }
-			rr.Status.MergeContentUnreadSince = &metav1.Time{Time: now.Add(-mergeContentWait + time.Second)}
+			setContentWait(rr, &metav1.Time{Time: now.Add(-mergeContentWait + time.Second)})
 			if err := r.Status().Update(ctx, rr); err != nil {
 				t.Fatal(err)
 			}

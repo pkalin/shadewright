@@ -245,32 +245,61 @@ var _ = Describe("RemediationRequest", func() {
 		})
 	}
 
-	// #771: the start of the reads of what a retargeted merge brought cannot move while set, so neither a restart
-	// nor the wait for the merge commit uses up the wait. A successful content read clears it (decision of
-	// 2026-11-17), so a later failure starts its own wait.
-	It("keeps mergeContentUnreadSince from moving while set, and lets a successful read clear it", func() {
+	// #771 (third decision of 2026-11-17): Git waits are a set, one entry per kind. A standing wait keeps its start
+	// and its pull request, so neither a restart nor another wait moves it; a removed one starts again; a content
+	// wait names its pull request and no other kind names one.
+	It("keeps a standing Git wait from moving and a content wait whole", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
 		deleteAfterSpec(rr)
 		since := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
-		rr.Status.MergeContentUnreadSince = &since
+		pr := &v1alpha1.GitWaitPullRequest{Number: 7, URL: "https://github.com/example/fleet/pull/7",
+			HeadSHA: "0123456789abcdef0123456789abcdef01234567"}
+		content := v1alpha1.GitWait{Kind: v1alpha1.GitWaitMergeContent, Since: since,
+			Operation: "read the parents of the merge commit", PullRequest: pr}
+		paced := v1alpha1.GitWait{Kind: v1alpha1.GitWaitPaced, Since: since, Operation: "read the pull request"}
+		rr.Status.GitWaits = []v1alpha1.GitWait{content, paced}
 		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write is allowed")
+
+		refused := func(name, message string, change func(got *v1alpha1.RemediationRequest)) {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			change(got)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			if message != "" {
+				Expect(err.Error()).To(ContainSubstring(message), name)
+			}
+		}
+		later := metav1.NewTime(since.Add(time.Minute))
+		refused("a moved start", "a Git wait keeps its start", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[0].Since = later
+		})
+		refused("another pull request", "a Git wait keeps its start", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[0].PullRequest.Number = 8
+		})
+		refused("a content wait without its pull request", "a MergeContent wait names its pull request",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits = []v1alpha1.GitWait{{Kind: v1alpha1.GitWaitMergeContent, Since: since,
+					Operation: "read"}}
+			})
+		refused("a paced wait with a pull request", "a MergeContent wait names its pull request",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits[1].PullRequest = pr
+			})
+		refused("two entries of one kind", "", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits = append(got.Status.GitWaits, paced)
+		})
 
 		got := &v1alpha1.RemediationRequest{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
-		later := metav1.NewTime(since.Add(time.Minute))
-		got.Status.MergeContentUnreadSince = &later
-		err := k8sClient.Status().Update(ctx, got)
-		Expect(err).To(HaveOccurred(), "the API server accepted a moved clock")
-		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
-		Expect(err.Error()).To(ContainSubstring("status.mergeContentUnreadSince cannot move while set"))
+		got.Status.GitWaits = got.Status.GitWaits[1:]
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a successful read removes its wait alone")
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
-		got.Status.MergeContentUnreadSince = nil
-		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a successful read clears the clock")
-
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
-		got.Status.MergeContentUnreadSince = &later
+		content.Since = later
+		got.Status.GitWaits = append(got.Status.GitWaits, content)
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a later failure starts its own wait")
 	})
 

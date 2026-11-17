@@ -629,6 +629,81 @@ spec:
                 description: effectiveApprovalRequired is what policy decided, which
                   may be stricter than spec.approvalRequired.
                 type: boolean
+              gitWaits:
+                description: |-
+                  gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of
+                  bound: Paced (no end of its own), RequestDeadline, HandoffGrace, MergeCheck and MergeContent. Starting or ending
+                  one kind never touches another, and an entry holds everything needed to end it. At the start of every
+                  reconcile the executor ends each entry whose bound has passed, before any read: RequestDeadline expires the
+                  request, HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed, MergeCheck records the merge with
+                  the plan not shown fresh, and MergeContent (five minutes from its start) ends it NeedsIntervention with
+                  MergeContentUnreadable, recording the pull request the entry names when the status holds none. An entry whose
+                  kind no longer applies to the request is removed. A successful read of what a merge brought removes the
+                  MergeContent entry, and a reconcile with no failed Git read removes the others. Condition GitReadRetry
+                  summarizes the entries for people.
+                items:
+                  description: GitWait is one wait on a read of the Git host that
+                    failed (status.gitWaits).
+                  properties:
+                    kind:
+                      description: kind is the kind of bound of the wait.
+                      enum:
+                      - Paced
+                      - RequestDeadline
+                      - HandoffGrace
+                      - MergeCheck
+                      - MergeContent
+                      type: string
+                    operation:
+                      description: operation is the fixed name of the read that failed
+                        last, never the Git host's answer.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    pullRequest:
+                      description: |-
+                        pullRequest is, for a MergeContent wait only, the pull request whose merge the reads are about: the recorded
+                        one, or one found by the request's marker whose head was checked, so the end of the wait can record it.
+                      properties:
+                        headSHA:
+                          description: headSHA is the head of the pull request, one
+                            Shadewright pushed.
+                          pattern: ^[0-9a-f]{40}$
+                          type: string
+                        number:
+                          description: number of the pull request.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        url:
+                          description: url of the pull request.
+                          maxLength: 2048
+                          pattern: ^https://
+                          type: string
+                      required:
+                      - headSHA
+                      - number
+                      - url
+                      type: object
+                    since:
+                      description: since is when the wait began, on the executor's
+                        clock. It does not move while the entry stands.
+                      format: date-time
+                      type: string
+                  required:
+                  - kind
+                  - operation
+                  - since
+                  type: object
+                  x-kubernetes-validations:
+                  - message: a MergeContent wait names its pull request, and no other
+                      kind names one
+                    rule: (self.kind == 'MergeContent') == has(self.pullRequest)
+                maxItems: 5
+                type: array
+                x-kubernetes-list-map-keys:
+                - kind
+                x-kubernetes-list-type: map
               handoff:
                 description: |-
                   handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
@@ -1019,16 +1094,6 @@ spec:
                   then records the merge with a plan not shown fresh (PlanFresh False, reason PlanChanged). Set once and never
                   changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset
                   when the commit was reported at once and the check at the merge answered.
-                format: date-time
-                type: string
-              mergeContentUnreadSince:
-                description: |-
-                  mergeContentUnreadSince is when the executor first failed to read what a merge brought, on its own clock: a
-                  pull request merged into the target branch the settings name now after the plan's branch changed (#771),
-                  whose merge counts only when it brought the planned change alone. The reads are retried for five minutes
-                  from it; after that the request ends NeedsIntervention with reason MergeContentUnreadable. The clock cannot
-                  move while set. A successful content read removes it, so a later failure starts its own wait; neither a
-                  restart nor the wait for the merge commit moves or uses up an uninterrupted failure wait.
                 format: date-time
                 type: string
               mergeReceipt:
@@ -1795,11 +1860,12 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince)
             || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince
             == oldSelf.status.mergeCommitAwaitedSince)'
-        - message: status.mergeContentUnreadSince cannot move while set; clear it
-            after a successful read
-          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeContentUnreadSince)
-            || !has(self.status) || !has(self.status.mergeContentUnreadSince) || self.status.mergeContentUnreadSince
-            == oldSelf.status.mergeContentUnreadSince'
+        - message: a Git wait keeps its start and its pull request while it stands;
+            remove it to start another
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status)
+            || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o,
+            o.kind != w.kind || (o.since == w.since && has(o.pullRequest) == has(w.pullRequest)
+            && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))'
         - message: status.mergeReceipt is set only in Merged or a phase after it
           rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
             && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',

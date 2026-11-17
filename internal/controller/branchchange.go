@@ -21,11 +21,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -259,7 +257,7 @@ func mergedForeignStale(rr *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // mergeContentWait is how long the reads of what a merge into the target branch the settings name now brought are
-// retried, from status.mergeContentUnreadSince, before the request ends MergeContentUnreadable (waitMergeContent).
+// retried, from the start of its entry in status.gitWaits, before the request ends MergeContentUnreadable (waitMergeContent).
 const mergeContentWait = mergeCommitWait
 
 // checkRetargeted reports whether the merge of cr into branch (git is opened for it) brought that branch the
@@ -267,11 +265,11 @@ const mergeContentWait = mergeCommitWait
 // *renderRefusal with reason MergedWithForeignChange otherwise (the merge brought more, or its shape does not show
 // what it brought). A merge commit that is not a full commit ID cannot be checked (MergedWithForeignChange).
 //
-// A read that fails is an error of the content wait (readOfKind waitMergeContent), for a retry: retryGitRead starts
-// its clock (status.mergeContentUnreadSince) with the parent context when there is none, so a read that runs out of
-// the step's time starts it too (keepGitRead), and the check at the start of a reconcile past its end ends the
-// request MergeContentUnreadable (endPassedWait). A successful content read clears the clock, so a later failure
-// starts a new wait.
+// A read that fails is an error of the content wait about cr (readOfContent), for a retry: retryGitRead records its
+// entry in status.gitWaits, with cr, with the parent context, so a read that runs out of the step's time starts it
+// too (keepGitRead), and the check at the start of a reconcile past its end ends the request MergeContentUnreadable
+// (endPassedWait), recording cr when the status holds no pull request. A successful content read removes the
+// entry, so a later failure starts a new wait.
 func (r *RemediationRequestReconciler) checkRetargeted(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, branch remediationv1alpha1.GitBranch) (
 	*renderRefusal, error) {
@@ -283,55 +281,21 @@ func (r *RemediationRequestReconciler) checkRetargeted(ctx context.Context, git 
 	if err != nil {
 		logf.FromContext(ctx).Info("Could not read what the merge of the pull request of RemediationRequest brought; "+
 			"tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return nil, readOfKind(waitMergeContent, err)
+		return nil, readOfContent(cr, err)
 	}
 	return ref, r.clearContentWait(ctx, rr)
 }
 
-// startContentWait records the start of the reads of what a retargeted merge brought (checkRetargeted) in
-// status.mergeContentUnreadSince, in a patch with the resourceVersion read, as startMergeWait does. A pull request the
-// read found by the request's marker and checked (adopted, checkAdoptedHead) is recorded in the same patch, so the end
-// of the wait (endContentUnreadable) can name it.
-func (r *RemediationRequestReconciler) startContentWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	return r.contentWait(ctx, rr, true)
-}
-
-// clearContentWait clears only the clock whose read has just succeeded.
+// clearContentWait removes the content wait (status.gitWaits) after a read of what the merge brought worked, and no
+// other entry: the read clears only the wait it times.
 func (r *RemediationRequestReconciler) clearContentWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	return r.contentWait(ctx, rr, false)
-}
-
-// contentWait patches the clock alone. A conflict is retried after a fresh read; other status is never copied.
-func (r *RemediationRequestReconciler) contentWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, failed bool) error {
-	if (rr.Status.MergeContentUnreadSince != nil) == failed {
+	if gitWait(rr, waitMergeContent) == nil {
 		return nil
 	}
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		live := &remediationv1alpha1.RemediationRequest{}
-		if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
-			return err
-		}
-		if live.UID != rr.UID {
-			return errors.New("RemediationRequest was replaced")
-		}
-		base := live.DeepCopy()
-		if failed {
-			if live.Status.MergeContentUnreadSince == nil {
-				t := metav1.NewTime(r.now().Truncate(time.Second))
-				live.Status.MergeContentUnreadSince = &t
-			}
-		} else {
-			live.Status.MergeContentUnreadSince = nil
-		}
-		if err := r.Status().Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			return err
-		}
-		rr.Status.MergeContentUnreadSince = live.Status.MergeContentUnreadSince
-		rr.ResourceVersion = live.ResourceVersion
-		return nil
-	})
-	if err != nil {
-		return &clusterError{err: fmt.Errorf("record the merge content read clock: %w", err)}
+	if err := r.dropGitWaits(ctx, rr, func(w remediationv1alpha1.GitWait) bool {
+		return w.Kind == remediationv1alpha1.GitWaitMergeContent
+	}); err != nil {
+		return &clusterError{err: fmt.Errorf("remove the content wait: %w", err)}
 	}
 	return nil
 }
@@ -594,7 +558,7 @@ func markStaleForBranchChange(rr *remediationv1alpha1.RemediationRequest) {
 // is looked at again when what is left of its wait is over; failed Git reads use retryGitRead; a failed Kubernetes read or write remains an error. No failed read
 // records the merge. The lock is kept meanwhile. The waits for the merge commit and for the check at the merge are
 // bounded by mergeCommitWait (status.mergeCommitAwaitedSince), the reads of what a retargeted merge brought by
-// mergeContentWait (status.mergeContentUnreadSince); a read of the pull request itself that keeps failing
+// mergeContentWait (its entry in status.gitWaits); a read of the pull request itself that keeps failing
 // shows in condition PullRequestUnreadable.
 func (r *RemediationRequestReconciler) followHeldMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	record func(context.Context) error) (reconcile.Result, error) {

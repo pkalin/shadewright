@@ -231,7 +231,7 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	}
 	for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 		rr.Status.UnfinishedRenders = nil
-		rr.Status.MergeContentUnreadSince = nil
+		rr.Status.GitWaits = nil
 		rr.Status.MergeCommitAwaitedSince = nil
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)

@@ -82,7 +82,7 @@ Validation rules:
 - status.mergeReceipt.pullRequest, headSHA and mergedAt must equal status.pullRequest.number, headSHA and mergedAt: `!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest) && self.status.mergeReceipt.pullRequest == self.status.pullRequest.number && self.status.mergeReceipt.headSHA == self.status.pullRequest.headSHA && has(self.status.pullRequest.mergedAt) && self.status.mergeReceipt.mergedAt == self.status.pullRequest.mergedAt)`
 - status.pullRequest.reviewCheck does not change once status.mergeReceipt exists: `!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck) == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck) || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))`
 - status.mergeCommitAwaitedSince is set once and never changed: `!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)`
-- status.mergeContentUnreadSince cannot move while set; clear it after a successful read: `!has(oldSelf.status) || !has(oldSelf.status.mergeContentUnreadSince) || !has(self.status) || !has(self.status.mergeContentUnreadSince) || self.status.mergeContentUnreadSince == oldSelf.status.mergeContentUnreadSince`
+- a Git wait keeps its start and its pull request while it stands; remove it to start another: `!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status) || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o, o.kind != w.kind || (o.since == w.since && has(o.pullRequest) == has(w.pullRequest) && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))`
 - status.mergeReceipt is set only in Merged or a phase after it: `!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))`
 - status.phase WaitingForDelivery and Verifying require status.mergeReceipt: `!has(self.status) || !has(self.status.phase) || !(self.status.phase in ['WaitingForDelivery', 'Verifying']) || has(self.status.mergeReceipt)`
 - status.phase Verifying requires status.pullRequest.appliedObservedAt: `!has(self.status) || !has(self.status.phase) || self.status.phase != 'Verifying' || (has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt))`
@@ -462,6 +462,54 @@ Used by: [RemediationSettingsSpec](#remediationsettingsspec).
 | `targetBranch` | [GitBranch](#gitbranch) | No | targetBranch is the only branch pull requests may target. The branch Flux tracks must equal it. For GitHub it starts with a letter or digit, has at most 200 characters and does not end with '.'.<br>Default: `main`<br>Maximum length: 255<br>Minimum length: 1<br>Pattern: `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$`<br>Rule: must be a plain branch name, not HEAD, refs/..., shadewright/... or one containing '..' or '.lock' |
 | `provider` | [GitProviderType](#gitprovidertype) | Yes | provider selects the Git hosting adapter.<br>One of `GitHub` |
 | `github` | [GitHubRepository](#githubrepository) | No | github holds GitHub App settings. |
+
+### GitWait
+
+GitWait is one wait on a read of the Git host that failed (status.gitWaits).
+
+
+Validation rules:
+
+- a MergeContent wait names its pull request, and no other kind names one: `(self.kind == 'MergeContent') == has(self.pullRequest)`
+
+Used by: [RemediationRequestStatus](#remediationrequeststatus).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `kind` | [GitWaitKind](#gitwaitkind) | Yes | kind is the kind of bound of the wait.<br>One of `Paced`, `RequestDeadline`, `HandoffGrace`, `MergeCheck`, `MergeContent` |
+| `since` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | since is when the wait began, on the executor's clock. It does not move while the entry stands. |
+| `operation` | string | Yes | operation is the fixed name of the read that failed last, never the Git host's answer.<br>Maximum length: 256<br>Minimum length: 1 |
+| `pullRequest` | [GitWaitPullRequest](#gitwaitpullrequest) | No | pullRequest is, for a MergeContent wait only, the pull request whose merge the reads are about: the recorded one, or one found by the request's marker whose head was checked, so the end of the wait can record it. |
+
+### GitWaitKind
+
+GitWaitKind is the kind of bound of a Git wait (status.gitWaits).
+
+- Underlying type: string
+- One of `Paced`, `RequestDeadline`, `HandoffGrace`, `MergeCheck`, `MergeContent`
+
+Used by: [GitWait](#gitwait).
+
+| Value | Description |
+| --- | --- |
+| `Paced` | GitWaitPaced has no end of its own: the read is retried at the poll interval until it works, for a reason the executor names in code (a request that has no deadline at that step, or a target lock kept until a read settles it). |
+| `RequestDeadline` | GitWaitRequestDeadline ends at status.deadline of a request in PolicyChecked: the request expires. |
+| `HandoffGrace` | GitWaitHandoffGrace ends a grace after status.deadline of a replacement recovering a handoff: the request ends NeedsIntervention with HandoffRecoveryFailed. |
+| `MergeCheck` | GitWaitMergeCheck ends five minutes after status.mergeCommitAwaitedSince (or its own start when that is unset): the merge is recorded with the plan not shown fresh. |
+| `MergeContent` | GitWaitMergeContent ends five minutes after its start: the request ends NeedsIntervention with MergeContentUnreadable. It names the pull request whose merge it reads. |
+
+### GitWaitPullRequest
+
+GitWaitPullRequest is the pull request a MergeContent wait is about.
+
+
+Used by: [GitWait](#gitwait).
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `number` | integer | Yes | number of the pull request.<br>Minimum: 1 |
+| `url` | string | Yes | url of the pull request.<br>Maximum length: 2048<br>Pattern: `^https://` |
+| `headSHA` | string | Yes | headSHA is the head of the pull request, one Shadewright pushed.<br>Pattern: `^[0-9a-f]{40}$` |
 
 ### Handoff
 
@@ -1367,7 +1415,7 @@ Used by: [RemediationRequest](#remediationrequest).
 | `unfinishedRenders` | [UnfinishedRenders](#unfinishedrenders) | No | unfinishedRenders marks render checks of the plan that started and did not finish: written before the render process starts, removed when the render check returns. At MaxUnfinishedRenders for the current plan digest the executor starts no further render and ends the request in NeedsIntervention with reason RenderNeverFinished (#714, ADR-0035). Only the executor writes it. Unset when no render is running, unless a removal was lost, which the next render of the same executor process clears without counting it.<br>Rule: a new status.unfinishedRenders, or one for another planDigest, starts at count 1<br>Rule: status.unfinishedRenders.count rises by exactly 1 per write for the same planDigest; it is only removed |
 | `mergeReceipt` | [MergeReceipt](#mergereceipt) | No | mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed after (validation rules on the object). A request merged without a full merge commit ID gets none and ends Inconclusive with reason NoMergeReceipt; a merge with a foreign change (MergedWithForeignChange) gets none either. Unset on a request merged before the field existed (condition Verified Unknown, reason MergedBeforeVerification). |
 | `mergeCommitAwaitedSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot read what it needs, the executor records the start here if it is unset, retries until the wait is over, and then records the merge with a plan not shown fresh (PlanFresh False, reason PlanChanged). Set once and never changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset when the commit was reported at once and the check at the merge answered. |
-| `mergeContentUnreadSince` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | mergeContentUnreadSince is when the executor first failed to read what a merge brought, on its own clock: a pull request merged into the target branch the settings name now after the plan's branch changed (#771), whose merge counts only when it brought the planned change alone. The reads are retried for five minutes from it; after that the request ends NeedsIntervention with reason MergeContentUnreadable. The clock cannot move while set. A successful content read removes it, so a later failure starts its own wait; neither a restart nor the wait for the merge commit moves or uses up an uninterrupted failure wait. |
+| `gitWaits` | [GitWait](#gitwait) array | No | gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of bound: Paced (no end of its own), RequestDeadline, HandoffGrace, MergeCheck and MergeContent. Starting or ending one kind never touches another, and an entry holds everything needed to end it. At the start of every reconcile the executor ends each entry whose bound has passed, before any read: RequestDeadline expires the request, HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed, MergeCheck records the merge with the plan not shown fresh, and MergeContent (five minutes from its start) ends it NeedsIntervention with MergeContentUnreadable, recording the pull request the entry names when the status holds none. An entry whose kind no longer applies to the request is removed. A successful read of what a merge brought removes the MergeContent entry, and a reconcile with no failed Git read removes the others. Condition GitReadRetry summarizes the entries for people.<br>Maximum items: 5<br>List type: map<br>List key: `kind`<br>Rule: a MergeContent wait names its pull request, and no other kind names one |
 | `rollout` | [RolloutStatus](#rolloutstatus) | No | rollout is what the check after the merge keeps between reconciles (the RolledOut condition). |
 | `deadline` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | deadline is when the current step gives up, on the executor's clock. In WaitingForDelivery it is the end of the delivery window: one hour after mergeReceipt.mergedAt, extended by the time writes were paused. In Verifying it is the timeout, written on entering the phase: status.pullRequest.appliedObservedAt plus the larger of spec.verification.timeout and the rollout deadline plus the effective stableFor plus the executor's --node-grace. Past the merge a deadline never ends a request Expired: the evidence decides between Failed and Inconclusive (ADR-0030 sections 2, 4 and 6). |
 | `verification` | [VerificationWindow](#verificationwindow) | No | verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4), and the readings of the Incident's count taken from the merge on (incidentCount). Only the executor writes it; once set it is kept, windowStart and the time of lastReset only move forward, resets never decreases and a reading is never changed, only removed (validation rules on the object).<br>Rule: lastReset requires resets of at least 1 |

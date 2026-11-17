@@ -440,10 +440,16 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.gitRetries().take(req.NamespacedName)
 	res, err := r.reconcile(ctx, req)
-	if m := r.gitRetries().take(req.NamespacedName); err == nil && ctx.Err() == nil && m.shown && !m.retried {
-		// The reads of this reconcile worked, or were decided on for good: the retry the request showed is over.
-		if clearErr := r.clearGitReadRetry(ctx, req.NamespacedName); clearErr != nil {
+	if m := r.gitRetries().take(req.NamespacedName); err == nil && ctx.Err() == nil && (m.shown || m.retried) {
+		// The reads of this reconcile worked, or were decided on for good: the retry the request showed is over,
+		// but for the waits a read of their own ends (clearGitReadRetry). Whatever stands is looked at again by its
+		// end, whatever pace the reconcile chose (gitwait.go).
+		left, clearErr := r.clearGitReadRetry(ctx, req.NamespacedName, m.shown && !m.retried)
+		if clearErr != nil {
 			return ctrl.Result{}, clearErr
+		}
+		if left > 0 && (res.RequeueAfter <= 0 || left < res.RequeueAfter) {
+			res.RequeueAfter = left
 		}
 	}
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
@@ -532,7 +538,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry) != nil {
+	if showsGitWait(rr) {
 		// Reconcile removes it after this reconcile if no read is retried; a request without it costs no read.
 		r.gitRetries().shown(req.NamespacedName)
 	}
@@ -640,7 +646,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 			rr.Status.BreakerProbe = true
 		}
 		// The lock on the target is taken in the same status write (targetlock.go).
-		rr.Status.HoldsTarget = new(true)
+		acquire(rr)
 		// A replacement names the request it takes over in the same write (handoff step 1, handoff.go).
 		reserveOnAdmission(rr)
 	} else if rr.Status.HoldsTarget == nil {

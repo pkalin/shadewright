@@ -1782,7 +1782,7 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		res.RequeueAfter = max(res.RequeueAfter, waited.RequeueAfter)
+		res.RequeueAfter = r.withinWaits(rr, max(res.RequeueAfter, waited.RequeueAfter))
 		return res, nil
 	}
 	return waited, nil

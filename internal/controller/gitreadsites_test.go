@@ -36,8 +36,8 @@ import (
 )
 
 // gitReadSite is one call that gives a failed Git read its bound: retryGitRead, waitOrFail (which hands a failed
-// read to retryGitRead), deliveryRetry (the same for the delivery) or readOfKind (a read error that carries the kind
-// of its wait to the caller's retryGitRead). bound is the source text of its bound argument. check, when set, makes the read fail at that site with a delay of hostDelay, started c.left
+// read to retryGitRead), deliveryRetry (the same for the delivery) or readOfMergeCheck and readOfContent (a read error
+// that carries its wait to the caller's retryGitRead). bound is the source text of its bound argument. check, when set, makes the read fail at that site with a delay of hostDelay, started c.left
 // before the bound, with the executor's clock moving on by c.during while the call runs, and reports the wait, or
 // that the path's own end ran instead (expired). A bound passed down from the caller (bound) is checked at the
 // caller's row. An unbounded site names its reason in the call (unboundedRead).
@@ -118,7 +118,10 @@ var gitReadSites = map[string]gitReadSite{
 				t.Fatal(err)
 			}
 			clock := clockOf(r)
-			rr.Status.MergeContentUnreadSince = &metav1.Time{Time: clock.at.Add(-mergeContentWait + c.left)}
+			setContentWait(rr, &metav1.Time{Time: clock.at.Add(-mergeContentWait + c.left)})
+			if err := r.Status().Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
 			failOnce(g, opParents, clock, c.during)
 			_, err = r.checkRetargeted(ctx, g, rr, cr, freshOtherBranch)
 			res, err := r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
@@ -293,20 +296,22 @@ func gitReadCalls(t *testing.T) map[string]string {
 				case *ast.Ident:
 					callee = fun.Name
 				}
-				if callee != "retryGitRead" && callee != "waitOrFail" && callee != "readOfKind" && callee != "deliveryRetry" {
+				kinded := map[string]string{"readOfMergeCheck": "waitMergeCheck", "readOfContent": "waitMergeContent"}
+				if callee != "retryGitRead" && callee != "waitOrFail" && kinded[callee] == "" && callee != "deliveryRetry" {
 					return true
 				}
 				n++
-				arg := call.Args[len(call.Args)-1]
-				if callee == "readOfKind" {
+				site := fmt.Sprintf("%s:%s:%d", name, fn.Name.Name, n)
+				if kind := kinded[callee]; kind != "" {
 					// A read below the path that names its wait: the kind is its bound.
-					arg = call.Args[0]
+					calls[site] = kind
+					return true
 				}
 				var text bytes.Buffer
-				if err := printer.Fprint(&text, fset, arg); err != nil {
+				if err := printer.Fprint(&text, fset, call.Args[len(call.Args)-1]); err != nil {
 					t.Fatal(err)
 				}
-				calls[fmt.Sprintf("%s:%s:%d", name, fn.Name.Name, n)] = text.String()
+				calls[site] = text.String()
 				return true
 			})
 		}

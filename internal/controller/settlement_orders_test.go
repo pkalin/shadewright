@@ -152,7 +152,7 @@ func TestRetargetedContentTimeoutsReachUnreadable(t *testing.T) {
 		if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
 			t.Fatal(err)
 		}
-		if rr.Status.MergeContentUnreadSince == nil {
+		if contentWaitSince(rr) == nil {
 			t.Fatalf("reconcile %d: the content wait has no clock", i)
 		}
 		c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry)
@@ -257,22 +257,22 @@ func TestAdoptedRetargetedHeadNotPushedGetsNoReceipt(t *testing.T) {
 // which may read to close a pull request of its own, ends the request Expired).
 func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 	type wait struct {
-		reason string
-		setup  func(rr *api.RemediationRequest, now time.Time)
-		reads  bool
-		check  func(t *testing.T, rr *api.RemediationRequest)
+		kind  waitKind
+		setup func(rr *api.RemediationRequest, now time.Time)
+		reads bool
+		check func(t *testing.T, rr *api.RemediationRequest)
 	}
 	waits := map[string]wait{
-		"content": {reason: ReasonGitReadUntilContentWait, setup: func(rr *api.RemediationRequest, now time.Time) {
-			rr.Status.MergeContentUnreadSince = &metav1.Time{Time: now.Add(-mergeContentWait)}
+		"content": {kind: waitMergeContent, setup: func(rr *api.RemediationRequest, now time.Time) {
+			setContentWait(rr, &metav1.Time{Time: now.Add(-mergeContentWait)})
 		}, check: func(t *testing.T, rr *api.RemediationRequest) {
 			if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved); c == nil ||
-				c.Reason != ReasonMergeContentUnreadable || rr.Status.MergeContentUnreadSince != nil {
-				t.Fatalf("Approved = %+v, clock %v; want MergeContentUnreadable and the clock cleared", c,
-					rr.Status.MergeContentUnreadSince)
+				c.Reason != ReasonMergeContentUnreadable || contentWaitSince(rr) != nil || rr.Status.PullRequest == nil {
+				t.Fatalf("Approved = %+v, wait %v; want MergeContentUnreadable, the pull request recorded and the wait removed", c,
+					contentWaitSince(rr))
 			}
 		}},
-		"merge check": {reason: ReasonGitReadUntilMergeWait, setup: func(rr *api.RemediationRequest, now time.Time) {
+		"merge check": {kind: waitMergeCheck, setup: func(rr *api.RemediationRequest, now time.Time) {
 			rr.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Add(-mergeCommitWait)}
 		}, reads: true, check: func(t *testing.T, rr *api.RemediationRequest) {
 			if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPlanFresh); c == nil ||
@@ -280,7 +280,7 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 				t.Fatalf("PlanFresh = %+v; want the plan not shown fresh", c)
 			}
 		}},
-		"handoff grace": {reason: ReasonGitReadUntilHandoffGrace, setup: func(rr *api.RemediationRequest, now time.Time) {
+		"handoff grace": {kind: waitHandoffGrace, setup: func(rr *api.RemediationRequest, now time.Time) {
 			rr.Status.Phase = api.PhasePolicyChecked
 			rr.Status.Deadline = &metav1.Time{Time: now.Add(-handoffRecoveryGrace)}
 			rr.Spec.Replaces = &api.RequestReplacement{}
@@ -291,7 +291,7 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 				t.Fatalf("phase %s, Approved %+v; want HandoffRecoveryFailed", rr.Status.Phase, c)
 			}
 		}},
-		"deadline": {reason: ReasonGitReadUntilDeadline, setup: func(rr *api.RemediationRequest, now time.Time) {
+		"deadline": {kind: waitRequestDeadline, setup: func(rr *api.RemediationRequest, now time.Time) {
 			rr.Status.Phase = api.PhasePolicyChecked
 			rr.Status.Deadline = &metav1.Time{Time: now}
 		}, reads: true, check: func(t *testing.T, rr *api.RemediationRequest) {
@@ -317,8 +317,11 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 				}
 				rr.ResourceVersion = spec.ResourceVersion
 			}
-			meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionGitReadRetry,
-				Status: metav1.ConditionTrue, Reason: w.reason, Message: "Retrying Git read: x"})
+			if gitWait(rr, w.kind) == nil {
+				entry, _ := newWait(w.kind, "x", clock.at.Add(-time.Hour))
+				rr.Status.GitWaits = append(rr.Status.GitWaits, entry)
+			}
+			gitWaitSummary(rr, clock.at)
 			if err := r.Status().Update(ctx, rr); err != nil {
 				t.Fatal(err)
 			}
@@ -414,7 +417,12 @@ func runSettlementOrder(t *testing.T, o settlementOrder) {
 		}
 		lockProperty(t, i, o, live)
 		boundProperty(t, i, clock.at, before, live, res, err)
-		clock.advance(confirmWait + time.Minute)
+		if err != nil {
+			// The error backoff retries within a second, not after minutes.
+			clock.advance(time.Second)
+		} else {
+			clock.advance(confirmWait + time.Minute)
+		}
 	}
 	if !always {
 		settledProperty(t, o, live)
@@ -519,26 +527,32 @@ func orderLostWrite(r *RemediationRequestReconciler, lost int) client.WithWatch 
 	return base
 }
 
-// boundProperty: after reconcile i at now, a failed Git read is a wait with no error, never past the end of its
-// kind, and a wait that was past its end before the reconcile no longer stands.
+// boundProperty: after reconcile i at now, a failed Git read is a wait with no error, never past the end of any
+// recorded wait, and a wait that was past its end before the reconcile no longer stands.
 func boundProperty(t *testing.T, i int, now time.Time, before, live *api.RemediationRequest, res reconcile.Result,
 	err error) {
 	t.Helper()
-	retry := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry)
-	switch {
-	case err != nil && !isLostWrite(err):
-		t.Fatalf("reconcile %d returned %v; a failed Git read is a wait", i, err)
-	case err == nil && retry != nil && res.RequeueAfter <= 0:
-		t.Fatalf("reconcile %d shows %s with no wait", i, retry.Reason)
-	case err == nil && retry != nil:
-		if end, ok := waitKindOf(retry.Reason).end(live, now); ok && now.Add(res.RequeueAfter).After(end.Add(boundPassedWait)) {
-			t.Fatalf("reconcile %d waits %v, past the end of %s at %v", i, res.RequeueAfter, retry.Reason, end)
+	if err != nil {
+		if !isLostWrite(err) {
+			t.Fatalf("reconcile %d returned %v; a failed Git read is a wait", i, err)
+		}
+		return
+	}
+	if len(live.Status.GitWaits) > 0 && res.RequeueAfter <= 0 {
+		t.Fatalf("reconcile %d records waits %+v with no requeue", i, live.Status.GitWaits)
+	}
+	for _, w := range live.Status.GitWaits {
+		if end, ok := kindOfEntry(w).end(live, now); ok && now.Add(res.RequeueAfter).After(end.Add(boundPassedWait)) {
+			t.Fatalf("reconcile %d waits %v, past the end of %s at %v", i, res.RequeueAfter, w.Kind, end)
 		}
 	}
-	if c := meta.FindStatusCondition(before.Status.Conditions, api.ConditionGitReadRetry); c != nil {
-		if end, ok := waitKindOf(c.Reason).end(before, now); ok && !now.Before(end) && retry != nil &&
-			retry.Reason == c.Reason && retry.LastTransitionTime.Equal(&c.LastTransitionTime) {
-			t.Fatalf("reconcile %d: the wait %s was past its end and did not end", i, c.Reason)
+	for _, w := range before.Status.GitWaits {
+		end, ok := kindOfEntry(w).end(before, now)
+		if !ok || now.Before(end) {
+			continue
+		}
+		if after := gitWait(live, kindOfEntry(w)); after != nil && after.Since.Equal(&w.Since) {
+			t.Fatalf("reconcile %d: the wait %s was past its end and did not end", i, w.Kind)
 		}
 	}
 }

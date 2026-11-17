@@ -1064,7 +1064,7 @@ const keySpaceExpr = `[ \t\p{Zs}\x{200B}\x{2060}\x{FEFF}]`
 var anyKey = regexp.MustCompile(`(?i)(` + secretKeyExpr + `)` + keySpaceExpr + `*:` + keySpaceExpr + `*([|>][1-9+-]{0,2})`)
 
 // countScan counts n bytes read by the rule for block indicators, or of a line by nextBlockLine, as work
-// ([Work]).
+// (tick, work.go).
 func countScan(n int) { tick(n) }
 
 // anyKeySpans is the spans function of the rule for a secret key and a block indicator wherever the key
@@ -2864,9 +2864,12 @@ func builtinRules() []rule {
 			`[A-Za-z0-9_~.-]{3}[0-9]Q(?:~|%7[Ee])(?:[A-Za-z0-9_~.-]|%7[Ee]){31,34}` +
 				`(?:(?:[A-Za-z0-9_~.-]|%7[Ee])*(?:[A-Za-z0-9_~-]|%7[Ee]))?`)},
 		// URLs with any userinfo part, such as postgres://user:pass@host/db, https://token:@host/repo or
-		// https://token@host/repo: a user name alone may be a token.
+		// https://token@host/repo: a user name alone may be a token. The user info may hold "<" and ">" (a
+		// password such as "Hunter<2"), which a JSON or HTML encoder would have escaped and text read raw
+		// does not (#840); it still ends at "/", so it never reaches into the next URL. The host part ends at
+		// "<" and ">", so a bracket of the markup around the URL ("<postgres://u:p@h/x>") stays.
 		{kind: KindConnectionString, re: regexp.MustCompile(
-			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"<>]+@[^\s'"<>]+`)},
+			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"]+@[^\s'"<>]+`)},
 		// Secret fields of semicolon-separated connection strings (Azure Storage, Service Bus, SQL Server):
 		// quoted with doubled quotes, or bare up to the next ";" or line end, spaces included.
 		{kind: KindConnectionString, groups: []int{1, 2, 3}, re: regexp.MustCompile(

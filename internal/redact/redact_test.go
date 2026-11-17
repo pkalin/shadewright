@@ -693,10 +693,12 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 
 // workString returns the work of String on in and the size of in, and fails when the output is longer
 // than the input.
+//
+//nolint:unparam // name is used after the count, which returns only in a build with the tag redactwork
 func workString(t *testing.T, name, in string) (int64, int) {
 	t.Helper()
 	var out string
-	w := Work(func() { out = String(in) })
+	w := countWork(t, func() { out = String(in) })
 	if len(out) > len(in) {
 		t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
 	}

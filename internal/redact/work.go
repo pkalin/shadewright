@@ -16,35 +16,13 @@ limitations under the License.
 
 package redact
 
-import (
-	"strings"
-	"sync/atomic"
-)
+import "strings"
 
 // The work of redaction is counted, not timed, by the tests that show it stays linear in the size of the
-// text (#825, #840): a busy machine slows a clock, never a count.
-var (
-	counting atomic.Bool
-	steps    atomic.Int64
-)
-
-// step adds n to the count of work while [Work] counts: one turn of a scanning loop, or the bytes a library
-// call (an index, a regular expression) is given to scan. It does nothing otherwise.
-func tick(n int) {
-	if counting.Load() {
-		steps.Add(int64(n))
-	}
-}
-
-// Work runs f and returns the steps of redaction it took. It is for tests: redaction run by other goroutines
-// meanwhile is counted too, and calls of Work must not overlap.
-func Work(f func()) int64 {
-	steps.Store(0)
-	counting.Store(true)
-	defer counting.Store(false)
-	f()
-	return steps.Load()
-}
+// text (#825, #840): a busy machine slows a clock, never a count. The scanning loops and the library calls
+// below report their work to tick. In the product (no build tag) tick does nothing and the package holds no
+// counter; built with the tag redactwork, as make test runs the linearity tests, tick adds to the count of
+// Work (work_counted.go).
 
 // counted returns t, counting its bytes as the work of the library call it is handed to.
 func counted(t string) string {

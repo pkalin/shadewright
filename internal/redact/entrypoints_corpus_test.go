@@ -50,9 +50,9 @@ var entryPoints = map[string]func(in string) []string{
 	// The read tools of the model: the answer of get_resource is JSON, whose escapes must not hide an
 	// indicator (an HTML-escaped ">" did, #840).
 	tools.NameGetResource: toolText(tools.NameGetResource,
-		map[string]any{"kind": toolKind, argNamespace: toolNS, "name": toolPod}),
+		map[string]any{argKind: toolKind, argNamespace: toolNS, argName: toolPod}),
 	tools.NameListEvents: toolText(tools.NameListEvents,
-		map[string]any{argNamespace: toolNS, "kind": toolKind, "name": toolPod, "limit": 5}),
+		map[string]any{argNamespace: toolNS, argKind: toolKind, argName: toolPod, "limit": 5}),
 	tools.NameGetPodLogs: toolText(tools.NameGetPodLogs,
 		map[string]any{argNamespace: toolNS, "pod": toolPod, "container": toolContainer}),
 	// The log excerpt, whole and cut after each of its lines: a cut that drops the key's line must not

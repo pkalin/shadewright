@@ -121,8 +121,10 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -coverprofile cover.out
 	@# The redact timing tests and the 100,000 seeded keys skip under -race (internal/redact/race_test.go): run the
-	@# whole package again without it, so that no test is selected by name and a renamed one cannot drop out.
-	go test ./internal/redact
+	@# whole package again without it, so that no test is selected by name and a renamed one cannot drop out. The
+	@# linearity tests count redaction work only in a build with the tag redactwork (internal/redact/work_counted.go,
+	@# no counter in the product build), so this run and the log excerpt's package get it.
+	go test -tags redactwork ./internal/redact ./internal/providers/logs/kube
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
 	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
 

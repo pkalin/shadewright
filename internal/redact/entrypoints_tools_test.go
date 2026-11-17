@@ -39,6 +39,8 @@ const (
 	toolKind      = "Pod"
 	toolReason    = "BackOff"
 	argNamespace  = "namespace"
+	argKind       = "kind"
+	argName       = "name"
 )
 
 // textReader answers every read of the tool set with objects that carry one text: a pod whose container

@@ -629,13 +629,13 @@ var anyKeyHostileUnits = map[string]func(i int) string{
 
 // anyKeyWork returns the work ([Work]) of String on the hostile input of about n
 // bytes built from unit, and the size of that input.
-func anyKeyWork(unit func(int) string, n int) (work, size int) {
+func anyKeyWork(t *testing.T, unit func(int) string, n int) (work, size int) {
 	var b strings.Builder
 	for i := 0; b.Len() < n; i++ {
 		b.WriteString(unit(i))
 	}
 	in := b.String()
-	return int(Work(func() { String(in) })), len(in)
+	return int(countWork(t, func() { String(in) })), len(in)
 }
 
 // The rule for block indicators reads each line a bounded number of times, whatever the input: on
@@ -645,8 +645,8 @@ func anyKeyWork(unit func(int) string, n int) (work, size int) {
 func TestAnyKeyWorkIsLinear(t *testing.T) {
 	const perByte = maxWorkPerByte
 	for name, unit := range anyKeyHostileUnits {
-		small, smallSize := anyKeyWork(unit, 16<<10)
-		large, largeSize := anyKeyWork(unit, 128<<10)
+		small, smallSize := anyKeyWork(t, unit, 16<<10)
+		large, largeSize := anyKeyWork(t, unit, 128<<10)
 		if large > perByte*largeSize {
 			t.Errorf("%s: %d steps for a %d-byte input, more than %d per byte", name, large, largeSize, perByte)
 		}

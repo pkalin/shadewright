@@ -62,19 +62,26 @@ func StripControls(s string) string {
 }
 
 // StripControlsJSON returns the JSON text raw with [StripControls] applied to each decoded string, keys
-// included, so a control written as an escape (\u001b, \b, \f, \r) goes as well as a raw one. A string
-// literal it changes is written anew by encoding/json; everything else, and a text without controls, is
-// left byte for byte. Raw control characters outside string literals are removed too (newline and tab, JSON
-// whitespace, stay), and bytes that are not UTF-8 become U+FFFD. It never repairs or refuses anything: text
-// that is not JSON stays text that the caller's parser refuses, and nothing it returns decodes to a string
-// with a control.
+// included, so a control goes in every form JSON writes one: raw (DEL and C1, which JSON allows inside a
+// string) or as an escape (\u001b, \b, \f, \r). Only decoded strings are cleaned, never the JSON text: a string
+// literal whose value changes is written anew by encoding/json, and every other byte is left as it is. So a
+// raw control between two escapes never joins them (the halves of a surrogate pair with a C1 between them
+// stay two U+FFFD), and text JSON refuses (a raw C0 control in a string, a control between tokens) stays text
+// the caller's parser refuses; nothing is repaired into another value. If raw parses, the output parses to the
+// same tokens with each string cleaned; a text whose strings hold no control comes back byte for byte.
 func StripControlsJSON(raw []byte) []byte {
+	out, _ := cleanJSON(raw)
+	return out
+}
+
+// cleanJSON is [StripControlsJSON], and reports whether a decoded string of raw held a removed control.
+func cleanJSON(raw []byte) ([]byte, bool) {
 	if !mayHoldControl(raw) {
-		return raw
+		return raw, false
 	}
-	s := StripControls(string(raw))
+	s := string(raw)
 	var out strings.Builder
-	out.Grow(len(s))
+	held := false
 	for i := 0; i < len(s); {
 		if s[i] != '"' {
 			j := strings.IndexByte(s[i:], '"')
@@ -86,10 +93,15 @@ func StripControlsJSON(raw []byte) []byte {
 			continue
 		}
 		end := literalEnd(s, i)
-		out.WriteString(cleanLiteral(s[i:end]))
+		lit, changed := cleanLiteral(s[i:end])
+		held = held || changed
+		out.WriteString(lit)
 		i = end
 	}
-	return []byte(out.String())
+	if !held {
+		return raw, false
+	}
+	return []byte(out.String()), true
 }
 
 // mayHoldControl reports whether raw may hold a control character: raw text that is not valid UTF-8 or holds
@@ -112,45 +124,49 @@ func literalEnd(s string, start int) int {
 	return len(s)
 }
 
-// cleanLiteral returns the JSON string literal lit with the controls of its decoded value removed. A literal
-// that holds none, or that is not valid JSON (the document's parser refuses it), comes back unchanged.
-func cleanLiteral(lit string) string {
-	if !strings.Contains(lit, `\`) {
-		// Raw controls are gone already, and without an escape the literal holds no other.
-		return lit
+// cleanLiteral returns the JSON string literal lit with the controls of its decoded value removed, and
+// whether it held one. A literal that holds none, or that is not valid JSON (a raw C0 control in it: the
+// document's parser refuses it), comes back unchanged.
+func cleanLiteral(lit string) (string, bool) {
+	if !strings.Contains(lit, `\`) && cleanText(lit) {
+		return lit, false
 	}
 	var v string
 	if json.Unmarshal([]byte(lit), &v) != nil {
-		return lit
+		return lit, false
 	}
 	c := StripControls(v)
 	if c == v {
-		return lit
+		return lit, false
 	}
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	if enc.Encode(c) != nil {
 		// A string always encodes; were it not to, an empty string is safe and still valid JSON.
-		return `""`
+		return `""`, true
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return strings.TrimSuffix(b.String(), "\n"), true
 }
 
 // WithoutControls returns c with [StripControls] applied to every model-derived string the analysis loop reads:
 // the content (as JSON, [StripControlsJSON]: the loop decodes it as the structured result), and each tool
 // call's ID, name and arguments (as JSON). It is applied once, where a reply of any provider enters the loop,
-// before anything parses, redacts, stores, logs, records or compares the text (issue #852). Model is left as
-// it is: every adapter accepts only a name of a fixed ASCII pattern, and removing characters could turn a
-// refused name into the configured one. ProviderBlocks is opaque and goes back to its adapter unchanged. c is
-// not changed in place; a reply without controls comes back with its slices shared.
+// before anything parses, redacts, stores, logs, records or compares the text (issue #852). A tool call that
+// held a control is cleaned too, so what is stored, logged or recorded about it holds none, and is marked
+// [ToolCall.HeldControls]: the loop refuses it instead of running a value the model did not write. Model is
+// left as it is: every adapter accepts only a name of a fixed ASCII pattern, and removing characters could
+// turn a refused name into the configured one. ProviderBlocks is opaque and goes back to its adapter unchanged.
+// c is not changed in place; a reply without controls comes back with its slices shared.
 func WithoutControls(c Completion) Completion {
 	c.Content = string(StripControlsJSON([]byte(c.Content)))
 	var calls []ToolCall
 	for i, tc := range c.ToolCalls {
-		n := ToolCall{ID: StripControls(tc.ID), Name: StripControls(tc.Name),
-			Arguments: StripControlsJSON(tc.Arguments)}
-		if n.ID == tc.ID && n.Name == tc.Name && bytes.Equal(n.Arguments, tc.Arguments) {
+		args, argsHeld := cleanJSON(tc.Arguments)
+		held := argsHeld || strings.ContainsFunc(tc.ID, removedControl) || strings.ContainsFunc(tc.Name, removedControl)
+		n := ToolCall{ID: StripControls(tc.ID), Name: StripControls(tc.Name), Arguments: args,
+			HeldControls: tc.HeldControls || held}
+		if n.ID == tc.ID && n.Name == tc.Name && bytes.Equal(n.Arguments, tc.Arguments) && n.HeldControls == tc.HeldControls {
 			continue
 		}
 		if calls == nil {

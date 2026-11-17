@@ -19,12 +19,15 @@ package providers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"reflect"
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -308,12 +311,17 @@ func utf16Pair(r rune) (rune, rune) {
 	return 0xd800 + (r>>10)&0x3ff, 0xdc00 + r&0x3ff
 }
 
-// encodeControl writes a removed control code point inside a JSON string literal: raw (which JSON allows
-// for DEL and C1, and refuses for C0), as a \u escape in either case, or as its short escape.
+// encodeControl writes a removed control code point inside a JSON string literal: raw for DEL and C1 (which
+// JSON allows; a raw C0 control is not JSON and is tested apart), as a \u escape in either case, or as its
+// short escape.
 func encodeControl(rng *rand.Rand, b *strings.Builder, c rune) {
 	short := map[rune]string{'\b': `\b`, '\f': `\f`, '\r': `\r`}
 	switch rng.IntN(4) {
 	case 0:
+		if c < 0x7f {
+			fmt.Fprintf(b, `\u%04x`, c)
+			return
+		}
 		b.WriteRune(c)
 	case 1:
 		fmt.Fprintf(b, `\u%04x`, c)
@@ -328,21 +336,53 @@ func encodeControl(rng *rand.Rand, b *strings.Builder, c rune) {
 	}
 }
 
+// surrogateHalves are halves of UTF-16 surrogate pairs that a JSON string may hold as lone \u escapes.
+var surrogateHalves = []rune{0xd800, 0xd83d, 0xdbff, 0xdc00, 0xde00, 0xdfff}
+
 // genString returns a JSON string literal of generated segments, with or without controls, and its expected
-// decoded value.
+// decoded value. Lone surrogate halves are drawn between the segments, so controls stand next to them as they
+// do next to every other escape. The expected value follows the JSON rule, not the implementation: a high
+// half pairs only with a low half escaped right after it in the text, any other half decodes to U+FFFD, and a
+// control between two halves therefore leaves both unpaired.
 func genString(rng *rand.Rand, controls bool) jsonValue {
 	var b, want strings.Builder
+	var high rune // a high half written last, not yet paired or ended
+	endHigh := func() {
+		if high != 0 {
+			want.WriteRune(utf8.RuneError)
+			high = 0
+		}
+	}
 	b.WriteByte('"')
 	for _, s := range genSegments(rng, rng.IntN(8)) {
-		if s.isCtrl {
+		switch {
+		case s.isCtrl:
 			if controls {
 				encodeControl(rng, &b, s.control)
+				endHigh()
 			}
+		case s.text != "":
+			encodeKept(rng, &b, s.text)
+			endHigh()
+			want.WriteString(s.text)
+		}
+		if rng.IntN(4) != 0 {
 			continue
 		}
-		encodeKept(rng, &b, s.text)
-		want.WriteString(s.text)
+		h := surrogateHalves[rng.IntN(len(surrogateHalves))]
+		fmt.Fprintf(&b, []string{`\u%04x`, `\u%04X`}[rng.IntN(2)], h)
+		switch {
+		case h < 0xdc00:
+			endHigh()
+			high = h
+		case high != 0:
+			want.WriteRune(utf16.DecodeRune(high, h))
+			high = 0
+		default:
+			want.WriteRune(utf8.RuneError)
+		}
 	}
+	endHigh()
 	b.WriteByte('"')
 	return jsonValue{text: b.String(), want: want.String()}
 }
@@ -445,8 +485,14 @@ func TestStripControlsJSONNeighbours(t *testing.T) {
 		// A control between the halves of a surrogate pair: the halves stay unpaired, as encoding/json reads
 		// them without the control, so removal never joins two characters into a new one.
 		{`{"a":"\ud83d\u001b\ude00"}`, "��"},
-		// A raw control next to an escaped one, in a literal JSON refuses until the raw one is gone.
-		{"{\"a\":\"x\x1b\\u001by\"}", "xy"},
+		// A raw control (DEL and C1, which JSON allows raw) between the halves: the decoder reads the halves
+		// apart, each as U+FFFD, and so does the cleaned text. Removing the raw control from the text first
+		// would join the escapes into one emoji.
+		{`{"a":"\ud83d` + "\u009b" + `\ude00"}`, "\ufffd\ufffd"},
+		{`{"a":"\ud83d` + "\u007f" + `\ude00"}`, "\ufffd\ufffd"},
+		{`{"a":"\ud83d` + "\u0080\u0085" + `\ude00"}`, "\ufffd\ufffd"},
+		// A raw DEL next to an escaped control.
+		{"{\"a\":\"x\x7f\\u001by\"}", "xy"},
 		// A key, and a value that holds a quote right after a removed control.
 		{`{"k\u0007ey":"\u0007\"q\""}`, `"q"`},
 		// Short escapes of kept characters stay.
@@ -470,27 +516,132 @@ func TestStripControlsJSONNeighbours(t *testing.T) {
 	}
 }
 
-// Text that is not JSON, or JSON that is broken, is never refused or repaired into another value: whatever the
-// input, the output holds no raw control and no byte that is not UTF-8, and when it parses, no decoded string
-// holds a control. Random bytes drawn mostly from the characters of JSON and of escapes.
+// jsonEscapes are the kinds of escape a JSON string can hold, each with the value it decodes to when it
+// stands alone: a \u escape, a surrogate pair, either half alone (U+FFFD, as encoding/json reads it), the
+// escaped backslash, quote and slash, and short escapes of kept characters.
+var jsonEscapes = []struct{ text, want string }{
+	{`\u00e9`, "\u00e9"}, {`\u0041`, "A"}, {`\ud83d\ude00`, "\U0001F600"}, {`\uD83D\uDE00`, "\U0001F600"},
+	{`\ud83d`, "\ufffd"}, {`\ude00`, "\ufffd"}, {`\udbff`, "\ufffd"}, {`\udc00`, "\ufffd"},
+	{`\\`, `\`}, {`\"`, `"`}, {`\/`, "/"}, {`\n`, "\n"}, {`\t`, "\t"},
+}
+
+// jsonControls are the forms a removed control takes inside a JSON string that JSON accepts: raw DEL and C1
+// (UTF-8), \u escapes of C0, DEL and C1 in both cases, and the short escapes of C0.
+var jsonControls = []string{"\x7f", "\u0080", "\u0085", "\u009b", "\u009f", "\x7f\u009b",
+	`\u001b`, `\u001B`, `\u0000`, `\u007f`, `\u009B`, `\b`, `\f`, `\r`, `\u001b` + "\u009b"}
+
+// A removed control, in every form JSON accepts, before, after and between every kind of escape: each escape
+// decodes as it would alone, the control goes, and the text around survives. Raw controls are never taken
+// out of the JSON text, so they cannot join two escapes into one character (two halves of a surrogate pair
+// with a raw C1 between them stay two U+FFFD).
+func TestStripControlsJSONControlsNextToEveryEscape(t *testing.T) {
+	for _, c := range jsonControls {
+		for _, e1 := range jsonEscapes {
+			for _, e2 := range jsonEscapes {
+				for _, tc := range []struct{ in, want string }{
+					{"x" + c + e1.text + "y", "x" + e1.want + "y"},
+					{"x" + e1.text + c + "y", "x" + e1.want + "y"},
+					{"x" + e1.text + c + e2.text + "y", "x" + e1.want + e2.want + "y"},
+					{"x" + e1.text + c + c + e2.text + c + "y", "x" + e1.want + e2.want + "y"},
+				} {
+					doc := `{"k` + c + `":"` + tc.in + `","n":1}`
+					got := StripControlsJSON([]byte(doc))
+					var v map[string]any
+					if err := json.Unmarshal(got, &v); err != nil {
+						t.Fatalf("StripControlsJSON(%q) = %q, which does not parse: %v", doc, got, err)
+					}
+					if len(v) != 2 || v["k"] != tc.want || v["n"] != 1.0 {
+						t.Errorf("StripControlsJSON(%q) = %q, value %q, want %q", doc, got, v["k"], tc.want)
+					}
+				}
+			}
+		}
+	}
+}
+
+// A raw C0 control inside a string is not JSON: the text is left as it is, so the parser that reads it
+// refuses it, as it did before control characters were removed. Nothing is repaired into another value.
+func TestStripControlsJSONLeavesRawC0ForTheParser(t *testing.T) {
+	for _, in := range []string{"{\"a\":\"x\x1b\\u001by\"}", "{\"a\":\"\x00\"}", "[\"\x1b[31m\"]",
+		"{\"a\":\"\\ud83d\x1b\\ude00\"}", "{\"a\":1}\x1b", "{\"a\":\x07\"b\"}"} {
+		got := StripControlsJSON([]byte(in))
+		if json.Valid(got) {
+			t.Errorf("StripControlsJSON(%q) = %q, which parses", in, got)
+		}
+		if string(got) != in {
+			t.Errorf("StripControlsJSON(%q) = %q, want the text unchanged", in, got)
+		}
+	}
+}
+
+// removedRef is the test's own rule for a decoded string: every Cc code point but newline and tab goes.
+func removedRef(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cc, r) && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// jsonTokens returns the tokens of data, one JSON value, with clean applied to every string (keys included),
+// or false when data is not JSON.
+func jsonTokens(data []byte, clean func(string) string) ([]any, bool) {
+	if !json.Valid(data) {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var out []any
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return out, true
+		}
+		if err != nil {
+			return nil, false
+		}
+		if s, ok := tok.(string); ok {
+			tok = clean(s)
+		}
+		out = append(out, tok)
+	}
+}
+
+// checkAgainstDecoded is the differential check of StripControlsJSON against encoding/json: when in parses,
+// out parses to the same tokens with every string cleaned by the test's own rule (removing or matching less
+// fails, and so does any other change of the value); when in does not parse, out does not either; and a
+// second pass changes nothing.
+func checkAgainstDecoded(t *testing.T, in, out []byte) {
+	t.Helper()
+	want, inOK := jsonTokens(in, removedRef)
+	got, outOK := jsonTokens(out, func(s string) string { return s })
+	switch {
+	case inOK != outOK:
+		t.Fatalf("%q parses %v, its output %q parses %v", in, inOK, out, outOK)
+	case inOK && !reflect.DeepEqual(got, want):
+		t.Fatalf("%q: output %q decodes to %q, want %q", in, out, got, want)
+	}
+	if again := StripControlsJSON(out); !bytes.Equal(again, out) {
+		t.Fatalf("%q: a second pass changed %q to %q", in, out, again)
+	}
+}
+
+// Text that is not JSON, or JSON that is broken, is never repaired into another value, and JSON is cleaned to
+// exactly its decoded value without controls (checkAgainstDecoded). Random bytes drawn mostly from the
+// characters of JSON, of escapes and of surrogate halves, with raw C0, DEL, C1 and bytes that are not UTF-8.
 func TestStripControlsJSONNeverLetsAControlThrough(t *testing.T) {
-	alphabet := []byte("{}[]:,\"\\u0019bBfFrRnt\x1b\x00\x07\x7f\xc2\x9b\x80\xff\n\t aZ1")
+	pieces := []string{"{", "}", "[", "]", ":", ",", `"`, `"`, `"`, `\`, `\\`, `\"`, `\u`, `\u001b`, `\u009B`,
+		`\ud83d`, `\ude00`, `\uDBFF`, `\uDC00`, "0019", "b", "f", "r", "n", "t", "\x1b", "\x00", "\x07", "\x7f",
+		"\u0085", "\u009b", "\xc2", "\x9b", "\x80", "\xff", "\n", "\t", " ", "a", "Z", "1", "true", "null"}
 	rng := rand.New(rand.NewPCG(852, 4)) // #nosec G404 -- a seeded corpus, not a secret
-	for i := range 50000 {
-		in := make([]byte, rng.IntN(40))
-		for j := range in {
-			in[j] = alphabet[rng.IntN(len(alphabet))]
+	for range 50000 {
+		var b strings.Builder
+		for range rng.IntN(20) {
+			b.WriteString(pieces[rng.IntN(len(pieces))])
 		}
-		got := StripControlsJSON(in)
-		if !utf8.Valid(got) || bytes.ContainsFunc(got, func(r rune) bool {
-			return unicode.Is(unicode.Cc, r) && r != '\n' && r != '\t'
-		}) {
-			t.Fatalf("input %d %q: output %q holds a control or a byte that is not UTF-8", i, in, got)
-		}
-		var v any
-		if json.Unmarshal(got, &v) == nil && anyString(v, hasRemovedControl) {
-			t.Fatalf("input %d %q: output %q decodes to a string with a control", i, in, got)
-		}
+		in := []byte(b.String())
+		checkAgainstDecoded(t, in, StripControlsJSON(in))
 	}
 }
 
@@ -576,13 +727,17 @@ func TestWithoutControlsCoversEveryField(t *testing.T) {
 			t.Errorf("completionFields lists %s, which Completion does not have", p)
 		}
 	}
-	var raw, esc strings.Builder
+	var raw, rawJSON, esc strings.Builder
 	for _, c := range removedCodePoints() {
 		raw.WriteString("x" + string(c))
+		if c >= 0x7f {
+			// JSON allows DEL and C1 raw in a string; a raw C0 control is not JSON.
+			rawJSON.WriteString("x" + string(c))
+		}
 		fmt.Fprintf(&esc, `y\u%04x`, c)
 	}
 	text := raw.String()
-	doc := `{"k` + esc.String() + `":["` + esc.String() + `", "` + strings.ReplaceAll(text, "\x00", "") + `"]}`
+	doc := `{"k` + esc.String() + `":["` + esc.String() + `", "` + rawJSON.String() + `"]}`
 	in := Completion{Content: doc, Model: "m", ToolCalls: []ToolCall{
 		{ID: text, Name: text, Arguments: json.RawMessage(doc)},
 		{ID: text, Name: text, Arguments: json.RawMessage(doc)},
@@ -631,27 +786,65 @@ func TestWithoutControlsLeavesCleanRepliesAlone(t *testing.T) {
 	}
 }
 
-// FuzzStripControlsJSON: whatever the input, the output is UTF-8 without a removed control, raw or decoded,
-// a second pass changes nothing, and an input without a backslash or a control comes back unchanged.
+// FuzzStripControlsJSON: whatever the input, checkAgainstDecoded holds, and an input without a backslash or
+// a control comes back unchanged. The seeds put raw controls next to every kind of escape.
 func FuzzStripControlsJSON(f *testing.F) {
 	for _, s := range []string{`{"a":"\u001b[31m"}`, "{\"a\":\"x\x1b\\u001by\"}", `{"a":"\ud83d\u001b\ude00"}`,
 		`["\\u0007", "\b\f\r"]`, "\xc2\x9b\x80\xff", `{"k\u0000":1,"k":2}`} {
 		f.Add([]byte(s))
 	}
+	for _, c := range jsonControls {
+		for _, e := range jsonEscapes {
+			f.Add([]byte(`["` + e.text + c + e.text + `","` + c + e.text + `","` + e.text + c + `"]`))
+		}
+		f.Add([]byte(`{"a":"\ud83d` + c + `\ude00"}`))
+	}
 	f.Fuzz(func(t *testing.T, in []byte) {
 		got := StripControlsJSON(in)
-		if !utf8.Valid(got) || hasRemovedControl(string(got)) {
-			t.Fatalf("%q: output %q holds a control or a byte that is not UTF-8", in, got)
-		}
-		var v any
-		if json.Unmarshal(got, &v) == nil && anyString(v, hasRemovedControl) {
-			t.Fatalf("%q: output %q decodes to a string with a control", in, got)
-		}
-		if again := StripControlsJSON(got); !bytes.Equal(again, got) {
-			t.Fatalf("%q: a second pass changed %q to %q", in, got, again)
-		}
+		checkAgainstDecoded(t, in, got)
 		if utf8.Valid(in) && !bytes.ContainsRune(in, '\\') && !hasRemovedControl(string(in)) && !bytes.Equal(got, in) {
 			t.Fatalf("%q: changed without a control to %q", in, got)
 		}
 	})
+}
+
+// shopArgs are clean arguments naming the namespace shop.
+const shopArgs = `{"namespace":"shop"}`
+
+// A tool call whose ID, name or a decoded string or key of its arguments held a removed control is marked, in
+// every form JSON writes one; the cleaned call is what comes back. A call whose text only looks like an escape
+// (an escaped backslash before "u001b"), or holds newline, tab or a byte that is not UTF-8, is not marked.
+func TestWithoutControlsMarksToolCallsThatHeldControls(t *testing.T) {
+	call := func(id, name, args string) ToolCall {
+		return ToolCall{ID: id, Name: name, Arguments: json.RawMessage(args)}
+	}
+	for _, tc := range []struct {
+		name string
+		in   ToolCall
+		held bool
+		args string
+	}{
+		{"escaped value", call("c1", "list_events", `{"namespace":"sh\u001bop"}`), true, shopArgs},
+		{"short escape", call("c1", "list_events", `{"namespace":"sh\rop"}`), true, shopArgs},
+		{"raw C1", call("c1", "list_events", `{"namespace":"sh`+"\u009b"+`op"}`), true, shopArgs},
+		{"raw DEL", call("c1", "list_events", `{"namespace":"sh`+"\x7f"+`op"}`), true, shopArgs},
+		{"key", call("c1", "list_events", `{"name\u0000space":"shop"}`), true, shopArgs},
+		{"nested", call("c1", "list_events", `{"a":[{"b":"\u0085"}]}`), true, `{"a":[{"b":""}]}`},
+		{"ID", call("c\x1b1", "list_events", `{}`), true, `{}`},
+		{"name", call("c1", "list_\u009bevents", `{}`), true, `{}`},
+		{"clean", call("c1", "list_events", shopArgs), false, shopArgs},
+		{"escaped backslash", call("c1", "list_events", `{"q":"\\u001b"}`), false, `{"q":"\\u001b"}`},
+		{"newline and tab", call("c1", "list_events", `{"q":"a\nb\tc"}`), false, `{"q":"a\nb\tc"}`},
+		{"not UTF-8", call("c1", "list_events", "{\"q\":\"\xff\"}"), false, "{\"q\":\"\xff\"}"},
+		{"raw C0, not JSON", call("c1", "list_events", "{\"q\":\"\x1b\"}"), false, "{\"q\":\"\x1b\"}"},
+	} {
+		got := WithoutControls(Completion{ToolCalls: []ToolCall{tc.in, call("c2", "list_events", `{}`)}})
+		if c := got.ToolCalls[0]; c.HeldControls != tc.held || string(c.Arguments) != tc.args ||
+			hasRemovedControl(c.ID) || hasRemovedControl(c.Name) {
+			t.Errorf("%s: %+v, want marked %v and arguments %s", tc.name, c, tc.held, tc.args)
+		}
+		if got.ToolCalls[1].HeldControls {
+			t.Errorf("%s: the clean call beside it is marked", tc.name)
+		}
+	}
 }

@@ -58,6 +58,10 @@ type ToolCall struct {
 	ID        string
 	Name      string
 	Arguments json.RawMessage
+	// HeldControls is set by [WithoutControls] on a call whose ID, name, or a decoded string or key of its
+	// arguments held a control character, which it removed (#852). The analysis loop never runs such a call.
+	// Adapters leave it false.
+	HeldControls bool
 }
 
 // CompletionRequest is one call to a model.

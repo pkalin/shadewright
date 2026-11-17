@@ -142,8 +142,16 @@ func thinkingError(body []byte) string {
 // runLoop runs one analysis whose escalation model is the adapter, answering the calls with replies in order.
 func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools) {
 	t.Helper()
+	out, bodies, lt := runLoopBodies(t, replies...)
+	return out, len(bodies), lt
+}
+
+// runLoopBodies is runLoop that returns the body of each request the API accepted.
+func runLoopBodies(t *testing.T, replies ...string) (analysis.Outcome, []json.RawMessage, *loopTools) {
+	t.Helper()
 	var mu sync.Mutex
 	sent := 0
+	var bodies []json.RawMessage
 	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		var raw json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -161,6 +169,7 @@ func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools
 		mu.Lock()
 		defer mu.Unlock()
 		sent++
+		bodies = append(bodies, raw)
 		if sent > len(replies) {
 			http.Error(w, "no reply scripted", http.StatusBadRequest)
 			return
@@ -191,7 +200,7 @@ func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	return out, sent, lt
+	return out, bodies, lt
 }
 
 func toolUseReply(model, id string) string {

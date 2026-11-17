@@ -19,6 +19,7 @@ package foundry
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -72,6 +73,8 @@ func (l *loopTools) Call(_ context.Context, call providers.ToolCall) (tools.Resu
 type sentRequest struct {
 	tools       []string
 	lastContent string
+	// body is the whole request.
+	body []byte
 }
 
 // runLoop runs one analysis whose escalation model is the adapter, answering the calls with replies in order.
@@ -95,12 +98,13 @@ func runLoopWith(t *testing.T, mod func(*Config), maxToolSteps int, replies ...s
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil || json.Unmarshal(raw, &body) != nil {
 			t.Errorf("decoding the request: %v", err)
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		var s sentRequest
+		s := sentRequest{body: raw}
 		for _, tl := range body.Tools {
 			s.tools = append(s.tools, tl.Function.Name)
 		}

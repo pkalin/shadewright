@@ -124,6 +124,7 @@ Before the first run, the maintainer sets up:
 | `EVAL_ESCALATION_DEPLOYMENT` | no | Name of the escalation deployment; without it an escalation is handed off |
 | `EVAL_ESCALATION_MODEL` | with the above | Model ID and version of the escalation replies, as `--escalation-model` |
 | `EVAL_API_VERSION` | no | Inference API version, `v1` by default |
+| `EVAL_TRIAGE_INFERENCE_API`, `EVAL_ESCALATION_INFERENCE_API` | no | `inferenceAPI` of the triage or escalation deployment: unset (chat completions), `ChatCompletions` or `Responses` (needs `EVAL_API_VERSION` `v1`). Set `Responses` for a model that refuses function tools on chat completions, such as `gpt-6.1-sol` on escalation ([#501](https://github.com/pkalin/shadewright/issues/501)). Any other value is an error before the identity is used; the escalation one needs `EVAL_ESCALATION_DEPLOYMENT` |
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
 | `EVAL_ESCALATION_PRICE_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_OUTPUT_PER_MTOK` | no | The escalation deployment's own prices: all three or none, and only with the ones above and `EVAL_ESCALATION_DEPLOYMENT`. Without them the escalation calls are priced as the triage ones |
 | `EVAL_FORCE_ESCALATION` | no | `1` sends every run to the escalation model with its read tools (below); needs `EVAL_ESCALATION_DEPLOYMENT`. Any other value is an error, checked before the identity is used, and `make eval` (the replay) refuses it |
@@ -165,7 +166,7 @@ another Claude model.
 | `EVAL_ANTHROPIC_THINKING_ALLOWANCE` | no | Tokens added to the run's output limit in `max_tokens`, as room for thinking; default 4096, at most 32768 |
 | `EVAL_PRICE_*`, `EVAL_ESCALATION_PRICE_*`, `EVAL_REPEATS`, `EVAL_MIN_PASS_RATE`, `EVAL_FORCE_ESCALATION` | no | As in the table above (`EVAL_FORCE_ESCALATION=1` needs `EVAL_ESCALATION_MODEL`); take the prices from Anthropic's price list |
 
-`EVAL_ENDPOINT`, `EVAL_ENDPOINT_SUFFIXES`, `EVAL_API_VERSION` and the `*_DEPLOYMENT` variables apply to Foundry
+`EVAL_ENDPOINT`, `EVAL_ENDPOINT_SUFFIXES`, `EVAL_API_VERSION`, the `*_INFERENCE_API` and the `*_DEPLOYMENT` variables apply to Foundry
 only, and a run with one of them set fails before any call. The adapter posts to `https://api.anthropic.com` only (a
 constant, not a setting) and follows no redirect. The manifest names the provider (`provider: anthropic`) and its
 settings (`anthropic.effort`, `anthropic.thinkingAllowance`, also on the report's first lines), and each role's
@@ -346,7 +347,7 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | --- | --- |
 | `provider` | `anthropic` with the Anthropic API; left out for fake and Foundry runs, so their digests are those they had before the field |
 | `anthropic` | With the Anthropic API only: `effort` and `thinkingAllowance` (tokens added to the output limit in `max_tokens`) |
-| `models` | Per role: `deployment` (with `anthropic`, the model ID), `model` (the ID and version replies must name), `apiVersion` |
+| `models` | Per role: `deployment` (with `anthropic`, the model ID), `model` (the ID and version replies must name), `apiVersion`, and `inferenceAPI` when it is set (left out for chat completions, so earlier digests stay the same) |
 | `promptVersion` | `analysis.PromptVersion()`: the prompt templates, the generated schema and the catalog |
 | `toolDefinitions` | Hash of the tool definitions offered on escalation, `query_metrics` included; a scenario without `metrics.yaml` is offered them without it |
 | `outputSchema` | Hash of the generated output schema and the action catalog |
@@ -384,9 +385,20 @@ analyses (units taken from the daily budget, and model calls) and the requests.
   request. Without the rule each event is an observation of its own, which the gate opens once it recurs, as
   the lab saw (#432); the case fails then, since the cause's tally stays empty. The case pins that order: it
   creates the kubelet events only once the cause's Incident exists. The collector delivers pod and event
-  observations from separate reconcilers. Since #828 the collector holds a consequence whose cause has no
-  Incident yet until the cause is counted, at most 2 minutes; the order is pinned so that the case does not depend
-  on that hold's end, where the Incident controller's first sightings count it instead.
+  observations from separate reconcilers, so with both created at once either may reach the Incident controller
+  first; the other order has cases of its own (below).
+- `TestGroupingOOMConsequenceFirst` (`grouping_order_test.go`, #820): the same fault with the other order. A relay
+  between the collector and the Incident controller holds back what the collector reports until it has the cause
+  and both consequences, delivers each consequence once, waits until the Incident controller holds it as a first
+  sighting, and only then delivers the cause; it drops every later observation of a consequence, so no repeat
+  counts it. The cause's observation counts what is held for its consequences on its Incident: one Incident, the
+  cause's, with `BackOff` 5 and `Unhealthy` 4 (the events' series counts) in `status.absorbed`, analyzed once
+  with one request, and no Incident of a consequence. The order is set by the relay, not by timing.
+- `TestGroupingOOMConsequenceRepeatNamesCause` (#820): as above, but the relay first delivers each consequence
+  without a cause fingerprint and one less in its total, the collector's reading before it linked the event to
+  the pod's cause, then the consequence as the collector reported it, a repeat of the held occurrence that names
+  its cause. The held first sighting takes the cause from the repeat, so the cause finds and counts it; the
+  outcome is the same as above.
 - `TestGroupingOOMFoldsALateCause`: an `Unhealthy` Incident of the `web` container opened before the kill and not
   analyzed yet. When the cause's Incident opens, it is folded into it (`Resolved`, `status.foldedInto`); one
   Incident stays open, analyzed once. The case holds back every analysis until it has seen the fold, so a slow

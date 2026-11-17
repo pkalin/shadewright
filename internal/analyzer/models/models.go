@@ -166,8 +166,10 @@ type ModelsConfig struct {
 // provider field names and makes no network call:
 //   - Foundry (the default): it refuses the deployment when the analyzer has no allow-list and token source
 //     (analysis.ErrProviderNotConfigured, naming --model-endpoint-suffixes), and the Anthropic API's host
-//     whatever the allow-list says, then checks the endpoint against the allow-list ([CheckEndpoint]), so a refused endpoint gets no request and no token,
-//     then builds a Foundry provider bound to that endpoint, deployment and API version, with the workload
+//     whatever the allow-list says, then checks the endpoint against the allow-list ([CheckEndpoint]), so a
+//     refused endpoint gets no request and no token, then builds a Foundry provider bound to that endpoint,
+//     deployment, API version and inference API (chat completions, or the Responses API with inferenceAPI
+//     Responses, #501), with the workload
 //     identity token source (Cognitive Services audience only; the adapter refuses private addresses at dial
 //     time).
 //   - Anthropic: it refuses the deployment when the analyzer has no key file
@@ -204,7 +206,7 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 				return nil, refused(role, d, err)
 			}
 			p, err := foundry.New(foundry.Config{Endpoint: d.Endpoint, Deployment: d.Deployment,
-				APIVersion: d.APIVersion, Tokens: cfg.Tokens})
+				APIVersion: d.APIVersion, API: foundry.API(d.InferenceAPI), Tokens: cfg.Tokens})
 			if err != nil {
 				return nil, refused(role, d, err)
 			}

@@ -293,6 +293,18 @@ const (
 	ModelProviderAnthropic ModelProvider = "Anthropic"
 )
 
+// InferenceAPI names the inference API a Foundry deployment is called through (#501).
+// +kubebuilder:validation:Enum=ChatCompletions;Responses
+type InferenceAPI string
+
+// The inference APIs of a Foundry deployment.
+const (
+	// InferenceAPIChatCompletions is the chat completions API, used when inferenceAPI is left out.
+	InferenceAPIChatCompletions InferenceAPI = "ChatCompletions"
+	// InferenceAPIResponses is the Responses API, with apiVersion v1 only.
+	InferenceAPIResponses InferenceAPI = "Responses"
+)
+
 // AnthropicEndpoint is the only endpoint of a deployment with provider Anthropic (ADR-0037 decision 2).
 const AnthropicEndpoint = "https://api.anthropic.com"
 
@@ -309,6 +321,8 @@ const AnthropicEndpoint = "https://api.anthropic.com"
 // +kubebuilder:validation:XValidation:rule="has(self.apiVersion) || (has(self.provider) && self.provider == 'Anthropic')",message="a deployment with a provider other than Anthropic needs apiVersion",fieldPath=".apiVersion"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'Anthropic' || self.endpoint == 'https://api.anthropic.com'",message="a deployment with provider Anthropic must have the endpoint https://api.anthropic.com"
 // +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider == 'Anthropic') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.anthropic.com'",message="the host api.anthropic.com is only for a deployment with provider Anthropic"
+// +kubebuilder:validation:XValidation:rule="!has(self.inferenceAPI) || !has(self.provider) || self.provider == 'Foundry'",message="inferenceAPI is only for a deployment with provider Foundry"
+// +kubebuilder:validation:XValidation:rule="!has(self.inferenceAPI) || self.inferenceAPI != 'Responses' || (has(self.apiVersion) && self.apiVersion == 'v1')",message="inferenceAPI Responses needs apiVersion v1"
 type ModelDeployment struct {
 	// provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default) or
 	// Anthropic. It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
@@ -358,6 +372,17 @@ type ModelDeployment struct {
 	// +kubebuilder:validation:Pattern=`^(v1|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(-preview)?)$`
 	// +optional
 	APIVersion string `json:"apiVersion,omitempty"`
+
+	// No schema default on inferenceAPI: the API server would set it on an Anthropic deployment too, and the rule
+	// that allows the field only for provider Foundry would then refuse every Anthropic deployment.
+
+	// inferenceAPI is the API a Foundry deployment is called through: ChatCompletions (used when it is left
+	// out) or Responses, which needs apiVersion v1 and posts to <endpoint>/openai/v1/responses. Both carry the
+	// same redacted context, tool definitions, response schema and output limit; the Responses request asks the
+	// service to store nothing. Set Responses for a model that refuses function tools on chat completions,
+	// such as the gpt-6.1 models, whose escalation calls need the read tools (#501). Only for provider Foundry.
+	// +optional
+	InferenceAPI InferenceAPI `json:"inferenceAPI,omitempty"`
 
 	// maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
 	// plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input

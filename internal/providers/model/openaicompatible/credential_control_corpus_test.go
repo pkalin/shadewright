@@ -227,6 +227,27 @@ func TestEscapeSequenceInsideKeyIsNotRefused(t *testing.T) {
 	}
 }
 
+// TestOpenSequenceInOneValueDoesNotHideTheKeyInTheNext is the regression of the escape-sequence view (decided
+// 2026-11-17, fifth, on #834): an operating system command left open in one argument value hid the whole key
+// in the next value of the joined stream, while a reader sees each value on its own.
+func TestOpenSequenceInOneValueDoesNotHideTheKeyInTheNext(t *testing.T) {
+	for _, open := range []string{"x\x1b]0;", "x\x1b]", "x\u009d", "x\x1bP", "x\x1b["} {
+		args, err := json.Marshal(map[string]string{"a": open, "b": secretKey})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, api := range []API{APIChatCompletions, APIResponses} {
+			data, err := json.Marshal(decoyReply(api, []string{"plain text"}, string(args)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !replyContainsKey(data, api, secretKey) {
+				t.Errorf("%s: key after an open sequence %q in the value before it passed", api, open)
+			}
+		}
+	}
+}
+
 func parseCompletion(api API, data []byte) (providers.Completion, error) {
 	offered := map[string]bool{decoyTool: true}
 	if api == APIResponses {

@@ -162,7 +162,7 @@ repaired into proposals. Qualify each server and model with the
 | --- | --- |
 | `analyzer.analysis.endpointSuffixes` / `--model-endpoint-suffixes` | Foundry-only destination allow-list, unchanged for existing installs. No default |
 | `analyzer.analysis.openAICompatible.endpoints` / `--openai-compatible-endpoints` | Exact endpoint declarations. The flag is a JSON array with `url`, `inferenceAPI`, a nonempty `models` list (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), optional `keyFile` and optional `service`. Settings must match a parsed base, API and declared model name byte for byte (`EndpointNotAllowed` or `ModelNotAllowed` otherwise); duplicate bases and segment path prefixes on the same authority are refused; request paths come only from the declaration |
-| `analyzer.analysis.openAICompatible.inClusterCIDRs` / `--openai-compatible-in-cluster-cidrs` | Default empty. Up to 32 IPv4 or IPv6 CIDRs that count as in-cluster besides the private, shared (100.64.0.0/10) and link-local ranges: the cluster's pod and Service ranges when they are routable addresses. A compatible endpoint that is not a declared `service` gets no connection to an address in them, checked at dial time for every resolved address before any byte is sent. The IPv4 ranges are added to the except list of the egress rule for declared ports other than 443. A malformed CIDR, one with host bits set, or one containing an endpoint's literal address stops the analyzer at start; the chart refuses malformed entries and the value without `endpoints` at render. The flag is comma-separated |
+| `analyzer.analysis.openAICompatible.inClusterCIDRs` / `--openai-compatible-in-cluster-cidrs` | Default empty. Up to 32 IPv4 or IPv6 CIDRs that count as in-cluster besides the private, shared (100.64.0.0/10) and link-local ranges: the cluster's pod and Service ranges when they are routable addresses. A compatible endpoint that is not a declared `service` gets no connection to an address in them, checked at dial time for every resolved address before any byte is sent. The IPv4 ranges are added to the except list of the egress rule for declared ports other than 443. Each entry follows the [rule for in-cluster ranges](#in-cluster-ranges); the chart refuses an entry that breaks it, and the value without `endpoints`, at render, the analyzer at start. The flag is comma-separated |
 | `analyzer.analysis.disableFoundry` / `--disable-foundry` | Default false. True disables Foundry and its inference token source. Blob records still need Azure identity |
 | `endpoints[].apiKey.secretName`, `secretKey` | Existing Secret and its key (default `api-key`), mounted whole and read-only only in the analyzer. The chart creates no Secret or RBAC |
 | `endpoints[].apiKey.volume`, `fileName` | Alternative Secret or CSI volume and file name (default `api-key`). Do not combine with `secretName` |
@@ -191,6 +191,33 @@ Calico `IPPool` objects); the Service range is the API server's
 `--service-cluster-ip-range`, `kubectl get servicecidrs` on clusters that serve
 that API, or the cluster's settings at your cloud (for AKS,
 `az aks show --query networkProfile`).
+
+### In-cluster ranges
+
+One rule holds for each entry of `inClusterCIDRs` and of
+`--openai-compatible-in-cluster-cidrs`, and the chart (at render) and the analyzer
+(at start) refuse the same entries, naming the entry in the refusal:
+
+- a CIDR in canonical form, as Go's `net/netip` prints it: lower case, no leading
+  zeros, and the longest run of two or more zero IPv6 groups written as `::`
+  (`2001:db8::/32`, not `2001:DB8::/32` or `2001:0db8:0::/32`);
+- no host bits (`198.51.100.0/24`, not `198.51.100.7/24`);
+- not `0.0.0.0/0` or `::/0`: every address would be in-cluster, so no endpoint
+  outside a declared Service could be reached, and the egress rule for declared
+  ports, whose peer is `0.0.0.0/0`, cannot except its own range;
+- an IPv4 range in IPv4 form: no IPv6 range that overlaps a form embedding IPv4
+  addresses (IPv4-mapped `::ffff:0:0/96`, IPv4-compatible `::/96`, NAT64
+  `64:ff9b::/96`, 6to4 `2002::/16`). The dial guard reads an address in those forms
+  by its IPv4 address, so a declared IPv4 range already covers them.
+
+Neither the 443/6443 egress rule nor the rule for declared ports other than 443
+allows an IPv6 address: both use the peer `0.0.0.0/0`. The IPv6 ranges are enforced
+by the dial guard alone. So are all ranges on port 443: that rule has no except
+list, neither the private ranges nor the declared ones, because it carries the
+analyzer's traffic to the API server, whose `kubernetes` Service is an in-cluster
+address, next to the model hosts. Only on declared ports other than 443 does the
+NetworkPolicy back the guard up.
+
 See [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md), and the [installation runbook](../how-to/qualify-openai-compatible.md).
 
 ## Analyzer only

@@ -122,7 +122,11 @@ ranges (the cluster's pod and Service ranges when they are routable addresses,
 IPv4 or IPv6) are refused by the dial guard of every compatible endpoint that is
 not a declared Service, like the private ranges; the install declares them,
 the analyzer does not read them from Nodes. The existing 443/6443 rule
-remains unchanged, including its API-server access. These rules do not enforce DNS identity.
+remains unchanged, including its API-server access: it excepts no range, so on 443
+the dial guard alone keeps a compatible endpoint off the private and declared
+ranges, and neither rule allows an IPv6 address. The chart and the analyzer refuse
+the same entries: a CIDR that is not canonical, has host bits, is a /0, or is an
+IPv6 form of IPv4 addresses ([rule](../reference/configuration.md#in-cluster-ranges)). These rules do not enforce DNS identity.
 Keep the selectors narrow and consistent with the Service and trusted certificate.
 
 ### What can go wrong

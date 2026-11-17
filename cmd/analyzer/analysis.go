@@ -118,9 +118,9 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 		"Comma-separated CIDRs (IPv4 or IPv6), such as 198.51.100.0/24, that count as in-cluster besides the "+
 			"private, shared and link-local ranges: the cluster's pod and Service ranges when they are routable "+
 			"addresses. A compatible endpoint that is not a declared Service gets no connection to an address in "+
-			"them, checked at dial time for every resolved address. A malformed CIDR, one with host bits set, or "+
-			"one that contains an endpoint's literal address refuses the start. Used only with "+
-			"--openai-compatible-endpoints.")
+			"them, checked at dial time for every resolved address. Each must be a canonical CIDR without host "+
+			"bits, not a /0, and an IPv4 range in IPv4 form (no IPv4-mapped, IPv4-compatible, NAT64 or 6to4 "+
+			"range); anything else refuses the start. Used only with --openai-compatible-endpoints.")
 	fs.StringVar(&f.actionPolicies, "action-policies", "",
 		"Comma-separated ActionType=policy pairs: the RemediationPolicy a proposed RemediationRequest of each "+
 			"action type refers to, such as SetContainerMemoryLimit=memory-limits. An action type without one is "+
@@ -402,7 +402,7 @@ func (f analysisFlags) modelCredentials(
 	return suffixes, tokens, nil
 }
 
-// compatibleInClusterRanges parses --openai-compatible-in-cluster-cidrs against the declared endpoints.
+// compatibleInClusterRanges parses --openai-compatible-in-cluster-cidrs, which needs declared endpoints.
 func (f analysisFlags) compatibleInClusterRanges(endpoints []openaicompatible.Endpoint) ([]netip.Prefix, error) {
 	if f.compatibleInCluster == "" {
 		return nil, nil
@@ -410,7 +410,7 @@ func (f analysisFlags) compatibleInClusterRanges(endpoints []openaicompatible.En
 	if len(endpoints) == 0 {
 		return nil, errors.New("--openai-compatible-in-cluster-cidrs needs --openai-compatible-endpoints")
 	}
-	ranges, err := openaicompatible.ParseInClusterRanges(f.compatibleInCluster, endpoints)
+	ranges, err := openaicompatible.ParseInClusterRanges(f.compatibleInCluster)
 	if err != nil {
 		return nil, fmt.Errorf("invalid --openai-compatible-in-cluster-cidrs: %w", err)
 	}

@@ -90,6 +90,8 @@ func TestCompatibleInClusterRangesAtStart(t *testing.T) {
 	for _, tc := range []struct{ name, endpoints, ranges, reason string }{
 		{"malformed", declared, "198.51.100.0/33", "not a CIDR"},
 		{"host bits", declared, "198.51.100.1/24", "host bits"},
+		{"every address", declared, "::/0", "covers every address"},
+		{"mapped", declared, "::ffff:c633:6400/120", "write the IPv4 range"},
 		{"empty item", declared, "198.51.100.0/24,", "not a CIDR"},
 		{"no endpoints", "", "198.51.100.0/24", "needs --openai-compatible-endpoints"},
 	} {

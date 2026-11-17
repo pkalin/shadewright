@@ -105,7 +105,9 @@ analyzer:
         - 2001:db8:42::/56
 ```
 
-The analyzer refuses to start on a malformed range or one with host bits set.
+The chart and the analyzer refuse an entry that is not a canonical CIDR, has host
+bits set, is a /0, or is an IPv6 form of IPv4 addresses
+([rule](../reference/configuration.md#in-cluster-ranges)).
 Read the pod ranges with
 `kubectl get nodes -o jsonpath='{.items[*].spec.podCIDRs}'` (or the CNI's own
 pool objects) and the Service range from the API server's

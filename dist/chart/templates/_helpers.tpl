@@ -232,9 +232,9 @@ Foundry deployment (#814). */ -}}
 {{- fail "analyzer.analysis.openAICompatible.inClusterCIDRs must be a list of CIDRs" -}}
 {{- end -}}
 {{- range $compatible.inClusterCIDRs -}}
-{{- /* The analyzer is the exact gate (openaicompatible.ParseInClusterRanges): it also refuses host bits. */ -}}
-{{- if not (and (kindIs "string" .) (or (regexMatch "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}/(3[0-2]|[12]?[0-9])$" .) (regexMatch "^[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$" .))) -}}
-{{- fail "analyzer.analysis.openAICompatible.inClusterCIDRs has an entry that is not an IPv4 or IPv6 CIDR" -}}
+{{- $problem := include "shadewright.inClusterCIDRProblem" . -}}
+{{- if $problem -}}
+{{- fail (printf "analyzer.analysis.openAICompatible.inClusterCIDRs entry %q %s" (toString .) $problem) -}}
 {{- end -}}
 {{- end -}}
 {{- $seen := dict -}}
@@ -558,3 +558,151 @@ secret:
 {{- end -}}
 {{- toJson $out -}}
 {{- end }}
+
+{{/*
+shadewright.pow2 prints 2 to the power of the argument (0 to 32).
+*/}}
+{{- define "shadewright.pow2" -}}
+{{- $p := 1 -}}
+{{- range until (int .) -}}{{- $p = mul $p 2 -}}{{- end -}}
+{{- $p -}}
+{{- end -}}
+
+{{/*
+shadewright.ipv6Text prints eight 16-bit groups in the canonical text form Go's netip prints (RFC 5952):
+lower case, no leading zeros, the longest run of two or more zero groups (the first of equal runs) as ::.
+*/}}
+{{- define "shadewright.ipv6Text" -}}
+{{- $groups := . -}}
+{{- $best := -1 -}}{{- $bestLen := 1 -}}{{- $start := 0 -}}{{- $run := 0 -}}
+{{- range $i, $g := $groups -}}
+{{- if eq (int64 $g) 0 -}}
+{{- if eq $run 0 -}}{{- $start = $i -}}{{- end -}}
+{{- $run = add1 $run -}}
+{{- if gt $run $bestLen -}}{{- $bestLen = $run -}}{{- $best = $start -}}{{- end -}}
+{{- else -}}
+{{- $run = 0 -}}
+{{- end -}}
+{{- end -}}
+{{- $hex := list -}}
+{{- range $groups -}}{{- $hex = append $hex (printf "%x" (int64 .)) -}}{{- end -}}
+{{- if lt $best 0 -}}
+{{- join ":" $hex -}}
+{{- else -}}
+{{- printf "%s::%s" (join ":" (slice $hex 0 $best)) (join ":" (slice $hex (add $best $bestLen) 8)) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+shadewright.prefixesOverlap prints "true" when the IPv6 prefixes a and b (eight groups each) with lengths
+aBits and bBits share an address: their first min(aBits, bBits) bits are equal.
+*/}}
+{{- define "shadewright.prefixesOverlap" -}}
+{{- $m := min .aBits .bBits -}}
+{{- $equal := true -}}
+{{- range $i := until 8 -}}
+{{- $rem := sub $m (mul $i 16) -}}
+{{- $x := int64 (index $.a $i) -}}{{- $y := int64 (index $.b $i) -}}
+{{- if ge $rem 16 -}}
+{{- if ne $x $y -}}{{- $equal = false -}}{{- end -}}
+{{- else if gt $rem 0 -}}
+{{- $unit := int64 (include "shadewright.pow2" (sub 16 $rem)) -}}
+{{- if ne (div $x $unit) (div $y $unit) -}}{{- $equal = false -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $equal -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+shadewright.inClusterCIDRProblem prints why one entry of analyzer.analysis.openAICompatible.inClusterCIDRs is
+refused, or nothing. The rule is the analyzer's (openaicompatible.CheckInClusterRange), and a chart test runs
+the same inputs through both: a CIDR in canonical text form, no host bits, not a /0, and no IPv6 range that
+overlaps a form embedding IPv4 addresses (::ffff:0:0/96, ::/96, 64:ff9b::/96, 2002::/16).
+*/}}
+{{- define "shadewright.inClusterCIDRProblem" -}}
+{{- $notCIDR := "is not a CIDR such as 203.0.113.0/24 or 2001:db8::/64" -}}
+{{- if not (kindIs "string" .) -}}
+{{- $notCIDR -}}
+{{- else if not (regexMatch "^[0-9A-Fa-f:.]+/(0|[1-9][0-9]{0,2})$" .) -}}
+{{- $notCIDR -}}
+{{- else -}}
+{{- $addr := regexReplaceAll "/.*$" . "" -}}
+{{- $bits := int (regexReplaceAll "^.*/" . "") -}}
+{{- if not (contains ":" $addr) -}}
+  {{- if or (not (regexMatch "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$" $addr)) (gt $bits 32) -}}
+  {{- $notCIDR -}}
+  {{- else if eq $bits 0 -}}
+  covers every address: no endpoint outside a declared Service could be reached, and the egress rule cannot except it; list the cluster's pod and Service ranges
+  {{- else -}}
+  {{- $v := int64 0 -}}
+  {{- range splitList "." $addr -}}{{- $v = add (mul $v 256) (int64 .) -}}{{- end -}}
+  {{- $unit := int64 (include "shadewright.pow2" (sub 32 $bits)) -}}
+  {{- $host := mod $v $unit -}}
+  {{- if ne $host 0 -}}
+  {{- $n := sub $v $host -}}
+  {{- printf "has host bits set: write %d.%d.%d.%d/%d" (div $n 16777216) (mod (div $n 65536) 256) (mod (div $n 256) 256) (mod $n 256) $bits -}}
+  {{- end -}}
+  {{- end -}}
+{{- else if or (contains "." $addr) (contains ":::" $addr) (gt (len (regexFindAll "::" $addr -1)) 1) (gt $bits 128) -}}
+  {{- $notCIDR -}}
+{{- else -}}
+  {{- $digits := dict "0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7 "8" 8 "9" 9 "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15 -}}
+  {{- $halves := list $addr -}}
+  {{- if contains "::" $addr -}}{{- $halves = splitList "::" $addr -}}{{- end -}}
+  {{- $parsed := list -}}
+  {{- $bad := false -}}
+  {{- range $halves -}}
+  {{- $groups := list -}}
+  {{- if ne . "" -}}
+  {{- range splitList ":" . -}}
+  {{- if not (regexMatch "^[0-9A-Fa-f]{1,4}$" .) -}}{{- $bad = true -}}{{- else -}}
+  {{- $g := 0 -}}
+  {{- range splitList "" (lower .) -}}{{- $g = add (mul $g 16) (get $digits .) -}}{{- end -}}
+  {{- $groups = append $groups $g -}}
+  {{- end -}}
+  {{- end -}}
+  {{- end -}}
+  {{- $parsed = append $parsed $groups -}}
+  {{- end -}}
+  {{- $groups := list -}}
+  {{- if eq (len $parsed) 1 -}}
+  {{- $groups = index $parsed 0 -}}
+  {{- if ne (len $groups) 8 -}}{{- $bad = true -}}{{- end -}}
+  {{- else -}}
+  {{- $zeros := sub 8 (add (len (index $parsed 0)) (len (index $parsed 1))) -}}
+  {{- if lt $zeros 1 -}}{{- $bad = true -}}{{- else -}}
+  {{- $groups = concat (index $parsed 0) (list) -}}
+  {{- range until (int $zeros) -}}{{- $groups = append $groups 0 -}}{{- end -}}
+  {{- $groups = concat $groups (index $parsed 1) -}}
+  {{- end -}}
+  {{- end -}}
+  {{- if $bad -}}
+  {{- $notCIDR -}}
+  {{- else if eq $bits 0 -}}
+  covers every address: no endpoint outside a declared Service could be reached, and the egress rule cannot except it; list the cluster's pod and Service ranges
+  {{- else -}}
+  {{- $overlap := "" -}}
+  {{- range list (list "::ffff:0:0/96" (list 0 0 0 0 0 65535 0 0) 96) (list "::/96" (list 0 0 0 0 0 0 0 0) 96) (list "64:ff9b::/96" (list 100 65435 0 0 0 0 0 0) 96) (list "2002::/16" (list 8194 0 0 0 0 0 0 0) 16) -}}
+  {{- if and (not $overlap) (include "shadewright.prefixesOverlap" (dict "a" $groups "aBits" $bits "b" (index . 1) "bBits" (index . 2))) -}}{{- $overlap = index . 0 -}}{{- end -}}
+  {{- end -}}
+  {{- if $overlap -}}
+  {{- printf "overlaps %s, a form that embeds IPv4 addresses: write the IPv4 range, which the dial guard also applies to that form" $overlap -}}
+  {{- else -}}
+  {{- $masked := list -}}
+  {{- range $i, $g := $groups -}}
+  {{- $rem := sub $bits (mul $i 16) -}}
+  {{- if le $rem 0 -}}{{- $masked = append $masked 0 -}}
+  {{- else if lt $rem 16 -}}{{- $masked = append $masked (sub $g (mod $g (int64 (include "shadewright.pow2" (sub 16 $rem))))) -}}
+  {{- else -}}{{- $masked = append $masked $g -}}{{- end -}}
+  {{- end -}}
+  {{- $text := printf "%s/%d" (include "shadewright.ipv6Text" $masked) $bits -}}
+  {{- if ne (toJson $masked) (toJson $groups) -}}
+  {{- printf "has host bits set: write %s" $text -}}
+  {{- else if ne $text . -}}
+  {{- printf "is not in canonical form: write %s" $text -}}
+  {{- end -}}
+  {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

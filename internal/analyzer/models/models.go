@@ -202,7 +202,7 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	if err := openaicompatible.ValidateEndpoints(cfg.CompatibleEndpoints, cfg.Suffixes); err != nil {
 		return nil, err
 	}
-	if err := openaicompatible.ValidateInClusterRanges(cfg.CompatibleInClusterRanges, cfg.CompatibleEndpoints); err != nil {
+	if err := openaicompatible.ValidateInClusterRanges(cfg.CompatibleInClusterRanges); err != nil {
 		return nil, err
 	}
 	cfg.CompatibleInClusterRanges = slices.Clone(cfg.CompatibleInClusterRanges)

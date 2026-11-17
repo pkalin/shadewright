@@ -208,8 +208,8 @@ const MaxInClusterRanges = 32
 
 // ParseInClusterRanges reads the comma-separated in-cluster ranges of the installation flag (ADR-0042): the
 // pod and Service ranges of a cluster that are outside the private ranges. The dialer of every compatible
-// endpoint refuses an address in them like a private address. See ValidateInClusterRanges.
-func ParseInClusterRanges(raw string, endpoints []Endpoint) ([]netip.Prefix, error) {
+// endpoint refuses an address in them like a private address. Each item must pass CheckInClusterRange.
+func ParseInClusterRanges(raw string) ([]netip.Prefix, error) {
 	if raw == "" {
 		return nil, nil
 	}
@@ -218,46 +218,62 @@ func ParseInClusterRanges(raw string, endpoints []Endpoint) ([]netip.Prefix, err
 		return nil, fmt.Errorf("at most %d in-cluster ranges may be declared", MaxInClusterRanges)
 	}
 	ranges := make([]netip.Prefix, 0, len(items))
-	for i, item := range items {
-		p, err := netip.ParsePrefix(item)
+	for _, item := range items {
+		p, err := CheckInClusterRange(item)
 		if err != nil {
-			return nil, fmt.Errorf("in-cluster range %d is not a CIDR such as 203.0.113.0/24 or 2001:db8::/64", i+1)
+			return nil, err
 		}
 		ranges = append(ranges, p)
-	}
-	if err := ValidateInClusterRanges(ranges, endpoints); err != nil {
-		return nil, err
 	}
 	return ranges, nil
 }
 
-// ValidateInClusterRanges refuses a range that is not in its canonical network form (host bits set, or an
-// IPv4 range written as IPv4-mapped IPv6), more than MaxInClusterRanges, and a range that contains the literal
-// address of a declared endpoint, whose every call would then be refused. Declared hosts are DNS names
-// (CanonicalBase), so the last check holds for any endpoint that passes ValidateEndpoints and guards against
-// a later change of that rule.
-func ValidateInClusterRanges(ranges []netip.Prefix, endpoints []Endpoint) error {
+// embeddedIPv4Forms are the IPv6 ranges whose addresses the dial guard reads as an IPv4 address
+// (openaiwire.Guard): IPv4-mapped, IPv4-compatible, the well-known NAT64 prefix and 6to4. A declared IPv4
+// range already covers its addresses in these forms, so a range that overlaps them is refused as input.
+var embeddedIPv4Forms = []string{"::ffff:0:0/96", "::/96", "64:ff9b::/96", "2002::/16"}
+
+// CheckInClusterRange parses one in-cluster range. The rule, the same as the chart's
+// (shadewright.inClusterCIDRProblem): a CIDR in the canonical text form that netip prints (lower case, no
+// leading zeros, the longest run of two or more zero groups written as ::), no host bits, not a /0, and no
+// IPv6 range that overlaps a form embedding IPv4 addresses (embeddedIPv4Forms): write the IPv4 range instead.
+// The error names the value: it is installation configuration, not a secret.
+func CheckInClusterRange(item string) (netip.Prefix, error) {
+	p, err := netip.ParsePrefix(item)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("in-cluster range %q is not a CIDR such as 203.0.113.0/24 or 2001:db8::/64", item)
+	}
+	if p.Bits() == 0 {
+		return netip.Prefix{}, fmt.Errorf("in-cluster range %q covers every address: no endpoint outside a declared Service could be reached, and the egress rule cannot except it; list the cluster's pod and Service ranges", item)
+	}
+	if p.Addr().Is6() {
+		for _, form := range embeddedIPv4Forms {
+			if p.Overlaps(netip.MustParsePrefix(form)) {
+				return netip.Prefix{}, fmt.Errorf("in-cluster range %q overlaps %s, a form that embeds IPv4 addresses: write the IPv4 range, which the dial guard also applies to that form", item, form)
+			}
+		}
+	}
+	if p.Masked() != p {
+		return netip.Prefix{}, fmt.Errorf("in-cluster range %q has host bits set: write %s", item, p.Masked())
+	}
+	if p.String() != item {
+		return netip.Prefix{}, fmt.Errorf("in-cluster range %q is not in canonical form: write %s", item, p)
+	}
+	return p, nil
+}
+
+// ValidateInClusterRanges checks parsed ranges against the rule of CheckInClusterRange and MaxInClusterRanges,
+// for callers that build the list themselves.
+func ValidateInClusterRanges(ranges []netip.Prefix) error {
 	if len(ranges) > MaxInClusterRanges {
 		return fmt.Errorf("at most %d in-cluster ranges may be declared", MaxInClusterRanges)
 	}
-	for i, p := range ranges {
-		if !p.IsValid() || p.Addr().Is4In6() || p.Addr().Zone() != "" || p.Masked() != p {
-			return fmt.Errorf("in-cluster range %d is not a network address with its prefix length (host bits must be zero; IPv4 ranges in IPv4 form)", i+1)
+	for _, p := range ranges {
+		if !p.IsValid() {
+			return errors.New("an in-cluster range is not a CIDR")
 		}
-	}
-	for _, e := range endpoints {
-		u, err := url.Parse(e.URL)
-		if err != nil {
-			continue // ValidateEndpoints refuses it.
-		}
-		ip, err := netip.ParseAddr(u.Hostname())
-		if err != nil {
-			continue
-		}
-		for i, p := range ranges {
-			if p.Contains(ip.Unmap()) {
-				return fmt.Errorf("in-cluster range %d contains the address of a declared endpoint", i+1)
-			}
+		if _, err := CheckInClusterRange(p.String()); err != nil {
+			return err
 		}
 	}
 	return nil

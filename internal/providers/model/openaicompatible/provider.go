@@ -206,7 +206,7 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	if err := ValidateEndpoints([]Endpoint{{URL: cfg.Endpoint, API: api, Models: []string{cfg.Deployment}, KeyFile: cfg.KeyFile, Service: cfg.Service}}, nil); err != nil {
 		return nil, invalid("the endpoint declaration is invalid")
 	}
-	if err := ValidateInClusterRanges(cfg.InClusterRanges, []Endpoint{{URL: cfg.Endpoint}}); err != nil {
+	if err := ValidateInClusterRanges(cfg.InClusterRanges); err != nil {
 		return nil, invalid("an in-cluster range is invalid")
 	}
 	guard := openaiwire.Guard{AllowPrivateService: cfg.Service != nil, InCluster: slices.Clone(cfg.InClusterRanges)}

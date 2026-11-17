@@ -334,7 +334,7 @@ func TestCompatibleInClusterCIDRs(t *testing.T) {
 	if flag != "198.51.100.0/24,2001:db8:1::/48,11.0.0.0/8" {
 		t.Fatalf("in-cluster flag = %q", flag)
 	}
-	if _, err := openaicompatible.ParseInClusterRanges(flag, declaredArgs(t, r)); err != nil {
+	if _, err := openaicompatible.ParseInClusterRanges(flag); err != nil {
 		t.Fatalf("the analyzer refuses the rendered flag: %v", err)
 	}
 	k := "NetworkPolicy/" + operatorNS + "/shadewright-allow-analyzer-egress"
@@ -393,5 +393,82 @@ func TestCompatibleInClusterCIDRsRefused(t *testing.T) {
 	out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "needs analyzer.analysis.openAICompatible.endpoints") {
 		t.Fatalf("ranges without endpoints rendered: %v %.1200s", err, out)
+	}
+}
+
+// One rule for the in-cluster ranges: the analyzer's flag parser and the chart, with its schema and without
+// it, give the same verdict for each input, and the chart's refusal names the value (ADR-0042).
+func TestCompatibleInClusterCIDRsSameVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		ok    bool
+	}{
+		{"198.51.100.0/24", true},
+		{"11.0.0.0/8", true},
+		{"128.0.0.0/1", true},
+		{"203.0.113.7/32", true},
+		{"2001:db8:1::/48", true},
+		{"2a0b:4000::/32", true},
+		{"64:ff9b:1::/48", true},
+		{"1::/16", true},
+		{"2001:db8::1/128", true},
+		{"1:0:1:1:1:1:1:1/128", true},
+		{"1::1:0:0:1:1/128", true},
+		{"1:2:3:4:5:6:7:8/128", true},
+		{"0.0.0.0/0", false},
+		{"11.0.0.0/0", false},
+		{"::/0", false},
+		{"11.0.0.1/8", false},
+		{"203.0.113.7/24", false},
+		{"2001:db8::1/32", false},
+		{"2a0b:4000::8000/113", true},
+		{"2a0b:4000::4000/113", false},
+		{"::ffff:a00:0/104", false},
+		{"::ffff:10.0.0.0/104", false},
+		{"64:ff9b::c633:6400/120", false},
+		{"64:ff9b::198.51.100.0/120", false},
+		{"::c633:6400/120", false},
+		{"2002:c633:6400::/40", false},
+		{"2000::/3", false},
+		{"::/64", false},
+		{"2001:DB8::/32", false},
+		{"2001:0db8::/32", false},
+		{"2001:db8:0::/48", false},
+		{"2001:db8:0:0:0:0:0:0/32", false},
+		{"1::1:1:1:1:1:1/128", false},
+		{"1:0:0:1::1:1/128", false},
+		{"2001:db8::1.2.3.4/128", false},
+		{"1:2:3:4:5:6:7::8/128", false},
+		{"1:2:3:4:5:6:7:8:9/128", false},
+		{":::/64", false},
+		{"1::2::/64", false},
+		{"fe80::%eth0/64", false},
+		{"2001:db8::/129", false},
+		{"198.51.100.0/33", false},
+		{"198.51.300.0/24", false},
+		{"010.0.0.0/8", false},
+		{"11.0.0.0/08", false},
+		{"198.51.100.0", false},
+		{"pods", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Parallel()
+			if _, err := openaicompatible.ParseInClusterRanges(tc.value); (err == nil) != tc.ok {
+				t.Errorf("flag verdict %v, want accepted=%v", err, tc.ok)
+			}
+			for _, skip := range []bool{false, true} {
+				args := helmArgs(t, false, append(compatibleSet(), inClusterValue+"={"+tc.value+"}")...)
+				if skip {
+					args = append(args, "--skip-schema-validation")
+				}
+				out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+				if (err == nil) != tc.ok {
+					t.Errorf("chart verdict (schema skipped=%v) %v, want accepted=%v: %.600s", skip, err, tc.ok, out)
+				}
+				if err != nil && skip && !strings.Contains(string(out), fmt.Sprintf("%q", tc.value)) {
+					t.Errorf("the chart's refusal does not name the value: %.600s", out)
+				}
+			}
+		})
 	}
 }

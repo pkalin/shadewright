@@ -69,8 +69,14 @@ choose no part of the request destination.
    declared Service refuses an address in them, after DNS, for every resolved
    address and before any byte of the request or key is sent, and the IPv4 ones
    are added to the except list of the rule for declared ports other than 443
-   (that rule allows no IPv6 address). A malformed range, one with host bits set,
-   or one that contains an endpoint's literal address stops the analyzer at start.
+   (that rule allows no IPv6 address). On 443 the dial guard alone enforces the
+   private and declared ranges: that rule has no except list, since it carries
+   the traffic to the API server at its in-cluster address. An entry must be a
+   canonical CIDR without host bits, not a /0, and an IPv4 range in IPv4 form
+   (no IPv6 range overlapping the IPv4-mapped, IPv4-compatible, NAT64 or 6to4
+   forms, which the guard already reads by their IPv4 address); the chart
+   refuses any other entry at render and the analyzer at start
+   ([rule](../reference/configuration.md#in-cluster-ranges)).
 4. A key belongs only to its declaration's complete base. Two endpoints can have
    different keys, including on the same gateway host at different paths. An
    endpoint without a key sends no Authorization header. Only the analyzer mounts

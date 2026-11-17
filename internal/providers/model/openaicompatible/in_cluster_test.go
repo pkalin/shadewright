@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -159,40 +160,62 @@ func TestInClusterRangeRefusedAfterResolution(t *testing.T) {
 }
 
 func TestParseInClusterRanges(t *testing.T) {
-	declared := []Endpoint{{URL: "https://api.openai.com/v1", API: APIResponses, Models: []string{"m"}}}
-	got, err := ParseInClusterRanges("198.51.100.0/24,2001:db8:1::/48,11.0.0.0/8", declared)
-	if err != nil || len(got) != 3 || got[1] != netip.MustParsePrefix("2001:db8:1::/48") {
+	const notCIDR = "not a CIDR"
+	got, err := ParseInClusterRanges("198.51.100.0/24,2001:db8:1::/48,11.0.0.0/8,64:ff9b:1::/48")
+	if err != nil || len(got) != 4 || got[1] != netip.MustParsePrefix("2001:db8:1::/48") {
 		t.Fatalf("valid ranges: %v %v", got, err)
 	}
-	if got, err := ParseInClusterRanges("", declared); err != nil || got != nil {
+	if got, err := ParseInClusterRanges(""); err != nil || got != nil {
 		t.Fatalf("empty flag: %v %v", got, err)
 	}
-	for _, raw := range []string{
-		"11.0.0.0",              // no prefix length
-		"11.0.0.0/33",           // prefix too long
-		"11.0.0.1/8",            // host bits set
-		"2001:db8::1/32",        // host bits set, IPv6
-		"::ffff:11.0.0.0/104",   // IPv4 written as mapped IPv6
-		"fe80::%eth0/64",        // zone
-		"11.0.0.0/8,",           // empty item
-		" 11.0.0.0/8",           // space
-		"11.0.0.0/8;12.0.0.0/8", // wrong separator
-		"pods",
-		strings.Repeat("11.0.0.0/8,", MaxInClusterRanges) + "11.0.0.0/8",
+	for _, tc := range []struct{ raw, reason string }{
+		{"11.0.0.0", notCIDR},
+		{"11.0.0.0/33", notCIDR},
+		{"fe80::%eth0/64", notCIDR},
+		{"11.0.0.0/8,", notCIDR},
+		{" 11.0.0.0/8", notCIDR},
+		{"11.0.0.0/8;12.0.0.0/8", notCIDR},
+		{"pods", notCIDR},
+		{"0.0.0.0/0", "covers every address"},
+		{"::/0", "covers every address"},
+		{"11.0.0.1/8", "host bits set: write 11.0.0.0/8"},
+		{"2001:db8::1/32", "host bits set: write 2001:db8::/32"},
+		{"::ffff:11.0.0.0/104", "::ffff:0:0/96"},
+		{"::ffff:b00:0/104", "::ffff:0:0/96"},
+		{"64:ff9b::198.51.100.0/120", "64:ff9b::/96"},
+		{"64:ff9b::c633:6400/120", "64:ff9b::/96"},
+		{"::c633:6400/120", "::/96"},
+		{"2002:c633:6400::/40", "2002::/16"},
+		{"2001:DB8::/32", "canonical form: write 2001:db8::/32"},
+		{"2001:0db8::/32", "canonical form: write 2001:db8::/32"},
+		{"1::1:1:1:1:1:1/128", "canonical form: write 1:0:1:1:1:1:1:1/128"},
 	} {
-		if _, err := ParseInClusterRanges(raw, declared); err == nil {
-			t.Errorf("accepted %q", raw)
-		} else if strings.Contains(err.Error(), raw) {
-			t.Errorf("error repeats the input: %v", err)
+		_, err := ParseInClusterRanges(tc.raw)
+		if err == nil || !strings.Contains(err.Error(), tc.reason) {
+			t.Errorf("%q: %v, want %s", tc.raw, err, tc.reason)
+		}
+		// The refusal names the value (configuration, not a secret), not only a position.
+		if err != nil && !strings.Contains(tc.raw, ",") && !strings.Contains(err.Error(), fmt.Sprintf("%q", tc.raw)) {
+			t.Errorf("%q: the refusal does not name the value: %v", tc.raw, err)
 		}
 	}
-	// A declaration grammar that let a literal address through would make every call to it fail; refused.
-	literal := []Endpoint{{URL: "https://198.51.100.7/v1"}}
-	if err := ValidateInClusterRanges([]netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, literal); err == nil {
-		t.Fatal("a range containing an endpoint's literal address was accepted")
+	if _, err := ParseInClusterRanges(strings.Repeat("11.0.0.0/8,", MaxInClusterRanges) + "11.0.0.0/8"); err == nil {
+		t.Error("more than the maximum accepted")
 	}
-	if _, err := New(Config{Endpoint: endpoint, Deployment: testModel,
-		InClusterRanges: []netip.Prefix{netip.MustParsePrefix("11.0.0.1/8")}}); !errors.Is(err, providers.ErrInvalidConfig) {
-		t.Fatalf("New accepted a range with host bits: %v", err)
+	for _, p := range []string{"11.0.0.1/8", "0.0.0.0/0", "::ffff:11.0.0.0/104"} {
+		if _, err := New(Config{Endpoint: endpoint, Deployment: testModel,
+			InClusterRanges: []netip.Prefix{netip.MustParsePrefix(p)}}); !errors.Is(err, providers.ErrInvalidConfig) {
+			t.Errorf("New accepted %s: %v", p, err)
+		}
+	}
+}
+
+// Declared hosts are DNS names: an IP literal is refused by the host pattern, so no in-cluster range can hold
+// a declared endpoint's own address.
+func TestDeclarationRefusesIPLiteralHost(t *testing.T) {
+	for _, raw := range []string{"https://198.51.100.7/v1", "https://[2001:db8::7]/v1", "https://[::ffff:c633:6407]/v1"} {
+		if err := ValidateEndpoints([]Endpoint{{URL: raw, API: APIChatCompletions, Models: []string{testModel}}}, nil); err == nil {
+			t.Errorf("IP literal host accepted: %s", raw)
+		}
 	}
 }

@@ -46,8 +46,8 @@ func TestValueIsRedactedBeforeItIsFlattened(t *testing.T) {
 // rule; the test fails if the replacement runs first again.
 func TestRedactSeesInvalidBytesBeforeTheyAreReplaced(t *testing.T) {
 	for in, secret := range map[string]string{
-		"dial https://admin:Hunter\xff2Secret@db.shop.svc:5432/x": "Hunter",
-		"postgres://app:pw\xff@db/x":                              "pw",
+		"dial https://admin:Hunter\xff2Secret@db:5432/x": "Hunter",
+		"postgres://app:pw\xff@db/x":                     "pw",
 	} {
 		if !strings.Contains(redact.String(strings.ToValidUTF8(in, "?")), secret) {
 			t.Fatalf("%q: replacing first loses %q too, so this input proves nothing about the order", in, secret)

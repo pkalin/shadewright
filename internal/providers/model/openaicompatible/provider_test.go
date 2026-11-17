@@ -576,9 +576,12 @@ func TestBilledFailedUsageCeilingBoundary(t *testing.T) {
 	}
 }
 
+// The error of a short key names only the minimum: its text is the same for every length, so neither the
+// key nor its length reaches a log.
 func TestShortKeyIsMalformed(t *testing.T) {
+	first := ""
 	for n := 1; n < 16; n++ {
-		key := strings.Repeat("k", n)
+		key := "Q" + strings.Repeat("k", n-1)
 		calls := 0
 		p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: keyFile(t, key)}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
 			calls++
@@ -591,6 +594,12 @@ func TestShortKeyIsMalformed(t *testing.T) {
 		var retry *providers.RetryableError
 		if err == nil || !providers.IsNotSent(err) || !errors.Is(err, providers.ErrCredentialUnavailable) || errors.As(err, &retry) || calls != 0 || !strings.Contains(err.Error(), "at least 16 bytes") {
 			t.Fatalf("length %d: %v calls=%d", n, err, calls)
+		}
+		if first == "" {
+			first = err.Error()
+		}
+		if err.Error() != first || strings.Contains(err.Error(), key) {
+			t.Fatalf("length %d: the error depends on the key: %v", n, err)
 		}
 	}
 }

@@ -266,6 +266,18 @@ Foundry deployment (#814). */ -}}
 {{- with .service -}}
 {{- if or (not .namespace) (not .podSelector) (lt (int .port) 1) (gt (int .port) 65535) (not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.svc(\\.cluster\\.local)?$" $host)) (ne (index (splitList "." $host) 1) .namespace) -}}
 {{- fail "openAICompatible service needs its DNS namespace, podSelector and target port" -}}{{- end -}}
+{{- /* The analyzer's rules (openaicompatible.ValidateEndpoints): 1 to 32 entries, each key a qualified name and each value a label value. */ -}}
+{{- if or (not (kindIs "map" .podSelector)) (gt (len .podSelector) 32) -}}
+{{- fail "openAICompatible service podSelector must have 1 to 32 labels" -}}{{- end -}}
+{{- range $k, $v := .podSelector -}}
+{{- $parts := splitList "/" $k -}}
+{{- $name := last $parts -}}
+{{- $prefixOK := or (eq (len $parts) 1) (and (eq (len $parts) 2) (le (len (first $parts)) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" (first $parts))) -}}
+{{- $nameOK := and (le (len $name) 63) (regexMatch "^([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$" $name) -}}
+{{- $valueOK := and (kindIs "string" $v) (le (len (toString $v)) 63) (regexMatch "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$" (toString $v)) -}}
+{{- if not (and $prefixOK $nameOK $valueOK) -}}
+{{- fail "openAICompatible service podSelector has an invalid label" -}}{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if and $a.escalationModel (not $a.triageModel) -}}

@@ -634,30 +634,25 @@ func completeUsage(data []byte, api API) bool {
 // replyContainsKey checks the text and arguments in the form the caller will decode: Responses text is
 // joined across parts, and structured content and tool arguments carry another JSON escape layer.
 // This check never changes the reply or repairs an invalid result.
+//
+// It fails closed. A reply that is not valid JSON is scanned as raw bytes (and the caller refuses it).
+// Every JSON value and key of a valid reply is scanned whatever the typed decode below does. The typed
+// decode reads only the fields of the caller's later decode for this API (openaiwire's responsesReply or
+// chatResponse), with the same JSON types, so a field of the other API, or any field the caller ignores,
+// cannot make it fail. When it does fail (a wrong type in one of those fields), the caller's decode
+// refuses the same reply too, so the reply is treated as containing a credential: nothing a caller
+// would accept is refused, and no decoy field can switch the joined scans off.
 func replyContainsKey(data []byte, api API, key string) bool {
-	var r struct {
-		Choices []struct {
-			Message struct {
-				Content   string `json:"content"`
-				ToolCalls []struct {
-					Function struct {
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls"`
-			} `json:"message"`
-		} `json:"choices"`
-		Output []struct {
-			Type      string `json:"type"`
-			Arguments string `json:"arguments"`
-			Content   []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
+	if !json.Valid(data) {
+		return bytes.Contains(data, []byte(key))
 	}
-	if json.Unmarshal(data, &r) != nil {
-		return false
+	var all, allValues strings.Builder
+	appendJSONValues(&all, json.NewDecoder(bytes.NewReader(data)), true)
+	appendJSONValues(&allValues, json.NewDecoder(bytes.NewReader(data)), false)
+	if strings.Contains(withoutWhitespace(all.String()), key) || strings.Contains(withoutWhitespace(allValues.String()), key) {
+		return true
 	}
+
 	var joined, keyed, rawJoined, messageText strings.Builder
 	matched := false
 	appendText := func(text string) {
@@ -673,6 +668,19 @@ func replyContainsKey(data []byte, api API, key string) bool {
 	}
 
 	if api == APIResponses {
+		var r struct {
+			Output []struct {
+				Type      string `json:"type"`
+				Arguments string `json:"arguments"`
+				Content   []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(data, &r) != nil {
+			return true
+		}
 		for _, item := range r.Output {
 			for _, part := range item.Content {
 				if item.Type == "message" && part.Type == "output_text" {
@@ -683,16 +691,31 @@ func replyContainsKey(data []byte, api API, key string) bool {
 			appendText(item.Arguments)
 		}
 	} else {
+		var r struct {
+			Choices []struct {
+				Message struct {
+					Content   *string `json:"content"`
+					ToolCalls []struct {
+						Function struct {
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(data, &r) != nil {
+			return true
+		}
 		for _, choice := range r.Choices {
-			appendText(choice.Message.Content)
+			if choice.Message.Content != nil {
+				appendText(*choice.Message.Content)
+			}
 			for _, call := range choice.Message.ToolCalls {
 				appendText(call.Function.Arguments)
 			}
 		}
 	}
-	var all strings.Builder
-	appendJSONValues(&all, json.NewDecoder(bytes.NewReader(data)), true)
-	return strings.Contains(withoutWhitespace(all.String()), key) || strings.Contains(withoutWhitespace(keyed.String()), key) || matched || containsKey([]byte(rawJoined.String()), key) ||
+	return strings.Contains(withoutWhitespace(keyed.String()), key) || matched || containsKey([]byte(rawJoined.String()), key) ||
 		strings.Contains(withoutWhitespace(joined.String()), key) || containsKey([]byte(messageText.String()), key)
 }
 

@@ -104,7 +104,7 @@ Declarations with segment path prefixes on the same authority are refused. The k
 is a read-only Secret or CSI mount in the analyzer only, read at every attempt;
 executor and verifier never receive it and no Secret RBAC is added.
 For each `analyzer.analysis.openAICompatible.endpoints[].service` declaration the chart adds
-one egress rule to its `namespace` and nonempty `podSelector` on the pod target
+one egress rule to its `namespace` and `podSelector` (1 to 32 valid labels, refused otherwise at render and at analyzer startup) on the pod target
 `port`. The declared Service base uses verified HTTPS (443 by default). This explicit selector rule
 is necessary on CNIs such as Cilium where CIDR rules exclude in-cluster pods.
 Public compatible declarations add their explicit TCP ports other than 443 to a

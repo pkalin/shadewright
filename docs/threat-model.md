@@ -293,6 +293,17 @@ identities; operators own Service routing, trust roots and key sources. Declared
 public ports other than 443 use a separate egress rule excluding 10.0.0.0/8,
 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 and 169.254.0.0/16. The existing
 443/6443 rule is unchanged. Nonempty keys under 16 bytes are malformed and not retried.
+The refusal's fixed text names the 16-byte minimum, so the analyzer log shows that a
+refused key is shorter than the minimum, but never the key or its exact length:
+the operator can tell a truncated or placeholder key from an unreadable file, and a
+key that short is no usable secret.
+
+Two trust assumptions follow from [ADR-0042](adr/0042-openai-compatible-model-endpoints.md).
+A cluster that uses non-RFC 1918 address space other than 100.64.0.0/10 for pods or
+Services has those addresses treated as public by the dial guard and by the except
+list of the egress rule for declared public ports. A tenant who can create pods
+matching a declared Service's `podSelector` in its namespace is inside that egress
+rule and is stopped only by verified TLS with the Service DNS name.
 
 A compatible server may ignore schema hints or invent tool calls. Shared wire
 parsing and typed validators fail closed, and deterministic policy still decides

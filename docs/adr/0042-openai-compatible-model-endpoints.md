@@ -10,12 +10,14 @@ ADR-0037. Foundry already speaks Chat Completions and Responses, but binds them 
 an Entra identity. Operators also need the OpenAI API, gateways and models served
 inside a cluster. A protocol name is not a claim that every server enforces schemas.
 The decision of 2026-11-16 is one configurable provider, not one fixed vendor host.
+On 2026-11-17 the [decision on issue #834](https://github.com/pkalin/shadewright/issues/834#issuecomment-6946338496)
+bound the models at install time as well: each endpoint declaration names an exact
+base URL and the model names allowed at it, so settings choose neither the base nor
+the model alias a gateway routes on.
 
 ## Decision
 
 [![The analyzer selects one provider after redaction. Foundry uses Entra, Anthropic uses its own key, and an OpenAI-compatible endpoint uses a separate optional key bound to one install-time base URL and its model list. Both OpenAI wire formats share one parser. Every proposal still passes typed validation and policy.](../assets/diagrams/openai-compatible.svg)](../assets/diagrams/openai-compatible.svg "Open full size")
-
-Decision 2026-11-17, third: each install-time endpoint declaration binds an exact base URL and its allowed model names.
 
 Three destination choices require install-time binding: the host, the gateway
 path and the model alias. A gateway can route an alias to another upstream,
@@ -27,7 +29,8 @@ choose no part of the request destination.
    `--openai-compatible-endpoints` JSON array. Each declaration has an exact `url`
    (scheme, DNS host, port and path prefix), `inferenceAPI` (`ChatCompletions` or
    `Responses`), a nonempty `models` list, optionally `keyFile`, and optionally `service` with `namespace`,
-   nonempty `podSelector` and pod target `port`. There is no compatible suffix list.
+   a `podSelector` of 1 to 32 valid Kubernetes labels and pod target `port`, refused
+   otherwise by both chart render and analyzer startup. There is no compatible suffix list.
    Each model name matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
    Chart `apiKey` sources are an existing Secret or CSI volume; the chart derives
    the declaration's mounted file path, one separate mount per endpoint.
@@ -103,7 +106,11 @@ The credential echo check scans raw reply bytes before parsing a completion, the
 concatenates parsed strings, numbers and object keys in wire order with whitespace
 removed. It also scans decoded content and arguments, joining their values and
 keys across parts. It detects literal and JSON-escaped echoes, including keys split
-between content, argument keys and numeric values. It does not detect transformed
+between content, argument keys and numeric values. It fails closed: the scan of
+every parsed value runs whatever the typed decode of content and arguments does, a
+reply that is not JSON is scanned as raw bytes, and a reply whose content or
+argument fields have a wrong JSON type counts as containing a credential (the
+completion parser refuses such a reply too). It does not detect transformed
 keys such as base64 or a key split across two replies. Outputs remain untrusted:
 the redactor checks records and telemetry, typed result and tool argument validation
 and deterministic policy constrain proposals, and credentials never authorize a
@@ -125,6 +132,17 @@ training is opt-in before allowing a vendor; the Azure region promise does not
 cover this provider. A compromised analyzer can read its mounted credentials.
 Standard NetworkPolicy permits HTTPS addresses, not DNS host identities.
 
+Two trust assumptions remain:
+
+- A cluster that uses address space for pods or Services outside RFC 1918 other
+  than 100.64.0.0/10 has those addresses treated as public, both by the dial guard
+  and by the except list of the egress rule for declared public ports. A declared
+  public endpoint could then reach such a pod or Service address.
+- A tenant who can create pods that match a declared Service's `podSelector` in
+  that Service's namespace is inside the egress rule and can receive the
+  analyzer's connections. Only verified TLS with the Service DNS name stops it from
+  reading the key and the redacted context.
+
 ### Adversarial analysis
 
 | Attack | Control and remaining boundary |
@@ -133,7 +151,7 @@ Standard NetworkPolicy permits HTTPS addresses, not DNS host identities.
 | Redirect or proxy steals a key | No redirects of any status and no environment proxy |
 | Public DNS rebinds into the cluster or metadata | Address checks on each connection; private addresses only for explicitly named Service hosts, never metadata or loopback |
 | Service impersonation | Verified TLS with the Service DNS name; cluster operators own certificates and Service routing |
-| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; scan the raw body before reply parsing and whitespace-free concatenations of every parsed string, number and object key, including decoded structured content and arguments, before returning a completion |
+| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; scan the raw body before reply parsing and whitespace-free concatenations of every parsed string, number and object key, including decoded structured content and arguments, before returning a completion; a wrong-typed decoy field fails closed |
 | Server ignores schema or invents a tool | Shared parser, typed argument/result validation, closed catalog and deterministic policy; no output repair |
 | Server omits usage or returns 429 | Unknown usage costs the upper bound; no compatible-host unbilled exception |
 | Key rotation races a call | Read per attempt, bounded retry, no cached key; update source before revoking old key |
@@ -160,6 +178,11 @@ Offline transport tests do not replace scenario qualification.
   dependency and does not bind gateway paths or model aliases. Operators may add
   this defense in depth; portable NetworkPolicy and application checks remain
   the shipped boundary.
+- A separate credential-holding egress component (a sidecar or small proxy with
+  its own identity) that owns the key and forwards only to declared bases. The
+  analyzer would never read the key. Not chosen now: it adds a component and an
+  identity. It is the next step if a compromised analyzer reading its mounted keys
+  becomes the concern.
 - A fixed-host OpenAI provider excludes gateways and cluster servers.
 - Reusing Foundry with a key mixes identity and Azure URL/version semantics.
 - Refusing all private addresses excludes cluster inference; explicit Service

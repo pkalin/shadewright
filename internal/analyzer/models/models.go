@@ -147,7 +147,7 @@ const anthropicHost = "api.anthropic.com"
 type ModelsConfig struct {
 	// DisableFoundry prevents constructing or using an Entra token source, for compatible-only installs.
 	DisableFoundry bool
-	// CompatibleEndpoints are exact install-time bases with their own API and optional key.
+	// CompatibleEndpoints are exact install-time bases with their own API, allowed models and optional key.
 	CompatibleEndpoints []openaicompatible.Endpoint
 	// Suffixes is the allow-list of endpoint host suffixes for Foundry deployments only.
 	// Set together with Tokens unless DisableFoundry is true. Empty refuses every Foundry deployment
@@ -183,7 +183,7 @@ type ModelsConfig struct {
 //     deployment is not the model its role expects (analysis.ErrDeploymentNotExpected); the allow-list is not
 //     consulted. It then builds an Anthropic provider for that model that reads the key file at every attempt
 //     and logs every failed call.
-//   - OpenAICompatible: it matches an exact installation endpoint and builds the shared-wire adapter with no
+//   - OpenAICompatible: it matches an exact installation endpoint and its allowed models (ErrModelNotAllowed before any call), then builds the shared-wire adapter with no
 //     token source, an optional key bound to that exact base, and the declared Service endpoints allowed private addresses. Azure model hosts and the Anthropic API are refused. No key means
 //     no Authorization header; API versions are refused and the API prefix is part of the endpoint.
 //   - Any other provider is refused (analysis.ErrProviderNotConfigured).
@@ -200,6 +200,9 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	}
 	// Freeze installation data: settings and caller mutations cannot move a credential.
 	cfg.CompatibleEndpoints = slices.Clone(cfg.CompatibleEndpoints)
+	for i := range cfg.CompatibleEndpoints {
+		cfg.CompatibleEndpoints[i].Models = slices.Clone(cfg.CompatibleEndpoints[i].Models)
+	}
 	refused := func(role analysis.Role, d remediationv1alpha1.ModelDeployment, err error) error {
 		cfg.Log.Info("Refused a model deployment from RemediationSettings", "role", role,
 			"provider", d.ProviderName(), "deployment", d.Deployment, "reason", err.Error())
@@ -232,6 +235,9 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			decl, ok := openaicompatible.MatchEndpoint(cfg.CompatibleEndpoints, d.Endpoint, openaicompatible.API(d.InferenceAPI))
 			if !ok {
 				return nil, refused(role, d, fmt.Errorf("model endpoint or API is not declared at installation: %w", analysis.ErrEndpointNotAllowed))
+			}
+			if !slices.Contains(decl.Models, d.Deployment) {
+				return nil, refused(role, d, analysis.ErrModelNotAllowed)
 			}
 			if d.APIVersion != "" {
 				return nil, refused(role, d, fmt.Errorf("OpenAICompatible does not allow apiVersion: %w", providers.ErrInvalidConfig))

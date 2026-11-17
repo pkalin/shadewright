@@ -78,7 +78,7 @@ func TestWireAndCredentialRotation(t *testing.T) {
 				calls++
 				wantKey := secretKey
 				if calls > 1 {
-					wantKey = "rotated-key-834"
+					wantKey = "rotated-key-834-000"
 				}
 				if r.Header.Get("Authorization") != "Bearer "+wantKey || r.Header.Get("x-api-key") != "" {
 					t.Error("wrong credential")
@@ -100,7 +100,7 @@ func TestWireAndCredentialRotation(t *testing.T) {
 				if err != nil || c.Usage.InputTokens != 30 || c.Usage.OutputTokens != 5 || c.Usage.CachedInputTokens != 10 || c.Content != `{"ok":true}` {
 					t.Fatalf("completion %+v, %v", c, err)
 				}
-				if err := os.WriteFile(path, []byte("rotated-key-834"), 0o600); err != nil {
+				if err := os.WriteFile(path, []byte("rotated-key-834-000"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -294,13 +294,15 @@ func TestRetryRereadsKeyAndKeepsBounds(t *testing.T) {
 	path := keyFile(t, secretKey)
 	calls := 0
 	p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: path, MaxAttempts: 2}, testHooks{
-		sleep: func(context.Context, time.Duration) error { return os.WriteFile(path, []byte("rotated"), 0o600) },
+		sleep: func(context.Context, time.Duration) error {
+			return os.WriteFile(path, []byte("rotated-marker-834-000"), 0o600)
+		},
 		transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 			calls++
 			if calls == 1 {
 				return response(429, "application/json", ""), nil
 			}
-			if r.Header.Get("Authorization") != "Bearer rotated" {
+			if r.Header.Get("Authorization") != "Bearer rotated-marker-834-000" {
 				t.Fatal("retry cached old key")
 			}
 			return response(200, "application/json", chatOK), nil
@@ -570,6 +572,25 @@ func TestBilledFailedUsageCeilingBoundary(t *testing.T) {
 		}
 		if n > ceiling && c.Usage.InputTokens != 0 {
 			t.Fatal("oversized billed failure retained usage")
+		}
+	}
+}
+
+func TestShortKeyIsMalformed(t *testing.T) {
+	for n := 1; n < 16; n++ {
+		key := strings.Repeat("k", n)
+		calls := 0
+		p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, KeyFile: keyFile(t, key)}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
+			calls++
+			return response(200, "application/json", chatOK), nil
+		})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = p.Complete(t.Context(), request())
+		var retry *providers.RetryableError
+		if err == nil || !providers.IsNotSent(err) || !errors.Is(err, providers.ErrCredentialUnavailable) || errors.As(err, &retry) || calls != 0 || !strings.Contains(err.Error(), "at least 16 bytes") {
+			t.Fatalf("length %d: %v calls=%d", n, err, calls)
 		}
 	}
 }

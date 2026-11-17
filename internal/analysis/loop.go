@@ -129,9 +129,12 @@ const (
 	ReasonUnexpectedModel Reason = "UnexpectedModel"
 	// ReasonEndpointNotAllowed: the deployment's endpoint is one the analyzer may not call
 	// (ErrEndpointNotAllowed): for Foundry, outside the operator's allow-list of host suffixes or the Anthropic
-	// API's host; for Anthropic, not the API's fixed endpoint. Nothing was sent to it and no token requested for
+	// API's host; for Anthropic, not the API's fixed endpoint; for OpenAICompatible,
+	// not a declared base and inference API. Nothing was sent to it and no token requested for
 	// it; an earlier triage call may have gone to another endpoint.
 	ReasonEndpointNotAllowed Reason = "EndpointNotAllowed"
+	// ReasonModelNotAllowed: the compatible deployment model is absent from its endpoint's install-time list; no request is sent.
+	ReasonModelNotAllowed Reason = "ModelNotAllowed"
 	// ReasonProviderNotConfigured: the deployment's provider needs something the analyzer was not started
 	// with, such as the API key file of an Anthropic deployment or the endpoint allow-list and workload identity
 	// of a Foundry deployment (ErrProviderNotConfigured), or the provider's
@@ -159,6 +162,9 @@ const (
 // other than the API's fixed one; the analysis hands off with ReasonEndpointNotAllowed.
 var ErrEndpointNotAllowed = errors.New("the model endpoint is not allowed")
 
+// ErrModelNotAllowed is returned before any call when a compatible model is not declared for its endpoint.
+var ErrModelNotAllowed = errors.New("the model is not allowed by the endpoint declaration")
+
 // ErrProviderNotConfigured is what a [ModelFactory] returns, wrapped, for a deployment whose provider the
 // analyzer cannot call as started, such as an Anthropic deployment without the analyzer's key file flag or a
 // Foundry deployment without its --model-endpoint-suffixes; the
@@ -173,6 +179,8 @@ var ErrDeploymentNotExpected = errors.New("the deployment names another model th
 // factoryFailure is the hand-off reason of a ModelFactory error.
 func factoryFailure(err error) Reason {
 	switch {
+	case errors.Is(err, ErrModelNotAllowed):
+		return ReasonModelNotAllowed
 	case errors.Is(err, ErrEndpointNotAllowed):
 		return ReasonEndpointNotAllowed
 	case errors.Is(err, ErrProviderNotConfigured):

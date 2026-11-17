@@ -338,7 +338,7 @@ type ModelDeployment struct {
 	// deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
 	// started without them refuses it (ProviderNotConfigured). A Foundry deployment may
 	// not name the host api.anthropic.com. There is no fallback between providers.
-	// OpenAICompatible matches --openai-compatible-endpoints declarations, with no Azure identity and an optional API key
+	// OpenAICompatible matches --openai-compatible-endpoints declarations and their allowed models lists (ModelNotAllowed for an undeclared model), with no Azure identity and an optional API key
 	// read from its endpoint's own mounted file. The key is bound to its full install-time base URL, never an Azure model host
 	// or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.
 	// +kubebuilder:default=Foundry
@@ -368,7 +368,8 @@ type ModelDeployment struct {
 
 	// deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting
 	// with a letter or digit. For provider Anthropic it is the model ID exactly as the replies name it, such as
-	// claude-haiku-5-5. For OpenAICompatible it is the server's model name.
+	// claude-haiku-5-5. For OpenAICompatible it is the server's model name and must equal a name in the
+	// endpoint declaration's models list byte for byte (ModelNotAllowed otherwise).
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*$`

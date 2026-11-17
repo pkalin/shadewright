@@ -135,7 +135,9 @@ The lab cluster is destroyed after every session, so everything in the cluster g
 the endpoint allowed at install time. It may be the OpenAI API, a gateway or a
 separately operated cluster Service; the provider name promises no residency or
 retention policy. Check the server's retention, geography and opt-in training
-terms before allowing it. Settings writers can select among allowed hosts, so
-use narrow suffixes. A separate exact base URL binding keeps the optional key from
-moving with a settings edit. No redirects, HTTP or environment proxy are used.
+terms before allowing it. Settings writers can select only declared bases, APIs
+and model names. Keep each nonempty `models` list narrow: a gateway may route a
+model alias to an upstream that receives both the key and redacted context.
+Install-time base and model binding prevents an undeclared destination choice
+through a settings edit. Gateway operators still control what declared aliases mean. No redirects, HTTP or environment proxy are used.
 See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md).

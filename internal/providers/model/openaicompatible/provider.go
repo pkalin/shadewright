@@ -196,7 +196,7 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ValidateEndpoints([]Endpoint{{URL: cfg.Endpoint, API: api, KeyFile: cfg.KeyFile, Service: cfg.Service}}, nil); err != nil {
+	if err := ValidateEndpoints([]Endpoint{{URL: cfg.Endpoint, API: api, Models: []string{cfg.Deployment}, KeyFile: cfg.KeyFile, Service: cfg.Service}}, nil); err != nil {
 		return nil, invalid("the endpoint declaration is invalid")
 	}
 	allowPrivate := cfg.Service != nil
@@ -565,6 +565,9 @@ func (p *Provider) readKey() (string, error) {
 	key := strings.TrimSpace(string(data))
 	if key == "" {
 		return "", unavailable()
+	}
+	if len(key) < 16 {
+		return "", fmt.Errorf("openai-compatible: the API key file is malformed (key must be at least 16 bytes): %w", providers.ErrCredentialUnavailable)
 	}
 	if len(key) > 512 {
 		return "", malformed()

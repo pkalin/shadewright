@@ -273,7 +273,7 @@ escalation to cover read tools and multi-turn Responses calls.
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `EVAL_ENDPOINT` | yes | HTTPS API base, such as `https://api.openai.com/v1`; the adapter appends `/responses` or `/chat/completions` |
-| `EVAL_COMPATIBLE_ENDPOINTS` | yes | JSON array as `--openai-compatible-endpoints`: each has `url`, `inferenceAPI`, optional `keyFile` and optional `service` (namespace, podSelector, port). Each key belongs only to its exact base |
+| `EVAL_COMPATIBLE_ENDPOINTS` | yes | JSON array as `--openai-compatible-endpoints`: each has `url`, `inferenceAPI`, a nonempty `models` list, optional `keyFile` and optional `service` (namespace, podSelector, port). Each key belongs only to its exact base |
 | `EVAL_COMPATIBLE_SERVER_ID` | yes | Operator-recorded server release or dated service identifier, using model-name characters. Included in the qualification digest along with an endpoint hash, never the endpoint URL |
 | `EVAL_TRIAGE_DEPLOYMENT`, `EVAL_TRIAGE_MODEL` | yes | Request model name and exact model ID replies must name |
 | `EVAL_TRIAGE_INFERENCE_API` | no | `ChatCompletions` (default) or `Responses` |
@@ -286,7 +286,7 @@ live run with an inference key already held in a private file:
 ```bash
 EVAL_MODEL=openaicompatible \
 EVAL_ENDPOINT=https://api.openai.com/v1 \
-EVAL_COMPATIBLE_ENDPOINTS='[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses","keyFile":"/mounted/model-key"}]' \
+EVAL_COMPATIBLE_ENDPOINTS='[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses","models":["gpt-6.1-sol"],"keyFile":"/mounted/model-key"}]' \
 EVAL_COMPATIBLE_SERVER_ID=openai-2026-11-16 \
 EVAL_TRIAGE_DEPLOYMENT=gpt-6.1-sol EVAL_TRIAGE_MODEL=gpt-6.1-sol \
 EVAL_TRIAGE_INFERENCE_API=Responses make eval-model

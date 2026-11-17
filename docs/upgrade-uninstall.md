@@ -261,7 +261,8 @@ A new `helm install` with `settings.create=true` over a leftover object keeps th
 
 Apply the new CRDs before selecting `provider: OpenAICompatible`. Compatible
 deployments omit `apiVersion`; their base and inference API must match an
-install-time endpoint declaration. Compatible-only installs set
+install-time endpoint declaration, and their model must be in its allowed
+`models` list (`ModelNotAllowed` otherwise). Compatible-only installs set
 `analyzer.analysis.disableFoundry=true` and need no inference workload identity.
 Blob records still need Azure identity.
 
@@ -275,7 +276,8 @@ Blob records still need Azure identity.
   remove its `apiVersion`, or restore a permitted Foundry resource before resuming.
 
 Declare compatible endpoints and optional per-endpoint Secret or CSI key sources
-under `analyzer.analysis.openAICompatible.endpoints`, then follow the
+with a nonempty allowed `models` list under
+`analyzer.analysis.openAICompatible.endpoints`, then follow the
 [qualification runbook](how-to/qualify-openai-compatible.md). The Foundry suffix list
 never authorizes a compatible endpoint. Removing the release removes its mounts
 but does not revoke server credentials; revoke each key separately. No Secret API

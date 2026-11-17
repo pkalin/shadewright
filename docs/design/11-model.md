@@ -46,13 +46,17 @@ For an `Anthropic` deployment the host is fixed in code, `api.anthropic.com`, an
 ### OpenAI-compatible endpoints
 
 <span class="sw-status sw-built">built</span> `OpenAICompatible` matches settings
-against exact install-time `--openai-compatible-endpoints` declarations. Each owns
+against exact install-time `--openai-compatible-endpoints` declarations, including
+the nonempty allowed `models` list. An undeclared model alias ends
+`ModelNotAllowed` before any request. Each owns
 its base URL, inference API and optional key file; no settings path is used to
 construct a request. The shared `internal/providers/model/openaiwire` codec keeps
 Foundry wire behavior unchanged. No compatible suffix list exists. Scheme/host
 case, default port and one trailing slash normalize; dot segments, userinfo,
-queries and fragments are refused. Duplicate bases and Foundry/Azure/Anthropic
-host overlaps fail chart rendering and analyzer startup.
+queries and fragments are refused. Duplicate bases, segment path prefixes on the
+same authority, invalid model lists and Foundry/Azure/Anthropic host overlaps fail
+chart rendering and analyzer startup. Nonempty keys shorter than 16 bytes are
+malformed and are not retried.
 
 Set `--disable-foundry` for compatible-only inference without an Entra token
 source. The Foundry suffix list remains Foundry-only. Every declared compatible

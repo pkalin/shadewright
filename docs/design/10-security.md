@@ -98,15 +98,19 @@ The per-component split exists so that narrowing is possible without touching th
     - An egress proxy or gateway with an allow-list (an HTTP proxy, or a service mesh egress gateway), with the components' egress allowed only to it.
 
 The built OpenAICompatible provider ([ADR-0042](../adr/0042-openai-compatible-model-endpoints.md))
-uses exact install-time base declarations, each with its own optional key. The key
+uses exact install-time base declarations, each with a nonempty allowed model
+list and its own optional key. Settings cannot choose an undeclared model alias.
+Declarations with segment path prefixes on the same authority are refused. The key
 is a read-only Secret or CSI mount in the analyzer only, read at every attempt;
 executor and verifier never receive it and no Secret RBAC is added.
 For each `analyzer.analysis.openAICompatible.endpoints[].service` declaration the chart adds
 one egress rule to its `namespace` and nonempty `podSelector` on the pod target
 `port`. The declared Service base uses verified HTTPS (443 by default). This explicit selector rule
 is necessary on CNIs such as Cilium where CIDR rules exclude in-cluster pods.
-Public compatible declarations also add their explicit TCP ports to the public
-egress rule. This does not narrow the existing public HTTPS rule or enforce DNS identity.
+Public compatible declarations add their explicit TCP ports other than 443 to a
+separate rule whose `0.0.0.0/0` peer excludes 10.0.0.0/8, 172.16.0.0/12,
+192.168.0.0/16, 100.64.0.0/10 and 169.254.0.0/16. The existing 443/6443 rule
+remains unchanged, including its API-server access. These rules do not enforce DNS identity.
 Keep the selectors narrow and consistent with the Service and trusted certificate.
 
 ### What can go wrong

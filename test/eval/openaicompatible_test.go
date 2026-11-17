@@ -139,7 +139,8 @@ func TestCompatibleSourceWithoutAzure(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	t.Setenv(envEndpoint, "https://api.openai.com/v1")
-	t.Setenv(envCompatibleEndpoints, `[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses"}]`)
+	t.Setenv(envCompatibleEndpoints, `[{"url":"https://api.openai.com/v1",`+
+		`"inferenceAPI":"Responses","models":["gpt-6.1-sol"]}]`)
 	t.Setenv(envTriageDep, "gpt-6.1-sol")
 	t.Setenv(envTriageMod, "gpt-6.1-sol")
 	t.Setenv(envTriageAPI, "Responses")
@@ -173,7 +174,8 @@ func TestCompatibleSourceWithoutAzure(t *testing.T) {
 	if err != nil || changed.Digest == m.Digest {
 		t.Fatal("server identity does not change qualification digest")
 	}
-	t.Setenv(envCompatibleEndpoints, `[{"url":"https://other.example.com/v1","inferenceAPI":"Responses",`+
+	t.Setenv(envCompatibleEndpoints, `[{"url":"https://other.example.com/v1",`+
+		`"inferenceAPI":"Responses","models":["gpt-6.1-sol"],`+
 		`"keyFile":"/unread/key"}]`)
 	if _, err := newCompatibleSource(); err == nil {
 		t.Fatal("misbound key accepted")

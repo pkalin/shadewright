@@ -12,23 +12,37 @@ spec:
   - ports:
     - port: 443
       protocol: TCP
-    {{- $ports := dict "443" true "6443" true }}
-    {{- range .Values.analyzer.analysis.openAICompatible.endpoints }}
-    {{- if not .service }}
-    {{- $authority := (urlParse .url).host }}
-    {{- $port := last (splitList ":" $authority) }}
-    {{- if and (contains ":" $authority) (not (hasKey $ports $port)) }}
-    {{- $_ := set $ports $port true }}
-    - port: {{ int $port }}
-      protocol: TCP
-    {{- end }}
-    {{- end }}
-    {{- end }}
     - port: 6443
       protocol: TCP
     to:
     - ipBlock:
         cidr: 0.0.0.0/0
+  {{- $ports := dict }}
+  {{- range .Values.analyzer.analysis.openAICompatible.endpoints }}
+  {{- if not .service }}
+  {{- $authority := (urlParse .url).host }}
+  {{- $port := last (splitList ":" $authority) }}
+  {{- if and (contains ":" $authority) (ne $port "443") }}
+  {{- $_ := set $ports $port true }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if $ports }}
+  - ports:
+    {{- range $port, $_ := $ports }}
+    - port: {{ int $port }}
+      protocol: TCP
+    {{- end }}
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 100.64.0.0/10
+        - 169.254.0.0/16
+  {{- end }}
   {{- with .Values.networkPolicy.analyzer.prometheus }}
   {{- if .enabled }}
   {{- if not .namespace }}

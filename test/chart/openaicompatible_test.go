@@ -31,12 +31,15 @@ import (
 	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
 )
 
+const serviceModelName = "model"
+
 const endpointPrefix = "analyzer.analysis.openAICompatible.endpoints[0]."
 const compatibleKey = endpointPrefix + "apiKey.secretName=model-key"
 
 func compatibleSet() []string {
 	return []string{"analyzer.analysis.triageModel=m", "analyzer.analysis.disableFoundry=true",
-		endpointPrefix + "url=https://api.openai.com/v1", endpointPrefix + "inferenceAPI=Responses"}
+		endpointPrefix + "url=https://api.openai.com/v1", endpointPrefix + "inferenceAPI=Responses",
+		endpointPrefix + "models[0]=m"}
 }
 
 // Compatible rendering needs Helm only. A missing Helm fails loudly.
@@ -90,7 +93,7 @@ func TestCompatibleDeclaredEndpointRender(t *testing.T) {
 	r := compatibleRender(t, set...)
 	got := declaredArgs(t, r)
 	if len(got) != 1 || got[0].URL != "https://api.openai.com/v1" ||
-		got[0].API != openaicompatible.APIResponses ||
+		got[0].API != openaicompatible.APIResponses || !reflect.DeepEqual(got[0].Models, []string{"m"}) ||
 		got[0].KeyFile != "/var/run/secrets/shadewright/openai-compatible/0/api-key" {
 		t.Fatalf("declarations: %+v", got)
 	}
@@ -192,7 +195,8 @@ func TestCompatibleChartDeclarationRefusals(t *testing.T) {
 		"https://api.openai.com/v1", "HTTPS://API.OPENAI.COM:443/v1/", "https://api.openai.com/%76%31",
 	} {
 		set := append(compatibleSet(), "analyzer.analysis.openAICompatible.endpoints[1].url="+duplicate,
-			"analyzer.analysis.openAICompatible.endpoints[1].inferenceAPI=ChatCompletions")
+			"analyzer.analysis.openAICompatible.endpoints[1].inferenceAPI=ChatCompletions",
+			"analyzer.analysis.openAICompatible.endpoints[1].models[0]=m")
 		if out := helmFails(t, set...); !strings.Contains(out, "duplicate") {
 			t.Fatalf("wrong duplicate refusal: %s", out)
 		}
@@ -210,9 +214,9 @@ func TestCompatibleServiceEgress(t *testing.T) {
 	base := compatibleRender(t)
 	set := make([]string, 0, 16)
 	set = append(set, "analyzer.analysis.triageModel=m", "analyzer.analysis.disableFoundry=true")
-	for i, name := range []string{"model", "secondary-model"} {
+	for i, name := range []string{serviceModelName, "secondary-model"} {
 		p := fmt.Sprintf("analyzer.analysis.openAICompatible.endpoints[%d].", i)
-		set = append(set, p+"url=https://"+name+".demo.svc.cluster.local/v1", p+"inferenceAPI=Responses",
+		set = append(set, p+"url=https://"+name+".demo.svc.cluster.local/v1", p+"inferenceAPI=Responses", p+"models[0]=m",
 			p+"service.namespace=demo", p+"service.podSelector.app="+name, fmt.Sprintf("%sservice.port=%d", p, 8443+i))
 	}
 	r := compatibleRender(t, set...)
@@ -221,7 +225,7 @@ func TestCompatibleServiceEgress(t *testing.T) {
 	if len(after) != len(before)+2 || !reflect.DeepEqual(after[:len(before)], before) {
 		t.Fatal("Service declarations changed other egress")
 	}
-	for i, name := range []string{"model", "secondary-model"} {
+	for i, name := range []string{serviceModelName, "secondary-model"} {
 		rule := after[len(before)+i]
 		if len(rule.To) != 1 || rule.To[0].IPBlock != nil ||
 			rule.To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "demo" ||
@@ -241,6 +245,7 @@ func TestCompatibleTwoEndpointKeys(t *testing.T) {
 	set := append(compatibleSet(), compatibleKey,
 		"analyzer.analysis.openAICompatible.endpoints[1].url=https://api.openai.com/tenant-b/v1",
 		"analyzer.analysis.openAICompatible.endpoints[1].inferenceAPI=ChatCompletions",
+		"analyzer.analysis.openAICompatible.endpoints[1].models[0]=m",
 		"analyzer.analysis.openAICompatible.endpoints[1].apiKey.secretName=second-key")
 	r := compatibleRender(t, set...)
 	got := declaredArgs(t, r)
@@ -268,7 +273,9 @@ func TestCompatibleDeclaredPortEgress(t *testing.T) {
 		for _, port := range rule.Ports {
 			if port.Port != nil && port.Port.IntValue() == 8443 {
 				found = true
-				if len(rule.To) != 1 || rule.To[0].IPBlock == nil {
+				except := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"}
+				if len(rule.To) != 1 || rule.To[0].IPBlock == nil ||
+					!reflect.DeepEqual(rule.To[0].IPBlock.Except, except) {
 					t.Fatal("public port lacks its IP peer")
 				}
 			}
@@ -276,5 +283,35 @@ func TestCompatibleDeclaredPortEgress(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("declared public port is blocked")
+	}
+}
+
+func TestCompatibleChartModelAndPrefixRefusals(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		for _, tc := range []struct{ name, value, reason string }{
+			{"prefix", "https://api.openai.com/v1/team", "path prefix"},
+			{"empty models", "", "models"},
+			{"invalid model", "bad/name", "model"},
+		} {
+			t.Run(fmt.Sprintf("%s/schema-skipped=%v", tc.name, skip), func(t *testing.T) {
+				set := append(compatibleSet(), endpointPrefix+"models[0]=m")
+				if tc.name == "prefix" {
+					p := "analyzer.analysis.openAICompatible.endpoints[1]."
+					set = append(set, p+"url="+tc.value, p+"inferenceAPI=Responses", p+"models[0]=m")
+				} else if tc.value == "" {
+					set = append(set, endpointPrefix+"models=null")
+				} else {
+					set = append(set, endpointPrefix+"models[0]="+tc.value)
+				}
+				args := helmArgs(t, false, set...)
+				if skip {
+					args = append(args, "--skip-schema-validation")
+				}
+				out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+				if err == nil || !strings.Contains(string(out), tc.reason) {
+					t.Fatalf("wrong refusal: %v %.1200s", err, out)
+				}
+			})
+		}
 	}
 }

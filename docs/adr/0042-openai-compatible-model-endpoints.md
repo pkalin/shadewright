@@ -13,21 +13,22 @@ The decision of 2026-11-16 is one configurable provider, not one fixed vendor ho
 
 ## Decision
 
-[![The analyzer selects one provider after redaction. Foundry uses Entra, Anthropic uses its own key, and an OpenAI-compatible endpoint uses a separate optional key bound to one install-time base URL. Both OpenAI wire formats share one parser. Every proposal still passes typed validation and policy.](../assets/diagrams/openai-compatible.svg)](../assets/diagrams/openai-compatible.svg "Open full size")
+[![The analyzer selects one provider after redaction. Foundry uses Entra, Anthropic uses its own key, and an OpenAI-compatible endpoint uses a separate optional key bound to one install-time base URL and its model list. Both OpenAI wire formats share one parser. Every proposal still passes typed validation and policy.](../assets/diagrams/openai-compatible.svg)](../assets/diagrams/openai-compatible.svg "Open full size")
 
-Decision 2026-11-17, second: compatible endpoints are declared at install time as exact base URLs.
+Decision 2026-11-17, third: each install-time endpoint declaration binds an exact base URL and its allowed model names.
 
-Two successive checks exposed the same credential-routing problem: a shared host
-list let settings choose another host, and binding a key to a host still let
-settings choose another account or upstream through a gateway path. Settings must
+Three destination choices require install-time binding: the host, the gateway
+path and the model alias. A gateway can route an alias to another upstream,
+carrying the key and redacted context with it. Settings must
 choose no part of the request destination.
 
 1. The install declares each compatible endpoint through chart
    `analyzer.analysis.openAICompatible.endpoints` or the analyzer's
    `--openai-compatible-endpoints` JSON array. Each declaration has an exact `url`
    (scheme, DNS host, port and path prefix), `inferenceAPI` (`ChatCompletions` or
-   `Responses`), optionally `keyFile`, and optionally `service` with `namespace`,
+   `Responses`), a nonempty `models` list, optionally `keyFile`, and optionally `service` with `namespace`,
    nonempty `podSelector` and pod target `port`. There is no compatible suffix list.
+   Each model name matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
    Chart `apiKey` sources are an existing Secret or CSI volume; the chart derives
    the declaration's mounted file path, one separate mount per endpoint.
 2. `provider: OpenAICompatible` settings name `endpoint`, `deployment` (model name)
@@ -36,7 +37,9 @@ choose no part of the request destination.
    DNS case, default port 443 and one trailing slash normalize; unreserved path
    encodings normalize after parsing. Dot segments, encoded separators, userinfo,
    query and fragment are refused, never cleaned into an allowed base. A mismatch
-   ends `EndpointNotAllowed`. The request URL is the declared base plus the fixed
+   ends `EndpointNotAllowed`. The deployment model must equal one of that endpoint's
+   declared names byte for byte; otherwise it ends `ModelNotAllowed` before any call.
+   The request URL is the declared base plus the fixed
    `/chat/completions` or `/responses` path. Nothing from settings is joined into it.
    `apiVersion` is forbidden. CEL remains a shape check, never install authorization.
 3. HTTPS with verified TLS 1.2 or newer is required, including for Services. There
@@ -48,18 +51,23 @@ choose no part of the request destination.
    adds one namespace/pod-selector egress rule on its target TCP port. Operators
    provision serving certificates, access controls and trusted roots. Declared
    HTTPS ports are bounded to 1 through 65535; the chart also opens each declared
-   public endpoint port in its public-address egress rule. Foundry stays on 443.
+   public endpoint port other than 443 in a separate egress rule excluding
+   10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 and 169.254.0.0/16.
+   The existing 443/6443 rule is unchanged. Foundry stays on 443.
 4. A key belongs only to its declaration's complete base. Two endpoints can have
    different keys, including on the same gateway host at different paths. An
    endpoint without a key sends no Authorization header. Only the analyzer mounts
    the whole read-only Secret or CSI source, with no subPath, Secret API reads,
    new RBAC, credential environment variable or custom resource field. Each attempt
    rereads its bounded regular file, so rotation needs no restart. Unavailable or
-   empty files are retryable; malformed files are refused. Fixed errors and call
-   reports never contain keys, paths, headers or response text.
+   empty files are retryable; malformed files, including keys shorter than 16 bytes,
+   are refused without retry and with a fixed message naming the minimum length.
+   Fixed errors and call reports never contain keys, paths, headers or response text.
 5. Both chart render and analyzer startup refuse a declaration whose host matches
    the Foundry suffix list, an Azure model host or `api.anthropic.com`; duplicate
-   parsed bases (even with different APIs or keys); and malformed URL declarations.
+   parsed bases (even with different APIs or keys); a base that is a segment path
+   prefix of another on the same scheme, host and port; missing, empty or invalid
+   model lists; and malformed URL declarations.
    A generated corpus varies settings hosts, ports, paths, case, encodings and dot
    segments and asserts that credentials reach only requests under their own base.
 6. The Foundry suffix list remains Foundry-only and never authorizes compatible
@@ -121,7 +129,7 @@ Standard NetworkPolicy permits HTTPS addresses, not DNS host identities.
 
 | Attack | Control and remaining boundary |
 | --- | --- |
-| Settings points at an attacker host | Exact parsed install-time base and API matching; requests use declaration data only, including the fixed inference route |
+| Settings points at an attacker host | Exact parsed install-time base, API and model matching; requests use declaration data only, including the fixed inference route |
 | Redirect or proxy steals a key | No redirects of any status and no environment proxy |
 | Public DNS rebinds into the cluster or metadata | Address checks on each connection; private addresses only for explicitly named Service hosts, never metadata or loopback |
 | Service impersonation | Verified TLS with the Service DNS name; cluster operators own certificates and Service routing |
@@ -146,8 +154,17 @@ Offline transport tests do not replace scenario qualification.
 - A host suffix list with a key bound to a host leaves settings in control of the
   path. On a shared gateway that path can select another tenant or upstream.
   This alternative was not chosen: restricting hosts does not bind credentials to
-  an account. Full install-time bases remove every destination choice from settings.
+  an account or model upstream. Exact install-time bases and model lists remove
+  those destination choices from settings.
+- An egress proxy or FQDN egress policy for declared hosts adds an infrastructure
+  dependency and does not bind gateway paths or model aliases. Operators may add
+  this defense in depth; portable NetworkPolicy and application checks remain
+  the shipped boundary.
 - A fixed-host OpenAI provider excludes gateways and cluster servers.
 - Reusing Foundry with a key mixes identity and Azure URL/version semantics.
 - Refusing all private addresses excludes cluster inference; explicit Service
   declarations provide a bounded TLS and egress exception without new RBAC.
+
+## Amendments
+
+None.

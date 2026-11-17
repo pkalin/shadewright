@@ -108,7 +108,8 @@ The verifier (`shadewright-verifier`, #682) is the third ServiceAccount. It has 
 Only the analyzer mounts the optional compatible key. The provider has no Entra
 token source and never receives the Anthropic key. With `--disable-foundry` and
 no Blob record store, a compatible-only analyzer needs no Azure identity. A key
-is read per attempt and bound to its exact declared base in `--openai-compatible-endpoints`; redirects
-are refused. Exact Service DNS names may be granted private-address access at
+is read per attempt and bound to its exact declared base in
+`--openai-compatible-endpoints`. Each declaration also names the allowed models;
+settings cannot route that key through an undeclared model alias. Redirects are refused. Exact Service DNS names may be granted private-address access at
 install time, still over verified HTTPS. No RBAC changes. See
 [identity and rotation](../identity-rotation.md#openai-compatible-credential).

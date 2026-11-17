@@ -161,11 +161,11 @@ repaired into proposals. Qualify each server and model with the
 | Install setting | Meaning |
 | --- | --- |
 | `analyzer.analysis.endpointSuffixes` / `--model-endpoint-suffixes` | Foundry-only destination allow-list, unchanged for existing installs. No default |
-| `analyzer.analysis.openAICompatible.endpoints` / `--openai-compatible-endpoints` | Exact endpoint declarations. The flag is a JSON array with `url`, `inferenceAPI`, optional `keyFile` and optional `service`. Settings must match a parsed base and API; request paths come only from the declaration |
+| `analyzer.analysis.openAICompatible.endpoints` / `--openai-compatible-endpoints` | Exact endpoint declarations. The flag is a JSON array with `url`, `inferenceAPI`, a nonempty `models` list (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), optional `keyFile` and optional `service`. Settings must match a parsed base, API and declared model name byte for byte (`EndpointNotAllowed` or `ModelNotAllowed` otherwise); duplicate bases and segment path prefixes on the same authority are refused; request paths come only from the declaration |
 | `analyzer.analysis.disableFoundry` / `--disable-foundry` | Default false. True disables Foundry and its inference token source. Blob records still need Azure identity |
 | `endpoints[].apiKey.secretName`, `secretKey` | Existing Secret and its key (default `api-key`), mounted whole and read-only only in the analyzer. The chart creates no Secret or RBAC |
 | `endpoints[].apiKey.volume`, `fileName` | Alternative Secret or CSI volume and file name (default `api-key`). Do not combine with `secretName` |
-| `endpoints[].keyFile` (flag only) | Absolute clean file path, read per attempt. The chart derives `/var/run/secrets/shadewright/openai-compatible/<index>/<fileName>` from each endpoint's key source. No source means no Authorization header. Unavailable/empty files are retryable; malformed files are refused. Errors never quote paths or keys |
+| `endpoints[].keyFile` (flag only) | Absolute clean file path, read per attempt. The chart derives `/var/run/secrets/shadewright/openai-compatible/<index>/<fileName>` from each endpoint's key source. No source means no Authorization header. Unavailable/empty files are retryable; malformed files, including nonempty keys shorter than 16 bytes, are refused without retry. Fixed errors name the minimum and never quote paths or keys |
 | `endpoints[].service` | Exact Service URL's namespace, nonempty `podSelector` and pod target `port`. Grants private unicast dialing and one selector-based egress rule. Verified TLS, trusted certificates and address guards remain required |
 
 Duplicate parsed bases, Azure/Anthropic hosts, Foundry-listed hosts and ambiguous

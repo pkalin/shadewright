@@ -229,7 +229,17 @@ Foundry deployment (#814). */ -}}
 {{- range $compatible.endpoints -}}
 {{- $base := include "shadewright.compatibleBase" .url -}}
 {{- if hasKey $seen $base -}}{{- fail "openAICompatible.endpoints contains duplicate base URLs" -}}{{- end -}}
+{{- range $previous, $_ := $seen -}}
+{{- if or (hasPrefix (printf "%s/" $previous) $base) (hasPrefix (printf "%s/" $base) $previous) -}}
+{{- fail "openAICompatible endpoint base is a path prefix of another declaration" -}}
+{{- end -}}
+{{- end -}}
 {{- $_ := set $seen $base true -}}
+{{- if or (not (kindIs "slice" .models)) (not .models) -}}{{- fail "openAICompatible endpoint needs a nonempty models list" -}}{{- end -}}
+{{- range .models -}}
+{{- if not (kindIs "string" .) -}}{{- fail "openAICompatible endpoint model name must be a string" -}}{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" .) -}}{{- fail "openAICompatible endpoint model name is invalid" -}}{{- end -}}
+{{- end -}}
 {{- $host := (urlParse $base).hostname -}}
 {{- if or (eq $host "api.anthropic.com") (regexMatch "(^|\\.)(openai\\.azure\\.com|cognitiveservices\\.azure\\.com|services\\.ai\\.azure\\.com)$" $host) -}}
 {{- fail "openAICompatible endpoint belongs to Azure or Anthropic" -}}{{- end -}}
@@ -515,7 +525,7 @@ secret:
 {{- define "shadewright.compatibleEndpoints" -}}
 {{- $out := list -}}
 {{- range $i, $e := . -}}
-{{- $d := dict "url" $e.url "inferenceAPI" $e.inferenceAPI -}}
+{{- $d := dict "url" $e.url "inferenceAPI" $e.inferenceAPI "models" $e.models -}}
 {{- if include "shadewright.compatibleKeyVolume" $e -}}
 {{- $_ := set $d "keyFile" (printf "/var/run/secrets/shadewright/openai-compatible/%d/%s" $i (include "shadewright.compatibleKeyFile" $e)) -}}
 {{- end -}}

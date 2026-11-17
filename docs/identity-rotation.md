@@ -98,7 +98,8 @@ credential environment variable or custom resource field is added.
 
 The key is read on every attempt. Rotate the Secret or CSI source, allow its
 projection to update, and then revoke the old credential at the endpoint. A
-missing or empty file is retryable; malformed files are refused. Keys never reach
+missing or empty file is retryable; malformed files, including nonempty keys
+shorter than 16 bytes, are refused without retry. Keys never reach
 errors, events or records. A declaration without a key sends no Authorization
 header. Separate endpoints, including different tenant paths on one host, can
 have separate keys. Settings cannot move a key away from its exact declared base

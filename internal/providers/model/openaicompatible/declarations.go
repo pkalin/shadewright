@@ -29,12 +29,14 @@ import (
 )
 
 // Endpoint declares one complete credential destination at installation time (ADR-0042).
-// URL and API, never settings input, construct the inference request.
+// URL, API and Models bind the inference destination, including gateway model aliases.
 type Endpoint struct {
 	// URL is the exact HTTPS API base, including its account path prefix.
 	URL string `json:"url"`
 	// API is the declared inference wire format.
 	API API `json:"inferenceAPI"`
+	// Models is the nonempty list of exact request model names allowed at this base.
+	Models []string `json:"models"`
 	// KeyFile is the optional mounted credential belonging only to URL.
 	KeyFile string `json:"keyFile,omitempty"`
 	// Service permits private dialing and describes installation egress.
@@ -120,7 +122,7 @@ func CanonicalBase(raw string) (string, error) {
 	return u.String(), nil
 }
 
-// ValidateEndpoints refuses invalid, overlapping-provider or duplicate declarations at analyzer start.
+// ValidateEndpoints refuses invalid, overlapping-provider, duplicate or nested-base declarations at analyzer start.
 func ValidateEndpoints(endpoints []Endpoint, foundrySuffixes []string) error {
 	if len(endpoints) > 16 {
 		return errors.New("at most 16 compatible endpoints may be declared")
@@ -144,7 +146,22 @@ func ValidateEndpoints(endpoints []Endpoint, foundrySuffixes []string) error {
 		if seen[base] {
 			return errors.New("compatible endpoints contain a duplicate base URL")
 		}
+		for previous := range seen {
+			// Canonical HTTPS bases have no query, fragment or trailing slash. A slash
+			// boundary therefore compares path segments on the same authority.
+			if strings.HasPrefix(base, previous+"/") || strings.HasPrefix(previous, base+"/") {
+				return errors.New("compatible endpoint base is a path prefix of another declaration")
+			}
+		}
 		seen[base] = true
+		if len(e.Models) == 0 {
+			return errors.New("compatible endpoint must declare a nonempty models list")
+		}
+		for _, model := range e.Models {
+			if !deploymentPattern.MatchString(model) {
+				return errors.New("compatible endpoint model name is invalid")
+			}
+		}
 		if e.API != APIChatCompletions && e.API != APIResponses {
 			return errors.New("compatible endpoint must declare its inference API")
 		}

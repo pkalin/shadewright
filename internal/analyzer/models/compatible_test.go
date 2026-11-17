@@ -25,15 +25,17 @@ import (
 	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
 )
 
+const compatibleModel = "gpt-6.1-sol"
+
 const compatibleBase = "https://api.openai.com/v1"
 
 func TestCompatibleFactory(t *testing.T) {
-	cfg := ModelsConfig{DisableFoundry: true, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: compatibleBase, API: openaicompatible.APIResponses}}}
+	cfg := ModelsConfig{DisableFoundry: true, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: compatibleBase, API: openaicompatible.APIResponses, Models: []string{compatibleModel}}}}
 	factory, err := NewModelFactory(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderOpenAICompatible, Endpoint: compatibleBase, Deployment: "gpt-6.1-sol", InferenceAPI: remediationv1alpha1.InferenceAPIResponses}
+	d := remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderOpenAICompatible, Endpoint: compatibleBase, Deployment: compatibleModel, InferenceAPI: remediationv1alpha1.InferenceAPIResponses}
 	p, err := factory(analysis.RoleTriage, d)
 	if _, ok := p.(*openaicompatible.Provider); err != nil || !ok {
 		t.Fatalf("compatible-only deployment: %T %v", p, err)
@@ -72,7 +74,7 @@ func TestCompatibleFactory(t *testing.T) {
 
 // A settings edit must not select a different account path on the same gateway.
 func TestCompatibleDeclaredBaseBoundary(t *testing.T) {
-	factory, err := NewModelFactory(ModelsConfig{DisableFoundry: true, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://gateway.example.com/tenant-a/v1", API: openaicompatible.APIChatCompletions, KeyFile: "/key"}}})
+	factory, err := NewModelFactory(ModelsConfig{DisableFoundry: true, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://gateway.example.com/tenant-a/v1", API: openaicompatible.APIChatCompletions, Models: []string{compatibleModel}, KeyFile: "/key"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,9 +85,20 @@ func TestCompatibleDeclaredBaseBoundary(t *testing.T) {
 }
 func TestCompatibleDeclarationStartupRefusals(t *testing.T) {
 	for _, host := range []string{"gateway.example.com", "api.anthropic.com", "r.openai.azure.com"} {
-		_, err := NewModelFactory(ModelsConfig{DisableFoundry: true, Suffixes: []string{".gateway.example.com"}, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://" + host + "/v1", API: openaicompatible.APIChatCompletions}}})
+		_, err := NewModelFactory(ModelsConfig{DisableFoundry: true, Suffixes: []string{".gateway.example.com"}, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://" + host + "/v1", API: openaicompatible.APIChatCompletions, Models: []string{compatibleModel}}}})
 		if err == nil {
 			t.Errorf("invalid declaration survived startup: %s", host)
 		}
+	}
+}
+
+func TestCompatibleUndeclaredModel(t *testing.T) {
+	factory, err := NewModelFactory(ModelsConfig{DisableFoundry: true, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: compatibleBase, API: openaicompatible.APIChatCompletions, Models: []string{"m"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = factory(analysis.RoleTriage, remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderOpenAICompatible, Endpoint: compatibleBase, Deployment: "undeclared"})
+	if !errors.Is(err, analysis.ErrModelNotAllowed) {
+		t.Fatalf("wrong model refusal: %v", err)
 	}
 }

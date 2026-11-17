@@ -399,7 +399,7 @@ func TestProviderHostMatrix(t *testing.T) {
 	cfg := ModelsConfig{Suffixes: []string{foundrySuffix}, Tokens: failingTokens{t},
 		AnthropicKeyFile: "/key", Expected: map[analysis.Role]string{analysis.RoleTriage: anthropicModel}}
 	for i := range 16 {
-		cfg.CompatibleEndpoints = append(cfg.CompatibleEndpoints, openaicompatible.Endpoint{URL: fmt.Sprintf("https://host%d%s/v1", i, gatewaySuffix), API: openaicompatible.APIChatCompletions})
+		cfg.CompatibleEndpoints = append(cfg.CompatibleEndpoints, openaicompatible.Endpoint{URL: fmt.Sprintf("https://host%d%s/v1", i, gatewaySuffix), API: openaicompatible.APIChatCompletions, Models: []string{anthropicModel}})
 	}
 	factory, err := NewModelFactory(cfg)
 	if err != nil {
@@ -424,7 +424,7 @@ func TestProviderHostMatrix(t *testing.T) {
 }
 
 func TestProviderListOverlap(t *testing.T) {
-	_, err := NewModelFactory(ModelsConfig{Suffixes: []string{gatewaySuffix}, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://llm.gateway.example.com/v1", API: openaicompatible.APIChatCompletions}}, Tokens: failingTokens{t}})
+	_, err := NewModelFactory(ModelsConfig{Suffixes: []string{gatewaySuffix}, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://llm.gateway.example.com/v1", API: openaicompatible.APIChatCompletions, Models: []string{anthropicModel}}}, Tokens: failingTokens{t}})
 	if err == nil {
 		t.Fatal("overlap survived startup")
 	}

@@ -65,12 +65,16 @@ const (
 	secFreshness   = "freshness"
 	secRender      = "render-check"
 	secNotRequest  = "not-request-reasons"
+	secCompatible  = "openai-compatible-model-refusals"
 )
 
 // troubleshootingSections maps each reason listed in a table of docs/troubleshooting.md to the anchors of the
 // sections whose tables list it, in page order. Table rows have no anchors of their own on the docs site, so a
 // link goes to the section that holds the row. TestTroubleshootingSections keeps this map equal to the page.
 var troubleshootingSections = map[string][]string{
+	"EndpointNotAllowed":                {secCompatible},
+	"ModelNotAllowed":                   {secCompatible},
+	"ProviderNotConfigured":             {secCompatible},
 	"AboveMaximum":                      {secPolicy},
 	"ActionNotAllowed":                  {secPolicy},
 	"ActionUnknown":                     {secPolicy},

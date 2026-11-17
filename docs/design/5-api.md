@@ -478,11 +478,14 @@ Conditions of other types are kept as they are. Like the others, these appear on
 | Paused request recheck | Every minute |
 
 For OpenAICompatible, the analyzer matches a parsed base and inference API against
-`--openai-compatible-endpoints` declarations, independently of the Foundry suffix
+`--openai-compatible-endpoints` declarations, including each endpoint's nonempty
+allowed `models` list. An undeclared model is refused as `ModelNotAllowed`.
+The declarations are independent of the Foundry suffix
 list. Requests use only declared destination data. Each declaration owns an
 optional key and, for private dialing, its exact Service's namespace, selector
 and target port. Dot segments, userinfo, queries and fragments are refused.
-Duplicates and Foundry/Azure/Anthropic host overlap fail chart render and startup.
+Duplicates, segment path prefixes on the same authority, invalid model lists and
+Foundry/Azure/Anthropic host overlap fail chart render and startup.
 Settings cannot move a key between hosts, ports or tenant paths. CEL remains a
 shape check, not installation authorization. Complete usage is charged at least
 the input estimate; unknown, above-ceiling usage and failed sent calls cost the

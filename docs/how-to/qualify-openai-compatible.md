@@ -22,6 +22,7 @@ analyzer:
       endpoints:
         - url: https://api.openai.com/v1
           inferenceAPI: Responses
+          models: [gpt-6.1-sol]
           apiKey:
             secretName: compatible-model-key
             secretKey: api-key
@@ -46,12 +47,16 @@ suffix. Set it from a recorded response before qualification. `deployment` is th
 server's request model name. Do not set `apiVersion`. The API base includes `/v1`;
 this adapter adds only `/responses` or `/chat/completions`.
 
-`openAICompatible.endpoints` declares complete bases and their APIs. The Foundry
+`openAICompatible.endpoints` declares complete bases, their APIs and nonempty allowed `models` lists.
+Each name matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. The Foundry
 `endpointSuffixes` list never authorizes a compatible endpoint. Each optional key
 belongs to its endpoint only. Two endpoints can have different keys, even when
 one gateway routes accounts by path. Settings must match a parsed declared base
-and API; another path, port or host is refused before a call. Duplicate bases,
-provider host overlap and malformed URLs fail chart rendering and startup.
+and API, and `deployment` must equal an entry in that endpoint's `models` list
+byte for byte (`ModelNotAllowed` otherwise). Another path, port or host ends
+`EndpointNotAllowed` before a call. Duplicate bases, segment path prefixes on the
+same authority, provider host overlap and invalid model lists or URLs fail chart
+rendering and startup.
 
 For a keyless Service use its verified HTTPS base, for example
 `https://model.inference.svc.cluster.local/v1`, and name its destination pods:
@@ -65,6 +70,7 @@ analyzer:
       endpoints:
         - url: https://model.inference.svc.cluster.local/v1
           inferenceAPI: Responses
+          models: [local-model]
           service:
             namespace: inference
             podSelector:
@@ -78,14 +84,18 @@ the namespace and pod selectors in the same peer. Cilium CIDR rules may exclude
 in-cluster pods, so the public HTTPS rule alone is insufficient. Verify the
 Service selector and target port against your deployment.
 
-Leave `apiKey` empty for no Authorization header. Provision a serving certificate
+Leave `apiKey` empty for no Authorization header. A supplied key must be at least
+16 bytes after surrounding whitespace is removed; a shorter nonempty key is
+malformed and is not retried. Provision a serving certificate
 trusted by the analyzer's system roots and valid for that Service DNS name.
 Certificates without a trusted issuer are refused. The chart adds no custom trust
 volume: use an operator-built analyzer image with the internal CA in its system
 root bundle when the Service uses a private CA.
 The operator owns certificate distribution, server authentication and ingress
-policy. HTTP, non-443 ports, IP literals and metadata/loopback addresses remain
-refused. No environment proxy or redirect is used.
+policy. A declared HTTPS base may use any port from 1 to 65535; settings must
+match it exactly. Public ports other than 443 get a separate egress rule excluding
+private, shared and link-local ranges. HTTP, IP literals and metadata/loopback
+addresses remain refused. No environment proxy or redirect is used.
 
 ## Kind installation with a dummy key
 
@@ -107,7 +117,7 @@ kind load docker-image "shadewright-analyzer:${app_version}" \
 kubectl --context kind-compatible-provider create namespace demo
 kubectl --context kind-compatible-provider create namespace shadewright-system
 kubectl --context kind-compatible-provider -n shadewright-system create secret generic \
-  compatible-model-key --from-literal=api-key=FAKE-KIND-KEY
+  compatible-model-key --from-literal=api-key=FAKE-KIND-KEY-834
 ```
 
 Use the [source-checkout image options](../install.md) to render all three local

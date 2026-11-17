@@ -105,8 +105,10 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 		"Disable the Foundry provider and its Entra token source. "+
 			"Set for a compatible-only install. The Foundry list never allows a compatible endpoint.")
 	fs.StringVar(&f.compatibleEndpoints, "openai-compatible-endpoints", "",
-		"JSON array of exact HTTPS base URL declarations: url, inferenceAPI, optional keyFile and optional service "+
+		"JSON array of exact HTTPS base URL declarations: url, inferenceAPI, nonempty models list, "+
+			"optional keyFile and optional service "+
 			"(namespace, podSelector, port). Each key belongs only to its declared base. "+
+			"Settings must name a declared model (ModelNotAllowed otherwise). "+
 			"No compatible endpoint is allowed by the Foundry suffix list.")
 	fs.StringVar(&f.actionPolicies, "action-policies", "",
 		"Comma-separated ActionType=policy pairs: the RemediationPolicy a proposed RemediationRequest of each "+

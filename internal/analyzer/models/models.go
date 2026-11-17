@@ -284,6 +284,7 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			}
 			log := cfg.Log.WithValues("role", role, "provider", d.ProviderName(), "deployment", d.Deployment)
 			p, err := anthropic.New(anthropic.Config{Model: d.Deployment, KeyFile: cfg.AnthropicKeyFile,
+				OtherKeyFiles: compatibleKeyFiles(cfg),
 				// The adapter's errors are fixed text that never holds the key, the key file's path or the
 				// reply; logging them tells a key file that cannot be used from an outage of the API.
 				OnCall: func(r anthropic.CallReport) {
@@ -342,6 +343,18 @@ func otherKeyFiles(cfg ModelsConfig, decl openaicompatible.Endpoint) []string {
 	}
 	if cfg.AnthropicKeyFile != "" {
 		out = append(out, cfg.AnthropicKeyFile)
+	}
+	return out
+}
+
+// compatibleKeyFiles lists the key files of the compatible endpoints, the other declarations of the Anthropic
+// provider's key (ADR-0042).
+func compatibleKeyFiles(cfg ModelsConfig) []string {
+	var out []string
+	for _, e := range cfg.CompatibleEndpoints {
+		if e.KeyFile != "" {
+			out = append(out, e.KeyFile)
+		}
 	}
 	return out
 }

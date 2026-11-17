@@ -293,7 +293,8 @@ type NamedKeyFile struct {
 // endpoints that name one file, or an endpoint that names one of others (the Anthropic key file). Files are
 // compared by clean path and, when both exist, by identity (os.SameFile after following links), so a symbolic
 // or hard link to the same file counts. A file that does not exist yet is compared by path only; the
-// provider checks identity again before each read (Config.OtherKeyFiles). A file whose identity cannot be
+// provider checks identity again before each read (Config.OtherKeyFiles, and anthropic.Config.OtherKeyFiles for
+// the Anthropic key file). A file whose identity cannot be
 // read for another reason stops the start. The error names the two declarations, never a path or content.
 func ValidateKeyFiles(endpoints []Endpoint, others []NamedKeyFile) error {
 	type named struct {

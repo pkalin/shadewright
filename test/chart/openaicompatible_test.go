@@ -491,6 +491,25 @@ func TestCompatibleKeySourceBelongsToOneDeclaration(t *testing.T) {
 		"endpoint and Anthropic key with a named key": append(compatibleSet(), endpointPrefix+"apiKey.secretName=shared",
 			endpointPrefix+"apiKey.secretKey=k", "analyzer.analysis.anthropic.apiKey.secretName=shared",
 			"analyzer.analysis.anthropic.apiKey.secretKey=k"),
+		// A secret volume's items map a Secret key to another file name: the ID follows the Secret key.
+		"two endpoints, one key through items": append(append(compatibleSet(), second...),
+			endpointPrefix+"apiKey.volume.secret.secretName=shared",
+			endpointPrefix+"apiKey.volume.secret.items[0].key=anthropic",
+			endpointPrefix+"apiKey.volume.secret.items[0].path=k", endpointPrefix+"apiKey.fileName=k",
+			key1+"volume.secret.secretName=shared", key1+"volume.secret.items[0].key=other",
+			key1+"volume.secret.items[0].path=j", key1+"volume.secret.items[1].key=anthropic",
+			key1+"volume.secret.items[1].path=k2", key1+"fileName=k2"),
+		"endpoint through items and Anthropic key": append(compatibleSet(),
+			endpointPrefix+"apiKey.volume.secret.secretName=shared",
+			endpointPrefix+"apiKey.volume.secret.items[0].key=anthropic",
+			endpointPrefix+"apiKey.volume.secret.items[0].path=k", endpointPrefix+"apiKey.fileName=k",
+			"analyzer.analysis.anthropic.apiKey.secretName=shared",
+			"analyzer.analysis.anthropic.apiKey.secretKey=anthropic"),
+		"endpoint Secret key and Anthropic through items": append(compatibleSet(),
+			endpointPrefix+"apiKey.secretName=shared", endpointPrefix+"apiKey.secretKey=anthropic",
+			"analyzer.analysis.anthropic.apiKey.volume.secret.secretName=shared",
+			"analyzer.analysis.anthropic.apiKey.volume.secret.items[0].key=anthropic",
+			"analyzer.analysis.anthropic.apiKey.volume.secret.items[0].path=api-key"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := helmFails(t, set...)
@@ -504,7 +523,21 @@ func TestCompatibleKeySourceBelongsToOneDeclaration(t *testing.T) {
 			key1+"secretKey=other-key"),
 		"Anthropic key in another Secret": append(compatibleSet(), compatibleKey,
 			"analyzer.analysis.anthropic.apiKey.secretName=anthropic-key"),
+		// The file name of one declaration is the Secret key of the other, but items map it to another key.
+		"items map one file name to another key": append(compatibleSet(),
+			endpointPrefix+"apiKey.volume.secret.secretName=shared",
+			endpointPrefix+"apiKey.volume.secret.items[0].key=compatible",
+			endpointPrefix+"apiKey.volume.secret.items[0].path=anthropic", endpointPrefix+"apiKey.fileName=anthropic",
+			"analyzer.analysis.anthropic.apiKey.secretName=shared",
+			"analyzer.analysis.anthropic.apiKey.secretKey=anthropic"),
 	} {
 		t.Run(name, func(t *testing.T) { compatibleRender(t, set...) })
+	}
+	// items that do not name the key file leave its Secret key unknown, and the file would not exist.
+	out := helmFails(t, append(compatibleSet(), endpointPrefix+"apiKey.volume.secret.secretName=shared",
+		endpointPrefix+"apiKey.volume.secret.items[0].key=anthropic",
+		endpointPrefix+"apiKey.volume.secret.items[0].path=other", endpointPrefix+"apiKey.fileName=k")...)
+	if !strings.Contains(out, `no item with path "k"`) {
+		t.Fatalf("wrong refusal: %s", out)
 	}
 }

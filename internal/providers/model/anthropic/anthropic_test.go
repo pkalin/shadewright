@@ -978,3 +978,45 @@ func (h heldUntilSeen) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	return resp, nil
 }
+
+// A key file missing at start that appears later as a link to another declaration's key file (a compatible
+// endpoint's) is refused before each read: no request carries that key (ADR-0042). The same file, not
+// declared elsewhere, is sent.
+func TestKeyFileThatAppearsAsALinkToAnotherDeclarationIsRefused(t *testing.T) {
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, messageJSON(testModel, stopEndTurn, `[{"type":"text","text":"{}"}]`))
+	})
+	dir := t.TempDir()
+	other := filepath.Join(dir, "compatible")
+	writeKey(t, other, keyMark+"\n")
+	if err := os.Remove(h.keyFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, h.keyFile); err != nil {
+		t.Fatal(err)
+	}
+	h.p.otherKeyFiles = []string{other}
+	_, err := h.p.Complete(context.Background(), structuredRequest())
+	if h.requests.Load() != 0 || !errors.Is(err, providers.ErrCredentialUnavailable) || !providers.IsNotSent(err) ||
+		providers.IsRetryable(err) {
+		t.Fatalf("%d requests sent with another declaration's key, err %v", h.requests.Load(), err)
+	}
+	if strings.Contains(err.Error(), keyMark) || strings.Contains(err.Error(), dir) {
+		t.Fatalf("the error repeats the content or the path: %v", err)
+	}
+	// A hard link is the same file too.
+	if err := os.Remove(h.keyFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(other, h.keyFile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.p.Complete(context.Background(), structuredRequest()); h.requests.Load() != 0 || err == nil {
+		t.Fatalf("hard link: %d requests, err %v", h.requests.Load(), err)
+	}
+	// Control: the other file not declared, the request is sent.
+	h.p.otherKeyFiles = nil
+	if _, err := h.p.Complete(context.Background(), structuredRequest()); err != nil || h.requests.Load() != 1 {
+		t.Fatalf("control: %d requests, err %v", h.requests.Load(), err)
+	}
+}

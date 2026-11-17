@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"math/rand/v2"
 	"mime"
 	"net"
@@ -31,7 +30,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -41,6 +39,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/model/keyfile"
 	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
 )
 
@@ -607,28 +606,6 @@ func ReservedHost(host string) bool {
 	return false
 }
 
-// keyFileShared reports whether the opened key file, st, is the key file of another declaration, by path or
-// by identity. A file of another declaration that does not exist is not this one; any other failure to read
-// its identity is an error (the key is unavailable for now, retried).
-func (p *Provider) keyFileShared(st os.FileInfo) (bool, error) {
-	for _, o := range p.otherKeyFiles {
-		if filepath.Clean(o) == p.keyFile {
-			return true, nil
-		}
-		ost, err := os.Stat(o)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		if os.SameFile(st, ost) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func (p *Provider) readKey() (string, error) {
 	if p.keyFile == "" {
 		return "", nil
@@ -651,7 +628,7 @@ func (p *Provider) readKey() (string, error) {
 	if !st.Mode().IsRegular() {
 		return "", malformed()
 	}
-	if shared, err := p.keyFileShared(st); err != nil {
+	if shared, err := keyfile.Shared(p.keyFile, st, p.otherKeyFiles); err != nil {
 		return "", unavailable()
 	} else if shared {
 		return "", fmt.Errorf("openai-compatible: the API key file is also declared for another endpoint or provider: %w", providers.ErrCredentialUnavailable)

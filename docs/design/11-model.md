@@ -59,10 +59,12 @@ chart rendering and analyzer startup. Nonempty keys shorter than 16 bytes are
 malformed and are not retried. A key file belongs to one declaration: startup
 refuses two declarations that name one file, and a declaration that names the
 `--anthropic-api-key-file` file, by path and by file identity (a link counts), and
-the adapter checks identity again before each read, so a file that appears after
-start as a link to another declared key is refused without a request. The chart
-refuses two endpoints that mount the same Secret key or volume source, or the
-Anthropic key.
+the compatible and Anthropic adapters check identity again before each read, so a
+file that appears after start as a link to another declared key is refused without
+a request. The chart refuses two endpoints that mount the same Secret key (through
+a secret volume's `items` too), or the Anthropic key; for a projected or CSI volume
+it refuses only the same source written twice, and one key to one declaration is
+the operator's to keep.
 
 Set `--disable-foundry` for compatible-only inference without an Entra token
 source. The Foundry suffix list remains Foundry-only. Every declared compatible

@@ -239,8 +239,8 @@ Foundry deployment (#814). */ -}}
 {{- end -}}
 {{- $seen := dict -}}
 {{- /* A key belongs to one declaration (ADR-0042): the analyzer compares key files by path and identity, but two
-mounts of one Secret key are two files to it, so the chart refuses what it can see, a Secret key or volume
-source shared by two endpoints or with the Anthropic key. */ -}}
+mounts of one Secret key are two files to it, so the chart refuses what it can see, a Secret key (through a
+secret volume's items too) shared by two endpoints or with the Anthropic key (shadewright.keySourceID). */ -}}
 {{- $anthropicKeyID := include "shadewright.keySourceID" $key -}}
 {{- $keyIDs := dict -}}
 {{- range $i, $_ := $compatible.endpoints -}}
@@ -525,14 +525,29 @@ secret:
 
 {{/*
 shadewright.keySourceID prints what a key source (an apiKey value: secretName and secretKey, or volume and
-fileName) mounts, so that two declarations of one key can be told apart: the Secret and key, or the volume
-source and file name. Empty when no source is set.
+fileName) mounts, so that two declarations of one key can be told apart. For a Secret, or a secret volume, it is
+the Secret and the Secret key the file comes from: through the volume's items when it has them (items that do
+not map fileName are refused, the file would not exist), else the file name. Any other volume source (projected,
+CSI) cannot be resolved at render: its ID is the source as written and the file name, which catches only the
+same declaration written twice, and keeping one key to one declaration there is the operator's to do. Empty
+when no source is set.
 */}}
 {{- define "shadewright.keySourceID" -}}
 {{- if .secretName -}}
 {{- printf "secret %s/%s" .secretName (.secretKey | default "api-key") -}}
 {{- else if and .volume (kindIs "map" .volume) (hasKey .volume "secret") (kindIs "map" .volume.secret) -}}
-{{- printf "secret %s/%s" (.volume.secret.secretName | default "") (.fileName | default "api-key") -}}
+{{- $file := .fileName | default "api-key" -}}
+{{- $secretKey := $file -}}
+{{- with .volume.secret.items -}}
+{{- $secretKey = "" -}}
+{{- range . -}}
+{{- if and (kindIs "map" .) (eq (toString .path) $file) -}}{{- $secretKey = toString .key -}}{{- end -}}
+{{- end -}}
+{{- if not $secretKey -}}
+{{- fail (printf "an apiKey secret volume has items but no item with path %q (its fileName): the key file would not exist" $file) -}}
+{{- end -}}
+{{- end -}}
+{{- printf "secret %s/%s" (.volume.secret.secretName | default "") $secretKey -}}
 {{- else if .volume -}}
 {{- printf "volume %s/%s" (toJson .volume) (.fileName | default "api-key") -}}
 {{- end -}}

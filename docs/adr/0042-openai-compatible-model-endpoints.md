@@ -91,11 +91,15 @@ choose no part of the request destination.
    names the file of `--anthropic-api-key-file`, by cleaned path and by file identity
    (`os.SameFile`, so a symbolic or hard link to the same file counts), and the error
    names the two declarations, never a path or content. A file that does not exist
-   at start is compared by path only; before each read the adapter checks the
-   identity of its file again against the other declared key files, so a file that
-   appears later as a link to another declaration's key is refused without a
-   request. The chart refuses at render what it can see: two endpoints that mount
-   the same Secret key or volume source, or one that mounts the Anthropic key. Two
+   at start is compared by path only; before each read the compatible adapter and
+   the Anthropic adapter check the identity of the handle they read against the
+   other declared key files, so a file that appears later as a link to another
+   declaration's key is refused without a request. The chart refuses at render
+   what it can see: two endpoints, or an endpoint and the Anthropic key, that mount
+   the same Secret key, taken through a secret volume's `items` when it has them
+   (items that do not map the file name are refused). A projected or CSI volume
+   cannot be resolved at render: only the same source written twice is refused,
+   and keeping one key to one declaration there is the operator's to do. Two
    separate copies of one key in different Secrets are different files and are not
    detected.
 5. Both chart render and analyzer startup refuse a declaration whose host matches
@@ -259,7 +263,7 @@ Two trust assumptions remain:
 | Server ignores schema or invents a tool | Shared parser, typed argument/result validation, closed catalog and deterministic policy; no output repair |
 | Server omits usage or returns 429 | Unknown usage costs the upper bound; no compatible-host unbilled exception |
 | Gateway fails each reply after the headers to multiply billed retries | Every attempt that may have been billed is charged, at `C` when its usage is unknown; no retry the remaining budget cannot cover at `C` |
-| A declaration names another provider's or endpoint's key file | Refused at start by path and file identity, and before each read by identity; the chart refuses a shared Secret key or volume source |
+| A declaration names another provider's or endpoint's key file | Refused at start by path and file identity, and before each read by identity in both adapters; the chart refuses a shared Secret key, through `items` too (not a projected or CSI volume) |
 | Key rotation races a call | Read per attempt, bounded retry, no cached key; update source before revoking old key |
 
 ### What is not built

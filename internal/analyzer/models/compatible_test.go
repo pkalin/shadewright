@@ -32,6 +32,8 @@ const compatibleModel = "gpt-6.1-sol"
 
 const compatibleBase = "https://api.openai.com/v1"
 
+const gatewayBase = "https://gateway.invalid/v1"
+
 func TestCompatibleFactory(t *testing.T) {
 	cfg := ModelsConfig{DisableFoundry: true, CompatibleEndpoints: []openaicompatible.Endpoint{{URL: compatibleBase, API: openaicompatible.APIResponses, Models: []string{compatibleModel}}}}
 	factory, err := NewModelFactory(cfg)
@@ -117,7 +119,7 @@ func TestCompatibleFactoryPassesOtherKeyFiles(t *testing.T) {
 	}
 	late := filepath.Join(dir, "late")
 	factory, err := NewModelFactory(ModelsConfig{DisableFoundry: true, AnthropicKeyFile: anthropicKey,
-		CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://gateway.invalid/v1",
+		CompatibleEndpoints: []openaicompatible.Endpoint{{URL: gatewayBase,
 			API: openaicompatible.APIChatCompletions, Models: []string{compatibleModel}, KeyFile: late}}})
 	if err != nil {
 		t.Fatal(err)
@@ -126,12 +128,43 @@ func TestCompatibleFactoryPassesOtherKeyFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := factory(analysis.RoleTriage, remediationv1alpha1.ModelDeployment{
-		Provider: remediationv1alpha1.ModelProviderOpenAICompatible, Endpoint: "https://gateway.invalid/v1", Deployment: compatibleModel})
+		Provider: remediationv1alpha1.ModelProviderOpenAICompatible, Endpoint: gatewayBase, Deployment: compatibleModel})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = p.Complete(t.Context(), providers.CompletionRequest{Messages: []providers.Message{{Role: providers.RoleUser, Content: "x"}}})
 	if !errors.Is(err, providers.ErrCredentialUnavailable) || !providers.IsNotSent(err) || providers.IsRetryable(err) {
 		t.Fatalf("the Anthropic key reached a compatible provider's read: %v", err)
+	}
+}
+
+// The factory gives the Anthropic provider the compatible endpoints' key files: an Anthropic key file missing
+// at start that appears as a link to a compatible endpoint's key is refused at read, without a request.
+func TestAnthropicFactoryPassesCompatibleKeyFiles(t *testing.T) {
+	dir := t.TempDir()
+	compatibleKey := filepath.Join(dir, "compatible")
+	if err := os.WriteFile(compatibleKey, []byte("content-marker-834-models-0002"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	late := filepath.Join(dir, "anthropic")
+	factory, err := NewModelFactory(ModelsConfig{DisableFoundry: true, AnthropicKeyFile: late,
+		Expected: map[analysis.Role]string{analysis.RoleTriage: anthropicModel},
+		CompatibleEndpoints: []openaicompatible.Endpoint{{URL: gatewayBase,
+			API: openaicompatible.APIChatCompletions, Models: []string{compatibleModel}, KeyFile: compatibleKey}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(compatibleKey, late); err != nil {
+		t.Fatal(err)
+	}
+	p, err := factory(analysis.RoleTriage, remediationv1alpha1.ModelDeployment{
+		Provider: remediationv1alpha1.ModelProviderAnthropic, Endpoint: remediationv1alpha1.AnthropicEndpoint,
+		Deployment: anthropicModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Complete(t.Context(), providers.CompletionRequest{Messages: []providers.Message{{Role: providers.RoleUser, Content: "x"}}})
+	if !errors.Is(err, providers.ErrCredentialUnavailable) || !providers.IsNotSent(err) || providers.IsRetryable(err) {
+		t.Fatalf("a compatible key reached the Anthropic provider's read: %v", err)
 	}
 }

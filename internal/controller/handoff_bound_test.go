@@ -20,9 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -67,18 +65,38 @@ const (
 	evReadable boundEvent = 'W' // the Git host answers again
 )
 
+// boundPR is the state of the pull request in the model.
+type boundPR int
+
+const (
+	prIsOpen boundPR = iota
+	prIsMerged
+	prIsClosed
+)
+
+// boundState is where the model's replacement is.
+type boundState int
+
+const (
+	stWaiting   boundState = iota // PolicyChecked, the recovery waiting or not started
+	stBound                       // NeedsIntervention at the bound of the wait
+	stTakenOver                   // the takeover recorded
+	stMerged                      // the merge of its commit recorded
+	stCancelled                   // ended on the close (HandoffAborted)
+)
+
 // boundModel is the rule, written from the decision, for one reconcile of the replacement after each event.
 type boundModel struct {
 	refusing  bool
-	pr        string // open, merged, closed
+	pr        boundPR
 	now       time.Duration
 	waitStart *time.Duration
-	phase     string // waiting, bound (NeedsIntervention at the bound), takenOver, merged, cancelled
+	phase     boundState
 	held      bool
 }
 
 func (m *boundModel) frozen() bool {
-	return m.phase == "takenOver" || m.phase == "merged" || m.phase == "cancelled"
+	return m.phase == stTakenOver || m.phase == stMerged || m.phase == stCancelled
 }
 
 func (m *boundModel) apply(e boundEvent) {
@@ -90,9 +108,9 @@ func (m *boundModel) apply(e boundEvent) {
 	case evBound:
 		m.now += cleanupFailingBound + time.Minute
 	case evMerged:
-		m.pr = "merged"
+		m.pr = prIsMerged
 	case evClosed:
-		m.pr = "closed"
+		m.pr = prIsClosed
 	}
 }
 
@@ -101,25 +119,25 @@ func (m *boundModel) apply(e boundEvent) {
 // close releases the lock, anything else keeps it.
 func (m *boundModel) step() {
 	switch m.phase {
-	case "waiting":
+	case stWaiting:
 		if m.refusing {
 			if m.waitStart == nil {
 				start := m.now
 				m.waitStart = &start
 			} else if m.now-*m.waitStart >= cleanupFailingBound {
-				m.phase, m.held = "bound", true
+				m.phase, m.held = stBound, true
 			}
 			return
 		}
-		m.phase = map[string]string{"open": "takenOver", "merged": "merged", "closed": "cancelled"}[m.pr]
-	case "bound":
+		m.phase = map[boundPR]boundState{prIsOpen: stTakenOver, prIsMerged: stMerged, prIsClosed: stCancelled}[m.pr]
+	case stBound:
 		if m.refusing || !m.held {
 			return
 		}
 		switch m.pr {
-		case "merged":
-			m.phase = "merged"
-		case "closed":
+		case prIsMerged:
+			m.phase = stMerged
+		case prIsClosed:
 			m.held = false
 		}
 	}
@@ -162,41 +180,14 @@ func boundOrder(t *testing.T, seq []boundEvent) {
 	r, g, _, rr, cr, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
 	move := movableClock(r)
-	m := &boundModel{pr: "open", phase: "waiting"}
+	m := &boundModel{pr: prIsOpen, phase: stWaiting}
 	key := client.ObjectKeyFromObject(rr)
-	refusing := false
 	for _, e := range seq {
 		if m.frozen() {
 			break
 		}
 		m.apply(e)
-		switch e {
-		case evRefusal:
-			refusing = true
-			refuseAll(g)
-		case evReadable:
-			refusing = false
-			g.SetFail(nil)
-		case evRestart:
-			r = &RemediationRequestReconciler{Client: r.Client, APIReader: r.APIReader, ReviewerHints: true,
-				OpenRepository: r.OpenRepository, Now: r.Now}
-		case evBound:
-			move(cleanupFailingBound + time.Minute)
-		case evMerged, evClosed:
-			g.SetFail(nil)
-			var err error
-			if e == evMerged {
-				_, err = g.MergeWithCommit(cr.Number)
-			} else {
-				err = g.CloseChangeRequest(ctx, cr.Number)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if refusing {
-				refuseAll(g)
-			}
-		}
+		r = boundEventOn(t, r, g, cr, move, m.refusing, e)
 		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		m.step()
 	}
@@ -204,9 +195,48 @@ func boundOrder(t *testing.T, seq []boundEvent) {
 	if err := r.Get(ctx, key, got); err != nil {
 		t.Fatal(err)
 	}
+	checkBoundEnd(t, m, got)
+}
+
+// boundEventOn makes event e happen to the world of r and g; refusing is whether the Git host refuses after it. It
+// returns the reconciler to use from then on (a new one after a restart).
+func boundEventOn(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git, cr providers.ChangeRequest,
+	move func(time.Duration), refusing bool, e boundEvent) *RemediationRequestReconciler {
+	t.Helper()
+	switch e {
+	case evRefusal:
+		refuseAll(g)
+	case evReadable:
+		g.SetFail(nil)
+	case evRestart:
+		return &RemediationRequestReconciler{Client: r.Client, APIReader: r.APIReader, ReviewerHints: true,
+			OpenRepository: r.OpenRepository, Now: r.Now}
+	case evBound:
+		move(cleanupFailingBound + time.Minute)
+	case evMerged, evClosed:
+		g.SetFail(nil)
+		var err error
+		if e == evMerged {
+			_, err = g.MergeWithCommit(cr.Number)
+		} else {
+			err = g.CloseChangeRequest(context.Background(), cr.Number)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if refusing {
+			refuseAll(g)
+		}
+	}
+	return r
+}
+
+// checkBoundEnd compares the stored replacement with the model's ending.
+func checkBoundEnd(t *testing.T, m *boundModel, got *api.RemediationRequest) {
+	t.Helper()
 	opened := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPROpened)
 	switch m.phase {
-	case "waiting":
+	case stWaiting:
 		if got.Status.Phase != api.PhasePolicyChecked || got.Status.Handoff.From.Phase != api.HandoffReserved {
 			t.Fatalf("phase %q, handoff %q: want the recovery still waiting", got.Status.Phase,
 				got.Status.Handoff.From.Phase)
@@ -214,7 +244,7 @@ func boundOrder(t *testing.T, seq []boundEvent) {
 		if (m.waitStart != nil) != (watchedRecovery(got) != nil) {
 			t.Fatalf("PullRequestUnreadable = %+v, want a wait recorded: %v", watchedRecovery(got), m.waitStart != nil)
 		}
-	case "bound":
+	case stBound:
 		if got.Status.Phase != api.PhaseNeedsIntervention || opened == nil || opened.Reason != ReasonRecoveryWaitExpired ||
 			got.Status.Handoff.From.Phase != api.HandoffAborted {
 			t.Fatalf("phase %q, PullRequestOpened %+v, handoff %q: want the end at the bound", got.Status.Phase, opened,
@@ -226,11 +256,11 @@ func boundOrder(t *testing.T, seq []boundEvent) {
 		if m.held && m.refusing && watchedRecovery(got) == nil {
 			t.Fatalf("the end lost the condition that says what is refused: %+v", got.Status.Conditions)
 		}
-	case "takenOver":
+	case stTakenOver:
 		if !tookOver(got) || got.Status.Phase != api.PhasePRCreated {
 			t.Fatalf("phase %q, handoff %q: want the takeover", got.Status.Phase, got.Status.Handoff.From.Phase)
 		}
-	case "merged":
+	case stMerged:
 		// The world has no policy, so the check at the merge marks the plan stale, and a reconcile after the
 		// merge ends it Inconclusive (StalePlanMerged): the merge is recorded either way, with its receipt.
 		if (got.Status.Phase != api.PhaseMerged && got.Status.Phase != api.PhaseInconclusive) ||
@@ -238,7 +268,7 @@ func boundOrder(t *testing.T, seq []boundEvent) {
 			t.Fatalf("phase %q, receipt %v: want the merge of the replacement's commit recorded", got.Status.Phase,
 				got.Status.MergeReceipt)
 		}
-	case "cancelled":
+	case stCancelled:
 		if got.Status.Phase != api.PhaseCancelled || opened == nil || opened.Reason != api.ReasonHandoffAborted {
 			t.Fatalf("phase %q, PullRequestOpened %+v: want the handoff ended on the close", got.Status.Phase, opened)
 		}
@@ -248,9 +278,9 @@ func boundOrder(t *testing.T, seq []boundEvent) {
 // boundWorld is a replacement whose recovery waits on a refusal of every call since reconcilerClock, with the clock
 // the test moves.
 func boundWorld(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest,
-	*api.RemediationRequest, providers.ChangeRequest, func(time.Duration)) {
+	*api.RemediationRequest, func(time.Duration)) {
 	t.Helper()
-	r, g, p, rr, cr, _ := handoffAppendedWorld(t, nil)
+	r, g, p, rr, _, _ := handoffAppendedWorld(t, nil)
 	move := movableClock(r)
 	refuseAll(g)
 	ctx := context.Background()
@@ -263,13 +293,13 @@ func boundWorld(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api
 	if c := watchedRecovery(rr); c == nil || c.Reason != ReasonGitForbidden {
 		t.Fatalf("the recovery does not wait: %+v", c)
 	}
-	return r, g, p, rr, cr, move
+	return r, g, p, rr, move
 }
 
 // While the replacement's recovery waits, the predecessor's freshness check, its merge gate and its deletion are
 // held for the handoff; once the bound has ended the replacement, each of them works again.
 func TestRecoveryBoundReleasesThePredecessor(t *testing.T) {
-	r, g, p, rr, _, move := boundWorld(t)
+	r, g, p, rr, move := boundWorld(t)
 	ctx := context.Background()
 	reconcilePred := func() {
 		for range 3 {
@@ -332,7 +362,7 @@ func TestRecoveryBoundReleasesThePredecessor(t *testing.T) {
 // reason (here the repository leaving the settings) keep it. Near the bound the request is still looked at after the
 // poll interval, or after the delay the host asked for, never sooner, and nothing ends it before the bound.
 func TestRecoveryBoundCountsFromTheFirstRefusal(t *testing.T) {
-	r, g, _, rr, _, move := boundWorld(t)
+	r, g, _, rr, move := boundWorld(t)
 	ctx := context.Background()
 	key := client.ObjectKeyFromObject(rr)
 	start := watchedRecovery(rr).LastTransitionTime
@@ -392,7 +422,7 @@ func TestRecoveryBoundCountsFromTheFirstRefusal(t *testing.T) {
 // The write that ends the request at the bound is retried after a conflict (the request changed between the read and
 // the write): the next reconcile reads it again and ends it, from the recorded condition alone.
 func TestRecoveryBoundEndRetriedAfterAConflict(t *testing.T) {
-	r, _, _, rr, _, move := boundWorld(t)
+	r, _, _, rr, move := boundWorld(t)
 	ctx := context.Background()
 	key := client.ObjectKeyFromObject(rr)
 	move(cleanupFailingBound + time.Minute)
@@ -407,7 +437,7 @@ func TestRecoveryBoundEndRetriedAfterAConflict(t *testing.T) {
 				if err := base.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
 					return err
 				}
-				live.Annotations = map[string]string{"example.com/touched": "yes"}
+				live.Annotations = map[string]string{"test.shadewright.io/bound": "changed"}
 				if err := base.Update(ctx, live); err != nil {
 					return err
 				}
@@ -487,7 +517,7 @@ func TestRecoveryGraceNeverEndsOnAnAPIFailure(t *testing.T) {
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
 			opts ...client.GetOption) error {
 			if key.Name == p.Name {
-				return &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+				return transportError()
 			}
 			return c.Get(ctx, key, obj, opts...)
 		},
@@ -534,7 +564,7 @@ func TestRecoveryGraceEndNamesTheGitHost(t *testing.T) {
 // After the end at the bound, the look that settles the lock reads the pull request the recovery reads: a failed read
 // of the Kubernetes API there is returned for the error backoff and keeps the lock.
 func TestHeldRecoveryReturnsAnAPIFailure(t *testing.T) {
-	r, g, p, rr, _, move := boundWorld(t)
+	r, g, p, rr, move := boundWorld(t)
 	ctx := context.Background()
 	key := client.ObjectKeyFromObject(rr)
 	move(cleanupFailingBound + time.Minute)
@@ -568,7 +598,7 @@ func TestHeldRecoveryReturnsAnAPIFailure(t *testing.T) {
 // A failure of the Kubernetes API on the look that finds the bound passed ends nothing: it goes to the error backoff,
 // and the next look that fails on the Git host ends the request.
 func TestRecoveryBoundNotOnAnAPIFailure(t *testing.T) {
-	r, _, p, rr, _, move := boundWorld(t)
+	r, _, p, rr, move := boundWorld(t)
 	ctx := context.Background()
 	key := client.ObjectKeyFromObject(rr)
 	move(cleanupFailingBound + time.Minute)
@@ -577,7 +607,7 @@ func TestRecoveryBoundNotOnAnAPIFailure(t *testing.T) {
 		Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, obj client.Object,
 			opts ...client.GetOption) error {
 			if k.Name == p.Name {
-				return &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+				return transportError()
 			}
 			return c.Get(ctx, k, obj, opts...)
 		},

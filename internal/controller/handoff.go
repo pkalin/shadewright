@@ -1002,8 +1002,8 @@ func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *r
 		return res, false, nil
 	case err != nil:
 		// A recovery that waited out its bound ends, cancelled or not (#786, decision of 2026-11-17).
-		if res, ended, berr := r.boundRecovery(ctx, rr, err); ended {
-			return res, true, berr
+		if ended, berr := r.boundRecovery(ctx, rr, err); ended {
+			return reconcile.Result{}, true, berr
 		}
 	}
 	switch {
@@ -1339,17 +1339,17 @@ func (r *RemediationRequestReconciler) startCancelledWait(ctx context.Context, r
 // request recorded (prMayBeOpen), and PullRequestUnreadable stays. The look that settles the lock (checkHeld,
 // heldRecovery) reads on and records a merge of the request's commit. ended is false when nothing ended.
 func (r *RemediationRequestReconciler) boundRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	err error) (res reconcile.Result, ended bool, _ error) {
+	err error) (ended bool, _ error) {
 	if ctx.Err() != nil || errors.Is(err, freshness.ErrPaused) || clusterSide(err) {
-		return reconcile.Result{}, false, nil
+		return false, nil
 	}
 	c := watchedRecovery(rr)
 	if c == nil || boundLeft(c, cleanupFailingBound, r.now()) > 0 {
-		return reconcile.Result{}, false, nil
+		return false, nil
 	}
 	logf.FromContext(ctx).Info("Ended the recovery of the handoff of RemediationRequest: it waited out its bound",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "reason", c.Reason, "error", err.Error())
-	return reconcile.Result{}, true, r.ignoreStopped(r.endRecoveryWait(ctx, rr, c))
+	return true, r.ignoreStopped(r.endRecoveryWait(ctx, rr, c))
 }
 
 // endRecoveryWait is boundRecovery's status write. PullRequestOpened is set before stop, so that the end keeps

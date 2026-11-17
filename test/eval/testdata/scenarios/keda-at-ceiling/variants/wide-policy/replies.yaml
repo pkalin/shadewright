@@ -1,0 +1,19 @@
+# Synthetic: the reply of keda-at-ceiling, unchanged. Under the wider policy the context shows the bounds 3 to 6
+# from 2; the reply still asks for 3, the size the load needs (13 requests per second over 5 per replica).
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 1800, outputTokens: 290}
+    content: |
+      {"summary": "The HPA of ScaledObject demo/worker is limited at its maximum of 2 replicas (ScalingLimited, TooManyReplicas) while its trigger asks for more; the ScaledObject is Ready with maxReplicaCount 2. Its external metric s0-prometheus is at 6.5 per replica, about 13 requests per second in all, against a target of 5 per replica, so the load needs 13 / 5 = 2.6, that is 3 replicas. Raising maxReplicaCount from 2 to 3, within the policy's bounds, lets it follow the load.",
+       "hypotheses": [{"description": "Steady load needs 3 replicas and maxReplicaCount is 2."}],
+       "evidence": [{"source": "c1", "quote": "ScalingLimited is True, reason TooManyReplicas"},
+                    {"source": "c2", "quote": "Scaling is performed because triggers are active"},
+                    {"source": "c4", "quote": "hpa_metric_current{horizontalpodautoscaler=keda-hpa-worker,metric_name=s0-prometheus,metric_target_type=average} last 6.5"},
+                    {"source": "c4", "quote": "hpa_metric_target{horizontalpodautoscaler=keda-hpa-worker,metric_name=s0-prometheus,metric_target_type=average} 5"}],
+       "missingData": [],
+       "uncertainty": "The load may keep rising; 3 replicas cover the current rate only.",
+       "proposal": {"action": {"type": "AdjustKedaMaxReplicas", "setContainerMemoryLimit": null,
+                               "adjustKedaMaxReplicas": {"previousValue": 2, "desiredValue": 3}},
+                    "expectedEffect": "The HPA scales to 3 replicas and is no longer limited.",
+                    "verificationChecks": []}}

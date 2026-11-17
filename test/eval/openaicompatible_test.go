@@ -202,12 +202,12 @@ func TestCostTimeAndTokensPerPassedRun(t *testing.T) {
 	r.summarise(p)
 	if r.Totals.Seconds != 5 || r.Totals.SecondsPerPassed == nil || *r.Totals.SecondsPerPassed != 5 ||
 		r.Totals.TokensPerPassed == nil || *r.Totals.TokensPerPassed != 65 ||
-		r.Totals.CostPerPassed == nil || *r.Totals.CostPerPassed != *r.Totals.CostUSD {
+		r.Totals.CostPerPassedRunUSD == nil || *r.Totals.CostPerPassedRunUSD != *r.Totals.CostUSD {
 		t.Fatalf("per passed totals: %+v", r.Totals)
 	}
 	r.Scenarios[0].Pass = false
 	r.summarise(p)
-	if r.Totals.SecondsPerPassed != nil || r.Totals.TokensPerPassed != nil || r.Totals.CostPerPassed != nil {
+	if r.Totals.SecondsPerPassed != nil || r.Totals.TokensPerPassed != nil || r.Totals.CostPerPassedRunUSD != nil {
 		t.Fatal("zero passes reported a per-passed number")
 	}
 }

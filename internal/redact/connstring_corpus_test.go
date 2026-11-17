@@ -225,10 +225,10 @@ func TestConnStringWiderUserInfoKeepsItsNeighbours(t *testing.T) {
 		"<https://example.com><postgres://app:Hunter<2Secret@db>": "<https://example.com><" + m + ">",
 		"see <postgres://app:Hunter<2Secret@db/x> and retry":      "see <" + m + "> and retry",
 		"a>b@c http://x<y/z": "a>b@c http://x<y/z",
-		"<a href=\"https://app:Hunter>2Secret@h/x\">link</a>":             "<a href=\"" + m + "\">link</a>",
-		"postgres://app:Hunter<2Secret@db/x>mysql://app:Q>2Secret@e.prod": m + ">" + m,
-		"--dsn=postgres://app:Hunter<2Secret@db:5432/x":                   "--dsn=" + m,
-		"<url>redis://:Hunter<2Secret@cache:6379/0</url>":                 "<url>" + m + "</url>",
+		"<a href=\"https://app:Hunter>2Secret@h/x\">link</a>":                  "<a href=\"" + m + "\">link</a>",
+		"postgres://app:Hunter<2Secret@db/x>mysql://app:Q>2Secret@e" + ".prod": m + ">" + m,
+		"--dsn=postgres://app:Hunter<2Secret@db:5432/x":                        "--dsn=" + m,
+		"<url>redis://:Hunter<2Secret@cache:6379/0</url>":                      "<url>" + m + "</url>",
 	} {
 		if got := redact.String(in); got != want {
 			t.Errorf("String(%q) = %q, want %q", in, got, want)

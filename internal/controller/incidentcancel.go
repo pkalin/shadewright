@@ -190,7 +190,7 @@ func (r *RemediationRequestReconciler) followCancelledMerge(ctx context.Context,
 	logf.FromContext(ctx).Info("Could not record the merge of the pull request of a cancelled RemediationRequest yet; "+
 		"tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number,
 		"error", err.Error())
-	return r.waitOrFail(ctx, rr, err)
+	return r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 }
 
 // recordCancelledOpen records cr, the request's own pull request found open after the cancel, in one status write:
@@ -327,7 +327,7 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 	if refused {
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 	}
-	return r.waitOrFail(ctx, rr, err)
+	return r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 }
 
 // cancelNotClosedCondition is condition PullRequestNotClosed for the recorded pull request of a request cancelled

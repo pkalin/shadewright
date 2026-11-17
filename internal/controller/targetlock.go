@@ -325,9 +325,8 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 // heldUnsettled is checkHeld's answer to a look that settled nothing: err is the look's failure, v its verdict, and
 // said whether PullRequestUnreadable already says why no read can be made. Answers that disagree
 // (errConflictingReads) or a 404 the branch does not confirm are no failed call: the lock is kept and looked at
-// again with nothing written (a failed call under such a verdict is still paced by Reconcile, from the read it
-// traced). A failed Git read is retried visibly (retryGitRead), never sooner than heldRecheckInterval, the pace of
-// a stopped holder's looks. Any other error without a condition is returned.
+// again with nothing written: every read behind such a verdict was answered. A failed Git read is retried visibly
+// (retryGitRead), never sooner than heldRecheckInterval, the pace of a stopped holder's looks. Any other error without a condition is returned.
 func (r *RemediationRequestReconciler) heldUnsettled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict, err error, said bool) (reconcile.Result, error) {
 	if err == nil {
@@ -337,7 +336,7 @@ func (r *RemediationRequestReconciler) heldUnsettled(ctx context.Context, rr *re
 	case v.state == changeUnknown && !said && errors.Is(err, v.err) && answeredUnknown(v.err):
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 	case gitReadFailure(err):
-		res, err := r.retryGitRead(ctx, rr, err)
+		res, err := r.retryGitRead(ctx, rr, err, unboundedRead(noBoundHeldLock))
 		if err != nil {
 			return reconcile.Result{}, err
 		}

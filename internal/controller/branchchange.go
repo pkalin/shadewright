@@ -291,10 +291,11 @@ func (r *RemediationRequestReconciler) checkRetargeted(ctx context.Context, git 
 			return nil, &clusterError{err: werr}
 		}
 	}
-	if mergeCommitWaitRemaining(rr.Status.MergeContentUnreadSince.Time, r.now()) > 0 {
+	if since := rr.Status.MergeContentUnreadSince.Time; mergeCommitWaitRemaining(since, r.now()) > 0 {
 		logf.FromContext(ctx).Info("Could not read what the merge of the pull request of RemediationRequest brought; "+
 			"tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return nil, err
+		// The retry is looked at again by the end of the wait, which then ends the request (below).
+		return nil, withReadBound(err, readBoundAt(since.Add(mergeContentWait)))
 	}
 	logf.FromContext(ctx).Info("Could not read what the merge of the pull request of RemediationRequest brought "+
 		"within the wait", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
@@ -530,7 +531,7 @@ func (r *RemediationRequestReconciler) followHeldMerge(ctx context.Context, rr *
 	logf.FromContext(ctx).Info("Could not record the merge of the pull request of a stopped RemediationRequest "+
 		"yet; tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest",
 		rr.Status.PullRequest.Number, "error", err.Error())
-	res, err := r.waitOrFail(ctx, rr, err)
+	res, err := r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 	return res, err
 }
 
@@ -570,8 +571,8 @@ func (r *RemediationRequestReconciler) openRecordedBranch(ctx context.Context, r
 // what recheck returns then: a merge seen and not recorded (mergeNotRecorded), or a pull request not read after
 // its target branch changed (prBranchUnread), which is read again and never ended on the failed read.
 func (r *RemediationRequestReconciler) lookUnsettled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	outcome prOutcome, lookErr error) (ctrl.Result, bool, error) {
-	if res, merged, err := r.mergeNotRecorded(ctx, rr, outcome, lookErr); merged {
+	outcome prOutcome, lookErr error, bound gitReadBound) (ctrl.Result, bool, error) {
+	if res, merged, err := r.mergeNotRecorded(ctx, rr, outcome, lookErr, bound); merged {
 		return res, true, err
 	}
 	if outcome == prBranchUnread {
@@ -580,13 +581,12 @@ func (r *RemediationRequestReconciler) lookUnsettled(ctx context.Context, rr *re
 		if err := r.resumeIfAllowed(ctx, rr); err != nil {
 			return ctrl.Result{}, true, &clusterError{err: err}
 		}
-		// The delay the host asked for never passes the full recheck's period, as on the look at an open one.
-		limitGitReadRetry(ctx, freshRecheckInterval)
+		// The delay the host asked for never passes the full recheck's period (bound), as on the look at an open one.
 		if d := retryAfterOf(lookErr); d > freshRecheckInterval {
 			lookErr = errors.Join(&freshness.ProviderError{Op: "wait for the delay the Git host asked for, capped",
 				RetryAfter: freshRecheckInterval}, lookErr)
 		}
-		res, err := r.waitOrFail(ctx, rr, lookErr)
+		res, err := r.waitOrFail(ctx, rr, lookErr, bound)
 		return res, true, err
 	}
 

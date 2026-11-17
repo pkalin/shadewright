@@ -1274,8 +1274,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	}
 	if ctx.Err() == nil {
 		// Open with the recorded head: the check run on it, and the merge gate only after the comments of this
-		// look are stored (reviewcheck.go).
-		r.watchReviewCheck(ctx, rr, comments)
+		// look are stored (reviewcheck.go). A failed Git read of it is the look's error: open, read again.
+		return prOpen, r.watchReviewCheck(ctx, rr, comments)
 	}
 	return prOpen, nil
 }
@@ -1673,14 +1673,11 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 		if isUnknownChange(err) {
 			what = "to read the pull requests of the branch, so none was closed"
 		}
+		// The refused read is decided on for good: the request ends Expired, nothing is retried.
 		err := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
 			ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and the "+
 				"Git host refused ("+reason+") "+what+"; if one is open, close it by hand. The target stays "+
 				"locked until none is found open"))
-		if err == nil {
-			// The refused read is decided on for good: the request ended Expired, nothing is retried.
-			decidedGitRead(ctx)
-		}
 		return reconcile.Result{}, err
 	}
 	if err != nil && !errors.Is(err, errRepositoryGone) && !errors.Is(err, errTargetBranchChanged) &&
@@ -1747,19 +1744,15 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 	if isUnknownChange(err) {
 		// A read of a pull request that failed, whatever its class (a 403 included), is never a refusal of a
 		// write: it is retried, until the request's own deadline (expire) or the handoff's (retryRecovery).
-		return r.waitOrFail(ctx, rr, err)
+		return r.waitOrFail(ctx, rr, err, requestBound(rr))
 	}
 	reason, message, ok := refusal(err)
 	if !ok {
-		return r.waitOrFail(ctx, rr, err)
+		return r.waitOrFail(ctx, rr, err, requestBound(rr))
 	}
 	if rr.Status.PullRequest == nil {
-		err := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, reason, message))
-		if err == nil {
-			// The refusal ended the request: nothing is retried.
-			decidedGitRead(ctx)
-		}
-		return reconcile.Result{}, err
+		// The refusal ends the request: nothing is retried.
+		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, reason, message))
 	}
 	// The recorded pull request is looked at first on every recheck; nothing else is written to Git while
 	// the refusal lasts, because the plan's freshness cannot be confirmed.
@@ -1781,7 +1774,7 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 	waited := r.waited(rr)
 	if gitReadFailure(err) {
 		// A refused read is a Git read retried like any other: GitReadRetry says so, besides PlanFresh.
-		res, err := r.retryGitRead(ctx, rr, err)
+		res, err := r.retryGitRead(ctx, rr, err, unboundedRead(noBoundRefusedWatch))
 		if err != nil {
 			return reconcile.Result{}, err
 		}
@@ -1850,24 +1843,26 @@ func retryAfterOf(err error) time.Duration {
 	return 0
 }
 
-// waitOrFail sends failed Git reads to retryGitRead. Other failures honour the host delay or return to the
-// error backoff, which does not read Retry-After. For a request in PolicyChecked the delay ends at
-// status.deadline at the latest, so the request expires on time; expiring makes no branch, commit or pull
-// request. A request whose cleanup of a stale plan has started (staleMark) never expires, so it waits as long
-// as the host asked.
+// waitOrFail sends failed Git reads to retryGitRead with the caller's bound. Other failures honour the host delay
+// or return to the error backoff, which does not read Retry-After; that delay ends at the bound too (at least
+// stepDelay after now), so a request in PolicyChecked (requestBound) expires on time; expiring makes no branch,
+// commit or pull request. A request whose cleanup of a stale plan has started (staleMark) never expires, so it
+// waits as long as the host asked.
 func (r *RemediationRequestReconciler) waitOrFail(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	err error) (reconcile.Result, error) {
+	err error, bound gitReadBound) (reconcile.Result, error) {
 	if gitReadFailure(err) {
-		// retryGitRead keeps the bound below: a request in PolicyChecked expires at status.deadline.
-		return r.retryGitRead(ctx, rr, err)
+		return r.retryGitRead(ctx, rr, err, bound)
 	}
 	d := retryAfterOf(err)
 	if d <= 0 {
 		return reconcile.Result{}, err
 	}
-	if rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && rr.Status.Deadline != nil && staleMark(rr) == nil {
-		// A deadline already passed (during a long step) still needs a positive requeue to reach expire.
-		d = min(d, max(rr.Status.Deadline.Sub(r.now()), stepDelay))
+	if !bound.until.IsZero() {
+		// A bound already passed (during a long step) still needs a positive requeue to reach the expiry.
+		d = min(d, max(bound.until.Sub(r.now()), stepDelay))
+	}
+	if bound.within > 0 {
+		d = min(d, max(bound.within, stepDelay))
 	}
 	logf.FromContext(ctx).Info("Waiting before retrying RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)

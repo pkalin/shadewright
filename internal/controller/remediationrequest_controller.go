@@ -244,6 +244,11 @@ type RemediationRequestReconciler struct {
 	// otherwise looks makes it on first use (goneLooksOnce).
 	goneLooks     *goneLooks
 	goneLooksOnce sync.Once
+
+	// gitRetryMarks says, per request, whether its reconcile in progress scheduled a Git read retry (gitread.go);
+	// gitRetries makes it on first use.
+	gitRetryMarks *gitRetryMarks
+	gitRetryOnce  sync.Once
 	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
 	// it. Memory only, set once.
 	since reconcilingSince
@@ -430,41 +435,15 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 // A missing policy or settings object and a target with another UID end the request as Denied at once, so a
 // permanent refusal never becomes a retry loop. A target whose state is not known yet (a ScaledObject KEDA has
 // not reported on) is checked again after a delay, with PolicyAllowed Unknown and no phase, for at most
-// TargetStateTimeout. Git read failures use a visible poll through retryGitRead. Kubernetes failures and
-// other retryable errors retain their error path.
+// TargetStateTimeout. A failed Git read is turned into a visible, bounded wait by the path that made it
+// (retryGitRead); Kubernetes failures and other retryable errors keep their error path.
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	trace := &gitReadTrace{}
-	ctx = context.WithValue(ctx, gitReadTraceKey{}, trace)
+	r.gitRetries().take(req.NamespacedName)
 	res, err := r.reconcile(ctx, req)
-	if trace.failure != nil && err != nil && !isClusterError(err) {
-		if _, gitFailure := errors.AsType[*freshness.ProviderError](err); gitFailure {
-			err = errors.Join(err, trace.failure)
-		}
-	}
-	if ctx.Err() == nil && trace.failure != nil && !isClusterError(err) && errors.Is(err, ErrTimeout) {
-		err = trace.failure
-	}
-	if ctx.Err() == nil && (gitReadFailure(err) || err == nil && trace.read) {
-		rr := &remediationv1alpha1.RemediationRequest{}
-		if readErr := r.reader().Get(ctx, req.NamespacedName, rr); readErr != nil {
-			if apierrors.IsNotFound(readErr) {
-				return res, err
-			}
-			return ctrl.Result{}, readErr
-		}
-		if gitReadFailure(err) {
-			return r.retryGitRead(ctx, rr, err)
-		}
-		// Some paths have their own successful wait after a failed read. The same retry helper paces those too.
-		if trace.failure != nil && !trace.retried && !mergedForeignStale(rr) {
-			waited, readErr := r.retryGitRead(ctx, rr, trace.failure)
-			waited.RequeueAfter = max(waited.RequeueAfter, res.RequeueAfter)
-			return waited, readErr
-		}
-		if !trace.retried && meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
-			if readErr := r.putGitReadRetry(ctx, rr, nil); readErr != nil {
-				return ctrl.Result{}, readErr
-			}
+	if err == nil && ctx.Err() == nil && !r.gitRetries().take(req.NamespacedName) {
+		// The reads of this reconcile worked, or were decided on for good: a retry shown earlier is over.
+		if clearErr := r.clearGitReadRetry(ctx, req.NamespacedName); clearErr != nil {
+			return ctrl.Result{}, clearErr
 		}
 	}
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
@@ -476,6 +455,22 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 	return res, err
+}
+
+// checkFailed handles err, a policy check that did not decide: a failed read of the source mapping or the build tree
+// is a visible retry (the check has no deadline yet); a remote system that asked for a delay (Retry-After) gets it,
+// as controller-runtime's error backoff does not read it and could retry sooner; anything else goes to that backoff.
+func (r *RemediationRequestReconciler) checkFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) (ctrl.Result, error) {
+	if gitReadFailure(err) {
+		return r.retryGitRead(ctx, rr, err, unboundedRead(noBoundPolicyCheck))
+	}
+	if te, ok := errors.AsType[*sourcemap.TransientError](err); ok && te.RetryAfter > 0 {
+		logf.FromContext(ctx).Info("Waiting before retrying RemediationRequest", "remediationRequest",
+			client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", te.RetryAfter)
+		return ctrl.Result{RequeueAfter: te.RetryAfter}, nil
+	}
+	return ctrl.Result{}, err
 }
 
 // afterStop handles a request that no longer progresses: nothing is written to Git any more, but a lock still
@@ -592,14 +587,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 	if err != nil {
-		// A remote system that asked for a delay (Retry-After) gets it; controller-runtime's error backoff
-		// does not read it and could retry sooner.
-		if te, ok := errors.AsType[*sourcemap.TransientError](err); ok && te.RetryAfter > 0 {
-			log.Info("Waiting before retrying RemediationRequest", "remediationRequest", req.NamespacedName,
-				"error", err.Error(), "retryAfter", te.RetryAfter)
-			return ctrl.Result{RequeueAfter: te.RetryAfter}, nil
-		}
-		return ctrl.Result{}, err
+		return r.checkFailed(ctx, rr, err)
 	}
 
 	unlock := func() {}
@@ -1211,36 +1199,63 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	if r.OpenRepository == nil || !progresses(rr) {
 		return ctrl.Result{}, nil
 	}
-	outcome := prOpen
-	if rr.Status.PullRequest != nil {
-		var lookErr error
-		if outcome, lookErr = r.watchPullRequest(ctx, rr); outcome == prStopped {
-			return ctrl.Result{}, nil
-		}
-		if err := r.clearConflictSeen(ctx, rr, outcome); err != nil {
-			return ctrl.Result{}, err
-		}
-		if res, unsettled, err := r.lookUnsettled(ctx, rr, outcome, lookErr); unsettled {
-			return res, err
-		}
-		if pe, ok := errors.AsType[*freshness.ProviderError](lookErr); ok && pe.RetryAfter > 0 && lookOnly(rr) {
-			// The Git host asked for a delay (a rate limit): the freshness check would ask it again at once. A
-			// request that carries a stale plan's mark or WritesPaused goes on to the full recheck instead, which
-			// settles those (and honours a delay of its own calls). The wait never passes the full recheck's period.
-			capped := *pe
-			capped.RetryAfter = min(pe.RetryAfter, freshRecheckInterval)
-			limitGitReadRetry(ctx, freshRecheckInterval)
-			return r.waitOrFail(ctx, rr, &capped)
-		}
-		if wait, ok := r.pollOnly(rr, outcome); ok {
-			// Still open, and the last full recheck is recent: only the pull request was read (#434). Replies to
-			// hints that wait (a rate limit, a post that may have gone through) get the look at the end of the wait.
-			if d := r.replyWait(rr); d > 0 {
-				wait = min(wait, d)
-			}
-			return ctrl.Result{RequeueAfter: wait}, nil
-		}
+	if rr.Status.PullRequest == nil {
+		return r.recheckFresh(ctx, rr, prOpen)
 	}
+	outcome, lookErr := r.watchPullRequest(ctx, rr)
+	if outcome == prStopped {
+		return ctrl.Result{}, nil
+	}
+	if err := r.clearConflictSeen(ctx, rr, outcome); err != nil {
+		return ctrl.Result{}, err
+	}
+	// The look at an open pull request is never later than the full recheck's period, nor the request's deadline.
+	lookBound := earlierBound(requestBound(rr), readBoundIn(freshRecheckInterval))
+	if res, unsettled, err := r.lookUnsettled(ctx, rr, outcome, lookErr, lookBound); unsettled {
+		return res, err
+	}
+	if pe, ok := errors.AsType[*freshness.ProviderError](lookErr); ok && pe.RetryAfter > 0 && lookOnly(rr) {
+		// The Git host asked for a delay (a rate limit): the freshness check would ask it again at once. A
+		// request that carries a stale plan's mark or WritesPaused goes on to the full recheck instead, which
+		// settles those (and honours a delay of its own calls). The wait never passes the full recheck's period.
+		capped := *pe
+		capped.RetryAfter = min(pe.RetryAfter, freshRecheckInterval)
+		return r.waitOrFail(ctx, rr, &capped, lookBound)
+	}
+	var res ctrl.Result
+	var err error
+	if wait, ok := r.pollOnly(rr, outcome); ok {
+		// Still open, and the last full recheck is recent: only the pull request was read (#434). Replies to
+		// hints that wait (a rate limit, a post that may have gone through) get the look at the end of the wait.
+		if d := r.replyWait(rr); d > 0 {
+			wait = min(wait, d)
+		}
+		res = ctrl.Result{RequeueAfter: wait}
+	} else {
+		res, err = r.recheckFresh(ctx, rr, outcome)
+	}
+	_, hostErr := errors.AsType[*freshness.ProviderError](err)
+	if err != nil && (!hostErr || isClusterError(err)) || !gitReadFailure(lookErr) || mergedForeignStale(rr) {
+		// A failure of the steps after the look that is not the Git host's (a Kubernetes read, a timeout of a
+		// cluster read) is returned as it is, for the error backoff: it is what fails now. A Git host failure of
+		// those steps (a close answered with a conflict) acted on what the failed look could not show, so the
+		// look is what is retried.
+		return res, err
+	}
+	// The look failed and the steps after it went on without it: the look is retried visibly. The steps' own wait
+	// may be longer (a poll); neither passes the look's bound.
+	waited, err := r.retryGitRead(ctx, rr, lookErr, lookBound)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	waited.RequeueAfter = readBoundOf(lookErr, lookBound).cap(r.now(), max(waited.RequeueAfter, res.RequeueAfter))
+	return waited, nil
+}
+
+// recheckFresh is recheck after the look at a recorded pull request (outcome, prOpen when none is recorded): the
+// end before the freshness check, a handoff, the deadline, then the freshness check and the next step.
+func (r *RemediationRequestReconciler) recheckFresh(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	outcome prOutcome) (ctrl.Result, error) {
 	if res, done, err := r.endBeforeFresh(ctx, rr, outcome); done {
 		return res, err
 	}
@@ -2091,6 +2106,10 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 func reinstalledTimeout(stepErr, timeout error) error {
 	if _, ok := errors.AsType[*reinstalledError](stepErr); !ok || errors.Is(timeout, context.Canceled) {
 		return timeout
+	}
+	if gitReadFailure(stepErr) {
+		// The read that ran out of the step's time is still a failed Git read, retried as one (retryGitRead).
+		timeout = errors.Join(timeout, stepErr)
 	}
 	switch s := stepOf(stepErr); s.step {
 	case stepToken, stepRead, stepListing:

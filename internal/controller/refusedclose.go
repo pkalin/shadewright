@@ -472,11 +472,9 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 	if refused {
 		// A refused read is retried within its grace: the common retry of a failed Git read keeps this bound.
 		wait := min(refusedLeft, closeRefusedRetry, failingLeft)
-		limitGitReadRetry(ctx, wait)
 		return reconcile.Result{RequeueAfter: wait}, nil, nil
 	}
-	limitGitReadRetry(ctx, failingLeft)
-	res, werr := r.waitOrFail(ctx, rr, err)
+	res, werr := r.waitOrFail(ctx, rr, err, readBoundIn(failingLeft))
 	if res.RequeueAfter > failingLeft {
 		res.RequeueAfter = failingLeft
 	}

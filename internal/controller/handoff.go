@@ -990,8 +990,9 @@ const ReasonHandoffRecoveryFailed = "HandoffRecoveryFailed"
 
 // retryRecovery is retry for an error of recoverStep. Before the deadline, and for an error retry ends or
 // waits on (a pause, a final refusal, settings that cannot reach the repository), it is retry. Past the
-// deadline a failure worth retrying is retried, after the delay the host asked for (Retry-After, which the
-// deadline does not cut short) or with the error backoff, until handoffRecoveryGrace after the deadline; then
+// deadline a failed Git read is retried visibly (retryGitRead), never later than the end of the grace, and any other
+// failure worth retrying after the delay the host asked for (Retry-After, which the deadline does not cut short)
+// or with the error backoff, until handoffRecoveryGrace after the deadline; then
 // the request ends NeedsIntervention with ReasonHandoffRecoveryFailed, and its handoff Aborted (declineOnEnd).
 func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
@@ -1010,6 +1011,10 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 			ReasonHandoffRecoveryFailed, "The deadline passed and the branch could not be read to learn whether "+
 				"this request's commit is on the pull request it replaces; check the branch and the pull request"))
+	}
+	if gitReadFailure(err) {
+		// Retried visibly, and looked at again by the end of the grace at the latest.
+		return r.retryGitRead(ctx, rr, err, readBoundAt(rr.Status.Deadline.Add(handoffRecoveryGrace)))
 	}
 	d := retryAfterOf(err)
 	if d <= 0 {

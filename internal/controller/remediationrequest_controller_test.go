@@ -534,7 +534,9 @@ var _ = Describe("RemediationRequest Controller", func() {
 		stub.err = &sourcemap.TransientError{Op: "read head of branch main", RetryAfter: 42 * time.Second}
 		res, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.RequeueAfter).To(Equal(42 * time.Second))
+		// A failed read of the source mapping is a visible retry: the poll interval, or the host's delay when longer.
+		Expect(res.RequeueAfter).To(BeNumerically(">=", 42*time.Second))
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		Expect(fetch().Status.Phase).To(BeEmpty())
 	})
 

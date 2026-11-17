@@ -163,8 +163,12 @@ func (r *RemediationRequestReconciler) mergeCheckFailed(ctx context.Context, rr 
 		}
 	}
 	since := rr.Status.MergeCommitAwaitedSince
-	if since == nil || mergeCommitWaitRemaining(since.Time, r.now()) > 0 {
+	if since == nil {
 		return fmt.Errorf("%w: %w", errMergeCheck, checkErr)
+	}
+	if mergeCommitWaitRemaining(since.Time, r.now()) > 0 {
+		// A failed Git read of the check is looked at again by the end of the wait at the latest.
+		return fmt.Errorf("%w: %w", errMergeCheck, withReadBound(checkErr, readBoundAt(since.Add(mergeCommitWait))))
 	}
 	msg := "The plan could not be checked at the merge within the wait for the merge (" + checkErr.Error() +
 		"), so it is not shown fresh"
@@ -311,12 +315,12 @@ func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alph
 // merge commit or the wait ends) and prMergeUnchecked (the plan could not be checked at the merge: Git reads use the common visible poll, while Kubernetes errors are returned). The full freshness check never runs on a merged change, which makes the plan
 // look stale.
 func (r *RemediationRequestReconciler) mergeNotRecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, outcome prOutcome,
-	lookErr error) (res ctrl.Result, merged bool, err error) {
+	lookErr error, bound gitReadBound) (res ctrl.Result, merged bool, err error) {
 	switch outcome {
 	case prMergeCommitPending:
 		return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, true, nil
 	case prMergeUnchecked:
-		res, err := r.waitOrFail(ctx, rr, lookErr)
+		res, err := r.waitOrFail(ctx, rr, lookErr, bound)
 		return res, true, err
 	}
 	return ctrl.Result{}, false, nil

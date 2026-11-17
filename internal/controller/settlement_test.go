@@ -338,7 +338,10 @@ func TestSettlementGitReadFailures(t *testing.T) {
 						t.Fatal(getErr)
 					}
 					c := meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry)
-					if err != nil || res.RequeueAfter < r.pullRequestPollInterval() || c == nil || !strings.Contains(c.Message, m.Name) || c.LastTransitionTime.IsZero() {
+					// The condition names the read: by its method, or by the fixed text of the step that made it (a
+					// provider error keeps no chain), never the catch-all.
+					if err != nil || res.RequeueAfter < r.pullRequestPollInterval() || c == nil || !strings.HasPrefix(c.Message, "Retrying Git read: ") ||
+						strings.HasSuffix(c.Message, ": read the Git host") || c.LastTransitionTime.IsZero() {
 						t.Fatalf("retry=%+v err=%v condition=%+v", res, err, c)
 					}
 				})
@@ -352,7 +355,7 @@ func TestSettlementRetryMarksDoNotWakeTheWatch(t *testing.T) {
 	ctx := context.Background()
 	for _, write := range []func() error{
 		func() error {
-			_, err := r.retryGitRead(ctx, rr, readFailure(ctx, opParents, errors.New("outage")))
+			_, err := r.retryGitRead(ctx, rr, readFailure(opParents, errors.New("outage")), unboundedRead(noBoundHeldLock))
 			return err
 		},
 		func() error { return r.startContentWait(ctx, rr) },
@@ -437,7 +440,7 @@ func TestSettlementRetryWritesSurviveConflict(t *testing.T) {
 			case clockClear:
 				err = r.clearContentWait(ctx, rr)
 			default:
-				_, err = r.retryGitRead(ctx, rr, readFailure(ctx, opParents, errors.New("outage")))
+				_, err = r.retryGitRead(ctx, rr, readFailure(opParents, errors.New("outage")), unboundedRead(noBoundHeldLock))
 			}
 			if err != nil || !raced {
 				t.Fatalf("raced=%v error=%v", raced, err)
@@ -541,8 +544,7 @@ func TestEveryGitReadReportsItsBoundaryFailure(t *testing.T) {
 		t.Run(m.Name, func(t *testing.T) {
 			g := fakegit.NewGit(mainBranch, nil)
 			g.SetFail(func(string) error { return errors.New("private provider error") })
-			trace := &gitReadTrace{}
-			ctx := context.WithValue(context.Background(), gitReadTraceKey{}, trace)
+			ctx := context.Background()
 			wrapped := &gatedGit{git: g, allow: func(context.Context) error { return nil }}
 			args := []reflect.Value{}
 			for in := range m.Type.Ins() {
@@ -554,8 +556,8 @@ func TestEveryGitReadReportsItsBoundaryFailure(t *testing.T) {
 			}
 			out := reflect.ValueOf(wrapped).MethodByName(m.Name).Call(args)
 			err, _ := reflect.TypeAssert[error](out[len(out)-1])
-			if !gitReadFailure(err) || trace.failure == nil || !strings.Contains(trace.failure.Error(), m.Name) {
-				t.Fatalf("read bypassed retry boundary: %v %+v", err, trace)
+			if !gitReadFailure(err) || !strings.Contains(err.Error(), m.Name) {
+				t.Fatalf("read bypassed retry boundary: %v", err)
 			}
 		})
 	}
@@ -612,7 +614,7 @@ func TestSettlementGitWritesKeepTheirErrorPath(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
 			failure := freshness.WrapProvider(operation, errors.New("write failed"))
-			result, err := r.waitOrFail(context.Background(), rr, failure)
+			result, err := r.waitOrFail(context.Background(), rr, failure, requestBound(rr))
 			if err == nil || result.RequeueAfter != 0 || meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
 				t.Fatalf("write was labelled as a read: %+v %v", result, err)
 			}

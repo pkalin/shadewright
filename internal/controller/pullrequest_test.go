@@ -1538,7 +1538,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
 		Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
 		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
-			To(ContainSubstring("CheckMerged"), "the read failure is the cause named")
+			To(ContainSubstring("check what the merged pull request held"), "the read failure is the cause named")
 		Expect(faulty.count(opClose)).To(BeZero(), "a merged pull request is not closed again")
 		faulty.failOn("", nil)
 		_ = reconcileOnce()
@@ -1594,7 +1594,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
 		Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
 		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
-			To(ContainSubstring("CheckBranch"))
+			To(ContainSubstring("check what the branch holds"))
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
 		Expect(faulty.count(opOpen)).To(BeZero())
 
@@ -5744,7 +5744,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
 			Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
 			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
-				To(ContainSubstring("ReadFile"))
+				To(ContainSubstring("read the file on the branch"))
 			Expect(faulty.faults()).To(Equal(1))
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
 			Expect(faulty.count(opCommit)).To(BeZero())

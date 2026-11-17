@@ -3166,7 +3166,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
 		retry := meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)
 		Expect(retry).NotTo(BeNil())
-		Expect(retry.Message).To(ContainSubstring(opParents))
+		Expect(retry.Message).To(ContainSubstring("read the parents"), "names the read")
 		Expect(holdsLock(fetch())).To(BeTrue())
 	})
 
@@ -3208,7 +3208,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
 			retry := meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)
 			Expect(retry).NotTo(BeNil())
-			Expect(retry.Message).To(ContainSubstring(opParents))
+			Expect(retry.Message).To(ContainSubstring("read the parents"), "names the read")
 			got = fetch()
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "nothing is decided on a failed read")
 			Expect(got.Status.MergeContentUnreadSince).NotTo(BeNil())

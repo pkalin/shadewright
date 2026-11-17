@@ -89,6 +89,9 @@ type tally struct {
 	last string
 	// reads are the read tool calls the loop ran, in order (recordedTools).
 	reads []readCall
+	// first is the messages of the first request of the analysis, the system prompt and the context as the
+	// model gets them.
+	first []providers.Message
 }
 
 // roleUsage is what the calls of one role returned.
@@ -111,6 +114,9 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 	c, err := r.inner.Complete(ctx, req)
 	r.t.mu.Lock()
 	defer r.t.mu.Unlock()
+	if r.t.first == nil {
+		r.t.first = slices.Clone(req.Messages)
+	}
 	if r.t.usage == nil {
 		r.t.usage = map[analysis.Role]*roleUsage{}
 	}
@@ -254,6 +260,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	last := t.last
 	calls := slices.Clone(t.reads)
+	res.prompt = t.first
 	t.mu.Unlock()
 	if aerr != nil {
 		return res, fmt.Errorf("the analysis stopped: %w", aerr)

@@ -227,8 +227,11 @@ type RemediationRequestSpec struct {
 	Cancel bool `json:"cancel,omitempty"`
 }
 
-// Reasons of a request that ends Cancelled because of its Incident (ADR-0039 points 21 and 22). They are
-// declared for the executor's live read of the Incident before the pull request; nothing sets them yet.
+// Reasons of a request that ends Cancelled because of its Incident (ADR-0039 points 21 and 22), on condition
+// PullRequestOpened. The executor sets them after its live read of the Incident, the last step before it opens
+// the pull request (#794). When the read of the branch after the cancel finds a pull request of the request's own
+// open (an earlier open whose answer was lost), the reason moves to condition Approved, and the pull request is
+// recorded and closed; one found merged is recorded as a merged stale plan, with the reason on PlanFresh.
 const (
 	// ReasonIncidentFolded: the request ended Cancelled before its pull request because its Incident has
 	// status.foldedInto: it was folded into the Incident of its cause.
@@ -398,7 +401,10 @@ const (
 	// refusal's reason, with GitNotFound for a 404, or with GitFailed for any other failure, a step still running at
 	// the cleanup's deadline included (#797). A close through that installation that fails without a refusal sets it
 	// too, with GitNotFound or GitFailed. The message names the latest failed step, and a step that failed without a
-	// refusal is retried with the error backoff or the delay the host asked for.
+	// refusal is retried with the error backoff or the delay the host asked for. A request Cancelled with
+	// IncidentFolded or IncidentGone (#794) sets it too, with the same reasons, when the close of its own pull
+	// request, found open by the read of its branch after the cancel, fails; it keeps its target lock meanwhile, and
+	// the close that goes through, or a read that finds the pull request closed, merged or not its own, removes it.
 	ConditionPullRequestNotClosed = "PullRequestNotClosed"
 	// ConditionCleanupRefused is True, with reason GitForbidden or GitRejected, once the Git host refused for good
 	// (403 or 422) a step of the cleanup of a deleted request: the access token for the plan's repository, the

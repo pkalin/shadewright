@@ -18,6 +18,7 @@ package redact_test
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/pkalin/shadewright/internal/incidentcontext"
@@ -74,13 +75,21 @@ var entryPoints = map[string]func(in string) []string{
 // Every input of both block corpora goes through every entry point, and no secret survives in any output.
 // A form closed in the redactor and open in a caller fails here. At 6ed30275 (the second build of #840) the
 // folded indicator ">" was replaced before redaction in the fingerprint's normalization, and the log excerpt
-// was cut before it was redacted; see the counts in the pull request of #840.
+// was cut before it was redacted; see the counts in the pull request of #840. Under -race each entry point
+// gets a seeded sample of the corpus (redact.RaceKeeps); make test runs the whole corpus without -race. The
+// entry points run in parallel. No linearity test counts work meanwhile: a top-level test ends only after its
+// parallel subtests, and no top-level test of the package is parallel.
 func TestBlockCorporaThroughEveryEntryPoint(t *testing.T) {
 	cases := redact.EntryCorpus()
 	for name, f := range entryPoints {
 		t.Run(name, func(t *testing.T) {
-			leaked := 0
-			for _, c := range cases {
+			t.Parallel()
+			leaked, ran := 0, 0
+			for i, c := range cases {
+				if !redact.RaceKeeps(name, i) {
+					continue
+				}
+				ran++
 				for _, out := range f(c.In) {
 					if s := leakedSecret(out, c.Secrets); s != "" {
 						leaked++
@@ -92,7 +101,10 @@ func TestBlockCorporaThroughEveryEntryPoint(t *testing.T) {
 				}
 			}
 			if leaked > 0 {
-				t.Errorf("%s: %d of %d inputs leak a secret", name, leaked, len(cases))
+				t.Errorf("%s: %d of %d inputs leak a secret", name, leaked, ran)
+			}
+			if ran < len(cases)/(2*redact.RaceSampleEvery) {
+				t.Fatalf("%s: only %d of %d inputs ran", name, ran, len(cases))
 			}
 		})
 	}
@@ -109,10 +121,12 @@ func leakedSecret(out string, secrets []string) string {
 }
 
 // defaultRedactor returns a redactor with the built-in rules, as the log source uses without extra patterns.
-func defaultRedactor() *redact.Redactor {
+// It is built once: New compiles every rule, which cost more than the redaction of a corpus input when each
+// call of an entry point built its own.
+var defaultRedactor = sync.OnceValue(func() *redact.Redactor {
 	r, err := redact.New()
 	if err != nil {
 		panic(err)
 	}
 	return r
-}
+})

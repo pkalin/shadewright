@@ -77,12 +77,14 @@ func (r *textReader) List(_ context.Context, list client.ObjectList, _ ...client
 
 // readTools is one tool set over a textReader and a fake log source; calls are serialized, since each
 // sets the text first.
-var readTools = sync.OnceValue(func() *struct {
+type readTools struct {
 	sync.Mutex
 	set    *tools.Set
 	reader *textReader
 	logs   *fake.Logs
-} {
+}
+
+func newReadTools() *readTools {
 	reader, logs := &textReader{}, &fake.Logs{}
 	set, err := tools.New(tools.Config{
 		Pods: reader, Events: reader, Objects: reader, Logs: logs,
@@ -91,16 +93,13 @@ var readTools = sync.OnceValue(func() *struct {
 	if err != nil {
 		panic(err)
 	}
-	return &struct {
-		sync.Mutex
-		set    *tools.Set
-		reader *textReader
-		logs   *fake.Logs
-	}{set: set, reader: reader, logs: logs}
-})
+	return &readTools{set: set, reader: reader, logs: logs}
+}
 
 // toolText calls one read tool of the model with in as the text the cluster holds, and returns its answer.
+// Each entry point has its own tool set, so the entry points can run in parallel.
 func toolText(name string, args map[string]any) func(in string) []string {
+	readTools := sync.OnceValue(newReadTools)
 	return func(in string) []string {
 		rt := readTools()
 		rt.Lock()

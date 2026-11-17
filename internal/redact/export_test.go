@@ -53,3 +53,9 @@ func EntryCorpus() []EntryCase {
 	}
 	return out
 }
+
+// RaceKeeps and RaceSampleEvery are raceKeeps and raceSampleEvery (racesample_test.go), for the tests of
+// package redact_test.
+var RaceKeeps = raceKeeps
+
+const RaceSampleEvery = raceSampleEvery

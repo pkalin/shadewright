@@ -30,7 +30,9 @@ import (
 // comes out on this branch (#840, decision of 2026-11-17, fourth). Encoding get_resource without HTML escapes
 // showed a raw "<" or ">" in the user info to the connection-string rule, which stopped there: on main only
 // the escape had let it match. The log excerpt did not exist on main; it is held to main's redactor, which
-// main's log source ran over the excerpt.
+// main's log source ran over the excerpt. Every line of the table is checked against its generator; under
+// -race each entry point gets a seeded sample of the inputs (redact.RaceKeeps), and make test runs them all
+// without it.
 func TestConnStringsThroughEveryEntryPointAgainstMain(t *testing.T) {
 	gen := connStringCorpus(connStringCorpusSize)
 	eps := connEntryPoints()
@@ -43,7 +45,7 @@ func TestConnStringsThroughEveryEntryPointAgainstMain(t *testing.T) {
 	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(nil, 1<<20)
-	n, lost, hidden := 0, 0, 0
+	n, lost, hidden, ran := 0, 0, 0, 0
 	for sc.Scan() {
 		var row connMainRow
 		if err := json.Unmarshal(sc.Bytes(), &row); err != nil {
@@ -55,6 +57,10 @@ func TestConnStringsThroughEveryEntryPointAgainstMain(t *testing.T) {
 		c := gen[n]
 		n++
 		for name, ep := range eps {
+			if !redact.RaceKeeps(name, n-1) {
+				continue
+			}
+			ran++
 			ref := name
 			if m, ok := mainOf[name]; ok {
 				ref = m
@@ -85,7 +91,10 @@ func TestConnStringsThroughEveryEntryPointAgainstMain(t *testing.T) {
 	if lost > 0 {
 		t.Errorf("%d outputs of %d inputs through %d entry points keep a secret part main hid", lost, n, len(eps))
 	}
-	if hidden < n*len(eps) {
+	if ran < n*len(eps)/(2*redact.RaceSampleEvery) {
+		t.Fatalf("only %d of %d inputs through %d entry points ran", ran, n, len(eps))
+	}
+	if hidden < ran {
 		t.Fatalf("corpus too weak: main hid %d secret parts over %d inputs", hidden, n)
 	}
 }
@@ -172,7 +181,10 @@ func connByConstruction() []connBuilt {
 func TestConnStringByConstruction(t *testing.T) {
 	cases := connByConstruction()
 	failed := 0
-	for _, c := range cases {
+	for i, c := range cases {
+		if !redact.RaceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		out := redact.String(c.in)
 		// The marker is the longest of its forms that fits in the match ([redact.Marker]).
 		marker := ""

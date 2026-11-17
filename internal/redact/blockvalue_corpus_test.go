@@ -425,7 +425,10 @@ func blockLeaks(c blockCase, spans []span) (leaked, lost []string) {
 func TestBlockValueCorpusRedactsEverySecret(t *testing.T) {
 	cases := blockCorpus(blockSecretKeys, true)
 	failed, notRequired := 0, 0
-	for _, c := range cases {
+	for i, c := range cases {
+		if !raceKeeps(t.Name(), i) && (c.indicator || !c.afterText && !c.bareQuoted) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		var leaked, lost []string
 		switch {
 		case c.indicator:
@@ -486,7 +489,10 @@ func blockPipelineLeaks(c blockCase) (leaked, lost []string) {
 func TestBlockValueCorpusKeepsInnocentBlocks(t *testing.T) {
 	cases := blockCorpus(blockInnocentKeys, false)
 	failed := 0
-	for _, c := range cases {
+	for i, c := range cases {
+		if !raceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		if out := String(c.in); out != c.in {
 			failed++
 			if failed <= 20 {
@@ -572,6 +578,9 @@ func TestBlockValueStillRedactsWhatMainRedacted(t *testing.T) {
 		in := gen[cases-1].in
 		if len(row.Spans) > 0 {
 			redacted++
+		}
+		if !raceKeeps(t.Name(), cases-1) {
+			continue // a seeded sample under -race; all of them without it
 		}
 		red := redactedBytes(in, defaultRedactor.spans(in))
 		for _, want := range row.Spans {

@@ -290,19 +290,9 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 		return nil, err
 	}
 	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
-	raw, err = os.ReadFile(filepath.Join(dir, "incident.yaml"))
-	if err != nil {
+	if s.incident, err = readIncident(decoder, filepath.Join(dir, "incident.yaml")); err != nil {
 		return nil, err
 	}
-	obj, _, err := decoder.Decode(raw, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("incident.yaml: %w", err)
-	}
-	inc, ok := obj.(*remediationv1alpha1.Incident)
-	if !ok {
-		return nil, fmt.Errorf("incident.yaml holds a %T, not an Incident", obj)
-	}
-	s.incident = inc
 	if err := s.checkIncident(); err != nil {
 		return nil, err
 	}
@@ -323,8 +313,8 @@ const variantsDir = "variants"
 
 // variant is a variant.yaml: a state of a fleet scenario the lab met that its own recording does not show,
 // such as a rollout in progress. A variant is scored against the scenario's expected.yaml and rubric.yaml,
-// unchanged, with the scenario's Incident; its directory holds its own objects.yaml and replies.yaml, and a
-// metrics.yaml when its series differ from the scenario's.
+// unchanged; its directory holds its own replies.yaml, and an incident.yaml, objects.yaml, metrics.yaml or
+// policy.yaml when its Incident, objects, series or policies differ from the scenario's.
 type variant struct {
 	// About says what the variant changes and why, in a sentence or two.
 	About string `json:"about"`
@@ -372,9 +362,24 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 	if err := s.loadMetrics(dir); err != nil {
 		return nil, err
 	}
-	var err error
 	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
-	if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "incident.yaml")); err == nil {
+		if s.incident, err = readIncident(decoder, filepath.Join(dir, "incident.yaml")); err != nil {
+			return nil, err
+		}
+		if err := s.checkIncident(); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(dir, "objects.yaml")); err == nil {
+		if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
+			return nil, err
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		s.objects = base.objects
+	} else {
 		return nil, err
 	}
 	if _, err := os.Stat(filepath.Join(dir, policyFile)); err == nil {
@@ -525,6 +530,23 @@ func (s *scenario) checkIncident() error {
 			e.Reason, e.Object.Kind, e.Object.Namespace, e.Object.Name)
 	}
 	return nil
+}
+
+// readIncident decodes the Incident of an incident.yaml.
+func readIncident(decoder runtime.Decoder, path string) (*remediationv1alpha1.Incident, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	obj, _, err := decoder.Decode(raw, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("incident.yaml: %w", err)
+	}
+	inc, ok := obj.(*remediationv1alpha1.Incident)
+	if !ok {
+		return nil, fmt.Errorf("incident.yaml holds a %T, not an Incident", obj)
+	}
+	return inc, nil
 }
 
 // readStrict reads a YAML file of the harness's own, refusing unknown fields.

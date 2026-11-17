@@ -1021,6 +1021,16 @@ spec:
                   when the commit was reported at once and the check at the merge answered.
                 format: date-time
                 type: string
+              mergeContentUnreadSince:
+                description: |-
+                  mergeContentUnreadSince is when the executor first failed to read what a merge brought, on its own clock: a
+                  pull request merged into the target branch the settings name now after the plan's branch changed (#771),
+                  whose merge counts only when it brought the planned change alone. The reads are retried for five minutes
+                  from it; after that the request ends NeedsIntervention with reason MergeContentUnreadable. Set once and never
+                  changed or removed (a validation rule on the object), so neither a restart nor the wait for the merge commit
+                  moves or uses up this wait.
+                format: date-time
+                type: string
               mergeReceipt:
                 description: |-
                   mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit
@@ -1785,6 +1795,10 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince)
             || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince
             == oldSelf.status.mergeCommitAwaitedSince)'
+        - message: status.mergeContentUnreadSince is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeContentUnreadSince)
+            || (has(self.status) && has(self.status.mergeContentUnreadSince) && self.status.mergeContentUnreadSince
+            == oldSelf.status.mergeContentUnreadSince)'
         - message: status.mergeReceipt is set only in Merged or a phase after it
           rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
             && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',

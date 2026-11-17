@@ -317,22 +317,61 @@ func (g *Git) CheckCommit(ctx context.Context, sha, path string) (providers.Bran
 	return providers.BranchOneChange, c.parent, nil
 }
 
-// CheckFirstParent reports what commit, a merge commit included, changed over its first parent
-// (providers.GitProvider.CheckFirstParent).
-func (g *Git) CheckFirstParent(ctx context.Context, sha, path string) (providers.BranchState, string, error) {
-	if err := g.before("CheckFirstParent"); err != nil {
-		return 0, "", err
+// CheckBetween reports whether the trees of commits from and to differ at most in the file at path
+// (providers.GitProvider.CheckBetween).
+func (g *Git) CheckBetween(ctx context.Context, from, to, path string) (providers.BranchState, error) {
+	if err := g.before("CheckBetween"); err != nil {
+		return 0, err
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	c, ok := g.commits[sha]
-	if !ok {
-		return 0, "", fmt.Errorf("commit %q: %w", sha, providers.ErrNotFound)
+	c, ok := g.commits[to]
+	if _, okFrom := g.commits[from]; !ok || !okFrom {
+		return 0, fmt.Errorf("commit: %w", providers.ErrNotFound)
 	}
-	if c.parent == "" || !g.onlyFile(c, c.parent, path) {
-		return providers.BranchForeign, "", nil
+	if !g.onlyFile(c, from, path) {
+		return providers.BranchForeign, nil
 	}
-	return providers.BranchOneChange, c.parent, nil
+	return providers.BranchOneChange, nil
+}
+
+// CountAhead reports how many commits the history of head holds that the history of base does not
+// (providers.GitProvider.CountAhead).
+func (g *Git) CountAhead(ctx context.Context, base, head string) (int, error) {
+	if err := g.before("CountAhead"); err != nil {
+		return 0, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.commits[base]; !ok {
+		return 0, fmt.Errorf("commit %q: %w", base, providers.ErrNotFound)
+	}
+	if _, ok := g.commits[head]; !ok {
+		return 0, fmt.Errorf("commit %q: %w", head, providers.ErrNotFound)
+	}
+	inBase := g.history(base)
+	n := 0
+	for c := range g.history(head) {
+		if !inBase[c] {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// history returns sha and every ancestor of it, through both parents of a merge commit. g.mu must be held.
+func (g *Git) history(sha string) map[string]bool {
+	seen := map[string]bool{}
+	for todo := []string{sha}; len(todo) > 0; {
+		at := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		if at == "" || seen[at] {
+			continue
+		}
+		seen[at] = true
+		todo = append(todo, g.commits[at].parent, g.commits[at].merged)
+	}
+	return seen
 }
 
 // CheckMerged reports what head carried over the target branch before mergeCommit merged it
@@ -805,6 +844,68 @@ func (g *Git) merge(n int64, withCommit bool) (string, error) {
 	cr.State = providers.ChangeRequestMerged
 	cr.MergeCommit = sha
 	return sha, nil
+}
+
+// RebaseMerge merges change request n as a host's rebase merge does: each commit of the head that the base branch
+// lacks, oldest first, is applied again on top of the base branch as a new commit with one parent, and the last
+// of them is the merge commit. Every such commit must have one parent. It fails with ErrConflict when a change
+// cannot be applied to what the base holds then.
+func (g *Git) RebaseMerge(n int64) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return "", err
+	}
+	if cr.State != providers.ChangeRequestOpen {
+		return "", fmt.Errorf("change request %d is %s: %w", n, cr.State, providers.ErrConflict)
+	}
+	at := g.branches[cr.BaseBranch]
+	inBase := g.history(at)
+	var replay []string
+	for c := g.branches[cr.HeadBranch]; c != "" && !inBase[c]; c = g.commits[c].parent {
+		if g.commits[c].merged != "" {
+			return "", fmt.Errorf("commit %q is a merge commit: %w", c, providers.ErrConflict)
+		}
+		replay = append(replay, c)
+	}
+	if len(replay) == 0 {
+		return "", fmt.Errorf("change request %d brings no commit: %w", n, providers.ErrConflict)
+	}
+	for _, sha := range slices.Backward(replay) {
+		c := g.commits[sha]
+		parent := g.commits[c.parent].files
+		next := maps.Clone(g.commits[at].files)
+		for _, p := range slices.Sorted(maps.Keys(mergedKeys(parent, c.files))) {
+			was, inParent := parent[p]
+			now, inCommit := c.files[p]
+			if inParent == inCommit && bytes.Equal(was, now) {
+				continue
+			}
+			cur, inCur := next[p]
+			if inCur != inParent || !bytes.Equal(cur, was) {
+				return "", fmt.Errorf("file %q changed on both sides: %w", p, providers.ErrConflict)
+			}
+			if inCommit {
+				next[p] = now
+			} else {
+				delete(next, p)
+			}
+		}
+		at = g.store(at, next)
+	}
+	g.branches[cr.BaseBranch] = at
+	g.syncHeads(cr.BaseBranch, at)
+	cr.State = providers.ChangeRequestMerged
+	cr.MergeCommit = at
+	return at, nil
+}
+
+// mergedKeys returns the paths of a and b together.
+func mergedKeys(a, b map[string][]byte) map[string][]byte {
+	out := maps.Clone(a)
+	maps.Copy(out, b)
+	return out
 }
 
 // SetMergeCommit replaces the merge commit the fake reports for the merged change request n, as a host that

@@ -42,6 +42,7 @@ const (
 	opCreateBranch = "GitHub create branch"
 	opCommitFile   = "GitHub commit file"
 	opCheckBranch  = "GitHub check branch"
+	opCountAhead   = "GitHub count commits ahead"
 	opCheckCommit  = "GitHub check commit"
 	opOpenCR       = "GitHub open pull request"
 	opFindCR       = "GitHub find pull request"
@@ -557,20 +558,6 @@ func (p *Provider) CheckMerged(ctx context.Context, head, mergeCommit, path stri
 // CheckCommit reports what commit carries over its own parent, whatever the target branch holds
 // (providers.GitProvider.CheckCommit): one parent, and the trees compared as CheckBranch compares them.
 func (p *Provider) CheckCommit(ctx context.Context, commit, path string) (providers.BranchState, string, error) {
-	return p.checkOverParent(ctx, commit, path, false)
-}
-
-// CheckFirstParent reports what commit, a merge commit included, changed over its first parent
-// (providers.GitProvider.CheckFirstParent): at least one parent, and the trees of commit and its first parent
-// compared as CheckBranch compares them.
-func (p *Provider) CheckFirstParent(ctx context.Context, commit, path string) (providers.BranchState, string, error) {
-	return p.checkOverParent(ctx, commit, path, true)
-}
-
-// checkOverParent is CheckCommit, or with merges CheckFirstParent: commit judged against its first parent, which
-// must be its only one unless merges is true.
-func (p *Provider) checkOverParent(ctx context.Context, commit, path string, merges bool) (providers.BranchState,
-	string, error) {
 	switch {
 	case !validSHA(commit):
 		return 0, "", errors.New(opCheckCommit + ": commit is not a full SHA")
@@ -583,7 +570,7 @@ func (p *Provider) checkOverParent(ctx context.Context, commit, path string, mer
 	if err != nil {
 		return 0, "", err
 	}
-	if len(parents) == 0 || (len(parents) != 1 && !merges) {
+	if len(parents) != 1 {
 		return providers.BranchForeign, "", nil
 	}
 	state, err := p.changedOnly(ctx, commit, parents[0], strings.Split(path, "/"))
@@ -591,6 +578,50 @@ func (p *Provider) checkOverParent(ctx context.Context, commit, path string, mer
 		return state, "", err
 	}
 	return state, parents[0], nil
+}
+
+// CheckBetween reports whether the trees of from and to differ at most in the regular file at path
+// (providers.GitProvider.CheckBetween), compared as CheckBranch compares them: one tree each per directory.
+func (p *Provider) CheckBetween(ctx context.Context, from, to, path string) (providers.BranchState, error) {
+	switch {
+	case !validSHA(from) || !validSHA(to):
+		return 0, errors.New(opCheckCommit + ": commit is not a full SHA")
+	case !validPath(path):
+		return 0, errors.New(opCheckCommit + ": path is invalid")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	return p.changedOnly(ctx, to, from, strings.Split(path, "/"))
+}
+
+// CountAhead returns how many commits head's history holds that base's does not (providers.GitProvider.CountAhead):
+// ahead_by of the comparison base...head, one call. A response too large to read is an error, never a count.
+func (p *Provider) CountAhead(ctx context.Context, base, head string) (int, error) {
+	if !validSHA(base) || !validSHA(head) {
+		return 0, errors.New(opCountAhead + ": commit is not a full SHA")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	r, err := p.do(ctx, call{
+		op: opCountAhead, method: http.MethodGet, path: "/compare/" + base + "..." + head,
+		query: url.Values{paramPerPage: {"1"}},
+	})
+	if err != nil {
+		return 0, err
+	}
+	if !r.ok() {
+		return 0, statusError(opCountAhead, r.status)
+	}
+	var c struct {
+		AheadBy *int `json:"ahead_by"`
+	}
+	if err := decode(opCountAhead, r, &c); err != nil {
+		return 0, err
+	}
+	if c.AheadBy == nil || *c.AheadBy < 0 {
+		return 0, errors.New(opCountAhead + ": the response holds no count")
+	}
+	return *c.AheadBy, nil
 }
 
 // changedOnly compares the trees of commit and parent along the path segs, from the root trees down.

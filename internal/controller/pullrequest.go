@@ -112,6 +112,10 @@ const (
 	// ReasonMergedWithForeignChange: Shadewright's pull request failed a check before it was recorded (#524),
 	// and a person merged it before Shadewright could close it. The merged change holds something no check saw.
 	ReasonMergedWithForeignChange = "MergedWithForeignChange"
+	// ReasonMergeContentUnreadable: the pull request was merged into the target branch the settings name now after
+	// the plan's branch changed (#771), and what the merge brought could not be read within mergeContentWait. It
+	// says nothing about that content: it is not known to be the planned change alone.
+	ReasonMergeContentUnreadable = "MergeContentUnreadable"
 	// ReasonPatchRefused: the typed patcher refused the file on the branch, or the target file at the head of
 	// the target branch while the pull request waits.
 	ReasonPatchRefused = "PatchRefused"

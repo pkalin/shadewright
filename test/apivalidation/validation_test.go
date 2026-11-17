@@ -215,29 +215,40 @@ var _ = Describe("RemediationRequest", func() {
 		}
 	})
 
-	// #678: the start of the wait for a merge commit is set once, so a restart or a write cannot move it.
-	It("keeps mergeCommitAwaitedSince once set", func() {
-		rr := fx.RemediationRequest("default", unique("rr"))
-		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
-		deleteAfterSpec(rr)
-		since := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
-		rr.Status.MergeCommitAwaitedSince = &since
-		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write is allowed")
-		later := metav1.NewTime(since.Add(time.Minute))
-		for name, change := range map[string]func(*v1alpha1.RemediationRequest){
-			"moved":       func(r *v1alpha1.RemediationRequest) { r.Status.MergeCommitAwaitedSince = &later },
-			"cleared":     func(r *v1alpha1.RemediationRequest) { r.Status.MergeCommitAwaitedSince = nil },
-			statusEmptied: func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} },
-		} {
-			got := &v1alpha1.RemediationRequest{}
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
-			change(got)
-			err := k8sClient.Status().Update(ctx, got)
-			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
-			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
-			Expect(err.Error()).To(ContainSubstring("status.mergeCommitAwaitedSince is set once and never changed"), name)
-		}
-	})
+	// #678: the start of the wait for a merge commit is set once, so a restart or a write cannot move it. #771: so
+	// is the start of the reads of what a retargeted merge brought, which the wait for the merge commit therefore
+	// cannot use up either.
+	for field, at := range map[string]func(*v1alpha1.RemediationRequestStatus) **metav1.Time{
+		"mergeCommitAwaitedSince": func(s *v1alpha1.RemediationRequestStatus) **metav1.Time {
+			return &s.MergeCommitAwaitedSince
+		},
+		"mergeContentUnreadSince": func(s *v1alpha1.RemediationRequestStatus) **metav1.Time {
+			return &s.MergeContentUnreadSince
+		},
+	} {
+		It("keeps "+field+" once set", func() {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			since := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+			*at(&rr.Status) = &since
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write is allowed")
+			later := metav1.NewTime(since.Add(time.Minute))
+			for name, change := range map[string]func(*v1alpha1.RemediationRequest){
+				"moved":       func(r *v1alpha1.RemediationRequest) { *at(&r.Status) = &later },
+				"cleared":     func(r *v1alpha1.RemediationRequest) { *at(&r.Status) = nil },
+				statusEmptied: func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} },
+			} {
+				got := &v1alpha1.RemediationRequest{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+				change(got)
+				err := k8sClient.Status().Update(ctx, got)
+				Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+				Expect(err.Error()).To(ContainSubstring("status."+field+" is set once and never changed"), name)
+			}
+		})
+	}
 
 	// ADR-0030 section 1 (#678): the merge receipt is written once and never changed, also by dropping it or the
 	// whole status and writing it again, and its merge commit is the one status.pullRequest records.

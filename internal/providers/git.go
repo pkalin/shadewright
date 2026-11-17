@@ -290,13 +290,14 @@ type GitProvider interface {
 	// failures to find out, never an answer.
 	CheckCommit(ctx context.Context, commit, path string) (BranchState, string, error)
 
-	// CheckFirstParent reports what commit, a merge commit included, changed over its first parent: BranchOneChange
-	// with that parent when commit has at least one parent and the trees of commit and its first parent differ at
-	// most in the content of the regular file at path (same mode), BranchForeign otherwise. On a branch whose
-	// history is kept, the first parent of a merge commit is the head of that branch before the merge, so the
-	// answer covers everything the merge brought to the branch, whatever its other parents carry. It only reads.
-	// Errors are failures to find out, never an answer.
-	CheckFirstParent(ctx context.Context, commit, path string) (BranchState, string, error)
+	// CheckBetween reports whether the trees of commits from and to differ at most in the content of the regular
+	// file at path (same mode, held by both): BranchOneChange when they do, BranchForeign otherwise. It says nothing
+	// about how the two commits are related. It only reads. Errors are failures to find out, never an answer.
+	CheckBetween(ctx context.Context, from, to, path string) (BranchState, error)
+
+	// CountAhead returns how many commits the history of head holds that the history of base does not (git
+	// rev-list --count base..head). It only reads. Errors are failures to find out, never an answer.
+	CountAhead(ctx context.Context, base, head string) (int, error)
 
 	// CheckMerged reports what head, the head of a change request that mergeCommit merged into the target
 	// branch, carried over the target branch as it was before the merge: BranchOneChange with head's parent

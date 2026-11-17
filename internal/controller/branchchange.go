@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -46,7 +47,7 @@ import (
 //     number, the head Shadewright pushed and this request's marker, it is recorded with a receipt that names
 //     that branch (recordRetargetedMerge) when the merge brought that branch the planned change and nothing else
 //     (checkRetargeted), and ends the request NeedsIntervention with MergedWithForeignChange, without a receipt,
-//     when it brought more. A merge into that branch is the only one recorded off the recorded branch: any other
+//     when it brought more, or with MergeContentUnreadable when what it brought could not be read. A merge into that branch is the only one recorded off the recorded branch: any other
 //     base is not read as a merge;
 //  2. on the recorded target branch (status.source): merged with the head Shadewright pushed, the merge is recorded
 //     as any other (recordMergeSeen), with its receipt.
@@ -65,8 +66,8 @@ import (
 // lock while its pull request is open on either branch, and the look that settles the lock (checkHeld, every
 // heldRecheckInterval) reads the pull request by its number on the configured branch (heldOnConfigured), then on
 // the recorded one (lookHeld). A merge that counts there is recorded as above, and the request leaves
-// NeedsIntervention for Merged (then Inconclusive with StalePlanMerged), or ends MergedWithForeignChange; a pull
-// request closed without a merge releases the lock, and the request stays as it is.
+// NeedsIntervention for Merged (then Inconclusive with StalePlanMerged), or ends MergedWithForeignChange (or
+// MergeContentUnreadable); a pull request closed without a merge releases the lock, and the request stays as it is.
 
 // errBranchChangedUnread marks a look at the pull request of a plan whose target branch changed that could not
 // read the pull request: recheck retries it (prBranchUnread) and does not go on to the freshness check, which
@@ -145,13 +146,18 @@ func retargetedMergeCounts(rr *remediationv1alpha1.RemediationRequest, v changeV
 // branch the settings name now, after a person moved it there (#771), read through git, a provider opened for that
 // branch. The merge counts only when what it brought to branch is the planned change and nothing else
 // (checkRetargeted): the head was built on the recorded branch's history and may carry commits branch lacks.
-//   - It brought more (or what it brought could not be shown within the wait of the merge): the request ends
-//     NeedsIntervention with MergedWithForeignChange, with no merge receipt, so nothing after the merge is judged on
-//     content the policy never checked, and with the stale mark, so the circuit breaker counts no outcome
-//     (breakerOutcome) and no revert is proposed (only Failed gets one).
+//   - It brought more, or its shape does not show what it brought: the request ends NeedsIntervention with
+//     MergedWithForeignChange, with no merge receipt, so nothing after the merge is judged on content the policy
+//     never checked, and with the stale mark, so the circuit breaker counts no outcome (breakerOutcome) and no
+//     revert is proposed (only Failed gets one).
+//   - What it brought could not be read within mergeContentWait: the same end with reason MergeContentUnreadable,
+//     which claims nothing about the content.
 //   - The planned change alone: the plan was made for another branch, so it is stale whatever the check at the
 //     merge finds: when that check finds nothing (the settings changed back meanwhile), the plan gets the stale mark
 //     with reason SettingsChanged all the same, so the outcome is capped (StalePlanMerged). The receipt names branch.
+//
+// Both ends without a receipt mark the pull request merged, which releases the lock on the target: the merge is in
+// Git, nothing of the request is left open, and a person reviews what the merge brought.
 //
 // A request still waiting for review (watchStep) and one stopped with TargetBranchChanged (checkHeld) both come
 // here. It returns errStopped once the write that ends the request went through, errMergeCommitPending while the
@@ -173,7 +179,7 @@ func (r *RemediationRequestReconciler) recordRetargetedMerge(ctx context.Context
 	if ref != nil {
 		markStaleForBranch(rr, branch)
 		log.Info("The pull request of RemediationRequest was merged into the target branch the settings name now "+
-			"with more than the planned change", "check", ref.reason)
+			"without being shown to bring the planned change alone", "reason", ref.reason)
 		return r.mergedForeignInto(ctx, rr, branch, ref)
 	}
 	if err := r.checkAtMerge(ctx, rr); err != nil {
@@ -209,127 +215,190 @@ func markedStale(rr *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // mergedForeignInto ends a request whose pull request was merged into branch, the target branch the settings name
-// now, with more than the planned change (ref, checkRetargeted): NeedsIntervention with MergedWithForeignChange, the
-// pull request marked merged, so the lock on the target is released, and no merge receipt. The caller has set the
-// stale mark; the breaker's watermark is set again from it, as a request already in NeedsIntervention keeps its
-// phase (setPhase does not run it then).
+// now, without being shown to bring the planned change alone (ref, checkRetargeted): NeedsIntervention with
+// ref.reason, MergedWithForeignChange or MergeContentUnreadable, the pull request marked merged, so the lock on the
+// target is released, and no merge receipt. The caller has set the stale mark; the breaker's watermark is set again
+// from it, as a request already in NeedsIntervention keeps its phase (setPhase does not run it then).
 func (r *RemediationRequestReconciler) mergedForeignInto(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	branch remediationv1alpha1.GitBranch, ref *renderRefusal) error {
 	message := fmt.Sprintf("Pull request #%d was merged into %s, the target branch the settings name now, and the "+
 		"merge did not bring the planned change alone: %s. Nothing after the merge is checked; review what the merge "+
 		"brought", rr.Status.PullRequest.Number, branch, ref.message)
-	markClosed(rr, ReasonChangeRequestMerged, "was merged into "+string(branch)+" with more than the planned change")
+	if ref.reason == ReasonMergeContentUnreadable {
+		message = fmt.Sprintf("Pull request #%d was merged into %s, the target branch the settings name now, and what "+
+			"the merge brought could not be read: %s. Nothing after the merge is checked; review what the merge brought",
+			rr.Status.PullRequest.Number, branch, ref.message)
+	}
+	markClosed(rr, ReasonChangeRequestMerged, "was merged into "+string(branch)+
+		" without being shown to bring the planned change alone")
 	// stop sets the same condition; set first, so the breaker's watermark below and in setPhase reads it.
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type: remediationv1alpha1.ConditionApproved, Status: metav1.ConditionFalse,
-		Reason: ReasonMergedWithForeignChange, Message: message, ObservedGeneration: rr.Generation,
+		Reason: ref.reason, Message: message, ObservedGeneration: rr.Generation,
 	})
 	if rr.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention {
 		classifyBreaker(rr)
 	}
-	err := r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonMergedWithForeignChange, message)
+	err := r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ref.reason, message)
 	if err != nil && !errors.Is(err, errStopped) {
 		return fmt.Errorf("%w: %w", errMergeCheck, err)
 	}
 	return err
 }
 
-// mergedForeignStale reports whether rr ended NeedsIntervention with MergedWithForeignChange while its plan carried
-// the stale mark: a pull request merged into the target branch the settings name now with more than the planned
-// change (#771). Neither the change nor its failure is Shadewright's to count, as for any merged stale plan.
+// mergedForeignStale reports whether rr ended NeedsIntervention with MergedWithForeignChange or
+// MergeContentUnreadable while its plan carried the stale mark: a pull request merged into the target branch the
+// settings name now that was not shown to bring the planned change alone (#771). Neither the change nor its failure
+// is Shadewright's to count, as for any merged stale plan.
 func mergedForeignStale(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
-	return rr.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention && markedStale(rr) &&
-		c != nil && c.Reason == ReasonMergedWithForeignChange
+	return rr.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention && markedStale(rr) && c != nil &&
+		(c.Reason == ReasonMergedWithForeignChange || c.Reason == ReasonMergeContentUnreadable)
 }
 
+// mergeContentWait is how long checkRetargeted retries reads of what a merge into the target branch the settings
+// name now brought, from status.mergeContentUnreadSince, before the request ends MergeContentUnreadable.
+const mergeContentWait = mergeCommitWait
+
 // checkRetargeted reports whether the merge of cr into branch (git is opened for it) brought that branch the
-// planned change and nothing else (#771). It compares the merge commit with its first parent, the head of branch
-// before the merge: their trees differ at most in the plan's target file (CheckFirstParent), and that file is
-// byte for byte the planned change of the file at the parent. And it checks what took the head in:
-//   - a merge commit (two parents) must have the head Shadewright pushed as its second parent; whatever that head's
-//     history carries shows in the comparison with the first parent;
-//   - a squash or rebase merge (one parent) must come from a head that carries over branch only Shadewright's own
-//     commits, each changing the target file alone, on a commit of branch (CheckChain): a rebase of several commits
-//     shows only the last of them in the comparison with its parent, so a head that carries commits of the recorded
-//     branch that branch lacks never counts, also when the last one is the planned change.
+// planned change and nothing else (#771, retargetedContent). The answer is nil when the merge counts, a
+// *renderRefusal otherwise: reason MergedWithForeignChange when the merge brought more or its shape does not show
+// what it brought, MergeContentUnreadable when the reads kept failing. A merge commit that is not a full commit ID
+// cannot be checked (MergedWithForeignChange).
 //
-// A merge commit that is not a full commit ID cannot be checked. The answer is nil when the merge counts, a
-// *renderRefusal saying what it brought otherwise. A read that fails is retried within the wait of the merge (the
-// recorded status.mergeCommitAwaitedSince, started at the first failure as for the check at the merge); once that
-// wait is over, what the merge brought was not shown, and the answer is a refusal. It reads Git only: Parents,
-// CheckChain for a single parent, CheckFirstParent and two ReadFile calls, about eight to fifteen calls of the
-// GitHub API once per merge.
+// A read that fails is an error for a retry. The first failure records its start, on the executor's clock, in
+// status.mergeContentUnreadSince (set once, never moved: its own start, so the wait for the merge commit cannot
+// have used it up), and the reads are retried until mergeContentWait from it is over; a failure after that is the
+// refusal MergeContentUnreadable. A failed write of the start is an error for a retry.
 func (r *RemediationRequestReconciler) checkRetargeted(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, branch remediationv1alpha1.GitBranch) (
 	*renderRefusal, error) {
 	if !shaPattern.MatchString(cr.MergeCommit) {
-		return &renderRefusal{reason: ReasonBranchDiverged, message: "the Git host reported no full merge commit " +
-			"ID, so what the merge brought cannot be checked"}, nil
+		return &renderRefusal{reason: ReasonMergedWithForeignChange, message: "the Git host reported no full merge " +
+			"commit ID, so what the merge brought cannot be checked"}, nil
 	}
 	ref, err := retargetedContent(ctx, git, rr, cr, branch)
 	if err == nil {
 		return ref, nil
 	}
-	if rr.Status.MergeCommitAwaitedSince == nil && ctx.Err() == nil {
-		if werr := r.startMergeWait(ctx, rr); werr != nil {
+	if ctx.Err() != nil {
+		return nil, err
+	}
+	if rr.Status.MergeContentUnreadSince == nil {
+		if werr := r.startContentWait(ctx, rr); werr != nil {
 			return nil, errors.Join(err, werr)
 		}
 	}
-	if since := rr.Status.MergeCommitAwaitedSince; since == nil || mergeCommitWaitRemaining(since.Time, r.now()) > 0 {
+	if mergeCommitWaitRemaining(rr.Status.MergeContentUnreadSince.Time, r.now()) > 0 {
+		logf.FromContext(ctx).Info("Could not read what the merge of the pull request of RemediationRequest brought; "+
+			"tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 		return nil, err
 	}
 	logf.FromContext(ctx).Info("Could not read what the merge of the pull request of RemediationRequest brought "+
-		"within the wait for the merge", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-	return &renderRefusal{reason: ReasonBranchDiverged, message: "what the merge brought could not be read within " +
-		"the wait for the merge, so it is not shown to be the planned change alone"}, nil
+		"within the wait", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+	return &renderRefusal{reason: ReasonMergeContentUnreadable, message: "the reads of the Git host kept failing " +
+		"for " + mergeContentWait.String()}, nil
 }
 
-// retargetedContent is checkRetargeted's reads (see there). An error is a failed read, never an answer.
+// startContentWait records the start of the reads of what a retargeted merge brought (checkRetargeted) in
+// status.mergeContentUnreadSince, alone in a patch with the resourceVersion read, as startMergeWait does.
+func (r *RemediationRequestReconciler) startContentWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	base := rr.DeepCopy()
+	upd := rr.DeepCopy()
+	t := metav1.NewTime(r.now().Truncate(time.Second))
+	upd.Status.MergeContentUnreadSince = &t
+	if err := r.Status().Patch(ctx, upd, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("record the start of the reads of the merge of RemediationRequest %s/%s: %w", rr.Namespace,
+			rr.Name, err)
+	}
+	rr.Status.MergeContentUnreadSince = upd.Status.MergeContentUnreadSince
+	rr.ResourceVersion = upd.ResourceVersion
+	return nil
+}
+
+// retargetedContent is checkRetargeted's reads. It compares what the merge brought as a whole, whatever the merge
+// method: before, the head of branch right before the merge, against the merge result, cr.MergeCommit. Their
+// trees must differ at most in the plan's target file (CheckBetween), the file at before must hold the plan's
+// previous value, and the file at the merge result must be byte for byte the planned change of it. before is found
+// from the shape of the merge:
+//   - a merge commit (two parents): its second parent must be the head Shadewright pushed, and before is its first
+//     parent. One Parents call.
+//   - one parent, a squash or a rebase merge: the merge added n commits on top of before, one for a squash and one
+//     per replayed commit for a rebase, and the head carries those n over before. n is taken as the number of
+//     commits the head's history holds that the merge result's does not (CountAhead): a rebase replays exactly
+//     those, a squash adds one of them. before is found by walking n first parents from the merge result, each
+//     commit with one parent. For a squash with n above one the walk goes past before, and the comparison then
+//     covers commits made on branch before the merge as well: it counts the merge only when that whole range is
+//     the planned change alone, which a branch that moved since the head's base seldom is. n must be from
+//     one to MaxChainCommits, the most commits a Shadewright branch carries. Parents, CountAhead, then n-1 more
+//     Parents calls.
+//
+// A merge result equal to the head (the head taken in as it is) shows no before, and every other shape is refused
+// too. The comparison then reads two trees per directory of the path and the file at both commits: about eight to
+// sixteen calls of the GitHub API, once per merge. An error is a failed read, never an answer; every unknown shape
+// is a refusal, so nothing unknown counts the merge.
 func retargetedContent(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, branch remediationv1alpha1.GitBranch) (*renderRefusal, error) {
+	foreign := func(message string) (*renderRefusal, error) {
+		return &renderRefusal{reason: ReasonMergedWithForeignChange, message: message}, nil
+	}
 	path := string(rr.Status.Source.Path)
+	if cr.MergeCommit == cr.HeadSHA {
+		return foreign("the head was taken into " + string(branch) + " as it is, so what the branch held before " +
+			"the merge is not known")
+	}
 	parents, err := git.Parents(ctx, cr.MergeCommit)
 	if err != nil {
 		return nil, freshness.WrapProvider("read the parents of the merge commit", err)
 	}
+	var before string
 	switch {
 	case len(parents) == 2 && parents[1] == cr.HeadSHA:
+		before = parents[0]
 	case len(parents) == 2:
-		return &renderRefusal{reason: ReasonBranchDiverged, message: "the merge commit does not take in the head " +
-			"Shadewright pushed"}, nil
+		return foreign("the merge commit does not take in the head Shadewright pushed")
 	case len(parents) == 1:
-		state, err := git.CheckChain(ctx, cr.HeadSHA, path, providers.MaxChainCommits)
+		added, err := git.CountAhead(ctx, cr.MergeCommit, cr.HeadSHA)
 		switch {
 		case err != nil:
-			return nil, freshness.WrapProvider("check what the pull request carried over "+string(branch), err)
-		case state != providers.BranchOneChange:
-			return &renderRefusal{reason: ReasonBranchDiverged, message: "the pull request carried commits over " +
-				string(branch) + " besides Shadewright's change of the target file"}, nil
+			return nil, freshness.WrapProvider("count the commits the pull request carried over "+string(branch), err)
+		case added < 1 || added > providers.MaxChainCommits:
+			return foreign(fmt.Sprintf("the pull request carried %d commits over %s, not one to %d", added, branch,
+				providers.MaxChainCommits))
+		}
+		before = parents[0]
+		for range added - 1 {
+			up, err := git.Parents(ctx, before)
+			switch {
+			case err != nil:
+				return nil, freshness.WrapProvider("read the parents of a commit the merge added", err)
+			case len(up) != 1:
+				return foreign("a commit below the merge result on " + string(branch) + " does not have one parent, " +
+					"so what the branch held before the merge is not known")
+			}
+			before = up[0]
 		}
 	default:
-		return &renderRefusal{reason: ReasonBranchDiverged, message: "the merge commit has an unexpected number of " +
-			"parents"}, nil
+		return foreign("the merge commit has an unexpected number of parents")
 	}
-	state, base, err := git.CheckFirstParent(ctx, cr.MergeCommit, path)
+	state, err := git.CheckBetween(ctx, before, cr.MergeCommit, path)
 	switch {
 	case err != nil:
 		return nil, freshness.WrapProvider("check what the merge brought to "+string(branch), err)
-	case state != providers.BranchOneChange || base == "":
-		return &renderRefusal{reason: ReasonBranchDiverged, message: "the merge changed more of " + string(branch) +
-			" than the target file"}, nil
+	case state != providers.BranchOneChange:
+		return foreign("the merge changed more of " + string(branch) + " than the target file")
 	}
 	to, err := git.ReadFile(ctx, cr.MergeCommit, path, providers.MaxFileBytes)
 	if err != nil {
 		return nil, freshness.WrapProvider("read the target file at the merge commit", err)
 	}
-	from, err := git.ReadFile(ctx, base, path, providers.MaxFileBytes)
+	from, err := git.ReadFile(ctx, before, path, providers.MaxFileBytes)
 	if err != nil {
 		return nil, freshness.WrapProvider("read the target file before the merge", err)
 	}
 	if want, state, err := planned(from.Data, rr); err != nil || state != fileHoldsPrevious || !bytes.Equal(want, to.Data) {
-		return &renderRefusal{reason: ReasonBranchDiverged, message: "the target file the merge left on " +
-			string(branch) + " is not exactly the planned change of the file it held before"}, nil
+		return foreign("the target file the merge left on " + string(branch) + " is not exactly the planned change " +
+			"of the file it held before")
 	}
 	return nil, nil
 }
@@ -357,15 +426,23 @@ func branchChangedOpenRead(rr *remediationv1alpha1.RemediationRequest, err error
 }
 
 // stoppedForBranchChange reports whether rr stopped in NeedsIntervention because the target branch of its plan's
-// repository changed (PlanFresh False with reason TargetBranchChanged, endFreshness), with its pull request and its
-// source recorded. Such a request keeps the target lock while its pull request is open on the recorded or on the
-// configured branch, and the read that settles the lock records a merge that counts (#771): heldOnConfigured,
-// lookHeld and checkHeld.
+// repository changed, with its pull request and its source recorded. Every stop with reason TargetBranchChanged
+// counts: the freshness check's (endFreshness, PlanFresh False with that reason) and a step's (retry, stop: Approved
+// False with that reason once a pull request is recorded, as after the recovery of a handoff, retryRecovery). Such a
+// request keeps the target lock while its pull request is open on the recorded or on the configured branch, and the
+// read that settles the lock records a merge that counts (#771): heldOnConfigured, lookHeld and checkHeld.
 func stoppedForBranchChange(rr *remediationv1alpha1.RemediationRequest) bool {
-	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
-	return rr.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention && c != nil &&
-		c.Status == metav1.ConditionFalse && c.Reason == reasonTargetBranchChanged &&
-		rr.Status.PullRequest != nil && rr.Status.Source != nil
+	if rr.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention || rr.Status.PullRequest == nil ||
+		rr.Status.Source == nil {
+		return false
+	}
+	for _, t := range []string{remediationv1alpha1.ConditionPlanFresh, remediationv1alpha1.ConditionApproved} {
+		c := meta.FindStatusCondition(rr.Status.Conditions, t)
+		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonTargetBranchChanged {
+			return true
+		}
+	}
+	return false
 }
 
 // heldOnConfigured is checkHeld's first read for a request stoppedForBranchChange whose repository entry still
@@ -484,7 +561,8 @@ func (r *RemediationRequestReconciler) recordHeldMerge(ctx context.Context, rr *
 // is looked at again when what is left of its wait is over; any other failure (a read of the Git host, the check
 // at the merge, a status write) is retried after the delay the host asked for or with the error backoff, with
 // nothing recorded. The lock is kept meanwhile. The waits for the merge commit and for the check at the merge are
-// bounded by mergeCommitWait (status.mergeCommitAwaitedSince); a read of the pull request itself that keeps failing
+// bounded by mergeCommitWait (status.mergeCommitAwaitedSince), the reads of what a retargeted merge brought by
+// mergeContentWait (status.mergeContentUnreadSince); a read of the pull request itself that keeps failing
 // shows in condition PullRequestUnreadable.
 func (r *RemediationRequestReconciler) followHeldMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	record func(context.Context) error) (reconcile.Result, bool, error) {

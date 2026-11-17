@@ -619,33 +619,71 @@ func TestGitCommentChangeRequestContract(t *testing.T) {
 	})
 }
 
-// #771: CheckFirstParent judges a merge commit against its first parent, and a view's CheckChain judges a head
-// against the view's target branch.
-func TestGitCheckFirstParentAndViewChain(t *testing.T) {
+// retargetShapes is a repository whose branch release forked from main and has a commit of its own, and a head
+// on main's later commit that changes path alone.
+func retargetShapes(t *testing.T) (g *fake.Git, path, base, extra, head, release string) {
+	t.Helper()
 	ctx := t.Context()
-	const path = "apps/a.yaml"
-	g := fake.NewGit("main", map[string][]byte{path: []byte("a"), "README": []byte("r")})
-	base, _ := g.BranchHead(ctx, "main")
+	path = "apps/a.yaml"
+	g = fake.NewGit("main", map[string][]byte{path: []byte("a"), "README": []byte("r")})
+	base, _ = g.BranchHead(ctx, "main")
 	if err := g.CreateBranch(ctx, "release", base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Push("release", "NOTES", []byte("n")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := g.Push("main", "README", []byte("r2")); err != nil {
 		t.Fatal(err)
 	}
-	extra, _ := g.BranchHead(ctx, "main")
+	extra, _ = g.BranchHead(ctx, "main")
 	if err := g.CreateBranch(ctx, "shadewright/x", extra); err != nil {
 		t.Fatal(err)
 	}
-	head, err := g.CommitFile(ctx, "shadewright/x", extra, providers.FileChange{Path: path, Content: []byte("b")})
+	var err error
+	head, err = g.CommitFile(ctx, "shadewright/x", extra, providers.FileChange{Path: path, Content: []byte("b")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	release, _ = g.BranchHead(ctx, "release")
+	return g, path, base, extra, head, release
+}
+
+// #771: a view's CheckChain judges a head against the view's target branch; CheckBetween compares two trees;
+// CountAhead counts the head's commits the base lacks.
+func TestGitRetargetedReads(t *testing.T) {
+	ctx := t.Context()
+	g, path, base, extra, head, release := retargetShapes(t)
 	if got, err := g.ForTarget("release").CheckChain(ctx, head, path, 1); err != nil || got != providers.BranchForeign {
 		t.Errorf("CheckChain over release = %v, %v; want foreign: the head carries a commit release lacks", got, err)
 	}
 	if got, err := g.CheckChain(ctx, head, path, 1); err != nil || got != providers.BranchOneChange {
 		t.Errorf("CheckChain over main = %v, %v; want one change", got, err)
 	}
+	if got, err := g.CheckBetween(ctx, extra, head, path); err != nil || got != providers.BranchOneChange {
+		t.Errorf("CheckBetween(extra, head) = %v, %v; want one change", got, err)
+	}
+	if got, err := g.CheckBetween(ctx, base, head, path); err != nil || got != providers.BranchForeign {
+		t.Errorf("CheckBetween(base, head) = %v, %v; want foreign: README differs too", got, err)
+	}
+	if _, err := g.CheckBetween(ctx, strings.Repeat("0", 40), head, path); !providers.IsNotFound(err) {
+		t.Errorf("CheckBetween of an unknown commit = %v, want not found", err)
+	}
+	if got, err := g.CountAhead(ctx, release, head); err != nil || got != 2 {
+		t.Errorf("CountAhead(release, head) = %v, %v; want 2", got, err)
+	}
+	if got, err := g.CountAhead(ctx, head, release); err != nil || got != 1 {
+		t.Errorf("CountAhead(head, release) = %v, %v; want 1", got, err)
+	}
+	if _, err := g.CountAhead(ctx, strings.Repeat("0", 40), head); !providers.IsNotFound(err) {
+		t.Errorf("CountAhead of an unknown commit = %v, want not found", err)
+	}
+}
+
+// #771: RebaseMerge replays each commit of the head the base lacks on top of the base.
+func TestGitRebaseMerge(t *testing.T) {
+	ctx := t.Context()
+	g, path, _, _, _, release := retargetShapes(t)
 	cr, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: "shadewright/x", BaseBranch: "main"})
 	if err != nil {
 		t.Fatal(err)
@@ -653,18 +691,33 @@ func TestGitCheckFirstParentAndViewChain(t *testing.T) {
 	if err := g.SetBase(cr.Number, "release"); err != nil {
 		t.Fatal(err)
 	}
-	merge, err := g.MergeWithCommit(cr.Number)
+	merge, err := g.RebaseMerge(cr.Number)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, parent, err := g.CheckFirstParent(ctx, merge, path); err != nil || got != providers.BranchForeign || parent != "" {
-		t.Errorf("CheckFirstParent(merge) = %v, %q, %v; want foreign: it brought README too", got, parent, err)
+	if got, _ := g.BranchHead(ctx, "release"); got != merge {
+		t.Errorf("release = %s, want the last replayed commit %s", got, merge)
 	}
-	if got, parent, err := g.CheckFirstParent(ctx, head, path); err != nil || got != providers.BranchOneChange ||
-		parent != extra {
-		t.Errorf("CheckFirstParent(head) = %v, %q, %v; want the one change on %s", got, parent, err, extra)
+	first, err := g.Parents(ctx, merge)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("Parents(merge) = %v, %v", first, err)
 	}
-	if _, _, err := g.CheckFirstParent(ctx, strings.Repeat("0", 40), path); !providers.IsNotFound(err) {
-		t.Errorf("CheckFirstParent of an unknown commit = %v, want not found", err)
+	before, err := g.Parents(ctx, first[0])
+	if err != nil || len(before) != 1 || before[0] != release {
+		t.Fatalf("Parents(first replay) = %v, %v; want the head of release before the merge", before, err)
+	}
+	if got, err := g.CheckBetween(ctx, first[0], merge, path); err != nil || got != providers.BranchOneChange {
+		t.Errorf("the last replay = %v, %v; want the change of the file alone", got, err)
+	}
+	for name, want := range map[string]string{"README": "r2", "NOTES": "n", path: "b"} {
+		if f, err := g.ReadFile(ctx, merge, name, 100); err != nil || string(f.Data) != want {
+			t.Errorf("%s after the rebase = %q, %v; want %q", name, f.Data, err, want)
+		}
+	}
+	if got := g.ChangeRequests()[0]; got.State != providers.ChangeRequestMerged || got.MergeCommit != merge {
+		t.Errorf("change request after the rebase = %+v", got)
+	}
+	if _, err := g.RebaseMerge(cr.Number); !errors.Is(err, providers.ErrConflict) {
+		t.Errorf("a second rebase of a merged change request = %v, want a conflict", err)
 	}
 }

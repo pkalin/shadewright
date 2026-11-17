@@ -19,7 +19,10 @@ package providers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -149,6 +152,74 @@ func cleanLiteral(lit string) (string, bool) {
 	return strings.TrimSuffix(b.String(), "\n"), true
 }
 
+// controlPaths returns where the decoded strings of the JSON text raw hold a removed control, in document
+// order. A document that does not parse ends the list with an entry of empty path at the point it stops, so a
+// control past that point is never taken for one in a place the caller accepts.
+func controlPaths(raw []byte) []ControlPath {
+	type frame struct {
+		object, wantKey bool
+		key             string
+		index           int
+	}
+	var stack []frame
+	var out []ControlPath
+	path := func() []string {
+		p := make([]string, 0, len(stack))
+		for _, f := range stack {
+			if f.object {
+				p = append(p, f.key)
+			} else {
+				p = append(p, strconv.Itoa(f.index))
+			}
+		}
+		return p
+	}
+	// valueDone moves the innermost container past the value that just ended.
+	valueDone := func() {
+		if len(stack) == 0 {
+			return
+		}
+		top := &stack[len(stack)-1]
+		if top.object {
+			top.wantKey = true
+		} else {
+			top.index++
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) && len(stack) == 0 {
+			return out
+		}
+		if err != nil {
+			return append(out, ControlPath{})
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				stack = append(stack, frame{object: d == '{', wantKey: d == '{'})
+			default:
+				stack = stack[:len(stack)-1]
+				valueDone()
+			}
+			continue
+		}
+		s, isString := tok.(string)
+		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].wantKey {
+			stack[n-1].key, stack[n-1].wantKey = StripControls(s), false
+			if strings.ContainsFunc(s, removedControl) {
+				out = append(out, ControlPath{Path: path(), Key: true})
+			}
+			continue
+		}
+		if isString && strings.ContainsFunc(s, removedControl) {
+			out = append(out, ControlPath{Path: path()})
+		}
+		valueDone()
+	}
+}
+
 // WithoutControls returns c with [StripControls] applied to every model-derived string the analysis loop reads:
 // the content (as JSON, [StripControlsJSON]: the loop decodes it as the structured result), and each tool
 // call's ID, name and arguments (as JSON). It is applied once, where a reply of any provider enters the loop,
@@ -157,9 +228,18 @@ func cleanLiteral(lit string) (string, bool) {
 // [ToolCall.HeldControls]: the loop refuses it instead of running a value the model did not write. Model is
 // left as it is: every adapter accepts only a name of a fixed ASCII pattern, and removing characters could
 // turn a refused name into the configured one. ProviderBlocks is opaque and goes back to its adapter unchanged.
+// Where the content held a control is listed in [Completion.ContentControls]: the content's schema is the
+// caller's, which refuses a control in a field that is not free text instead of reading the cleaned value.
 // c is not changed in place; a reply without controls comes back with its slices shared.
 func WithoutControls(c Completion) Completion {
-	c.Content = string(StripControlsJSON([]byte(c.Content)))
+	if content, held := cleanJSON([]byte(c.Content)); held {
+		paths := controlPaths([]byte(c.Content))
+		if len(paths) == 0 {
+			// cleanJSON found a control the walk did not place: fail closed at the root.
+			paths = []ControlPath{{}}
+		}
+		c.Content, c.ContentControls = string(content), append(slices.Clip(c.ContentControls), paths...)
+	}
 	var calls []ToolCall
 	for i, tc := range c.ToolCalls {
 		args, argsHeld := cleanJSON(tc.Arguments)

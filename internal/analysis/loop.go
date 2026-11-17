@@ -432,7 +432,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		shownContext += scalerNotReadyNotice
 	}
 	if hint != "" {
-		shownContext += hintMessage(r.redact(hint))
+		shownContext += hintMessage(incidentcontext.Redact(r.redact, hint))
 	}
 	r.contextText = shownContext
 
@@ -633,7 +633,7 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 			code = retryToolCall
 			continue
 		}
-		res, action, err := decodeResult(c.Content)
+		res, action, err := decodeReply(c)
 		if err == nil {
 			return res, action, "", nil
 		}
@@ -643,6 +643,16 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 		}
 	}
 	return nil, nil, "", nil
+}
+
+// decodeReply decodes the structured result of a reply ([decodeResult]). A reply that held a control
+// character anywhere but in a free-text field of the result is refused as not matching the schema
+// ([controlsRefused], #852), before its cleaned text is read.
+func decodeReply(c providers.Completion) (*Result, *remediationv1alpha1.Action, error) {
+	if controlsRefused(c.ContentControls) {
+		return nil, nil, errInvalid
+	}
+	return decodeResult(c.Content)
 }
 
 // escalate calls the escalation model with the read tools, bound to the Incident's namespace, for at most
@@ -678,7 +688,7 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 			return nil, nil, reason, err
 		}
 		if len(c.ToolCalls) == 0 {
-			res, action, err := decodeResult(c.Content)
+			res, action, err := decodeReply(c)
 			if err != nil {
 				return nil, nil, ReasonInvalidOutput, nil
 			}

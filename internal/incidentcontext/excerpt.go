@@ -31,14 +31,24 @@ type RedactFunc func(string) string
 
 // Redact redacts s with r as it was read, makes the result valid UTF-8 (each invalid run becomes one "?", so
 // it never grows) and redacts it again: no character is replaced before redaction has seen the text (#840).
+// Then the text is made what the model is shown: every control character but newline and tab is removed
+// ([providers.StripControls], #852), the set a model's text is read without, so a quote copied from the
+// context and cleaned the same way still matches it; text that lost a control is redacted once more, since
+// removing one can join the parts of a key ("pass" ESC "word"). Only redacted text is cleaned: redaction
+// always decides on the text as it was read first.
 func Redact(r RedactFunc, s string) string {
-	return r(strings.ToValidUTF8(r(s), "?"))
+	v := r(strings.ToValidUTF8(r(s), "?"))
+	if c := providers.StripControls(v); c != v {
+		return r(c)
+	}
+	return v
 }
 
 // Value redacts one value from the cluster for a result line: a value longer than maxValueBytes once redacted
-// is left out whole, never cut, and replaced by a note of its size; control characters and Unicode line and
-// paragraph separators become spaces, so a value never adds lines of its own, nor anything a reader could
-// take for a line break. Package internal/tools shows values the same way.
+// is left out whole, never cut, and replaced by a note of its size. [Redact] has removed its control
+// characters but newline and tab; those two and the Unicode line and paragraph separators become spaces, so a
+// value never adds lines of its own, nor anything a reader could take for a line break. Package
+// internal/tools shows values the same way.
 func Value(r RedactFunc, s string) string {
 	v := Redact(r, s)
 	if len(v) > maxValueBytes {

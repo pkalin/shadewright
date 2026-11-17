@@ -98,6 +98,20 @@ type Completion struct {
 	// next request of the conversation (Message.ProviderBlocks), for example thinking blocks. The caller never
 	// reads, logs or stores it. Empty without tool calls and for adapters that need nothing back.
 	ProviderBlocks Opaque
+	// ContentControls lists, as set by [WithoutControls], where Content held a control character it removed:
+	// one entry for each decoded string or object key of the JSON that held one. The caller, which knows the
+	// schema of the content, decides what a control in each place means (#852). Adapters leave it empty.
+	ContentControls []ControlPath
+}
+
+// ControlPath is where a decoded string of a JSON document held a control character ([WithoutControls]).
+type ControlPath struct {
+	// Path is the names of the members and the decimal indexes of the array elements from the root to the
+	// string, each without its control characters. It is empty for a string at the root, and for a control
+	// whose place could not be told because the document does not parse.
+	Path []string
+	// Key says the string is the name of a member, the last element of Path, not its value.
+	Key bool
 }
 
 // OutputBounder is implemented by a ModelProvider that may bill more output tokens for a request than its

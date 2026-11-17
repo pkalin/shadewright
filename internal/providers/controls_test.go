@@ -670,8 +670,9 @@ func anyString(v any, f func(string) bool) bool {
 // WithoutControls treats it. A field added to Completion or ToolCall that can hold a string, bytes or anything
 // that may contain them fails TestWithoutControlsCoversEveryField until it is listed here.
 const (
-	kindJSON = "json"
-	kindText = "text"
+	kindJSON   = "json"
+	kindText   = "text"
+	kindExempt = "exempt"
 )
 
 var completionFields = map[string]string{
@@ -682,10 +683,13 @@ var completionFields = map[string]string{
 	// Model is not cleaned: each adapter accepts only a name matching a fixed ASCII pattern (validModel),
 	// and the loop compares it with the configured name. Removing characters could turn a refused name
 	// into the configured one.
-	"Model": "exempt",
+	"Model": kindExempt,
 	// ProviderBlocks is opaque: the loop never reads, logs or stores it, and hands it back unchanged to the
 	// adapter that made it (the thinking blocks the Anthropic API signs).
-	"ProviderBlocks": "exempt",
+	"ProviderBlocks": kindExempt,
+	// ContentControls is written by WithoutControls itself: member names without their controls and decimal
+	// indexes. An adapter leaves it empty.
+	"ContentControls.Path": kindExempt,
 }
 
 // textPaths walks t and returns the path of every field that is not a number or a bool.
@@ -845,6 +849,50 @@ func TestWithoutControlsMarksToolCallsThatHeldControls(t *testing.T) {
 		}
 		if got.ToolCalls[1].HeldControls {
 			t.Errorf("%s: the clean call beside it is marked", tc.name)
+		}
+	}
+}
+
+// WithoutControls says where the content held each control it removed, so the caller can refuse a control in
+// a field its schema does not declare free text: the path of every string and key that held one, in each form
+// JSON writes one, with the members and indexes that lead to it, and nothing for one that only looks like an
+// escape or holds newline and tab. Each content is generated from a known document, so the expected paths
+// are known by construction.
+func TestWithoutControlsPlacesContentControls(t *testing.T) {
+	p := func(key bool, path ...string) ControlPath { return ControlPath{Path: path, Key: key} }
+	for _, tc := range []struct {
+		name, content string
+		want          []ControlPath
+	}{
+		{"clean", `{"a":"x","b":["y"]}`, nil},
+		{"escaped backslash", `{"a":"\\u001b"}`, nil},
+		{"newline and tab", `{"a":"x\ny\tz"}`, nil},
+		{"value", `{"a":"x\u001by"}`, []ControlPath{p(false, "a")}},
+		{"raw C1", `{"a":"x` + "\u0085" + `"}`, []ControlPath{p(false, "a")}},
+		{"raw DEL", `{"a":"x` + "\x7f" + `"}`, []ControlPath{p(false, "a")}},
+		{"key", `{"a\u0007":"x"}`, []ControlPath{p(true, "a")}},
+		{"key and value", `{"a\u0007":"\b"}`, []ControlPath{p(true, "a"), p(false, "a")}},
+		{"array element", `{"a":["x","y\u001b",1,{"b":"\f"}]}`, []ControlPath{p(false, "a", "1"), p(false, "a", "3", "b")}},
+		{"after a nested value", `{"a":{"b":[1,[2]],"c":null},"d":"\r"}`, []ControlPath{p(false, "d")}},
+		{"nested arrays", `[[],["\u009b"]]`, []ControlPath{p(false, "1", "0")}},
+		{"root string", `"\u001b"`, []ControlPath{p(false)}},
+		{"does not parse", `{"a":"\u001b"`, []ControlPath{p(false, "a"), p(false)}},
+		{"a second document", `{} "\u001b"`, []ControlPath{p(false)}},
+	} {
+		content := tc.content
+		got := WithoutControls(Completion{Content: content})
+		for i := range got.ContentControls {
+			if len(got.ContentControls[i].Path) == 0 {
+				got.ContentControls[i].Path = nil
+			}
+		}
+		if !reflect.DeepEqual(got.ContentControls, tc.want) {
+			t.Errorf("%s: %s placed at %+v, want %+v", tc.name, content, got.ContentControls, tc.want)
+		}
+		for _, cp := range got.ContentControls {
+			if hasRemovedControl(strings.Join(cp.Path, "/")) {
+				t.Errorf("%s: path %q holds a control", tc.name, cp.Path)
+			}
 		}
 	}
 }

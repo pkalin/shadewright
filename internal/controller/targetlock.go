@@ -166,6 +166,28 @@ func heldForVerification(rr *remediationv1alpha1.RemediationRequest, verify bool
 		(rr.Status.Phase == remediationv1alpha1.PhaseMerged && rr.Status.MergeReceipt != nil)
 }
 
+// settleStopException handles checkHeld's two exceptions to the rule per verdict, once a read worked: a request
+// stoppedForBranchChange whose own pull request is found merged with the head Shadewright pushed moves on to
+// Merged (#771), and a request cancelledForIncident whose own pull request is found open or merged is settled by
+// settleCancelled (#794). The phases differ (NeedsIntervention, Cancelled), so at most one applies. done is false
+// when neither does, and checkHeld goes on with the rule per verdict.
+func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) (res reconcile.Result, done bool, err error) {
+	if pr := rr.Status.PullRequest; stoppedForBranchChange(rr) && v.state == changeMerged && v.pr.Number == pr.Number &&
+		v.pr.HeadSHA == pr.HeadSHA {
+		// Merged into the recorded branch, with the head Shadewright pushed, after the request stopped (#771).
+		cr := v.pr
+		res, _, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error { return r.recordHeldMerge(ctx, rr, cr) })
+		return res, true, err
+	}
+	if reason, ok := cancelledForIncident(rr); ok && (v.state == changeOpen || v.state == changeMerged) {
+		// Its own pull request, from an open whose answer was lost: closed, or its merge followed (settleCancelled).
+		res, err := r.settleCancelled(ctx, rr, v, reason)
+		return res, true, err
+	}
+	return reconcile.Result{}, false, nil
+}
+
 // closedOnly reports whether the status says no pull request of the request is open only because its recorded
 // pull request is closed without a merge: PullRequestOpened with reason PullRequestClosed or ChangeRequestClosed,
 // or Superseded (written after Shadewright's close) with a pull request recorded. Another pull request of its
@@ -210,9 +232,19 @@ func release(rr *remediationv1alpha1.RemediationRequest) {
 //     (changeOf), and so does a repository that cannot be opened as the settings stand (reason RepositoryUnavailable,
 //     TargetBranchChanged or RepositoryUnusable).
 //
+// Two stops are exceptions. A request stopped NeedsIntervention because the target branch changed
+// (stoppedForBranchChange) is first looked up on the branch the settings name now (heldOnConfigured), and its own
+// pull request found merged with the head Shadewright pushed moves it on to Merged (followHeldMerge, #771). A
+// request that ended Cancelled because of its Incident (cancelledForIncident) is the exception to open and
+// merged: its own pull request, found open, is recorded and closed, and found merged, its merge is recorded as a
+// stale plan's (settleCancelled, ADR-0039 points 21 and 22, amended 2026-11-16). For such a request, a pause found
+// before the read sets WritesPaused (waitWhilePaused), and a closed or gone verdict removes it with
+// PullRequestNotClosed: no close is left for either to speak of.
+//
 // TargetHeld is written when it changes. Every outcome but unknown is looked at again after heldRecheckInterval
 // while the lock is kept, and so is unknown; only the caller's cancellation and a failed write of
-// PullRequestUnreadable are returned as errors.
+// PullRequestUnreadable are returned as errors, besides settleCancelled's (a failed status write, a failed read of
+// the cluster, and a close or a merge check that failed without a refusal, for the error backoff).
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !ptr.Deref(rr.Status.HoldsTarget, false) || progresses(rr) || heldForVerification(rr, r.VerifyOutcomes) {
@@ -242,6 +274,12 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err
 	}
+	if _, ok := cancelledForIncident(rr); ok && errors.Is(err, freshness.ErrPaused) {
+		// Writes are paused before the read: a close of its own may be left to make, and the kill switch holds it.
+		// WritesPaused says so, as when the pause comes between the read and the close (closeCancelled); the read
+		// after the pause removes it (settleCancelled, or the release below).
+		return r.waitWhilePaused(ctx, rr)
+	}
 	c := repositoryRead(rr, err)
 	if errors.Is(err, errBranchChangedUnread) {
 		// The recorded branch of a request stopped with TargetBranchChanged could not be opened (lookHeld).
@@ -263,16 +301,24 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 			"branch, could not be looked up", "error", err.Error())
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 	}
-	if pr := rr.Status.PullRequest; stoppedForBranchChange(rr) && v.state == changeMerged && v.pr.Number == pr.Number &&
-		v.pr.HeadSHA == pr.HeadSHA {
-		// Merged into the recorded branch, with the head Shadewright pushed, after the request stopped (#771).
-		cr := v.pr
-		res, _, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error { return r.recordHeldMerge(ctx, rr, cr) })
+	if res, done, err := r.settleStopException(ctx, rr, v); done {
 		return res, err
 	}
 	before := rr.Status.DeepCopy()
+	reason, cancelled := cancelledForIncident(rr)
+	if cancelled {
+		// Closed (by Shadewright, its answer lost, or by a person) or not this request's: no close is left to make,
+		// so neither a failed close nor a pause that held it is left to say.
+		clearNotClosed(rr)
+		resume(rr)
+	}
 	if v.state != changeGone {
 		recordFound(rr, v.pr)
+		if cancelled {
+			// recordFound rewrote PullRequestOpened, where the reason of the cancel was while no pull request was
+			// recorded: it moves to Approved in the same write, as for one found open (recordCancelledOpen).
+			keepCancelReason(rr, reason, "found closed on the branch afterwards")
+		}
 	}
 	free := frees(v, holding)
 	switch {

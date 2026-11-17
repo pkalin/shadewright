@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	fx "github.com/pkalin/shadewright/internal/testfixtures"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -83,6 +84,12 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// The executor reads the Incident a request names live before it opens the pull request, and cancels the
+	// request when that Incident is gone (ADR-0039 point 22). The fixture requests name this one.
+	inc := fx.Incident(requestNamespace, fx.IncidentName)
+	Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+	fx.IncidentUID = remediationv1alpha1.UID(inc.UID)
 })
 
 var _ = AfterSuite(func() {

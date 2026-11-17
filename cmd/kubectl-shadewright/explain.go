@@ -130,6 +130,8 @@ var troubleshootingSections = map[string][]string{
 	"HelmManaged":                       {secFlux},
 	"HintsTurnedOff":                    {secPhases},
 	"IncidentCountUnchanged":            {secPullRequest},
+	"IncidentFolded":                    {secPhases},
+	"IncidentGone":                      {secPhases},
 	"IncompleteInput":                   {secPolicy},
 	"IncreaseTooLarge":                  {secPolicy},
 	"InputTooLarge":                     {secFiles},

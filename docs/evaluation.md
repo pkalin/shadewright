@@ -141,7 +141,7 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the ten scenarios and their variants (one so far, `oom/rollout`) is eleven analyses per repeat, each bounded by the loop's limits (at most 7 model
+A run of the ten scenarios and their variants (two so far, `oom/rollout` and `oom/absorbed`) is twelve analyses per repeat, each bounded by the loop's limits (at most 7 model
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
@@ -236,8 +236,9 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 **Variants.** A variant is a state of a fleet scenario that the lab met and the scenario's own recording does not
 show. It is scored against the scenario's `expected.yaml` and `rubric.yaml`, unchanged, with the scenario's
 Incident, and is reported as `<scenario>/<name>`. Its directory holds `variant.yaml` (`about`: what it changes and
-why, required), its own `objects.yaml` and `replies.yaml`, and a `metrics.yaml` or `policy.yaml` when its series or
-policies differ (otherwise the scenario's are used). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
+why, required), its own `replies.yaml`, and an `incident.yaml`, `objects.yaml`, `metrics.yaml` or `policy.yaml` when
+its Incident, objects, series or policies differ (otherwise the scenario's are used; a variant's Incident must match
+`expected.yaml` as the scenario's does). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
 `oom` scenario during a rollout, as the lab met it on 2026-11-07
 ([#494](https://github.com/pkalin/shadewright/issues/494)): the pod template sets 48Mi while the old ReplicaSet's
 pod still runs with 64Mi, and the reply takes a value from a running pod (the new pod's working set, copied from
@@ -248,6 +249,21 @@ and passes the outcome check ([Scoring](#scoring)). The lab's model asked for 96
 48Mi. The block shows 64Mi to 72Mi from 48Mi; the reply asks for 64Mi, the smallest change the evidence supports
 (the old pod runs under 64Mi without kills), and its summary names that evidence as what sets the size
 ([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)).
+
+`oom/absorbed` is the `oom` Incident as the analyzer keeps it since the cause rule of
+[ADR-0039](adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) (#791): `status.cause` set and the
+kubelet's `BackOff` (5, last 11:56:10) and `Unhealthy` (4, last 11:56:00) counted in `status.absorbed`, the counts
+the grouping case takes from `grouping.yaml`. Its context's summary shows the absorbed tally (point 18,
+[#796](https://github.com/pkalin/shadewright/issues/796), [design 3.3](design/3-observation-and-deduplication.md#the-context-builder));
+everything else is the scenario's, and so is its reply, unchanged: the tally adds lines at the end of the summary block and
+moves no block ID, and none of its lines is quotable. It is the recorded scenario the evaluation gate of ADR-0025
+asked for before the tally reached the model. `TestPromptShowsTheAbsorbedTally` replays it, checks that it passes
+and that its prompt holds one line per entry of the tally.
+
+**The prompt of a scenario without a tally.** `TestPromptGolden` keeps, in `test/eval/testdata/prompt.golden`, the
+SHA-256 of the first model request (the system prompt and the context) of every scenario whose Incident has an empty
+`status.absorbed`, computed by the code before the tally block. Each must stay the same byte for byte; a change meant
+to alter every prompt writes them again with `SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/`.
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
 Prometheus adapter implements (`test/eval/metrics_test.go`). The harness refuses a recording that the adapter could
@@ -364,6 +380,14 @@ The digest has no field for the Go code of `internal/analysis` and `internal/too
 output schema and the tool definitions: a change to that code that alters behaviour without altering them (for
 example how a tool reads or how a result is checked) needs a new evaluation by hand, as ADR-0025 says for any change
 to the tools or the context.
+
+**The absorbed tally and the digest.** The tally block ([#796](https://github.com/pkalin/shadewright/issues/796))
+changes `contextBuilder.source`, since it is code in `internal/incidentcontext`, `redaction.builtInRules`, since
+`MarkerShapes` in `internal/redact` is hashed, and `scenarios`, since it adds the `oom/absorbed` variant. So every manifest digest changes, for every Incident, with or without a tally: a real-model
+result recorded before it no longer matches. No passing result is stored in this repository yet (planned), so
+nothing stored is lost; a real-model evaluation run after this change, `oom/absorbed` included, is the one that
+counts. In CI the fake model replays the recorded replies, which do not depend on the prompt: every scenario, `oom`
+and `oom/absorbed` included, still passes.
 
 The analyzer cannot yet compute the same digest at run time (it does not know the rubric, the threshold or the
 repeats, which ADR-0025 checks when the list of passing results is built); that check is the planned follow-up.

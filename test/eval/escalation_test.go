@@ -223,17 +223,44 @@ func TestReportCostByRole(t *testing.T) {
 		t.Errorf("cost %v, by role %v", r.Totals.CostUSD, r.Totals.CostUSDByRole)
 	}
 	md := r.markdown()
-	for _, want := range []string{"Escalation forced", "  - escalation: input 2000", "estimated cost USD 0.0320",
+	for _, want := range []string{"Escalation forced", "  - escalation: calls 0, input 2000", "estimated cost USD 0.0320",
 		"| Escalated |", "| yes |"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("the markdown lacks %q:\n%s", want, md)
 		}
 	}
-	// Without its own prices, the escalation is priced as the triage.
+	// Without its own prices, the cost of the escalation's tokens is unknown, never priced as the triage: the run
+	// that used them and the totals leave their cost out and say why; the triage keeps its own.
 	p.Escalation = nil
 	r.summarise(p)
-	if !near(*r.Totals.CostUSD, wantTri+0.0064) {
-		t.Errorf("cost without escalation prices %v", *r.Totals.CostUSD)
+	a0, b0, tot := r.Scenarios[0], r.Scenarios[1], r.Totals
+	if a0.CostUSD == nil || !near(*a0.CostUSD, wantTri) || a0.CostUnknown != "" ||
+		b0.CostUSD != nil || !strings.Contains(b0.CostUnknown, "no prices for the escalation deployment") ||
+		tot.CostUSD != nil || tot.CostPerPassedRunUSD != nil || tot.CostUnknown != b0.CostUnknown ||
+		!near(tot.CostUSDByRole[string(analysis.RoleTriage)], wantTri) {
+		t.Errorf("without escalation prices: runs %+v, totals %+v", r.Scenarios, tot)
+	}
+	if _, ok := tot.CostUSDByRole[string(analysis.RoleEscalation)]; ok {
+		t.Errorf("the escalation was priced without prices: %v", tot.CostUSDByRole)
+	}
+	md = r.markdown()
+	for _, want := range []string{"- Estimated cost: unknown, no prices for the escalation deployment",
+		"- Cost per passed run: unknown\n", "output 300, calls with unknown usage 1, no prices, cost unknown",
+		"| unknown |", "| 0.0024 |"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("the markdown lacks %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "- Estimated cost: USD") {
+		t.Errorf("the markdown gives a total cost:\n%s", md)
+	}
+	// A role that made calls but used no tokens and has no call of unknown usage (refused before processing,
+	// #725) cost nothing: the cost stays known.
+	r.Scenarios[1].Tokens = tokens{}
+	r.Scenarios[1].Tokens.addRole(string(analysis.RoleEscalation), roleTokens{Calls: 2})
+	r.summarise(p)
+	if r.Totals.CostUSD == nil || !near(*r.Totals.CostUSD, wantTri) || r.Totals.CostUnknown != "" {
+		t.Errorf("an escalation without tokens: totals %+v", r.Totals)
 	}
 }
 
@@ -274,15 +301,16 @@ func TestFailedCallsMakeTheCostIncomplete(t *testing.T) {
 	if u == nil || u.usageUnknown != 1 || u.usage.InputTokens != 100 {
 		t.Fatalf("usage %+v", u)
 	}
+	bothPrices := &prices{Input: 1, CachedInput: 1, Output: 1, Escalation: &prices{Input: 1, CachedInput: 1, Output: 1}}
 	var tk tokens
 	tk.addRole(string(analysis.RoleEscalation), roleTokens{UsageUnknownCalls: u.usageUnknown})
 	r := &report{Manifest: manifest{MinPassRate: 1, Repeats: 1}, Scenarios: []scenarioResult{{Name: "a", Tokens: tk}}}
-	r.summarise(&prices{Input: 1, CachedInput: 1, Output: 1})
+	r.summarise(bothPrices)
 	if !r.Totals.CostIncomplete || !strings.Contains(r.markdown(), "incomplete, a lower bound: 1 call(s)") {
 		t.Errorf("totals %+v:\n%s", r.Totals, r.markdown())
 	}
 	r.Scenarios[0].Tokens = tokens{Input: 10}
-	r.summarise(&prices{Input: 1, CachedInput: 1, Output: 1})
+	r.summarise(bothPrices)
 	if r.Totals.CostIncomplete || strings.Contains(r.markdown(), "incomplete") {
 		t.Errorf("a complete run is marked incomplete: %+v", r.Totals)
 	}

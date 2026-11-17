@@ -26,26 +26,45 @@ import (
 // termIn reports whether a rubric term is in text. It is the one matcher of the package: the diagnosis score
 // (scoreDiagnosis), the subject terms and the behind-reads check (factReached) all use it (#848).
 //
-// The boundary rule: case is ignored, and a term matches only where no word character is glued to an end of
-// the term that is itself a word character. A word character is a letter, a digit or an underscore. An end
-// that is a digit is also glued to a decimal point followed by a digit, so a number is not taken from a longer
-// number. An end that is not a word character (a space, a colon, a comma) is a delimiter of its own and takes
-// no check. So "256" is in "requests 256 CPUs", `"cpu": "256"` and "256." at the end of a sentence, and not in
-// "256Mi", "sha256:", "1256", "2560" or "0.256"; "48Mi" is in "limit: 48Mi," and not in "148Mi"; "cache" is in
-// "cache.yaml" and not in "caches".
+// Case is ignored. The boundary rule depends on the side and on how the term ends (decision of 2026-11-17 on
+// #848), and an end of the term that is not a letter or a digit (a space, a colon, a brace) takes no check:
+//
+//   - Left: strict. No letter or digit is glued before the term, nor, before a term that starts with a digit,
+//     a decimal point after a digit ("0.256"). A lower-case letter followed by an upper-case start of the
+//     term is a boundary ("itemCache" holds "cache"), and underscores glue only when a letter or digit comes
+//     before them ("DB_POOL_SIZE" is not in "MY_DB_POOL_SIZE", and is in "_DB_POOL_SIZE_").
+//   - Right, a term that ends in a digit: strict. No letter or digit follows, nor a decimal point and a digit
+//     ("256.5"), except a plural "s" that ends the word ("503s"). Underscores glue only when a letter or
+//     digit follows them.
+//   - Right, a term that ends in a letter: open to letters, so the word may go on ("restart" is in
+//     "restarted", "96Mi" in "96MiB", "cpu" in "CPUs"), as the substring match was on that side. A digit
+//     glues ("app=web" is not in "app=web2"), and underscores glue only when a letter or digit follows them.
+//
+// So "256" is in "requests 256 CPUs", `"cpu": "256"`, "256-core", "256:" and "256." at the end of a sentence,
+// and not in "256Mi", "sha256:", "v256", "2560", "0.256" or "256.5".
 func termIn(term, text string) bool {
-	t, l := []rune(strings.ToLower(term)), []rune(strings.ToLower(text))
+	t, orig := []rune(term), []rune(text)
 	if len(t) == 0 {
 		return false
 	}
+	// Each rune is lowered on its own, so the lowered text keeps the indexes of the original one, whose case
+	// the camel-case boundary reads.
+	l := make([]rune, len(orig))
+	for i, r := range orig {
+		l[i] = unicode.ToLower(r)
+	}
+	for i := range t {
+		t[i] = unicode.ToLower(t[i])
+	}
+	first, last := []rune(term)[0], t[len(t)-1]
 	for i := 0; i+len(t) <= len(l); i++ {
 		if !slices.Equal(l[i:i+len(t)], t) {
 			continue
 		}
-		if wordRune(t[0]) && gluedBefore(l, i, unicode.IsDigit(t[0])) {
+		if alnum(first) && gluedBefore(orig, i) {
 			continue
 		}
-		if end := i + len(t); wordRune(t[len(t)-1]) && gluedAfter(l, end, unicode.IsDigit(t[len(t)-1])) {
+		if end := i + len(t); alnum(last) && gluedAfter(l, end, unicode.IsDigit(last)) {
 			continue
 		}
 		return true
@@ -53,33 +72,61 @@ func termIn(term, text string) bool {
 	return false
 }
 
-// wordRune reports whether r is a word character for termIn: a letter, a digit or an underscore.
-func wordRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+// alnum reports whether r is a letter or a digit.
+func alnum(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-// gluedBefore reports whether the match starting at l[i] follows a word character, or, for a match that
-// starts with a digit, a decimal point after a digit ("0.5").
-func gluedBefore(l []rune, i int, digit bool) bool {
+// gluedBefore reports whether the match that starts at text[i], whose first rune is a letter or a digit, is glued
+// to what comes before it: a letter or a digit (unless a lower-case letter before an upper-case start), a decimal
+// point after a digit before a digit start, or underscores after a letter or a digit.
+func gluedBefore(text []rune, i int) bool {
 	if i == 0 {
 		return false
 	}
-	if wordRune(l[i-1]) {
+	prev, start := text[i-1], text[i]
+	switch {
+	case prev == '_':
+		j := i - 1
+		for j > 0 && text[j-1] == '_' {
+			j--
+		}
+		return j > 0 && alnum(text[j-1])
+	case unicode.IsLower(prev) && unicode.IsUpper(start):
+		return false
+	case alnum(prev):
 		return true
 	}
-	return digit && l[i-1] == '.' && i >= 2 && unicode.IsDigit(l[i-2])
+	return unicode.IsDigit(start) && prev == '.' && i >= 2 && unicode.IsDigit(text[i-2])
 }
 
-// gluedAfter reports whether the match ending before l[end] is followed by a word character, or, for a match
-// that ends with a digit, by a decimal point and a digit ("5.5").
+// gluedAfter reports whether the match that ends before l[end], whose last rune is a letter or a digit, is glued
+// to what follows it. After a digit: a letter or a digit other than a plural "s" that ends the word, or a
+// decimal point and a digit. After a letter: a digit. After either: underscores followed by a letter or a digit.
 func gluedAfter(l []rune, end int, digit bool) bool {
 	if end >= len(l) {
 		return false
 	}
-	if wordRune(l[end]) {
+	next := l[end]
+	switch {
+	case next == '_':
+		return underscoresGlue(l, end)
+	case unicode.IsDigit(next):
 		return true
+	case !digit:
+		return false
+	case unicode.IsLetter(next):
+		return next != 's' || end+1 < len(l) && (alnum(l[end+1]) || l[end+1] == '_' && underscoresGlue(l, end+1))
 	}
-	return digit && l[end] == '.' && end+1 < len(l) && unicode.IsDigit(l[end+1])
+	return next == '.' && end+1 < len(l) && unicode.IsDigit(l[end+1])
+}
+
+// underscoresGlue reports whether the underscores that start at l[i] are followed by a letter or a digit.
+func underscoresGlue(l []rune, i int) bool {
+	for i < len(l) && l[i] == '_' {
+		i++
+	}
+	return i < len(l) && alnum(l[i])
 }
 
 // rubricTerms returns every term of every rubric, the escalation scenarios' included, once each.
@@ -119,8 +166,8 @@ func rubricTerms(t *testing.T) []string {
 // Every rubric term matches wherever a diagnosis can write it, with known answers by construction: alone, at
 // the start and the end of the text, after and before words, punctuation, quotes and backticks, in any case.
 func TestTermInRubricTermsMatchTheirForms(t *testing.T) {
-	before := []string{"", "the value ", "(", "`", `"`, "'", "\n", ": ", "=", "/"}
-	after := []string{"", " here", ")", "`", `"`, "'", ".", ",", ";", ":", "\n", "/"}
+	before := []string{"", "the value ", "(", "`", `"`, "'", "\n", ": ", "=", "/", "-"}
+	after := []string{"", " here", ")", "`", `"`, "'", ".", ",", ";", ":", "\n", "/", "-"}
 	for _, term := range rubricTerms(t) {
 		for _, form := range []string{term, strings.ToLower(term), strings.ToUpper(term)} {
 			for _, b := range before {
@@ -134,27 +181,68 @@ func TestTermInRubricTermsMatchTheirForms(t *testing.T) {
 	}
 }
 
-// No rubric term matches where a word character is glued to an end of it that is a word character, nor a
-// number glued to a decimal part: answers known by construction ("256Mi", "sha256", "1256", "0.5", "5.5").
+// termForms are the forms a diagnosis may write a term in, by construction (#848): the plural, a unit suffix
+// after a term that ends in a letter ("96MiB"), camel case after a lower-case word for a term that starts with a
+// letter ("itemCache", "noOOMKills"), Markdown emphasis and code marks.
+func termForms(term string) []string {
+	r := []rune(term)
+	first, last := r[0], r[len(r)-1]
+	forms := []string{"*" + term + "*", "_" + term + "_", "**" + term + "**", "__" + term + "__", "`" + term + "`",
+		"_" + strings.ToUpper(term) + "_"}
+	if alnum(last) {
+		forms = append(forms, term+"s", "*"+term+"s*", "`"+term+"s`")
+	}
+	if unicode.IsLetter(last) {
+		forms = append(forms, term+"B", term+"es", term+"ed", term+"Probe", "_"+term+"Count_")
+		if unicode.IsLetter(first) {
+			forms = append(forms, "no"+strings.ToUpper(term)+"Kills")
+		}
+	}
+	if unicode.IsLetter(first) {
+		camel := string(unicode.ToUpper(first)) + string(r[1:])
+		forms = append(forms, "item"+camel, "**item"+camel+"**")
+	}
+	return forms
+}
+
+// The probe over every term of every rubric under testdata: each form of termForms, in a sentence, matches.
+func TestTermInRubricTermsMatchWordForms(t *testing.T) {
+	for _, term := range rubricTerms(t) {
+		for _, form := range termForms(term) {
+			if text := "The diagnosis names " + form + " here."; !termIn(term, text) {
+				t.Errorf("termIn(%q, %q) = false, want true", term, text)
+			}
+		}
+	}
+}
+
+// No rubric term matches where it is glued, with answers known by construction: on the left a letter, a digit or
+// underscores after a letter or digit, and a decimal point after a digit before a digit start; on the right of a
+// term that ends in a digit, a letter or a digit (an "s" that does not end the word included), underscores before
+// a letter or digit, or a decimal part; on the right of a term that ends in a letter, a digit or underscores
+// before a letter or digit.
 func TestTermInRubricTermsRefuseGluedForms(t *testing.T) {
-	glue := []string{"x", "7", "_", "Mi"}
 	for _, term := range rubricTerms(t) {
 		r := []rune(term)
+		lower := strings.ToLower(term)
 		var texts []string
-		if wordRune(r[0]) {
-			for _, g := range glue {
-				texts = append(texts, "a "+g+term+" b")
+		if alnum(r[0]) {
+			// Lower case on both sides, so no camel-case boundary.
+			for _, g := range []string{"x", "7", "x_", "7__", "mi"} {
+				texts = append(texts, "a "+g+lower+" b")
 			}
 			if unicode.IsDigit(r[0]) {
 				texts = append(texts, "a 1."+term+" b")
 			}
 		}
-		if wordRune(r[len(r)-1]) {
-			for _, g := range glue {
+		switch last := r[len(r)-1]; {
+		case unicode.IsDigit(last):
+			for _, g := range []string{"x", "7", "Mi", "B", "st", "s7", "s_x", "_x", "__7", ".5"} {
 				texts = append(texts, "a "+term+g+" b")
 			}
-			if unicode.IsDigit(r[len(r)-1]) {
-				texts = append(texts, "a "+term+".5 b")
+		case unicode.IsLetter(last):
+			for _, g := range []string{"7", "_x", "__7"} {
+				texts = append(texts, "a "+term+g+" b")
 			}
 		}
 		for _, text := range texts {
@@ -165,56 +253,87 @@ func TestTermInRubricTermsRefuseGluedForms(t *testing.T) {
 	}
 }
 
-// termIn matches a term on word boundaries without case, so a value glued to a unit or another word is not taken
-// for it: hand-picked cases, the near misses of #848 among them. Each term is in every text of in, and in no text
-// of out.
+// Each rule of termIn with its true forms and its near misses, hand-picked (#848): each term is in every text of
+// in, and in no text of out.
 func TestTermIn(t *testing.T) {
 	for _, c := range []struct {
-		term    string
-		in, out []string
+		rule, term string
+		in, out    []string
 	}{
-		{"256",
-			[]string{"the web container requests 256 CPUs", `"cpu": "256"`, "cpu request 256", "256 at the start",
-				"(`256`)", "a request of 256."},
-			[]string{"a limit of 256Mi", "sha256:00", "image@sha256:256abc", "2560 bytes", "1256 bytes",
-				"a share of 0.256", "256.5 CPUs", "256_total"}},
-		{"256m", []string{"cpu: 256m"}, []string{"cpu: 256Mi"}},
-		{"10.0.0.1",
+		{"left strict", "cache",
+			[]string{"the key cache.yaml", "(cache)", "a cache"},
+			[]string{"itemcache", "ITEMCACHE", "7cache", "dcache"}},
+		{"left camel case", "cache",
+			[]string{"the itemCache map", "itemCaches"},
+			[]string{"ItemcACHE"}},
+		{"left camel case, upper-case term", "OOMKilled",
+			[]string{"noOOMKilled", "lastState.terminated.reason: OOMKilled"},
+			[]string{"NOOOMKilled", "xoomkilled"}},
+		{"left underscore", "DB_POOL_SIZE",
+			[]string{"DB_POOL_SIZE=0", "_DB_POOL_SIZE_", "__DB_POOL_SIZE__", "env _DB_POOL_SIZE"},
+			[]string{"MY_DB_POOL_SIZE", "MY__DB_POOL_SIZE", "7_DB_POOL_SIZE", "DB_POOL_SIZE_MAX=4"}},
+		{"left decimal", "256",
+			[]string{"a request of 256.", "requests 256 CPUs", "cpu=256"},
+			[]string{"a share of 0.256", "v256", "sha256:00", "1256 bytes", "x_256"}},
+		{"right digit strict", "256",
+			[]string{`"cpu": "256"`, "cpu request 256", "256 at the start", "(`256`)", "_256_", "**256**",
+				"256-core", "256:", "256s of them"},
+			[]string{"a limit of 256Mi", "2560 bytes", "256.5 CPUs", "256_total", "256B", "256sec", "256s7",
+				"256s_x", "image@sha256:256abc"}},
+		{"right digit plural", "503",
+			[]string{"returns 503s", "the 503s.", "*503s*"},
+			[]string{"5030", "503x", "503ms"}},
+		{"right digit plural", "404",
+			[]string{"404s from /healthz"},
+			[]string{"4040", "404.1"}},
+		// A term that ends in a letter is open on the right, so a unit term takes a longer unit too: write the
+		// full unit ("48Mi", not "48M").
+		{"right letter open, unit term", "256m", []string{"cpu: 256m", "cpu: 256Mi"}, []string{"cpu: 256m0", "1256m"}},
+		{"right digit, address", "10.0.0.1",
 			[]string{"dial tcp 10.0.0.1:5432: connection refused"},
-			[]string{"dial tcp 10.0.0.12:5432", "dial tcp 110.0.0.1:5432"}},
-		{"app=web", []string{"selector app=web,tier=front"}, []string{"selector app=webhook"}},
-		{"podinfo:6.17.99",
+			[]string{"dial tcp 10.0.0.12:5432", "dial tcp 110.0.0.1:5432", "10.0.0.1.5"}},
+		{"right digit, image tag", "podinfo:6.17.99",
 			[]string{"image ghcr.io/stefanprodan/podinfo:6.17.99 not found"},
 			[]string{"image podinfo:6.17.990", "image podinfo:6.17.99.1"}},
-		{"6.5", []string{"6.5 per replica"}, []string{"16.5 per replica", "6.55 per replica"}},
-		{"exit code 1", []string{"Exit Code 1."}, []string{"exited with exit code 137"}},
-		{"0 restarts", []string{"0 restarts so far"}, []string{"10 restarts"}},
-		{"restart", []string{"restart count 3"}, []string{"restarts: 3"}},
-		{"cache", []string{"the key cache.yaml"}, []string{"the caches"}},
-		{"DB_POOL_SIZE", []string{"DB_POOL_SIZE=0"}, []string{"DB_POOL_SIZE_MAX=4"}},
-		{"liveness", []string{"the liveness probe"}, []string{"livenessProbe failed"}},
-		{"not a memory issue", []string{"It is NOT a memory issue."}, []string{"not a memory issues list"}},
-		{"/healthz",
-			[]string{"GET /healthz returned 404", `"path": "/healthz"`},
-			[]string{"/healthzcheck"}},
-		{"Insufficient cpu", []string{"3 insufficient CPU."}, nil},
-		{"", nil, []string{"anything"}},
+		{"right digit, decimal term", "6.5", []string{"6.5 per replica"}, []string{"16.5 per replica", "6.55 per replica"}},
+		{"right letter open, unit", "96Mi",
+			[]string{"a limit of 96MiB", "96Mi", "96Mi,"},
+			[]string{"196Mi", "96Mi5", "96Mi_x"}},
+		{"right letter open, unit", "64Mi", []string{"64MiB"}, []string{"164Mi"}},
+		{"right letter open, unit", "48Mi", []string{"48MiB", "limit: 48Mi,"}, []string{"148Mi"}},
+		{"right letter open, word forms", "restart",
+			[]string{"restarts: 3", "restarted", "restarting", "restartCount 4", "_restart_"},
+			[]string{"restart7", "restart_count"}},
+		{"right letter open, phrase", "no oom", []string{"no OOMKills", "no OOM"}, []string{"no oom7"}},
+		{"right letter open, phrase", "insufficient cpu", []string{"3 Insufficient CPUs."}, nil},
+		{"right letter open, phrase", "readiness probe", []string{"readiness probes failed"}, nil},
+		{"right letter open, hyphen", "dry-run", []string{"two dry-runs failed"}, []string{"xdry-run"}},
+		{"right letter open", "liveness", []string{"the liveness probe", "livenessProbe failed"}, nil},
+		{"right letter open", "app=web", []string{"selector app=web,tier=front", "app=webhook"},
+			[]string{"app=web2"}},
+		{"right letter open", "/healthz",
+			[]string{"GET /healthz returned 404", `"path": "/healthz"`, "/healthzcheck"},
+			[]string{"/healthz2"}},
+		{"emphasis", "OOMKilled", []string{"_OOMKilled_", "**OOMKilled**", "*OOMKilled*", "`OOMKilled`"}, nil},
+		{"multi-word", "exit code 1", []string{"Exit Code 1."}, []string{"exited with exit code 137"}},
+		{"multi-word", "0 restarts", []string{"0 restarts so far"}, []string{"10 restarts"}},
+		{"empty term", "", nil, []string{"anything"}},
 	} {
 		for _, text := range c.in {
 			if !termIn(c.term, text) {
-				t.Errorf("termIn(%q, %q) = false, want true", c.term, text)
+				t.Errorf("%s: termIn(%q, %q) = false, want true", c.rule, c.term, text)
 			}
 		}
 		for _, text := range c.out {
 			if termIn(c.term, text) {
-				t.Errorf("termIn(%q, %q) = true, want false", c.term, text)
+				t.Errorf("%s: termIn(%q, %q) = true, want false", c.rule, c.term, text)
 			}
 		}
 	}
 }
 
-// The rubric facts whose terms were written for substring matching still pass a correct diagnosis in each form
-// of the word it may use, now that terms match on word boundaries (#848).
+// The rubric facts whose base terms were written for substring matching ("restart", "liveness", " 13 req") still
+// pass a correct diagnosis in each form of the word it may use, now that terms match on word boundaries (#848).
 func TestRubricFactsAcceptWordForms(t *testing.T) {
 	_, esc := mustEscalationScenarios(t)
 	const backlog = "the backlog, the current external metric value (about 13 requests per second) against its " +

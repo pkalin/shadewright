@@ -106,27 +106,39 @@ func (c *Controller) causeFor(o collector.Observation) (string, remediationv1alp
 	return name, cause.spec, reason, true
 }
 
-// CauseCounted answers the collector (collector.CauseCountedFunc, ADR-0039 point 7): whether consequence o
-// would be counted now as evidence on its cause's Incident, decided by [Controller.causeFor] from the
-// controller's own list, so it answers true exactly when consume would link o. That is once the cause's
-// observation has been consumed and its Incident exists or is being opened (a cause counted and not written
-// yet), and also for a cause Incident loaded at start, so the hold the collector rebuilds after a restart is
-// answered from the stored Incidents. It reads nothing from the API server: it costs one lock and a few map
-// lookups. It waits until the Incidents are loaded, or ctx ends, which is an error and no answer.
-func (c *Controller) CauseCounted(ctx context.Context, o collector.Observation) (bool, error) {
+// CauseSeen answers the collector (collector.CauseSeenFunc, ADR-0039 point 7, decided 2026-11-17): whether the
+// controller has seen the cause consequence o names ([Controller.causeSeen]): it holds an observation of the
+// cause as a first sighting, or has an Incident of it that counts a cause, opened by this process or loaded at
+// start, so the hold the collector rebuilds after a restart is answered from the stored Incidents. A consequence
+// whose container name is not a DNS label is answered true: consume leaves that name out (containerName) and
+// then never links it to its cause, so holding it gains nothing. It reads nothing from the API server: it costs
+// one lock and a few map lookups. It waits until the Incidents are loaded, or ctx ends, which is an error and no
+// answer. A cause seen later is told to the collector through [Controller.OnCauseSeen].
+func (c *Controller) CauseSeen(ctx context.Context, o collector.Observation) (bool, error) {
 	select {
 	case <-c.ready:
 	case <-ctx.Done():
 		return false, fmt.Errorf("waiting for the Incidents to load: %w", ctx.Err())
 	}
 	if o.Container != "" && len(validation.IsDNS1123Label(o.Container)) > 0 {
-		// consume would leave the container out (containerName), and then not link o.
-		return false, nil
+		return true, nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, _, _, linked := c.causeFor(o)
-	return linked, nil
+	return c.causeSeen(o.CauseFingerprint), nil
+}
+
+// causeSeen reports whether the controller has seen cause fingerprint fp: it is held as a first sighting, or the
+// latest Incident of fp counts a cause (status.cause, or a cause observation counted for it and not written
+// yet). A cause refused at the cap, or not counted for want of room, is not seen. The caller holds mu.
+func (c *Controller) causeSeen(fp string) bool {
+	if fp == "" {
+		return false
+	}
+	if inc, ok := c.causes[c.nameOf(fp)]; ok && inc.spec.Fingerprint == fp {
+		return true
+	}
+	return c.sightings.holds(fp)
 }
 
 // absorbHeld counts on the cause's Incident name, as evidence, the observations of consequence fingerprint

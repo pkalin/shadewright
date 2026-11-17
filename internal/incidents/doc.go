@@ -53,8 +53,9 @@ limitations under the License.
 // status.cause for the same subject UID (ADR-0039, #791): in status.absorbed and status.absorbedOccurrences,
 // apart from the Incident's own count, lastSeen and occurrences, so it never makes the cause due, restarts no
 // cooldown, does not keep it from going quiet and takes no place under the cap. The cause's phase is not
-// read. The collector holds a consequence whose cause has no Incident yet until the cause is consumed, at most
-// collector.ConsequenceGrace, asking [Controller.CauseCounted] (ADR-0039 point 7, #828); one that reaches the
+// read. The collector holds a consequence whose cause the controller has not seen until it has, at most
+// collector.ConsequenceGrace: it asks [Controller.CauseSeen] once, and the controller tells it of each cause
+// it sees later through the function set by [Controller.OnCauseSeen] (ADR-0039 point 7, #828); one that reaches the
 // controller before its cause's Incident exists goes through the gate as any observation; one held as
 // a first sighting is counted on the cause in full once a later observation of it links there, or once the
 // cause's observation is consumed (#820), found through the first sightings' index by cause fingerprint. A

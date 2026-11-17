@@ -357,30 +357,41 @@ func TestHoldBoundEmitsAtOnce(t *testing.T) {
 	}
 }
 
-// TestHoldBoundDefaults: at 1,024 held consequences, 256 in each of four namespaces, the next is refused, in any
-// namespace, and nothing held is dropped.
+// TestHoldBoundDefaults: at 1,024 held consequences with no cause, 256 in each of four namespaces, the next is
+// refused, in any namespace, and nothing held is dropped. The holds with a cause have a share of their own, with
+// the same bounds, which the full share of those with none does not touch.
 func TestHoldBoundDefaults(t *testing.T) {
 	hs := newConsequenceHolds(DefaultMaxHeldConsequences)
-	for ns := range 4 {
-		for i := range 256 {
-			key := types.NamespacedName{Namespace: fmt.Sprintf("ns-%d", ns), Name: fmt.Sprintf("ev-%d", i)}
-			if !hs.put(key, consequenceHold{event: types.UID(key.String())}) {
-				t.Fatalf("%s refused below the bound", key)
+	fits := func(key types.NamespacedName, s consequenceHold) bool {
+		_, ok := hs.put(key, s)
+		return ok
+	}
+	for _, cause := range []string{"", "a-cause"} {
+		for ns := range 4 {
+			for i := range 256 {
+				key := types.NamespacedName{Namespace: fmt.Sprintf("ns-%d", ns), Name: fmt.Sprintf("ev-%s-%d", cause, i)}
+				if !fits(key, consequenceHold{event: types.UID(key.String()), cause: cause}) {
+					t.Fatalf("%s (cause %q) refused below the bound", key, cause)
+				}
+			}
+			key := types.NamespacedName{Namespace: fmt.Sprintf("ns-%d", ns), Name: "one-more" + cause}
+			if fits(key, consequenceHold{cause: cause}) {
+				t.Fatalf("namespace %d took more than its share (cause %q)", ns, cause)
 			}
 		}
-		key := types.NamespacedName{Namespace: fmt.Sprintf("ns-%d", ns), Name: "one-more"}
-		if hs.put(key, consequenceHold{}) {
-			t.Fatalf("namespace %d took more than its share", ns)
+		if fits(types.NamespacedName{Namespace: "ns-new", Name: "ev" + cause}, consequenceHold{cause: cause}) {
+			t.Fatalf("took one over 1,024 (cause %q)", cause)
 		}
 	}
-	if hs.put(types.NamespacedName{Namespace: "ns-new", Name: "ev"}, consequenceHold{}) {
-		t.Fatal("took one over 1,024")
+	if hs.len() != 2*DefaultMaxHeldConsequences {
+		t.Fatalf("%d held, want 1,024 in each share", hs.len())
 	}
-	if hs.len() != DefaultMaxHeldConsequences {
-		t.Fatalf("%d held, want 1,024", hs.len())
+	const first = "ns-0"
+	hs.done(types.NamespacedName{Namespace: first, Name: "ev--0"})
+	if fits(types.NamespacedName{Namespace: first, Name: "again"}, consequenceHold{cause: "a-cause"}) {
+		t.Fatal("a hold with no cause that ended made room in the other share")
 	}
-	hs.done(types.NamespacedName{Namespace: "ns-0", Name: "ev-0"})
-	if !hs.put(types.NamespacedName{Namespace: "ns-0", Name: "again"}, consequenceHold{}) {
+	if !fits(types.NamespacedName{Namespace: first, Name: "again"}, consequenceHold{}) {
 		t.Fatal("no room after one hold ended")
 	}
 }
@@ -646,7 +657,7 @@ func TestHoldOfAnOlderEventOfTheNameIsDropped(t *testing.T) {
 // holdOutcomeCounts reads shadewright_analyzer_held_consequences_total by outcome.
 func holdOutcomeCounts() map[string]float64 {
 	out := map[string]float64{}
-	for _, o := range []string{holdOpened, holdNotOpened, holdReleased, holdUncaused, holdDropped, holdOverflow} {
+	for _, o := range []string{holdOpened, holdNotOpened, holdReleased, holdCauseUnseen, holdDropped, holdOverflow} {
 		out[o] = testutil.ToFloat64(heldConsequences.WithLabelValues(o))
 	}
 	return out
@@ -744,7 +755,7 @@ func TestOverflowMarksAreBounded(t *testing.T) {
 	}
 }
 
-// TestHoldOutcomesAddUp: every hold started ends in exactly one of opened, not_opened, released, cause_unopened
+// TestHoldOutcomesAddUp: every hold started ends in exactly one of opened, not_opened, released, cause_unseen
 // and dropped.
 func TestHoldOutcomesAddUp(t *testing.T) {
 	getEvent := func(t *testing.T, h *harness) *eventsv1.Event {

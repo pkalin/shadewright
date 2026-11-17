@@ -184,7 +184,7 @@ func main() {
 	var det *detection.Detector
 	recheck := make(chan struct{}, 1)
 	col, err := collector.New(collector.Config{
-		ClusterID: clusterID, Handled: inc.Handled, CauseCounted: inc.CauseCounted, Namespaces: watched,
+		ClusterID: clusterID, Handled: inc.Handled, CauseSeen: inc.CauseSeen, Namespaces: watched,
 		Grants:       moduleGrants,
 		Modules:      func() modules.Selection { return det.Selection() },
 		WatchChanged: notify(recheck),
@@ -215,6 +215,9 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// The Incident controller tells the collector of each cause it has seen, which releases the consequences held
+	// for it (ADR-0039 point 7): an in-process call, no API read.
+	inc.OnCauseSeen(col.ReleaseCause)
 	if err := inc.SetupWithManager(mgr, col.Observations()); err != nil {
 		setupLog.Error(err, "Failed to set up the Incident controller")
 		os.Exit(1)

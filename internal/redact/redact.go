@@ -29,8 +29,10 @@ limitations under the License.
 // runs that mix letters and digits, such as Git commit hashes and container IDs, 32 characters or more of
 // mixed-case base64 that slashes cut short, or that has no slash and no digit (also a base64 blob that is not
 // a secret, and at most one short part of up to five characters on each side of it in a path), and every
-// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"), the value after a
-// secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
+// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"), also after other
+// text on the key's line, where every line indented deeper than that line goes, and in text whose line breaks
+// were flattened to blanks, where the rest of the line goes when a block was flattened onto it (#840), the
+// value after a secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
 // argument lists and after a flag that took the flag as its value), however it reads or starts with
 // ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
 // name of two or more words, joined by "_", "-" or in camelCase, and a blank ("aws_secret_access_key x",
@@ -72,8 +74,9 @@ limitations under the License.
 // pretty-printed escaped JSON ("\",\n  \""), the part of an
 // unquoted value after a quote inside it, the words after the first of a block sequence item after a quoted
 // flag item or of an item after a flag item that opens with a backslash or "$(", a quoted scalar after a
-// verbatim tag in an array, a value after a compound name and a blank that is no opaque token, and a secret in
-// a format no rule knows (TestKeyNameKnownLeaks).
+// verbatim tag in an array, a value after a compound name and a blank that is no opaque token, a secret key
+// after other text inside the block of a bare short key whose value is refused, and a secret in a format no
+// rule knows (TestKeyNameKnownLeaks).
 package redact
 
 import (
@@ -609,7 +612,7 @@ func lineLooksLikeSecret(text string) bool {
 // (lineLooksLikeSecret).
 func blockLooksLikeSecret(s string, start, end int) bool {
 	for line := range strings.SplitSeq(s[start:end], "\n") {
-		if lineLooksLikeSecret(strings.TrimLeft(line, " \t\r")) {
+		if lineLooksLikeSecret(strings.Trim(line, " \t\r")) {
 			return true
 		}
 	}
@@ -735,6 +738,7 @@ func nextBlockLine(s string, pos, keyCol, kind int) (blockLine, int, bool) {
 			continue
 		}
 		l := blockLine{start: pos + 1, end: lineEnd(s, pos+1)}
+		countScan(l.end - l.start + 1)
 		pos = l.end
 		text := s[l.start:l.end]
 		trimmed := strings.TrimLeft(text, " \t")
@@ -925,8 +929,10 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 			continue
 		}
 		cm := childKey.FindStringSubmatchIndex(text)
-		if cm == nil {
-			// A scalar line: a sequence entry, a flow collection or a continuation.
+		if cm == nil || gluedKey(text[cm[2]:cm[3]]) {
+			// A scalar line: a sequence entry, a flow collection or a continuation. A plain key holding a
+			// blank, a comma or a quote is no key of a secret's map but a value with another key glued to it
+			// ("hunter2 token: x"), and goes whole (#840).
 			addValue(inlineValue(s, l.text+dashes(text), l.end))
 			continue
 		}
@@ -951,6 +957,12 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 	return end
 }
 
+// gluedKey reports whether a child key found by childKey is plain and holds a blank, a comma or a quote,
+// as a value with another key glued to it does.
+func gluedKey(key string) bool {
+	return key[0] != '"' && key[0] != '\'' && strings.ContainsAny(key, " \t,\"'")
+}
+
 // scalarValue returns the part of the scalar block value s[start:end] to redact: the text between the
 // quotes of a quoted scalar that is the whole value, so it keeps its quotes, otherwise all of it. A quoted
 // scalar that a backslash continues past the block's end (an escaped line break, #523) is redacted up to its
@@ -966,6 +978,305 @@ func scalarValue(s string, start, end int) (int, int) {
 		}
 	}
 	return start, end
+}
+
+// anyKey matches a secret key directly followed by its colon, then a blank or the line end, wherever it
+// stands on a line (group 1 is the key): the YAML forms of the rules above with the key after other text on
+// its line, as in a symptom whose line breaks were flattened to blanks (#840). A blank before the colon is
+// not taken: in prose ("volume \"secret-volume\" : secret") it does not make a key.
+var anyKey = regexp.MustCompile(`(?im)(` + secretKeyExpr + `):(?:[ \t]|\r?$)`)
+
+// scanned, when set, is told how many bytes the rule for keys anywhere on a line reads at each step, and
+// how many bytes of each line nextBlockLine reads for any rule. Only tests set it, to bound that work by the
+// size of the input without a clock (TestAnyKeyWorkIsLinear); it is nil otherwise.
+var scanned func(n int)
+
+// countScan reports n bytes read to scanned, when it is set.
+func countScan(n int) {
+	if scanned != nil {
+		scanned(n)
+	}
+}
+
+// anyKeyLine is what the rule for keys anywhere on a line knows about the line it reads, so that no part
+// of the line is read more than a fixed number of times, however many keys it holds.
+type anyKeyLine struct {
+	le int
+	// refusedFrom: under a bare short key no word from here to the line end looks like a secret, so a
+	// later bare key's rest of the line is refused without reading it again; le when unknown.
+	refusedFrom int
+	// unclosed: a quote of each kind (double, single) that does not close on the line was found at this
+	// position or before, so no quote of that kind after it closes either; le when unknown.
+	unclosed [2]int
+}
+
+// anyKeySpans is the spans function of the rule for YAML keys wherever they stand on a line (#840). The
+// first match on a line reads the whole line: each secret key on it in turn, and the lines after it that
+// belong to the last one, so each line is read once by this rule and later matches on it are skipped. A key
+// inside a flow collection ("{", "[") is left to the flow rules.
+//
+// A key first on its line (after blanks and sequence dashes) has its own column; a key after other text
+// has the column of the line's text, so its block takes every line indented deeper than the line: more
+// than YAML would, which errs on the side of removing too much. For each key, in order:
+//   - nothing after the colon, or a comment: the value on the following lines, as the next-line rule reads
+//     it (nextLineBlock); with no such lines, a comment is read as a block flattened onto the line;
+//   - a block scalar indicator and the line end: the lines below, as the block scalar rule reads them;
+//   - text that cannot follow a YAML key on the same line: a block scalar indicator and more text, a
+//     sequence dash, another key ("credentials: user: admin"), a quote that does not close on the line, a
+//     closing quote with text glued to it, or a value followed by two or more blanks and more text: a block
+//     flattened onto one line. Its end cannot be told, so the rest of the line is redacted, and the lines
+//     after it that are deeper than the key, comment lines or entries of a compact sequence (flattenedRest);
+//   - otherwise the inline value: the text between its quotes, or one word.
+//
+// The lines indented deeper than the key after the last inline value on the line are its continuation
+// lines and are redacted too (a plain or quoted scalar over several lines). A bare short key
+// (bareShortColon) counts only where a word looks like a secret; a line it refuses ends what it redacts,
+// so a key on that line is read on its own.
+func anyKeySpans(s string, m []int, prevEnd int, add func(start, end int)) int {
+	if m[0] < prevEnd {
+		return prevEnd
+	}
+	ls := strings.LastIndexByte(s[:m[0]], '\n') + 1
+	le := lineEnd(s, m[0])
+	countScan(le - ls)
+	text := ls
+	for text < le && (s[text] == ' ' || s[text] == '\t') {
+		text++
+	}
+	lineCol := text - ls
+	firstKey := text + dashes(s[text:le])
+	st := &anyKeyLine{le: le, refusedFrom: le, unclosed: [2]int{le, le}}
+	end := le
+	cursor := m[0]
+	cont, contCol, contBare := false, 0, false
+	// depth counts the flow brackets open before the key.
+	depth, read := 0, ls
+	for _, km := range anyKey.FindAllStringSubmatchIndex(s[m[0]:le], -1) {
+		for i := range km {
+			if km[i] >= 0 {
+				km[i] += m[0]
+			}
+		}
+		for ; read < km[0]; read++ {
+			switch s[read] {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth = max(depth-1, 0)
+			}
+		}
+		if km[0] < cursor || depth > 0 || keepReference(s, km) || sasRefused(s, km, true) {
+			continue
+		}
+		keyCol := lineCol
+		if km[2] == firstKey {
+			keyCol = km[2] - ls
+		}
+		bare := bareShortColon(s, km)
+		e, next, done := anyKeyValue(s, km[1], st, keyCol, bare, add)
+		end = max(end, e)
+		if done {
+			return end
+		}
+		cursor, cont, contCol, contBare = next, true, keyCol, bare
+	}
+	if cont {
+		end = max(end, continuationLines(s, le, contCol, contBare, add))
+	}
+	return end
+}
+
+// anyKeyValue reads the value of a key whose colon ends before pos, on the line st, as described for
+// anyKeySpans. It returns the end of what it read and, when the value was an inline one (done false),
+// where the next key on the line may start.
+func anyKeyValue(s string, pos int, st *anyKeyLine, keyCol int, bare bool, add func(start, end int)) (end, next int, done bool) {
+	le := st.le
+	for pos < le && (s[pos] == ' ' || s[pos] == '\t') {
+		pos++
+	}
+	if pos == le || s[pos] == '#' {
+		if e := nextLineBlock(s, le, keyCol, bare, add); e > le || pos == le {
+			return e, le, true
+		}
+		e, _ := flattenedRest(s, pos, st, keyCol, bare, add)
+		return e, le, true
+	}
+	if ie := indicatorEnd(s, pos, le); ie > pos {
+		return anyKeyBlockScalar(s, pos, ie, st, keyCol, bare, add)
+	}
+	return anyKeyInline(s, pos, st, keyCol, bare, add)
+}
+
+// anyKeyBlockScalar reads a value that opens with the block scalar indicator s[pos:ie], for anyKeyValue.
+func anyKeyBlockScalar(s string, pos, ie int, st *anyKeyLine, keyCol int, bare bool, add func(start, end int)) (end, next int, done bool) {
+	le := st.le
+	after := ie
+	for after < le && (s[after] == ' ' || s[after] == '\t') {
+		after++
+	}
+	if after < le && s[after] != '#' {
+		// Text after the indicator: a block flattened onto the line.
+		if e, ok := flattenedRest(s, after, st, keyCol, bare, add); ok {
+			return e, le, true
+		}
+		return le, after, false
+	}
+	if start, e := indentedLines(s, le, keyCol); start >= 0 {
+		countScan(e - start)
+		if !bare || blockLooksLikeSecret(s, start, e) {
+			add(start, e)
+		}
+		return e, le, true
+	}
+	if after == le {
+		if !bare {
+			add(pos, ie)
+		}
+		return le, le, true
+	}
+	// A comment and no block below: the comment may be a block flattened onto the line.
+	e, _ := flattenedRest(s, after, st, keyCol, bare, add)
+	return e, le, true
+}
+
+// anyKeyInline reads a value that starts on the key's line and is no block scalar header, for anyKeyValue.
+func anyKeyInline(s string, pos int, st *anyKeyLine, keyCol int, bare bool, add func(start, end int)) (end, next int, done bool) {
+	le := st.le
+	vs, ve, closed := inlineWord(s, pos, st)
+	quoted := s[pos] == '"' || s[pos] == '\''
+	if closed < 0 || dashes(s[pos:le]) > 0 || !quoted && ve > vs && s[ve-1] == ':' {
+		// A quote that does not close on the line, a sequence dash or another key: a quoted scalar that
+		// goes on below, or a block flattened onto the line.
+		if e, ok := flattenedRest(s, pos, st, keyCol, bare, add); ok {
+			return e, le, true
+		}
+		return le, pos, false
+	}
+	if !bare || lineLooksLikeSecret(s[pos:closed]) {
+		add(vs, ve)
+	}
+	if quoted && closed < le && strings.IndexByte(" \t,}]\"", s[closed]) < 0 {
+		// Text glued to a closing quote, other than a delimiter: no YAML or JSON, so the end of the value
+		// cannot be told.
+		if e, ok := flattenedRest(s, closed, st, keyCol, bare, add); ok {
+			return e, le, true
+		}
+	}
+	blanks := closed
+	for blanks < le && (s[blanks] == ' ' || s[blanks] == '\t') {
+		blanks++
+	}
+	if blanks-closed >= 2 && blanks < le {
+		if e, ok := flattenedRest(s, blanks, st, keyCol, bare, add); ok {
+			return e, le, true
+		}
+	}
+	return closed, closed, false
+}
+
+// indicatorEnd returns the end of a YAML block scalar indicator ("|", ">-", "|2+") at pos that a blank or
+// the line end le follows, or pos when there is none. It reads at most four bytes.
+func indicatorEnd(s string, pos, le int) int {
+	end := pos
+	for end < le && end-pos < 3 && strings.IndexByte("|>123456789+-", s[end]) >= 0 {
+		end++
+	}
+	if !blockIndicator.MatchString(s[pos:end]) || end < le && s[end] != ' ' && s[end] != '\t' {
+		return pos
+	}
+	return end
+}
+
+// inlineWord returns the inline value at pos on the line st: the text between its quotes, or one word up
+// to a blank. closed is the end of the value with its closing quote, or -1 for a quote that does not close
+// on the line. A quote of a kind already found unclosed at or before pos is taken as unclosed unread.
+func inlineWord(s string, pos int, st *anyKeyLine) (start, end, closed int) {
+	le := st.le
+	if c := s[pos]; c == '"' || c == '\'' {
+		k := 0
+		if c == '\'' {
+			k = 1
+		}
+		if st.unclosed[k] > pos {
+			if qe := quotedEnd(s, pos); qe > 0 && qe <= le {
+				countScan(qe - pos)
+				return pos + 1, qe - 1, qe
+			}
+			countScan(le - pos)
+			st.unclosed[k] = pos
+		}
+		return pos, le, -1
+	}
+	end = pos
+	for end < le && s[end] != ' ' && s[end] != '\t' {
+		end++
+	}
+	return pos, end, end
+}
+
+// flattenedRest redacts, from pos, the rest of the line st and the lines after it that belong to the block
+// of a key at column keyCol: deeper lines, comment lines and entries of a compact sequence (blockValue). It
+// is used where the end of a value cannot be told, so it errs on the side of removing too much. Under a
+// bare short key the rest of the line counts only when a word of it looks like a secret (ok false
+// otherwise), and each line after it on its own; the first line it refuses ends the block. It returns the
+// end of what it redacted.
+func flattenedRest(s string, pos int, st *anyKeyLine, keyCol int, bare bool, add func(start, end int)) (int, bool) {
+	le := st.le
+	e := le
+	for e > pos && isSpace(s[e-1]) {
+		e--
+	}
+	if bare {
+		if pos >= st.refusedFrom {
+			return le, false
+		}
+		countScan(e - pos)
+		if !wordsLookLikeSecret(s[pos:e]) {
+			st.refusedFrom = pos
+			return le, false
+		}
+	}
+	add(pos, e)
+	end := le
+	for l := range blockLines(s, le, keyCol, blockValue) {
+		countScan(l.end - l.start)
+		if bare && !wordsLookLikeSecret(s[l.text:l.end]) {
+			break
+		}
+		add(l.text, l.end)
+		end = l.end
+	}
+	return end, true
+}
+
+// continuationLines redacts the lines after le indented deeper than keyCol, the continuation lines of an
+// inline value, and returns the end of the last. Under a bare short key each line counts only when a word
+// of it looks like a secret, and the first line it refuses ends them.
+func continuationLines(s string, le, keyCol int, bare bool, add func(start, end int)) int {
+	end := le
+	for l := range blockLines(s, le, keyCol, blockScalar) {
+		countScan(l.end - l.start)
+		if bare && !wordsLookLikeSecret(s[l.text:l.end]) {
+			break
+		}
+		add(l.text, l.end)
+		end = l.end
+	}
+	return end
+}
+
+// wordsLookLikeSecret reports whether the text of a line, or any blank-separated word of it, looks like a
+// secret (lineLooksLikeSecret).
+func wordsLookLikeSecret(text string) bool {
+	if lineLooksLikeSecret(strings.TrimSpace(text)) {
+		return true
+	}
+	for w := range strings.FieldsSeq(text) {
+		if lineLooksLikeSecret(w) {
+			return true
+		}
+	}
+	return false
 }
 
 // envEntryLines bounds the lines of an environment entry read to find its "value": Kubernetes writes it
@@ -2397,6 +2708,9 @@ func builtinRules() []rule {
 		// Kubernetes environment variables in YAML block form: "- name: DB_PASSWORD" and its "value".
 		{kind: KindCredential, span: envValueSpan, re: regexp.MustCompile(
 			`(?im)^[ \t]*-[ \t]+name[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?[ \t]*\r?$`)},
+		// YAML keys wherever they stand on a line, also after other text, as in a symptom whose line breaks
+		// were flattened to blanks (#840): block values, continuation lines and blocks flattened onto one line.
+		{kind: KindCredential, spans: anyKeySpans, re: anyKey},
 		// Long random tokens without a known prefix: a run of base64, base64url or hex characters (see
 		// longTokenSpans).
 		{kind: KindToken, spans: longTokenSpans, re: regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}=*`)},

@@ -389,6 +389,10 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		// A quoted value that never closes before the next key's value opens runs to that quote: the next key
 		// is inside it, so its value is read from the middle and loses only its first token.
 		"unclosed quote before the next key": `token="x DB_PASSWORD="hidden ` + k + `"`,
+		// The block of a bare short key ("pass") is read once and skipped by the rule for keys anywhere on a
+		// line (#840): a secret key after other text on a line of that block, under a value the bare key
+		// refuses, is not read on its own.
+		"key after text in a refused bare block": "x pass:\n  note: hello token: |\n    alpha " + k + "\n",
 	} {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",

@@ -454,6 +454,11 @@ func TestNormalizeRedacts(t *testing.T) {
 		{"quoted value with a comma", `{"password": "sword,fish"}`, ",fish"},
 		{"underscore-prefixed password key", `DB_PASSWORD=opensesame`, "opensesame"},
 		{"underscore-prefixed client secret key", `AZURE_CLIENT_SECRET=opensesame`, "opensesame"},
+		// Issue #840: a YAML block value under a secret key after other text on its line, and the same
+		// symptom once its line breaks are flattened to blanks, as an Incident stores it.
+		{"block scalar after text", "Back-off restarting\nmsg: password: |\n  hunter2xyzAB\n", "hunter2xyzAB"},
+		{"flattened block scalar", "Back-off restarting password: |   hunter2xyzAB", "hunter2xyzAB"},
+		{"flattened secret map", "Back-off credentials:   user: admin   pass: s3cr3tPW", "admin"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

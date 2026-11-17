@@ -510,6 +510,9 @@ scenario, `expected.yaml`, `incident.yaml`, `objects.yaml` and `policy.yaml`, an
 | `contextBytes` | The builder's total bound on the context, the section bounds staying at their defaults; required with `signal: truncated` and refused otherwise, 4096 to 262144 (the range of `maxContextBytes`). The default section bounds add up to the default total, so with the defaults the total cut never happens; only a total below their sum can cut the context. The analyzer does not pass `maxContextBytes` to the builder yet ([#372](https://github.com/pkalin/shadewright/issues/372)): this is a configuration the builder accepts, not what a deployed analyzer runs today |
 | `metricsSource` | `down`: a configured metrics source that fails every query, a Prometheus that is down. Required with `signal: failedSource` and refused otherwise, and refused with a `metrics.yaml` |
 
+`escalation/cut-context` tests the total bound only. A logs section cut at its own bound, with the total within
+its limit, sets no signal and the product does not escalate on it ([#851](https://github.com/pkalin/shadewright/issues/851)); no scenario covers that case.
+
 The harness refuses an escalation scenario whose rubric lists no `reads`, or that has variants. The tests check,
 for every escalation scenario, that it passes on its recorded replies (`TestEscalationScenariosPass`); that each
 fact `behindReads` names is not scored by the first model request, the system prompt and the context the builder

@@ -26,22 +26,47 @@ import (
 	"time"
 )
 
-// ErrDialRefused marks a connection refused by refusePrivate.
+// ErrDialRefused marks a connection refused by Guard.Control.
 var ErrDialRefused = errors.New("the address is not a public unicast address")
 
 // PublicControl is the dialer's control: it runs on the resolved address of every connection, so a host name
 // that resolves (or is rebound) to an address that is not public unicast gets no connection and no token
-// (design 11.1). See publicAddress.
-func PublicControl(_, address string, _ syscall.RawConn) error {
+// (design 11.1). See publicAddress. It is Guard{}.Control.
+func PublicControl(network, address string, c syscall.RawConn) error {
+	return Guard{}.Control(network, address, c)
+}
+
+// Guard is the address rule of a client's dialer. The zero Guard allows public unicast addresses only.
+type Guard struct {
+	// AllowPrivateService allows private unicast addresses too, for a Service host the adapter already
+	// validated (PrivateServiceControl). InCluster does not apply then.
+	AllowPrivateService bool
+	// InCluster lists further ranges that count as in-cluster, such as pod or Service ranges outside RFC 1918
+	// declared at install (ADR-0042). An address in one is refused like a private address, also when it is
+	// embedded in an IPv6 address the way publicAddress reads it.
+	InCluster []netip.Prefix
+}
+
+// Control runs on the resolved address of every connection the dialer makes, before it connects: every
+// address of a name, and again after a rebinding, so nothing of a request reaches a refused address.
+func (g Guard) Control(network, address string, c syscall.RawConn) error {
+	if g.AllowPrivateService {
+		return PrivateServiceControl(network, address, c)
+	}
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return ErrDialRefused
 	}
 	ip, err := netip.ParseAddr(host)
-	if err != nil || ip.Zone() != "" || !publicAddress(ip) {
+	if err != nil || ip.Zone() != "" || !publicAddress(ip, g.InCluster) {
 		return ErrDialRefused
 	}
 	return nil
+}
+
+// Dialer returns the guarded dialer of a client: bounded connection setup, Control on every address.
+func (g Guard) Dialer() *net.Dialer {
+	return &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: g.Control}
 }
 
 // publicAddress reports whether ip is a public unicast address. IPv4 (also mapped into IPv6) must be global
@@ -49,18 +74,23 @@ func PublicControl(_, address string, _ syscall.RawConn) error {
 // (NAT64 64:ff9b::/96, 6to4 2002::/16, IPv4-compatible ::/96) is judged by that IPv4 address, so a DNS64
 // answer for a public endpoint still connects while one for 10.0.0.1 does not. Any other IPv6 address must be
 // global unicast, not unique-local and outside reservedIPv6, which refuses outright the forms whose IPv4
-// cannot be read reliably (local-use NAT64 64:ff9b:1::/48, Teredo 2001::/32, SIIT ::ffff:0:0:0/96).
-func publicAddress(ip netip.Addr) bool {
+// cannot be read reliably (local-use NAT64 64:ff9b:1::/48, Teredo 2001::/32, SIIT ::ffff:0:0:0/96). An
+// address in inCluster is not public, and neither is an IPv6 address in the forms above whose IPv4 address
+// is in inCluster.
+func publicAddress(ip netip.Addr, inCluster []netip.Prefix) bool {
 	ip = ip.Unmap()
+	if inAny(inCluster, ip) {
+		return false
+	}
 	if ip.Is4() {
 		return ip.IsGlobalUnicast() && !ip.IsPrivate() && !inAny(reservedIPv4, ip)
 	}
 	b := ip.As16()
 	switch {
 	case nat64WellKnown.Contains(ip), ipv4Compatible.Contains(ip):
-		return publicAddress(netip.AddrFrom4([4]byte(b[12:16])))
+		return publicAddress(netip.AddrFrom4([4]byte(b[12:16])), inCluster)
 	case sixToFour.Contains(ip):
-		return publicAddress(netip.AddrFrom4([4]byte(b[2:6])))
+		return publicAddress(netip.AddrFrom4([4]byte(b[2:6])), inCluster)
 	}
 	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !inAny(reservedIPv6, ip)
 }
@@ -110,11 +140,10 @@ func mustPrefixes(s ...string) []netip.Prefix {
 }
 
 // NewHTTPClient never follows redirects (the bearer token must reach the configured host only), requires
-// TLS 1.2 or later, connects to public unicast addresses only (refusePrivate), and bounds connection setup
-// and the wait for headers (headerTimeout, the attempt timeout of the caller). allowPrivateService enables
-// the separate private-unicast control only for a Service host the adapter already validated. Each attempt has its own
-// deadline on its context.
-func NewHTTPClient(headerTimeout time.Duration, allowPrivateService bool) *http.Client {
+// TLS 1.2 or later, connects only to the addresses guard allows (Guard.Control, public unicast for the zero
+// Guard), and bounds connection setup and the wait for headers (headerTimeout, the attempt timeout of the
+// caller). Each attempt has its own deadline on its context.
+func NewHTTPClient(headerTimeout time.Duration, guard Guard) *http.Client {
 	var rt http.RoundTripper
 	{
 		t := http.DefaultTransport.(*http.Transport).Clone()
@@ -122,10 +151,7 @@ func NewHTTPClient(headerTimeout time.Duration, allowPrivateService bool) *http.
 		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		t.TLSHandshakeTimeout = 10 * time.Second
 		t.ResponseHeaderTimeout = headerTimeout
-		t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: PublicControl}).DialContext
-		if allowPrivateService {
-			t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: PrivateServiceControl}).DialContext
-		}
+		t.DialContext = guard.Dialer().DialContext
 		rt = t
 	}
 	return &http.Client{
@@ -151,7 +177,7 @@ func PrivateServiceControl(_, address string, _ syscall.RawConn) error {
 	if ip.IsPrivate() && ip.IsGlobalUnicast() {
 		return nil
 	}
-	if publicAddress(ip) {
+	if publicAddress(ip, nil) {
 		return nil
 	}
 	return ErrDialRefused

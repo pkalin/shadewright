@@ -162,6 +162,7 @@ repaired into proposals. Qualify each server and model with the
 | --- | --- |
 | `analyzer.analysis.endpointSuffixes` / `--model-endpoint-suffixes` | Foundry-only destination allow-list, unchanged for existing installs. No default |
 | `analyzer.analysis.openAICompatible.endpoints` / `--openai-compatible-endpoints` | Exact endpoint declarations. The flag is a JSON array with `url`, `inferenceAPI`, a nonempty `models` list (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), optional `keyFile` and optional `service`. Settings must match a parsed base, API and declared model name byte for byte (`EndpointNotAllowed` or `ModelNotAllowed` otherwise); duplicate bases and segment path prefixes on the same authority are refused; request paths come only from the declaration |
+| `analyzer.analysis.openAICompatible.inClusterCIDRs` / `--openai-compatible-in-cluster-cidrs` | Default empty. Up to 32 IPv4 or IPv6 CIDRs that count as in-cluster besides the private, shared (100.64.0.0/10) and link-local ranges: the cluster's pod and Service ranges when they are routable addresses. A compatible endpoint that is not a declared `service` gets no connection to an address in them, checked at dial time for every resolved address before any byte is sent. The IPv4 ranges are added to the except list of the egress rule for declared ports other than 443. A malformed CIDR, one with host bits set, or one containing an endpoint's literal address stops the analyzer at start; the chart refuses malformed entries and the value without `endpoints` at render. The flag is comma-separated |
 | `analyzer.analysis.disableFoundry` / `--disable-foundry` | Default false. True disables Foundry and its inference token source. Blob records still need Azure identity |
 | `endpoints[].apiKey.secretName`, `secretKey` | Existing Secret and its key (default `api-key`), mounted whole and read-only only in the analyzer. The chart creates no Secret or RBAC |
 | `endpoints[].apiKey.volume`, `fileName` | Alternative Secret or CSI volume and file name (default `api-key`). Do not combine with `secretName` |
@@ -179,6 +180,17 @@ incomplete usage is refused with `UsageUnknown` and charged at the input estimat
 plus the output limit with a rounded-up 10% margin. Complete reports cost at least
 the input estimate. Above-ceiling usage is refused and charged that ceiling.
 Each endpoint owns its optional key, including separate account paths on one host. A compatible server's 429 is never assumed unbilled.
+
+The dial guard treats the private, shared and link-local ranges as in-cluster. If
+the cluster's pods or Services use other addresses, list them in
+`inClusterCIDRs`: otherwise a declared public name that resolves into them would
+reach a pod or Service with the key. To find a cluster's ranges: the pod ranges are in
+`kubectl get nodes -o jsonpath='{.items[*].spec.podCIDRs}'` (empty with some CNIs,
+which keep them in their own configuration, such as the Cilium `IPPool` or the
+Calico `IPPool` objects); the Service range is the API server's
+`--service-cluster-ip-range`, `kubectl get servicecidrs` on clusters that serve
+that API, or the cluster's settings at your cloud (for AKS,
+`az aks show --query networkProfile`).
 See [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md), and the [installation runbook](../how-to/qualify-openai-compatible.md).
 
 ## Analyzer only

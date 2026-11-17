@@ -42,6 +42,13 @@ spec:
         - 192.168.0.0/16
         - 100.64.0.0/10
         - 169.254.0.0/16
+        {{- /* Declared in-cluster ranges outside the private ones (ADR-0042). This rule allows no IPv6
+        address, so only the IPv4 ranges need an exception. */}}
+        {{- range .Values.analyzer.analysis.openAICompatible.inClusterCIDRs }}
+        {{- if not (contains ":" .) }}
+        - {{ . }}
+        {{- end }}
+        {{- end }}
   {{- end }}
   {{- with .Values.networkPolicy.analyzer.prometheus }}
   {{- if .enabled }}

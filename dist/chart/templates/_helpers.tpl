@@ -174,7 +174,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file disable-foundry openai-compatible-endpoints analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file disable-foundry openai-compatible-endpoints openai-compatible-in-cluster-cidrs analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
 {{- end }}
 
 {{/*
@@ -224,6 +224,18 @@ Foundry deployment (#814). */ -}}
 {{- $compatible := $a.openAICompatible | default dict -}}
 {{- if and (or $a.disableFoundry $compatible.endpoints) (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.openAICompatible and disableFoundry need triageModel" -}}
+{{- end -}}
+{{- if and $compatible.inClusterCIDRs (not $compatible.endpoints) -}}
+{{- fail "analyzer.analysis.openAICompatible.inClusterCIDRs needs analyzer.analysis.openAICompatible.endpoints" -}}
+{{- end -}}
+{{- if and $compatible.inClusterCIDRs (not (kindIs "slice" $compatible.inClusterCIDRs)) -}}
+{{- fail "analyzer.analysis.openAICompatible.inClusterCIDRs must be a list of CIDRs" -}}
+{{- end -}}
+{{- range $compatible.inClusterCIDRs -}}
+{{- /* The analyzer is the exact gate (openaicompatible.ParseInClusterRanges): it also refuses host bits. */ -}}
+{{- if not (and (kindIs "string" .) (or (regexMatch "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}/(3[0-2]|[12]?[0-9])$" .) (regexMatch "^[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$" .))) -}}
+{{- fail "analyzer.analysis.openAICompatible.inClusterCIDRs has an entry that is not an IPv4 or IPv6 CIDR" -}}
+{{- end -}}
 {{- end -}}
 {{- $seen := dict -}}
 {{- range $compatible.endpoints -}}

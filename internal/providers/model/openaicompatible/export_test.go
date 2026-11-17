@@ -16,7 +16,14 @@ limitations under the License.
 
 package openaicompatible
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
+)
 
 // SetTestTransport replaces networking for offline factory boundary tests.
 func SetTestTransport(p *Provider, transport http.RoundTripper) { p.client.Transport = transport }
+
+// DialGuard returns the address rule of the provider's dialer.
+func DialGuard(p *Provider) openaiwire.Guard { return p.guard }

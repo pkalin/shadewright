@@ -93,6 +93,9 @@ spec:
         {{- with $compatibleEndpoints }}
         - {{ printf "--openai-compatible-endpoints=%s" (include "shadewright.compatibleEndpoints" .) | quote }}
         {{- end }}
+        {{- with $c.analysis.openAICompatible.inClusterCIDRs }}
+        - --openai-compatible-in-cluster-cidrs={{ join "," . }}
+        {{- end }}
         {{- with $c.analysis.endpointSuffixes }}
         - --model-endpoint-suffixes={{ join "," . }}
         {{- end }}

@@ -633,7 +633,7 @@ func (p *Provider) encode(req providers.CompletionRequest) ([]byte, map[string]b
 }
 
 func newHTTPClient(rt http.RoundTripper, headerTimeout time.Duration) *http.Client {
-	c := openaiwire.NewHTTPClient(headerTimeout, false)
+	c := openaiwire.NewHTTPClient(headerTimeout, openaiwire.Guard{})
 	if rt != nil {
 		c.Transport = rt
 	}

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"time"
@@ -60,6 +61,9 @@ type analysisFlags struct {
 	anthropicKeyFile    string
 	disableFoundry      bool
 	compatibleEndpoints string
+	// compatibleInCluster is --openai-compatible-in-cluster-cidrs: ranges outside the private ones that count
+	// as in-cluster for the compatible provider's dial guard (ADR-0042).
+	compatibleInCluster string
 	actionPolicies      string
 	// storeAccount and storeContainer name the Blob Storage container of the analysis records (ADR-0015).
 	storeAccount, storeContainer string
@@ -110,6 +114,13 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 			"(namespace, podSelector, port). Each key belongs only to its declared base. "+
 			"Settings must name a declared model (ModelNotAllowed otherwise). "+
 			"No compatible endpoint is allowed by the Foundry suffix list.")
+	fs.StringVar(&f.compatibleInCluster, "openai-compatible-in-cluster-cidrs", "",
+		"Comma-separated CIDRs (IPv4 or IPv6), such as 198.51.100.0/24, that count as in-cluster besides the "+
+			"private, shared and link-local ranges: the cluster's pod and Service ranges when they are routable "+
+			"addresses. A compatible endpoint that is not a declared Service gets no connection to an address in "+
+			"them, checked at dial time for every resolved address. A malformed CIDR, one with host bits set, or "+
+			"one that contains an endpoint's literal address refuses the start. Used only with "+
+			"--openai-compatible-endpoints.")
 	fs.StringVar(&f.actionPolicies, "action-policies", "",
 		"Comma-separated ActionType=policy pairs: the RemediationPolicy a proposed RemediationRequest of each "+
 			"action type refers to, such as SetContainerMemoryLimit=memory-limits. An action type without one is "+
@@ -233,6 +244,10 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if err != nil {
 		return nil, err
 	}
+	inCluster, err := f.compatibleInClusterRanges(endpoints)
+	if err != nil {
+		return nil, err
+	}
 	if f.claimTimeout <= 0 {
 		return nil, errors.New("the analysis needs the Incident trigger's analysis timeout")
 	}
@@ -252,7 +267,7 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 		expected[analysis.RoleEscalation] = escalation
 	}
 	factory, err := models.NewModelFactory(models.ModelsConfig{
-		Suffixes: suffixes, CompatibleEndpoints: endpoints, Tokens: tokens,
+		Suffixes: suffixes, CompatibleEndpoints: endpoints, CompatibleInClusterRanges: inCluster, Tokens: tokens,
 		DisableFoundry: f.disableFoundry, AnthropicKeyFile: f.anthropicKeyFile,
 		Expected: expected, Log: d.log.WithName("models")})
 	if err != nil {
@@ -365,7 +380,7 @@ func setupAnalysis(mgr ctrl.Manager, inc *incidents.Controller, f analysisFlags,
 }
 
 func (f analysisFlags) compatibleFlagsSet() bool {
-	return f.compatibleEndpoints != "" || f.disableFoundry
+	return f.compatibleEndpoints != "" || f.compatibleInCluster != "" || f.disableFoundry
 }
 
 func (f analysisFlags) modelCredentials(
@@ -385,6 +400,21 @@ func (f analysisFlags) modelCredentials(
 		}
 	}
 	return suffixes, tokens, nil
+}
+
+// compatibleInClusterRanges parses --openai-compatible-in-cluster-cidrs against the declared endpoints.
+func (f analysisFlags) compatibleInClusterRanges(endpoints []openaicompatible.Endpoint) ([]netip.Prefix, error) {
+	if f.compatibleInCluster == "" {
+		return nil, nil
+	}
+	if len(endpoints) == 0 {
+		return nil, errors.New("--openai-compatible-in-cluster-cidrs needs --openai-compatible-endpoints")
+	}
+	ranges, err := openaicompatible.ParseInClusterRanges(f.compatibleInCluster, endpoints)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --openai-compatible-in-cluster-cidrs: %w", err)
+	}
+	return ranges, nil
 }
 
 // compatibleDeclarations checks every installation base before the token source is built.

@@ -78,3 +78,30 @@ func TestCompatibleInvalidDeclarationStopsBeforeIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestCompatibleInClusterRangesAtStart(t *testing.T) {
+	const declared = `[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses","models":["m"]}]`
+	f := validFlags()
+	f.disableFoundry, f.endpointSuffixes, f.compatibleEndpoints = true, "", declared
+	f.compatibleInCluster = "198.51.100.0/24,2001:db8:1::/48"
+	if c, err := buildAnalysis(f, testDeps(t), nil); err != nil || c == nil {
+		t.Fatalf("valid ranges refused: %v", err)
+	}
+	for _, tc := range []struct{ name, endpoints, ranges, reason string }{
+		{"malformed", declared, "198.51.100.0/33", "not a CIDR"},
+		{"host bits", declared, "198.51.100.1/24", "host bits"},
+		{"empty item", declared, "198.51.100.0/24,", "not a CIDR"},
+		{"no endpoints", "", "198.51.100.0/24", "needs --openai-compatible-endpoints"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := f
+			bad.compatibleEndpoints, bad.compatibleInCluster = tc.endpoints, tc.ranges
+			if tc.endpoints == "" {
+				bad.anthropicKeyFile = "/var/run/secrets/shadewright/anthropic/api-key"
+			}
+			if _, err := buildAnalysis(bad, testDeps(t), nil); err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("wrong startup refusal: %v, want %s", err, tc.reason)
+			}
+		})
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -89,5 +90,34 @@ func TestGeneratedSettingsModelsBoundToDeclarations(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The factory hands the declared in-cluster ranges to the dial guard of every compatible provider it builds.
+func TestFactoryWiresInClusterRanges(t *testing.T) {
+	endpoints := []openaicompatible.Endpoint{{URL: "https://gateway.example.com/a", API: openaicompatible.APIChatCompletions, Models: []string{"m"}}}
+	ranges := []netip.Prefix{netip.MustParsePrefix("11.0.0.0/8"), netip.MustParsePrefix("2a0b:4000::/32")}
+	factory, err := models.NewModelFactory(models.ModelsConfig{DisableFoundry: true, CompatibleEndpoints: endpoints, CompatibleInClusterRanges: ranges})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ranges[0] = netip.MustParsePrefix("12.0.0.0/8") // a later change by the caller moves nothing
+	p, err := factory(analysis.RoleTriage, remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderOpenAICompatible,
+		Endpoint: "https://gateway.example.com/a", InferenceAPI: remediationv1alpha1.InferenceAPI(openaicompatible.APIChatCompletions), Deployment: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := openaicompatible.DialGuard(p.(*openaicompatible.Provider))
+	for _, addr := range []string{"11.2.3.4:443", "[2a0b:4000::1]:443", "[::ffff:11.2.3.4]:443"} {
+		if err := guard.Control("tcp", addr, nil); err == nil {
+			t.Errorf("in-cluster address %s allowed", addr)
+		}
+	}
+	if err := guard.Control("tcp", "12.2.3.4:443", nil); err != nil {
+		t.Errorf("public address refused: %v", err)
+	}
+	if _, err := models.NewModelFactory(models.ModelsConfig{DisableFoundry: true, CompatibleEndpoints: endpoints,
+		CompatibleInClusterRanges: []netip.Prefix{netip.MustParsePrefix("11.0.0.1/8")}}); err == nil {
+		t.Fatal("a range with host bits was accepted")
 	}
 }

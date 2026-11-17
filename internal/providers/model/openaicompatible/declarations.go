@@ -19,7 +19,9 @@ package openaicompatible
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strconv"
@@ -199,4 +201,64 @@ func MatchEndpoint(endpoints []Endpoint, raw string, api API) (Endpoint, bool) {
 		}
 	}
 	return Endpoint{}, false
+}
+
+// MaxInClusterRanges bounds the in-cluster ranges an install may declare.
+const MaxInClusterRanges = 32
+
+// ParseInClusterRanges reads the comma-separated in-cluster ranges of the installation flag (ADR-0042): the
+// pod and Service ranges of a cluster that are outside the private ranges. The dialer of every compatible
+// endpoint refuses an address in them like a private address. See ValidateInClusterRanges.
+func ParseInClusterRanges(raw string, endpoints []Endpoint) ([]netip.Prefix, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	items := strings.Split(raw, ",")
+	if len(items) > MaxInClusterRanges {
+		return nil, fmt.Errorf("at most %d in-cluster ranges may be declared", MaxInClusterRanges)
+	}
+	ranges := make([]netip.Prefix, 0, len(items))
+	for i, item := range items {
+		p, err := netip.ParsePrefix(item)
+		if err != nil {
+			return nil, fmt.Errorf("in-cluster range %d is not a CIDR such as 203.0.113.0/24 or 2001:db8::/64", i+1)
+		}
+		ranges = append(ranges, p)
+	}
+	if err := ValidateInClusterRanges(ranges, endpoints); err != nil {
+		return nil, err
+	}
+	return ranges, nil
+}
+
+// ValidateInClusterRanges refuses a range that is not in its canonical network form (host bits set, or an
+// IPv4 range written as IPv4-mapped IPv6), more than MaxInClusterRanges, and a range that contains the literal
+// address of a declared endpoint, whose every call would then be refused. Declared hosts are DNS names
+// (CanonicalBase), so the last check holds for any endpoint that passes ValidateEndpoints and guards against
+// a later change of that rule.
+func ValidateInClusterRanges(ranges []netip.Prefix, endpoints []Endpoint) error {
+	if len(ranges) > MaxInClusterRanges {
+		return fmt.Errorf("at most %d in-cluster ranges may be declared", MaxInClusterRanges)
+	}
+	for i, p := range ranges {
+		if !p.IsValid() || p.Addr().Is4In6() || p.Addr().Zone() != "" || p.Masked() != p {
+			return fmt.Errorf("in-cluster range %d is not a network address with its prefix length (host bits must be zero; IPv4 ranges in IPv4 form)", i+1)
+		}
+	}
+	for _, e := range endpoints {
+		u, err := url.Parse(e.URL)
+		if err != nil {
+			continue // ValidateEndpoints refuses it.
+		}
+		ip, err := netip.ParseAddr(u.Hostname())
+		if err != nil {
+			continue
+		}
+		for i, p := range ranges {
+			if p.Contains(ip.Unmap()) {
+				return fmt.Errorf("in-cluster range %d contains the address of a declared endpoint", i+1)
+			}
+		}
+	}
+	return nil
 }

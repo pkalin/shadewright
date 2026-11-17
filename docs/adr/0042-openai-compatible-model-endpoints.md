@@ -61,7 +61,16 @@ choose no part of the request destination.
    HTTPS ports are bounded to 1 through 65535; the chart also opens each declared
    public endpoint port other than 443 in a separate egress rule excluding
    10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 and 169.254.0.0/16.
-   The existing 443/6443 rule is unchanged. Foundry stays on 443.
+   The existing 443/6443 rule is unchanged. Foundry stays on 443. Ranges the
+   install declares as in-cluster (chart value
+   `analyzer.analysis.openAICompatible.inClusterCIDRs`, flag
+   `--openai-compatible-in-cluster-cidrs`, decided 2026-11-17) count like the
+   private ranges: the dial guard of every compatible endpoint that is not a
+   declared Service refuses an address in them, after DNS, for every resolved
+   address and before any byte of the request or key is sent, and the IPv4 ones
+   are added to the except list of the rule for declared ports other than 443
+   (that rule allows no IPv6 address). A malformed range, one with host bits set,
+   or one that contains an endpoint's literal address stops the analyzer at start.
 4. A key belongs only to its declaration's complete base. Two endpoints can have
    different keys, including on the same gateway host at different paths. An
    endpoint without a key sends no Authorization header. Only the analyzer mounts
@@ -178,12 +187,24 @@ training is opt-in before allowing a vendor; the Azure region promise does not
 cover this provider. A compromised analyzer can read its mounted credentials.
 Standard NetworkPolicy permits HTTPS addresses, not DNS host identities.
 
+For this provider only, ADR-0042 amends decision 9 of
+[ADR-0023](0023-how-the-analyzer-calls-the-model.md) (its amendment of
+2026-11-17 links back here): every usage counts at least the loop's input
+estimate, at most the ceiling `C` of decision 7; a reply that reports usage above
+`C` is refused and charged `C`; and a 429 or other refusal of a compatible host
+is never treated as unbilled, so a failed sent call costs `C`. Foundry and
+Anthropic accounting is unchanged.
+
 Two trust assumptions remain:
 
-- A cluster that uses address space for pods or Services outside RFC 1918 other
-  than 100.64.0.0/10 has those addresses treated as public, both by the dial guard
-  and by the except list of the egress rule for declared public ports. A declared
-  public endpoint could then reach such a pod or Service address.
+- The pod and Service ranges of the cluster are known to the install. The dial
+  guard and the egress except list treat the private, shared (100.64.0.0/10) and
+  link-local ranges as in-cluster, plus the ranges declared in
+  `inClusterCIDRs` (decision 3). A cluster whose pods or Services use other
+  routable addresses must declare them; an undeclared range is treated as public,
+  and a declared public endpoint whose DNS points into it would get the key and
+  the redacted context. The analyzer does not read the ranges from Nodes: see
+  Alternatives.
 - The right to create pods in a declared Service's namespace, or to edit that
   Service or its EndpointSlices, is equivalent to holding the key and the redacted
   context. Such a pod can mount the namespace's Secrets, including the Service's
@@ -199,7 +220,7 @@ Two trust assumptions remain:
 | --- | --- |
 | Settings points at an attacker host | Exact parsed install-time base, API and model matching; requests use declaration data only, including the fixed inference route |
 | Redirect or proxy steals a key | No redirects of any status and no environment proxy |
-| Public DNS rebinds into the cluster or metadata | Address checks on each connection; private addresses only for explicitly named Service hosts, never metadata or loopback |
+| Public DNS rebinds into the cluster or metadata | Address checks on each connection, against the private ranges and the declared in-cluster ranges; private addresses only for explicitly named Service hosts, never metadata or loopback |
 | Service impersonation | Verified TLS with the Service DNS name; cluster operators own certificates and Service routing. Pod creation in the Service's namespace, or edits of the Service or its EndpointSlices, bypass it (a pod can mount the serving certificate): only cluster administrators may create pods there |
 | Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; before a completion is returned, search an allow-list view of the reply (ASCII letters, digits and the key's punctuation, every other character dropped) over the raw body and over every decoded string, number and object key in document order, with nested JSON decoded; control characters are removed from model text before storage (#852), so a key whole in stored text is whole in the view; a wrong-typed decoy field fails closed with its own fixed text. A re-encoded key (base64, percent encoding, homoglyphs) is not found: the endpoint is trusted with the key |
 | Server ignores schema or invents a tool | Shared parser, typed argument/result validation, closed catalog and deterministic policy; no output repair |
@@ -233,6 +254,15 @@ Offline transport tests do not replace scenario qualification.
   analyzer would never read the key. Not chosen now: it adds a component and an
   identity. It is the next step if a compromised analyzer reading its mounted keys
   becomes the concern.
+- Reading the in-cluster ranges from the cluster (`spec.podCIDRs` of the Nodes,
+  and the Service range) instead of declaring them. Not chosen: the analyzer's
+  `list` on Nodes is granted for platform detection only (invariant 6), and using
+  it to decide where a key may go widens what that grant is for; the Service
+  range would need a further grant (the `ServiceCIDR` objects, where the cluster
+  serves them); and a range read at
+  run time changes with the cluster while the declaration is fixed at install
+  and checked at start. The install declares the ranges instead, with no RBAC
+  change.
 - A fixed-host OpenAI provider excludes gateways and cluster servers.
 - Reusing Foundry with a key mixes identity and Azure URL/version semantics.
 - Refusing all private addresses excludes cluster inference; explicit Service

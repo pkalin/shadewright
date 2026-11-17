@@ -116,7 +116,12 @@ the inference Service in a namespace where only cluster administrators create po
 is necessary on CNIs such as Cilium where CIDR rules exclude in-cluster pods.
 Public compatible declarations add their explicit TCP ports other than 443 to a
 separate rule whose `0.0.0.0/0` peer excludes 10.0.0.0/8, 172.16.0.0/12,
-192.168.0.0/16, 100.64.0.0/10 and 169.254.0.0/16. The existing 443/6443 rule
+192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 and the IPv4 ranges of
+`analyzer.analysis.openAICompatible.inClusterCIDRs`. Those declared in-cluster
+ranges (the cluster's pod and Service ranges when they are routable addresses,
+IPv4 or IPv6) are refused by the dial guard of every compatible endpoint that is
+not a declared Service, like the private ranges; the install declares them,
+the analyzer does not read them from Nodes. The existing 443/6443 rule
 remains unchanged, including its API-server access. These rules do not enforce DNS identity.
 Keep the selectors narrow and consistent with the Service and trusted certificate.
 

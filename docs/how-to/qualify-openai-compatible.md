@@ -93,6 +93,25 @@ the declared `podSelector`, and where the CNI applies `ipBlock` rules to pod
 addresses the 443 rule admits any pod. The Service address must be in an RFC 1918
 range: one in 100.64.0.0/10 is refused even when declared.
 
+If the cluster's pod or Service ranges are routable addresses outside the private
+ones, declare them so that a public endpoint cannot resolve into the cluster:
+
+```yaml
+analyzer:
+  analysis:
+    openAICompatible:
+      inClusterCIDRs:
+        - 198.51.100.0/22
+        - 2001:db8:42::/56
+```
+
+The analyzer refuses to start on a malformed range or one with host bits set.
+Read the pod ranges with
+`kubectl get nodes -o jsonpath='{.items[*].spec.podCIDRs}'` (or the CNI's own
+pool objects) and the Service range from the API server's
+`--service-cluster-ip-range`, `kubectl get servicecidrs`, or the cluster's
+settings at your cloud.
+
 Leave `apiKey` empty for no Authorization header. A supplied key must be at least
 16 bytes after surrounding whitespace is removed; a shorter nonempty key is
 malformed and is not retried. Provision a serving certificate

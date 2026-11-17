@@ -26,6 +26,7 @@ package models
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
@@ -149,6 +150,9 @@ type ModelsConfig struct {
 	DisableFoundry bool
 	// CompatibleEndpoints are exact install-time bases with their own API, allowed models and optional key.
 	CompatibleEndpoints []openaicompatible.Endpoint
+	// CompatibleInClusterRanges are the in-cluster ranges outside the private ones that every compatible
+	// endpoint's dialer refuses (--openai-compatible-in-cluster-cidrs, ADR-0042).
+	CompatibleInClusterRanges []netip.Prefix
 	// Suffixes is the allow-list of endpoint host suffixes for Foundry deployments only.
 	// Set together with Tokens unless DisableFoundry is true. Empty refuses every Foundry deployment
 	// (analysis.ErrProviderNotConfigured): an analyzer that only calls the Anthropic API needs no Azure
@@ -184,7 +188,7 @@ type ModelsConfig struct {
 //     consulted. It then builds an Anthropic provider for that model that reads the key file at every attempt
 //     and logs every failed call.
 //   - OpenAICompatible: it matches an exact installation endpoint and its allowed models (ErrModelNotAllowed before any call), then builds the shared-wire adapter with no
-//     token source, an optional key bound to that exact base, and the declared Service endpoints allowed private addresses. Azure model hosts and the Anthropic API are refused. No key means
+//     token source, an optional key bound to that exact base, and the declared Service endpoints allowed private addresses; every other endpoint refuses private addresses and the declared in-cluster ranges at dial time. Azure model hosts and the Anthropic API are refused. No key means
 //     no Authorization header; API versions are refused and the API prefix is part of the endpoint.
 //   - Any other provider is refused (analysis.ErrProviderNotConfigured).
 func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
@@ -198,6 +202,10 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	if err := openaicompatible.ValidateEndpoints(cfg.CompatibleEndpoints, cfg.Suffixes); err != nil {
 		return nil, err
 	}
+	if err := openaicompatible.ValidateInClusterRanges(cfg.CompatibleInClusterRanges, cfg.CompatibleEndpoints); err != nil {
+		return nil, err
+	}
+	cfg.CompatibleInClusterRanges = slices.Clone(cfg.CompatibleInClusterRanges)
 	// Freeze installation data: settings and caller mutations cannot move a credential.
 	cfg.CompatibleEndpoints = slices.Clone(cfg.CompatibleEndpoints)
 	for i := range cfg.CompatibleEndpoints {
@@ -245,7 +253,7 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			log := cfg.Log.WithValues("role", role, "provider", d.ProviderName())
 			p, err := openaicompatible.New(openaicompatible.Config{
 				Endpoint: decl.URL, Deployment: d.Deployment, API: decl.API,
-				KeyFile: decl.KeyFile, Service: decl.Service,
+				KeyFile: decl.KeyFile, Service: decl.Service, InClusterRanges: cfg.CompatibleInClusterRanges,
 				OnCall: func(r openaicompatible.CallReport) {
 					if r.Err != nil {
 						log.Info("A call to an OpenAI-compatible endpoint failed", "attempts", r.Attempts,

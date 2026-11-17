@@ -27,9 +27,11 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -116,6 +118,10 @@ type Config struct {
 	KeyFile string
 	// Service permits private unicast addresses for this declared Service endpoint.
 	Service *Service
+	// InClusterRanges are the declared in-cluster ranges outside the private ones (ParseInClusterRanges). A
+	// public endpoint whose name resolves into one is refused at dial time, before any byte is sent. Not used
+	// for a Service endpoint, which may dial private addresses.
+	InClusterRanges []netip.Prefix
 	// API is ChatCompletions (the default) or Responses.
 	API API
 	// MaxOutputTokens is sent when a request leaves its own limit at zero. Zero means DefaultMaxOutputTokens;
@@ -142,6 +148,7 @@ type Config struct {
 // testHooks are what tests replace.
 type testHooks struct {
 	transport http.RoundTripper
+	dialer    func(*net.Dialer)
 	sleep     func(context.Context, time.Duration) error
 	jitter    func(time.Duration) time.Duration
 	now       func() time.Time
@@ -154,6 +161,7 @@ type Provider struct {
 	// api is the inference API: APIChatCompletions or APIResponses.
 	api            API
 	keyFile        string
+	guard          openaiwire.Guard
 	client         *http.Client
 	maxOutput      int
 	attempts       int
@@ -198,7 +206,10 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	if err := ValidateEndpoints([]Endpoint{{URL: cfg.Endpoint, API: api, Models: []string{cfg.Deployment}, KeyFile: cfg.KeyFile, Service: cfg.Service}}, nil); err != nil {
 		return nil, invalid("the endpoint declaration is invalid")
 	}
-	allowPrivate := cfg.Service != nil
+	if err := ValidateInClusterRanges(cfg.InClusterRanges, []Endpoint{{URL: cfg.Endpoint}}); err != nil {
+		return nil, invalid("an in-cluster range is invalid")
+	}
+	guard := openaiwire.Guard{AllowPrivateService: cfg.Service != nil, InCluster: slices.Clone(cfg.InClusterRanges)}
 	if cfg.MaxOutputTokens < 0 || cfg.MaxOutputTokens > MaxOutputTokens {
 		return nil, invalid("the output token limit is out of range")
 	}
@@ -217,7 +228,8 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 		deployment:     cfg.Deployment,
 		api:            api,
 		keyFile:        cfg.KeyFile,
-		client:         openaiwire.NewHTTPClient(cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout), allowPrivate),
+		guard:          guard,
+		client:         openaiwire.NewHTTPClient(cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout), guard),
 		maxOutput:      cmpOr(cfg.MaxOutputTokens, DefaultMaxOutputTokens),
 		attempts:       cmpOr(cfg.MaxAttempts, DefaultMaxAttempts),
 		base:           cmpOr(cfg.BaseDelay, DefaultBaseDelay),
@@ -232,6 +244,12 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	}
 	if h.transport != nil {
 		p.client.Transport = h.transport
+	}
+	if h.dialer != nil {
+		// Tests give the guarded dialer a resolver and watch its control; the guard is the provider's own.
+		d := p.guard.Dialer()
+		h.dialer(d)
+		p.client.Transport.(*http.Transport).DialContext = d.DialContext
 	}
 	if p.sleep == nil {
 		p.sleep = sleep
@@ -476,7 +494,7 @@ func transportError(ctx context.Context, err error) error {
 		return ctxError(ctx)
 	}
 	if errors.Is(err, openaiwire.ErrDialRefused) {
-		return fmt.Errorf("openai-compatible: the endpoint resolves to an address that is not public: %w", providers.ErrInvalidConfig)
+		return fmt.Errorf("openai-compatible: the endpoint resolves to an address that is not public or is in-cluster: %w", providers.ErrInvalidConfig)
 	}
 	var ne net.Error
 	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) && ne.Timeout() {

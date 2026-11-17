@@ -376,6 +376,21 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "inClusterCIDRs": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": {
+                    "type": "string",
+                    "anyOf": [
+                      {
+                        "pattern": "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}/(3[0-2]|[12]?[0-9])$"
+                      },
+                      {
+                        "pattern": "^[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$"
+                      }
+                    ]
+                  }
+                },
                 "endpoints": {
                   "type": "array",
                   "maxItems": 16,

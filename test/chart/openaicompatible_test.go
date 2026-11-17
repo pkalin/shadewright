@@ -315,3 +315,83 @@ func TestCompatibleChartModelAndPrefixRefusals(t *testing.T) {
 		}
 	}
 }
+
+const inClusterKey = "inClusterCIDRs"
+const inClusterValue = "analyzer.analysis.openAICompatible." + inClusterKey
+
+// Declared in-cluster ranges reach the analyzer as one flag, and the IPv4 ones are excepted from the egress
+// rule of a declared port other than 443 like the private ranges (ADR-0042).
+func TestCompatibleInClusterCIDRs(t *testing.T) {
+	set := append(compatibleSet(), endpointPrefix+"url=https://api.openai.com:8443/v1",
+		inClusterValue+"={198.51.100.0/24,2001:db8:1::/48,11.0.0.0/8}")
+	r := compatibleRender(t, set...)
+	flag := ""
+	for _, arg := range container(t, r, analyzerDeployment).Args {
+		if v, ok := strings.CutPrefix(arg, "--openai-compatible-in-cluster-cidrs="); ok {
+			flag = v
+		}
+	}
+	if flag != "198.51.100.0/24,2001:db8:1::/48,11.0.0.0/8" {
+		t.Fatalf("in-cluster flag = %q", flag)
+	}
+	if _, err := openaicompatible.ParseInClusterRanges(flag, declaredArgs(t, r)); err != nil {
+		t.Fatalf("the analyzer refuses the rendered flag: %v", err)
+	}
+	k := "NetworkPolicy/" + operatorNS + "/shadewright-allow-analyzer-egress"
+	want := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16",
+		"198.51.100.0/24", "11.0.0.0/8"}
+	found := false
+	for _, rule := range nonDNSRules(t, k, r) {
+		for _, port := range rule.Ports {
+			if port.Port != nil && port.Port.IntValue() == 8443 {
+				found = true
+				if len(rule.To) != 1 || rule.To[0].IPBlock == nil || rule.To[0].IPBlock.CIDR != "0.0.0.0/0" ||
+					!reflect.DeepEqual(rule.To[0].IPBlock.Except, want) {
+					t.Fatalf("declared port rule = %+v", rule.To)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("declared port rule missing")
+	}
+
+	// Without the value: no flag.
+	for _, arg := range container(t, compatibleRender(t, compatibleSet()...), analyzerDeployment).Args {
+		if strings.HasPrefix(arg, "--openai-compatible-in-cluster-cidrs") {
+			t.Fatalf("flag rendered without ranges: %s", arg)
+		}
+	}
+}
+
+func TestCompatibleInClusterCIDRsRefused(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		for _, tc := range []struct{ name, value, reason string }{
+			{"not a cidr", "{pods}", inClusterKey},
+			{"no prefix length", "{198.51.100.0}", inClusterKey},
+			{"prefix too long", "{198.51.100.0/33}", inClusterKey},
+			{"octet too large", "{198.51.300.0/24}", inClusterKey},
+			{"mapped ipv6", "{::ffff:198.51.100.0/120}", inClusterKey},
+			{"ipv6 prefix too long", "{2001:db8::/129}", inClusterKey},
+		} {
+			t.Run(fmt.Sprintf("%s/schema-skipped=%v", tc.name, skip), func(t *testing.T) {
+				args := helmArgs(t, false, append(compatibleSet(), inClusterValue+"="+tc.value)...)
+				if skip {
+					args = append(args, "--skip-schema-validation")
+				}
+				out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+				if err == nil || !strings.Contains(string(out), tc.reason) {
+					t.Fatalf("wrong refusal: %v %.1200s", err, out)
+				}
+			})
+		}
+	}
+	// Ranges without a compatible endpoint have nothing to guard.
+	args := helmArgs(t, false, "analyzer.analysis.triageModel=m", "analyzer.analysis.anthropic.apiKey.secretName=k",
+		inClusterValue+"={198.51.100.0/24}")
+	args = append(args, "--skip-schema-validation")
+	out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "needs analyzer.analysis.openAICompatible.endpoints") {
+		t.Fatalf("ranges without endpoints rendered: %v %.1200s", err, out)
+	}
+}

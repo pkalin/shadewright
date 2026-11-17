@@ -176,4 +176,14 @@ and `service` egress fields on its endpoint declaration. Run that Service in a
 namespace where only cluster administrators create pods: the right to create pods
 there, or to edit the Service or its EndpointSlices, is equivalent to holding the
 key and the redacted context. A Service address in 100.64.0.0/10 is refused.
+If the cluster's pod or Service ranges are routable addresses outside the private
+ones, list them in `openAICompatible.inClusterCIDRs`: the analyzer then refuses to
+connect a public endpoint to them, and the egress rule of a declared port other
+than 443 excepts them. To find a cluster's ranges: the pod ranges are in
+`kubectl get nodes -o jsonpath='{.items[*].spec.podCIDRs}'` (empty with some CNIs,
+which keep them in their own configuration, such as the Cilium `IPPool` or the
+Calico `IPPool` objects); the Service range is the API server's
+`--service-cluster-ip-range`, `kubectl get servicecidrs` on clusters that serve
+that API, or the cluster's settings at your cloud (for AKS,
+`az aks show --query networkProfile`).
 Plain HTTP is refused. Follow the [installation and qualification runbook](how-to/qualify-openai-compatible.md).

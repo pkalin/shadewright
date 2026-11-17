@@ -59,6 +59,9 @@ func TestStartupProbeMemoryFact(t *testing.T) {
 		{name: "is a memory issue", text: "It is a memory issue.", pass: false},
 		{name: "points to memory", text: "The restart pattern points to memory.", pass: false},
 		{name: "limit implicated", text: "The memory limit is implicated.", pass: false},
+		// Short forms of the added phrases must not pass a reply that leaves memory open.
+		{name: "whether or not memory", text: "It is unclear whether or not memory is the cause.", pass: false},
+		{name: "not a memory limit this low", text: "This is not a memory limit that can hold the workload.", pass: false},
 		// Replies of real runs silent about memory: a real miss, so they still fail.
 		{
 			name: "silent, available",

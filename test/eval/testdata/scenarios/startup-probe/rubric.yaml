@@ -20,7 +20,7 @@ facts:
       - no memory evidence
       # The phrasings below come from replies that refused as expected and ruled memory out in other words (#843).
       - no evidence that the pod-template memory # gpt-6.1-sol, 2026-11-17
-      - not a memory # Claude Sonnet and Claude Opus, 2026-11-14
-      - not memory # Claude Opus, 2026-11-14
+      - not a memory issue # Claude Sonnet and Claude Opus, 2026-11-14
+      - not memory or scaling # Claude Opus, 2026-11-14
       - nothing points to memory # Claude Opus, 2026-11-14
       - memory limit is not implicated # Claude Haiku, 2026-11-14

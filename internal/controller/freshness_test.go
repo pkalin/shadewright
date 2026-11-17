@@ -1281,29 +1281,33 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(notClosed(got).Reason).To(Equal(ReasonGitFailed))
 	})
 
-	It("removes PullRequestUnreadable of the new installation when the request ends without a read that worked (#808)", func() {
-		unrecorded()
-		refused := atomic.Bool{}
-		r := reconciler()
-		r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
-			if refused.Load() {
-				return nil, fmt.Errorf("installation token: %w", providers.ErrForbidden)
+	// The request ends without a read that worked: its repository left the settings. The condition of the cleanup,
+	// a failed or a refused token, goes with the end, since nothing reads that branch for the request again.
+	DescribeTable("removes PullRequestUnreadable of the cleanup when the request ends without a read that worked (#808)",
+		func(class error) {
+			unrecorded()
+			r := reconciler()
+			r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				return nil, fmt.Errorf("installation token: %w", class)
 			}
-			return nil, fmt.Errorf("installation token: %w", providers.ErrRetryable)
-		}
-		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
-		Expect(err).To(HaveOccurred())
-		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
-			NotTo(BeNil())
-		// The installation is then refused the repository for good: the request ends, and nothing reads its pull
-		// requests through the new installation again.
-		refused.Store(true)
-		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
-		got := fetch()
-		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
-		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
-			To(BeNil(), "removed with the end")
-	})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+				NotTo(BeNil())
+			const moved = "https://github.com/example/moved"
+			live := &remediationv1alpha1.RemediationSettings{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), live)).To(Succeed())
+			live.Spec.Repositories[0].URL = moved
+			Expect(k8sClient.Update(ctx, live)).To(Succeed())
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			Expect(planFresh().Reason).To(Equal(reasonRepositoryUnavailable))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+				To(BeNil(), "removed with the end")
+		},
+		Entry("a token that fails", providers.ErrRetryable),
+		Entry("a token the host refuses", providers.ErrForbidden),
+	)
 
 	It("keeps the delay the host asked for while the new installation fails with no pull request recorded (#808)", func() {
 		unrecorded()
@@ -1474,11 +1478,63 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			To(BeNil(), "setting one removes the other")
 	})
 
-	// #808, 2026-11-16: with no pull request recorded, a close the Git host refuses for good does not end the request.
-	// It waits with PullRequestNotClosed, keeps the lock and the mark, retries at the error backoff and ends once the
-	// pull request is found closed, by anyone, or merged.
-	DescribeTable("waits after a refused close with no pull request recorded, and ends once it is closed or merged (#808)",
-		func(newInstallation bool, class error, reason, end string) {
+	// #808: a refused step waits the poll interval, but a failed write of its condition is a Kubernetes API error and
+	// goes to the error backoff, so the condition is written again soon.
+	It("sends a failed write of the condition of a refused step to the error backoff (#808)", func() {
+		unrecorded()
+		git.SetFail(func(op string) error {
+			if op == opClose {
+				return fmt.Errorf("close: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		r := reconciler()
+		r.Client = &statusFailer{Client: k8sClient, fail: func() bool { return true }}
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).To(MatchError(ContainSubstring("status write lost")), "the error backoff, not the poll interval")
+		Expect(res).To(Equal(reconcile.Result{}))
+		Expect(notClosed(fetch())).To(BeNil(), "not written")
+	})
+
+	// #808: the write of PullRequestUnreadable by the listing's read (noteRead) removes PullRequestNotClosed in the same
+	// write, so a cleanup stopped before cleanUpStale's own write (here the caller's cancellation, right before it)
+	// never leaves both True.
+	It("removes PullRequestNotClosed in the read's own write of PullRequestUnreadable (#808)", func() {
+		unrecorded()
+		listRefused := atomic.Bool{}
+		git.SetFail(func(op string) error {
+			switch {
+			case op == opList && listRefused.Load():
+				return fmt.Errorf("listing: %w", providers.ErrForbidden)
+			case op == opClose:
+				return fmt.Errorf("close: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		_, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(notClosed(fetch())).NotTo(BeNil(), "the close was refused")
+
+		listRefused.Store(true)
+		cctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		r := reconciler()
+		r.Client = &bumpBeforeStatusUpdate{Client: k8sClient, bump: func(client.Object) { cancel() }}
+		_, _ = r.Reconcile(cctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		got := fetch()
+		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		Expect(c).NotTo(BeNil(), "the listing was refused")
+		Expect(c.Reason).To(Equal(ReasonGitForbidden))
+		Expect(notClosed(got)).To(BeNil(), "never both, also when the cleanup stops between two writes")
+	})
+
+	// #808, both decisions of 2026-11-16: with no pull request recorded, a close, a token or a listing the Git host
+	// refuses for good does not end the request. It waits with PullRequestNotClosed (close) or PullRequestUnreadable
+	// (token, listing) naming the step and the class of the host's answer, keeps the lock and the mark, is tried again
+	// after the poll interval (never at once, never through the rate limiter), and ends once the pull request is
+	// found closed, by anyone, or merged.
+	DescribeTable("waits after a refused step with no pull request recorded, and ends once it is closed or merged (#808)",
+		func(step string, newInstallation bool, class error, reason, end string) {
 			if newInstallation {
 				unrecorded()
 			} else {
@@ -1487,13 +1543,28 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 					got.Status.PullRequest = nil
 				})
 			}
+			condition, event, what, answer := remediationv1alpha1.ConditionPullRequestNotClosed,
+				EventPullRequestNotClosed, fmt.Sprintf("the close of pull request #%d", cr.Number), "403"
+			switch step {
+			case "token":
+				condition, event, what = remediationv1alpha1.ConditionPullRequestUnreadable, EventPullRequestUnreadable,
+					"the access token for the plan's repository"
+			case "listing":
+				condition, event, what = remediationv1alpha1.ConditionPullRequestUnreadable, EventPullRequestUnreadable,
+					"the listing of the pull requests of branch "
+			}
+			if errors.Is(class, providers.ErrRejected) {
+				answer = "422"
+			}
 			recorder := record.NewFakeRecorder(20)
 			refused := atomic.Bool{}
 			refused.Store(true)
 			git.SetFail(func(op string) error {
 				switch {
-				case op == opClose && refused.Load():
-					return fmt.Errorf("status %s: %w", reason, class)
+				case step == "close" && op == opClose && refused.Load():
+					return fmt.Errorf("status secret-host-text: %w", class)
+				case step == "listing" && op == opList && refused.Load():
+					return fmt.Errorf("status secret-host-text: %w", class)
 				case op == opClose:
 					closes.Add(1)
 				}
@@ -1501,42 +1572,66 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			})
 			r := reconciler()
 			r.Recorder = recorder
-			for range 2 {
+			r.PullRequestPollInterval = 2 * time.Minute
+			open := r.OpenRepository
+			r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				if step == "token" && refused.Load() {
+					return nil, fmt.Errorf("installation token secret-host-text: %w", class)
+				}
+				return open(ctx, repo)
+			}
+			var written string
+			for i := range 2 {
 				res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
-				Expect(err).To(HaveOccurred(), "retried at the error backoff")
-				Expect(res).To(Equal(reconcile.Result{}))
+				Expect(err).NotTo(HaveOccurred(), "never the controller's rate limiter")
+				Expect(res).To(Equal(reconcile.Result{RequeueAfter: 2 * time.Minute}), "the poll interval")
 				got := fetch()
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "not a final phase")
 				Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged), "the mark stays")
 				Expect(got.Status.HoldsTarget).To(HaveValue(BeTrue()), "the lock stays")
-				c := notClosed(got)
+				c := meta.FindStatusCondition(got.Status.Conditions, condition)
 				Expect(c).NotTo(BeNil(), "the wait is visible")
+				Expect(c.Status).To(Equal(metav1.ConditionTrue))
 				Expect(c.Reason).To(Equal(reason))
-				Expect(c.Message).To(ContainSubstring(fmt.Sprintf("the Git host refused (%s) to close pull request #%d",
-					reason, cr.Number)))
-				Expect(c.Message).To(ContainSubstring("no status recorded"))
-				Expect(c.Message).NotTo(ContainSubstring("status "+reason), "no text of the host")
-				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
-					To(BeNil())
+				Expect(c.Message).To(ContainSubstring(fmt.Sprintf("the Git host refused (%s) %s", reason, what)))
+				Expect(c.Message).To(ContainSubstring("it answered 4xx"), "the class of the host's answer")
+				Expect(c.Message).To(ContainSubstring("("+answer), "the status code")
+				Expect(c.Message).NotTo(ContainSubstring("secret-host-text"), "no text of the host")
+				other := remediationv1alpha1.ConditionPullRequestUnreadable
+				if condition == other {
+					other = remediationv1alpha1.ConditionPullRequestNotClosed
+				}
+				Expect(meta.FindStatusCondition(got.Status.Conditions, other)).To(BeNil(), "never both")
 				Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
+				if i == 1 {
+					Expect(got.ResourceVersion).To(Equal(written), "a retry that changes nothing writes nothing")
+				}
+				written = got.ResourceVersion
 			}
-			Expect(eventsOf(recorder, EventPullRequestNotClosed)).To(Equal(1), "one Event while the reason stays")
+			Expect(eventsOf(recorder, event)).To(Equal(1), "one Event while the reason stays")
 
 			switch end {
 			case "closed by a person":
+				// The person's close goes past the refusal the fake answers Shadewright with.
 				refused.Store(false)
 				Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
-				refused.Store(true)
+				refused.Store(step == "close")
 			case "merged by a person":
 				_, err := git.Merge(cr.Number)
 				Expect(err).NotTo(HaveOccurred())
+				if step != "close" {
+					refused.Store(false)
+				}
 			case "closed by the retried close":
 				refused.Store(false)
 			}
+			closes.Store(0)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 			Expect(err).NotTo(HaveOccurred())
 			got := fetch()
 			Expect(notClosed(got)).To(BeNil(), "removed with the end")
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+				To(BeNil(), "removed with the end")
 			if end == "merged by a person" {
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 				Expect(stalePlanMerged(got)).To(BeTrue(), "recorded as a stale plan's merge")
@@ -1548,14 +1643,36 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged))
 			Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
 		},
-		Entry("same installation, 403, closed by a person", false, providers.ErrForbidden, ReasonGitForbidden,
-			"closed by a person"),
-		Entry("same installation, 422, merged", false, providers.ErrRejected, ReasonGitRejected, "merged by a person"),
-		Entry("new installation, 403, merged", true, providers.ErrForbidden, ReasonGitForbidden, "merged by a person"),
-		Entry("new installation, 422, closed by a person", true, providers.ErrRejected, ReasonGitRejected,
-			"closed by a person"),
-		Entry("new installation, 403, closed by the retried close", true, providers.ErrForbidden, ReasonGitForbidden,
-			"closed by the retried close"),
+		Entry("close, same installation, 403, closed by a person", "close", false, providers.ErrForbidden,
+			ReasonGitForbidden, "closed by a person"),
+		Entry("close, same installation, 422, merged", "close", false, providers.ErrRejected, ReasonGitRejected,
+			"merged by a person"),
+		Entry("close, new installation, 403, merged", "close", true, providers.ErrForbidden, ReasonGitForbidden,
+			"merged by a person"),
+		Entry("close, new installation, 422, closed by a person", "close", true, providers.ErrRejected,
+			ReasonGitRejected, "closed by a person"),
+		Entry("close, new installation, 403, closed by the retried close", "close", true, providers.ErrForbidden,
+			ReasonGitForbidden, "closed by the retried close"),
+		Entry("token, same installation, 403, closed by a person", "token", false, providers.ErrForbidden,
+			ReasonGitForbidden, "closed by a person"),
+		Entry("token, same installation, 422, merged", "token", false, providers.ErrRejected, ReasonGitRejected,
+			"merged by a person"),
+		Entry("token, new installation, 403, merged", "token", true, providers.ErrForbidden, ReasonGitForbidden,
+			"merged by a person"),
+		Entry("token, new installation, 422, closed by a person", "token", true, providers.ErrRejected,
+			ReasonGitRejected, "closed by a person"),
+		Entry("token, new installation, 403, closed by the retried close", "token", true, providers.ErrForbidden,
+			ReasonGitForbidden, "closed by the retried close"),
+		Entry("listing, same installation, 403, closed by a person", "listing", false, providers.ErrForbidden,
+			ReasonGitForbidden, "closed by a person"),
+		Entry("listing, same installation, 422, merged", "listing", false, providers.ErrRejected, ReasonGitRejected,
+			"merged by a person"),
+		Entry("listing, new installation, 403, merged", "listing", true, providers.ErrForbidden, ReasonGitForbidden,
+			"merged by a person"),
+		Entry("listing, new installation, 422, closed by a person", "listing", true, providers.ErrRejected,
+			ReasonGitRejected, "closed by a person"),
+		Entry("listing, new installation, 403, closed by the retried close", "listing", true, providers.ErrForbidden,
+			ReasonGitForbidden, "closed by the retried close"),
 	)
 
 	// #808: the condition writes of the cleanup with no pull request recorded wake no reconcile of their own, so the
@@ -1600,6 +1717,82 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			remediationv1alpha1.ConditionPullRequestNotClosed),
 		Entry("a close the host refuses", opClose, fmt.Errorf("close: %w", providers.ErrForbidden),
 			remediationv1alpha1.ConditionPullRequestNotClosed),
+	)
+
+	// #808, second decision of 2026-11-16: a refused close, token or listing of the cleanup with no pull request
+	// recorded is tried again after the poll interval, never through the controller's rate limiter (5 ms, doubling),
+	// and a restart starts no burst. The controller here keeps the default rate limiter; the poll interval is an
+	// hour, so each manager run makes exactly one attempt.
+	DescribeTable("paces a refused step of the cleanup with no pull request recorded by the poll interval (#808)",
+		func(step string, condition string) {
+			unrecorded()
+			var calls atomic.Int32
+			git.SetFail(func(op string) error {
+				calls.Add(1)
+				switch {
+				case step == "close" && op == opClose:
+					return fmt.Errorf("close: %w", providers.ErrForbidden)
+				case step == "listing" && op == opList:
+					return fmt.Errorf("listing: %w", providers.ErrForbidden)
+				}
+				return nil
+			})
+			run := func() {
+				GinkgoHelper()
+				before := calls.Load()
+				mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+					Scheme:     k8sClient.Scheme(),
+					Metrics:    metricsserver.Options{BindAddress: "0"},
+					Cache:      cache.Options{DefaultNamespaces: map[string]cache.Config{request.Namespace: {}}},
+					Controller: config.Controller{SkipNameValidation: new(true)},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				r := reconciler()
+				r.PullRequestPollInterval = time.Hour
+				open := r.OpenRepository
+				r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+					calls.Add(1)
+					if step == "token" {
+						return nil, fmt.Errorf("installation token: %w", providers.ErrForbidden)
+					}
+					return open(ctx, repo)
+				}
+				counted := &wakeCounter{inner: r, key: client.ObjectKeyFromObject(request)}
+				Expect(ctrl.NewControllerManagedBy(mgr).For(&remediationv1alpha1.RemediationRequest{}).
+					WithEventFilter(skipOwnMarks).Named("unrecorded-pace-" + request.Name).Complete(counted)).To(Succeed())
+				mctx, cancel := context.WithCancel(ctx)
+				DeferCleanup(cancel)
+				done := make(chan struct{})
+				go func() {
+					defer GinkgoRecover()
+					defer close(done)
+					Expect(mgr.Start(mctx)).To(Succeed())
+				}()
+				Eventually(calls.Load).WithTimeout(10 * time.Second).Should(BeNumerically(">", before))
+				// Whatever one attempt calls (a token, a listing, a close), it settles at once.
+				time.Sleep(200 * time.Millisecond)
+				attempt := calls.Load()
+				time.Sleep(5 * time.Second)
+				GinkgoWriter.Printf("calls of the Git host: %d after the first attempt, %d five seconds later\n",
+					attempt-before, calls.Load()-before)
+				Expect(calls.Load()).To(Equal(attempt), "tried again before the poll interval")
+				Expect(counted.calls.Load()).To(Equal(int32(1)), "one reconcile: the condition write wakes none")
+				cancel()
+				Eventually(done).WithTimeout(10 * time.Second).Should(BeClosed())
+			}
+			run()
+			once := calls.Load()
+			Expect(once).To(BeNumerically(">", 0))
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "not a final phase")
+			Expect(meta.FindStatusCondition(got.Status.Conditions, condition)).NotTo(BeNil(), "the wait is visible")
+			// A restart reconciles the request once and waits the poll interval again.
+			run()
+			Expect(calls.Load()).To(Equal(2*once), "one attempt per start, no burst")
+		},
+		Entry("a refused close", "close", remediationv1alpha1.ConditionPullRequestNotClosed),
+		Entry("a refused token", "token", remediationv1alpha1.ConditionPullRequestUnreadable),
+		Entry("a refused listing", "listing", remediationv1alpha1.ConditionPullRequestUnreadable),
 	)
 
 	It("closes nothing through the new installation when the pull request lacks this request's marker (#290)", func() {

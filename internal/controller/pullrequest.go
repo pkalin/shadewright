@@ -1700,7 +1700,8 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 
 // refuseOrWait handles a step error of recheck and retry. A final refusal of the Git host (refusal) stops
 // Shadewright's writes at once instead of retrying until the deadline: a request without a recorded pull
-// request ends in NeedsIntervention, while one whose pull request waits for review (PRCreated,
+// request ends in NeedsIntervention (except a stale plan's cleanup, errUnrecordedRefused, which waits the poll
+// interval: waitUnrecorded), while one whose pull request waits for review (PRCreated,
 // AwaitingApproval) keeps its phase, says why on PlanFresh (Unknown) and keeps watching the pull request, so
 // a later merge is still recorded (a close without a merge is decided once the freshness check runs again).
 // Any other error goes to waitOrFail, and so does a failed read of a pull request (isUnknownChange), whatever
@@ -1713,10 +1714,8 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 		// and the close, the check or the look tried, again after the poll interval.
 		return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
 	}
-	if errors.Is(err, errUnrecordedCloseRefused) {
-		// A stale plan's close refused for good with no pull request recorded (#808): not a final phase, the close
-		// is tried again at the error backoff, or after the delay the host asked for.
-		return r.waitOrFail(ctx, rr, err)
+	if errors.Is(err, errUnrecordedRefused) {
+		return r.waitUnrecorded(ctx, rr, err)
 	}
 	if isUnknownChange(err) {
 		// A read of a pull request that failed, whatever its class (a 403 included), is never a refusal of a
@@ -1749,6 +1748,25 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 	}
 	// The refusal is asked again at the next full recheck; the looks until then read only the pull request.
 	return r.waited(rr), nil
+}
+
+// waitUnrecorded is refuseOrWait for errUnrecordedRefused, a step of a stale plan's cleanup with no pull request
+// recorded that the Git host refused for good (#808, second decision of 2026-11-16): not a final phase, and the
+// cleanup is tried again after the poll interval, or the longer delay the host asked for, like the path with a
+// recorded pull request (errStaleNotClosed). It never goes through the controller's rate limiter (5 ms, doubling),
+// and a restart reconciles once and waits again. The condition that says so (noteUnrecorded) lasts while the
+// refusal does. A failure of the Kubernetes side in the same look (a *clusterError: the condition's write) goes to
+// the error backoff instead, as any Kubernetes API error does.
+func (r *RemediationRequestReconciler) waitUnrecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) (reconcile.Result, error) {
+	if isClusterError(err) {
+		return reconcile.Result{}, err
+	}
+	d := max(r.pullRequestPollInterval(), retryAfterOf(err))
+	logf.FromContext(ctx).Info("Waiting before the stale RemediationRequest's cleanup is tried again: the Git host "+
+		"refused a step of it", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(),
+		"retryAfter", d)
+	return reconcile.Result{RequeueAfter: d}, nil
 }
 
 // refusedWhileWatching is the fixed PlanFresh message of a refusal while a recorded pull request waits.

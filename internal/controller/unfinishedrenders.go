@@ -193,8 +193,8 @@ func (r *RemediationRequestReconciler) unmarkFresh(ctx context.Context, rr *reme
 }
 
 // skipOwnMarks drops the watch events of an update that changed nothing of a request but status.unfinishedRenders,
-// condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound, set or
-// removed, PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
+// condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound (or, in a
+// stale plan's cleanup with no pull request recorded, GitForbidden or GitRejected), set or removed, PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
 // the metadata every write changes. Those are the executor's own writes: the mark and its removal
 // around a render, the condition that says why a stale plan's pull request is not closed (keepWatchingStale,
 // noteNotReached, noteUnrecorded) and its removal with the close (recordStaleClosed), and the one that says a read through a new installation of the GitHub App failed (noteRead,
@@ -251,8 +251,13 @@ func closedRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // reinstalledUnreadable reports whether rr has no condition PullRequestUnreadable, or one with reason GitFailed or
-// GitNotFound: only a read through a new installation of the GitHub App sets those (reinstalledRead, #797).
+// GitNotFound: only a read through a new installation of the GitHub App sets those (reinstalledRead, #797). With
+// the stale mark and no pull request recorded, reason GitForbidden or GitRejected counts too: the refused token or
+// listing of that cleanup (unrecordedRefusedCondition, #808), whose look waits the poll interval.
 func reinstalledUnreadable(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	if c != nil && (c.Reason == ReasonGitForbidden || c.Reason == ReasonGitRejected) {
+		return unrecordedCleanup(rr)
+	}
 	return c == nil || c.Reason == ReasonGitFailed || c.Reason == ReasonGitNotFound
 }

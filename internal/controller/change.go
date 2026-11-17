@@ -719,6 +719,11 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 	var want *metav1.Condition
 	ownListed, isOwnListed := errors.AsType[*ownListedError](v.err)
 	switch reason, _, refused := refusal(v.err); {
+	case v.state == changeUnknown && refused && n == 0 && unrecordedCleanup(rr):
+		// The listing of a stale plan's cleanup with no pull request recorded (#808): the condition cleanUpStale
+		// writes for it next (unrecordedRefusedCondition), so the two writes of one look agree.
+		c := unrecordedRefusedCondition(rr, refusedStep{step: stepListing, reason: reason}, v.err)
+		want = &c
 	case v.state == changeUnknown && refused:
 		want = refusedRead(rr, reason, v.err, n)
 	case v.state == changeUnknown && isOwnListed:

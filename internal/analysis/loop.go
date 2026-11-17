@@ -932,6 +932,9 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		attrAttempt.Int(attempt+1), attrMaxOutputTokens.Int(req.MaxOutputTokens)))
 	defer func() { endModelCall(span, res) }()
 	c, err := model.Complete(ctx, req)
+	// Model text is untrusted and is read without control characters, for every provider, before anything
+	// parses, redacts, logs, records or compares it (#852): what is stored is what any terminal shows.
+	c = providers.WithoutControls(c)
 	notSent := providers.IsNotSent(err)
 	if !notSent {
 		r.a.sent(r.parent, r.inc, role, d.ProviderName())

@@ -48,6 +48,7 @@ func (loopContext) Build(context.Context, *remediationv1alpha1.Incident) (*incid
 type loopTools struct {
 	mu    sync.Mutex
 	calls []string
+	args  []string
 }
 
 func (*loopTools) Definitions() []providers.ToolDefinition {
@@ -62,6 +63,7 @@ func (l *loopTools) Call(_ context.Context, call providers.ToolCall) (tools.Resu
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.calls = append(l.calls, call.Name)
+	l.args = append(l.args, string(call.Arguments))
 	return tools.Result{Tool: call.Name, Status: tools.StatusOK, Text: "no events\n"}, nil
 }
 

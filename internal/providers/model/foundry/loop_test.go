@@ -49,6 +49,7 @@ func (loopContext) Build(context.Context, *remediationv1alpha1.Incident) (*incid
 type loopTools struct {
 	mu    sync.Mutex
 	calls []string
+	args  []string
 }
 
 func (*loopTools) Definitions() []providers.ToolDefinition {
@@ -63,6 +64,7 @@ func (l *loopTools) Call(_ context.Context, call providers.ToolCall) (tools.Resu
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.calls = append(l.calls, call.Name)
+	l.args = append(l.args, string(call.Arguments))
 	return tools.Result{Tool: call.Name, Status: tools.StatusOK, Text: "no events\n"}, nil
 }
 
@@ -74,6 +76,13 @@ type sentRequest struct {
 
 // runLoop runs one analysis whose escalation model is the adapter, answering the calls with replies in order.
 func runLoop(t *testing.T, maxToolSteps int, replies ...string) (analysis.Outcome, []sentRequest, *loopTools) {
+	t.Helper()
+	return runLoopWith(t, nil, maxToolSteps, replies...)
+}
+
+// runLoopWith is runLoop with the adapter's configuration changed by mod, when not nil.
+func runLoopWith(t *testing.T, mod func(*Config), maxToolSteps int, replies ...string) (analysis.Outcome,
+	[]sentRequest, *loopTools) {
 	t.Helper()
 	var mu sync.Mutex
 	var sent []sentRequest
@@ -104,7 +113,7 @@ func runLoop(t *testing.T, maxToolSteps int, replies ...string) (analysis.Outcom
 			return
 		}
 		reply(w, replies[len(sent)-1])
-	}, nil)
+	}, mod)
 	lt := &loopTools{}
 	a, err := analysis.New(analysis.Config{
 		Builder: loopContext{},

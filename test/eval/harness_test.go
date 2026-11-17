@@ -227,6 +227,14 @@ func (s *scenario) metricsSource() providers.MetricsSource {
 	return newReplayMetrics(s.metrics)
 }
 
+// contextConfig is the context builder's configuration for a run of s against the cluster c.
+func (s *scenario) contextConfig(c client.Client, redactor *redact.Redactor, metrics providers.MetricsSource,
+	logs providers.LogSource) incidentcontext.Config {
+	return incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
+		Metrics: metrics, Logs: logs, Limits: s.limits, Redactor: redactor, Now: func() time.Time { return fixtureNow },
+		Policies: evalPolicies, PolicyReader: c, RequestNamespace: evalRequestNamespace}
+}
+
 // runScenario builds the scenario's context with the real context builder and runs the real analysis loop
 // once.
 func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, models modelSource) (scenarioResult, error) {
@@ -238,9 +246,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	now := func() time.Time { return fixtureNow }
 	metrics, logs := s.metricsSource(), s.logSource()
-	builder, err := incidentcontext.New(incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
-		Metrics: metrics, Logs: logs, Limits: s.limits, Redactor: redactor, Now: now,
-		Policies: evalPolicies, PolicyReader: c, RequestNamespace: evalRequestNamespace})
+	builder, err := incidentcontext.New(s.contextConfig(c, redactor, metrics, logs))
 	if err != nil {
 		return res, err
 	}

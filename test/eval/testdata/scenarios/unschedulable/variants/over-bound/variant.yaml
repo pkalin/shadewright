@@ -1,0 +1,8 @@
+about: >-
+  The unschedulable Incident in a shared cluster of 48 nodes: the scheduler's note lists thirteen distinct reasons
+  (tainted pools, cordoned and pressured nodes) before its preemption sentence, so the 953-byte symptom makes the
+  summary longer than its bound with no absorbed tally. The summary keeps every line and shortens the symptom,
+  with a note of the bytes cut (#796); the cause, 12 Insufficient cpu, stays in the part shown. For #841.
+# The summary bound of this variant's context: the smallest the context builder accepts. At the default bound
+# (2048) no Incident within the schema's limits and without a tally reaches it (TestOverBoundSummaryVariant).
+summaryBytes: 1024

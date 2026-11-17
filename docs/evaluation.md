@@ -233,8 +233,10 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the ten scenarios, their variants (three so far, `oom/rollout`, `oom/absorbed` and `keda-at-ceiling/wide-policy`)
-and the five escalation scenarios is eighteen analyses per repeat. The escalation scenarios need an escalation
+A run of the ten scenarios, their variants (four so far, `oom/rollout`, `oom/absorbed`, `keda-at-ceiling/wide-policy`
+and `unschedulable/over-bound`) and the five escalation scenarios is nineteen analyses per repeat. The real-model
+run for [#841](https://github.com/pkalin/shadewright/issues/841), before the v0.6.0 release, is a run of all of them,
+so it includes both `oom/absorbed` and `unschedulable/over-bound`. The escalation scenarios need an escalation
 model: on Foundry `EVAL_ESCALATION_DEPLOYMENT` with `EVAL_ESCALATION_MODEL` (the deployment alone is refused
 before any call), through the Anthropic API ([below](#a-claude-model-the-anthropic-api)) `EVAL_ESCALATION_MODEL`.
 Without one, each escalation scenario is handed off (`EscalationNotConfigured`) and fails. Each analysis is bounded by the loop's limits (at most 7 model
@@ -335,7 +337,8 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 **Variants.** A variant is a state of a fleet scenario that the lab met and the scenario's own recording does not
 show. It is scored against the scenario's `expected.yaml` and `rubric.yaml`, unchanged, with the scenario's
 Incident, and is reported as `<scenario>/<name>`. Its directory holds `variant.yaml` (`about`: what it changes and
-why, required), its own `replies.yaml`, and an `incident.yaml`, `objects.yaml`, `metrics.yaml` or `policy.yaml` when
+why, required; `summaryBytes`: the context's summary bound, optional, the default when left out), its own
+`replies.yaml`, and an `incident.yaml`, `objects.yaml`, `metrics.yaml` or `policy.yaml` when
 its Incident, objects, series or policies differ (otherwise the scenario's are used; a variant's Incident must match
 `expected.yaml` as the scenario's does). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
 `oom` scenario during a rollout, as the lab met it on 2026-11-07
@@ -362,9 +365,26 @@ moves no block ID, and none of its lines is quotable. It is the recorded scenari
 asked for before the tally reached the model. `TestPromptShowsTheAbsorbedTally` replays it, checks that it passes
 and that its prompt holds one line per entry of the tally.
 
+`unschedulable/over-bound` is the case for the other half of #796: a summary over its bound with no tally, whose
+lines all stay while its values are shortened with a "(N bytes cut)" note. Its Incident is `unschedulable` in a
+shared cluster of 48 nodes: the scheduler's note lists thirteen distinct reasons (tainted node pools, cordoned and
+pressured nodes, `12 Insufficient cpu`) before its preemption sentence, a 953-byte symptom, and the new pod's
+`PodScheduled` message in `objects.yaml` is the same note. A symptom this long is an event's note; the scenarios
+that end in a proposal (`oom`, `statefulset-oom`, `keda-at-ceiling`) have symptoms the code writes, too short for
+any summary bound, so the variant's outcome is the scenario's refusal. At the default summary bound of 2 KiB no Incident within the schema's limits is over it without a
+tally (the symptom is at most 1 KiB), so the variant sets `summaryBytes: 1024`, the smallest bound the builder
+accepts: the summary is 1150 bytes before shortening and 1024 after, with the symptom cut by 142 bytes and its
+cause, `12 Insufficient cpu`, in the part shown. Its reply quotes that part and is scored with the scenario's
+rubric and expected refusal. `TestOverBoundSummaryVariant` measures the summary with the product's own builder and
+bounds (over the bound before, within it after, every line kept, only the symptom cut, with its note), checks that
+the reply passes, and that no quotable part of the summary holds the cut part, a quote across the cut or the note.
+The outcome is a refusal, and the loop checks quotes only for a proposal: in a real-model run, a quote of the cut
+part shows in the report's reply text, not as a failure.
+
 **The prompt of a scenario without a tally.** `TestPromptGolden` keeps, in `test/eval/testdata/prompt.golden`, the
 SHA-256 of the first model request (the system prompt and the context) of every scenario whose Incident has an empty
-`status.absorbed`, computed by the code before the tally block. Each must stay the same byte for byte; a change meant
+`status.absorbed`, computed by the code before the tally block (that of `unschedulable/over-bound`, added after it,
+pins its shortened summary). Each must stay the same byte for byte; a change meant
 to alter every prompt writes them again with `SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/`.
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the

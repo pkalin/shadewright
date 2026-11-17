@@ -1,6 +1,6 @@
 # ADR-0036: The model sees the ScaledObject of a KEDA incident
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-14
 
 ## Context

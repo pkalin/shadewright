@@ -101,7 +101,7 @@ func TestForcedEscalationSendsEveryScenarioToEscalation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if s.forceEscalation {
+			if s.escalates {
 				// An escalation scenario goes to the escalation model with or without the source forcing it.
 				if !pres.Escalated || len(plain.roles) == 0 || plain.roles[0] != analysis.RoleEscalation {
 					t.Fatalf("an escalation scenario did not escalate: %v, roles %v", pres.Escalated, plain.roles)

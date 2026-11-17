@@ -283,8 +283,8 @@ var offeredToolParams = sync.OnceValues(func() (map[string]toolParams, error) {
 })
 
 // checkReads parses the rubric's expected reads against the tools the scenario is offered (query_metrics only
-// with a metrics.yaml), and refuses a read no accepted call can make (readRule.callable). It runs once the
-// scenario's Incident and metrics are loaded.
+// with a metrics.yaml, get_pod_logs only with a logs.yaml), and refuses a read no accepted call can make
+// (readRule.callable). It runs once the scenario's Incident, metrics and logs are loaded.
 func (s *scenario) checkReads() error {
 	offered, err := offeredToolParams()
 	if err != nil {
@@ -293,6 +293,10 @@ func (s *scenario) checkReads() error {
 	if s.metrics == nil {
 		offered = maps.Clone(offered)
 		delete(offered, tools.NameQueryMetrics)
+	}
+	if s.logs == nil {
+		offered = maps.Clone(offered)
+		delete(offered, tools.NameGetPodLogs)
 	}
 	set, err := readCheckTools()
 	if err != nil {
@@ -328,7 +332,8 @@ var readCheckTools = sync.OnceValues(func() (*tools.Set, error) {
 	}
 	c := newClient(scheme, nil)
 	return tools.New(tools.Config{Pods: c, Events: c, Objects: c, Redactor: r, Namespaces: watchedNamespaces,
-		Metrics: newReplayMetrics(&metricsRecording{}), Now: func() time.Time { return fixtureNow }})
+		Metrics: newReplayMetrics(&metricsRecording{}), Logs: replayLogs{rec: &logsRecording{}},
+		Now: func() time.Time { return fixtureNow }})
 })
 
 // callable returns why no call that r matches can be accepted in a scenario whose subject is in

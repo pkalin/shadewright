@@ -1,0 +1,119 @@
+# Synthetic: the objects of the escalation scenario oom-config-key, written by hand, not recorded on a cluster.
+# The web container mounts the whole ConfigMap web-config at /etc/web; the ConfigMap itself is not shown (the
+# analyzer reads no ConfigMap). The image and its registry are placeholders.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000a01
+  generation: 3
+  creationTimestamp: "2026-11-04T09:00:00Z"
+  labels:
+    app.kubernetes.io/name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: web
+    spec:
+      containers:
+        - name: web
+          image: registry.invalid/demo/catalog:1.8.0
+          volumeMounts:
+            - name: config
+              mountPath: /etc/web
+          resources:
+            limits:
+              memory: 64Mi
+      volumes:
+        - name: config
+          configMap:
+            name: web-config
+status:
+  observedGeneration: 3
+  replicas: 1
+  updatedReplicas: 1
+  readyReplicas: 1
+  availableReplicas: 1
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-5f6b8c9d7
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000a02
+  creationTimestamp: "2026-11-04T11:38:00Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 5f6b8c9d7
+  annotations:
+    deployment.kubernetes.io/revision: "3"
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: web
+      uid: 00000000-0000-4000-8000-000000000a01
+      controller: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      pod-template-hash: 5f6b8c9d7
+status:
+  replicas: 1
+  readyReplicas: 1
+  availableReplicas: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-5f6b8c9d7-m4n6q
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000a03
+  creationTimestamp: "2026-11-04T11:38:05Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 5f6b8c9d7
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: web-5f6b8c9d7
+      uid: 00000000-0000-4000-8000-000000000a02
+      controller: true
+spec:
+  containers:
+    - name: web
+      image: registry.invalid/demo/catalog:1.8.0
+      volumeMounts:
+        - name: config
+          mountPath: /etc/web
+      resources:
+        limits:
+          memory: 64Mi
+  volumes:
+    - name: config
+      configMap:
+        name: web-config
+status:
+  phase: Running
+  containerStatuses:
+    - name: web
+      ready: true
+      restartCount: 4
+      image: registry.invalid/demo/catalog:1.8.0
+      imageID: ""
+      state:
+        running:
+          startedAt: "2026-11-04T11:58:00Z"
+      lastState:
+        terminated:
+          reason: OOMKilled
+          exitCode: 137
+          startedAt: "2026-11-04T11:41:00Z"
+          finishedAt: "2026-11-04T11:57:50Z"

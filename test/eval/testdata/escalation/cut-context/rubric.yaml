@@ -1,0 +1,11 @@
+# How the diagnosis of escalation/cut-context is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored).
+facts:
+  - fact: the requests fail with 503 for want of a database connection
+    all: ["503"]
+  - fact: the container exits with code 1 and restarts
+    any: ["exit code 1", "exits with code 1", "exited with code 1", "exiting with code 1"]
+  - fact: the startup line sets DB_POOL_SIZE=0, which disables the database connection pool
+    anyOf: [["DB_POOL_SIZE=0"], ["DB_POOL_SIZE", "0"]]
+reads:
+  - read: get_pod_logs pod=web-6c8d7f5b4-k2x8p container=web previous=true

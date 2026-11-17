@@ -168,9 +168,10 @@ func TestExtraReadIsCounted(t *testing.T) {
 // A rubric whose read cannot be made in its scenario is refused when it loads: a tool the scenario is not
 // offered, and a read listed twice.
 func TestRubricReadsAreChecked(t *testing.T) {
-	_, s := mustScenario(t, scnBadImage) // no metrics.yaml, so no query_metrics
+	_, s := mustScenario(t, scnBadImage) // no metrics.yaml or logs.yaml, so no query_metrics or get_pod_logs
 	for _, reads := range [][]string{
 		{"query_metrics template=container_memory_working_set_bytes"},
+		{"get_pod_logs pod=web-0 container=web"},
 		{readGetWeb, "get_resource  kind=Deployment name=web"},
 		{"get_resource Service/web"},
 	} {
@@ -186,6 +187,11 @@ func TestRubricReadsAreChecked(t *testing.T) {
 	oom.rubric.Reads = []rubricRead{{Read: "query_metrics template=container_memory_working_set_bytes"}}
 	if err := oom.checkReads(); err != nil {
 		t.Errorf("query_metrics in a scenario with metrics.yaml: %v", err)
+	}
+	oom.logs = &logsRecording{Source: sourceSynthetic, Namespace: nsDemo}
+	oom.rubric.Reads = []rubricRead{{Read: "get_pod_logs pod=web-0 container=web"}}
+	if err := oom.checkReads(); err != nil {
+		t.Errorf("get_pod_logs in a scenario with logs.yaml: %v", err)
 	}
 }
 
@@ -254,6 +260,8 @@ func TestRubricReadsTheToolRefusesAreRefused(t *testing.T) {
 // one character past it is refused. The right answer is known from the schema alone.
 func TestRubricReadsAtTheSchemaBoundaries(t *testing.T) {
 	_, oom := mustScenario(t, scnOOM)
+	// oom has metrics but no logs: an empty log recording offers get_pod_logs too.
+	oom.logs = &logsRecording{Source: sourceSynthetic, Namespace: oom.incident.Spec.Subject.Namespace}
 	scheme, err := newScheme()
 	if err != nil {
 		t.Fatal(err)

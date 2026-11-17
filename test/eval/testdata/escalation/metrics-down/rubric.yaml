@@ -1,0 +1,9 @@
+# How the diagnosis of escalation/metrics-down is scored: each fact of expected.yaml, verbatim, with the terms
+# the result's summary, hypotheses or evidence quotes must contain (case ignored).
+facts:
+  - fact: the web container is OOMKilled and restarts
+    all: ["OOMKilled"]
+  - fact: the previous revision set the memory limit to 96Mi, and the rollout lowered it to 48Mi
+    all: ["96Mi"]
+reads:
+  - read: get_resource ReplicaSet/web-7b9c5d8f6

@@ -1,0 +1,29 @@
+# Synthetic, not from the fleet repository: the expectation of the escalation scenario cut-context (#504), in
+# the fleet's scenario schema. No lab run has observed it.
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: cut-context
+summary: The web container starts with DB_POOL_SIZE=0, so its database connection pool is disabled, every request fails with 503 and the container exits with code 1 and restarts.
+incident:
+  reason: BackOff
+  status: synthetic
+  source: The kubelet's Warning event BackOff on the pod, attributed to Deployment demo/web through ReplicaSet.
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: synthetic
+  evidence:
+    - fact: the requests fail with 503 for want of a database connection
+      source: the log excerpt of the previous instance in the context
+    - fact: the container exits with code 1 and restarts
+      source: the pod's container status in the context
+    - fact: the startup line sets DB_POOL_SIZE=0, which disables the database connection pool
+      source: the previous instance's log, read with get_pod_logs past what the context kept
+outcome:
+  type: refusal
+  status: synthetic
+  reason: Changing an environment variable is not in the catalog; a person is notified.
+  phase: NeedsIntervention

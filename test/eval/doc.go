@@ -21,7 +21,10 @@ limitations under the License.
 // expected.yaml as vendored from a named fleet commit, a rubric that says how each expected fact is scored,
 // the RemediationPolicies of its cluster (policy.yaml, #493) and the model replies recorded for it.
 // The escalation scenarios under testdata/escalation (#504) hold a fact only a read tool shows; each runs on the
-// escalation model with the read tools from its first call (escalation_scenarios_test.go).
+// escalation model with the read tools from its first call, forced by the harness or through the product's own
+// signal (a context cut to its total bound, a metrics source that is down), and some have the logs of their pods
+// (logs.yaml, replayed through the LogSource interface for the harness only; escalation_scenarios_test.go,
+// logs_test.go).
 //
 // A run builds each scenario's context with the real context builder (package incidentcontext) over a fake
 // client that holds the recorded objects, and runs the real analysis loop (package analysis) with the real

@@ -5,7 +5,7 @@ replays recorded replies, and on demand against the real model ([design 11.2](de
 [ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 3, [#78](https://github.com/pkalin/shadewright/issues/78)).
 
 <span class="sw-status sw-built">built</span> The harness, the recorded contexts of ten fleet scenarios and of
-their variants, two [escalation scenarios](#the-escalation-scenarios) whose deciding fact only a read tool shows, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
+their variants, five [escalation scenarios](#the-escalation-scenarios) whose deciding fact only a read tool shows, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
 <span class="sw-status sw-planned">planned</span> Contexts and replies recorded from lab runs instead of written by
 hand, passing results stored in this repository, and the analyzer's run-time check that refuses automatic analysis
 without a passing result for its manifest digest. Until that check exists, a run with a real model in the lab is an
@@ -17,13 +17,17 @@ For each scenario in `test/eval/testdata/scenarios/` and each escalation scenari
 ([below](#the-escalation-scenarios)), the harness:
 
 1. Loads the recorded Incident, the cluster objects and the scenario's RemediationPolicies (`policy.yaml`) into a fake
-   API server, with a `RemediationSettings` that enables the KEDA module, and the scenario's recorded metrics, if it
-   has any, into a replayed metrics source.
+   API server, with a `RemediationSettings` that enables the KEDA module, and the scenario's recorded metrics and
+   pod logs, if it has any, into a replayed metrics source and log source.
 2. Builds the context with the real context builder (`internal/incidentcontext`, default limits, the lab's watched
    namespace `demo`, the built-in redaction rules) and runs the real analysis loop (`internal/analysis`) with the
    real read tools. A scenario with recorded metrics gives the builder and the `query_metrics` tool the same
    `MetricsSource` (below); one without them has no metrics source, so its metrics section says "not available: no
-   metrics source is configured", as an analyzer without `--prometheus-url`. No scenario has a log source. The
+   metrics source is configured", as an analyzer without `--prometheus-url`. Likewise a scenario with recorded logs
+   (`logs.yaml`, only escalation scenarios so far) gives the builder and `get_pod_logs` the same `LogSource`, a
+   replay for the harness only; one without them has no log source, so its log section says "not available: no log
+   source is configured" and `get_pod_logs` is not offered. An escalation scenario may also set the total bound of
+   the context or have a metrics source that is down ([below](#the-escalation-scenarios)). The
    builder reads the policies by name as the analyzer does (`demo-memory` for `SetContainerMemoryLimit`, `demo-keda`
    for `AdjustKedaMaxReplicas`), so the context holds the policy bounds block
    ([design 3.3](design/3-observation-and-deduplication.md#the-context-builder)). In CI the model is a fake that answers with the scenario's recorded replies, in order; on
@@ -124,9 +128,9 @@ The `Kind/name` form comes right after the tool and can be followed by arguments
 (`read: get_resource Deployment/web namespace=demo`). It applies only to a tool with `kind` and `name` arguments
 (`get_resource`, `list_events`, `check_missing_reference`). Values are compared exactly, case included; a value has
 no spaces and may hold `=` and `/` (`path=apps/web/values.yaml`). The harness refuses a rubric whose read
-names a tool the scenario is not offered (the tools of an evaluation run without `get_delivery_status`, and
-`query_metrics` only with a `metrics.yaml`; tools whose source the run lacks, such as `get_pod_logs`, are not
-offered), an argument the tool's schema does not have, a value outside the argument's enum (`get_resource
+names a tool the scenario is not offered (the tools of an evaluation run without `get_delivery_status`,
+`query_metrics` only with a `metrics.yaml` or a metrics source that is down, and `get_pod_logs` only with a
+`logs.yaml`), an argument the tool's schema does not have, a value outside the argument's enum (`get_resource
 Service/web`: `get_resource` reads only Pods, Deployments, StatefulSets and ReplicaSets), a boolean other than
 `true` or `false`, an integer that is not a whole number, an argument given twice, and a read listed twice. It also
 refuses a read that no accepted call can make, so that no run fails for the rubric's error: the read is checked
@@ -207,7 +211,7 @@ The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
 A run of the ten scenarios, their variants (three so far, `oom/rollout`, `oom/absorbed` and `keda-at-ceiling/wide-policy`)
-and the two escalation scenarios is fifteen analyses per repeat. The escalation scenarios need an escalation
+and the five escalation scenarios is eighteen analyses per repeat. The escalation scenarios need an escalation
 model: on Foundry `EVAL_ESCALATION_DEPLOYMENT` with `EVAL_ESCALATION_MODEL` (the deployment alone is refused
 before any call), through the Anthropic API ([below](#a-claude-model-the-anthropic-api)) `EVAL_ESCALATION_MODEL`.
 Without one, each escalation scenario is handed off (`EscalationNotConfigured`) and fails. Each analysis is bounded by the loop's limits (at most 7 model
@@ -299,6 +303,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events, and the KEDA ScaledObject of `broken-keda-trigger` and `keda-at-ceiling` (spec from the fleet's scenario file, synthetic status; decoded as unstructured JSON, as the analyzer reads it) |
 | `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom`, `statefulset-oom` and `keda-at-ceiling` have one (and the `oom/rollout` variant, below) |
+| `logs.yaml` | Optional. What the scenario's pod logs hold: `source`, the `namespace` (the Incident's), and per container instance (`pod`, `container`, `previous`, the instance's `podUID`, `containerID` and `restartCount`) its whole log as `text`, oldest line first. The replay answers as the API server does: the newest whole lines within the asked bytes, marked truncated when older lines are left out, a refused request for an instance the pod does not have, not found for another pod. No fleet scenario has one; the escalation scenarios `cut-context` and `oom-config-key` do |
 | `policy.yaml` | The RemediationPolicies of the scenario's cluster (#493): the lab's `demo-memory`, its spec copied from the fleet repository (the file names the commit), and a synthetic `demo-keda` (the lab has no KEDA policy yet). The context shows their bounds and a plan they refuse fails |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |
 | `grouping.yaml` | Optional. The kubelet events of the scenario's fault that the grouping case adds to `objects.yaml` ([below](#the-grouping-cases)). Only `oom` has one. The analysis does not read it |
@@ -451,11 +456,11 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | `anthropic` | With the Anthropic API only: `effort` and `thinkingAllowance` (tokens added to the output limit in `max_tokens`) |
 | `models` | Per role: `deployment` (with `anthropic`, the model ID), `model` (the ID and version replies must name), `apiVersion`, and `inferenceAPI` when it is set (left out for chat completions, so earlier digests stay the same) |
 | `promptVersion` | `analysis.PromptVersion()`: the prompt templates, the generated schema and the catalog |
-| `toolDefinitions` | Hash of the tool definitions offered on escalation, `query_metrics` included; a scenario without `metrics.yaml` is offered them without it |
+| `toolDefinitions` | Hash of the tool definitions offered on escalation, `query_metrics` and `get_pod_logs` included; a scenario without a metrics source or without `logs.yaml` is offered them without that tool |
 | `outputSchema` | Hash of the generated output schema and the action catalog |
-| `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run: `pods`, `objects`, `recorded metrics`, `policies`) |
+| `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run: `pods`, `objects`, `recorded metrics`, `recorded logs`, `policies`); an escalation scenario's own total bound (`contextBytes`) is covered by the `scenarios` hash |
 | `runLimits` | The loop limits of the run: `maxToolSteps` and `maxOutputTokens` |
-| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml`, `replies.yaml` and `policy.yaml`, of every file of its variants, and of the same files and the `scenario.yaml` of every escalation scenario (what the model is shown, and that the run escalates) |
+| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml`, `logs.yaml`, `replies.yaml` and `policy.yaml`, of every file of its variants, and of the same files and the `scenario.yaml` of every escalation scenario (what the model is shown, and that the run escalates) |
 | `redaction` | `builtInRules` (hash of the Go sources of `internal/redact`), `operatorPatterns` (their number: 0, nothing configures them yet) |
 | `rubric` | `fleetRepository`, `fleetCommit`, and `files` (hash of every `expected.yaml` and `rubric.yaml`, the escalation scenarios' included) |
 | `forcedEscalation` | `true` when the run forced every analysis to the escalation model (`EVAL_FORCE_ESCALATION`); left out otherwise, though the escalation scenarios escalate in every run |
@@ -487,19 +492,23 @@ tool (the forced-escalation benchmark of 2026-11-07 escalated 27 times and calle
 ([#504](https://github.com/pkalin/shadewright/issues/504)). Its report name is `escalation/<directory>`.
 
 No deterministic signal of the context fires for a fact that is merely missing (a `missingData` entry is never
-one, design 3.3), so the harness sends every run of an escalation scenario to the escalation model with the read
-tools from its first call, in the replay and with a real model, through the same failed-source signal as
-`EVAL_FORCE_ESCALATION` ([Benchmarking escalation models](#benchmarking-escalation-models)): the model is shown the
-context triage would have been shown. As with that switch, the analyzer has no path to it.
+one, design 3.3), so unless a scenario names a `signal`, the harness sends every run of it to the escalation model
+with the read tools from its first call, in the replay and with a real model, through the same failed-source signal
+as `EVAL_FORCE_ESCALATION` ([Benchmarking escalation models](#benchmarking-escalation-models)): the model is shown
+the context triage would have been shown. As with that switch, the analyzer has no path to it. A scenario with a
+`signal` is not forced: the product's own context builder raises the signal, and the loop escalates on it.
 
 Each directory holds `scenario.yaml`, `rubric.yaml` and `replies.yaml`, and, unless it takes them from a fleet
-scenario, `expected.yaml`, `incident.yaml`, `objects.yaml` and `policy.yaml`:
+scenario, `expected.yaml`, `incident.yaml`, `objects.yaml` and `policy.yaml`, and optionally `logs.yaml`:
 
 | `scenario.yaml` field | Meaning |
 | --- | --- |
 | `about` | Required: what the scenario tests and which read shows the deciding fact |
-| `fleetScenario` | The fleet scenario whose `expected.yaml`, `incident.yaml`, `objects.yaml`, `policy.yaml` and `metrics.yaml` it takes, unchanged; the directory may not hold its own. Left out, the scenario is synthetic: its own `expected.yaml`, in the fleet's schema, under a name no fleet scenario has |
+| `fleetScenario` | The fleet scenario whose `expected.yaml`, `incident.yaml`, `objects.yaml`, `policy.yaml`, `metrics.yaml` and `logs.yaml` it takes, unchanged; the directory may not hold its own. Left out, the scenario is synthetic: its own `expected.yaml`, in the fleet's schema, under a name no fleet scenario has |
 | `behindReads` | Required: the facts of `rubric.yaml`, verbatim, that only the expected reads show; a name that is no scored fact of the rubric is refused |
+| `signal` | The product's own escalation signal the scenario relies on: `truncated` (the builder cut the context to its total bound) or `failedSource` (a configured source failed). Left out, no signal fires and the harness forces the escalation |
+| `contextBytes` | The builder's total bound on the context, the section bounds staying at their defaults; required with `signal: truncated` and refused otherwise, 4096 to 262144 (the range of `maxContextBytes`). The default section bounds add up to the default total, so with the defaults the total cut never happens; only a total below their sum can cut the context. The analyzer does not pass `maxContextBytes` to the builder yet ([#372](https://github.com/pkalin/shadewright/issues/372)): this is a configuration the builder accepts, not what a deployed analyzer runs today |
+| `metricsSource` | `down`: a configured metrics source that fails every query, a Prometheus that is down. Required with `signal: failedSource` and refused otherwise, and refused with a `metrics.yaml` |
 
 The harness refuses an escalation scenario whose rubric lists no `reads`, or that has variants. The tests check,
 for every escalation scenario, that it passes on its recorded replies (`TestEscalationScenariosPass`); that each
@@ -507,22 +516,33 @@ fact `behindReads` names is not scored by the first model request, the system pr
 made, and is scored by the tool results of the run, both with the rubric's own terms matched on word boundaries
 (so the `256` of a CPU request is not taken from a `256Mi`; `TestEscalationFactsOnlyBehindReads`); and that taking any one expected
 read out of the replies fails the run, with that read reported missing (`TestEscalationScenarioFailsWithoutItsRead`).
+For a scenario with a `signal`, `TestEscalationScenarioSignal` checks that the context the builder returned carries
+that signal and no other, that every call went to the escalation model, and that without the cause (the default
+bounds, or no metrics source) the same scenario starts on triage. `TestEscalationMemoryProposalFails` replaces the
+final reply of `metrics-down` and `oom-config-key` with a memory proposal inside `demo-memory`: the loop proposes it
+and the scenario fails on its outcome alone. `TestEscalationFailedSourceAcceptsDiagnosisAndHandOff` checks that
+`metrics-down` passes both with its recorded hand-off (`MissingData`) and with the same diagnosis and no missing
+data (`NoProposal`).
 
 | Scenario | What it tests | Expected reads | Outcome |
 | --- | --- | --- | --- |
 | `escalation/unschedulable` | The fleet's `unschedulable`: the context shows `3 Insufficient cpu` but not the pod template's requests. Its third fact, the 256 CPU request of the web container, unscored in the fleet scenario, is scored here from the Deployment | `get_resource Deployment/web` | refusal |
 | `escalation/probe-path` | Synthetic. The liveness probe fails with HTTP 404 and the container restarts (exit code 137, which can pass for a memory kill). The probe's path, `/healthz`, is only in the Deployment's pod template | `get_resource Deployment/web` | refusal: changing a probe is not in the catalog |
+| `escalation/cut-context` | Synthetic, `signal: truncated`, `contextBytes: 8192`. A cut context: the container exits with code 1 after its requests fail with 503. The line that names the cause, `DB_POOL_SIZE=0` at startup, is followed by about 11 KiB of failed requests; the builder reads the whole log of the previous instance, then cuts the context to its total bound, which leaves only the last line of the excerpt and marks the context truncated. The escalation model reads the previous instance's log (16 KiB at most) and finds the line | `get_pod_logs pod=web-6c8d7f5b4-k2x8p container=web previous=true` | refusal: changing an environment variable is not in the catalog |
+| `escalation/metrics-down` | Synthetic, `signal: failedSource`, `metricsSource: down`. A failed source: the container is OOMKilled after a rollout and every metric is "could not fetch". The previous ReplicaSet's pod template shows that the rollout lowered the memory limit from 96Mi to 48Mi. Without the working set no memory size is supported: a diagnosis without a proposal and a hand-off for the missing metrics (`MissingData`) both pass, a memory proposal fails | `get_resource ReplicaSet/web-7b9c5d8f6` | refusal (`NoProposal` or `MissingData`) |
+| `escalation/oom-config-key` | Synthetic, forced. A plausible wrong first guess: the container is OOMKilled (exit code 137) and restarts, which reads as a limit too low, but its item cache has no size bound because the ConfigMap it mounts has no key `cache.yaml`. The context's excerpt, the newest 24 KiB of the previous instance's log, shows the cache growing but not its startup line; the current instance's log, behind `get_pod_logs`, names the missing key. A memory proposal fails | `get_pod_logs pod=web-5f6b8c9d7-m4n6q container=web previous=false` | refusal: a higher limit only delays the kill, and setting a ConfigMap key is not in the catalog |
 
 Every file is `source: synthetic` or says it is synthetic: written by hand, not recorded, with placeholder UIDs and
-an image on the reserved `.invalid` domain.
+an image on the reserved `.invalid` domain. The log lines are synthetic too, and hold no secret.
 
 Two cases of #504 are not built. A Service selector that does not match the pod labels: no read tool reads a
 Service (`get_resource` reads Pods, Deployments, StatefulSets and ReplicaSets) and the analyzer has no RBAC on
 Services, so the selector cannot sit behind a read ([#847](https://github.com/pkalin/shadewright/issues/847)). A
 renamed Secret key: the kubelet's error in the context already names the missing key, and the fact only a read
 could add, which keys the Secret has, is shown by no read tool (`check_missing_reference` answers from the pod
-status and Events and never reads the Secret, and `get_resource` reads no Secret). The other groups of #504 (a context cut past the logs bound, a
-failed source, a plausible wrong first guess) follow in a second change.
+status and Events and never reads the Secret, and `get_resource` reads no Secret). For the same reason the missing
+ConfigMap key of `oom-config-key` is a key of a mounted ConfigMap that the application reports in its log, not a
+`configMapKeyRef` the kubelet reports in the pod status, which the context already shows.
 
 ## The grouping cases
 

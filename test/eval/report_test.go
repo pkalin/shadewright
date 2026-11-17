@@ -63,9 +63,13 @@ type scenarioResult struct {
 	prompt []providers.Message
 	// toolText is the text of every tool result of the run, in order (not reported).
 	toolText []string
-	Name     string `json:"name"`
-	Repeat   int    `json:"repeat"`
-	Pass     bool   `json:"pass"`
+	// truncated and failedSources are the escalation signals of the context the product built, before any
+	// forced escalation (not reported).
+	truncated     bool
+	failedSources []incidentcontext.Section
+	Name          string `json:"name"`
+	Repeat        int    `json:"repeat"`
+	Pass          bool   `json:"pass"`
 	// Recording is the recording's source (fake mode only).
 	Recording string         `json:"recording,omitempty"`
 	Reason    string         `json:"reason"`
@@ -365,8 +369,8 @@ type manifest struct {
 	Redaction      manifestRedaction      `json:"redaction"`
 	// RunLimits are the loop limits of the run (the sample settings' maxToolSteps and maxOutputTokens).
 	RunLimits manifestRunLimits `json:"runLimits"`
-	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml, metrics.yaml, replies.yaml and
-	// policy.yaml, and of every file of its variants, and of the same files and the scenario.yaml of every
+	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml, metrics.yaml, logs.yaml, replies.yaml
+	// and policy.yaml, and of every file of its variants, and of the same files and the scenario.yaml of every
 	// escalation scenario: what the model is shown (and, in fake mode, answers).
 	Scenarios string         `json:"scenarios"`
 	Rubric    manifestRubric `json:"rubric"`
@@ -453,8 +457,9 @@ func buildManifestIn(dir, escDir string, src source, models modelSource, defs []
 			Limits: manifestLimits{Total: l.Total, Summary: l.Summary, Status: l.Status, Logs: l.Logs,
 				Metrics: l.Metrics, Git: l.Git, Policy: l.Policy},
 			// Recorded metrics: the metrics.yaml of the scenarios that have one, replayed (metrics_test.go).
+			// Recorded logs: the logs.yaml of the escalation scenarios that have one, replayed (logs_test.go).
 			// Policies: each scenario's policy.yaml, for the policy bounds section (#493).
-			Sources: []string{"pods", "objects", "recorded metrics", "policies"},
+			Sources: []string{"pods", "objects", "recorded metrics", "recorded logs", "policies"},
 		},
 		RunLimits: manifestRunLimits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens},
 		Rubric:    manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
@@ -494,9 +499,11 @@ func buildManifestIn(dir, escDir string, src source, models modelSource, defs []
 		return m, err
 	}
 	if m.Scenarios, err = hashFiles(filepath.Join(dir, "*", "incident.yaml"), filepath.Join(dir, "*", "objects.yaml"),
-		filepath.Join(dir, "*", metricsFile), filepath.Join(dir, "*", "replies.yaml"), filepath.Join(dir, "*", policyFile),
+		filepath.Join(dir, "*", metricsFile), filepath.Join(dir, "*", logsFile), filepath.Join(dir, "*", "replies.yaml"),
+		filepath.Join(dir, "*", policyFile),
 		filepath.Join(dir, "*", variantsDir, "*", "*.yaml"), filepath.Join(escDir, "*", "incident.yaml"),
 		filepath.Join(escDir, "*", "objects.yaml"), filepath.Join(escDir, "*", metricsFile),
+		filepath.Join(escDir, "*", logsFile),
 		filepath.Join(escDir, "*", "replies.yaml"), filepath.Join(escDir, "*", policyFile),
 		filepath.Join(escDir, "*", escalationFile)); err != nil {
 		return m, err

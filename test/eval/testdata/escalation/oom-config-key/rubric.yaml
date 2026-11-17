@@ -1,0 +1,11 @@
+# How the diagnosis of escalation/oom-config-key is scored: each fact of expected.yaml, verbatim, with the terms
+# the result's summary, hypotheses or evidence quotes must contain (case ignored).
+facts:
+  - fact: the web container is OOMKilled and restarts
+    all: ["OOMKilled"]
+  - fact: the item cache grows until the container is killed
+    all: ["cache"]
+  - fact: the ConfigMap web-config has no key cache.yaml, so the item cache has no size bound
+    all: ["cache.yaml"]
+reads:
+  - read: get_pod_logs pod=web-5f6b8c9d7-m4n6q container=web previous=false

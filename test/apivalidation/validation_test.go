@@ -2012,7 +2012,7 @@ var _ = Describe("RemediationSettings", func() {
 						expectAccepted(s)
 						return
 					}
-					expectRefused(s, "a deployment with a provider other than Anthropic needs apiVersion")
+					expectRefused(s, "a Foundry deployment needs apiVersion")
 				},
 				Entry("Foundry with apiVersion", v1alpha1.ModelProviderFoundry, "2024-10-21", true),
 				Entry("Foundry without apiVersion", v1alpha1.ModelProviderFoundry, "", false),
@@ -2049,13 +2049,46 @@ var _ = Describe("RemediationSettings", func() {
 					"https://example.services.ai.azure.com/", "small-model"
 				err := k8sClient.Update(ctx, got)
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("a deployment with a provider other than Anthropic needs apiVersion"))
+				Expect(err.Error()).To(ContainSubstring("a Foundry deployment needs apiVersion"))
 			})
 
 			It("refuses an unknown provider", func() {
 				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.Provider = "OpenAI" }),
 					"spec.analysis.models.triage.provider")
 			})
+		})
+
+		Describe("OpenAICompatible (#834)", func() {
+			It("refuses a Foundry deployment at the OpenAI API", func() {
+				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+					m.Endpoint = compatibleEndpoint
+				}), "the host api.openai.com needs provider OpenAICompatible")
+			})
+			DescribeTable("checks provider, API version and inference API combinations",
+				func(version string, inference v1alpha1.InferenceAPI, endpoint string, accepted bool) {
+					s := withModel(func(m *v1alpha1.ModelDeployment) {
+						m.Provider = v1alpha1.ModelProviderOpenAICompatible
+						m.Endpoint, m.APIVersion, m.InferenceAPI = endpoint, version, inference
+					})
+					if accepted {
+						expectAccepted(s)
+					} else {
+						err := k8sClient.Create(ctx, s)
+						Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected result: %v", err)
+					}
+				},
+				Entry("default chat", "", v1alpha1.InferenceAPI(""), "https://api.openai.com/v1", true),
+				Entry("chat", "", v1alpha1.InferenceAPIChatCompletions, "https://gateway.example.com/v1", true),
+				Entry("Responses", "", v1alpha1.InferenceAPIResponses, "https://api.openai.com/v1", true),
+				Entry("Service HTTPS", "", v1alpha1.InferenceAPIResponses, "https://model.demo.svc.cluster.local/v1", true),
+				Entry("Azure version", "v1", v1alpha1.InferenceAPIResponses, "https://api.openai.com/v1", false),
+				Entry("dated version", "2024-10-21", v1alpha1.InferenceAPIChatCompletions, "https://api.openai.com/v1", false),
+				Entry("unknown API", "", v1alpha1.InferenceAPI("Other"), "https://api.openai.com/v1", false),
+				Entry("Anthropic host", "", v1alpha1.InferenceAPIResponses, "https://api.anthropic.com", false),
+				Entry("Azure model host", "", v1alpha1.InferenceAPIResponses, "https://r.openai.azure.com", false),
+				Entry("plain Service HTTP", "", v1alpha1.InferenceAPIResponses, "http://model.demo.svc/v1", false),
+				Entry("IP literal", "", v1alpha1.InferenceAPIResponses, "https://10.0.0.2/v1", false),
+			)
 		})
 
 		Describe("inferenceAPI (#501)", func() {
@@ -2095,7 +2128,7 @@ var _ = Describe("RemediationSettings", func() {
 						m.Provider, m.Endpoint, m.Deployment = v1alpha1.ModelProviderAnthropic,
 							"https://api.anthropic.com", "claude-haiku-5-5"
 						m.InferenceAPI = api
-					}), "inferenceAPI is only for a deployment with provider Foundry")
+					}), "inferenceAPI is only for a deployment with provider Foundry or OpenAICompatible")
 				},
 				Entry(nil, v1alpha1.InferenceAPIResponses), Entry(nil, v1alpha1.InferenceAPIChatCompletions),
 			)

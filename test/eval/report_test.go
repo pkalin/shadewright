@@ -53,9 +53,10 @@ type report struct {
 
 // scenarioResult is one run of one scenario.
 type scenarioResult struct {
-	Name   string `json:"name"`
-	Repeat int    `json:"repeat"`
-	Pass   bool   `json:"pass"`
+	Name    string  `json:"name"`
+	Seconds float64 `json:"seconds,omitempty"`
+	Repeat  int     `json:"repeat"`
+	Pass    bool    `json:"pass"`
 	// Recording is the recording's source (fake mode only).
 	Recording string         `json:"recording,omitempty"`
 	Reason    string         `json:"reason"`
@@ -243,8 +244,14 @@ type totals struct {
 	Passed   int     `json:"passed"`
 	PassRate float64 `json:"passRate"`
 	// Pass is whether PassRate reached the manifest's threshold.
-	Pass   bool   `json:"pass"`
-	Tokens tokens `json:"tokens"`
+	Pass bool `json:"pass"`
+	// Seconds includes all runs, successful or failed, measured with a monotonic clock.
+	Seconds float64 `json:"seconds,omitempty"`
+	// Per passed run amortizes all attempts, including failures. Absent when no run passed.
+	SecondsPerPassed *float64 `json:"secondsPerPassed,omitempty"`
+	TokensPerPassed  *float64 `json:"tokensPerPassed,omitempty"`
+	CostPerPassed    *float64 `json:"costUSDPerPassed,omitempty"`
+	Tokens           tokens   `json:"tokens"`
 	// CostUSD is the estimated cost from the prices the run was given, nil without prices.
 	CostUSD *float64 `json:"costUSD,omitempty"`
 	// CostUSDByRole splits CostUSD by the role of the calls (Tokens.ByRole), each at its deployment's prices.
@@ -283,6 +290,8 @@ type manifest struct {
 	Provider string `json:"provider,omitempty"`
 	// Anthropic holds the settings of the anthropic provider; left out for the others.
 	Anthropic *manifestAnthropic `json:"anthropic,omitempty"`
+	// Compatible identifies the server and endpoint without storing its URL or credential.
+	Compatible *manifestCompatible `json:"openAICompatible,omitempty"`
 	// Models are the deployments by role: deployment name and the model ID and version the replies must name.
 	Models map[string]manifestModel `json:"models"`
 	// PromptVersion is analysis.PromptVersion: the prompt templates and their generated parts.
@@ -307,6 +316,12 @@ type manifest struct {
 	Repeats     int     `json:"repeats"`
 	// Digest is the SHA-256 of the manifest's JSON without this field (see manifestDigest).
 	Digest string `json:"digest,omitempty"`
+}
+
+// manifestCompatible identifies the qualified server without storing its endpoint URL.
+type manifestCompatible struct {
+	ServerID     string `json:"serverID"`
+	EndpointHash string `json:"endpointHash"`
 }
 
 // manifestAnthropic are the settings of the Anthropic API adapter that change the replies.
@@ -389,6 +404,9 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 		Rubric:    manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
 	}
 	m.Provider, m.Anthropic = models.manifestProvider()
+	if c, ok := models.(*compatibleSource); ok {
+		m.Compatible = &manifestCompatible{ServerID: c.serverID, EndpointHash: c.endpointHash}
+	}
 	triage, escalation := models.deployments()
 	expectedModels := models.expectedModels()
 	for role, d := range map[analysis.Role]*remediationv1alpha1.ModelDeployment{
@@ -484,6 +502,7 @@ func (r *report) summarise(p *prices) {
 			t.Passed++
 		}
 		t.Tokens.add(s.Tokens)
+		t.Seconds += s.Seconds
 	}
 	if t.Runs > 0 {
 		t.PassRate = float64(t.Passed) / float64(t.Runs)
@@ -503,6 +522,15 @@ func (r *report) summarise(p *prices) {
 		}
 		t.CostUSD = &cost
 		t.CostIncomplete = t.Tokens.UsageUnknownCalls > 0
+	}
+	if t.Passed > 0 {
+		seconds := t.Seconds / float64(t.Passed)
+		tokens := float64(t.Tokens.Charged) / float64(t.Passed)
+		t.SecondsPerPassed, t.TokensPerPassed = &seconds, &tokens
+		if t.CostUSD != nil {
+			cost := *t.CostUSD / float64(t.Passed)
+			t.CostPerPassed = &cost
+		}
 	}
 	r.Totals = t
 }
@@ -524,6 +552,14 @@ func (r *report) markdown() string {
 		r.Manifest.Rubric.FleetCommit[:min(12, len(r.Manifest.Rubric.FleetCommit))])
 	fmt.Fprintf(&b, "- Passed %d of %d runs (%.0f%%, threshold %.0f%%, %d repeat(s))\n", r.Totals.Passed, r.Totals.Runs,
 		100*r.Totals.PassRate, 100*r.Manifest.MinPassRate, r.Manifest.Repeats)
+	if r.Totals.SecondsPerPassed != nil && r.Totals.Seconds > 0 {
+		fmt.Fprintf(&b, "- Per passed run (all attempts included): %.2f seconds, %.0f charged tokens",
+			*r.Totals.SecondsPerPassed, *r.Totals.TokensPerPassed)
+		if r.Totals.CostPerPassed != nil {
+			fmt.Fprintf(&b, ", estimated USD %.4f", *r.Totals.CostPerPassed)
+		}
+		b.WriteString("\n")
+	}
 	tk := r.Totals.Tokens
 	if r.Manifest.ForcedEscalation {
 		b.WriteString("- Escalation forced (EVAL_FORCE_ESCALATION): every run went to the escalation model\n")

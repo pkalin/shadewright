@@ -265,3 +265,32 @@ These are recorded, not decided; each links the issue that tracks it, or is an o
 - The same person can advance the shared drop mark of occurrence records and so suppress the counting of older occurrences in every Incident, not only their own (G5.5).
 - A pod that copies a real controller reference and matching labels is correlated to that workload (G4.9).
 - No test checks that the analyzer binary cannot reach the signer or the GitHub adapter, that `pods/exec` is refused, or the containers' security context (G2.5, G6.4, S6).
+
+## OpenAI-compatible endpoint boundary
+
+[ADR-0042](adr/0042-openai-compatible-model-endpoints.md), Proposed, adds an
+operator-chosen destination and an optional static key. The analyzer's suffix
+allow-list bounds redacted-context egress. A separate install-time exact host
+binds the key, so settings cannot move it to another allowed host. The adapter
+receives no Entra token source or Anthropic key and refuses Azure model hosts and
+`api.anthropic.com`; Foundry refuses `api.openai.com` and configured compatible
+key/Service hosts. No fallback, proxy or redirects are allowed.
+
+Private-address access requires an explicitly named Service DNS host as well as
+the suffix allow-list. The resolved address is checked at each dial. Loopback,
+link-local metadata, multicast and reserved ranges stay refused. Verified HTTPS
+on 443 is required; a compromised Service or trusted certificate issuer can
+still expose the redacted context. Standard NetworkPolicy cannot enforce DNS
+identities. Cluster operators own Service routing, trust roots and the key source.
+
+A compatible server may ignore schema hints or invent tool calls. Shared wire
+parsing and typed validators fail closed, and deterministic policy still decides
+authorization. Missing usage costs the upper bound; compatible-host throttling
+is never assumed free. Error-path tests inject a fake key into errors, headers,
+body reads, escaped structured content and arguments, and keys split across
+Responses text parts. Completions are checked after joining text and at the JSON
+layer their consumers decode; this never repairs a reply. The key is mounted only in the analyzer,
+read per attempt and never logged or returned in errors. A compromised analyzer
+or node can read mounted credentials; server-side spend limits bound a stolen
+key independently of analyzer budgets. The evaluation harness qualifies each
+model/server/API combination, not the word "compatible".

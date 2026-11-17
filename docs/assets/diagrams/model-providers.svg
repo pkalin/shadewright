@@ -1,83 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 540" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
-  <title id="t">Shadewright model providers</title>
-  <desc id="d">Overview of ADR-0037, accepted and built (provider choice and key file since v0.5.0). Inside the cluster the analyzer builds one redacted context and calls the provider named by the ModelDeployment, chosen per deployment with no fallback between providers. The provider names the API, not the model family. For a Foundry deployment (the default) it sends the context to the Azure resource in the region of ADR-0016 with a workload identity token and no key, and the context stays in Azure; the allow-list of endpoint suffixes applies only here and the Foundry path refuses api.anthropic.com. An Anthropic deployment has no operator-chosen host: the adapter talks only to api.anthropic.com, fixed in code, and sends the API key in the request header, so the redacted context leaves Azure. The key is a file at a path given by a flag, put there by a Kubernetes Secret or a CSI volume such as Secrets Store with Azure Key Vault, mounted whole and read-only into the analyzer pod only, with no subPath. The analyzer has no RBAC on Secrets and refuses an Anthropic deployment that has no key path. The executor and the verifier never receive the key. The key is the one static credential that authorizes a call to an external service; a leak allows inference up to the spend limit set on the key and nothing in the cluster or in Git. Replies from both providers are untrusted and parsed by the same typed code.</desc>
-  <defs>
-    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
-    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
-    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
-    <style>
-      .lane{fill:#13121c;stroke:#2a2740}
-      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
-      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
-      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
-      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
-      .pl{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
-      .h{fill:#f1edff;font-size:15px;font-weight:650}
-      .s{fill:#a9a4c4;font-size:12.5px}
-      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
-      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
-      .lbl{fill:#c6a8ff;font-size:11.5px}
-      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
-    </style>
-  </defs>
-
-  <rect width="1120" height="540" rx="18" fill="#0e0e16"/>
-
-  <rect class="lane" x="24" y="24" width="640" height="492" rx="14"/>
-  <text class="lanet" x="44" y="54">CLUSTER</text>
-  <rect class="lane" x="690" y="24" width="406" height="492" rx="14"/>
-  <text class="lanet" x="710" y="54">OUTSIDE THE CLUSTER</text>
-
-  <!-- analyzer pod -->
-  <rect class="key" x="48" y="80" width="360" height="236" rx="12"/>
-  <text class="h" x="66" y="108">Analyzer pod</text>
-  <text class="s" x="66" y="132">one redacted context (invariant 4)</text>
-  <text class="s" x="66" y="152">provider chosen per ModelDeployment:</text>
-  <text class="s" x="66" y="172">Foundry (default) or Anthropic</text>
-  <text class="s" x="66" y="192">triage and escalation may differ</text>
-  <text class="no" x="66" y="218">No fallback between providers</text>
-  <text class="s" x="66" y="244">reply is untrusted, same typed parser,</text>
-  <text class="s" x="66" y="264">same validator, then policy decides</text>
-  <text class="s" x="66" y="296">no RBAC on Secrets; no key path, no Anthropic</text>
-
-  <!-- secret -->
-  <rect class="box" x="48" y="344" width="360" height="148" rx="12"/>
-  <text class="h" x="66" y="372">Key file: the API key</text>
-  <text class="s" x="66" y="396">Secret or CSI volume (Key Vault),</text>
-  <text class="s" x="66" y="416">set by the operator, never Git or Terraform</text>
-  <text class="s" x="66" y="440">the one static external-call credential</text>
-  <text class="s" x="66" y="460">whole mount, no subPath, read per call:</text>
-  <text class="s" x="66" y="478">rotation needs no restart</text>
-  <path class="f" d="M228 344V320" marker-end="url(#a)"/>
-  <text class="lbl" x="240" y="334">mounted read-only</text>
-
-  <!-- executor and verifier -->
-  <rect class="box" x="440" y="344" width="200" height="148" rx="12"/>
-  <text class="h" x="458" y="372">Executor, verifier</text>
-  <text class="no" x="458" y="402">Never receive the key</text>
-  <text class="s" x="458" y="428">no mount, no model access</text>
-  <text class="s" x="458" y="448">(executor: Git App only)</text>
-
-  <!-- providers -->
-  <rect class="ext" x="716" y="80" width="354" height="148" rx="12"/>
-  <text class="h" x="734" y="108">Foundry deployment</text>
-  <text class="s" x="734" y="132">Azure resource, region of ADR-0016</text>
-  <text class="s" x="734" y="152">workload identity token, no key</text>
-  <text class="s" x="734" y="172">endpointSuffixes applies here only</text>
-  <text class="lbl" x="734" y="206">context stays in Azure</text>
-
-  <rect class="ext" x="716" y="260" width="354" height="196" rx="12"/>
-  <text class="h" x="734" y="288">Anthropic API</text>
-  <text class="s" x="734" y="312">host fixed in code: api.anthropic.com</text>
-  <text class="s" x="734" y="332">deployment: must equal the model flag</text>
-  <text class="s" x="734" y="352">endpoint must equal it (CEL), not in suffixes</text>
-  <text class="s" x="734" y="372">key in the request header, this host only</text>
-  <text class="no" x="734" y="400">Context leaves Azure; ADR-0016 does not</text>
-  <text class="no" x="734" y="418">cover it. The operator decides per deployment</text>
-  <text class="s" x="734" y="442">leaked key: inference up to its spend limit</text>
-
-  <path class="f" d="M408 150H712" marker-end="url(#a)"/>
-  <text class="lbl" x="440" y="142">redacted context, token</text>
-  <path class="f" d="M408 230H620V330H712" marker-end="url(#a)"/>
-  <text class="lbl" x="560" y="222">redacted context, key</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc" font-family="Inter, system-ui, sans-serif">
+<title id="title">Model providers and credentials</title>
+<desc id="desc">After redaction the analyzer selects one provider. Foundry authenticates with Entra, Anthropic with its own key, and OpenAICompatible with a separate optional key bound to an allowed host. The two OpenAI wire formats share parsers. Every proposal passes typed validation and deterministic policy. Only the analyzer mounts key files; no Secret RBAC is added.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker></defs>
+<rect width="1120" height="520" rx="18" fill="#0e0e16"/>
+<g fill="#1d1b2b" stroke="#7c24fc" stroke-width="2"><rect x="36" y="185" width="260" height="125" rx="12"/><rect x="365" y="48" width="340" height="110" rx="12"/><rect x="365" y="205" width="340" height="110" rx="12"/><rect x="365" y="362" width="340" height="110" rx="12"/></g>
+<g fill="#16222a" stroke="#2f5d63" stroke-width="2"><rect x="785" y="48" width="300" height="110" rx="12"/><rect x="785" y="205" width="300" height="110" rx="12"/><rect x="785" y="362" width="300" height="110" rx="12"/></g>
+<g fill="none" stroke="#a879ff" stroke-width="2" marker-end="url(#arrow)"><path d="M296 220H330V103H365"/><path d="M296 248H365"/><path d="M296 278H330V417H365"/><path d="M705 103H785"/><path d="M705 260H785"/><path d="M705 417H785"/></g>
+<g fill="#f1edff" font-size="19" font-weight="600"><text x="56" y="220">Analyzer</text><text x="385" y="80">Foundry</text><text x="385" y="238">OpenAICompatible</text><text x="385" y="395">Anthropic</text><text x="805" y="80">Azure model resource</text><text x="805" y="238">Allowed HTTPS endpoint</text><text x="805" y="395">api.anthropic.com</text></g>
+<g fill="#a9a4c4" font-size="15"><text x="56" y="250">Bounded, redacted context</text><text x="56" y="277">Typed result, then policy</text><text x="385" y="108">Entra token only</text><text x="385" y="136">Shared OpenAI wire parsers</text><text x="385" y="266">Optional key, exact host binding</text><text x="385" y="294">Shared OpenAI wire parsers</text><text x="385" y="423">Separate key from mounted file</text><text x="385" y="451">Fixed host, separate protocol</text><text x="805" y="108">Install-time suffix allow-list</text><text x="805" y="136">No static key</text><text x="805" y="266">Public or named cluster Service</text><text x="805" y="294">No redirect, proxy or Entra token</text><text x="805" y="423">No redirect or Entra token</text><text x="805" y="451">No Secret API reads</text></g>
 </svg>

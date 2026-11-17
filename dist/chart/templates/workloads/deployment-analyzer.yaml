@@ -84,6 +84,12 @@ spec:
         {{- with $c.analysis.escalationModel }}
         - --escalation-model={{ . }}
         {{- end }}
+        {{- if $c.analysis.disableFoundry }}
+        - --disable-foundry=true
+        {{- end }}
+        {{- with $c.analysis.openAICompatible.serviceHosts }}
+        - --openai-compatible-service-hosts={{ join "," . }}
+        {{- end }}
         {{- with $c.analysis.endpointSuffixes }}
         - --model-endpoint-suffixes={{ join "," . }}
         {{- end }}
@@ -100,6 +106,10 @@ spec:
         - --analysis-store-container={{ .container }}
         {{- end }}
         {{- end }}
+        {{- end }}
+        {{- if include "shadewright.compatibleKeyVolume" $ }}
+        - --openai-compatible-api-key-file=/var/run/secrets/shadewright/openai-compatible/{{ include "shadewright.compatibleKeyFile" $ }}
+        - --openai-compatible-api-key-host={{ $c.analysis.openAICompatible.apiKey.host }}
         {{- end }}
         {{- if include "shadewright.anthropicKeyVolume" $ }}
         - --anthropic-api-key-file=/var/run/secrets/shadewright/anthropic/{{ include "shadewright.anthropicKeyFile" $ }}
@@ -168,11 +178,17 @@ spec:
         resources:
           {{- toYaml $c.resources | nindent 10 }}
         {{- $keyVolume := include "shadewright.anthropicKeyVolume" $ }}
-        {{- if or $c.metricsTLS.secretName $keyVolume }}
+        {{- $compatibleKeyVolume := include "shadewright.compatibleKeyVolume" $ }}
+        {{- if or $c.metricsTLS.secretName $keyVolume $compatibleKeyVolume }}
         volumeMounts:
         {{- with $c.metricsTLS.secretName }}
         - name: metrics-tls
           mountPath: /etc/shadewright/metrics-tls
+          readOnly: true
+        {{- end }}
+        {{- if $compatibleKeyVolume }}
+        - name: openai-compatible-api-key
+          mountPath: /var/run/secrets/shadewright/openai-compatible
           readOnly: true
         {{- end }}
         {{- if $keyVolume }}
@@ -181,13 +197,17 @@ spec:
           readOnly: true
         {{- end }}
         {{- end }}
-      {{- if or $c.metricsTLS.secretName $keyVolume }}
+      {{- if or $c.metricsTLS.secretName $keyVolume $compatibleKeyVolume }}
       volumes:
       {{- with $c.metricsTLS.secretName }}
       - name: metrics-tls
         secret:
           secretName: {{ . | quote }}
           defaultMode: 0444
+      {{- end }}
+      {{- if $compatibleKeyVolume }}
+      - name: openai-compatible-api-key
+        {{- $compatibleKeyVolume | nindent 8 }}
       {{- end }}
       {{- if $keyVolume }}
       - name: anthropic-api-key

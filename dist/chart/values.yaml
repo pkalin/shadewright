@@ -278,12 +278,35 @@ analyzer:
     # -- Model ID and version the escalation deployment serves (`--escalation-model`). Empty: escalation is off whatever `RemediationSettings` names, and an escalation signal hands the incident off. Used only with `triageModel`.
     # @section -- Analyzer
     escalationModel: ""
-    # -- Host suffixes a model endpoint in `RemediationSettings` must end with or, without the leading dot, equal (`--model-endpoint-suffixes`), each a dot and two or more lower-case DNS labels, at most 16. With `triageModel` needed unless the Anthropic API key is set: there is no default, so no Azure AI host is allowed unless listed. Empty, the analyzer builds no Azure token source and refuses every Foundry deployment. When it is set together with `triageModel`, it needs `analyzer.identity.azure.clientId` (the chart refuses to render without it). Any resource under an allowed suffix receives the context and a token, so list your own resource, such as `.<resource>.services.ai.azure.com`, which allows that host only.
+    # -- Host suffixes a model endpoint in `RemediationSettings` must end with or, without the leading dot, equal (`--model-endpoint-suffixes`), each a dot and two or more lower-case DNS labels, at most 16. For Foundry and OpenAICompatible. With `triageModel` needed unless the Anthropic API key is set: there is no default, so no Azure AI host is allowed unless listed. Empty, the analyzer builds no Azure token source and refuses every Foundry deployment. When it is set together with `triageModel` and `disableFoundry` is false, it needs `analyzer.identity.azure.clientId` (the chart refuses to render without it). Any resource under an allowed suffix may receive redacted context (and a token on the Foundry path), so list your own resource, such as `.<resource>.services.ai.azure.com`, which allows that host only.
     # @section -- Analyzer
     endpointSuffixes: []
     # -- The RemediationPolicy a proposed RemediationRequest of each action type refers to (`--action-policies`), a map from `AdjustKedaMaxReplicas` or `SetContainerMemoryLimit` to a policy name, such as `{SetContainerMemoryLimit: memory-limits}`. An action type without one is never proposed. Used only with `triageModel`. With at least one name, the chart grants the analyzer `get` on exactly these RemediationPolicies (ClusterRole and ClusterRoleBinding `analyzer-policy-reader`, `resourceNames` set to the names, no `list` or `watch`), so the context shows the model the bounds of the policy that will decide its proposal; the policy still decides. Without a name there is no such rule.
     # @section -- Analyzer
     actionPolicies: {}
+    # -- Disable the Foundry provider and its Azure token source (`--disable-foundry`). Set true for compatible-only endpoints. Blob records still need Azure identity.
+    # @default -- false
+    disableFoundry: false
+    openAICompatible:
+      # -- Exact Service DNS hosts allowed private unicast addresses (`--openai-compatible-service-hosts`). HTTPS on 443 and endpointSuffixes still apply. Empty allows public addresses only.
+      # @default -- []
+      serviceHosts: []
+      apiKey:
+        # -- Exact DNS host allowed to receive this optional key. Required with a source below. Kept outside RemediationSettings so a settings edit cannot move a key to another host.
+        # @default -- empty
+        host: ""
+        # -- Existing Secret holding the separate compatible API key. Mounted whole and read-only in the analyzer only, with no new RBAC. With no source no Authorization header is sent.
+        # @default -- empty
+        secretName: ""
+        # -- Key in that Secret, also the mounted file name.
+        # @default -- api-key
+        secretKey: api-key
+        # -- Alternative CSI or other Pod volume source, without name. Not with secretName. The operator provides the source; the chart never creates a Secret.
+        # @default -- {}
+        volume: {}
+        # -- File inside a volume source, read at every attempt for rotation without restart.
+        # @default -- api-key
+        fileName: api-key
     anthropic:
       apiKey:
         # -- Name of an existing Secret in the release namespace that holds the model API key for a deployment with `provider: Anthropic` (ADR-0037). The chart mounts it read-only and whole (no `subPath`, so a rotated Secret reaches the file without a restart) at `/var/run/secrets/shadewright/anthropic` in the analyzer container only, and passes `--anthropic-api-key-file`. The chart never creates the Secret and the analyzer gets no RBAC on Secrets: the kubelet mounts it. Set at most one of `secretName` and `volume`. With neither, nothing is mounted and no flag is passed. The render fails when `settings.spec` names an `Anthropic` deployment and neither is set; that is a convenience at install only, because `RemediationSettings` is edited live and the analyzer is the gate: it refuses such a deployment with no key file.
@@ -308,7 +331,7 @@ analyzer:
         container: analyses
   identity:
     azure:
-      # -- Client ID (a UUID, not a secret) of the analyzer's Azure managed identity, for the analyzer's Entra ID tokens: the model call (Cognitive Services audience) and, with `analyzer.analysis.recordStore.azureBlob.account`, the analysis records (Storage audience). Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Needed exactly when `analyzer.analysis.endpointSuffixes` is set (with a triage model) or `analyzer.analysis.recordStore.azureBlob.account` is set; leave it empty otherwise, such as an install with only the Anthropic API key. It must differ from the executor's or the chart refuses to render (separate identities, never one for both).
+      # -- Client ID (a UUID, not a secret) of the analyzer's Azure managed identity, for the analyzer's Entra ID tokens: the model call (Cognitive Services audience) and, with `analyzer.analysis.recordStore.azureBlob.account`, the analysis records (Storage audience). Sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`. Needed exactly when `analyzer.analysis.endpointSuffixes` is set (with a triage model and `disableFoundry` false) or `analyzer.analysis.recordStore.azureBlob.account` is set; leave it empty otherwise, such as an Anthropic-only install or compatible-only inference with `disableFoundry` true. It must differ from the executor's or the chart refuses to render (separate identities, never one for both).
       # @default -- empty (no identity)
       # @section -- Identity
       clientId: ""

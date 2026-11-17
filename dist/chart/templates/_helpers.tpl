@@ -174,7 +174,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file disable-foundry openai-compatible-api-key-file openai-compatible-api-key-host openai-compatible-service-hosts analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
 {{- end }}
 
 {{/*
@@ -218,8 +218,25 @@ Foundry deployment (#814). */ -}}
 {{- if and $a.triageModel (not $a.endpointSuffixes) (not (or $key.secretName $key.volume)) -}}
 {{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes (Foundry deployments: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com) or analyzer.analysis.anthropic.apiKey (Anthropic deployments), or both" -}}
 {{- end -}}
-{{- if and $a.triageModel $a.endpointSuffixes (not $c.identity.azure.clientId) -}}
+{{- if and $a.triageModel $a.endpointSuffixes (not $a.disableFoundry) (not $c.identity.azure.clientId) -}}
 {{- fail "analyzer.analysis.endpointSuffixes needs analyzer.identity.azure.clientId: with a triage model and suffixes the analyzer builds an Azure token source, which needs the analyzer's workload identity" -}}
+{{- end -}}
+{{- $compatibleKey := (($a.openAICompatible | default dict).apiKey | default dict) -}}
+{{- $compatibleSource := or $compatibleKey.secretName $compatibleKey.volume -}}
+{{- if ne (not (not $compatibleSource)) (not (not $compatibleKey.host)) -}}
+{{- fail "analyzer.analysis.openAICompatible.apiKey.host and a key source must be set together" -}}
+{{- end -}}
+{{- if and $compatibleKey.secretName $compatibleKey.volume -}}
+{{- fail "analyzer.analysis.openAICompatible.apiKey sets both secretName and volume" -}}
+{{- end -}}
+{{- if and $compatibleKey.volume (hasKey $compatibleKey.volume "name") -}}
+{{- fail "analyzer.analysis.openAICompatible.apiKey.volume may not set name" -}}
+{{- end -}}
+{{- if and $compatibleKey.host (not $a.endpointSuffixes) -}}
+{{- fail "analyzer.analysis.openAICompatible.apiKey needs endpointSuffixes" -}}
+{{- end -}}
+{{- if and (or $a.disableFoundry $compatibleSource (($a.openAICompatible | default dict).serviceHosts)) (not $a.triageModel) -}}
+{{- fail "analyzer.analysis.openAICompatible and disableFoundry need triageModel" -}}
 {{- end -}}
 {{- if and $a.escalationModel (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.escalationModel needs analyzer.analysis.triageModel" -}}
@@ -434,5 +451,25 @@ secret:
 {{/* The file name inside the key volume: the Secret key, or fileName of a volume source. */}}
 {{- define "shadewright.anthropicKeyFile" -}}
 {{- $key := ((.Values.analyzer.analysis.anthropic | default dict).apiKey | default dict) -}}
+{{- if $key.secretName -}}{{ $key.secretKey | default "api-key" }}{{- else -}}{{ $key.fileName | default "api-key" }}{{- end -}}
+{{- end }}
+
+{{- define "shadewright.compatibleKeyVolume" -}}
+{{- $key := ((.Values.analyzer.analysis.openAICompatible | default dict).apiKey | default dict) -}}
+{{- if $key.secretName -}}
+secret:
+  secretName: {{ $key.secretName | quote }}
+  defaultMode: 0444
+  items:
+  - key: {{ $key.secretKey | default "api-key" | quote }}
+    path: {{ $key.secretKey | default "api-key" | quote }}
+{{- else if $key.volume -}}
+{{- toYaml $key.volume -}}
+{{- end -}}
+{{- end }}
+
+{{/* The file name inside the key volume: the Secret key, or fileName of a volume source. */}}
+{{- define "shadewright.compatibleKeyFile" -}}
+{{- $key := ((.Values.analyzer.analysis.openAICompatible | default dict).apiKey | default dict) -}}
 {{- if $key.secretName -}}{{ $key.secretKey | default "api-key" }}{{- else -}}{{ $key.fileName | default "api-key" }}{{- end -}}
 {{- end }}

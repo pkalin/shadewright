@@ -44,4 +44,6 @@
 | [0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) | Code sizes a memory proposal from the metrics, and the pull request shows the evidence | Accepted |
 | [0041](0041-a-freshness-check-at-the-merge-of-a-pull-request.md) | A freshness check at the merge of a pull request | Proposed |
 
+| [0042](0042-openai-compatible-model-endpoints.md) | OpenAI-compatible model endpoints and an optional API key | Proposed |
+
 New ADR: copy [the template](template.md), take the next number, add a row here.

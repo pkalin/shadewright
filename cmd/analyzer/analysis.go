@@ -43,6 +43,7 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	fluxdelivery "github.com/pkalin/shadewright/internal/providers/delivery/flux"
 	"github.com/pkalin/shadewright/internal/providers/model/foundry"
+	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
 	"github.com/pkalin/shadewright/internal/providers/store/azureblob"
 	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
@@ -56,8 +57,10 @@ type analysisFlags struct {
 	endpointSuffixes             string
 	// anthropicKeyFile is the path of the Anthropic API key file (ADR-0037); empty refuses every Anthropic
 	// deployment.
-	anthropicKeyFile string
-	actionPolicies   string
+	anthropicKeyFile                                             string
+	disableFoundry                                               bool
+	compatibleKeyFile, compatibleKeyHost, compatibleServiceHosts string
+	actionPolicies                                               string
 	// storeAccount and storeContainer name the Blob Storage container of the analysis records (ADR-0015).
 	storeAccount, storeContainer string
 	// claimTimeout is the Incident trigger's AnalysisTimeout: how long a claim lasts (ADR-0025 decision 1).
@@ -74,8 +77,9 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 		"The model ID and version the triage deployment of RemediationSettings serves, as its replies name it, "+
 			"such as gpt-5.4-mini-2026-03-17. A reply that names another model is refused (ADR-0023). Empty (the "+
 			"default) starts no analysis: no model is called, no Azure token is requested, and the analyzer behaves "+
-			"as without a model. Set, it needs --model-endpoint-suffixes (Foundry), --anthropic-api-key-file "+
-			"(Anthropic) or both. With --model-endpoint-suffixes the analyzer needs its Azure workload identity "+
+			"as without a model. Set, it needs --model-endpoint-suffixes (Foundry or OpenAICompatible), "+
+			"--anthropic-api-key-file "+
+			"(Anthropic) or both. With endpoint suffixes and Foundry enabled, it needs its Azure workload identity "+
 			"(AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE) or it refuses to start.")
 	fs.StringVar(&f.escalationModel, "escalation-model", "",
 		"The model ID and version the escalation deployment serves, as its replies name it. Empty (the default): "+
@@ -84,7 +88,7 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&f.endpointSuffixes, "model-endpoint-suffixes", "",
 		"Comma-separated host suffixes a model endpoint in RemediationSettings must end with or, without the "+
 			"leading dot, equal, each a dot and two or more DNS labels, such as .<resource>.services.ai.azure.com "+
-			"for one resource. There is no default, so no Azure AI host is allowed unless named. An endpoint outside "+
+			"for one resource. There is no default, so no model host is allowed unless named. An endpoint outside "+
 			"them, or on a port other than 443, is refused before any token is requested (EndpointNotAllowed). "+
 			"Empty: no Azure token source is built and every Foundry deployment is refused (ProviderNotConfigured), "+
 			"for an analyzer that only calls the Anthropic API; then --anthropic-api-key-file is required.")
@@ -95,6 +99,18 @@ func (f *analysisFlags) bind(fs *flag.FlagSet) {
 			"malformed one is not retried. Empty (the default): a deployment with "+
 			"provider Anthropic in RemediationSettings is refused (ProviderNotConfigured). The file is not read "+
 			"at start. Used only with --triage-model.")
+	fs.BoolVar(&f.disableFoundry, "disable-foundry", false,
+		"Disable the Foundry provider and its Entra token source. "+
+			"Set for a compatible-only install; endpoint suffixes still apply.")
+	fs.StringVar(&f.compatibleKeyFile, "openai-compatible-api-key-file", "",
+		"Optional key file, mounted read-only and read per attempt. "+
+			"Requires --openai-compatible-api-key-host. Without it no Authorization header is sent.")
+	fs.StringVar(&f.compatibleKeyHost, "openai-compatible-api-key-host", "",
+		"Exact endpoint DNS host allowed to receive the compatible key. "+
+			"Set together with its key file, outside RemediationSettings.")
+	fs.StringVar(&f.compatibleServiceHosts, "openai-compatible-service-hosts", "",
+		"Comma-separated exact service.namespace.svc or service.namespace.svc.cluster.local "+
+			"names allowed private unicast addresses. HTTPS and endpoint suffixes still apply.")
 	fs.StringVar(&f.actionPolicies, "action-policies", "",
 		"Comma-separated ActionType=policy pairs: the RemediationPolicy a proposed RemediationRequest of each "+
 			"action type refers to, such as SetContainerMemoryLimit=memory-limits. An action type without one is "+
@@ -190,8 +206,8 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 		if f.storeAccount != "" || f.storeContainer != "" {
 			return nil, errors.New("--analysis-store-account and --analysis-store-container need --triage-model")
 		}
-		if f.anthropicKeyFile != "" {
-			return nil, errors.New("--anthropic-api-key-file needs --triage-model")
+		if f.anthropicKeyFile != "" || f.compatibleFlagsSet() {
+			return nil, errors.New("model credential flags, including --anthropic-api-key-file, need --triage-model")
 		}
 		return nil, nil
 	}
@@ -213,6 +229,10 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if k := f.anthropicKeyFile; k != "" && (!filepath.IsAbs(k) || filepath.Clean(k) != k) {
 		return nil, errors.New("--anthropic-api-key-file must be an absolute, clean path")
 	}
+	services, err := f.compatibleServices()
+	if err != nil {
+		return nil, err
+	}
 	if f.claimTimeout <= 0 {
 		return nil, errors.New("the analysis needs the Incident trigger's analysis timeout")
 	}
@@ -223,22 +243,18 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	// Without --model-endpoint-suffixes no Foundry deployment can be called, so the workload identity is not
 	// read and no Azure token source exists: an Anthropic-only analyzer needs no Azure settings (#814). The
 	// factory refuses a Foundry deployment then (ProviderNotConfigured).
-	var suffixes []string
-	var tokens foundry.TokenSource
-	if f.endpointSuffixes != "" {
-		if suffixes, err = models.ParseEndpointSuffixes(f.endpointSuffixes); err != nil {
-			return nil, fmt.Errorf("invalid --model-endpoint-suffixes: %w", err)
-		}
-		if tokens, err = newTokens(); err != nil {
-			return nil, fmt.Errorf("the analyzer's Azure workload identity, needed with --model-endpoint-suffixes: %w", err)
-		}
+	suffixes, tokens, err := f.modelCredentials(newTokens)
+	if err != nil {
+		return nil, err
 	}
 	expected := map[analysis.Role]string{analysis.RoleTriage: triage}
 	if escalation != "" {
 		expected[analysis.RoleEscalation] = escalation
 	}
 	factory, err := models.NewModelFactory(models.ModelsConfig{Suffixes: suffixes, Tokens: tokens,
-		AnthropicKeyFile: f.anthropicKeyFile, Expected: expected, Log: d.log.WithName("models")})
+		DisableFoundry: f.disableFoundry, CompatibleKeyFile: f.compatibleKeyFile, CompatibleKeyHost: f.compatibleKeyHost,
+		CompatibleServiceHosts: services, AnthropicKeyFile: f.anthropicKeyFile,
+		Expected: expected, Log: d.log.WithName("models")})
 	if err != nil {
 		return nil, err
 	}
@@ -346,4 +362,37 @@ func setupAnalysis(mgr ctrl.Manager, inc *incidents.Controller, f analysisFlags,
 		"actionPolicies", f.actionPolicies,
 		"analysisStoreAccount", f.storeAccount, "analysisStoreContainer", f.storeContainer)
 	return c.SetupWithManager(mgr)
+}
+
+func (f analysisFlags) compatibleFlagsSet() bool {
+	return f.compatibleKeyFile != "" || f.compatibleKeyHost != "" || f.compatibleServiceHosts != "" || f.disableFoundry
+}
+
+func (f analysisFlags) modelCredentials(
+	newTokens func() (foundry.TokenSource, error)) ([]string, foundry.TokenSource, error) {
+	var suffixes []string
+	var tokens foundry.TokenSource
+	var err error
+	if f.endpointSuffixes != "" {
+		if suffixes, err = models.ParseEndpointSuffixes(f.endpointSuffixes); err != nil {
+			return nil, nil, fmt.Errorf("invalid --model-endpoint-suffixes: %w", err)
+		}
+		if !f.disableFoundry {
+			if tokens, err = newTokens(); err != nil {
+				return nil, nil, fmt.Errorf("the analyzer's Azure workload identity, needed with "+
+					"--model-endpoint-suffixes: %w", err)
+			}
+		}
+	}
+	return suffixes, tokens, nil
+}
+
+func (f analysisFlags) compatibleServices() ([]string, error) {
+	if k := f.compatibleKeyFile; k != "" && (!filepath.IsAbs(k) || filepath.Clean(k) != k) {
+		return nil, errors.New("--openai-compatible-api-key-file must be an absolute, clean path")
+	}
+	if (f.compatibleKeyFile == "") != (f.compatibleKeyHost == "") {
+		return nil, errors.New("--openai-compatible-api-key-file and --openai-compatible-api-key-host must be set together")
+	}
+	return openaicompatible.ParseServiceHosts(f.compatibleServiceHosts)
 }

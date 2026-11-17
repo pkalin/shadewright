@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package foundry
+package openaiwire
 
 import (
 	"encoding/json"
@@ -369,15 +369,8 @@ func responsesView(t *testing.T, body []byte) requestView {
 }
 
 func TestResponsesCorpusRequestCarriesWhatChatCarries(t *testing.T) {
-	chatP, err := New(Config{Endpoint: azureEndpoint, Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	respP, err := New(Config{Endpoint: azureEndpoint, Deployment: testDeployment, APIVersion: "v1", API: APIResponses,
-		Tokens: &fakeTokens{}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	chatP := testCodec(APIChatCompletions)
+	respP := testCodec(APIResponses)
 	r := rand.New(rand.NewPCG(501, 11)) // #nosec G404 -- a seeded generator keeps the corpus reproducible
 	for i := range 2000 {
 		req := genRequest(r)
@@ -418,9 +411,8 @@ func TestResponsesCorpusRequestCarriesWhatChatCarries(t *testing.T) {
 
 // Every request the chat encoder refuses, the Responses encoder refuses with the same class.
 func TestResponsesCorpusRefusesWhatChatRefuses(t *testing.T) {
-	chatP, _ := New(Config{Endpoint: azureEndpoint, Deployment: testDeployment, APIVersion: "v1", Tokens: &fakeTokens{}})
-	respP, _ := New(Config{Endpoint: azureEndpoint, Deployment: testDeployment, APIVersion: "v1", API: APIResponses,
-		Tokens: &fakeTokens{}})
+	chatP := testCodec(APIChatCompletions)
+	respP := testCodec(APIResponses)
 	r := rand.New(rand.NewPCG(501, 12)) // #nosec G404 -- a seeded generator keeps the corpus reproducible
 	breaks := []func(*providers.CompletionRequest){
 		func(q *providers.CompletionRequest) { q.Messages = nil },

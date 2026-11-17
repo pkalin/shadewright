@@ -128,3 +128,14 @@ The lab cluster is destroyed after every session, so everything in the cluster g
 - Cluster: `kubectl delete` the Incidents and requests. Deleting a request first closes its open pull request.
 - Git: close or delete the pull requests and `shadewright/*` branches in the repository.
 - Azure (lab): the records in the `analyses` container (a delete leaves the versions until the retention rule removes them), the audit workspace and the vault follow Azure's own rules above.
+
+## OpenAI-compatible destinations
+
+`OpenAICompatible` sends the same bounded, redacted context and tool results to
+the endpoint allowed at install time. It may be the OpenAI API, a gateway or a
+separately operated cluster Service; the provider name promises no residency or
+retention policy. Check the server's retention, geography and opt-in training
+terms before allowing it. Settings writers can select among allowed hosts, so
+use narrow suffixes. A separate exact host binding keeps the optional key from
+moving with a settings edit. No redirects, HTTP or environment proxy are used.
+See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md), Proposed.

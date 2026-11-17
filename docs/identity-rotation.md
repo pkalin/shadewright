@@ -85,3 +85,21 @@ In this order, because the first step is the one that stops the damage:
 2. Delete the compromised private key on the App's page and disable the matching Key Vault version.
 3. Review the `shadewright/*` branches and pull requests, and the `KeySign` entries of the vault's audit log for the period.
 4. Generate a new key, import it (section 1), install the App again (section 2), unpause.
+
+## OpenAI-compatible credential
+
+The optional compatible API key follows the same mounted-file rotation procedure
+as Anthropic, in a separate Secret or CSI volume. Use a dedicated inference key
+and a server-side spend cap. Set `analyzer.analysis.openAICompatible.apiKey.host`
+to the exact destination and `secretName` (or `volume`) to its source. The key is
+mounted only in the analyzer, whole and read-only, with no `subPath`, Secret API
+reads or RBAC changes. No source means no Authorization header.
+
+Create a replacement key, update the source, wait for the kubelet or CSI refresh,
+confirm a successful call, then revoke the old key. Each attempt rereads the file,
+so no restart is required. A missing or empty file is retryable within the call's
+bounds; malformed files are refused and need an operator correction. No error
+quotes the key or file path. Changing only RemediationSettings cannot move the
+key to a different allowed host. When changing hosts, provision a separate key
+source so old pods cannot reread the new host's key during the rollout. See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md),
+Proposed, and the [qualification runbook](how-to/qualify-openai-compatible.md).

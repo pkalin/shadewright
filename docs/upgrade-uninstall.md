@@ -255,3 +255,19 @@ A new `helm install` with `settings.create=true` over a leftover object keeps th
 ## Not covered
 
 - Rolling back after a merged pull request: merging is outside Shadewright's control, and undoing it is a revert pull request. After a request ends `Failed` with `Verified` False the analyzer proposes one revert request for it ([#96](https://github.com/pkalin/shadewright/issues/96)), which a person approves like any other; for anything else, revert in Git by hand. On the first start after an upgrade to a version with the proposer, only a request that ended that way at most 24 hours before (by its `Verified` condition) gets its revert proposed; older ones are left to you.
+
+## OpenAI-compatible provider (#834)
+
+Apply the new CRDs before selecting `provider: OpenAICompatible`. Existing Foundry
+and Anthropic objects retain their meaning; no new field is defaulted onto them.
+Compatible deployments omit `apiVersion` and may set `inferenceAPI`. For a
+compatible-only analyzer set `analyzer.analysis.disableFoundry=true`; otherwise
+endpoint suffixes still enable the existing Foundry token source and require its
+Azure identity. Blob records retain their own identity requirement.
+
+Provision any optional key outside Git, name its existing Secret or CSI source
+and exact host under `analyzer.analysis.openAICompatible.apiKey`, then follow the
+[qualification runbook](how-to/qualify-openai-compatible.md). No RBAC changes or
+key migrations are needed. Uninstall removes the mount; it does not revoke a key
+in the server account. Revoke that key separately. ADR-0042 remains Proposed
+until accepted, with live evaluation and Kind installation required before merge.

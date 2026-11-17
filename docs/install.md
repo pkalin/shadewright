@@ -164,3 +164,15 @@ An install that calls only `Anthropic` deployments needs no Azure settings for t
 For development, install from a clone with `./dist/chart` in place of the OCI reference. A clone has no image digests: pass `--set executor.image.digest=sha256:<digest> --set analyzer.image.digest=sha256:<digest> --set verifier.image.digest=sha256:<digest>` for the release whose tag you checked out, or `--set image.allowTag=true` to run the `appVersion` tag with images built from that same clone.
 
 The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values, only when it does not exist; Helm never changes it afterwards). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive. The commands to upgrade the release and to uninstall it, what stays behind (the CRDs and the settings object) and how to remove it are in [upgrade with Helm](upgrade-uninstall.md#upgrade-with-helm), [uninstall with Helm](upgrade-uninstall.md#uninstall-with-helm) and [the settings object](upgrade-uninstall.md#the-settings-object-and-helm).
+
+## OpenAI-compatible inference
+
+For an analyzer using only OpenAI-compatible endpoints, set
+`analyzer.analysis.disableFoundry=true`, choose narrow `endpointSuffixes`, and
+leave `analyzer.identity.azure.clientId` empty unless Blob records are enabled.
+The optional key is an existing Secret or CSI file mounted in the analyzer only;
+set its exact host binding too. A keyless cluster Service needs verified HTTPS,
+an exact entry in `openAICompatible.serviceHosts`, and the suffix allow-list.
+Plain HTTP is refused. Follow the [installation and qualification runbook](how-to/qualify-openai-compatible.md).
+Acceptance of Proposed [ADR-0042](adr/0042-openai-compatible-model-endpoints.md),
+a live gpt-6.x evaluation and a Kind install remain prerequisites before merge.

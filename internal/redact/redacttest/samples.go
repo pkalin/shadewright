@@ -59,6 +59,7 @@ func Samples() []Sample {
 		{Key: "password: |\n  ", Secret: value},
 		{Key: "credentials:\n  user: ", Secret: value},
 		{Key: "- name: DB_PASSWORD\n  value: ", Secret: value},
+		{Key: "msg: password: |\n  ", Secret: value},
 		{Secret: "Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lz"},
 		{Secret: "jane.doe@example.com"},
 		{Secret: "10.20.30.40"},

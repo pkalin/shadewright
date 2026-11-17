@@ -1,0 +1,709 @@
+{"h":"46357b1fb3c90418","f":"sha256:74b27ff640a7916db4b85f05e53fbb021fb75fa76725d663a96626fc23149dc5","s":"13"}
+{"h":"036b3cd8a95f9e1f","f":"sha256:799d072af5a690589f2b249877c2aaed2611d1e20900a98be0be505107b6e640","s":"13 in all"}
+{"h":"7fecfd36c81024a7","f":"sha256:054986619093333b8afc0777ce6674f5121f1287396cdeef029d0928dc785834","s":"13 per"}
+{"h":"7d201f30194f680e","f":"sha256:f0379c9bc41995abc45ff5d0b9a9654df860ea0e60adc93abe1aa337839482f2","s":"13 req"}
+{"h":"012905580a8621c5","f":"sha256:0e49565dbe21a5e214543abbccf960298e4f682628f7ff7c4983eedfbaf8774d","s":"13 total"}
+{"h":"2b3cbef36398b6bf","f":"sha256:37ce94f3ce70fd2475a94fea48eb89ce5dbb27f46c301c4d6f38a00e79185e97","s":"13)"}
+{"h":"519c8cc1d5bb9eee","f":"sha256:52a59f14bceefd1da759e91c615b103427e1357f677e1275af8ab486a2765cda","s":"13,"}
+{"h":"6eb8478c0839d8a8","f":"sha256:6ddc61d97d88c1ada7d85983206181964e51825583cf5c9ac6484ff623732b2c","s":"13."}
+{"h":"dbd4b8a09ddf4153","f":"sha256:32b6fe37a9794d2c4a816769bbd08f65940bd0451d5f7d8ba3084ec40c7f8eaa","s":"6.5"}
+{"h":"12188b22bd0a7290","f":"sha256:ccd2180c42a9c3bdf7207c6835659be6315fbf9bfc84f7f06cd0ef421ea6d73a","s":"6.5 per"}
+{"h":"f8044c00c8f41550","f":"sha256:b382f9f8c324f74af4386001b6ed7cced2f95a9c933215b450ce6233667f4682","s":"6.5)"}
+{"h":"1ab28ad324fc32ea","f":"sha256:900ebcfb787df4f1cfceb1e7537c5c07b7ca4e4e33249f106f59f468ef8f6248","s":"6.5,"}
+{"h":"839ebb518d7557b1","f":"sha256:4db2555ac900dbe9e5d83ca7fc43e3cbe1708ec6657f3e4e75b188c4070bf0e2","s":"6.5."}
+{"h":"a4e7806f50a35c0a","f":"sha256:493b30ee0a80444bfe7b09e6de31c4bbfe1aef54a0d18b7b83ada33823a1c23c","s":"- name: DB_PASSWORD value: \u003credacted\u003e"}
+{"h":"c257b5da5d9c72b5","f":"sha256:9033c099b42664610b72d065fb5ed4962dfe85e29bd1cd46c1533af3d0463cb9","s":"\u003credacted\u003e"}
+{"h":"18d23dbbb73bd2f6","f":"sha256:1ac67d84735ff996b2f10ade6e5747b7c07ff903f9c821bde28daf70a89e4c6f","s":"--client-secret \u003credacted\u003e"}
+{"h":"1e4d747b25d5e57e","f":"sha256:1d7e7b1d1439c6a4c6f5e43f43e9a0505b80942db72f3fa913e7cafbdfa789e8","s":"/readyz"}
+{"h":"94e8f55e478a32db","f":"sha256:d548b1ac2c82d5a6a6418858078ccf4da5853c5da03ee3cc7fd4b237b89d1d2f","s":"0 restarts"}
+{"h":"9e5231dbee0fd93f","f":"sha256:02491b3fd3d2b5bb93f6a09f93fa6da9846f1efaf44531040931f53c6fba285f","s":"0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod."}
+{"h":"b41726d121e9a720","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"b6aab887f8b2b74e","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"26b3e33375feb62f","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"5eb94ae16903ea51","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"d47295ffa30ae2ad","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"66ef662cdbf921a1","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"bb58ad40f5e87f71","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"e45af2c4f5f5b207","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"706cf70c6560dcc3","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"32090fd7108b5cb0","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"5c5ad64cf25c3ef3","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"eafea0cc22c4e871","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"42bfdf27b26f3bda","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"2b0ceed4aa28d15f","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"693e9613c7874658","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"288992aac19e8da7","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"802756100bae93df","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"4eabfeb5cd77b311","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"0ba0659822d993c2","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"8af38474c12e1d8d","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"950975d0edd9b53d","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"243a1de452cc20c7","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"a984a1dbd155dcdd","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"b4c385febb50aa48","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"83731643dc7d7729","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"18b0c91691c9ead5","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"ffd82d630540ab22","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"bee5dd22785d0dea","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"fff4b7e2eb86a000","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"1525b82a38847f80","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"4547db39cb718955","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"9a3091a56f62c6c5","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"451658543e61c4b9","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"33ba18103a258761","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"228fe18974785b42","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"6817baa8a92c805a","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"27827918bc255995","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"b2ac09c32ad67780","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"27f6cffa2ed610fd","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"ea40cb8bfeed050c","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"aa5dc9c1dca7b4e5","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"269ec2c84774de41","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"36bbe036885711b8","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"747cd84426d3c783","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"c5a273a63a0f7243","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"56edd5889954e0bb","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"17edf2e9fa865667","f":"sha256:4a7e14c24dbf9748ba154f9db7e0b008e0e3b6666fc5d8e145d3caa48da651c4","s":"\u003cuid\u003e"}
+{"h":"6b86b273ff34fce1","f":"sha256:37f11a45dc80bec89d95d57e579c13ac0bad8c28a603efc19bdbcfe3bd247c46","s":"1"}
+{"h":"fec9cdeaf025e268","f":"sha256:bb7d932d8223457d6dd11ba4731d7300b9813a26337883f9a81f204bd5ccc9aa","s":"\u003cip\u003e"}
+{"h":"6ef04fc2d275b705","f":"sha256:6a3cf73d16be72d0959d722065976c904baa882983000c800c5fb6e64d844d18","s":"\u003cduration\u003e"}
+{"h":"5b3aa992efd03c3b","f":"sha256:09f15c93ace5e4c3464ba990be55a97610c28d201eefe074714ce0e9208c11c9","s":"128Mi"}
+{"h":"d4735e3a265e16ee","f":"sha256:ff74bcf9fd5cc0ead7311f5ba63006ea43cd0c3639b874526caca6f98de7b37e","s":"2"}
+{"h":"7319aaed651685c9","f":"sha256:bb7d932d8223457d6dd11ba4731d7300b9813a26337883f9a81f204bd5ccc9aa","s":"\u003cip\u003e"}
+{"h":"b8a931c36f26053a","f":"sha256:6a3cf73d16be72d0959d722065976c904baa882983000c800c5fb6e64d844d18","s":"\u003cduration\u003e"}
+{"h":"1f67fcba7836c6f4","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"3dea900bc80a60aa","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"57eaeac0aa4e645a","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"e9b168f056898e84","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"7657be268ac00474","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"0a1e58d1a4329d98","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"f8b4798b0c8c857e","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"cf0d1dea48bb6702","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"221aceb52e8c345b","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"4809c230d0990876","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"4f584c64e9f55b08","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"6aefb5ab0dc520e4","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"4e9744dc415db6b8","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"79db1ca5dfc563f1","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"2403809d1a6b5606","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"ac7a9f9646b8000d","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"7c4f212de9d1237c","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"e9aace5442247af3","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"9b32c39069745f9e","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"adc2dd8c5df72226","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"6dfb12517fefd66e","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"b8cbe92a04184d6d","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"f62a3886586001a7","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"188be3e19f8f6e59","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"f725502441892f45","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"f7e1820e4302a459","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"3b6014bf4c130e59","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"1d3e4181dd512ca1","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"f240ed945f4c64a8","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"9a38a4b0f55cb515","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"359e3e971443746d","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"617ce726200aba3c","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"7d03e9109cd94189","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"3be1937ff3ab728d","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"8c0568a906cc04b1","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"83f78a5e75330366","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"d201ebeb1cb75507","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"6c2fcd900b26b4ca","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"cc1255079edc0eab","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"66085b7608a01fc1","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"0582f6e501ef3c17","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"95a94ef220cd3935","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"ea57d9c1019f0787","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"5d72def3b83e41c2","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"7c4a9286b206304c","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"92f4f1263f87861f","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"9978ae8a109b1c1f","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"2593c8ce23b00ed2","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"78326dc2544bf9bf","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"56f4d491e6aca932","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"0c60256cc89c19df","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"2fb7e86a11b10438","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"bf8609d6e2e54015","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"7b6700c970f35a09","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"39645b6fca69aee9","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"9bb80c0fefaf71b8","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"d511830ab72a2e7c","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"f6d814bb3dcf4d7c","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"3953683b58d38268","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"13b3d23f73102a80","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"95d65549399bf72d","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"e363574514f09422","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"db3591c010993a0c","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"ab6b653044bbb566","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"bd2254f72da8ac58","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"eca88a08bc97572d","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"0f2940e4813ad606","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"9f7a3abdb819a0c5","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"d36ab3d2b4ce9f0e","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"bf67fd712b32dcac","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"100de8db569a22e9","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"b982f8b2fcb249cd","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"faa88fa9c23c38bc","f":"sha256:7431f393a5887419d943583d275ffd200821845bd9dbf0da619355ed2d125820","s":"\u003ctime\u003e"}
+{"h":"9d7cd80c118b45a5","f":"sha256:9033c099b42664610b72d065fb5ed4962dfe85e29bd1cd46c1533af3d0463cb9","s":"\u003credacted\u003e"}
+{"h":"51e8ea280b44e169","f":"sha256:630e72756c22b7ac34c8315e25418c9e00204deda0c4d8b5819f9ad0b3f16758","s":"256"}
+{"h":"4e07408562bedb8b","f":"sha256:5dfb31464210e4ea8b0b0477bd6278c12b00814338a07e06e50009257fc8602c","s":"3"}
+{"h":"eac4dd614784cc0e","f":"sha256:e51d9e70c0f26b0021e416b4231b971f5171eeb69b4770a3cc5c1a13d9eaefe5","s":"32Mi"}
+{"h":"7f35179c13672213","f":"sha256:81ba102232f0d1de65704fad7e358616fc4dae1787839d37485eb4323b97fa80","s":"48Mi"}
+{"h":"ef2d127de37b942b","f":"sha256:a7ea73332b5966a46d8e9dd606d220d5e1ea60c22c82972640b0498d16a4e4be","s":"5"}
+{"h":"018307402924c40b","f":"sha256:cd8a65915dbb28e42fb30fff179e4e4681b7b6af7fc11bb66fc9949c1a690d2a","s":"5.03316e+07"}
+{"h":"6c1b0fe811724616","f":"sha256:afa4c1fe7c2800032d512e7838b35b6737c60d68b81bfa4c73b160e23ae41896","s":"50331648"}
+{"h":"ab39b39e6b11c4b4","f":"sha256:eac0d29abea2272deac0eebe24efe0258f91f84394004f63ff348646b4a9399c","s":"5d6f7b8c9"}
+{"h":"210abcc75dcb2b2c","f":"sha256:29e33f88494858d66da17bae5f33ce20b73053102f211013ca0ffa5ba19d49af","s":"5d9f7c6b8"}
+{"h":"607c8753a7d7f53d","f":"sha256:02c6698fbb2b4dc1ce194e2833b07e592a4c488e3a01c82324392b6028f16610","s":"64Mi"}
+{"h":"34737c51fd9f7aec","f":"sha256:807e2435604920f13a98654cb4ccd98f07691ce32e1c321affb6af72f6b633b7","s":"6c5b8d9f4"}
+{"h":"a2a91f581f2a1063","f":"sha256:0088002c5e584e8bd2d1f1595103e438e0c78355b565b2049a8c3de854ad4d53","s":"6f7c9d8b5"}
+{"h":"facf350824f0e1a3","f":"sha256:68ea5e884641f15a3c269f98d937d95e6c8227c970eeed2706354a5b0c527615","s":"6f8b9c7d5"}
+{"h":"1caf6de14575bca8","f":"sha256:98fdde25a8df9bd2f6580e6e44a6b055d5c5e699f09f6da74a1fec28ac30abd9","s":"7c9d8f6b5"}
+{"h":"0e8223ce2d7c4961","f":"sha256:b182a3ed52bcefda87232db3947cb32572540b7898676c98a316a1bda87d3534","s":"8d4c6b9f7"}
+{"h":"57a075f207db3fd9","f":"sha256:13e1c31e1ddc3341ab2b8467821e83d57adf2dd2a371745eb61487058f5c326f","s":"9b5d7c8f4"}
+{"h":"1048700bb45f1e86","f":"sha256:b4675c20350b9f90302394db9a91b9b4b978dc96d06f6f50de121eac4257f1ed","s":"A Service manifest in apps/demo/ fails schema validation, so the Flux Kustomization apps is not Ready and reports the apply error."}
+{"h":"1397cff22a676c0c","f":"sha256:85d46fbdba9530c8fd741f2eb0f43042020b551cb834744be7fe43a447a52b31","s":"A broken trigger is never fixed by raising maxReplicaCount (design 7), and no catalog action edits a trigger; a person is notified."}
+{"h":"30da7ac97172458d","f":"sha256:cf4f86d8c78c9c4ef225af4277f77792a98926b66121d1494a70620980bb1ef5","s":"A cache StatefulSet pod loads 36 MB into memory against a 48Mi limit, so it is OOMKilled and restarts."}
+{"h":"f5c2272854624cf2","f":"sha256:9da9028333a3ce1fcd1c6fa73759c64d1f35f69bbc92882b48a7ab2aed6f4751","s":"A new worker pod fails its readiness probe once while it starts (connection refused), is Ready seconds later and never restarts, so no change is warranted."}
+{"h":"ad41eb6ae804093e","f":"sha256:4bc1d71062a5ad8981ce91b3b84e82b7c8f35e3a27f6adeb2196c87b100d4cbb","s":"A rollout in progress, as the lab met it on \u003ctime\u003e (#494): the Deployment's pod template went from 64Mi back to 48Mi, the new pod is OOMKilled at 48Mi while the old ReplicaSet's pod still runs, ready, with 64Mi. The previous value of a memory limit change is the template's 48Mi, not the old pod's 64Mi."}
+{"h":"f01bd2bec2449605","f":"sha256:0cf2c5e1239626027083363caf851ea44b6311bdee02af53e0a1fccedd57bf04","s":"API_TOKEN"}
+{"h":"92340695899bd2d8","f":"sha256:12ea7606a6a7a5347c3a4179a69fbaff96492953d6538f0811945a8673e519f6","s":"Active"}
+{"h":"fc23fd73e32bbe89","f":"sha256:99f17b19c7790b35c0d094f8308763f41174e4e84a779dd2690d11dbafa05835","s":"AdjustKedaMaxReplicas"}
+{"h":"767b66eb57269e3d","f":"sha256:ea9b3d9af77dac0f4fa60068666b1dfe8b0ddaca8c99bc82ef1bb8a61c60f6ce","s":"Authorization: \u003credacted\u003e"}
+{"h":"e674447337e83c13","f":"sha256:051533f04927d18ea54186815ded2995b8a15036c860590d9d805b6e1ded5265","s":"Available"}
+{"h":"1db15500dd4b1d8a","f":"sha256:fe4ffd50b779c570c8c2b37e112b13c6cd95b4d67aec4accf06b0346d15a6dbc","s":"Back-off pulling image \"ghcr.io/stefanprodan/podinfo:6.17.99\""}
+{"h":"fc3c5156be3d8cb2","f":"sha256:0ffa0befc415d98d1726f1ab6bcc824f0d8d5df0ac0234dc12eb047437eaca32","s":"Back-off restarting failed container web in pod web-\u003cpod\u003e_demo(\u003cuid\u003e)"}
+{"h":"2296259be53e0482","f":"sha256:6a99034263ece99a252463f0f2b4dfd096303cccfd302d5c5a0634b6f96066f2","s":"BackOff"}
+{"h":"d93bfc5707b7eccd","f":"sha256:7c6e6895006b636240906b1808a684e455cbd7574ccf256f502c974d54d6c5e0","s":"Changing an image is not in the catalog (SetContainerMemoryLimit and AdjustKedaMaxReplicas only); the request ends NeedsIntervention and a person is notified through a GitHub issue."}
+{"h":"468614a336392353","f":"sha256:914674c19ceb2f8ffe1591686b62d1641849720bc235ba23444c4db793c93f0d","s":"Container cache terminated with exit code 137"}
+{"h":"d71f78cc308e12f9","f":"sha256:d031663a77b889bc2a00fd7b904fdd1a17b4de75dedb7c7a2bad04dd59d7319b","s":"Container web terminated with exit code 137"}
+{"h":"a8071669edfc06d9","f":"sha256:746d5613bae3590a21fad8d7c6a828f0e2a161297b6d81ff8f9efbafc6537d93","s":"ContainersNotReady"}
+{"h":"244066f0ce96904f","f":"sha256:aef3c6e7fbc896857a2133b74228b286fc66d10323a4d3510c7fdcefbb995e1c","s":"CrashLoopBackOff"}
+{"h":"635579aa33b25f64","f":"sha256:06104eabf97e120aa3b25df8c559ecbf3e75e536f9c4e57031d1821099a0aaa0","s":"CreateContainerConfigError"}
+{"h":"3b951ebd7c9647a1","f":"sha256:3479dea97108b63447eaf1fae6bd00a3a0a76c8de5615d3575f6e9dac6d38a1d","s":"Creating"}
+{"h":"870a8ffd98f4f2bd","f":"sha256:8df3f77802cf7dd6a464073c29f52235ef7268ddb0f4963cbbb56efc3cf80e14","s":"Deployment"}
+{"h":"76ba7e721d565050","f":"sha256:74ef63cf28bc40cad0f3baf610e3cd7072b448a42461577380ae88f6caa5b7b1","s":"Deployment does not have minimum availability."}
+{"h":"46bef98206a0e19c","f":"sha256:cfaa4f74b28050f8219c6694ebd93ce937b834b1779c7a67a62604655ecd097b","s":"Deployment has minimum availability."}
+{"h":"c3154a938ffdf38a","f":"sha256:834e8c003c7e014b6a6dd2dd8800f061d86c43dc1b61ed6cbd91fe4d009bc5e4","s":"Error: secret \"web-credentials\" not found"}
+{"h":"4e1f49a9c8ae8a15","f":"sha256:de3f93ec700fa3547039906925b907b478232545f0fbc5f943d3c61ef73c0287","s":"Event"}
+{"h":"031a8f0f659df890","f":"sha256:7a731ec952869ace3dbf451c9722cf7e0df0a1e1e7eab10c9651e62e4e7fdcdf","s":"Failed"}
+{"h":"1120ed66603dede5","f":"sha256:b19d91b47a2b47f5f43d92fb572b9d5055e48a8c5b2171c137f471fbbef44be0","s":"Failed to pull image \"ghcr.io/stefanprodan/podinfo:6.17.99\": rpc error: code = NotFound desc = failed to pull and unpack image \"ghcr.io/stefanprodan/podinfo:6.17.99\": failed to resolve reference \"ghcr.io/stefanprodan/podinfo:6.17.99\": ghcr.io/stefanprodan/podinfo:6.17.99: not found"}
+{"h":"c6e02cadae5d66ea","f":"sha256:4a1525b61a8c215fb591da988638e10f0bebc9d075ce51017e4575ebed20ff7a","s":"FailedScheduling"}
+{"h":"325e84939c6410fa","f":"sha256:a1f2f95050f6b560e064c96a0b883e269e605b23f0cae69f7b1be1fc6c152e38","s":"Fallback"}
+{"h":"60a33e6cf5151f2d","f":"sha256:dc9ee609dfcc21c403069ddc9c82fad67a3fad0cdd90c1deafb1582fbce682e1","s":"False"}
+{"h":"b2f573a10e6b0ead","f":"sha256:2d94b983c04fbd37aa8f70e7f7cc8225e998a5482a8f1fe10a139e1e236bb1fe","s":"Fixing arbitrary manifests is not in the catalog, and Shadewright never suspends or changes Flux (design 7); a person is notified."}
+{"h":"29ae818b49a12503","f":"sha256:b79b8efe47de600d0b177212b1ae5c3bcef4113ca7f747fffac8e3477fe0346f","s":"HorizontalPodAutoscaler"}
+{"h":"c41fe558ce130421","f":"sha256:3c32f2efe6e58ad568df1e93fb5b84a573f08022a3a39748bd3a45c4f3bef384","s":"HorizontalPodAutoscaler keda-hpa-worker is limited at its maximum: ScalingLimited is True, reason TooManyReplicas: the desired replica count is more than the maximum replica count (maxReplicas 2, currentReplicas 2)"}
+{"h":"7940487a277fca55","f":"sha256:06d319e112cf9d715182979038518151ee947e6c4efdf33485161495ff61d7c7","s":"ImagePullBackOff"}
+{"h":"36a606d4886552e8","f":"sha256:f99a155ddfc9b0993e6629c534ebfaeadc7e4110f9208529465f8ba3723cd413","s":"Incident"}
+{"h":"a1aae71820b25950","f":"sha256:340e3b4042dbb2ec3de14818372a010f6f63ddcf805d2f72b339f3f07a64fc3e","s":"KEDA's Warning event KEDAScalerFailed about the ScaledObject in demo, read by the collector's event watch (an event about a kind the analyzer does not follow is its own subject). The KEDA module's symptom source, which reads the Ready condition, feeds nothing yet, so the Incident exists only if KEDA writes the event. Not observed yet."}
+{"h":"e308f6a20eef8bf0","f":"sha256:24639883e6e7ba0920707d3e4fb720c9617f2ccdf582c5dfeda41ce1960dc41a","s":"KEDAScalerFailed"}
+{"h":"984881993d65e467","f":"sha256:28dc0d82439f65c70d8e8e5c4ae96e20b672533c0c012fde47d3246fe5d96a84","s":"Kustomization"}
+{"h":"220bf29d523b6d02","f":"sha256:fd16cb921b09b8c242a9abd22da542b6b73cd52d1a05070758ad8ffeebd58322","s":"Lowering resource requests or adding nodes is not in the catalog; a person is notified."}
+{"h":"15768e6cc7fbf34a","f":"sha256:8e54fa2a336513d7ab030406ff19909d05264cbd08c615f6b51c5015c29059a5","s":"MinimumReplicasAvailable"}
+{"h":"d38095e47bcadf36","f":"sha256:7700644d060c540ac597a08b2f0155a8a5bb9b7e4e0df1c6b0b2205101f23b26","s":"MinimumReplicasUnavailable"}
+{"h":"eb18a8b576164914","f":"sha256:7982c7acdf1cdc1ef390d35733032a02e6541399a86e44a90027c1367e7e84dc","s":"NeedsIntervention"}
+{"h":"f3a5b74d7847dffc","f":"sha256:547f3b38079ab9cc5a0d237b7f9102fac750d1a655d74ba3ad4503b07dee190f","s":"No fallbacks are active on this scaled object"}
+{"h":"615164963b119488","f":"sha256:ce096bfe35a49623b0a0d8bfee549989221b5480fa90ecebac828cec579e392e","s":"NoFallbackFound"}
+{"h":"aea3fb0357b0cd5a","f":"sha256:0c5d583a660f7a7b18153c01059216ecc43e15e456a0c2e17be0f0b6c061e13d","s":"NotFound"}
+{"h":"0de790650a01a18b","f":"sha256:6ca7fe2f4759ad0949a34773f94eb1c235ebe2a94c1ec66d8184d3974a26c4b4","s":"OOMKilled"}
+{"h":"8c999da3f29be80c","f":"sha256:4ac4da6d4afe616da4c6636e31f6286657295becb5034bfa07ec4d0740f68655","s":"OOMKilled from the container status (last state), not from an event reason"}
+{"h":"e999376a46fb2d9f","f":"sha256:7d9eb080ab5b9fee5385014a3d4fd26c4edb65d2ca8c1f585dbff1ac04afacfe","s":"Observed from the analyzer. On \u003ctime\u003e (v0.3.0-rc.5) it opened pkalin/shadewright-fleet#51 (48Mi to 64Mi in apps/demo/web-deployment.yaml) \u003cduration\u003e after the first symptom. One OOM opened three Incidents for demo/web (OOMKilled, BackOff, Unhealthy), each analyzed (proposals 64Mi, 72Mi, 64Mi), and the target lock kept it to one pull request (pkalin/shadewright#432). Merged \u003ctime\u003e UTC, the executor recorded the merge 12 s later, Flux applied it at \u003ctime\u003e and the new pod ran at 64Mi without restarts. The two waiting duplicate requests then ended NeedsIntervention with reason KustomizationNotReady (Flux was mid-reconcile of the fix). Earlier runs. \u003ctime\u003e (rc.2) the analyzer created the request itself and opened pkalin/shadewright-fleet#45 \u003cduration\u003e after the symptom, the executor saw the merge \u003cduration\u003e late (pkalin/shadewright#434). \u003ctime\u003e (rc.4) two proposals were Denied by policy, correctly. 48Mi to 96Mi was over the 50% step because the model did not see the policy bounds (pkalin/shadewright#493), and one"}
+{"h":"ff1a3a00240b800d","f":"sha256:4a9855a0cbb748da5b0c83eee2d7a4312037e8d35222272e838d715a47ca7a27","s":"Observed on Kind on \u003ctime\u003e (vendored agent v0.1.0 at the commit in infrastructure/shadewright/VENDOR). The kubelet's Warning event Failed on the pod, with the note Error secret web-credentials not found, read by the collector's event watch and attributed to Deployment demo/web through ReplicaSet; one Incident, reason Failed, count 1, about \u003cduration\u003e after the Flux apply. CreateContainerConfigError is a waiting reason of the container status, which the collector does not read, so it is never the Incident reason."}
+{"h":"b3c278567040b3e7","f":"sha256:8cce8811d421bfff355487541737d602b8d41ac34005eac283471fcfdb612cae","s":"Observed on Kind on \u003ctime\u003e (vendored agent v0.1.0 at the commit in infrastructure/shadewright/VENDOR). The kubelet's Warning events on the pod, all with reason Failed (the pull error, then Error ErrImagePull, then Error ImagePullBackOff), read by the collector's event watch and attributed to Deployment demo/web through ReplicaSet; three Incidents, each reason Failed, count 1, told apart by their symptom. The kubelet's image-pull BackOff event (Back-off pulling image) is type Normal, so the collector does not read it and BackOff is not an Incident reason here; the restart BackOff of a crash-looping container is a Warning, as in oom. ImagePullBackOff and ErrImagePull appear only inside the symptom text, never as the reason."}
+{"h":"1e15f2cd0ea50932","f":"sha256:62989f86e43d7b986e88c43a26e7a5972a6b7edfe325d35fcc85d557a5ce7c32","s":"Observed on the lab on \u003ctime\u003e (v0.3.0-rc.5), after pkalin/shadewright-fleet#52 added apps/demo/#-statefulset.yaml to the policy demo-memory. The OOMKilled Incident at about \u003ctime\u003e UTC led to pkalin/shadewright-fleet#54 (cache container 48Mi to 72Mi, +50%) at \u003ctime\u003e. Two more Incidents (BackOff, Unhealthy) for the same subject did not make more pull requests (pkalin/shadewright#432). It was merged at \u003ctime\u003e UTC as the lab was destroyed, so the delivery and the manual pod delete after a merge are still not checked (see the README). The real-model replay evaluation on rc.5 had 0 of 5 runs with all facts."}
+{"h":"6d18dc562eebe78b","f":"sha256:7841f2107478b0765661ca71217fb233d0e32433996d8fa17ee5c3059958e5af","s":"Observed on the lab on \u003ctime\u003e (v0.3.0-rc.5). pkalin/shadewright-fleet#52 listed keda in the settings and added the policy demo-keda (2 to 3, at most +50%, no decrease, apps/demo/#-scaledobject.yaml). Then pkalin/shadewright-fleet#53 (maxReplicaCount 2 to 3, one field) opened 53 s after the Incident, with one Incident and one request, no duplicates. Merged \u003ctime\u003e UTC, the executor saw it at \u003ctime\u003e, and the HPA was at 3 of 3 with ScalingLimited False (DesiredWithinRange) by \u003ctime\u003e. The real-model replay evaluation on rc.5 (5 repeats) proposed AdjustKedaMaxReplicas within bounds in 5 of 5 runs with all scored facts (https://shadewright.io/evaluation/)."}
+{"h":"ed077f3d8125d60d","f":"sha256:71a5a97240212ccc6d4cd57893be0f13882b11353dd7358aca9bb541c99f7fee","s":"Open"}
+{"h":"e159b06187d369a0","f":"sha256:dc5c54a00f52824cf9930f1ceda268dc438205d70319ba7913768d30151de03d","s":"Paused"}
+{"h":"331551b0de4157c9","f":"sha256:5b33dc85e255c44df93ceaf235c5e7dbc02e3b62541d38c9d7e3cbb28b61c537","s":"Pending"}
+{"h":"0a6bb8b01de10156","f":"sha256:04c3a541298cde29bfa547751e2529fafdae35b2886c65ae791defed10410b8c","s":"Pod"}
+{"h":"fda877c7e20320bf","f":"sha256:a28b55b9e3747f91f5a0115ac194df35664edde4a9f540cf15354a9c747e7684","s":"PodScheduled"}
+{"h":"804c78594edbada2","f":"sha256:4154491b035b0a016aefa70239de1ee24d7e2b3c19cca4d9039d65726baca6d5","s":"Probing"}
+{"h":"54ee07324c4b4595","f":"sha256:b031f72ad89f06eca7620affdac95b3388afd83379db244e9b5530ff65de5402","s":"Progressing"}
+{"h":"22d2313912690891","f":"sha256:b429804c6d7d961ab790971b0e3b6aae4fb02fa423b9ca2cbe9559c6451e66bd","s":"Pulling"}
+{"h":"f8a694f9f172ea1d","f":"sha256:2743b457a6e1990996c53c8ebb6b2532ff20be70fd51f8a25416e774f4b629d2","s":"Readiness probe failed: Get \"http://\u003cip\u003e/readyz\": dial tcp \u003cip\u003e: connect: connection refused"}
+{"h":"36ebab85eacf8c88","f":"sha256:2743b457a6e1990996c53c8ebb6b2532ff20be70fd51f8a25416e774f4b629d2","s":"Readiness probe failed: Get \"http://\u003cip\u003e/readyz\": dial tcp \u003cip\u003e: connect: connection refused"}
+{"h":"5fa7aac5375c5815","f":"sha256:13102b25d9d0189c4c935bd84c639a923989f21fc901538f668f99c44f7b346c","s":"Ready"}
+{"h":"2d16a41ef02448be","f":"sha256:84a398d28ac024f16cb7f1b5007f9a983e6e07fd2dfe4660b30cc81da980b177","s":"Ready condition is False"}
+{"h":"46a29f14a86a3d39","f":"sha256:435873f5c39205e96e2220d0aaa51d245a481aab97ea7d4fc28f5074eab443cd","s":"Ready is False"}
+{"h":"7699f87d5a19b7a3","f":"sha256:42240bc8cfebb877ad52c6cca31a2cf5bfe951cb66966d4943d8c0e029c66022","s":"Ready: False"}
+{"h":"6cdb65579badd527","f":"sha256:f910e448e1859996d49193ef895c18cee6a1cc879e0b66df4a5e107ce3bf90fd","s":"Ready=False"}
+{"h":"ae2f77eb29441647","f":"sha256:b18516c256ba37ee09dc45d31cc8bba53f0a7a0eb949486c1e214bd88313a208","s":"ReconciliationFailed"}
+{"h":"ac6de26cdbad0fd7","f":"sha256:d3683056615f178d66f6c7ac2c06f01f46bb10a9321fde599a535bf48edb1a8c","s":"RemediationPolicy"}
+{"h":"3245f14d0367b82c","f":"sha256:9cb6ad16d2272d4e2cea03e92d63a4a5c736328cf64b8dee36c3fd660783a387","s":"ReplicaCeiling"}
+{"h":"78b72a5e9b82180d","f":"sha256:4311a8e8d0446314f732136ed21a43fc62f012b40652bea1ef5f68634178579e","s":"ReplicaSet"}
+{"h":"c3466c20fd421ed0","f":"sha256:3d2bbf24524e19ebc4a3944442b9ad95fc2dc9d255b06316917a213974232f3a","s":"ReplicaSet \"web-\u003chash\u003e\" is progressing."}
+{"h":"e094ed260d4dd799","f":"sha256:3d2bbf24524e19ebc4a3944442b9ad95fc2dc9d255b06316917a213974232f3a","s":"ReplicaSet \"web-\u003chash\u003e\" is progressing."}
+{"h":"87b1592d0bdfb8c8","f":"sha256:0cc08572c180725b9f1605e0c228cc2a18b5c4b99b0a41e31b34ebbbc77e7a36","s":"ReplicaSetUpdated"}
+{"h":"4850b174b713d88c","f":"sha256:a23b886c6ed6bcbd627fd3d54f00637d5fc7e4058d55f843d57a627229d193e5","s":"Required"}
+{"h":"40f68cf75ff6fb2d","f":"sha256:b8ee8ae6b2459d6ec79ab49b69b0d43a228bbc0caa7389b2ae196f1fc2484137","s":"Restarting"}
+{"h":"f4ccae29e1bb0c20","f":"sha256:0703129a54434e7d61221768aec8b68f4eb31dd0278d4a1f50fae4f961b20433","s":"Running"}
+{"h":"615e74f37bbd7d75","f":"sha256:6ea1a0c82298ce8c6fe6a8fd03dc132cf909ce9c80b9f26354d4c9e3fe318dd3","s":"ScaledObject"}
+{"h":"b489434f9d7cd8ed","f":"sha256:b9a09dac547959275992f9cc10189ec4f6ebcdb3c4f9749a080e6c0814353377","s":"ScaledObject is defined correctly and is ready for scaling"}
+{"h":"07661478051ffc3d","f":"sha256:8e7be2a7f39a73e6273a717e4ac45f91b49fac48b91747f132b9839498119b41","s":"ScaledObjectReady"}
+{"h":"5f5813c67abffddf","f":"sha256:630bdc98b49386b43e3f1d9969a34e14dff5b895915f63f9f6f89359094c58cf","s":"ScaledObjectUnpaused"}
+{"h":"efff1a9dc941f9a0","f":"sha256:0af5f3b488bf099cc11b76a6b5467e98d432d9ed84822a58869e8cb3c03e5a87","s":"ScalerActive"}
+{"h":"d748a917151b846c","f":"sha256:533f3cd49c598fc57d04dcc2acd7f45d18fecbddeaea2f7f77f450592055436b","s":"ScalerNotActive"}
+{"h":"9f4444f25dac12af","f":"sha256:34a70706da5b65a0aec5849026da8f516c4a036266518d8a6ec40a6388772592","s":"Scaling is not performed because triggers are not active"}
+{"h":"0e62574c8384ded1","f":"sha256:09ad988b2987022f042aeb2e1206ef52d23b922ecfc06699e8c38b1eb6d70fbb","s":"Scaling is performed because triggers are active"}
+{"h":"2fcb5d374697f5ff","f":"sha256:aa0b58cb120d887782f792744008ecb8aa0f07d1a3fd4258951b6613cde46350","s":"Scenario"}
+{"h":"fd0518214e1608cb","f":"sha256:07cba0683d4a922b186a683f386de0d2e13f703690d0f60fe65fb8b46188d5f3","s":"Secrets are excluded from the MVP (design 10.10) and no catalog action creates or changes one; a person is notified."}
+{"h":"ea9fd09c27af9917","f":"sha256:998855e64d761fae4ef92f65269696ab6d8cef9f511fc5cdd19bea7c98ba0893","s":"Server=tcp:db;Password=\u003credacted\u003e"}
+{"h":"cfb27489e2f6fdf4","f":"sha256:a5b38198e8d87c37eb8d4be16e6357e84f80afeaa6fab762f5661f910b1e1016","s":"Service/demo/web dry-run failed (Invalid): Service \"web\" is invalid: spec.ports(0).port: Invalid value: \"http\": spec.ports(0).port in body must be of type integer: \"string\""}
+{"h":"8c530491969819f7","f":"sha256:8b30ddc9b6e5694247436136df1872192fd34f321d2730374d421cb5839a563c","s":"SetContainerMemoryLimit"}
+{"h":"34cbec34ca367e4e","f":"sha256:73d32bff44f778ee3beeb1ed0d76cf4c1fb46b9602b1d64ff5d2f04fd4732f35","s":"StatefulSet"}
+{"h":"be0d50713ae2e879","f":"sha256:2dc5cd270676c457bf981b89a833115c09bb1823177136a1fbb7f4d99e9f27a3","s":"The KEDA module's HorizontalPodAutoscaler symptom source (ScalingLimited=True with reason TooManyReplicas, internal/modules/keda/symptoms.go in pkalin/shadewright). Observed on the lab on \u003ctime\u003e (v0.3.0-rc.5) at about \u003ctime\u003e UTC, as a ReplicaCeiling Incident on the ScaledObject. Before that, \u003ctime\u003e (rc.4) opened the Incident but the analysis ended MissingData (pkalin/shadewright#480), and the first rc.5 run had no Incident for \u003cduration\u003e because since pkalin/shadewright#478 the KEDA symptom sources run only while spec.modules.integrations of the RemediationSettings lists keda (fixed by pkalin/shadewright-fleet#52)."}
+{"h":"efd6404638dab77b","f":"sha256:ef1c05345be8d4c2534e52032943c44876c4376ca80c237b1b7c254a71185a34","s":"The OOM evidence comes from a replaced template that is already fixed, so there is nothing left to change; a memory proposal built from the current template's 64Mi fails the case. The lab run of \u003ctime\u003e proposed 64Mi to 96Mi, and the request ended Succeeded (pkalin/shadewright#724)."}
+{"h":"795d27501d607d21","f":"sha256:607083878a84f6b0963a4036da97e1c3e207f9d20980816e9e922ddada4505c1","s":"The kubelet writes lastState.terminated.reason on the container status of pod cache-1; the collector's pod watch reads it and follows the pod's controller reference to the StatefulSet (internal/analyzer/collector/owners.go in pkalin/shadewright, unit test TestStatefulSetPod). Observed on the lab on \u003ctime\u003e (v0.3.0-rc.5) at about \u003ctime\u003e UTC, with BackOff and Unhealthy Incidents for the same subject."}
+{"h":"fe34ac826896d1d2","f":"sha256:b02aacaf32fe77b4bc117a4b596f3f206e404be50eb25865990a1aaae5c66b82","s":"The kubelet writes lastState.terminated.reason on the container status; the collector's pod watch reads it (there is no event with this reason). Observed on the lab on \u003ctime\u003e together with BackOff and Unhealthy Incidents for Deployment demo/web, and again in the analyzer-driven runs of \u003ctime\u003e (v0.3.0-rc.2), \u003ctime\u003e (rc.4) and \u003ctime\u003e (rc.5)."}
+{"h":"1896169f08b57437","f":"sha256:776ea9a7ee1fead7cdf5931ff3de6c0690a2d4857ec666caecd1f7b6f5a495d6","s":"The kubelet writes the termination reason on the container status; the collector's pod watch reads it. Observed on the lab on \u003ctime\u003e (v0.5.0-rc.1) after the switch from oom-leak to keda-ceiling-persists, from the last pod of the old ReplicaSet while it was terminating (pkalin/shadewright#724)."}
+{"h":"f2a46fdd9236622b","f":"sha256:41c7322afe3516770fb8e3ba046a2cd989e5f2c5cdfcfee0f565b795de2e5690","s":"The kubelet's Warning event Unhealthy on the new pod, read by the collector's event watch and attributed to Deployment demo/worker through ReplicaSet. Observed on the lab on \u003ctime\u003e (v0.5.0-rc.1, model gpt-5.4-mini-\u003ctime\u003e) when KEDA scaled the worker during keda-ceiling-persists (pkalin/shadewright#726)."}
+{"h":"03fc27f3dedbd170","f":"sha256:dec5c6188ad0f577d9afad16f1040dcf44f7eab0c6125da2be3385d7c3f89fb1","s":"The oom Incident as the analyzer keeps it since the cause rule of ADR-0039 (#791): a cause, with the kubelet's BackOff and readiness probe failures of the web container counted in its status.absorbed, so the context's summary shows the absorbed tally (point 18, #796). The objects, series and policies are the scenario's."}
+{"h":"7269f97fb9c7fcd0","f":"sha256:1169414b8aa89b0e760fa83d0d6e21d8173c6b414fac07e8606d1a0b358b7a3a","s":"The probe failure cleared by itself and nothing in the evidence points at memory, so no catalog action is supported; a proposal to change the memory limit fails the case. The lab run of \u003ctime\u003e proposed 64Mi to 96Mi (pkalin/shadewright#726)."}
+{"h":"12d2cfde54e7be0e","f":"sha256:d30fd92f51eb9697ec8b67cabfbbb4947ba9c55d82356411f4c16ab65a5f5fe8","s":"The same ceiling under a wider policy: demo-keda allows maxReplicaCount up to 6 in steps of at most 200%, so from 2 the model may ask for anything from 3 to 6. The load still needs 3 replicas (rubric.yaml, size): a proposal above 3 fails, though the policy allows it; one of 3 passes (#505, decided \u003ctime\u003e)."}
+{"h":"31226b6c28b524a9","f":"sha256:a90701cc1ed39d9cf103a7d4e092db8790bdf775996313f9bd08f15727c58f77","s":"The scheduler's Warning event FailedScheduling on the pending pod, read by the collector's event watch and attributed to Deployment demo/web through ReplicaSet. Not observed yet."}
+{"h":"3c64dee05e93350e","f":"sha256:1b3380d510375581f75412f18902e26df4ab265be7bcd3c68140172b1c03e20c","s":"The web Deployment points at an image tag that does not exist, so its new pod stays in ErrImagePull and ImagePullBackOff."}
+{"h":"1ff42d545a4c5b10","f":"sha256:9a509f6952a9fb7a9d702bf252a5f3e498067beca81a372beb2af844d0800a2b","s":"The web Deployment reads an env var from the Secret web-credentials, which does not exist, so the container stays in CreateContainerConfigError."}
+{"h":"a0272650bb322dce","f":"sha256:38cfcbe4bdbb06deec48f9a60e0049aae4253c5e9603bfd01a56ed554b26d3d9","s":"The web Deployment requests 256 CPUs, more than any node has, so its new pod stays Pending with FailedScheduling."}
+{"h":"83a0f85fa303f32c","f":"sha256:e5255aacb6d377ae00ad25e4c95a31ee685daef2813c836d50105863e70dc810","s":"The web Deployment's current template is healthy (64Mi, its new pod Running and Ready), and the only OOMKilled evidence is a terminating pod of the previous ReplicaSet under a 48Mi limit."}
+{"h":"fa4f9ffbe416f66c","f":"sha256:a6ac954320ea164898d569e3d20a4f1332ed4f5f19336e7b5a7283edef238a45","s":"The web container loads 36 MB into memory against a 48Mi limit, so it is OOMKilled and restarts."}
+{"h":"0e502fd2d4262363","f":"sha256:8f90d5b730dccfcfec9db02c2a9383dddec48af74e349fb6216270905057c82b","s":"The worker's ScaledObject has maxReplicaCount 2 while steady load makes its trigger ask for 3 replicas, so the HPA KEDA manages sits at its ceiling."}
+{"h":"09f4671c4557cee7","f":"sha256:92b23c2b505c9e84630e6656ca3db2165502c4ed108e1884b7a4af2b7c820231","s":"The worker's ScaledObject trigger points at a Prometheus address that does not exist, so the ScaledObject is not Ready and KEDA reports trigger errors."}
+{"h":"b8cd808b6409f4d3","f":"sha256:1b8111c421c6257796a3e16c647633cf660082944df058cd051c99273650dc9e","s":"TooManyReplicas"}
+{"h":"6bd187ee01f3d17f","f":"sha256:a743db4c2f1b4cf5fecbe9312c27c07409b28cb2c9776413d4fcdf2c8f636cd0","s":"TriggerError"}
+{"h":"aa55f9d8fef3b50d","f":"sha256:048bce350998ac0bce46309ad75d3812449d334d1d213063a99faecf6338c7f7","s":"Triggers defined in ScaledObject are not working correctly"}
+{"h":"3cbc87c7681f34db","f":"sha256:d52bdec0d701ded85e22beb1d6921f49493d827ef80d120c50df8e12532d1d69","s":"True"}
+{"h":"317b1fbc1e13beeb","f":"sha256:e147ea67c6f82ee26d081f2d1b379f32af1299f3e17380424ce803b18d28a63c","s":"Unhealthy"}
+{"h":"66475acf867a53d6","f":"sha256:c7c198d1e716b01408fc4b61e368869cd3da2bb39306535966e46740dee290e2","s":"Unschedulable"}
+{"h":"e981ddae45d8f4ca","f":"sha256:73bf5b3526d7ceacb82bedd9942b6e40e09837bb1fc122824594b932473ee961","s":"Warning"}
+{"h":"a02b7b1605fb1003","f":"sha256:9033c099b42664610b72d065fb5ed4962dfe85e29bd1cd46c1533af3d0463cb9","s":"\u003credacted\u003e"}
+{"h":"3060627b465a8901","f":"sha256:9033c099b42664610b72d065fb5ed4962dfe85e29bd1cd46c1533af3d0463cb9","s":"\u003credacted\u003e"}
+{"h":"ed54b6cc7a8a353f","f":"sha256:fb254b7c075965a2c10372ec9231eaf2959b1722a76911556790429cf84d33db","s":"a Prometheus query through the MetricsSource interface (planned, not wired into the analyzer yet)"}
+{"h":"8f4a434a057c0459","f":"sha256:9f9dbac8d10b27a17e3be87535b0e65f601f8bc4afb740b8db7268c8ec6a9e9e","s":"a Prometheus query through the MetricsSource interface, whose pod templates resolve StatefulSet pods by owner reference (planned, not wired into the analyzer yet)"}
+{"h":"b80300e89b4f7b3d","f":"sha256:1310aa2927416065676354ec4b9b4732f60ef485e117601171e53867339903e7","s":"a single readiness probe failure with connection refused while the pod was starting"}
+{"h":"a4262e1c9bcbc172","f":"sha256:996fe2a001383492850b620067d41d04890d980e56b0b4f6aa403bff1105ad58","s":"about"}
+{"h":"2f6378a857d08ce0","f":"sha256:4f5fb0750e74a65e4819ea9be9913c896634d3ec11924fe1c42ed7081058ce99","s":"absorbed"}
+{"h":"bd938c688f49b77c","f":"sha256:2d7d00606084be65f04ed025789a92824839af46c77a193a992866a097fee427","s":"action"}
+{"h":"2b0dcdd40016096b","f":"sha256:4f907d2b8f71905d7d70026dabb4a6e3acaad524e61f37ffee08d92fa83826e9","s":"actions"}
+{"h":"bea5f6cd07c91881","f":"sha256:c297ea8693c0815a85205a38f10935df2c60f7f411c9ceaa77b05ce545299ba8","s":"adjustKedaMaxReplicas"}
+{"h":"5ef5ef0364b6939c","f":"sha256:549d07830c626af673c008fc1fb58148c76e216765023b0005a7739a3c3964a9","s":"all"}
+{"h":"1289c192d0fae218","f":"sha256:9809bbb02d5b84728d45f7eb491b18eb2943e1dfe67f5e9f2a1cb119ba9e2581","s":"allowedPaths"}
+{"h":"295df243c6a33994","f":"sha256:4a576029c53f7acd6bbcf41eaf33a44956c9f30c8f9e655bf2517a21ba89b83a","s":"annotations"}
+{"h":"d6a7cd2a7371b1a1","f":"sha256:95e3be32f0f9fd0b2baf69bada1eebac40f3b6c28a49389e596cfec15256b93f","s":"any"}
+{"h":"86afb2feda96bdf0","f":"sha256:6a7bfeea2d85130da9565011850213b1b42278d76d7f3c4d403b522e5e48df3d","s":"anyOf"}
+{"h":"a00cf33cd46d9ef9","f":"sha256:a28efb1f7298e91f13c0710bb38ce327aa41865d1054ca284618514d5b53ce79","s":"api-token"}
+{"h":"43fbae3732c3fc06","f":"sha256:cadb07918cd08f4a2b2c304445756302b767ad56e3ce1c8653ff8167407432c7","s":"apiVersion"}
+{"h":"71dafa318ec2911c","f":"sha256:17fd9901eb25b2c20b0449d04b26e2c4e83c33bb3645e040661f08234adb6d93","s":"app.kubernetes.io/name"}
+{"h":"de62a6902048ef7f","f":"sha256:2d7d2d519e8af17b4a7bad34d371daa9b601aac32c144ef0e48fce2e0173aef1","s":"app.kubernetes.io/part-of"}
+{"h":"9deb65b8788f41ff","f":"sha256:16f6f9a33fe49f26b0aa2247ba5a8a17f0971be438c68bb4d9057860088b6b53","s":"approval"}
+{"h":"d56f6359d240f69e","f":"sha256:f791f80397896526fe7adcef31243361c7c3d56979d73f6852ae7c773a794dfc","s":"apps"}
+{"h":"fa9e650eadc213f0","f":"sha256:3466ee8d32084bb5199a1b51ce492c8600727e453d36dbb928cfedf766df6660","s":"apps/demo/#-deployment.yaml"}
+{"h":"c5411cb2e1fad834","f":"sha256:07e3d75c1dae79b61db27b7a2dadd39ce81507ac7e701cd606928f3a2de19f46","s":"apps/demo/#-scaledobject.yaml"}
+{"h":"8bf6d912f23bd6a3","f":"sha256:a423fa5bd90b5b81790fa750d3006beb41783c421a3b0dc43a6c412aaf03be1d","s":"apps/demo/cache-statefulset.yaml"}
+{"h":"c2f452e12d60e8f1","f":"sha256:cc232c2c7cbff01cc37255bb9a2931dabe3540e275e276ba71fb1dddf007d449","s":"apps/demo/web-deployment.yaml"}
+{"h":"02d3222e466197db","f":"sha256:9917d6ab5668e3f2b12f715675919cda3f3af918ecf1f19be15b5d81021e863e","s":"apps/demo/worker-scaledobject.yaml"}
+{"h":"024614bbf9753e35","f":"sha256:bffbe5059caedebd72ef638f680d7b5547f4984a21ca978c2a82522e3500093b","s":"apps/v1"}
+{"h":"45ad505b07ea7d01","f":"sha256:520c314bdaf2c923b56c3c6372a75edd747a4e6bd5fcddf56605814d02982c9a","s":"apps/v1.Deployment"}
+{"h":"b1d6b91b67c2afa5","f":"sha256:3710f550e909c52efc43ef364a6430ae4573ed956ae21a4c9304d93e4c0eea74","s":"at"}
+{"h":"488809f6f62c9bb7","f":"sha256:b115ca6c60a8cbc54c6233d6211dabd6eae8b3d26997d053417d6f898f495ebd","s":"autoscaling/v2"}
+{"h":"41cae9844ae689a3","f":"sha256:45d8b71f9b1a7103a96360285cd73292eed19508cc8e17aaf1aa2a824295d28d","s":"availableReplicas"}
+{"h":"184df936d41b2da8","f":"sha256:5191210e18dac3870b7302aff9df49cbd7305588584f9125025f84ae2eae155c","s":"average"}
+{"h":"63f577ade4119e83","f":"sha256:d8c042c30f37adefcda8072fb16851c76a34a81afee314c1a792d6b4b7e0a7d1","s":"aws_secret_access_key \u003credacted\u003e"}
+{"h":"903433c0edced1b2","f":"sha256:5c3b6e6727cab06d543353ac266c38e037309573f75ce200022e4af3b796cbd5","s":"back-off \u003cduration\u003e restarting failed container=cache pod=cache-1_demo(\u003cuid\u003e)"}
+{"h":"816fd1de68ccf1d3","f":"sha256:99cedb7f1d7288e8677b821a2c6829fd5c9d7446a04db9b9a794d3772bd7b53f","s":"back-off \u003cduration\u003e restarting failed container=web pod=web-\u003cpod\u003e_demo(\u003cuid\u003e)"}
+{"h":"411b9fc2d1504a54","f":"sha256:6699e44946bca696e74f89b3eaf31e7f437b1a2b3890482a9947304831512ebe","s":"bad-image"}
+{"h":"df776f91729341b4","f":"sha256:d1c6a2e4b22d2548058123b21ae797c81220c0f7e4e3b1029e81279e022d14a2","s":"blockOwnerDeletion"}
+{"h":"6ba9234898ef38b8","f":"sha256:cd7b47779bbecb30ab40ea2dcb78561a7fe5baeeaa0cd118ea4657c7cb466957","s":"bounds"}
+{"h":"bad28c56bf660170","f":"sha256:39787d2ff339804e12f2b952f5aa81ee91604ffdc7deb180da155338f6d6b9a0","s":"broken-keda-trigger"}
+{"h":"5e1ecee06a7fc06f","f":"sha256:8e209eb4cbc4401c55105d81e854abaecf7caab3430e5d350403f41d53c0ad84","s":"cache"}
+{"h":"9fad8dbd16eacf64","f":"sha256:50ccd108d379b51b42438a57996c04b4f9b36f9899d9277c02487114e6e8460d","s":"cache-0"}
+{"h":"49955e06336c6655","f":"sha256:9399942a1399eb98bf958494a9a018879f77a5a99ff68d584e4aa4b7d4ed4563","s":"cache-1"}
+{"h":"972d473deae9237b","f":"sha256:721907697dc01e77cc59c4a064d452a644bc1249c663645120519c0bce575d8e","s":"cache-5b7c9d6f4"}
+{"h":"b47d046959235c31","f":"sha256:d43c758c6f29f720937a6385354847a8bc275952e97c594d7fabdf43b5d4aa47","s":"cache-7d9f4b8c6"}
+{"h":"a1d8735a48781ba1","f":"sha256:8600e19648ae076140948aef32d320650aac5b357ff7efad53ae389df509e20f","s":"cannot be scheduled"}
+{"h":"6a7ef1ed9f15c2f5","f":"sha256:d28fe93260095ea1df5154beb2d9912b39910af91c12824b3e42d1c9d865c53f","s":"cause"}
+{"h":"5ab5a0a27abf6929","f":"sha256:14ed6018d4d50d09c97edee11af1081a54f99cb2c39c3d413c3060d7b5925ad2","s":"checked by the policy gate for AdjustKedaMaxReplicas at the policy step, not diagnosis input"}
+{"h":"562a77a7ae22fe1b","f":"sha256:acabff6db0d0d2fb237440f0ba01513e4d195d1f0df7dc3b50ebb3c27dfde7e8","s":"conditions"}
+{"h":"64f267f36846d279","f":"sha256:358c23cb80f76370809da4ae261b3a624d4894f1268540ba873ad3c3bfb99f43","s":"connect: connection refused"}
+{"h":"25a84382140b11ac","f":"sha256:07d72e4d2fda3f105a73cc019483590a2f39968482da53e5486f064338c74941","s":"connection refused"}
+{"h":"a42d519714d616e9","f":"sha256:a9c29627d2a0e606a8479263ade4ebe5cad26514e0548d5260458358f23fe0ef","s":"container"}
+{"h":"3e3e536179faec06","f":"sha256:732667114a0273c8ed76372a2052c5fa663506f676845638ae196acb6d3d2f0e","s":"containerStatuses"}
+{"h":"9907125a53ad9afb","f":"sha256:57eb453df027691ab569f8f3250a5b1bd053647397f6deaf391e2b9c0b6f298f","s":"container_cpu_throttled_ratio"}
+{"h":"f3a8722ef846d6c4","f":"sha256:ba4cb574d75067af91d6d71e0cbd70280b6bb2efd69f54fd6e67108a2e9ca424","s":"container_cpu_usage_cores"}
+{"h":"e376a8c34bf8b481","f":"sha256:f77d20fe73dd977092e92c69e776894cb4455138531b3bb2131d62b4ef8a2b11","s":"container_last_terminated_oomkilled"}
+{"h":"e802aff97a2ad483","f":"sha256:8259d1cc634eb1b83d9a6cc968c0872cb5b810da7e19beb7f371543a79fa58ce","s":"container_memory_limit_bytes"}
+{"h":"1419cc70ae7f9606","f":"sha256:9215aa2cb62dfbd45d6230a677078ed03513c1db7b381278b68014b7e0136529","s":"container_memory_working_set_bytes"}
+{"h":"ab8e0ce5d7c8c8f8","f":"sha256:e2d8c8913d77c87b07634a933a6cc47ddea84f3a603f197ce450e606b74dcf54","s":"container_restarts_total"}
+{"h":"d29c0eb5149119ac","f":"sha256:298daca87f361858ef30a8372f9e25da3a26316f26b96cfec369480a35115d0d","s":"container_waiting_reason"}
+{"h":"dc64336a2d181fbc","f":"sha256:3fafd7b0376c4ab8c6fdf8bcc4bf079a671fa5dee0c6d1b8828aa36d82862cd6","s":"containers"}
+{"h":"2958efa7bb1bbeab","f":"sha256:017e4fd29f40348fb4ed378ada644deb66195687669270787766fbfb2fba4dfe","s":"containers with unready status: (cache)"}
+{"h":"137a2bd7fe867540","f":"sha256:ea38195d027baafd55378bf4653ac2e32efb9945aad5093ef7b795ac8acba169","s":"containers with unready status: (web)"}
+{"h":"ed7002b439e9ac84","f":"sha256:8e0880d11db72616f891a9e7d6b8f022dc4c29107e2a3921926b4def3d87f04c","s":"content"}
+{"h":"c1472135b14c77c8","f":"sha256:73c40bb0cc8bf8a4c612c43aff931ab49acb153d380bf5a51a93d4f7b6036077","s":"controller"}
+{"h":"67b9ac9205cacfec","f":"sha256:685b3856e5b5071d9ee4790f31391895a2870d1c78567c0da03fa7b719918d33","s":"controller-revision-hash"}
+{"h":"4b2386f3cd7399a4","f":"sha256:9f8774a6d7b590d00cbab451d7d57239cbd2ff97cda2ca36b39fcb7de99b4554","s":"could not be scheduled"}
+{"h":"6c35493a2b937829","f":"sha256:ba8349d2665fd84ab01f8539f7fbe247aacee5f56874307b16839b352e28e484","s":"count"}
+{"h":"68ab84f7c6d0f578","f":"sha256:04a17fa0ddc1fd97da82bdc0204eba9e9b08d23a025b710bcc22c027d39c7db9","s":"cpu"}
+{"h":"d1a798d3b303c08e","f":"sha256:4d6d2cf8801f1fa93df5cd1e59550e4269e611239542672eca7e7bc469abf772","s":"creationTimestamp"}
+{"h":"cd3382d27d5ef7d7","f":"sha256:bedffb841346b5d4085d00f5005598ba08d18b486160948a11ec79303532f393","s":"credentials: \u003credacted\u003e"}
+{"h":"6a85ef36b635e589","f":"sha256:77a2f2392198027a018fd490f354c78bbf6457c66b65a37454d4e9d6f59f65da","s":"currentReplicas"}
+{"h":"888695ddd59089e0","f":"sha256:5ab5e131bc7b8b44bd6a40669cef9d23577c64318c6f9e4be2c63b7ed51219e7","s":"currentRevision"}
+{"h":"6a1fba091ce95fd8","f":"sha256:04dfe44f7276270861ac0c187dbb73f480bdbc4b408830b245d217854f35c174","s":"default-scheduler"}
+{"h":"a8d333398d583de1","f":"sha256:c414431a376c0138fd2b0f0d75206a85fc599d3af32c7c7bbcdfe95e962bda97","s":"deletionGracePeriodSeconds"}
+{"h":"68952aa1197f2143","f":"sha256:9b1a90f0f473c3d185e4230e621d617f60980ad6996602a146dc05dd3eaf311e","s":"deletionTimestamp"}
+{"h":"2a97516c354b6884","f":"sha256:ea27039cd3bf936b7ae238e36c0e9b3eaa524992a353ffa85e0b8b05694b9696","s":"demo"}
+{"h":"b423de4e07044cc4","f":"sha256:e1058e697c817dfe319502b7b54552c717786a2f187d9977bff077521807a38f","s":"demo-keda"}
+{"h":"e616e22f8d09ba3f","f":"sha256:3b113e35c56c28f651d056e4ae1c9ceadbedb0a5f5bace2ce21ca02c4f5d090a","s":"demo-memory"}
+{"h":"aee50b18a03c89e4","f":"sha256:ecf48069db214075a0a9653d43f97d6186a23838d56df1cac98b53fb36faadff","s":"deployment"}
+{"h":"02201a3bfaca9972","f":"sha256:fc3698917e48190c58758c3ca1739f9af24ce9f08fb5ecc7dcfb250881730ab0","s":"deployment.kubernetes.io/revision"}
+{"h":"d44a8583787caf15","f":"sha256:506a5ea49a7962548c45213573141e21fb82eded2759a291f61dbbda84cb60da","s":"deployment_replicas_unavailable"}
+{"h":"b54e2b152c2135f4","f":"sha256:eae8ac8950fee396a2c087930657b78efd45718249d3fb21a47ff6d5eb709181","s":"diagnosis"}
+{"h":"25d33183d01ca782","f":"sha256:86fa57e03e6e839690cd0dfaa33d567ec715e07b71f58611c8826f7f442d6258","s":"dry-run"}
+{"h":"3541eb8593decb20","f":"sha256:cf0bd3e958f7f6ad343b2312c0925e08c29fac346b81fafe679e4f1c8f612578","s":"earlier replicaset"}
+{"h":"b77349bf1fa9b26d","f":"sha256:8bd3a830cdb047f1c10299217d682022447b66d437c44ce1cd5c65142114a461","s":"env"}
+{"h":"9a03c1c1a7dbf49b","f":"sha256:34ed741c087c05ec4b5f55f46ad9a399e6e7ae40903c88011ae6ae73745f1002","s":"error resolving address: lookup prometheus-server.monitoring.svc.cluster.local on (ip): no such host"}
+{"h":"7b67b39c7728540a","f":"sha256:8b6db94fd39b6cd22682403856d9eb60e613604fbb32ca220385c06883d6793f","s":"eval-fake-1"}
+{"h":"9c35c18630cf84a7","f":"sha256:12056d7c47428657be768d6c043e493b7de483289dc062f0e3d234fb25ef3226","s":"eval.shadewright.io/keep-terminating"}
+{"h":"78a30c064d53305d","f":"sha256:093cf5eaead28109d905309917c52c50e9c63055456ecd4dbd3cffbe0eb97341","s":"eventTime"}
+{"h":"335981d35016971f","f":"sha256:9cc5346d1924cc091e5873d7d9d22a4859897449f5acb75611de6be00b0f6c3f","s":"events.k8s.io/v1"}
+{"h":"ee8250fb76e094b3","f":"sha256:1883b135c9672437132597e7cdecbcd19dd6726821d9f800f2f9923523cd0532","s":"evidence"}
+{"h":"bba321ba74d8a602","f":"sha256:7b378e2695e3879721d0ee34f4c416faa7a6137b9969b1b9849f761ed2bc7a55","s":"exitCode"}
+{"h":"1a1b434516dd8db5","f":"sha256:f56eada189511e9b67037707ecc05ccfee0ad1c38068073039af4b25914d59a1","s":"externalMetricNames"}
+{"h":"670b9d6f09faf504","f":"sha256:9033c099b42664610b72d065fb5ed4962dfe85e29bd1cd46c1533af3d0463cb9","s":"\u003credacted\u003e"}
+{"h":"1e7dc6d6c1656540","f":"sha256:d646163c3be1a4bc7b5803681026c263771aa842e5976415105d4634f96c7b3e","s":"fact"}
+{"h":"0694aacb66d62e74","f":"sha256:3b4ce950026ef3fd1bbf9e3912b44d99f4ea604f5bc5071eba016549c4f91f2d","s":"facts"}
+{"h":"c1481e2eb555ca92","f":"sha256:2ca54f189cebae33fcf67ea4860dfafa772a2d0e102f62c0e2c21a0b79361851","s":"fails"}
+{"h":"fcbcf165908dd18a","f":"sha256:bac6ee762348c91186cac3343401f076933e3d89763b5423f37408f0781baca2","s":"false"}
+{"h":"3dd9b438a0cbd710","f":"sha256:9142a157799835dc1f35f896885794615c2450fd15e7afff1883a7c8df49a0a6","s":"fieldPath"}
+{"h":"51da6bc2a8af06b3","f":"sha256:06ced7580ca4e020eab3319ebd2d48cdea73a1d3ca04fa16e6325d567dd37307","s":"finalizers"}
+{"h":"44863b03e9909b71","f":"sha256:5735a5c8dfb67aa6e294ba1ed9b4107a1330320cd0e6d0c8ed8f588e7c9e97f0","s":"fingerprint"}
+{"h":"9d3fbb7b4f08cfd5","f":"sha256:01cebc2acd2fe4b549805ffe916aeaaf9e2c1ed9aea78f14388d1ba9d33c0640","s":"finishedAt"}
+{"h":"8cdd056e5eae94b8","f":"sha256:44b56bb6ab5b2db5c2ddb9dcfb637956a70221dc1f7d36e55619de585e8a2dd5","s":"firstSeen"}
+{"h":"5eb2ce291c7d227d","f":"sha256:d2573c4fc085d799db4a7a560ddbe947fc6e7f11ef9efd32c620d9206f26c9be","s":"fleet"}
+{"h":"a06a54082c155697","f":"sha256:845652895725a051df491c37ef7f32de637e1f7930e87f997c8aa7504d8601b0","s":"fleetCommit"}
+{"h":"5a0dadbff91433dc","f":"sha256:1007f9f328a18f807ef96fe43b8cea6a4c43d1e510035fe57931ffbf0c797e71","s":"fleetRepository"}
+{"h":"9b6c18aea7d0cbeb","f":"sha256:4935b3648ba787fc1a5ff6d93ac857486f39d9e7459b71273cde03316148c992","s":"flux-system"}
+{"h":"fbfcea365cb47b0f","f":"sha256:e187cdc819e83bcb89c71c7546aed5214ca36e7fb7d81d39c5b745836777e8cd","s":"flux-system/apps"}
+{"h":"e661f4c935e8a5a8","f":"sha256:538f32bbd97ded446eb7c24bd16a75ae0924b82746f6fc034daf9227751e141b","s":"generation"}
+{"h":"c02ea9309c4f01d9","f":"sha256:a5e1e34eec318f21536a116d821c897cb03125808fc62007642d7cede5139b74","s":"ghcr.io/stefanprodan/podinfo:6.17.0"}
+{"h":"a3508820b4bfcc52","f":"sha256:9c29a76dd651912778cbf6a987f49fa57e6575460a7f49fc455df007bd552c28","s":"ghcr.io/stefanprodan/podinfo:6.17.99"}
+{"h":"4b09b09836f5874d","f":"sha256:9033c099b42664610b72d065fb5ed4962dfe85e29bd1cd46c1533af3d0463cb9","s":"\u003credacted\u003e"}
+{"h":"1395b6a019ad34ff","f":"sha256:7c4269218cf299ce18b8e94b9edb1b742ba1987fd76a5e65253bb364652e38fd","s":"gitOps"}
+{"h":"d291e14c148d0d1b","f":"sha256:99b16dfa02f8437e93b3ac35228f7e71390d4f75705556e456baf1c2a7fa76c1","s":"has not restarted"}
+{"h":"2efd17170def7f87","f":"sha256:076df808d17332b69154045f36af1e12f9a59d0f2631413a52489103194bf09d","s":"horizontalpodautoscaler"}
+{"h":"197e7963cb8d683d","f":"sha256:68c6b45d155ae5c02124e15a37cf7aa7520e8cf96858da344374a50cff1c85cb","s":"hpaName"}
+{"h":"1b6a8df33afd88f0","f":"sha256:7cdc545c47cd0d689715a308f9c2ba6f398c04274cdf4fa52806cc413d5f38a9","s":"hpa_metric_current"}
+{"h":"d61525ec1d456aca","f":"sha256:99c0d6ec0f4a183ceab9c62b9ac2b15690e81e0e0048c4acbbd39e9f78517d05","s":"hpa_metric_target"}
+{"h":"d35d99f963381726","f":"sha256:a164a6d8fca1c5c52114768a60a653982ade7c181fe9b6959e68e358e3caac41","s":"hpa_metric_target{"}
+{"h":"e0603c499aae47eb","f":"sha256:7c5c3e00eae95bbc0b772f6135288f5f72848b8e14dde96c95f434ca4295b076","s":"http"}
+{"h":"75468d9b0283e516","f":"sha256:22bd2c2e1e328c7987d4ed738885d974f7c3da654d22f8c0425122498243640d","s":"http://prometheus-server.monitoring.svc.cluster.local"}
+{"h":"a96ffa0b48cf9800","f":"sha256:911159596bdba1097492f9500a1a891591765edf7b1196fff2a979d3b75d8971","s":"http://prometheus-server.prometheus.svc.cluster.local"}
+{"h":"cb25346e90b2b59a","f":"sha256:86c9e4b5aa537d84f588bad88c5a800c0709b46c2090a2cb927a8b0ce1841608","s":"httpGet"}
+{"h":"e0e7d117eb574ffa","f":"sha256:b21c1524bd0a804efff23bdb4002de729868bf2a93e100be1161a1514babff33","s":"https://store.example.net/c?sv=2020\u0026sig=\u003credacted\u003e"}
+{"h":"1b0234e50032c01e","f":"sha256:ed93825f6d6403510eb466821a89d0b5b827920623d2b30b5a3cdc8f65c177ba","s":"ignoreNullValues"}
+{"h":"6105d6cc76af4003","f":"sha256:c4d2c55c93669a8cb5fc6b8374b46d6c2ca450ac83931e6f8a0e45ca6ed8df60","s":"image"}
+{"h":"8cb3b31c5bc6dc5d","f":"sha256:8745c48f61d5ba0d921d62ec4c66c026a9995a6cee93e2e00ab171f9ff8b0fc0","s":"imageID"}
+{"h":"0f244cda77d33be5","f":"sha256:c65d6eab5c8e62c3fbc9a8e667f78ed6aaf6a0c28c5f00c696919afedbe5b8c9","s":"inc-bad-image"}
+{"h":"7e60f263f3bec0bd","f":"sha256:201088d435af8ff49329375bb2003daf3d2b4673387cf1b407d41100e4957536","s":"inc-broken-keda-trigger"}
+{"h":"e4bbd1ef4cfe82f3","f":"sha256:1be7e086a23ff4b479a8c2ae05e9bb38d2916c0ff7dd32f9ea8bad8121bdbebf","s":"inc-invalid-manifest"}
+{"h":"5b7961b2ba75acad","f":"sha256:b2538b3b3b1e140bfe9a1a97dd4bb896b6e6862dd50d6b8b95fbcbc6ca2e337a","s":"inc-keda-at-ceiling"}
+{"h":"f865bc44223a3857","f":"sha256:3cc4880196da867e508cfa50fd545a90b0fefd400eb68c5acba7d3a9bbb20d33","s":"inc-missing-secret"}
+{"h":"41295e8c43a43b66","f":"sha256:36a15ef11069c2ce85e5f70acddabfda90560f16f61f2462b3145140f388435f","s":"inc-oom"}
+{"h":"1c22e06cbd6565eb","f":"sha256:4361326ad0fac68a6e7e651ac93c0ebd36e9fc892dc018d8635e7225690c6e4e","s":"inc-replaced-pod"}
+{"h":"be1d6e7d4ae97eb6","f":"sha256:e2c8b839be2d437e9a37ad3b5a0352422925e510cf5b7c7b4333ca4880d4a11d","s":"inc-startup-probe"}
+{"h":"61ceaf69f6ddc04c","f":"sha256:592b2b375da9a6c097e0af5deae44709c451a1205c410a4537890b70b7aa8fcb","s":"inc-statefulset-oom"}
+{"h":"e24bf0938670463b","f":"sha256:77b9e1f318dc8f8b779b0586b73cbc947201e3df07fc6789f08e09080a429aca","s":"inc-unschedulable"}
+{"h":"d4191834714542dc","f":"sha256:2ba21659607876a5d80c4c28a5fcbce44251decccbb284b2d0c35cf5e24dcf24","s":"incident"}
+{"h":"b37b389678e981c8","f":"sha256:452be09c071d20a329d6ea62e35077ba323bdb3c9438abd96696fa988f98db56","s":"inputTokens"}
+{"h":"95734330d02fd3f4","f":"sha256:fa84fbd8b38ebdf51347d04a0d4226a5a61bafee4273b041ebb5a13bb50f37e7","s":"insufficient cpu"}
+{"h":"15fac48b1a79b461","f":"sha256:5d267109e682550cef7fca30fdbce0bb568f10c850b55da1d04d4f01b9bdb14d","s":"invalid-manifest"}
+{"h":"86e0b9e56c17cc4d","f":"sha256:9033c099b42664610b72d065fb5ed4962dfe85e29bd1cd46c1533af3d0463cb9","s":"\u003credacted\u003e"}
+{"h":"a15acd348c44a40f","f":"sha256:83ddcb1baaddf28ff476f5c9bc2a07d88607cf9828a94687dede02d2d86918b8","s":"keda-at-ceiling"}
+{"h":"a70fc6eb77ab58bf","f":"sha256:548bdadbeea32722f84da451fd74a17d0d36f0440f5da54daf8cfc9ac99a4ead","s":"keda-hpa-worker"}
+{"h":"3de285286827822e","f":"sha256:fb6115557938e438a38a051e6788e2f26f05e9a06f6c36d44834e47fdf9685b2","s":"keda-operator"}
+{"h":"be2d40924e9b278a","f":"sha256:3849c7328ba73dd4606efbd97188852705f8fe560d8b236a275351e38fd6986c","s":"keda.sh/v1alpha1"}
+{"h":"2c70e12b7a0646f9","f":"sha256:d5c43e3675ebc688eff519667a911bded65e2bfb5a64927ab38bbb23256e81ae","s":"key"}
+{"h":"0b27c158feb36ab1","f":"sha256:24cf53c8e0a71dd104ca5dbab32f41f975db01445b38ab21e4dabed8c94c2295","s":"kind"}
+{"h":"1ca4bc7eb9b3d6f1","f":"sha256:9542a41af06c9adb2c73710c05576dbb38989a5bc8cc0cc55fc365626bdf5e09","s":"kubelet"}
+{"h":"a524899551292e9d","f":"sha256:556653368f4c6645f9f3cb2dc9d0c77c836a8d477e6c6c4fb286adec7b801f2d","s":"kustomize-controller"}
+{"h":"8ddbf46779ac5c6c","f":"sha256:1bdd1df19fe61d2052a9a03dd5d8b50b35b9ac70c8fb7d18c5a94afbd1e690c1","s":"kustomize-controller's Warning event ReconciliationFailed about Kustomization flux-system/apps. The analyzer watches only demo (--watch-namespaces=demo), so today no Incident is created for it; the scenario needs flux-system watched too, which is not set up (see the README). Not observed yet."}
+{"h":"c4528d2afaf631f7","f":"sha256:531a4a4d664160583f318834e2c6b940ba6d4d529c6db800c810868207451eab","s":"kustomize.toolkit.fluxcd.io/v1"}
+{"h":"d772ebb4590212c6","f":"sha256:6bf055d6e2bd34c2d54949234046963b3d18fb025c04ba90ff9ff4e03172768d","s":"labels"}
+{"h":"398b35604bbb6586","f":"sha256:4dc7f5f68e2847d9a6b48678aa4e8fda6dfa4ae72dd73fc347f72a01291bf3d7","s":"last 6.5"}
+{"h":"d930de1794512cde","f":"sha256:2a507af11f985ccac0449a2b722f9e89fa5f6404f96691eb1ec0fcd204639c2b","s":"lastObservedTime"}
+{"h":"758c78e59ed6d3a1","f":"sha256:8890fc1824370060a981489c94e5faaa35fffcfc8df67cb7694b4fbdaca3cd3c","s":"lastSeen"}
+{"h":"ce42572f151a1e1f","f":"sha256:ec000d9f1c98afabd22a544b32b700e13bb798cb9012764a6260844ab0f507da","s":"lastState"}
+{"h":"4d934f650f3ccaef","f":"sha256:27f159b9b589df303edbf86c40d21a82f61dfddebdc6695a56735d43f307a96d","s":"lastTransitionTime"}
+{"h":"8a46fd6fc3d79d41","f":"sha256:f2320a67b81f16a6ef5b102c8b43afa957a8d95678ab9bdaf50e8a497263901d","s":"limits"}
+{"h":"a4506b6825106ce7","f":"sha256:687509808b056129604c286948a0e2dfdffa5efc712d0f3048984402b286ea2a","s":"manifest unknown"}
+{"h":"7b52156cf4e0e9b2","f":"sha256:a0fa08ca00e778b4abb78672d80296138e50c0a8932ea2b610ae4ec9cfcc9667","s":"matchLabels"}
+{"h":"9baf3a40312f3984","f":"sha256:0994024dbd727159db58452327d553d108d4d4d2a0bbee072dc8a05037b3aa70","s":"max"}
+{"h":"3b263c82f17b501a","f":"sha256:147fbde0bb70b0c8ef8d7afc0c9517b845f5daee0b191f79a64ae961ab3106b1","s":"maxDecreasePercent"}
+{"h":"f90196d596150ad4","f":"sha256:bdb2949b26b1ebe3c79bea6b3c058c8d09f8db6c6c8b90739d98075b32442c14","s":"maxIncreasePercent"}
+{"h":"96d2dd604cbf4ad6","f":"sha256:d389a7bbfbe1c83039ec017f12d18beb7db8d1a74b848e61a1ade972246e5dcf","s":"maxReplicaCount"}
+{"h":"934ad17618953012","f":"sha256:7fe4c28ce56a253f5557490d6cc750e37c31b6fa1f3349a47dd571d37198699b","s":"maxReplicaCount is not the problem"}
+{"h":"224b18b6c9984067","f":"sha256:023d1a1240729697ad935d310d8286505447257163a5f85c9902c40c7a179a15","s":"maxReplicas"}
+{"h":"c064fbca9d9de8dd","f":"sha256:7573a19c62c7ef867f3507af5ea99726920ccf303592e33b62d54d97c3727488","s":"memory"}
+{"h":"8729f78c31ddfd26","f":"sha256:d80c9f98ee7b64b01f011b78d8ac49dafa111188eed54addb4bbb2a9c297ce1c","s":"memory pressure"}
+{"h":"ab530a13e4591498","f":"sha256:c1732866ae5c7f7cc1020e9a2a404eec7cbed21d1c27fa3a0aa520c8f08b7dac","s":"message"}
+{"h":"45447b7afbd5e544","f":"sha256:cc66c19e3b6b09bdeda8ea2a0f651e116ed87f37d99d9fee31996207228975a9","s":"metadata"}
+{"h":"839a712853ed2423","f":"sha256:bb5edfe9ba705470fb4df37696e08098e8057605a35bfad7788012f5a31bfb39","s":"metric_name"}
+{"h":"8f9f7fd0ca042f4f","f":"sha256:b718e871bb110bce69fdf08176819ee2c0c05ddbe0514f28d8970178010db699","s":"metric_target_type"}
+{"h":"f60e793143d79d0d","f":"sha256:fddd693274f08b3c867d9eda7b7f59d446348cfa5ab4f96da54f51ab837235ee","s":"metrics.yaml shows the HPA's metric at 6.5 per replica on 2 replicas, about 13 requests per second, against a target of 5 per replica, so the load needs 13 / 5 = 2.6, that is 3 replicas"}
+{"h":"1f6fa6f69d185e60","f":"sha256:5a21b4aef55690707a6a5dca4824e121fb549605c72684264067ba56da219beb","s":"min"}
+{"h":"151acba25f2917d7","f":"sha256:5ad9d576fcc189a1d58527b6dabb13a28934d54f8e0f1ef643d24d6d417eb9ba","s":"minReplicaCount"}
+{"h":"08d79c78f497f472","f":"sha256:3eb5554619e97f06d58e7b2909317243e0e876e676145cc4e4e2c899b5c0be4d","s":"minReplicas"}
+{"h":"ceccfe75b6b308f4","f":"sha256:ff90a4b2cff93a710c13679008f18fb1aac1513e949799cccfc535b2bfc98f71","s":"missing-secret"}
+{"h":"9372c470eeadd5ec","f":"sha256:d80fc98f611295007fa99f6a6218d6c16979dcc3407e16f8828c1cea76cdb33e","s":"model"}
+{"h":"82a3537ff0dbce7e","f":"sha256:f90c3f7426c611ff77482a569ebd15324a69a5bdc2c746da33186dc423827579","s":"name"}
+{"h":"9359f3bb2efa7aab","f":"sha256:b17c7ca4a3fcb0fc11eb5a7cad4e8849d6610f4381d1aa4cdbfca52cec32b586","s":"namespace"}
+{"h":"2b1b73aaac724fae","f":"sha256:37c9d44d42efeb79bc63e6cb4ef0ffa80e8cc32296eb4efb3f311029e2045eab","s":"namespaces"}
+{"h":"b18869bb49ee8457","f":"sha256:8b9d407d00e9a9df7148ed1bf013103c723857edcd885215588405e0af0bae0c","s":"needs a read of the repository (a planned read-only tool); source mapping cannot find it"}
+{"h":"a6f47d5b45346878","f":"sha256:7c2d68a59e3b9e9d7aea5fda17e0f309647987a49f24e5fe7c9f5fc6f4f8e957","s":"never restarted"}
+{"h":"6fddedd19ae49bc7","f":"sha256:5d91f98aedcbd9d2ee20cc0ded109445e984607db5585f5491195dca5500b3c4","s":"no approved metric template reads the trigger's request rate or the replica history; hpa_metric_current shows only the HPA's metric per replica over the window"}
+{"h":"de474a7f826aafac","f":"sha256:1302355471a270f2c103a8bd5bcfb56fc3ecab30c498d38bd71f8731d147b733","s":"no container was OOMKilled and nothing points at memory"}
+{"h":"c10f0cd3022200dc","f":"sha256:a1e0d2b725698825271a890a46d83d7173e33619ee975b8f57402a62d12954ce","s":"no evidence of memory"}
+{"h":"bf3fab57933c1917","f":"sha256:d86a7c9a78b0792f63b7f386d1514173bd4e70401c98dc7175d3f5ade871755f","s":"no memory"}
+{"h":"916afc649a47f499","f":"sha256:dbed7977cd57675ecd5a7c8d4c53f9682a038beb778df24fc855451486587eef","s":"no memory evidence"}
+{"h":"7e26d8a0f4d8ecbe","f":"sha256:59e5d19661c2350a8ab04339c7e55dfb655ae491a194395478a49d2e68b3ef61","s":"no oom"}
+{"h":"b28d728f9f97ae9a","f":"sha256:e6e2efcaab427d1d3f73962cfe2df0c0d59fe423e03a689394d45e3b49ba5f85","s":"no oomkilled"}
+{"h":"2d9d74e54772c1cd","f":"sha256:df05462a61f9e6fbccfa665ac9e42852023e50883eb264f5134b482469ece55e","s":"no restarts"}
+{"h":"f0cac601dc82a69f","f":"sha256:3ca4d17d9678bbba773d354bb15b4737bacfd414c5d8da5085f15d04ae53fe28","s":"no sign of memory"}
+{"h":"35971be6e9bb024a","f":"sha256:e35b7b0063e39628ab6497fb2bd026fde3b7ac6fa9e548890939e287503119fc","s":"node-1"}
+{"h":"907ba78b4545338d","f":"sha256:8efcbea1b160f053ad389bf2068a148b2da8ec92cc6c8371406b070a7de0505c","s":"not found"}
+{"h":"434086afc61fa5ab","f":"sha256:6a6da93a97c090f4ccab0f304345e841b4532d6b947fd2d324af5a11980dd3ee","s":"not oomkilled"}
+{"h":"d638746b38e06c01","f":"sha256:cb9344687985f4d86f9e8a8551f0770f1b582610fe11488b5fdbcdfc8651a861","s":"not restarted"}
+{"h":"edb465624291e405","f":"sha256:290771fb9fc7c5890e9a52d04d2a07a6cf1e37ea80b1fbee827bacceeda3a99f","s":"note"}
+{"h":"c6469dac0568e4be","f":"sha256:813926b5423a8cfcd3ef686c4c9806bfa1bd5e9605a46b50c886b2d92f749229","s":"nothing points at memory"}
+{"h":"2958d416d08aa5a4","f":"sha256:70761beff1217ce4b492d658428732774187a3e4d0b3909a937682dbc7d75ab3","s":"object"}
+{"h":"604cee807f644af4","f":"sha256:883374994096842d7f0a187fdcee460826a2ea68418aec2c2ea4df15d77379c2","s":"observed"}
+{"h":"9d388a1ef182ae8d","f":"sha256:b21daba89ccb464fce1b75da1980312eed578dc07385ca8708c7bb3b711dc16c","s":"observedGeneration"}
+{"h":"ca14186d64fd9c51","f":"sha256:0a348f11e0d9c8348f01f11bfab078d6faea4b90e7462467da84970dcafdfbeb","s":"old replicaset"}
+{"h":"e7a141b085ae7286","f":"sha256:0357528cd0ee0a0c9c864bcec78e7095f858e8f32818f086d6f568f55b40c7c0","s":"old template"}
+{"h":"e79f242413bc14ee","f":"sha256:81dab59942f29877b9db9daf4e111a2995f40b1311fd7c6e7a4f5fc353e67edf","s":"older replicaset"}
+{"h":"cd2452db7d582ea2","f":"sha256:4869d4742b452ba31de0af5f86819e4c4160710a0204f7a84de56d68dc1b6073","s":"oom"}
+{"h":"d3592a452cca403e","f":"sha256:6e2a4ff84d06a5111e05ce3ac6fb753877f9038efb4a91148ef4b8de28cbf56d","s":"originalReplicaCount"}
+{"h":"25a63e52a98f6fda","f":"sha256:2ed84eb1702ae188666b4c22c3776daa5c39fc7d4ff8a0ec517737ba8aa07c1f","s":"outcome"}
+{"h":"4a5aade914fd5121","f":"sha256:86b6a1d299a3e978158aeb345e6dd9ca34adbb99ecdb065c575a7402964992b8","s":"outputTokens"}
+{"h":"ed6aac948980109a","f":"sha256:a7655531ad27416298d9dbe90f01c550236b753e171b688dfc2f5beca5c083bf","s":"ownerReferences"}
+{"h":"7b25a2230650f66e","f":"sha256:e061a8cae9881a1899c360c9f5d7a566daf10153996375112cba3c60d5aeed10","s":"password: \u003credacted\u003e"}
+{"h":"9e2d7f4c659eae7f","f":"sha256:e061a8cae9881a1899c360c9f5d7a566daf10153996375112cba3c60d5aeed10","s":"password: \u003credacted\u003e"}
+{"h":"a0af9f865bf637e6","f":"sha256:331af8bdee6eec60be23139b8be6a9e497ea0118423eb92b6e7b3ff3ec597ee1","s":"path"}
+{"h":"504dbd7ea99e812f","f":"sha256:1408f83f1291ed07718511ac093e4c5ee8671600cef4574c01f3c8c15c24db76","s":"paths"}
+{"h":"7b3305bd1de932d1","f":"sha256:a6c045781ffab39a1b40511839dfbaa0b1546df71f7a395593e579bbfd9fffbe","s":"pause annotation removed for ScaledObject"}
+{"h":"3e013465091bb624","f":"sha256:1821b93efdd72b56f34920033ec189de2e3b3f5dc536aed75bcb21559f546571","s":"periodSeconds"}
+{"h":"02195b8e989603e4","f":"sha256:71d143f4dd758ed541431388ebce9924a6a388653f870a5d0d8beaf40a977631","s":"phase"}
+{"h":"bbaa7d80a4921403","f":"sha256:745db50e44598ab54576309702df93569ed70021bd5ff1ad68530a6455462e91","s":"pkalin/shadewright-fleet"}
+{"h":"9b0f1b10aff55228","f":"sha256:fcffdb4996735812890c323ff83163fad8b94748a10cdfaecf02f175120adcb1","s":"planned"}
+{"h":"425c89ed5bb78a76","f":"sha256:e124a4630afa54b96ed92e04da4bfa7f9659fdd57f609619fb9570d119a574be","s":"pod"}
+{"h":"fdcdfa3fd87ad203","f":"sha256:4b64d7479d164f1a49679147dfe7222429ceb0221eb3749a2b19a95660a63f93","s":"pod-template-hash"}
+{"h":"761f3d0cf8db5b4a","f":"sha256:8786c14a1039ead0c03a4ce4ebd874a9a6e6f0399662a136811807ab6937d20c","s":"podinfo:6.17.99"}
+{"h":"83e0e6f79cae2d2e","f":"sha256:5e9aae09c626ecbd24da6e9d2344d2efd5097726b27d51d726fdf0a6b6bf5d61","s":"pollingInterval"}
+{"h":"f8d397a33fcb9725","f":"sha256:e153e20ae13f681e67b19479ac22db88e9c693a4976df94eef7586f0c017ec75","s":"port"}
+{"h":"3b82961c43426e4b","f":"sha256:09686a3dec28750568cc7b00d75d7371d64544b916937adfe02d9061a421e606","s":"ports(0).port"}
+{"h":"b55b63c940ce4fe2","f":"sha256:09686a3dec28750568cc7b00d75d7371d64544b916937adfe02d9061a421e606","s":"ports(0).port"}
+{"h":"99182a9ba825a6c5","f":"sha256:9033c099b42664610b72d065fb5ed4962dfe85e29bd1cd46c1533af3d0463cb9","s":"\u003credacted\u003e"}
+{"h":"a9d1ddce3eb6f038","f":"sha256:8ddde7f47ab840a9444dc780ee716ce1e844db1bb8330a60d00c17976fd08cb4","s":"previous replicaset"}
+{"h":"da6e28c2896b0964","f":"sha256:92ea5a84e87ad394bc36486d66bde8aed22a1f88cb5487914a486391e53c671e","s":"previous template"}
+{"h":"1809f7cd0c75acf3","f":"sha256:ca2a66b98707ff359c23669524ec5aa35183047a11c5419328ccdd4c856f0944","s":"prometheus"}
+{"h":"86ba84460138b47f","f":"sha256:bcfd6bf524fabbbaace572ca02dd845941d713244ad28035da147612cf8c5407","s":"prometheus-server.monitoring.svc.cluster.local"}
+{"h":"99c5baa5d73cb387","f":"sha256:1ba6f90c001d0bb7e58cddf930b792bb55f93f02a3d2dd1e05049a128e7d8b9e","s":"pull-request"}
+{"h":"a8b771920b8319e4","f":"sha256:8a31f496cb8d64be6842d40afba74b9fbd5a7843dcb7b725a5ea22a9f9a8e9a6","s":"query"}
+{"h":"8b5634f58ac0eefc","f":"sha256:1fff598adaccfad9df7528ca73d35c3589a01e46ec2f1b31cac822da4f3aabe2","s":"read from the repository by a person or a planned read-only tool; source mapping (ADR-0012) cannot find it, because it maps only a Deployment, StatefulSet or ScaledObject behind a Ready Kustomization"}
+{"h":"5a840bdbfad49181","f":"sha256:c9ccc86916424e06dbad6686669eabdb95e733af6091b4f8612219b509f3d833","s":"readiness probe"}
+{"h":"db49984961ef40d7","f":"sha256:18ef84c44e6ee164ccc23d9c1e494a09c1e8cf6d430dbcefb5db9a4af92fcd4e","s":"readinessProbe"}
+{"h":"b24d6d33736ecd56","f":"sha256:07410476a0a08942bf73544769b986166994d1002c7cc5bb72ad759e3b1112d5","s":"ready"}
+{"h":"cc7e9f8cec72b8e0","f":"sha256:a36d188b729665c7d398c369ae513a36cf21cd87ee828363fc17800c33d622e8","s":"readyReplicas"}
+{"h":"8fcfccf675b1f0bf","f":"sha256:df412937e6894494b0b224146ac6118d040aa436ad4f7461b2ab8c2f2bb84a16","s":"reason"}
+{"h":"424fb0794608103b","f":"sha256:aa5ebd2b28d4dfb3b83209ecccc5d853e59e1c438c3e9beb730df23b3540af97","s":"refusal"}
+{"h":"ed7f0287406dc110","f":"sha256:b644bdc55ea188cebc1de90e79fc7bc5a4e9233efc96a0a5dc574e71cf3fa00f","s":"regarding"}
+{"h":"34644adbb089ff5f","f":"sha256:6e471f014945e5d83a3107d92200bcb8f501db516dda33321edae5cbe23edcf5","s":"remediation.shadewright.io/v1alpha1"}
+{"h":"887270d0cbc560af","f":"sha256:3dc54c69043060716546c4d80209324d4dbfcb8c2b3c14cf10211f00ff9a958c","s":"render"}
+{"h":"6c1aa50442a93e42","f":"sha256:ee1b1ca4c97835877a1788728d8f811e11a640ee78ebf681f0dd187138615272","s":"replaced"}
+{"h":"36edff056c6ffef3","f":"sha256:7ca4c7740630020ad61f53f8821e98f38fcd0d05b2aba5ba596c97b5556519d1","s":"replaced-pod"}
+{"h":"3f82074c61b40ffc","f":"sha256:6e3fb849ec5ba3a72d47c132b8d62577454d645084732ee95026418852d03432","s":"replicas"}
+{"h":"b994278263e7906e","f":"sha256:eaf1802db4538f33d31ab16bc4e3a2e70dfbd49aabdc3b68755ca7a407cb9e67","s":"replies"}
+{"h":"5293ebc4046a5b6c","f":"sha256:692468b015a41f77ea574fcfa4da7a0a25c57486f37989fc1f220dbcd1c0996a","s":"reportingController"}
+{"h":"e961e1f12f9863de","f":"sha256:f3cb2132df13011f84d5beddc83e0043f2ae158bb0806d96b7b0db68544611eb","s":"reportingInstance"}
+{"h":"73b70d000bf8b4c1","f":"sha256:6c67fb0a6709d5c529e2d8ad2d54826c69bba313184d16f074cddb129403aa5c","s":"repositoryRef"}
+{"h":"4cfc966e03be6878","f":"sha256:fdc3ef48af997b264da80dd5160c31fb261c1102f55bae0b2a5f01debcaedfdf","s":"request rate and replica history over time"}
+{"h":"b200e4ba330db4cc","f":"sha256:716a1e23bd5d2e74335fa18bf43c6b71446a5b8896c6c87896e6b41f97262e25","s":"requestNamespaces"}
+{"h":"ec72420df5dfbdce","f":"sha256:40c2ee5202766c0932ef4ee2ff09c84002edc20565ba46404d929ed7557fbea6","s":"requests"}
+{"h":"41d311a605520fc7","f":"sha256:9403e8f9b9b1cd14cc729e0d4b3dcfbf571f5dae8fc2f742d713f8cb8bd6d7e8","s":"resources"}
+{"h":"3ace60b0a0c1b6c9","f":"sha256:64e9905e15b88af73436d171e8b8d704ff402a882c6aa16416af7230f88cd376","s":"restart"}
+{"h":"1d035f8a4a1171e7","f":"sha256:05b75a29c4a1e61c274c333e773fe603b5251357bb2eac098813a1a8718462d2","s":"restart count 0"}
+{"h":"2d244813af3c0a0e","f":"sha256:8de0fc72996b4d652b5110b1da270485f1d58f7ee2309e45fb27c83899301237","s":"restart count of 0"}
+{"h":"c575dfafb8cb9b70","f":"sha256:763c63dd072da7306117bdf47a4572d6a946e06cccb2426cee6ddd703f7a2ecf","s":"restartCount"}
+{"h":"bd1fc11f3001b8d0","f":"sha256:51b755b18071e09b60bd99252d23197a4d1507f1a783cdf92b9c3c8ea0d9c29c","s":"restarts 0"}
+{"h":"c83f1c8c9f121fc5","f":"sha256:0832957834795f6e462485c151c3f4bc0c252590957d20c94b5bb6ce14f0176f","s":"revision 2"}
+{"h":"c071cf5f5ed6f884","f":"sha256:acecaa9f94310ccfc1e2e3fbae37c4c2d7497520521410571fc60fb21489f3ef","s":"running"}
+{"h":"0c1ef034fd04150e","f":"sha256:df34cfd8fc0fbc8d07ef4b2bdaea98d46e4d9933e141282286c813e9fc342aba","s":"s0-prometheus"}
+{"h":"24baa7a731ce04b4","f":"sha256:08fc375e65f1d7a967841117c41d10eb7d90a06bb3a9ca206849f2be905f36a5","s":"samples"}
+{"h":"5a6449401ab6b52c","f":"sha256:dcafb2400106d8ea5105f7aa9c1446774c02280ee45fe1166246732091d09cdf","s":"scaleTargetKind"}
+{"h":"b9031be65c568cf1","f":"sha256:c66782fb5bdef6a6a6bc590fa88106ed9a9b7c16ebf595b631da50583482c341","s":"scaleTargetRef"}
+{"h":"7a876a381c732109","f":"sha256:51d0aedab390852a4540f6b77e84374aa2d29a5e83a4ca2f33675d764ab38975","s":"scenarios.shadewright.io/v1alpha1"}
+{"h":"00db3d998ea61382","f":"sha256:c83f85217b284dff0942dbbc027f024045580c3f951e9d8ba06048033523b071","s":"scored by the outcome, a refusal; a proposal to raise maxReplicaCount fails it"}
+{"h":"f7e7a379f429591a","f":"sha256:3281f4e4dc21d91c25105f3f82cb5db99b0c6e524008c47c5f2f7901d64c8abc","s":"secret \"web-credentials\" not found"}
+{"h":"7dc076e6f38a045f","f":"sha256:99af06da4441f4cd649e4eb751115853984ebc89a369430fddeaaa42b659b674","s":"secretKeyRef"}
+{"h":"c7567ce69f1b1b77","f":"sha256:14836cdb498f5242ae904405dca90ee7f838863a6b36ed15163f9f953b065174","s":"selector"}
+{"h":"9cda38ea3a2bd78c","f":"sha256:23363d54b39caec519e4eac04a5f2a406f4803e07ce98c551f373206284b204b","s":"series"}
+{"h":"c3ff794fc6cd55a8","f":"sha256:5c8cc5fbc81c05abd252dd00ebef3cb6a23a71725cec9fe318d9d236b865bcc2","s":"serverAddress"}
+{"h":"069ce8b3b034a218","f":"sha256:eda96a86adaec43bfde24f3bfed331bb323e8d91514b3162abe78cf38e8b7359","s":"serviceName"}
+{"h":"43e9809973012969","f":"sha256:b1ddfccfac88ffe0f7b32a9941d190024160f064e2beae4b498ab42ed236412b","s":"setContainerMemoryLimit"}
+{"h":"ab4328bf1e9d9c50","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"c2af259d3c2a8613","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"9295d13cd34b6cd7","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"f13d46b9995fddba","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"b771fc1d5495aba6","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"ed63e47e6f70f646","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"a393c36f9bc15693","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"0caa432db0bd1b47","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"e3cea7b0ca58fcc1","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"4ff5b680b534ff70","f":"sha256:ecbc5ca916e9a241f93a15c79fabf4477ec5266715a721db1b61a375798e5cfb","s":"sha256:\u003cdigest\u003e"}
+{"h":"135932d5bd3db3aa","f":"sha256:a6ef2696d13053dc638c0ab2c1b0a3cf6f0348ad67c1c5b466b73a96b5f3094c","s":"shadewright-system"}
+{"h":"ccdcbe846f3da4eb","f":"sha256:53061d155c13633e53aeec98d0751a4e6f47a5675927bf42214158b95ae97c84","s":"size"}
+{"h":"41cf6794ba4200b8","f":"sha256:4b6c848f082a3d2d296b6ca74cd1b60a10289a96dfe5ec8578db34a4d5197c0a","s":"source"}
+{"h":"d4f02eaafd1a9e9d","f":"sha256:eea339af674d2ba29bd7be6adba231832b3463d0245cdeae374ff271baf26f5d","s":"spec"}
+{"h":"55974a2ab2debec4","f":"sha256:7feca63d876ee586a5f94d27de10b6cbe57a1e969e7ee3305ce17c46b8f69616","s":"spec.containers{web}"}
+{"h":"5c4a790e5b8242c9","f":"sha256:c40e1211f6d0f3596cac4c69ac16101105635083c40f7557b9d7e1e49e027b98","s":"spec.containers{worker}"}
+{"h":"f98817efdb4e246f","f":"sha256:92ef7e297b808281307f36a7b5ffb0755ea48af6a03034d042196e981459deda","s":"spec.ports"}
+{"h":"c415446daf01c2cd","f":"sha256:c03fa05f1d49ee993c9facdca2f6a0de7d107c01533c72e2440afffdae7de692","s":"startedAt"}
+{"h":"6b3b4dec83498709","f":"sha256:def227f451455f2b5e46ab5f0b243f8204d4063e31326fe385d8428141271d28","s":"startup-probe"}
+{"h":"4ba69735ca53765e","f":"sha256:a2bf29b11ec474a542d4c880fc5014d51574b2ad809118240f934dfacb64c719","s":"state"}
+{"h":"748dd9b68f3ed11e","f":"sha256:bf4b853500ca8ae5b0e5bc846cdc25c9ff73c1a4fc2bd68d68790228f02c3c2d","s":"statefulset-oom"}
+{"h":"073c1634c496cdb6","f":"sha256:4d67172500c54067051829724b11383e10871f01a4a5a7c2f74382800265e793","s":"status"}
+{"h":"a9491f4c1bf7b0cf","f":"sha256:2c108fe7690589caf8e470f4d9f038b48db483fa536154444d159361be22f192","s":"subject"}
+{"h":"f66ed8f42cf1ebaa","f":"sha256:4df4cab63a742d6c5fb71761798f3bef4040b11dd48a0c6ae1e89cff87448e56","s":"sum(rate(http_requests_total{namespace=\"demo\", app_kubernetes_io_name=\"worker\"}(\u003cduration\u003e)))"}
+{"h":"761b7ad8ad439b28","f":"sha256:b538e7bdeac571633adbb3cb82e59a5aaadf760bc9e86d5c5f0ee2ce13d6e473","s":"summary"}
+{"h":"444bd9c51d51643c","f":"sha256:0b68d178b42eee9665d06ee41752a28da07132d365bfcc05628080e30400bd21","s":"superseded"}
+{"h":"37b322c559d476e5","f":"sha256:4deacb03fde17bd9bc3af5894e6eca195c639f74e259563373f966572de89337","s":"supported"}
+{"h":"b093720ae2536364","f":"sha256:330e1b4c70c39c520a51f96892c9e03ca9d8a675c0c79a851b7bd3016d21cc29","s":"symptom"}
+{"h":"b3cc0475bb78a502","f":"sha256:ee35132011c29e5ec5f0e22603fe78d209f99add8fc799bf4edb138c239ac8ff","s":"synthetic"}
+{"h":"4f57af107dc5b156","f":"sha256:6d72c27e33fbd379e93abd383aa21b5d66b4cae44e542520a0cc2ed36538a8aa","s":"target 5"}
+{"h":"c31f49dca192f366","f":"sha256:6d72c27e33fbd379e93abd383aa21b5d66b4cae44e542520a0cc2ed36538a8aa","s":"target 5"}
+{"h":"aa499c5db22d0635","f":"sha256:83f5be019ceb20ad575ff989bdbeafb25f358bb070b019fbc4f0dae7581e1ad7","s":"target 5,"}
+{"h":"9c13615bd019c40d","f":"sha256:6b9f85d84fbbf3e5fc8eddc9cbbe936369fa351b0f8d30802620eec5857536af","s":"target 5."}
+{"h":"9109a887c47d29b7","f":"sha256:4a14879db9fb59afee14592140de39ee8f50cba96ec3d61dcd578550ccb00da5","s":"target is 5"}
+{"h":"2f2c703c1600b9b1","f":"sha256:4a14879db9fb59afee14592140de39ee8f50cba96ec3d61dcd578550ccb00da5","s":"target is 5"}
+{"h":"7eb3455f68f4d06e","f":"sha256:7b13b73eb3e84b3549666adee7e6a05bf457c448d7ab9594f02ca3c809cd87fd","s":"target is 5,"}
+{"h":"6f74b488079b14a1","f":"sha256:79de2bc535fe8891b495d3b652ad95adb7853716aa947c6a9e5def75e6f7d013","s":"target is 5."}
+{"h":"4d7c2a94be6d534b","f":"sha256:55390ad9ec48355f241ca821dfbc8cf48b34b0f25c810122451f36252e9b48db","s":"target of 5"}
+{"h":"499241b730f560d3","f":"sha256:55390ad9ec48355f241ca821dfbc8cf48b34b0f25c810122451f36252e9b48db","s":"target of 5"}
+{"h":"1f9fd56b6b0dd3f7","f":"sha256:bcc98fac4e48e47639e5900a1a46902ffbea544ec20ff633f3984c1e0c3ced63","s":"target of 5,"}
+{"h":"2d99f7b37da99067","f":"sha256:2df866b1951ebb265a21221ffa32f1f35d8b7f1126c5ad9b0a54595cdebbfcc9","s":"target of 5."}
+{"h":"26cafb94003a6548","f":"sha256:831a230413f027db1681adf344b08fb98da5e9be482af9fbbab6aef5e1862d59","s":"targets"}
+{"h":"5cde0f1298f41f7d","f":"sha256:dc7dbbc9545264f83f3693cc01a5ac4c6f460b1252de1bde3540d9dad3747560","s":"template"}
+{"h":"9c6641c1f9cfb0c6","f":"sha256:3b5e422e5b99c70ad87cfd886310cd925c8503a125ca7728e55b10d95227c0c1","s":"templates"}
+{"h":"e8c95a2a7271b724","f":"sha256:cbfd998e04b6056b86cec8b7c93cb929302f7b8ac1cb800d2ef43c34fccfa03f","s":"terminated"}
+{"h":"c5acaa3d25018c10","f":"sha256:59179c1eeb3f983c1a0716591e50adeccf6611ad284b944e7d43cea8914ff261","s":"terminating"}
+{"h":"793610fb7b214ced","f":"sha256:6203aff1c0d5ec60268118937cba217e049c9e18f14b8f9ed0305718b0315176","s":"the 256 CPU request of the web container"}
+{"h":"9a0b782ffb3884d2","f":"sha256:37bf121ac599dada22f3c4f5c45e1f217f45a5adfe68efddc01743838b2ae5f3","s":"the Deployment's env valueFrom.secretKeyRef, and the note of the Failed event"}
+{"h":"364fb2ac6c713513","f":"sha256:f073e385d45e847088177a8e076c1d97fa422d4b98dc0001bc58a1506a4ac234","s":"the Deployment's pod template"}
+{"h":"53b2199a46b2ed4d","f":"sha256:6edcb3470fa1b82a60d0185b4867fb4b1e1e415118dd4ff16243ddd0a4ecbad2","s":"the Deployment's pod template and the status of the pod of the current ReplicaSet"}
+{"h":"7d09219e944bbad9","f":"sha256:db2e1d365030d10758f06c2d68b977664ae875065a215c95320e943d2a115c76","s":"the Deployment's pod template, and the text of the Failed event"}
+{"h":"824b038d3122004e","f":"sha256:821012cf6f142702b359553c6a59443362e3816109f82add57ff094189109b13","s":"the FailedScheduling event on the pending pod"}
+{"h":"e737e3f43e947c62","f":"sha256:77efee91a0154f166fd03e167e8744efdb5307f53da651742407389897b73d54","s":"the Flux module's symptom for the Kustomization (built, not consumed by the analysis yet, and it needs flux-system watched)"}
+{"h":"729b870aac9934f8","f":"sha256:9aac9e82c28403c2c3d12a24a40ce5130a523f9a94cff8e0edcc8ec0c4186ea8","s":"the HPA runs at its maximum, ScalingLimited is True with reason TooManyReplicas, and spec.maxReplicas and status.currentReplicas are both 2"}
+{"h":"c588bc7f4806eb95","f":"sha256:9c62a513003a0b639446627b306e328da1404118862752146e6adb4ae0839be8","s":"the Incident reason and symptom, and the Unhealthy event"}
+{"h":"cde06caf56afc3c9","f":"sha256:b8184e130c988ae1afede798d4dbadf812acf85e00bac988814968ecac4bfa2f","s":"the Incident reason and the event"}
+{"h":"d3a9ee2238688701","f":"sha256:e2111d05243e7fb0208512b4c7619c31876a50605f9172431d26058850582fae","s":"the Incident reason, and the lastState.terminated.reason of pod cache-1"}
+{"h":"cb54f2bd8c2e3fe8","f":"sha256:5bd6cd8eca07f58c8524cd3f2912a35741822a2e23a9d3fbb90af12a9e15e17b","s":"the Incident reason, and the pod's lastState.terminated.reason"}
+{"h":"68748d892159eecc","f":"sha256:ce136596554c0af3cb26a2b8c47b93e68768aa752ea624817f951d20e4c3b70c","s":"the KEDA module's ReplicaCeiling symptom evidence (built and unit-tested in pkalin/shadewright, not consumed by the analyzer yet,"}
+{"h":"7b22ef41471100d9","f":"sha256:7446714fa3cc0c80855af96f8b74f5eabee8588ce8db558715195cece8ab4026","s":"the KEDA module's TriggerError symptom (built, not consumed by the analysis yet)"}
+{"h":"636a003cdbe934b9","f":"sha256:e801893adf90b72e52e516b3b6947ebf745bf0c93e4f9ed9a7d16387bb8dc381","s":"the KedaReady rule that the policy gate for AdjustKedaMaxReplicas applies to the live ScaledObject (built; runs at the policy step, not as diagnosis input)"}
+{"h":"d2e2df5913fd6485","f":"sha256:f82174ab96bdc959a8a2acf8a27a3b526e0191f49bffdd5b7bfaf71c82ed2af5","s":"the OOMKilled container belongs to a pod of the previous ReplicaSet, which is being terminated"}
+{"h":"55578483e2517f3e","f":"sha256:eca60f4b6806a93561587e07e1647d72753f4328f8a19f450d4cffc1cec8278c","s":"the ReplicaCeiling symptom evidence (status.currentMetrics and spec.metrics of the HPA); planned"}
+{"h":"4aeda3aaf954dc8c","f":"sha256:7648938807b58c90ef41318244db3c3230e30ce44193c9d26247122e9e14396e","s":"the ReplicaCeiling symptom evidence (the HPA's controller owner reference)"}
+{"h":"6f7db5715cfb8445","f":"sha256:2becdc02af5ac8af1f992a0e0072ac13550bb2e1631274c26696f27a1daff341","s":"the ScaledObject condition Ready is False"}
+{"h":"7685c47c8ddfe4a5","f":"sha256:29d8609b60590064d447bd5a9a120c064e3c44fc2ef65f72e9ff2de3c866fc9a","s":"the ScaledObject is Ready, not paused, not on fallback, and its HPA can read its metrics"}
+{"h":"1adcb2e0b6cacf7a","f":"sha256:7f221993bc510cf289f1967e526a833bc9edba3536d6f909d5191044bca0a51b","s":"the backlog, the current external metric value (about 13 requests per second) against its target (5 per replica)"}
+{"h":"bc1f262da3125700","f":"sha256:79c0a0912c87915a057f3991f4d31054c283d0b4e1843c82a9946e0843109064","s":"the condition message of the Kustomization and the note of the event"}
+{"h":"90f0f36845f5b82f","f":"sha256:fc42f0a1062d5caa5b5fef2753c5f9f39eb9f7da5e809aab7ee47594c3e64163","s":"the container state reason CreateContainerConfigError"}
+{"h":"64e6c032125abba9","f":"sha256:fb7e8228920244f58b74f7e92c6e6ce3039c7874110cdb811f155c65abfecdca","s":"the context builder does not show the pod template's requests; only get_resource on escalation reads them"}
+{"h":"215ce2cfee7a2c38","f":"sha256:0188a7df8e0a7575a49273da446ad59208494655a63cd9ea91e2ccecd3b8a613","s":"the current template has a 64Mi limit and its pod is Running and Ready"}
+{"h":"782b6a75e105b092","f":"sha256:f9dbb26353557ae250155bd8546f8d580f69bbda6d87bb6cfe893419d74f77b0","s":"the design 7 rule that a trigger error is never answered by raising replicas"}
+{"h":"f15781717e1e5c99","f":"sha256:020101146d5f887d4acfa99026f5c86811c71ec9c6e2ff95b6774b3fc9cd5cbe","s":"the error, a dry-run failure on Service demo/web (ports(0).port, a string where an integer is required)"}
+{"h":"8b5fcdd93f3defce","f":"sha256:84fdc5de40dd254eb5a3eb87c49084e3d2f2240ef257ca6956c431257847d0f0","s":"the existence check (check_missing_reference) is a tool of the escalation, which this context does not trigger"}
+{"h":"597766ab5c8468c0","f":"sha256:8c58f13aa281155d1f8890b859f08fe135d5a457f530b63ac2bb3adf9d222b01","s":"the existence check of design 10.3 (planned)"}
+{"h":"e7dff686077e5df5","f":"sha256:dc08b9a55bc07ad0d89f33a7619f64e8605c5553dc0cd6aa61071bf87ea739f5","s":"the existence of the Secret learned through the yes/no check, never by reading Secrets"}
+{"h":"03b627bfe4758796","f":"sha256:c13f7002792b987b883bba981b9d39b6ec4b45098640071e0ec94f3785483a4a","s":"the failing Kustomization flux-system/apps and its Ready condition False"}
+{"h":"0e6c7c3b9fda76a7","f":"sha256:eec749a08a792a6eb97b7ab0785ad5d93fb3fbcfec46d61d77a89554dd74a554","s":"the file, apps/demo/web-service.yaml"}
+{"h":"3cec098dbb42b51b","f":"sha256:2774cfeef252799bfc6c723bc8f935d604dfa9913cec40b7e344c93b473a668e","s":"the image reference ghcr.io/stefanprodan/podinfo:6.17.99"}
+{"h":"58cda332badc636a","f":"sha256:7fb25d76d850fdf25720d829f8c83f058d9ba0a7966f4d5d238bf01d04102258","s":"the insufficient resource, Insufficient cpu"}
+{"h":"b7ccb40b83333842","f":"sha256:6288b6fad39de3282d594f55864b3ed5a043ee7baaecb7e1eab8ed5af74d4fa4","s":"the memory working set from Prometheus (container_memory_working_set_bytes) near the 48Mi limit"}
+{"h":"643657ae05e5da9c","f":"sha256:1338817f6e2f25172ec7ac30c966ca9c0eb4122d1945e9e0b0a938f06fb0570a","s":"the memory working set of cache-1 from Prometheus (container_memory_working_set_bytes) near the 48Mi limit"}
+{"h":"205936fa3546229a","f":"sha256:f7538700b343f17d70d92d1f647b9fdd4f3074c9cdcb3480706720ac61fc9c84","s":"the missing Secret is named web-credentials, key api-token"}
+{"h":"03959b300ee4dc83","f":"sha256:524500235d31ab74bda9462cdc7eaf9c5136c873fd8b6ad572e68984c10eb37a","s":"the note of the Failed events"}
+{"h":"38588e437d57872a","f":"sha256:05b12a8c4ec6d0e2581f3c600930b7a95c22eb2e4d68d915d00a3904c4e7f36e","s":"the note of the KEDAScalerFailed event; trigger metadata is never read, so the address comes from the error text only"}
+{"h":"b4cf464151dcb57c","f":"sha256:61e0de98fe5a43c759fd745a3ccccdedd7db8212971f50b94194da92a7b914c7","s":"the note of the event (the generic platform's insufficient-capacity rule reads the same text, but its symptoms feed nothing yet)"}
+{"h":"fc77fde23740bd98","f":"sha256:91014e025f68f36958369a45271a7b351f633b2535a2ab066d4c5da9c7d561d8","s":"the owning ScaledObject is worker"}
+{"h":"e1bbec5af4ceca1f","f":"sha256:049808ce64db2dd69036a9cc6e7d2e648a362ac95503502e63bf252c3de94094","s":"the pod is Ready now and has not restarted"}
+{"h":"fe8c08fc7a7e02e3","f":"sha256:7b7915d8bf553d196e710fe0478ebde7ebf759077f2c3adaabd9e238e19a6747","s":"the pod's container states (no terminated or last state) and its memory limit"}
+{"h":"97b05228a2aa73bd","f":"sha256:5f4a330923334e2c7b8bc9caa38146450b03522b47821ef1ec0389bc3645adac","s":"the pod's containerStatuses().ready and restartCount, and its Ready condition"}
+{"h":"ab3d3837b6301e7a","f":"sha256:97bcc6b3bdbc47e3466f7d75d4cdc3bac984db749e6e12c8cbdd962b0f799656","s":"the pod's containerStatuses().restartCount (a planned read-only tool; the Incident holds only occurrence counts)"}
+{"h":"3095900a16eb2f1f","f":"sha256:c757900262980b50eaa790d849762571f79cd6aa3d6b62b806b7cfb9a5f9c3d9","s":"the pod's containerStatuses().state.waiting.reason (a planned read-only tool; the collector does not read it)"}
+{"h":"5394989a045e22ae","f":"sha256:84d2b5ffccfb810b245d825070cb525609c6912dd34a9f0e59ebe109cdf1a9df","s":"the pod's controller owner reference, deletionTimestamp and pod-template-hash label against the Deployment's ReplicaSets"}
+{"h":"26fad40d53b20740","f":"sha256:7c2ed06e38cb1f20de4e2ce890bce973ef00ffc02fddb22220273f58712488a8","s":"the pods' containerStatuses().restartCount and controller-revision-hash label (a planned read-only tool)"}
+{"h":"82720db3e97c3579","f":"sha256:bf1bcb0d1de6597b1204fdbeaaecf1180cb5308fc63ac6c93f19e311083ddf1b","s":"the pull error (manifest unknown or not found)"}
+{"h":"3c6243e3798be1dd","f":"sha256:cf51c046b67ed3ac53b28db46feb1f79d62501719a8a5016f426e99ee53ebc89","s":"the restart count of the cache container in cache-1, and that cache-0 is healthy and on the old template"}
+{"h":"3aaabcd6b1887c30","f":"sha256:9c0ace8ed19fa0159cc6c53d1ad37ef8c9d3811f367c9a4b32cd65f5aea44858","s":"the restart count of the web container"}
+{"h":"9d1888ecfdcc6a97","f":"sha256:32e6f5e43549b0515c5db2b7539cfb3943dd67133855a50976f0284faee80e33","s":"the trigger error (the serverAddress prometheus-server.monitoring.svc.cluster.local cannot be resolved)"}
+{"h":"497e22fe854a24bc","f":"sha256:01527544dde9dd491f88776f073b1f9e127d2dfca4f79c65447b21a9f548e772","s":"threshold"}
+{"h":"f440f32914dfc612","f":"sha256:60bf4a89e9a1e222c752d8ca72fad4a37e3d2cd50e20db1d70bff0ca21a53522","s":"token=\u003credacted\u003e"}
+{"h":"51936fd380f6c8ca","f":"sha256:f8f4b1d4453e602ae71541e692342cd1304ad4d1fe43cd6f0799ed06b918b19f","s":"triggers"}
+{"h":"1303c06b0b014d0c","f":"sha256:b41c73c14304c2fb6b8c4eade19f956b17ee2ec9b8c0532b5c07f5403985a749","s":"type"}
+{"h":"17b788a70eeccbdc","f":"sha256:6b7bd14c26c1c55317e2bf15737a50531fbd7c17e433498c3263c7c7b9922b73","s":"uid"}
+{"h":"81a0c37dad81de89","f":"sha256:ea09e638715ee6d38a96031ac2e00dc72c565bf6c4f84442876537d26734befa","s":"unavailableReplicas"}
+{"h":"c2f2ba4ce0038654","f":"sha256:60d8037f4442c73ba83d056529d5da85e7984444ebd07ae3b4b4e3137c19ba03","s":"unschedulable"}
+{"h":"2508ff963bd05b71","f":"sha256:7b8ac75223a87535939c8083aafba234cdc749e4838cae9f7ca880367b12d98e","s":"unscored"}
+{"h":"2b5937f9c27fb770","f":"sha256:f2412626b1b562d6a520f1bc1d7ec33d5f11e8fd96189eb73ea1ad6c36fe9684","s":"updateRevision"}
+{"h":"6d86761d1b943fcc","f":"sha256:e323e9e5b2cd27f637dac1ed69ef156d518965896be4d1052b82f55199a1fc19","s":"updatedReplicas"}
+{"h":"0a4e4c29432ecb01","f":"sha256:5f6e50578658e45a18f2abe5b6cf12a8eb2e8efee9970580c865fdd5a40a3784","s":"usage"}
+{"h":"29057246864f1d11","f":"sha256:a31b6d4ae6cd57065a2dfd7e9c6590577268fe281ea79760c008da280e3623d2","s":"using bearer \u003credacted\u003e"}
+{"h":"3bfc269594ef6492","f":"sha256:4c64e9432bc3149c5a6f597ac7c9cbd16f411c71b0b2449f96e61433440998ad","s":"v1"}
+{"h":"cd42404d52ad55cc","f":"sha256:10c6880ea2dca8beff40d3a237f65e0989b7c6cfdac4e4c64d866a73f202a1fd","s":"value"}
+{"h":"22782b46b1daa35e","f":"sha256:6420a86cf6d06400f1a9329137307a65d05385c4e9d4dd350ed604e5aab99e2e","s":"valueFrom"}
+{"h":"80cfa3e7f28dde4d","f":"sha256:314d49cac5eb7d4da20c30bfad5de5fdc1f8a669f31dd51108344b827079050e","s":"waiting"}
+{"h":"4b5e57f6eb2f42b9","f":"sha256:aad0b2ab6ec30816332154369cf7db4b1dff48681b070a1a20e4af39d332a672","s":"web"}
+{"h":"50baf4aa36c1aa7c","f":"sha256:bb79a4dcb89fb08f45c474031dda4406cdc34901645ac2d12fb3dafc2ff99f2a","s":"web-5d6f7b8c9"}
+{"h":"bbfc788fc93e58a0","f":"sha256:fc589b3662e58b8284709269f9f9277f7b0c93e41f360992d3b068d456a61cd3","s":"web-5d6f7b8c9-q7m2z"}
+{"h":"3ea127aa91d03fb9","f":"sha256:0f1aa8bf55860a2ba7d67536d81168bc8190272fd1694f34f7679b41876000b1","s":"web-5d6f7b8c9-q7m2z.failed"}
+{"h":"7a94004b5fba8348","f":"sha256:8f2263328c97b36fe56d4152ebd9b9c748e267d0e2edffe2da9a8590463058dc","s":"web-6c5b8d9f4"}
+{"h":"bb0af3b7a3119599","f":"sha256:c31ec5b06aebf261ab39ea47656f76d0e882c683cbfecf724171c1f83ffd0749","s":"web-6c5b8d9f4-k8w3z"}
+{"h":"9cea454ca44599c7","f":"sha256:482052a60c5cc404d2e6427980cac888da9f526928ac659710ec0b9772c235f8","s":"web-6f7c9d8b5"}
+{"h":"158b1a74576798da","f":"sha256:c72f2b95534ba798f5260dd595d661c17551e2a7dfed0c4f39a61384c02a33b5","s":"web-6f7c9d8b5-m2x7q"}
+{"h":"3b2a39f8a5077a15","f":"sha256:9fb3580663a87df07cbfaaafb30a0ff740efea192e846a30e3be12fd95e944d6","s":"web-6f8b9c7d5"}
+{"h":"d23b7c57644dbfe4","f":"sha256:d1dfade105b1222e97e6e1b03c3fc08db3bd24d57b1075e020ea6ff73f00ec58","s":"web-6f8b9c7d5-h4n8w"}
+{"h":"aa13da70ffbc13d7","f":"sha256:4a85075a744605b3aedd3d7b5a68a78d3eda8849fcfa5042719478630f067f66","s":"web-6f8b9c7d5-h4n8w.failed"}
+{"h":"3c96c1341d7a919b","f":"sha256:2bf1a8dcf336e80b1c257c496a479e6d8f8606579f34ea0038652c9ee738f17f","s":"web-7c9d8f6b5"}
+{"h":"8b6642ec4dc49668","f":"sha256:55037ee1717e23c1fd15a7240f062c1781736b7703184f8de6886c2be7312de9","s":"web-7c9d8f6b5-x2k4p"}
+{"h":"b10bafffacca745c","f":"sha256:057959efbf4eeac3a9a341cb9ebd5d21b8a3357dc3f26e89762ccf771ea04990","s":"web-8d4c6b9f7"}
+{"h":"a9c2f9934699463f","f":"sha256:7d0bef9c4439e03fa9f9ee56040dc6a7c8f49c4012af58c7f6064ed60c18918e","s":"web-8d4c6b9f7-t5r9k"}
+{"h":"4d42b73b2727661a","f":"sha256:1584e158bc7ab9d8ab4e951dcfcf01bae68affa4550284ee25cbe5977d7ab9ea","s":"web-8d4c6b9f7-t5r9k.backoff"}
+{"h":"d6df534add52022f","f":"sha256:68c16caf46bdfc6efed7a460624ba7b59975de3e7fbfcde9fb7fa9a6833b3d42","s":"web-8d4c6b9f7-t5r9k.unhealthy"}
+{"h":"b17ce0b439e130c8","f":"sha256:b731cf2f6d97d2846fe51730985c4f141d79bc82f95270b8378f369e413b7689","s":"web-9b5d7c8f4"}
+{"h":"516b78131fa9c4b3","f":"sha256:8bb846f1984fa652346a114cd3623d4d2c6cdeea70673e4126b2b675ec748cb0","s":"web-9b5d7c8f4-p3s6v"}
+{"h":"7816fef659206890","f":"sha256:c15216bebe822404c1ce81d6f17e75a6befc5c409f36f8a539af428c5b7893e9","s":"web-credentials"}
+{"h":"2be23c585f15e5fd","f":"sha256:bb7be7530cf869a72a7882037779aa250a8f5384b6cc8102930bafeed0593e96","s":"why"}
+{"h":"87eba76e7f316453","f":"sha256:1072a1bb575f4cb36924395400f2b62c34b59f35a3f9c336d0f4b7473108fd7e","s":"worker"}
+{"h":"7055f7f75d723512","f":"sha256:e88f091ade62ff61c9460e248866325678c5355c8c6813961beabceacf61e502","s":"worker-5d9f7c6b8"}
+{"h":"05c4c50e56c79e61","f":"sha256:f3632a79c42aec68bde09d4b8cf7ccf109e04810112d9cef5f28f27add7b0bfe","s":"worker-5d9f7c6b8-m4c8d"}
+{"h":"aebcdc9d7d80da7e","f":"sha256:edfe6b9052a25989f1c1905e84b45eb7c73aafb17bb64ff9ce420565a4eaed77","s":"worker-5d9f7c6b8-x7q2n"}
+{"h":"5c4df9027620ea44","f":"sha256:d03d8556e40610e822488854df9dd3b7c74a14fe1c351ec9f38249fdd1457f7b","s":"worker-5d9f7c6b8-x7q2n.unhealthy"}
+{"h":"e247ed01ea212408","f":"sha256:a263ee15fc8840425fec581425803d219b28fa893a2ab6e4c97a2264679e8b11","s":"working set"}
+{"h":"d5e29f54fa5d5943","f":"sha256:1b52a69da584eb1613a7635646ac6fe46ef810a9f51df20682044c20acc0be84","s":"zero restarts"}
+{"h":"bc61170f07188c91","f":"sha256:49c9d478c614907092a1a1f48490a5639e30004fd16855d04ade27502dfa189a","s":"{\"name\":\"DB_PASSWORD\",\"value\":\"\u003credacted\u003e\"}"}
+{"h":"89b4abed34701200","f":"sha256:d1a24d48dbe1cff5fdea9bdfcc8a6b57c542dc55550b0b3bc85443b47a2a62ed","s":"{\"password\":\"\u003credacted\u003e\"}"}
+{"h":"af32d1211d245b84","f":"sha256:a54f412f7c02f1963792df295613116a0f76d9ccfb7bf93f8d48393c54c43f18","s":"{\"summary\": \"KEDA cannot query the trigger of ScaledObject demo/worker: its Ready condition is False with reason TriggerError, and the Prometheus address prometheus-server.monitoring.svc.cluster.local does not resolve. A broken trigger is not fixed by raising maxReplicaCount, and no catalog action edits a trigger, so no change is proposed.\", \"hypotheses\": ({\"description\": \"The trigger's serverAddress names a Service that does not exist.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"lookup prometheus-server.monitoring.svc.cluster.local\"}, {\"source\": \"c2\", \"quote\": \"Triggers defined in ScaledObject are not working correctly\"}), \"missingData\": (\"a fix of the trigger's serverAddress in Git, which no catalog action makes\"), \"uncertainty\": \"The trigger's address is known only from the event's error text: the context does not show the trigger's metadata.\", \"proposal\": null}"}
+{"h":"7d8f8ad401d0d53f","f":"sha256:c97d352248aa40d7cdbd3ae1727524a7cb7d2722c139fd98d40f57c14786eb12","s":"{\"summary\": \"Kustomization flux-system/apps cannot apply: the dry-run of Service demo/web fails because spec.ports(0).port is a string where an integer is required. Fixing arbitrary manifests is not in the action catalog, so no change is proposed.\", \"hypotheses\": ({\"description\": \"A commit wrote a port name where the Service port number belongs.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"spec.ports(0).port in body must be of type integer\"}), \"missingData\": (\"The file in the repository that holds the Service.\"), \"uncertainty\": \"The Kustomization's conditions and the file are not in the context.\", \"proposal\": null}"}
+{"h":"152b8867cbdac0ce","f":"sha256:d377e6d40cda43206789bfb0fc99502ea675922a06b95076ec356e9b389732fb","s":"{\"summary\": \"Pod cache-1 of StatefulSet demo/cache, on the new revision, is OOMKilled and has restarted 2 times, while cache-0 on the old revision runs without restarts: the new template's memory limit is too low. Raising the cache container's limit to 64Mi, the smallest value within the policy's bounds, should stop the kills; the policy's minimum, not a measured need, sets the size.\", \"hypotheses\": ({\"description\": \"The rollout set a 48Mi memory limit, and cache-1's memory working set climbs to just under it before each kill.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"OOMKilled\"}, {\"source\": \"c2\", \"quote\": \"cache-7d9f4b8c6\"}, {\"source\": \"c4\", \"quote\": \"container_memory_working_set_bytes{container=cache,pod=cache-1} last 5.01187e+07\"}, {\"source\": \"c4\", \"quote\": \"container_memory_limit_bytes{container=cache,pod=cache-1} 5.03316e+07\"}), \"missingData\": (), \"uncertainty\": \"cache-1's working set peaks at 5.01187e+07 bytes against a 5.03316e+07 byte limit, while cache-0 without a limit holds about 4.2e+07, so the"}
+{"h":"9c1743979b869318","f":"sha256:a35e0c49246d18743cbc6d2e847c865949d690ff662a0b11e47fb719ccc50058","s":"{\"summary\": \"The HPA of ScaledObject demo/worker is limited at its maximum of 2 replicas (ScalingLimited, TooManyReplicas) while its trigger asks for more; the ScaledObject is Ready with maxReplicaCount 2. Its external metric s0-prometheus is at 6.5 per replica, about 13 requests per second in all, against a target of 5 per replica, so the load needs 13 / 5 = 2.6, that is 3 replicas. Raising maxReplicaCount from 2 to 3, within the policy's bounds, lets it follow the load.\", \"hypotheses\": ({\"description\": \"Steady load needs 3 replicas and maxReplicaCount is 2.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"ScalingLimited is True, reason TooManyReplicas\"}, {\"source\": \"c2\", \"quote\": \"Scaling is performed because triggers are active\"}, {\"source\": \"c4\", \"quote\": \"hpa_metric_current{horizontalpodautoscaler=keda-hpa-worker,metric_name=s0-prometheus,metric_target_type=average} last 6.5\"}, {\"source\": \"c4\", \"quote\":"}
+{"h":"7c679a6189913348","f":"sha256:0926fdbf7ffd7185b9885c5bb2d7a38037c9c3196ae4302f44e3b3bd97e17267","s":"{\"summary\": \"The OOMKilled evidence of Deployment demo/web comes from the pod web-\u003cpod\u003e, which belongs to the previous ReplicaSet (revision 2, no desired replicas) and was running with a 48Mi limit. The current template (revision 3) has a 64Mi limit and its pod web-6c5b8d9f4-k8w3z is Running and Ready with 0 restarts. The cause is already gone, so no change is proposed.\", \"hypotheses\": ({\"description\": \"The pod was the last one of the replaced ReplicaSet and was killed under the old 48Mi limit; the current template no longer has that limit.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"OOMKilled\"}, {\"source\": \"c2\", \"quote\": \"controlled by ReplicaSet web-\u003chash\u003e\"}), \"missingData\": (), \"uncertainty\": \"Whether the current pod stays under 64Mi under load is not shown by this evidence.\", \"proposal\": null}"}
+{"h":"1f580da6ddb4a96f","f":"sha256:3cfd302dd1bf278125f3c06e31aeaa663533e579fcc93718c33dc7db91fde15f","s":"{\"summary\": \"The new pod of Deployment demo/web cannot start: the image ghcr.io/stefanprodan/podinfo:6.17.99 does not exist in the registry (not found), so the pull fails and the kubelet backs off. Changing an image is not in the action catalog, so no change is proposed.\", \"hypotheses\": ({\"description\": \"The tag 6.17.99 was never published; the image reference in the pod template is wrong.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"ghcr.io/stefanprodan/podinfo:6.17.99: not found\"}, {\"source\": \"c2\", \"quote\": \"Back-off pulling image \\\"ghcr.io/stefanprodan/podinfo:6.17.99\\\"\"}), \"missingData\": (), \"uncertainty\": \"Whether the tag was removed or never existed is not visible from the cluster.\", \"proposal\": null}"}
+{"h":"c1b5a8d7cb4ad0e3","f":"sha256:529417eb896ff263bd49f920b013ab744a3a7a5b8efabb5c8b137f9c57717307","s":"{\"summary\": \"The new pod of Deployment demo/web is Pending with FailedScheduling: no node has enough CPU (Insufficient cpu on all 3 nodes, and preemption finds no victims). Lowering requests or adding nodes is not in the action catalog, so no change is proposed.\", \"hypotheses\": ({\"description\": \"The new template requests more CPU than any node can offer.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"3 Insufficient cpu\"}, {\"source\": \"c2\", \"quote\": \"Unschedulable\"}), \"missingData\": (\"The container's CPU request in the pod template.\"), \"uncertainty\": \"The request itself is not in the context; the scheduler's message implies it is large.\", \"proposal\": null}"}
+{"h":"6513f3e6a42b68c9","f":"sha256:bbe9b3970798c59863e315bae342fd3c545caff0f44af915d2a8975706f81afe","s":"{\"summary\": \"The new pod of Deployment demo/worker failed its readiness probe once while it started (Readiness probe failed ... connection refused): the server was not listening yet. The pod is Ready now with 0 restarts and no container was OOMKilled, and nothing points at memory. No catalog action is supported by this evidence, so no change is proposed.\", \"hypotheses\": ({\"description\": \"A one-off probe failure at start: the container began serving after the first readiness probe.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"connect: connection refused\"}, {\"source\": \"c2\", \"quote\": \"restarts 0\"}), \"missingData\": (), \"uncertainty\": \"Whether the probe's start delay is too short for the image is not visible; it is not a catalog action.\", \"proposal\": null}"}
+{"h":"ee461eda4e824657","f":"sha256:4158bd7651dfa3b64e98d0c3ede34dc7c253ac52fcd33c69c5e056402cbe56d0","s":"{\"summary\": \"The web container of Deployment demo/web cannot be created (CreateContainerConfigError): it reads an environment variable from the Secret web-credentials, which does not exist. Creating or changing a Secret is not in the action catalog, so no change is proposed.\", \"hypotheses\": ({\"description\": \"The Secret web-credentials was never created in demo, or the reference names the wrong Secret.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"Error: secret \\\"web-credentials\\\" not found\"}, {\"source\": \"c2\", \"quote\": \"CreateContainerConfigError\"}), \"missingData\": (), \"uncertainty\": \"Whether the Secret is meant to exist under another name is not visible.\", \"proposal\": null}"}
+{"h":"2decb888a6cc447f","f":"sha256:df8179389f3a3568ebced78159885f25aebad6782a5966db309d875788e9f096","s":"{\"summary\": \"The web container of Deployment demo/web was OOMKilled (exit code 137) and has restarted 3 times: it needs more memory than its limit. The working set peaks at 5.0135e+07 bytes, just under the 48Mi limit, which sets the size: 64Mi, the smallest value within the policy's bounds, leaves headroom above that peak and should stop the kills.\", \"hypotheses\": ({\"description\": \"The memory working set climbs to just under the 48Mi limit after each start, then the container is killed.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"OOMKilled\"}, {\"source\": \"c2\", \"quote\": \"OOMKilled\"}, {\"source\": \"c4\", \"quote\": \"container_memory_working_set_bytes{container=web,pod=web-\u003cpod\u003e} last 5.0135e+07\"}, {\"source\": \"c4\", \"quote\": \"container_memory_limit_bytes{container=web,pod=web-\u003cpod\u003e} 5.03316e+07\"}), \"missingData\": (), \"uncertainty\": \"The working set peaks at 5.0135e+07 bytes against a 5.03316e+07 byte limit, so the needed headroom above the limit is estimated from the peak, not measured.\", \"proposal\": {\"action\":"}
+{"h":"7a233f26d24911b3","f":"sha256:747a6bf66d173af39e44643c1ca2299b202ad98aee076826764696abc2ba9e6e","s":"{\"summary\": \"The web container of Deployment demo/web was OOMKilled (exit code 137) in the new pod and has restarted 3 times, while the old pod still runs with more memory. It needs more memory than the new limit. The old pod runs under a 64Mi limit without kills, which sets the size: 64Mi, the limit that pod already runs under and the smallest value within the policy's bounds, should stop the kills.\", \"hypotheses\": ({\"description\": \"The rollout lowered the memory limit; the new pod's working set climbs to just under it after each start, then the container is killed.\"}), \"evidence\": ({\"source\": \"c1\", \"quote\": \"OOMKilled\"}, {\"source\": \"c2\", \"quote\": \"OOMKilled\"}, {\"source\": \"c4\", \"quote\": \"container_memory_working_set_bytes{container=web,pod=web-\u003cpod\u003e} last 5.0135e+07\"}, {\"source\": \"c4\", \"quote\": \"container_memory_limit_bytes{container=web,pod=web-\u003cpod\u003e} 6.71089e+07\"}), \"missingData\": (), \"uncertainty\": \"The old pod ran under a higher limit without kills, so the needed limit is estimated from the new pod's"}
+{"h":"ae376183c223bda8","f":"sha256:2d4e583e3e6ff439571e705a2c8b5c829035fb624d2ac4dd4090bf77cf4d19bc","s":"} 5"}
+{"h":"5d8273db629c4812","f":"sha256:2d4e583e3e6ff439571e705a2c8b5c829035fb624d2ac4dd4090bf77cf4d19bc","s":"} 5"}

@@ -43,6 +43,13 @@ type blockCase struct {
 	in      string
 	secrets [][2]int
 	keep    [][2]int
+	// lined is the input before its line breaks were flattened (in itself when it was not).
+	lined string
+	// indicator: the value opens with a block scalar indicator; afterText: other text than sequence dashes
+	// stands before the key on its line.
+	indicator, afterText bool
+	// bareQuoted: a quoted or plain scalar over several lines under a bare short key.
+	bareQuoted bool
 }
 
 // blockWriter builds one blockCase.
@@ -352,6 +359,11 @@ func writeBlockCase(st blockStyle, pl blockPlacement, nl, step, tail, key string
 		tail = tail[closing+1:]
 	}
 	w.c.in = w.b.String()
+	w.c.lined = w.c.in
+	w.c.indicator = strings.HasPrefix(st.name, "scalar")
+	w.c.afterText = pl.lead != "" && pl.lead != "- "
+	w.c.bareQuoted = (strings.HasSuffix(st.name, "quoted over lines") || st.name == "plain continuation") &&
+		isBareShortCorpusKey(key)
 	if pl.flat {
 		w.c.in = strings.Map(func(r rune) rune {
 			if r == '\n' || r == '\r' {
@@ -399,12 +411,33 @@ func blockLeaks(c blockCase, spans []span) (leaked, lost []string) {
 
 // Every secret the generator placed in a block value is redacted, and the text around it survives: the
 // prose before the key, the text before it on its line, and, when the lines are not flattened, the dedented
-// key or prose after the block.
+// key or prose after the block. Since the decision of 2026-11-17 on #840:
+//   - a value that opens with a block scalar indicator is redacted wherever the key stands, also when its
+//     lines were flattened before it reached the redactor;
+//   - any other value, under a key first on its line, is redacted in the text with its lines; text that was
+//     flattened is checked as the callers produce it, redacted with its lines first, then flattened and
+//     redacted again (blockPipeline);
+//   - any other value under a key after other text on its line ("warning: credentials:" and a map below) is
+//     not required: no YAML has a key there, and reading a block for it took prose for one. Those inputs
+//     are only held to what main redacted (TestBlockValueStillRedactsWhatMainRedacted);
+//   - nor is the part of a quoted or plain scalar over several lines under a bare short key ("pass: 'x" and
+//     the closing line below) after its first line, which main leaves too (TestKeyNameKnownLeaks).
 func TestBlockValueCorpusRedactsEverySecret(t *testing.T) {
 	cases := blockCorpus(blockSecretKeys, true)
-	failed := 0
+	failed, notRequired := 0, 0
 	for _, c := range cases {
-		leaked, lost := blockLeaks(c, defaultRedactor.spans(c.in))
+		var leaked, lost []string
+		switch {
+		case c.indicator:
+			leaked, lost = blockLeaks(c, defaultRedactor.spans(c.in))
+		case c.afterText || c.bareQuoted:
+			notRequired++
+			continue
+		case c.lined != c.in:
+			leaked, lost = blockPipelineLeaks(c)
+		default:
+			leaked, lost = blockLeaks(c, defaultRedactor.spans(c.in))
+		}
 		if len(leaked)+len(lost) == 0 {
 			continue
 		}
@@ -414,8 +447,39 @@ func TestBlockValueCorpusRedactsEverySecret(t *testing.T) {
 		}
 	}
 	if failed > 0 {
-		t.Errorf("%d of %d corpus inputs leak a secret or lose kept text", failed, len(cases))
+		t.Errorf("%d of %d corpus inputs leak a secret or lose kept text", failed, len(cases)-notRequired)
 	}
+	if notRequired > len(cases)/2 {
+		t.Fatalf("%d of %d inputs not required: the corpus checks too little", notRequired, len(cases))
+	}
+}
+
+// blockPipeline redacts the text with its lines, flattens its line breaks to blanks and redacts it again,
+// as fingerprint.Symptom and the context builder's values do.
+func blockPipeline(lined string) string {
+	return String(strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, String(lined)))
+}
+
+// blockPipelineLeaks returns the secrets of c that blockPipeline leaves in its output, and the kept words it
+// loses, compared by text.
+func blockPipelineLeaks(c blockCase) (leaked, lost []string) {
+	out := blockPipeline(c.lined)
+	for _, r := range c.secrets {
+		if v := c.in[r[0]:r[1]]; strings.Contains(out, v) {
+			leaked = append(leaked, v)
+		}
+	}
+	for _, r := range c.keep {
+		if v := c.in[r[0]:r[1]]; !strings.Contains(out, v) {
+			lost = append(lost, v)
+		}
+	}
+	return leaked, lost
 }
 
 // The same block values under innocent keys, with innocent values, come out byte for byte as they went in.
@@ -537,30 +601,30 @@ func TestBlockValueStillRedactsWhatMainRedacted(t *testing.T) {
 	}
 }
 
-// anyKeyHostileUnits are units that repeat into hostile inputs for the rule for keys anywhere on a line:
-// many keys on one long line in each form it reads (flattened blocks, refused bare keys, quotes that do
-// not close, values followed by blanks, keys inside flow collections), headers with blocks, and indentation
-// that deepens line by line.
+// anyKeyHostileUnits are units that repeat into hostile inputs for the rule for block indicators: many keys
+// on one long line in each form it reads (flattened blocks, refused bare keys, keys in strings that close or
+// not, in flow collections and after brackets that never close), headers with blocks below, less indented or
+// after a document marker, and indentation that deepens or shallows line by line under bare short keys.
 var anyKeyHostileUnits = map[string]func(i int) string{
 	"flattened scalars on one line": func(int) string { return "password: |   a " },
 	"refused bare scalars":          func(int) string { return "pass: |   a b " },
-	"refused bare comments":         func(int) string { return "x pass: # a b " },
-	"unclosed bare quotes":          func(int) string { return "pass: 'a " },
-	"mixed unclosed quotes":         func(int) string { return `pass: "a sig: 'b ` },
-	"closed quotes glued":           func(int) string { return "pass: 'a'b " },
-	"bare values and blanks":        func(int) string { return "pass: a  b " },
-	"bare flattened maps":           func(int) string { return "pass: user: x " },
-	"bare flattened lists":          func(int) string { return "auth: - x " },
-	"keys in flow collections":      func(int) string { return "{token: a, " },
-	"inline values":                 func(int) string { return "x token: a " },
-	"mid-line empty headers":        func(int) string { return "x password:\n" },
+	"refused bare comments":         func(int) string { return "x pass: | # a b " },
+	"keys in strings":               func(int) string { return `"m":"token: | a", ` },
+	"refused bare keys in strings":  func(int) string { return `"m":"pass: | a b", ` },
+	"keys in unclosed strings":      func(int) string { return `"m: token: | a ` },
+	"keys in flow collections":      func(int) string { return "{token: | a}, " },
+	"keys after unclosed brackets":  func(int) string { return "[{token: | a " },
+	"no blank after the indicator":  func(int) string { return "token: |a " },
 	"mid-line block scalars":        func(int) string { return "x token: |\n  a\n" },
-	"refused bare blocks":           func(int) string { return "x pass:\n  a b\n" },
-	"refused bare continuations":    func(int) string { return "x pass: a\n  b c\n" },
-	"deepening bare headers":        func(i int) string { return strings.Repeat(" ", i%512) + "x pass: a\n" },
-	"deepening bare blocks":         func(i int) string { return strings.Repeat(" ", i%512) + "x auth:\n" },
-	"deepening inline values":       func(i int) string { return strings.Repeat("\t", i%512) + "x token: a\n" },
-	"comment lines under headers":   func(i int) string { return []string{"x pass:\n", "#\n", " y auth:\n"}[i%3] },
+	"refused bare blocks":           func(int) string { return "x pass: |\n  a b\n" },
+	"less indented blocks":          func(int) string { return "    x token: |\n  a\n" },
+	"document markers":              func(int) string { return "x token: |\n---\n" },
+	"deepening bare headers":        func(i int) string { return strings.Repeat(" ", i%512) + "x pass: |\n" },
+	"deepening bare scalars":        func(i int) string { return strings.Repeat(" ", i%512) + "x auth: | a b\n" },
+	"deepening headers":             func(i int) string { return strings.Repeat("\t", i%512) + "x token: |\n" },
+	"shallowing bare headers":       func(i int) string { return strings.Repeat(" ", 511-i%512) + "x pass: |\n" },
+	"comment lines under headers":   func(i int) string { return []string{"x pass: |\n", "#\n", " y auth: |\n"}[i%3] },
+	"many keys before a block":      func(i int) string { return []string{"x token: | pass: | ", "\n  a\n"}[min(i%64, 1)] },
 }
 
 // anyKeyWork returns the bytes read, as countScan reports them, by String on the hostile input of about n
@@ -577,7 +641,7 @@ func anyKeyWork(unit func(int) string, n int) (work, size int) {
 	return work, len(in)
 }
 
-// The rule for keys anywhere on a line reads each line a bounded number of times, whatever the input: on
+// The rule for block indicators reads each line a bounded number of times, whatever the input: on
 // every hostile input the bytes read are at most a fixed multiple of its size, and eight times the input
 // reads at most nine times as much. Work is counted, not timed, so a loaded machine cannot fail it (#825).
 func TestAnyKeyWorkIsLinear(t *testing.T) {
@@ -594,23 +658,42 @@ func TestAnyKeyWorkIsLinear(t *testing.T) {
 	}
 }
 
-// The cases of #840 by hand: a block value under a secret key after other text on its line, and with its
-// line breaks flattened to blanks; the text before the key stays.
+// The cases of #840 by hand: a block value under a secret key and a block indicator after other text on its
+// line, and with its line breaks flattened to blanks; the text before the key stays. A value on the next
+// lines under a key first on its line is redacted before the callers flatten the text (blockPipeline).
 func TestBlockValueAfterTextOrFlattened(t *testing.T) {
-	const pw, user, pass = "hunter2xyzAB", "admin", "Tr0ub4dor9"
+	const pw, pass = "hunter2xyzAB", "Tr0ub4dor9"
 	for in, secrets := range map[string][]string{
-		"Back-off restarting\nmsg: password: |\n  hunter2xyzAB\n":     {pw},
-		"Back-off restarting password: |   hunter2xyzAB":              {pw},
-		"Back-off restarting\nwarning: credentials:\n  user: admin\n": {user},
-		"Back-off credentials:   user: admin   pass: s3cr3tPW":        {user, "s3cr3tPW"},
-		"Back-off token:   - hunter2xyzAB   - Tr0ub4dor9":             {pw, pass},
-		"Back-off password: hunter2xyzAB   Tr0ub4dor9":                {pw, pass},
-		"Back-off 'token': \"hunter two\n  three\"":                   {"hunter two", "three"},
-		"Back-off pass: |-   Qz12049xK9w":                             {"Qz12049xK9w"},
-		"Back-off restarting\r\nmsg: secret: >-\r\n\tTr0ub4dor9\r\n":  {pass},
-		"Back-off restarting\nmsg: apiKey: |2- # rotated\n  Zq81xx\n": {"Zq81xx"},
+		"Back-off restarting\nmsg: password: |\n  hunter2xyzAB\n":      {pw},
+		"Back-off restarting password: |   hunter2xyzAB":               {pw},
+		"Back-off pass: |-   Qz12049xK9w":                              {"Qz12049xK9w"},
+		"Back-off restarting\r\nmsg: secret: >-\r\n\tTr0ub4dor9\r\n":   {pass},
+		"Back-off restarting\nmsg: apiKey: |2- # rotated\n  Zq81xx\n":  {"Zq81xx"},
+		"Back-off token: |   - hunter2xyzAB   - Tr0ub4dor9":            {pw, pass},
+		`Back-off {"msg":"bad config: password: |   hunter2xyzAB"}`:    {pw},
+		"Back-off [config password:| hunter2xyzAB":                     {pw},
+		"Back-off password\u00a0: |   hunter2xyzAB":                    {pw},
+		"Back-off\n    password: |\n  hunter2xyzAB\n":                  {pw},
+		"Back-off\npassword: |\n---\n  hunter2xyzAB\n":                 {pw},
+		"Back-off\nauth:\n  mode: basic secret: |\n    hunter2xyzAB\n": {pw},
 	} {
 		checkRedacted(t, in, secrets, []string{"Back-off"})
+	}
+	for in, secrets := range map[string][]string{
+		"Back-off\ncredentials:\n  user: admin\n  pass: s3cr3tPW\n": {"admin", "s3cr3tPW"},
+		"Back-off\ntoken:\n  - hunter2xyzAB\n  - Tr0ub4dor9\n":      {pw, pass},
+		"Back-off\npassword: hunter2xyzAB\n  Tr0ub4dor9\n":          {pw, pass},
+		"Back-off\n'token': \"hunter two\n  three\"":                {"hunter two", "three"},
+	} {
+		out := blockPipeline(in)
+		for _, sec := range secrets {
+			if strings.Contains(out, sec) {
+				t.Errorf("redacted, flattened and redacted again, %q leaks %q: %q", in, sec, out)
+			}
+		}
+		if !strings.Contains(out, "Back-off") {
+			t.Errorf("%q lost Back-off: %q", in, out)
+		}
 	}
 }
 

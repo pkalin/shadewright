@@ -447,7 +447,17 @@ const (
 	// is set or its reason changes. A pull request known closed never keeps it: the request ends Cancelled, also when
 	// the failed review check cannot be written. The write that ends the request removes it.
 	ConditionCancelPending = "CancelPending"
+	// ConditionGitReadRetry is True, with reason GitReadFailed, while the executor retries a read of the Git host
+	// that failed (#771). The message names the read, never the host's answer; lastTransitionTime is when the
+	// retry of that read began, on the executor's clock. The read is made again after the pull request poll
+	// interval, or the longer delay the host asked for, and never later than the bound of the step that made it
+	// (a deadline, a wait or a grace); once that bound has passed the step's own end runs at once. A failure of the
+	// Kubernetes API never sets it. The condition is removed after a reconcile that ends with no failed Git read.
+	ConditionGitReadRetry = "GitReadRetry"
 )
+
+// ReasonGitReadFailed is the reason of condition GitReadRetry True: a read of the Git host failed and is retried.
+const ReasonGitReadFailed = "GitReadFailed"
 
 // ReasonIncidentCountUnchanged is the reason of condition IncidentStopped True: the Incident's count did not
 // change for at least the quiet time of its closure rules while the pull request waited for review (#715).

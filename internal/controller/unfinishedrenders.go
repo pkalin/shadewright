@@ -234,7 +234,7 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 		rr.Status.MergeContentUnreadSince = nil
 		rr.Status.MergeCommitAwaitedSince = nil
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
-		meta.RemoveStatusCondition(&rr.Status.Conditions, conditionGitReadRetry)
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 	}
 	if deliveryPending(o) && deliveryPending(n) {

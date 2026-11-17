@@ -153,6 +153,12 @@ func heldForVerification(rr *remediationv1alpha1.RemediationRequest, verify bool
 // when neither does, and checkHeld goes on with the rule per verdict.
 func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) (res reconcile.Result, done bool, err error) {
+	adopted := heldMergeFollows(rr, v) && rr.Status.PullRequest == nil
+	if adopted {
+		// Its pull request was opened while the status write that would record it was lost (#827): the read
+		// found it by the request's marker, and it is recorded before its merge is, as the merge's own.
+		recordFound(rr, v.pr)
+	}
 	if v.state == changeMerged && rr.Status.Source != nil && v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
 		cancelReason, cancelled := cancelledForIncident(rr)
 		if stoppedForBranchChange(rr) || cancelled {
@@ -187,8 +193,9 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 			}
 		}
 	}
-	if pr := rr.Status.PullRequest; stoppedForBranchChange(rr) && v.state == changeMerged && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA {
-		res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error { return r.recordHeldMerge(ctx, rr, v.pr) })
+	if pr := rr.Status.PullRequest; stoppedForBranchChange(rr) && v.state == changeMerged && pr != nil &&
+		v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA {
+		res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error { return r.recordHeldMerge(ctx, rr, v.pr, adopted) })
 		return res, true, err
 	}
 	if reason, ok := cancelledForIncident(rr); ok && (v.state == changeOpen || v.state == changeMerged) {
@@ -381,7 +388,7 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 		return v, holding, err
 	}
 	_, cancelled := cancelledForIncident(rr)
-	followsMerge := v.state == changeMerged && (cancelled || stoppedForBranchChange(rr) && retargetedMergeCounts(rr, v))
+	followsMerge := v.state == changeMerged && (cancelled || heldMergeFollows(rr, v))
 	if frees(v, holding) && !heldForVerification(rr, r.VerifyOutcomes) && !followsMerge {
 		release(rr)
 	} else if holding != nil {
@@ -438,7 +445,15 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 			return changeVerdict{}, nil, &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}
 		}
 		q := changeQuery{marker: !closedOnly(rr), openOnBranch: true, reinstalled: reinstalled}
-		if changed {
+		switch {
+		case changed && branch == rr.Status.Source.TargetBranch && verdict.state == changeGone:
+			// The configured branch does not show the pull request either: the recorded branch confirms a missing
+			// pull request as before #771 (settleGone), so one 404 the listing of the branch does not confirm yet
+			// keeps the lock instead of releasing it on two unconfirmed answers.
+			q.recordedBranch = true
+		case changed:
+			// The configured branch (read first), or the recorded one after the configured branch showed the
+			// pull request there: a 404 on the recorded branch is then the move itself, not a missing pull request.
 			q.configuredBranch = branch
 		}
 		v := r.changeOf(ctx, git, rr, q)
@@ -514,12 +529,31 @@ func (r *RemediationRequestReconciler) openHolding(ctx context.Context, rr *reme
 	return nil, nil
 }
 
+// heldMergeFollows reports whether v is a merge that a request stoppedForBranchChange records before its lock may
+// go (settleStopException): its recorded pull request merged with the head Shadewright pushed, or, when no pull
+// request is recorded (opened while the status write that would record it was lost), the pull request the read
+// found by the request's marker, which is recorded first (recordFound) and whose content the record checks.
+func heldMergeFollows(rr *remediationv1alpha1.RemediationRequest, v changeVerdict) bool {
+	if !stoppedForBranchChange(rr) || v.state != changeMerged {
+		return false
+	}
+	if rr.Status.PullRequest == nil {
+		return recordable(v.pr)
+	}
+	return retargetedMergeCounts(rr, v)
+}
+
+// recordable reports whether cr passes the schema of status.pullRequest (recordFound).
+func recordable(cr providers.ChangeRequest) bool {
+	return shaPattern.MatchString(cr.HeadSHA) && cr.Number > 0 && strings.HasPrefix(cr.URL, "https://") &&
+		len(cr.URL) <= 2048
+}
+
 // recordFound writes what a look-up found into the status: the pull request when none is recorded (and its
 // number, URL and head pass the schema), and PullRequestOpened as closed or merged when it is no longer open,
 // unless that condition already says it is (a close by Shadewright keeps its own reason).
 func recordFound(rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) {
-	if rr.Status.PullRequest == nil && shaPattern.MatchString(cr.HeadSHA) && cr.Number > 0 &&
-		strings.HasPrefix(cr.URL, "https://") && len(cr.URL) <= 2048 {
+	if rr.Status.PullRequest == nil && recordable(cr) {
 		recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	}
 	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened); c != nil &&

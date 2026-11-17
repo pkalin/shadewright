@@ -731,3 +731,12 @@ func TestStopReportPrefersFalseOverUnknown(t *testing.T) {
 		t.Errorf("stopReport without a False condition = %+v, want Approved", got)
 	}
 }
+
+// The retry of a failed Git read (condition GitReadRetry, reason GitReadFailed) links to the pull request step,
+// where the troubleshooting page lists it.
+func TestTroubleshootingLinkGitReadRetry(t *testing.T) {
+	link, listed := troubleshootingLink(remediationv1alpha1.ConditionGitReadRetry, remediationv1alpha1.ReasonGitReadFailed)
+	if want := troubleshootingURL + "#" + secPullRequest; !listed || link != want {
+		t.Errorf("troubleshootingLink(GitReadRetry, GitReadFailed) = %q, %v, want %q, true", link, listed, want)
+	}
+}

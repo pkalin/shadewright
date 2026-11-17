@@ -120,6 +120,7 @@ var troubleshootingSections = map[string][]string{
 	"GitFailed":                         {secPullRequest},
 	"GitForbidden":                      {secPullRequest},
 	"GitNotFound":                       {secPullRequest},
+	"GitReadFailed":                     {secPullRequest},
 	"GitRejected":                       {secPullRequest},
 	"HandedOff":                         {secPhases},
 	"HandoffAborted":                    {secPhases},

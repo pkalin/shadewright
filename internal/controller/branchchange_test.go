@@ -333,3 +333,24 @@ func TestRetargetedContentFailedReadsAreErrors(t *testing.T) {
 		}
 	}
 }
+
+// #827: the configured branch changes the README and reverts it, and the pull request carries the recorded
+// branch's README change and the planned change. Against the commit the merge was made on, the merge brought the
+// README change as well, whatever the merge method; against the earlier commit that held the same README it would
+// look like the planned change alone.
+func TestRetargetedContentComparesWithTheRealParent(t *testing.T) {
+	for _, m := range []mergeMethod{viaSquash, viaRebase, viaMergeCommit} {
+		t.Run(m.String(), func(t *testing.T) {
+			w := newRetargetedWorld(t)
+			w.push(freshOtherBranch, readmePath, []byte("a: 2\n"))
+			w.push(freshOtherBranch, readmePath, []byte("a: 1\n"))
+			c1 := w.push(mainBranch, readmePath, []byte("a: 2\n"))
+			n := w.branchOff(c1)
+			w.push("shadewright/rr", sourcePath, w.planned(w.previous))
+			ref, err := w.content(w.mergeInto(n, m))
+			if err != nil || ref == nil || ref.reason != ReasonMergedWithForeignChange {
+				t.Fatalf("retargetedContent() = %v, %v; want MergedWithForeignChange", ref, err)
+			}
+		})
+	}
+}

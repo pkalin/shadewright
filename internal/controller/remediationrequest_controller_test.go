@@ -536,7 +536,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		// A failed read of the source mapping is a visible retry: the poll interval, or the host's delay when longer.
 		Expect(res.RequeueAfter).To(BeNumerically(">=", 42*time.Second))
-		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).NotTo(BeNil())
 		Expect(fetch().Status.Phase).To(BeEmpty())
 	})
 
@@ -666,7 +666,7 @@ var _ = Describe("RemediationRequest Controller", func() {
 		got := fetch()
 		Expect(got.Status.Phase).To(BeEmpty())
 		Expect(got.Status.Conditions).To(HaveLen(1))
-		Expect(got.Status.Conditions[0].Type).To(Equal(conditionGitReadRetry))
+		Expect(got.Status.Conditions[0].Type).To(Equal(remediationv1alpha1.ConditionGitReadRetry))
 		Expect(got.Status.Conditions[0].Message).To(ContainSubstring("read head of branch main"))
 	})
 

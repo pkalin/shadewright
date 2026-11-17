@@ -273,7 +273,7 @@ func TestRecheckHonoursTheResolverRetryAfter(t *testing.T) {
 			if err := c.Get(context.Background(), key, rr); err != nil {
 				t.Fatal(err)
 			}
-			retry := meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry)
+			retry := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
 			if retry == nil || !strings.Contains(retry.Message, "read head") {
 				t.Fatalf("missing retry operation: %+v", retry)
 			}

@@ -28,6 +28,7 @@ import (
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,9 +37,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
-
-// conditionGitReadRetry names the read being retried. Its transition time is the executor's retry start.
-const conditionGitReadRetry = "GitReadRetry"
 
 // gitReadError identifies an error at the provider boundary, before any Kubernetes operation can wrap it.
 // It carries a fixed method name only; the host's answer never enters a condition or a log.
@@ -77,6 +75,24 @@ const (
 	noBoundRefusedWatch noBoundReason = "a refused freshness check is watched without an end"
 )
 
+// boundPassedWait is the wait of a retry whose bound passed while the reconcile's reads ran: the path's own end
+// runs at once, at the next reconcile.
+const boundPassedWait = time.Nanosecond
+
+// readsStartKey is the context key of the time a reconcile began, on the executor's clock (withReadsStart).
+type readsStartKey struct{}
+
+// withReadsStart records start, the executor's clock when the reconcile began, before any of its reads.
+func withReadsStart(ctx context.Context, start time.Time) context.Context {
+	return context.WithValue(ctx, readsStartKey{}, start)
+}
+
+// readsStart is the time the reconcile of ctx began (withReadsStart), zero when none is recorded.
+func readsStart(ctx context.Context) time.Time {
+	start, _ := ctx.Value(readsStartKey{}).(time.Time)
+	return start
+}
+
 // readBoundAt is a bound at t.
 func readBoundAt(t time.Time) gitReadBound { return gitReadBound{until: t} }
 
@@ -104,13 +120,22 @@ func earlierBound(b, o gitReadBound) gitReadBound {
 
 func (b gitReadBound) bounded() bool { return !b.until.IsZero() || b.within > 0 }
 
-// cap returns d, shortened to what is left of b at now. A deadline that has passed, or none, leaves d.
-func (b gitReadBound) cap(now time.Time, d time.Duration) time.Duration {
-	if left := b.until.Sub(now); !b.until.IsZero() && left > 0 {
-		d = min(d, left)
+// cap returns d, shortened to what is left of b at now, so a retry is never later than its bound. A deadline that
+// passed after start, the time the reconcile began (readsStart; zero when not known), so while its reads ran,
+// leaves boundPassedWait: the path's own end runs at once, at the next reconcile. A deadline that had passed
+// before the reconcile began leaves d: the read is one of the path that runs after the bound (an expiry that
+// reads the branch), which the bound no longer paces, so it never retries at once in a loop. No bound leaves d.
+func (b gitReadBound) cap(start, now time.Time, d time.Duration) time.Duration {
+	if !b.until.IsZero() {
+		switch left := b.until.Sub(now); {
+		case left > 0:
+			d = min(d, left)
+		case start.IsZero() || b.until.After(start):
+			d = boundPassedWait
+		}
 	}
 	if b.within > 0 {
-		d = min(d, b.within)
+		d = min(d, max(b.within, boundPassedWait))
 	}
 	return d
 }
@@ -192,8 +217,9 @@ func gitReadFailure(err error) bool {
 // retryGitRead is the common result of a failed Git read, called by the path that made the read: a visible retry
 // (condition GitReadRetry) after the poll interval or the delay the host asked for, whichever is longer, and never
 // later than bound (or a bound err carries, withReadBound), so the path's own end (a wait, a grace, a deadline) runs
-// on time. A bound that has passed does not shorten the wait: the caller's expiry path runs before its reads, and a
-// read that failed after it is a read of that path. Any error that is not a failed Git read (a Kubernetes read or
+// on time. A bound that passed while the reconcile's reads ran ends the wait now (boundPassedWait), so the
+// caller's expiry path runs at the next reconcile; one that had passed before the reconcile began does not
+// shorten the wait, since the read is then one of that expiry path (cap). Any error that is not a failed Git read (a Kubernetes read or
 // write, the cancellation of the reconcile) is returned unchanged, for the error backoff.
 func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api.RemediationRequest, err error,
 	bound gitReadBound) (reconcile.Result, error) {
@@ -210,7 +236,7 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	} else if e, ok := errors.AsType[*sourcemap.RefusedError](err); ok {
 		op = e.Op
 	}
-	want := &metav1.Condition{Type: conditionGitReadRetry, Status: metav1.ConditionTrue, Reason: "GitReadFailed",
+	want := &metav1.Condition{Type: api.ConditionGitReadRetry, Status: metav1.ConditionTrue, Reason: api.ReasonGitReadFailed,
 		Message: "Retrying Git read: " + op, ObservedGeneration: rr.Generation, LastTransitionTime: metav1.NewTime(r.now())}
 	if e := r.putGitReadRetry(ctx, rr, want); e != nil {
 		return reconcile.Result{}, e
@@ -220,7 +246,7 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	if hostDelay, ok := providers.RetryAfter(err); ok {
 		d = max(d, hostDelay)
 	}
-	d = readBoundOf(err, bound).cap(r.now(), d)
+	d = readBoundOf(err, bound).cap(readsStart(ctx), r.now(), d)
 	logf.FromContext(ctx).Info("Retried a Git read of RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr), "operation", op, "retryAfter", d)
 	return reconcile.Result{RequeueAfter: d}, nil
 }
@@ -290,10 +316,14 @@ func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, ke
 	if err := r.Get(ctx, key, rr); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) == nil {
+	if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
 		return nil
 	}
-	return r.putGitReadRetry(ctx, rr, nil)
+	// A request gone from the API server (its finalizer removed after the cache read) has nothing left to clear.
+	if err := r.putGitReadRetry(ctx, rr, nil); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // putGitReadRetry writes only the retry condition and retries conflicts from a fresh API read.
@@ -309,13 +339,13 @@ func (r *RemediationRequestReconciler) putGitReadRetry(ctx context.Context, rr *
 		base := live.DeepCopy()
 		changed := false
 		if want == nil {
-			changed = meta.RemoveStatusCondition(&live.Status.Conditions, conditionGitReadRetry)
+			changed = meta.RemoveStatusCondition(&live.Status.Conditions, api.ConditionGitReadRetry)
 		} else {
 			c := want.DeepCopy()
-			if old := meta.FindStatusCondition(live.Status.Conditions, conditionGitReadRetry); old != nil && old.Message == c.Message {
+			if old := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); old != nil && old.Message == c.Message {
 				c.LastTransitionTime = old.LastTransitionTime
 			} else {
-				meta.RemoveStatusCondition(&live.Status.Conditions, conditionGitReadRetry)
+				meta.RemoveStatusCondition(&live.Status.Conditions, api.ConditionGitReadRetry)
 			}
 			changed = meta.SetStatusCondition(&live.Status.Conditions, *c)
 		}
@@ -325,10 +355,10 @@ func (r *RemediationRequestReconciler) putGitReadRetry(ctx context.Context, rr *
 			}
 		}
 		rr.ResourceVersion = live.ResourceVersion
-		if c := meta.FindStatusCondition(live.Status.Conditions, conditionGitReadRetry); c != nil {
+		if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); c != nil {
 			meta.SetStatusCondition(&rr.Status.Conditions, *c)
 		} else {
-			meta.RemoveStatusCondition(&rr.Status.Conditions, conditionGitReadRetry)
+			meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionGitReadRetry)
 		}
 		return nil
 	})

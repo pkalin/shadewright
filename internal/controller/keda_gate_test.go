@@ -380,7 +380,7 @@ func TestKedaStaleCleanupFinishesAfterAFailedClose(t *testing.T) {
 			if err != nil || res.RequeueAfter < r.pullRequestPollInterval() {
 				t.Fatalf("want a paced read retry: %+v %v", res, err)
 			}
-			if meta.FindStatusCondition(w.fetch(t).Status.Conditions, conditionGitReadRetry) == nil {
+			if meta.FindStatusCondition(w.fetch(t).Status.Conditions, remediationv1alpha1.ConditionGitReadRetry) == nil {
 				t.Fatal("read retry is not visible")
 			}
 			got := w.fetch(t)

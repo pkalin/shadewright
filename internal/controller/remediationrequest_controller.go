@@ -439,7 +439,7 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 // (retryGitRead); Kubernetes failures and other retryable errors keep their error path.
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.gitRetries().take(req.NamespacedName)
-	res, err := r.reconcile(ctx, req)
+	res, err := r.reconcile(withReadsStart(ctx, r.now()), req)
 	if m := r.gitRetries().take(req.NamespacedName); err == nil && ctx.Err() == nil && m.shown && !m.retried {
 		// The reads of this reconcile worked, or were decided on for good: the retry the request showed is over.
 		if clearErr := r.clearGitReadRetry(ctx, req.NamespacedName); clearErr != nil {
@@ -517,7 +517,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
+	if meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry) != nil {
 		// Reconcile removes it after this reconcile if no read is retried; a request without it costs no read.
 		r.gitRetries().shown(req.NamespacedName)
 	}
@@ -1252,7 +1252,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	waited.RequeueAfter = readBoundOf(lookErr, lookBound).cap(r.now(), max(waited.RequeueAfter, res.RequeueAfter))
+	waited.RequeueAfter = readBoundOf(lookErr, lookBound).cap(readsStart(ctx), r.now(), max(waited.RequeueAfter, res.RequeueAfter))
 	return waited, nil
 }
 

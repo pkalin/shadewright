@@ -58,6 +58,9 @@ const (
 	racedAnnotation = "after-the-read"
 )
 
+// whyBranchChanged is the message of a stop for a branch change in these tests.
+const whyBranchChanged = "branch changed"
+
 func settlementWorld(t *testing.T, phase api.RemediationPhase) (*RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest) {
 	t.Helper()
 	ctx := context.Background()
@@ -89,7 +92,7 @@ func settlementWorld(t *testing.T, phase api.RemediationPhase) (*RemediationRequ
 		t.Fatal(err)
 	}
 	rr.Status.PullRequest = &api.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
-	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionApproved, Status: metav1.ConditionFalse, Reason: reasonTargetBranchChanged, Message: "branch changed"})
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionApproved, Status: metav1.ConditionFalse, Reason: reasonTargetBranchChanged, Message: whyBranchChanged})
 	if err := c.Status().Update(ctx, rr); err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +341,7 @@ func TestSettlementGitReadFailures(t *testing.T) {
 					if getErr := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); getErr != nil {
 						t.Fatal(getErr)
 					}
-					c := meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry)
+					c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry)
 					// The condition names the read: by its method, or by the fixed text of the step that made it (a
 					// provider error keeps no chain), never the catch-all.
 					if err != nil || res.RequeueAfter < r.pullRequestPollInterval() || c == nil || !strings.HasPrefix(c.Message, "Retrying Git read: ") ||
@@ -391,7 +394,7 @@ func TestSettlementReadRecoveryClearsRetry(t *testing.T) {
 	if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
 		t.Fatal(err)
 	}
-	if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) == nil {
+	if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
 		t.Fatal("retry missing")
 	}
 	fail = false
@@ -401,7 +404,7 @@ func TestSettlementReadRecoveryClearsRetry(t *testing.T) {
 	if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
 		t.Fatal(err)
 	}
-	if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
+	if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) != nil {
 		t.Fatal("successful read left the retry condition")
 	}
 }
@@ -459,7 +462,7 @@ func TestSettlementRetryWritesSurviveConflict(t *testing.T) {
 			if operation == clockStart && live.Status.MergeContentUnreadSince == nil {
 				t.Fatal("start lost")
 			}
-			if operation == retryMark && meta.FindStatusCondition(live.Status.Conditions, conditionGitReadRetry) == nil {
+			if operation == retryMark && meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) == nil {
 				t.Fatal("retry lost")
 			}
 		})
@@ -485,7 +488,7 @@ func TestSettlementClusterFailuresAreNotGitFailures(t *testing.T) {
 	if !errors.Is(err, failure) {
 		t.Fatalf("Kubernetes error swallowed: %v", err)
 	}
-	if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil || meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable) != nil {
+	if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) != nil || meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable) != nil {
 		t.Fatal("Kubernetes failure reported as Git")
 	}
 }
@@ -616,7 +619,7 @@ func TestSettlementGitWritesKeepTheirErrorPath(t *testing.T) {
 			r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
 			failure := freshness.WrapProvider(operation, errors.New("write failed"))
 			result, err := r.waitOrFail(context.Background(), rr, failure, requestBound(rr))
-			if err == nil || result.RequeueAfter != 0 || meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
+			if err == nil || result.RequeueAfter != 0 || meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) != nil {
 				t.Fatalf("write was labelled as a read: %+v %v", result, err)
 			}
 		})
@@ -632,8 +635,8 @@ func TestReconcileReadsForTheRetryClearOnlyWhenShown(t *testing.T) {
 			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 			ctx := context.Background()
 			if shown {
-				meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: conditionGitReadRetry,
-					Status: metav1.ConditionTrue, Reason: "GitReadFailed", Message: "an earlier read failed"})
+				meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionGitReadRetry,
+					Status: metav1.ConditionTrue, Reason: api.ReasonGitReadFailed, Message: "an earlier read failed"})
 				if err := r.Status().Update(ctx, rr); err != nil {
 					t.Fatal(err)
 				}
@@ -661,7 +664,7 @@ func TestReconcileReadsForTheRetryClearOnlyWhenShown(t *testing.T) {
 			if err := base.Get(ctx, request.NamespacedName, rr); err != nil {
 				t.Fatal(err)
 			}
-			if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
+			if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) != nil {
 				t.Fatal("a reconcile without a failed read left the retry condition")
 			}
 		})
@@ -680,5 +683,120 @@ func calledFrom(name string) bool {
 		if !more {
 			return false
 		}
+	}
+}
+
+// #827: the pull request was opened but the status write that recorded it was lost, and the request then stopped
+// for a branch change. The read that settles the lock finds the pull request merged, on the configured branch or on
+// the recorded one: the merge is recorded, with its receipt, before the lock goes.
+func TestSettlementBranchChangeAdoptsUnrecordedMerge(t *testing.T) {
+	for _, branch := range []string{mainBranch, freshOtherBranch} {
+		t.Run(branch, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			ctx := context.Background()
+			number := rr.Status.PullRequest.Number
+			rr.Status.PullRequest = nil
+			meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+			meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionPlanFresh,
+				Status: metav1.ConditionFalse, Reason: reasonTargetBranchChanged, Message: whyBranchChanged})
+			if err := r.Status().Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.SetBase(number, branch); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.Merge(number); err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				if _, err := r.checkHeld(ctx, rr); err != nil {
+					t.Fatal(err)
+				}
+				if rr.Status.MergeReceipt == nil && !*rr.Status.HoldsTarget {
+					t.Fatalf("the lock went before the merge was recorded: phase %s", rr.Status.Phase)
+				}
+			}
+			if rr.Status.MergeReceipt == nil || rr.Status.MergeReceipt.TargetBranch != api.GitBranch(branch) {
+				t.Fatalf("merge not recorded: phase %s, receipt %+v", rr.Status.Phase, rr.Status.MergeReceipt)
+			}
+		})
+	}
+}
+
+// laggingGit answers every read of a pull request by its number with a 404 and lists no pull request of the
+// branch: the host has not caught up with a pull request that may well be open or merged.
+type laggingGit struct{ providers.GitProvider }
+
+func (laggingGit) GetChangeRequest(context.Context, int64) (providers.ChangeRequest, error) {
+	return providers.ChangeRequest{}, fmt.Errorf("pull request: %w", providers.ErrNotFound)
+}
+
+func (laggingGit) ListChangeRequests(context.Context, string, bool) ([]providers.ChangeRequest, error) {
+	return nil, nil
+}
+
+// #827: after a branch change, one 404 on both branches that the listing of the branch does not confirm yet is no
+// proof that the pull request is gone: the read on the recorded branch keeps its first look (settleGone) and the
+// lock stays until a look confirmWait later finds it missing again.
+func TestSettlementBranchChangeUnconfirmedGoneKeepsLock(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	ctx := context.Background()
+	r.OpenRepository = func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+		return laggingGit{g.ForTarget(string(repo.TargetBranch))}, nil
+	}
+	if _, err := r.checkHeld(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if !*rr.Status.HoldsTarget {
+		t.Fatal("one unconfirmed 404 on both branches released the lock")
+	}
+}
+
+// #827: the request is gone from the API server (its finalizer removed) while the cache still shows it with
+// condition GitReadRetry: clearing the condition has nothing left to clear, and is no error for the backoff.
+func TestGitReadRetryClearIgnoresARequestGone(t *testing.T) {
+	r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	ctx := context.Background()
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionGitReadRetry,
+		Status: metav1.ConditionTrue, Reason: api.ReasonGitReadFailed, Message: "Retrying Git read: x"})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	r.APIReader = clientfake.NewClientBuilder().WithScheme(r.Scheme).Build()
+	if err := r.clearGitReadRetry(ctx, client.ObjectKeyFromObject(rr)); err != nil {
+		t.Fatalf("clearGitReadRetry() = %v; want nil for a request gone from the API server", err)
+	}
+}
+
+// #827: the same adoption with a head that is not the planned change alone (a person pushed to the branch) merged
+// into the recorded branch: no receipt, MergedWithForeignChange.
+func TestSettlementBranchChangeAdoptedForeignHead(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	ctx := context.Background()
+	number := rr.Status.PullRequest.Number
+	rr.Status.PullRequest = nil
+	meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionPlanFresh,
+		Status: metav1.ConditionFalse, Reason: reasonTargetBranchChanged, Message: whyBranchChanged})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Push(freshness.BranchName(rr), sourcePath, []byte("unapproved: change\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Merge(number); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := r.checkHeld(ctx, rr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rr.Status.MergeReceipt != nil {
+		t.Fatal("a foreign head adopted after a lost write received a merge receipt")
+	}
+	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved); c == nil ||
+		c.Reason != ReasonMergedWithForeignChange {
+		t.Fatalf("Approved = %+v; want MergedWithForeignChange", c)
 	}
 }

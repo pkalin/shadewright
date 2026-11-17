@@ -115,7 +115,7 @@ func TestRetargetedContentReadKeepsItsBound(t *testing.T) {
 func TestDeliveryAncestryReadKeepsTheGrace(t *testing.T) {
 	for _, verify := range []bool{false, true} {
 		t.Run(fmt.Sprintf("verify outcomes %t", verify), func(t *testing.T) {
-			if wait := ancestryRetry(t, verify, deliveryWindow+finalGrace-time.Second); wait > time.Second {
+			if wait := ancestryRetry(t, verify, deliveryWindow+finalGrace-time.Second, 0); wait > time.Second {
 				t.Fatalf("the retry waits %v; want at most the second left of the grace", wait)
 			}
 		})
@@ -123,8 +123,9 @@ func TestDeliveryAncestryReadKeepsTheGrace(t *testing.T) {
 }
 
 // ancestryRetry fails the ancestry read of the delivery at since after the merge, with the host asking for an
-// hour, and returns the wait of the retry, which must be shown and come with no error.
-func ancestryRetry(t *testing.T, verify bool, since time.Duration) time.Duration {
+// hour and the clock moving on by during while the read runs, and returns the wait of the retry, which must be
+// shown and come with no error.
+func ancestryRetry(t *testing.T, verify bool, since, during time.Duration) time.Duration {
 	t.Helper()
 	w := newRolloutWorld(t, completeStatefulSet())
 	w.r.VerifyOutcomes = verify
@@ -136,6 +137,7 @@ func ancestryRetry(t *testing.T, verify bool, since time.Duration) time.Duration
 	w.git.SetFail(func(op string) error {
 		if op == "IsAncestor" {
 			asked++
+			w.now = w.now.Add(during)
 			return delayedOutage()
 		}
 		return nil
@@ -154,7 +156,7 @@ func ancestryRetry(t *testing.T, verify bool, since time.Duration) time.Duration
 	if err != nil || res.RequeueAfter <= 0 {
 		t.Fatalf("Reconcile = %+v, %v; want a wait and no error", res, err)
 	}
-	if meta.FindStatusCondition(w.request(t).Status.Conditions, conditionGitReadRetry) == nil {
+	if meta.FindStatusCondition(w.request(t).Status.Conditions, api.ConditionGitReadRetry) == nil {
 		t.Fatal("the retry of the ancestry read is not shown")
 	}
 	return res.RequeueAfter
@@ -187,7 +189,7 @@ func TestReviewCheckReadOnAPollKeepsTheRecheckPeriod(t *testing.T) {
 	if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
 		t.Fatal(err)
 	}
-	if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) == nil {
+	if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
 		t.Fatal("the retry of the review check read is not shown")
 	}
 }

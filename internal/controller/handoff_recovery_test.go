@@ -318,7 +318,7 @@ func TestRecoverHandoffRetriesARefusedReadUntilTheGraceEnds(t *testing.T) {
 		}
 		return nil
 	})
-	if res, err := r.recheck(ctx, rr); err != nil || res.RequeueAfter < r.pullRequestPollInterval() || meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) == nil {
+	if res, err := r.recheck(ctx, rr); err != nil || res.RequeueAfter < r.pullRequestPollInterval() || meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
 		t.Fatalf("a refused read needs a visible poll: %+v %v", res, err)
 	}
 	if rr.Status.Phase != api.PhasePolicyChecked {

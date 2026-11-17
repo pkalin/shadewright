@@ -75,7 +75,7 @@ func TestRecoveryRetriesWhenTheRepositoryCannotBeOpened(t *testing.T) {
 	}
 	// A failed Git read past the deadline is a visible retry within the grace, not an error for the backoff.
 	if res, err := r.recheck(ctx, rr); err != nil || res.RequeueAfter <= 0 ||
-		meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) == nil {
+		meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
 		t.Fatalf("a recovery that could not open the repository was not retried: %+v %v", res, err)
 	}
 	if rr.Status.Phase != api.PhasePolicyChecked {

@@ -36,24 +36,41 @@ import (
 )
 
 // gitReadSite is one call that gives a failed Git read its bound: retryGitRead, waitOrFail (which hands a failed
-// read to retryGitRead), deliveryRetry (the same for the delivery) or withReadBound. bound is the source text of its bound argument. check, when set, makes
-// the read fail at that site with a delay of hostDelay one second before the bound (or, for a bound relative to
-// now, at once) and returns the wait and what was left of the bound; a bound passed down from the caller (bound)
-// is checked at the caller's row. An unbounded site names its reason in the call (unboundedRead).
+// read to retryGitRead), deliveryRetry (the same for the delivery) or withReadBound. bound is the source text of its
+// bound argument. check, when set, makes the read fail at that site with a delay of hostDelay, started c.left
+// before the bound, with the executor's clock moving on by c.during while the call runs, and reports the wait, or
+// that the path's own end ran instead (expired). A bound passed down from the caller (bound) is checked at the
+// caller's row. An unbounded site names its reason in the call (unboundedRead).
 type gitReadSite struct {
 	bound string
-	check func(t *testing.T) (wait, left time.Duration)
+	check func(t *testing.T, c boundCase) (wait time.Duration, expired bool)
 }
+
+// boundCase is one case of the generated test over the bounded sites: the time left of the bound when the failing
+// call starts, how long the call takes on the executor's clock, and --verify-outcomes (for the delivery sites).
+type boundCase struct {
+	left, during time.Duration
+	verify       bool
+}
+
+func (c boundCase) String() string {
+	return fmt.Sprintf("left %v, call %v, verify outcomes %t", c.left, c.during, c.verify)
+}
+
+// testClock is the executor's clock of a check, moved on by hand.
+type testClock struct{ at time.Time }
+
+// clockOf sets r's clock to a testClock at the current whole second and returns it.
+func clockOf(r *RemediationRequestReconciler) *testClock {
+	c := &testClock{at: time.Now().Truncate(time.Second)}
+	r.Now = func() time.Time { return c.at }
+	return c
+}
+
+func (c *testClock) advance(d time.Duration) { c.at = c.at.Add(d) }
 
 // failedRead is a failed Git read whose host asked for hostDelay.
 func failedRead() error { return readFailure(opGet, delayedOutage()) }
-
-// fixedClock sets r's clock to now, whole seconds, and returns it.
-func fixedClock(r *RemediationRequestReconciler) time.Time {
-	now := time.Now().Truncate(time.Second)
-	r.Now = func() time.Time { return now }
-	return now
-}
 
 func mustWait(t *testing.T, res reconcile.Result, err error) time.Duration {
 	t.Helper()
@@ -61,6 +78,21 @@ func mustWait(t *testing.T, res reconcile.Result, err error) time.Duration {
 		t.Fatalf("a failed Git read returned an error for the backoff: %v", err)
 	}
 	return res.RequeueAfter
+}
+
+// failOnce fails the first call op of g with a delay of hostDelay, after moving clock on by during, and reports
+// whether it did.
+func failOnce(g interface{ SetFail(func(string) error) }, op string, clock *testClock, during time.Duration) *bool {
+	failed := new(bool)
+	g.SetFail(func(name string) error {
+		if name == op && !*failed {
+			*failed = true
+			clock.advance(during)
+			return delayedOutage()
+		}
+		return nil
+	})
+	return failed
 }
 
 const (
@@ -72,7 +104,7 @@ const (
 
 var gitReadSites = map[string]gitReadSite{
 	"branchchange.go:checkRetargeted:1": {bound: "readBoundAt(since.Add(mergeContentWait))",
-		check: func(t *testing.T) (time.Duration, time.Duration) {
+		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 			ctx := context.Background()
 			if err := g.SetBase(rr.Status.PullRequest.Number, freshOtherBranch); err != nil {
@@ -85,43 +117,53 @@ var gitReadSites = map[string]gitReadSite{
 			if err != nil {
 				t.Fatal(err)
 			}
-			now := fixedClock(r)
-			rr.Status.MergeContentUnreadSince = &metav1.Time{Time: now.Add(-mergeContentWait + time.Second)}
-			g.SetFail(func(op string) error {
-				if op == opParents {
-					return delayedOutage()
-				}
-				return nil
-			})
-			_, err = r.checkRetargeted(ctx, g, rr, cr, freshOtherBranch)
+			clock := clockOf(r)
+			ctx = withReadsStart(ctx, clock.at)
+			rr.Status.MergeContentUnreadSince = &metav1.Time{Time: clock.at.Add(-mergeContentWait + c.left)}
+			failOnce(g, opParents, clock, c.during)
+			ref, err := r.checkRetargeted(ctx, g, rr, cr, freshOtherBranch)
+			if err == nil {
+				// The read failed past the content wait: the request ends MergeContentUnreadable.
+				return 0, ref != nil
+			}
 			res, err := r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
-			return mustWait(t, res, err), time.Second
+			return mustWait(t, res, err), false
 		}},
 	"branchchange.go:followHeldMerge:1": {bound: heldLockBound},
 	"branchchange.go:lookUnsettled:1":   {bound: callerBound},
 	"cancel.go:cancelFailed:1": {bound: "readBoundIn(left)",
-		check: func(t *testing.T) (time.Duration, time.Duration) {
+		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, _, rr := settlementWorld(t, api.PhaseAwaitingApproval)
-			now := fixedClock(r)
+			clock := clockOf(r)
 			rr.Status.Conditions = append(rr.Status.Conditions, metav1.Condition{Type: api.ConditionCancelPending,
 				Status: metav1.ConditionTrue, Reason: ReasonCancelFailing, Message: "failing",
-				LastTransitionTime: metav1.NewTime(now.Add(-cleanupFailingBound))})
-			res, err := r.cancelFailed(context.Background(), rr, failedRead(), "read the pull request")
-			return mustWait(t, res, err), time.Second
+				LastTransitionTime: metav1.NewTime(clock.at.Add(-cleanupFailingBound + c.left - time.Second))})
+			ctx := withReadsStart(context.Background(), clock.at)
+			clock.advance(c.during)
+			if _, past := r.cancelBound(rr); past {
+				return 0, true
+			}
+			res, err := r.cancelFailed(ctx, rr, failedRead(), "read the pull request")
+			return mustWait(t, res, err), false
 		}},
 	helperSite:                   {},
 	"handoff.go:retryRecovery:1": {bound: "readBoundAt(rr.Status.Deadline.Add(handoffRecoveryGrace))", check: checkRecoveryBound},
 	"incidentcancel.go:followCancelledMerge:1": {bound: heldLockBound},
 	"incidentcancel.go:closeCancelled:1":       {bound: heldLockBound},
 	"merge.go:mergeCheckFailed:1": {bound: "readBoundAt(since.Add(mergeCommitWait))",
-		check: func(t *testing.T) (time.Duration, time.Duration) {
+		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
-			now := fixedClock(r)
-			rr.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Add(-mergeCommitWait + time.Second)}
-			ctx := context.Background()
+			clock := clockOf(r)
+			rr.Status.MergeCommitAwaitedSince = &metav1.Time{Time: clock.at.Add(-mergeCommitWait + c.left)}
+			ctx := withReadsStart(context.Background(), clock.at)
+			clock.advance(c.during)
 			err := r.mergeCheckFailed(ctx, rr, failedRead())
+			if err == nil {
+				// Past the wait for the merge: the merge is recorded with a plan not shown fresh.
+				return 0, true
+			}
 			res, err := r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
-			return mustWait(t, res, err), time.Second
+			return mustWait(t, res, err), false
 		}},
 	"merge.go:mergeNotRecorded:1":   {bound: callerBound},
 	"phases.go:deliveryRetry:1":     {bound: callerBound},
@@ -134,18 +176,20 @@ var gitReadSites = map[string]gitReadSite{
 	"pullrequest.go:refuseOrWait:3": {bound: "unboundedRead(noBoundRefusedWatch)"},
 	"pullrequest.go:waitOrFail:1":   {bound: callerBound},
 	"refusedclose.go:cleanupFailedOnDelete:1": {bound: "readBoundIn(failingLeft)",
-		check: func(t *testing.T) (time.Duration, time.Duration) {
+		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
-			now := fixedClock(r)
+			clock := clockOf(r)
 			err := failedRead()
 			failing := cleanupFailingCondition(rr, err)
-			failing.LastTransitionTime = metav1.NewTime(now.Add(-cleanupFailingBound))
+			failing.LastTransitionTime = metav1.NewTime(clock.at.Add(-cleanupFailingBound + c.left - time.Second))
 			rr.Status.Conditions = append(rr.Status.Conditions, failing)
-			res, release, err := r.cleanupFailedOnDelete(context.Background(), rr, err)
+			ctx := withReadsStart(context.Background(), clock.at)
+			clock.advance(c.during)
+			res, release, err := r.cleanupFailedOnDelete(ctx, rr, err)
 			if release != nil {
-				t.Fatal("the cleanup let the request go before its bound")
+				return 0, true
 			}
-			return mustWait(t, res, err), time.Second
+			return mustWait(t, res, err), false
 		}},
 	"remediationrequest_controller.go:checkFailed:1": {bound: "unboundedRead(noBoundPolicyCheck)"},
 	"remediationrequest_controller.go:recheck:1":     {bound: "lookBound", check: checkLookBound},
@@ -153,63 +197,68 @@ var gitReadSites = map[string]gitReadSite{
 	"targetlock.go:heldUnsettled:1":                  {bound: heldLockBound},
 }
 
-// checkRequestBound: a request in PolicyChecked one second before its deadline (requestBound) fails a read.
-func checkRequestBound(t *testing.T) (time.Duration, time.Duration) {
-	r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
-	now := fixedClock(r)
-	rr.Status.Deadline = &metav1.Time{Time: now.Add(time.Second)}
-	res, err := r.refuseOrWait(context.Background(), rr, unknownChange(failedRead()).err)
-	wait := mustWait(t, res, err)
-	if res, err = r.refuseOrWait(context.Background(), rr, failedRead()); mustWait(t, res, err) > wait {
-		wait = res.RequeueAfter
+// checkRequestBound: a request in PolicyChecked c.left before its deadline (requestBound) fails a read that takes
+// c.during.
+func checkRequestBound(t *testing.T, c boundCase) (time.Duration, bool) {
+	var wait time.Duration
+	for _, unknown := range []bool{true, false} {
+		r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
+		clock := clockOf(r)
+		rr.Status.Deadline = &metav1.Time{Time: clock.at.Add(c.left)}
+		ctx := withReadsStart(context.Background(), clock.at)
+		clock.advance(c.during)
+		err := failedRead()
+		if unknown {
+			err = unknownChange(err).err
+		}
+		res, rerr := r.refuseOrWait(ctx, rr, err)
+		wait = max(wait, mustWait(t, res, rerr))
 	}
-	return wait, time.Second
+	return wait, false
 }
 
-// checkRecoveryBound: the recovery of a handoff fails a read one second before the end of its grace.
-func checkRecoveryBound(t *testing.T) (time.Duration, time.Duration) {
+// checkRecoveryBound: the recovery of a handoff fails a read that takes c.during, c.left before the end of its
+// grace.
+func checkRecoveryBound(t *testing.T, c boundCase) (time.Duration, bool) {
 	r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
-	now := fixedClock(r)
-	rr.Status.Deadline = &metav1.Time{Time: now.Add(-handoffRecoveryGrace + time.Second)}
-	res, err := r.retryRecovery(context.Background(), rr, failedRead())
-	return mustWait(t, res, err), time.Second
+	clock := clockOf(r)
+	rr.Status.Deadline = &metav1.Time{Time: clock.at.Add(-handoffRecoveryGrace + c.left)}
+	ctx := withReadsStart(context.Background(), clock.at)
+	clock.advance(c.during)
+	res, err := r.retryRecovery(ctx, rr, failedRead())
+	if rr.Status.Phase == api.PhaseNeedsIntervention {
+		// Past the grace: the request ended HandoffRecoveryFailed.
+		return 0, true
+	}
+	return mustWait(t, res, err), false
 }
 
-// checkDeliveryBound: the ancestry read of the delivery fails one second before the grace ends, both modes.
-func checkDeliveryBound(t *testing.T) (time.Duration, time.Duration) {
-	return max(ancestryRetry(t, false, deliveryWindow+finalGrace-time.Second),
-		ancestryRetry(t, true, deliveryWindow+finalGrace-time.Second)), time.Second
+// checkDeliveryBound: the ancestry read of the delivery fails c.left before the grace ends.
+func checkDeliveryBound(t *testing.T, c boundCase) (time.Duration, bool) {
+	return ancestryRetry(t, c.verify, deliveryWindow+finalGrace-c.left, c.during), false
 }
 
-// checkDeliveryWindow: the same one second before the delivery window ends, when the verdict is due.
-func checkDeliveryWindow(t *testing.T) (time.Duration, time.Duration) {
-	return max(ancestryRetry(t, false, deliveryWindow-time.Second),
-		ancestryRetry(t, true, deliveryWindow-time.Second)), time.Second
+// checkDeliveryWindow: the same c.left before the delivery window ends, when the verdict is due.
+func checkDeliveryWindow(t *testing.T, c boundCase) (time.Duration, bool) {
+	return ancestryRetry(t, c.verify, deliveryWindow-c.left, c.during), false
 }
 
-// checkLookBound: the look at the pull request of a request in PolicyChecked one second before its deadline fails;
-// the steps after it go on, and the look's retry keeps the deadline (lookBound).
-func checkLookBound(t *testing.T) (time.Duration, time.Duration) {
+// checkLookBound: the look at the pull request of a request in PolicyChecked c.left before its deadline fails
+// after c.during; the steps after it go on, and the look's retry keeps the deadline (lookBound).
+func checkLookBound(t *testing.T, c boundCase) (time.Duration, bool) {
 	r, g, rr := readFailureWorld(t, pathCreate)
-	now := fixedClock(r)
-	rr.Status.Deadline = &metav1.Time{Time: now.Add(time.Second)}
-	ctx := context.Background()
+	clock := clockOf(r)
+	rr.Status.Deadline = &metav1.Time{Time: clock.at.Add(c.left)}
+	ctx := withReadsStart(context.Background(), clock.at)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		t.Fatal(err)
 	}
-	failed := false
-	g.SetFail(func(op string) error {
-		if op == opGet && !failed {
-			failed = true
-			return delayedOutage()
-		}
-		return nil
-	})
+	failed := failOnce(g, opGet, clock, c.during)
 	res, err := r.recheck(ctx, rr)
-	if !failed {
+	if !*failed {
 		t.Fatal("the look never read the pull request")
 	}
-	return mustWait(t, res, err), time.Second
+	return mustWait(t, res, err), false
 }
 
 // gitReadCalls lists every call of retryGitRead, waitOrFail, deliveryRetry and withReadBound in the package's code (tests
@@ -266,8 +315,10 @@ func gitReadCalls(t *testing.T) map[string]string {
 }
 
 // Every call that bounds the retry of a failed Git read is in gitReadSites, with the bound it passes, and each
-// bound of its own holds: a read that fails one second before it, with the host asking for an hour, is looked at
-// again within that second. A new call site fails here until it is added with its bound and a check.
+// bound of its own holds by construction, over generated cases of (time left, call duration, --verify-outcomes):
+// a read that fails with the host asking for an hour is looked at again no later than its bound, and a bound that
+// passed while the call ran ends the wait now (at most boundPassedWait), unless the path's own end ran at once. A
+// new call site fails here until it is added with its bound and a check.
 func TestEveryGitReadRetrySiteKeepsItsBound(t *testing.T) {
 	calls := gitReadCalls(t)
 	for site, bound := range calls {
@@ -289,13 +340,35 @@ func TestEveryGitReadRetrySiteKeepsItsBound(t *testing.T) {
 			t.Errorf("gitReadSites lists %s, which is no call site any more", site)
 		}
 	}
+	cases := make([]boundCase, 0, 16)
+	for _, left := range []time.Duration{time.Second, 30 * time.Second} {
+		for _, during := range []time.Duration{0, 500 * time.Millisecond, 2 * time.Second, time.Minute} {
+			for _, verify := range []bool{false, true} {
+				cases = append(cases, boundCase{left: left, during: during, verify: verify})
+			}
+		}
+	}
 	for site, row := range gitReadSites {
 		if row.check == nil {
 			continue
 		}
 		t.Run(site, func(t *testing.T) {
-			if wait, left := row.check(t); wait > left {
-				t.Fatalf("the retry waits %v, past the %v left of its bound", wait, left)
+			for _, c := range cases {
+				t.Run(c.String(), func(t *testing.T) {
+					wait, expired := row.check(t, c)
+					rest := c.left - c.during
+					switch {
+					case expired && rest > 0:
+						t.Fatalf("the path ended with %v of its bound left", rest)
+					case expired:
+					case wait <= 0:
+						t.Fatalf("the retry has no wait (%v)", wait)
+					case rest > 0 && wait > rest:
+						t.Fatalf("the retry waits %v, past the %v left of its bound", wait, rest)
+					case rest <= 0 && wait > boundPassedWait:
+						t.Fatalf("the bound passed during the call, and the retry still waits %v", wait)
+					}
+				})
 			}
 		})
 	}

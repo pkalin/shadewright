@@ -1537,7 +1537,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		res, err := reconcileResult()
 		Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
 		Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
-		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry).Message).
 			To(ContainSubstring("check what the merged pull request held"), "the read failure is the cause named")
 		Expect(faulty.count(opClose)).To(BeZero(), "a merged pull request is not closed again")
 		faulty.failOn("", nil)
@@ -1593,7 +1593,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		res, err := reconcileResult()
 		Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
 		Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
-		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry).Message).
 			To(ContainSubstring("check what the branch holds"))
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
 		Expect(faulty.count(opOpen)).To(BeZero())
@@ -1929,7 +1929,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		res, err = reconcileResult()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
-		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).NotTo(BeNil())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(cancelPending().Reason).To(Equal(ReasonCancelFailing))
 		Expect(cancelPending().LastTransitionTime).To(Equal(start))
@@ -2242,7 +2242,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			return nil
 		})
 		Expect(reconcileOnce()).To(Succeed())
-		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).NotTo(BeNil())
 		clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
 		Expect(reconcileOnce()).To(Succeed())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
@@ -4356,7 +4356,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			res, err := reconcileResult()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
-			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).NotTo(BeNil())
 			Expect(gone()).To(BeFalse(), "a failed read that is not a refusal is retried")
 			Expect(refusedOf().LastTransitionTime.Time).To(BeTemporally("==", first), "the first refusal is kept")
 
@@ -5055,7 +5055,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				// The failed look is a Git read retried visibly, after the host's delay when it is longer than the
 				// poll interval (decision of 2026-11-17).
 				Expect(wait).To(Equal(3 * time.Minute))
-				Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+				Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).NotTo(BeNil())
 				Expect(paused()).To(BeNil())
 				Expect(recorder.Events).To(Receive(Equal("Normal " + EventWritesResumed + " " + messageWritesResumed)))
 			})
@@ -5344,7 +5344,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			// 2026-11-17); the conflict on the mark never shortens it.
 			Expect(res.RequeueAfter).To(Equal(max(30*time.Second, r.pullRequestPollInterval())),
 				"the wait of the failed read stands")
-			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).NotTo(BeNil())
 			Expect(stopped()).NotTo(BeNil(), "the retry after the conflict marks")
 		})
 
@@ -5562,7 +5562,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			// The poll interval, or the host's delay when longer (decision of 2026-11-17).
 			Expect(res.RequeueAfter).To(Equal(max(42*time.Second, reconciler().pullRequestPollInterval())))
 			got := fetch()
-			Expect(meta.FindStatusCondition(got.Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).NotTo(BeNil())
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 			Expect(got.Status.PullRequest.RenderedTargetHead).To(Equal(rendered), "a head not rendered is not recorded")
 
@@ -5743,7 +5743,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			res, err := reconcileResult()
 			Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
 			Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
-			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry).Message).
 				To(ContainSubstring("read the file on the branch"))
 			Expect(faulty.faults()).To(Equal(1))
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
@@ -6174,7 +6174,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					if gitReads[strings.Fields(op)[0]] {
 						Expect(err).NotTo(HaveOccurred())
 						Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
-						c := meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)
+						c := meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
 						Expect(c).NotTo(BeNil())
 						Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
 					} else {

@@ -209,9 +209,9 @@ type scenario struct {
 	// forceEscalation sends every run of the scenario to the escalation model with the read tools, whatever
 	// the model source: an escalation scenario (escalation_scenarios_test.go), whose facts only a read shows.
 	forceEscalation bool
-	// behindReads are values of the diagnosis that only the expected reads show: absent from the context the
-	// builder makes, present in a tool result (TestEscalationFactsOnlyBehindReads).
-	behindReads []string
+	// behindReads are the rubric facts that only the expected reads show: not scored by the first request the
+	// product builds, scored by the tool results (TestEscalationFactsOnlyBehindReads).
+	behindReads []rubricFact
 }
 
 // policyFile holds a scenario's RemediationPolicies. Every scenario has one; a variant without its own takes

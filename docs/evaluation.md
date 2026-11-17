@@ -5,7 +5,7 @@ replays recorded replies, and on demand against the real model ([design 11.2](de
 [ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 3, [#78](https://github.com/pkalin/shadewright/issues/78)).
 
 <span class="sw-status sw-built">built</span> The harness, the recorded contexts of ten fleet scenarios and of
-their variants, three [escalation scenarios](#the-escalation-scenarios) whose deciding fact only a read tool shows, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
+their variants, two [escalation scenarios](#the-escalation-scenarios) whose deciding fact only a read tool shows, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
 <span class="sw-status sw-planned">planned</span> Contexts and replies recorded from lab runs instead of written by
 hand, passing results stored in this repository, and the analyzer's run-time check that refuses automatic analysis
 without a passing result for its manifest digest. Until that check exists, a run with a real model in the lab is an
@@ -207,8 +207,10 @@ The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
 A run of the ten scenarios, their variants (three so far, `oom/rollout`, `oom/absorbed` and `keda-at-ceiling/wide-policy`)
-and the three escalation scenarios is sixteen analyses per repeat. The escalation scenarios need
-`EVAL_ESCALATION_DEPLOYMENT`: without it each is handed off (`EscalationNotConfigured`) and fails. Each analysis is bounded by the loop's limits (at most 7 model
+and the two escalation scenarios is fifteen analyses per repeat. The escalation scenarios need an escalation
+model: on Foundry `EVAL_ESCALATION_DEPLOYMENT` with `EVAL_ESCALATION_MODEL` (the deployment alone is refused
+before any call), through the Anthropic API ([below](#a-claude-model-the-anthropic-api)) `EVAL_ESCALATION_MODEL`.
+Without one, each escalation scenario is handed off (`EscalationNotConfigured`) and fails. Each analysis is bounded by the loop's limits (at most 7 model
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
@@ -488,26 +490,29 @@ scenario, `expected.yaml`, `incident.yaml`, `objects.yaml` and `policy.yaml`:
 | --- | --- |
 | `about` | Required: what the scenario tests and which read shows the deciding fact |
 | `fleetScenario` | The fleet scenario whose `expected.yaml`, `incident.yaml`, `objects.yaml`, `policy.yaml` and `metrics.yaml` it takes, unchanged; the directory may not hold its own. Left out, the scenario is synthetic: its own `expected.yaml`, in the fleet's schema, under a name no fleet scenario has |
-| `behindReads` | Required: values of the diagnosis that only the expected reads show |
+| `behindReads` | Required: the facts of `rubric.yaml`, verbatim, that only the expected reads show; a name that is no scored fact of the rubric is refused |
 
 The harness refuses an escalation scenario whose rubric lists no `reads`, or that has variants. The tests check,
 for every escalation scenario, that it passes on its recorded replies (`TestEscalationScenariosPass`); that each
-value of `behindReads` is absent from the first model request, the system prompt and the context the builder made,
-and present in a tool result of the run (`TestEscalationFactsOnlyBehindReads`); and that taking any one expected
+fact `behindReads` names is not scored by the first model request, the system prompt and the context the builder
+made, and is scored by the tool results of the run, both with the rubric's own terms matched on word boundaries
+(so the `256` of a CPU request is not taken from a `256Mi`; `TestEscalationFactsOnlyBehindReads`); and that taking any one expected
 read out of the replies fails the run, with that read reported missing (`TestEscalationScenarioFailsWithoutItsRead`).
 
 | Scenario | What it tests | Expected reads | Outcome |
 | --- | --- | --- | --- |
 | `escalation/unschedulable` | The fleet's `unschedulable`: the context shows `3 Insufficient cpu` but not the pod template's requests. Its third fact, the 256 CPU request of the web container, unscored in the fleet scenario, is scored here from the Deployment | `get_resource Deployment/web` | refusal |
 | `escalation/probe-path` | Synthetic. The liveness probe fails with HTTP 404 and the container restarts (exit code 137, which can pass for a memory kill). The probe's path, `/healthz`, is only in the Deployment's pod template | `get_resource Deployment/web` | refusal: changing a probe is not in the catalog |
-| `escalation/secret-key` | Synthetic. The Secret `web-credentials` exists, but its key `api-token` was renamed, so the container stays in `CreateContainerConfigError`. The kubelet's error in the context names the key; the environment variable that reads it (`API_TOKEN`) is only in the Deployment, and only the yes/no check tells a missing key from a missing Secret, without reading the Secret. No Secret value appears in the scenario, only key names | `get_resource Deployment/web`, `check_missing_reference Secret/web-credentials` | refusal: Secrets are excluded |
 
 Every file is `source: synthetic` or says it is synthetic: written by hand, not recorded, with placeholder UIDs and
 an image on the reserved `.invalid` domain.
 
-A fourth case of #504, a Service selector that does not match the pod labels, is not built: no read tool reads a
+Two cases of #504 are not built. A Service selector that does not match the pod labels: no read tool reads a
 Service (`get_resource` reads Pods, Deployments, StatefulSets and ReplicaSets) and the analyzer has no RBAC on
-Services, so the selector cannot sit behind a read. The other groups of #504 (a context cut past the logs bound, a
+Services, so the selector cannot sit behind a read ([#847](https://github.com/pkalin/shadewright/issues/847)). A
+renamed Secret key: the kubelet's error in the context already names the missing key, and the fact only a read
+could add, which keys the Secret has, is shown by no read tool (`check_missing_reference` answers from the pod
+status and Events and never reads the Secret, and `get_resource` reads no Secret). The other groups of #504 (a context cut past the logs bound, a
 failed source, a plausible wrong first guess) follow in a second change.
 
 ## The grouping cases

@@ -4,4 +4,4 @@ about: >-
   404 and the kubelet restarts the container. The context shows the failed probe and the restarts but not the
   probe's path; the escalation model reads the Deployment with get_resource and names the path /healthz.
 behindReads:
-  - '"path": "/healthz"'
+  - the probe requests the path /healthz of the web container

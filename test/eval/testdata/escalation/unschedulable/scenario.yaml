@@ -7,4 +7,4 @@ about: >-
   and names the 256 CPU request of the web container.
 fleetScenario: unschedulable
 behindReads:
-  - '"cpu": "256"'
+  - the 256 CPU request of the web container

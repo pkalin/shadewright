@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
@@ -52,8 +53,8 @@ type escalationScenario struct {
 	// FleetScenario names the fleet scenario (testdata/scenarios/<name>) whose expected.yaml, incident.yaml,
 	// objects.yaml and policy.yaml it takes, unchanged; empty for a synthetic scenario with its own files.
 	FleetScenario string `json:"fleetScenario,omitempty"`
-	// BehindReads are values the diagnosis names that only the expected reads show: never in the context the
-	// builder makes, always in a tool result of the recorded run.
+	// BehindReads names the facts of rubric.yaml, verbatim, that only the expected reads show: their terms are
+	// never in the first request the product builds, and always in a tool result of the recorded run.
 	BehindReads []string `json:"behindReads"`
 }
 
@@ -101,10 +102,8 @@ func loadEscalationScenario(scheme *runtime.Scheme, name string) (*scenario, err
 	if strings.TrimSpace(meta.About) == "" {
 		return nil, fmt.Errorf("%s: about is required", escalationFile)
 	}
-	if len(meta.BehindReads) == 0 || slices.ContainsFunc(meta.BehindReads, func(v string) bool {
-		return strings.TrimSpace(v) == ""
-	}) {
-		return nil, fmt.Errorf("%s: behindReads needs at least one value, none empty", escalationFile)
+	if len(meta.BehindReads) == 0 {
+		return nil, fmt.Errorf("%s: behindReads needs at least one fact", escalationFile)
 	}
 	variants, err := exists(filepath.Join(dir, variantsDir))
 	if err != nil {
@@ -141,7 +140,15 @@ func loadEscalationScenario(scheme *runtime.Scheme, name string) (*scenario, err
 	if len(s.reads) == 0 {
 		return nil, errors.New("rubric.yaml: an escalation scenario must list the reads it expects")
 	}
-	s.forceEscalation, s.behindReads = true, meta.BehindReads
+	for _, name := range meta.BehindReads {
+		i := slices.IndexFunc(s.rubric.Facts, func(f rubricFact) bool { return f.Fact == name })
+		if i < 0 || s.rubric.Facts[i].Unscored != "" {
+			return nil, fmt.Errorf("%s: behindReads names %q, which is no scored fact of rubric.yaml", escalationFile,
+				name)
+		}
+		s.behindReads = append(s.behindReads, s.rubric.Facts[i])
+	}
+	s.forceEscalation = true
 	return s, nil
 }
 
@@ -186,9 +193,11 @@ func TestEscalationScenariosPass(t *testing.T) {
 	}
 }
 
-// The facts an escalation scenario scores from its reads cannot be reached from the context: each value of
-// behindReads is absent from the first request (the system prompt and the context the builder made) and
-// present in a tool result of the recorded run.
+// The facts an escalation scenario scores from its reads cannot be reached from the context: for each fact
+// behindReads names, the rubric's own terms do not score it against the first request the product builds (the
+// system prompt and the context, every message of it), and do score it against the tool results of the
+// recorded run. Terms are matched without case and on word boundaries (termIn), so a "256" scored for a CPU
+// request is not taken from a "256Mi" of the system prompt, and a plain-text "cpu request 256" is.
 func TestEscalationFactsOnlyBehindReads(t *testing.T) {
 	scheme, all := mustEscalationScenarios(t)
 	for _, s := range all {
@@ -203,16 +212,83 @@ func TestEscalationFactsOnlyBehindReads(t *testing.T) {
 			var prompt strings.Builder
 			for _, m := range res.prompt {
 				prompt.WriteString(m.Content)
+				prompt.WriteString("\n")
 			}
-			for _, v := range s.behindReads {
-				if strings.Contains(prompt.String(), v) {
-					t.Errorf("%q is in the context: triage could reach it without a read", v)
+			tools := strings.Join(res.toolText, "\n")
+			for _, f := range s.behindReads {
+				if factReached(f, prompt.String()) {
+					t.Errorf("the fact %q is scored by the first request alone: triage could reach it without a read",
+						f.Fact)
 				}
-				if !slices.ContainsFunc(res.toolText, func(text string) bool { return strings.Contains(text, v) }) {
-					t.Errorf("%q is in no tool result of the run: %q", v, res.toolText)
+				if !factReached(f, tools) {
+					t.Errorf("the fact %q is scored by no tool result of the run: %q", f.Fact, res.toolText)
 				}
 			}
 		})
+	}
+}
+
+// factReached reports whether text holds the terms that score f, as scoreDiagnosis combines them (every term
+// of All, one of Any, one group of AnyOf), each matched by termIn. Subject terms are left out: the Incident
+// holds them.
+func factReached(f rubricFact, text string) bool {
+	in := func(term string) bool { return termIn(term, text) }
+	if !slices.ContainsFunc(f.All, func(term string) bool { return !in(term) }) &&
+		(len(f.Any) == 0 || slices.ContainsFunc(f.Any, in)) &&
+		(len(f.AnyOf) == 0 || slices.ContainsFunc(f.AnyOf, func(g []string) bool {
+			return !slices.ContainsFunc(g, func(term string) bool { return !in(term) })
+		})) {
+		return len(f.All) > 0 || len(f.Any) > 0 || len(f.AnyOf) > 0
+	}
+	return false
+}
+
+// termIn reports whether term is in text, without case, with no letter or digit glued to an end of the term
+// that is itself a letter or digit: "256" is in "requests 256 CPUs" and in `"cpu": "256"`, not in "256Mi".
+func termIn(term, text string) bool {
+	word := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+	t, l := []rune(strings.ToLower(term)), []rune(strings.ToLower(text))
+	if len(t) == 0 {
+		return false
+	}
+	for i := 0; i+len(t) <= len(l); i++ {
+		if !slices.Equal(l[i:i+len(t)], t) {
+			continue
+		}
+		if word(t[0]) && i > 0 && word(l[i-1]) {
+			continue
+		}
+		if end := i + len(t); word(t[len(t)-1]) && end < len(l) && word(l[end]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// termIn matches a term on word boundaries without case, so a value glued to a unit or another word is not taken
+// for it.
+func TestTermIn(t *testing.T) {
+	const path = "/healthz"
+	for _, c := range []struct {
+		term, text string
+		want       bool
+	}{
+		{"256", "the web container requests 256 CPUs", true},
+		{"256", `"cpu": "256"`, true},
+		{"256", "cpu request 256", true},
+		{"256", "a limit of 256Mi", false},
+		{"256", "sha256:00", false},
+		{"256", "2560 bytes", false},
+		{path, "GET /healthz returned 404", true},
+		{path, `"path": "/healthz"`, true},
+		{path, "/healthzcheck", false},
+		{"Insufficient cpu", "3 insufficient CPU.", true},
+		{"", "anything", false},
+	} {
+		if got := termIn(c.term, c.text); got != c.want {
+			t.Errorf("termIn(%q, %q) = %v, want %v", c.term, c.text, got, c.want)
+		}
 	}
 }
 
@@ -268,8 +344,9 @@ func TestEscalationScenarioFailsWithoutItsRead(t *testing.T) {
 	}
 }
 
-// The loader refuses an escalation scenario that is not one: no reads, no values behind reads, no about, a
-// synthetic one under a fleet scenario's name, and a fleet one that holds its own copy of the fleet's files.
+// The loader refuses an escalation scenario that is not one, each with its own message: no reads, no facts
+// behind reads or one the rubric does not score, no about, a variant, a synthetic one under a fleet scenario's
+// name, and a fleet one that holds its own copy of the fleet's files.
 func TestEscalationScenarioRefused(t *testing.T) {
 	scheme, err := newScheme()
 	if err != nil {
@@ -293,10 +370,10 @@ func TestEscalationScenarioRefused(t *testing.T) {
 		t.Fatalf("need a fleet and a synthetic escalation scenario, have %q and %q", fleet, synthetic)
 	}
 	cases := []struct {
-		name, scenario string
-		change         func(t *testing.T, dir string)
+		name, scenario, want string
+		change               func(t *testing.T, dir string)
 	}{
-		{"no reads", synthetic, func(t *testing.T, dir string) {
+		{"no reads", synthetic, "must list the reads it expects", func(t *testing.T, dir string) {
 			rewrite(t, filepath.Join(dir, "rubric.yaml"), func(s string) string {
 				i := strings.Index(s, "\nreads:")
 				if i < 0 {
@@ -305,25 +382,34 @@ func TestEscalationScenarioRefused(t *testing.T) {
 				return s[:i+1]
 			})
 		}},
-		{"no values behind reads", synthetic, func(t *testing.T, dir string) {
+		{"no facts behind reads", synthetic, "behindReads needs at least one fact", func(t *testing.T, dir string) {
 			changeMeta(t, dir, func(m *escalationScenario) { m.BehindReads = nil })
 		}},
-		{"an empty value behind reads", synthetic, func(t *testing.T, dir string) {
-			changeMeta(t, dir, func(m *escalationScenario) { m.BehindReads = append(m.BehindReads, " ") })
+		{"a fact not in the rubric", synthetic, "which is no scored fact of rubric.yaml", func(t *testing.T, dir string) {
+			changeMeta(t, dir, func(m *escalationScenario) { m.BehindReads = append(m.BehindReads, "no such fact") })
 		}},
-		{"no about", synthetic, func(t *testing.T, dir string) {
+		{"no about", synthetic, "about is required", func(t *testing.T, dir string) {
 			changeMeta(t, dir, func(m *escalationScenario) { m.About = " " })
 		}},
-		{"a variant", synthetic, func(t *testing.T, dir string) {
+		{"a variant", synthetic, "has no variants", func(t *testing.T, dir string) {
 			if err := os.MkdirAll(filepath.Join(dir, variantsDir, "v"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"own copy of a fleet file", fleet, func(t *testing.T, dir string) {
+		{"own copy of a fleet file", fleet, "comes from the fleet scenario", func(t *testing.T, dir string) {
 			if err := os.WriteFile(filepath.Join(dir, "objects.yaml"), []byte("# copy\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}},
+		// Only the name changes: a fleet scenario directory appears under the synthetic one's name, so the
+		// scenario is otherwise the one that loads below.
+		{"synthetic under a fleet name", synthetic, "may not take the fleet scenario name",
+			func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(filepath.Dir(filepath.Dir(dir)), "scenarios", filepath.Base(dir)),
+					0o700); err != nil {
+					t.Fatal(err)
+				}
+			}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -331,23 +417,12 @@ func TestEscalationScenarioRefused(t *testing.T) {
 			copyTestdata(t, root)
 			tc.change(t, filepath.Join(root, escalationDir, tc.scenario))
 			t.Chdir(root)
-			if _, err := loadEscalationScenario(scheme, tc.scenario); err == nil {
-				t.Error("loaded")
+			_, err := loadEscalationScenario(scheme, tc.scenario)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("got %v, want an error with %q", err, tc.want)
 			}
 		})
 	}
-	t.Run("synthetic under a fleet name", func(t *testing.T) {
-		root := t.TempDir()
-		copyTestdata(t, root)
-		if err := os.Rename(filepath.Join(root, escalationDir, synthetic),
-			filepath.Join(root, escalationDir, scnOOM)); err != nil {
-			t.Fatal(err)
-		}
-		t.Chdir(root)
-		if _, err := loadEscalationScenario(scheme, scnOOM); err == nil {
-			t.Error("loaded")
-		}
-	})
 	t.Run("unchanged copy loads", func(t *testing.T) {
 		root := t.TempDir()
 		copyTestdata(t, root)

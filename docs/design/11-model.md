@@ -66,11 +66,13 @@ address guards remain required. No redirects or proxy are used. Missing or
 unusable usage and failed sent calls cost the input estimate plus output bound
 and a rounded-up 10% margin; complete usage costs at least the input estimate.
 The raw body and joined decoded strings, numbers and object keys are scanned
-for credential echoes before any completion is returned, with whitespace and
-Unicode control and format characters removed before each comparison; a reply
+for credential echoes before any completion is returned, in a view that keeps
+only ASCII letters, digits and the key's punctuation, so no character inserted
+into the key hides it; a reply
 whose content or argument fields have a wrong JSON type is refused as malformed
-output with its own fixed text. Transformed keys and
-splits across replies remain outside this check. Output redaction, typed
+output with its own fixed text. Re-encoded keys (base64,
+percent encoding, homoglyphs) and splits across replies remain outside this check:
+the endpoint is trusted with the key at install. Output redaction, typed
 validation and deterministic policy still apply. [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md)
 remains Proposed.
 

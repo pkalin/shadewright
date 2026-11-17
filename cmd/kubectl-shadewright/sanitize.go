@@ -25,6 +25,6 @@ const (
 )
 
 // clean makes a string from the cluster or the model safe to print on a terminal (invariant 4), cut to
-// maxRunes runes: see [termtext.Clean]. The OpenAI-compatible provider's credential scan compares on the same
-// transformation.
+// maxRunes runes: see [termtext.Clean]. The OpenAI-compatible provider's credential scan skips escape
+// sequences by the same grammar ([termtext.EscapeEnd]).
 func clean(s string, maxRunes int) string { return termtext.Clean(s, maxRunes) }

@@ -53,3 +53,21 @@ func TestUnboundedAndCompact(t *testing.T) {
 		t.Fatalf("Compact = %q", got)
 	}
 }
+
+// EscapeEnd skips exactly what Clean skips: each whole sequence, and nothing where none starts.
+func TestEscapeEnd(t *testing.T) {
+	for _, seq := range []string{"\x1b[0m", "\x1b[38;5;196m", "\x1b]0;t\x07", "\x1b]8;;https://e.test/\x1b\\", "\u009b0m", "\u009d0;t\u009c", "\x1bPq#0\x1b\\", "\x1b(B", "\x1b7"} {
+		end, ok := EscapeEnd(seq+"b", 0)
+		if !ok || end != len(seq) {
+			t.Errorf("EscapeEnd(%q) = %d, %v", seq, end, ok)
+		}
+		if Clean("a"+seq+"b", -1) != "ab" {
+			t.Errorf("Clean does not skip %q", seq)
+		}
+	}
+	for _, s := range []string{"a", "[0m", "é", " "} {
+		if end, ok := EscapeEnd(s, 0); ok || end != 0 {
+			t.Errorf("EscapeEnd(%q) = %d, %v", s, end, ok)
+		}
+	}
+}

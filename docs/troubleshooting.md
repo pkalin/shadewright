@@ -503,7 +503,7 @@ malformed reply):
 
 | Log text | Meaning and action |
 | --- | --- |
-| `openai-compatible: the reply contains a credential` | The endpoint's key appeared in the reply, also split across parts or with whitespace, control or format characters inside. Rotate the key, then find out why the server or gateway echoes request headers |
+| `openai-compatible: the reply contains a credential` | The endpoint's key appeared in the reply, also split across fields or parts, or with other characters (of any kind but ASCII letters, digits and the key's own punctuation) or terminal escape sequences between its characters. Rotate the key, then find out why the server or gateway echoes request headers |
 | `openai-compatible: the reply has a field of the wrong type` | A content or argument field has the wrong JSON type, so the reply could not be checked for a split key; no key was seen. Do not rotate the key for this. Check the server and its model against the declared inference API with the qualification runbook |
 
 An empty or invalid model list, duplicate base or segment path prefix on the same

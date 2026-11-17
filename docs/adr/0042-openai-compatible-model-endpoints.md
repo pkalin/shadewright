@@ -107,27 +107,46 @@ choose no part of the request destination.
    API and prompt combination with the evaluation harness, including forced escalation.
    A transport smoke result is not a passing scenario evaluation.
 
-The credential echo check scans raw reply bytes before parsing a completion, then
-concatenates parsed strings, numbers and object keys in wire order. Every
-comparison removes whitespace and every Unicode control (Cc) and format (Cf)
-character from the text and the key, the characters the kubectl plugin drops
-when it prints, so a zero-width space, soft hyphen or NUL inside a key cannot
-pass the scan and then show the whole key on a screen. Each comparison also runs on the text
-as the plugin would show it after its terminal cleaning (whole escape sequences dropped, invalid
-UTF-8 as U+FFFD, whitespace removed), so the check covers the key as the plugin would print it;
-other transformations, such as encodings or reversal, are out of scope. It also scans decoded content and arguments, joining their values and
-keys across parts. It detects literal and JSON-escaped echoes, including keys split
-between content, argument keys and numeric values. It fails closed: the scan of
-every parsed value runs whatever the typed decode of content and arguments does, a
-reply that is not JSON is scanned as raw bytes, and a reply whose content or
-argument fields have a wrong JSON type is refused with its own fixed text, "the
-reply has a field of the wrong type", as malformed output like an echo (the
-completion parser refuses such a reply too). It does not detect transformed
-keys such as base64 or a key split across two replies. Outputs remain untrusted:
-the redactor checks records and telemetry, typed result and tool argument validation
-and deterministic policy constrain proposals, and credentials never authorize a
-remediation. These controls do not promise detection of every transformed secret;
-operators must trust the endpoint with its dedicated, spend-limited credential.
+The credential echo check searches an allow-list view of the reply for the key
+before any completion is returned. The view keeps only ASCII letters, digits and
+the punctuation characters the key itself contains, and drops every other
+character, of any Unicode category, assigned or not. A character inserted
+between the key's characters (a zero-width space, U+034F, a variation selector,
+a Hangul filler or a visible letter of another script) is dropped by
+construction, so the check does not depend on a list of characters a screen
+does not show. The view is built over every decoded string value of the reply in
+document order as one stream, so a key split across fields, parts or tool-call
+arguments is found too; a second stream adds the object keys in their place, and
+the fields the completion parser reads (text parts, content, arguments) are
+joined once more on their own. JSON text inside a string, such as tool-call
+arguments and structured content, is decoded up to three levels and takes the
+string's place in the streams; its text as written is searched as well. Each
+stream is also searched with whole terminal escape sequences left out (the
+grammar the kubectl plugin uses), because a terminal prints the characters on
+both sides of a sequence such as `ESC [0m` as one word while the view keeps the
+sequence's own letters. The raw bytes are searched the same way, and a reply that
+is not JSON is scanned only as raw bytes. Every pass is linear in the size of the
+reply; the tests bound the work at a fixed multiple of it.
+
+The key must be printable ASCII and at least 16 bytes; anything else is refused
+as malformed when the key file is read, before any call, so the view never
+searches for a key it cannot hold or one too short to search. The check fails
+closed: the scan of every value runs whatever the typed decode of content and
+arguments does, and a reply whose content or argument fields have a wrong JSON
+type is refused with its own fixed text, "the reply has a field of the wrong
+type", as malformed output like an echo (the completion parser refuses such a
+reply too).
+
+The check has a stated limit. A key that comes back re-encoded (base64, percent
+encoding, homoglyphs, reordered characters) or split across two replies is not
+found, and no check of this kind can find it. The endpoint is given the key at
+install and is trusted with it: the check stops an echo from reaching status,
+Events, logs and pull requests in a form a reader can use, and is not a defence
+against an endpoint that hides the key. Outputs remain untrusted: the redactor
+checks records and telemetry, typed result and tool argument validation and
+deterministic policy constrain proposals, and credentials never authorize a
+remediation. Operators must trust the endpoint with its dedicated,
+spend-limited credential.
 
 ## Consequences
 
@@ -167,7 +186,7 @@ Two trust assumptions remain:
 | Redirect or proxy steals a key | No redirects of any status and no environment proxy |
 | Public DNS rebinds into the cluster or metadata | Address checks on each connection; private addresses only for explicitly named Service hosts, never metadata or loopback |
 | Service impersonation | Verified TLS with the Service DNS name; cluster operators own certificates and Service routing. Pod creation in the Service's namespace, or edits of the Service or its EndpointSlices, bypass it (a pod can mount the serving certificate): only cluster administrators may create pods there |
-| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; scan the raw body before reply parsing and concatenations, without whitespace, control or format characters and as the plugin's terminal cleaning shows them, of every parsed string, number and object key, including decoded structured content and arguments, before returning a completion; a wrong-typed decoy field fails closed with its own fixed text |
+| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; before a completion is returned, search an allow-list view of the reply (ASCII letters, digits and the key's punctuation, every other character dropped) over the raw body and over every decoded string, number and object key in document order, with nested JSON decoded and with terminal escape sequences left out; a wrong-typed decoy field fails closed with its own fixed text. A re-encoded key (base64, percent encoding, homoglyphs) is not found: the endpoint is trusted with the key |
 | Server ignores schema or invents a tool | Shared parser, typed argument/result validation, closed catalog and deterministic policy; no output repair |
 | Server omits usage or returns 429 | Unknown usage costs the upper bound; no compatible-host unbilled exception |
 | Key rotation races a call | Read per attempt, bounded retry, no cached key; update source before revoking old key |

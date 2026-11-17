@@ -220,7 +220,9 @@ func TestErrorsNeverExposeTheKey(t *testing.T) {
 }
 
 func TestKeyFileErrorsAndCancellation(t *testing.T) {
-	for _, key := range []string{"", " ", "bad\nkey", strings.Repeat("k", 513), strings.Repeat("k", 4097)} {
+	// A key with a character outside printable ASCII is refused before any call: the echo check keeps only
+	// ASCII letters, digits and the key's punctuation, so it could not search for such a key.
+	for _, key := range []string{"", " ", "bad\nkey", strings.Repeat("k", 513), strings.Repeat("k", 4097), "sk-" + strings.Repeat("Ä", 16), "sk-\u00a0" + strings.Repeat("k", 16)} {
 		p, err := New(Config{Endpoint: endpoint, Deployment: "m", KeyFile: keyFile(t, key), MaxAttempts: 1})
 		if err != nil {
 			t.Fatal(err)

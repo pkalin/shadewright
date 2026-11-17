@@ -18,7 +18,6 @@ package openaicompatible
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,12 +30,11 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
+	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
@@ -589,34 +587,11 @@ func (p *Provider) readKey() (string, error) {
 	return key, nil
 }
 
-// containsKey also checks escaped JSON strings: a hostile server cannot echo the header into a model ID,
-// content or arguments that could later reach records, status or telemetry. Every comparison goes through
-// hasKey, so a zero-width or control character or a terminal escape sequence inside the key does not hide it.
+// containsKey reports whether the key is in data, read as one JSON document (or as raw bytes when data is
+// not valid JSON), by the allow-list view of [keyScan]. It does not check the shape of a reply.
 func containsKey(data []byte, key string) bool {
-	if bytes.Contains(data, []byte(key)) || hasKey(string(data), key) {
-		return true
-	}
-	var value any
-	if json.Unmarshal(data, &value) != nil {
-		return false
-	}
-	var has func(any) bool
-	has = func(v any) bool {
-		switch x := v.(type) {
-		case string:
-			return hasKey(x, key)
-		case []any:
-			return slices.ContainsFunc(x, has)
-		case map[string]any:
-			for k, e := range x {
-				if hasKey(k, key) || has(e) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	return has(value)
+	found, _ := keyIn(data, key)
+	return found
 }
 
 // completeUsage requires both counts even on Chat Completions. Foundry's historical parser stays unchanged.
@@ -658,48 +633,35 @@ func replyContainsKey(data []byte, api API, key string) bool {
 	return scanReply(data, api, key) != scanClean
 }
 
-// scanReply checks the text and arguments in the form the caller will decode: Responses text is
-// joined across parts, and structured content and tool arguments carry another JSON escape layer.
-// This check never changes the reply or repairs an invalid result.
+// scanReply checks a reply for the key with the allow-list view of [keyScan], then checks that the fields
+// the caller's later decode reads (openaiwire's responsesReply or chatResponse) have that decode's JSON
+// types, and scans those fields once more as the caller joins them. This check never changes the reply or
+// repairs an invalid result.
 //
-// It fails closed. A reply that is not valid JSON is scanned as raw bytes (and the caller refuses it).
-// Every JSON value and key of a valid reply is scanned whatever the typed decode below does. The typed
-// decode reads only the fields of the caller's later decode for this API (openaiwire's responsesReply or
-// chatResponse), with the same JSON types, so a field of the other API, or any field the caller ignores,
-// cannot make it fail. When it does fail (a wrong type in one of those fields), the caller's decode
-// refuses the same reply too, so the reply is refused as scanWrongType: nothing a caller would accept is
-// refused, and no decoy field can switch the joined scans off.
-//
-// Every comparison goes through hasKey: the text as is, the text without the runes of [HiddenRune], and the
-// text as the kubectl plugin shows it after its terminal cleaning ([termtext.Compact]), so a key with a
-// zero-width space, a NUL or a whole escape sequence such as ESC [0m inside cannot pass the scan and then
-// show whole on a screen. Other transformations (encodings, reversal) are out of scope. Each form is one
-// pass over a bounded reply, so the cost stays linear in its size.
+// It fails closed. A reply that is not valid JSON is scanned as raw bytes (and the caller refuses it). A
+// valid reply is scanned over every string value, object key and number, whatever field holds it. When the
+// typed decode fails (a wrong type in one of the caller's fields), the caller's decode refuses the same reply
+// too, so the reply is refused as scanWrongType: nothing a caller would accept is refused, and no decoy field
+// can switch the scan of the joined fields off.
 func scanReply(data []byte, api API, key string) scanResult {
+	res, _ := scanReplyWork(data, api, key)
+	return res
+}
+
+// scanReplyWork is scanReply that also returns its work count: the bytes the scan decoded, viewed and searched.
+func scanReplyWork(data []byte, api API, key string) (scanResult, int) {
+	found, work := keyIn(data, key)
+	if found {
+		return scanKey, work
+	}
 	if !json.Valid(data) {
-		return found(bytes.Contains(data, []byte(key)) || hasKey(string(data), key))
+		return scanClean, work
 	}
-	var all, allValues strings.Builder
-	appendJSONValues(&all, json.NewDecoder(bytes.NewReader(data)), true)
-	appendJSONValues(&allValues, json.NewDecoder(bytes.NewReader(data)), false)
-	if hasKey(all.String(), key) || hasKey(allValues.String(), key) {
-		return scanKey
-	}
-
-	var joined, keyed, rawJoined, messageText strings.Builder
-	matched := false
-	appendText := func(text string) {
-		rawJoined.WriteString(text)
-		matched = matched || containsKey([]byte(text), key)
-		if json.Valid([]byte(text)) {
-			appendJSONValues(&joined, json.NewDecoder(strings.NewReader(text)), false)
-			appendJSONValues(&keyed, json.NewDecoder(strings.NewReader(text)), true)
-		} else {
-			joined.WriteString(text)
-			keyed.WriteString(text)
-		}
-	}
-
+	work += len(data)
+	// The fields the caller reads, in wire order: the text parts and arguments of every output item, or the
+	// content and arguments of every choice; and the message text the caller joins from output_text parts.
+	var texts []string
+	var messageText strings.Builder
 	if api == APIResponses {
 		var r struct {
 			Output []struct {
@@ -712,16 +674,16 @@ func scanReply(data []byte, api API, key string) scanResult {
 			} `json:"output"`
 		}
 		if json.Unmarshal(data, &r) != nil {
-			return scanWrongType
+			return scanWrongType, work
 		}
 		for _, item := range r.Output {
 			for _, part := range item.Content {
 				if item.Type == "message" && part.Type == "output_text" {
 					messageText.WriteString(part.Text)
 				}
-				appendText(part.Text)
+				texts = append(texts, part.Text)
 			}
-			appendText(item.Arguments)
+			texts = append(texts, item.Arguments)
 		}
 	} else {
 		var r struct {
@@ -737,85 +699,213 @@ func scanReply(data []byte, api API, key string) scanResult {
 			} `json:"choices"`
 		}
 		if json.Unmarshal(data, &r) != nil {
-			return scanWrongType
+			return scanWrongType, work
 		}
 		for _, choice := range r.Choices {
 			if choice.Message.Content != nil {
-				appendText(*choice.Message.Content)
+				texts = append(texts, *choice.Message.Content)
 			}
 			for _, call := range choice.Message.ToolCalls {
-				appendText(call.Function.Arguments)
+				texts = append(texts, call.Function.Arguments)
 			}
 		}
 	}
-	return found(hasKey(keyed.String(), key) || matched || containsKey([]byte(rawJoined.String()), key) ||
-		hasKey(joined.String(), key) || containsKey([]byte(messageText.String()), key))
+	// One stream of the caller's fields, their JSON decoded in place (the reply's own field names and the
+	// values of other fields are not between them), then the raw join and the message text as documents.
+	joined := newKeyScan(key)
+	var raw strings.Builder
+	for _, text := range texts {
+		raw.WriteString(text)
+		if joined.nestedJSON(text) {
+			joined.walk(text, 1)
+		} else {
+			joined.add(text, false)
+		}
+	}
+	found = joined.result()
+	work += joined.work
+	for _, doc := range []string{raw.String(), messageText.String()} {
+		f, w := keyIn([]byte(doc), key)
+		found, work = found || f, work+w
+	}
+	return resultOf(found), work
 }
 
-func found(b bool) scanResult {
+func resultOf(b bool) scanResult {
 	if b {
 		return scanKey
 	}
 	return scanClean
 }
 
-// appendJSONValues joins scalar values in wire order, including object keys and numbers.
-// Embedded payload objects have field names that delimit arguments, so both their values
-// and their keys are scanned, in separate concatenations.
-func appendJSONValues(dst *strings.Builder, dec *json.Decoder, includeKeys bool) {
-	dec.UseNumber()
-	token, err := dec.Token()
-	if err != nil {
-		return
+// maxNestedJSON is how many levels of JSON text inside string values the scan decodes: a tool call's
+// arguments and structured content are JSON inside a string of the reply, and the caller decodes them once.
+// Deeper text is scanned as it is written, so the work stays linear in the size of the reply.
+const maxNestedJSON = 3
+
+// keyScan builds the allow-list view of a reply and searches it for the key. The view keeps only ASCII
+// letters, digits and the punctuation characters the key itself contains, and drops every other character,
+// of any category, assigned or not, so a character inserted between the key's characters does not hide it.
+// The key is printable ASCII (readKey refuses anything else), so the key is its own view.
+//
+// Every decoded string value of the reply, in document order, is one stream, so a key split across fields,
+// parts or tool-call arguments is found too. A second stream adds the object keys in their place. JSON text
+// inside a string (up to maxNestedJSON levels) is decoded and its values take the string's place in both
+// streams; its text as written is searched on its own as well. Each stream is kept twice: as is, and with
+// whole terminal escape sequences left out ([termtext.EscapeEnd]), because a terminal shows the characters
+// around a sequence such as ESC [0m as one word while the sequence's own letters stay in the first view.
+//
+// A key that comes back re-encoded (base64, percent encoding, homoglyphs, reordered) is not found, and no
+// check of this kind can find it: the endpoint is given the key at install and is trusted with it.
+type keyScan struct {
+	key   []byte
+	allow [utf8.RuneSelf]bool
+	// streams: values as is, values without escape sequences, values and keys as is, values and keys
+	// without escape sequences (these two hold decoded text until result views them).
+	streams [4][]byte
+	scratch []byte
+	found   bool
+	work    int
+}
+
+// newKeyScan returns a scan for key with empty streams.
+func newKeyScan(key string) *keyScan {
+	k := &keyScan{key: []byte(key)}
+	for c := range utf8.RuneSelf {
+		k.allow[c] = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 	}
-	switch v := token.(type) {
-	case string:
-		dst.WriteString(v)
-	case json.Number:
-		dst.WriteString(v.String())
-	case json.Delim:
-		for dec.More() {
-			if v == '{' {
-				k, _ := dec.Token()
-				if includeKeys {
-					dst.WriteString(k.(string))
-				}
+	for i := range len(key) {
+		if key[i] < utf8.RuneSelf {
+			k.allow[key[i]] = true
+		}
+	}
+	return k
+}
+
+// keyIn reports whether the key is in data, read as one document, and the work the scan took.
+func keyIn(data []byte, key string) (bool, int) {
+	k := newKeyScan(key)
+	// The document as written: the only view of one that is not JSON, and one more of one that is.
+	k.searchAlone(string(data))
+	if json.Valid(data) {
+		k.work += len(data)
+		k.walk(string(data), 0)
+	}
+	return k.result(), k.work
+}
+
+// result searches the streams and reports whether the key was found in them or on its own before.
+func (k *keyScan) result() bool {
+	for i, stream := range k.streams {
+		if i%2 == 1 {
+			stream = k.view(nil, string(stream), true)
+		}
+		k.work += len(stream)
+		k.found = k.found || bytes.Contains(stream, k.key)
+	}
+	return k.found
+}
+
+// view appends the allow-list view of s to dst, without whole escape sequences when escapes is set.
+func (k *keyScan) view(dst []byte, s string, escapes bool) []byte {
+	for i := 0; i < len(s); {
+		c := s[i]
+		if escapes && (c == 0x1b || c == 0xc2) {
+			if end, ok := termtext.EscapeEnd(s, i); ok {
+				k.work += end - i
+				i = end
+				continue
 			}
-			appendJSONValues(dst, dec, includeKeys)
 		}
-		_, _ = dec.Token()
-	}
-}
-
-// HiddenRune reports a rune the credential scan ignores when it compares: whitespace and every Unicode
-// control (Cc) and format (Cf) character. It covers every rune the kubectl plugin drops or prints as a
-// space (a test of that package checks all runes), so text the scan passes cannot show the key there.
-func HiddenRune(r rune) bool {
-	return unicode.IsSpace(r) || unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r)
-}
-
-// withoutHidden removes every rune of HiddenRune in one pass.
-func withoutHidden(s string) string {
-	return strings.Map(func(r rune) rune {
-		if HiddenRune(r) {
-			return -1
+		if c < utf8.RuneSelf && k.allow[c] {
+			dst = append(dst, c)
 		}
-		return r
-	}, s)
+		k.work++
+		i++
+	}
+	return dst
 }
 
-// hasKey reports the key in any of three forms of s: as is, with the runes of [HiddenRune] removed (from the
-// key too), and as the kubectl plugin shows it after its terminal cleaning ([termtext.Compact]: whole escape
-// sequences, control and format characters and whitespace left out, invalid UTF-8 as U+FFFD). Each form
-// is built in one pass over s and searched once, so a call costs three linear passes and three searches.
-func hasKey(s, key string) bool {
-	if strings.Contains(s, key) {
-		return true
+// searchAlone searches the views of s on their own, outside the streams.
+func (k *keyScan) searchAlone(s string) {
+	for _, escapes := range []bool{false, true} {
+		k.scratch = k.view(k.scratch[:0], s, escapes)
+		k.work += len(k.scratch)
+		k.found = k.found || bytes.Contains(k.scratch, k.key)
 	}
-	if strings.Contains(withoutHidden(s), cmp.Or(withoutHidden(key), key)) {
-		return true
+}
+
+// add appends s to the streams: to the two of values and keys only when objectKey is set, to all four
+// otherwise. The streams without escape sequences keep the text as decoded until result views it, so a
+// sequence that starts in one string and ends in the next is left out whole, as a terminal printing the
+// two together would.
+func (k *keyScan) add(s string, objectKey bool) {
+	from := 0
+	if objectKey {
+		from = 2
 	}
-	return strings.Contains(termtext.Compact(s), cmp.Or(termtext.Compact(key), key))
+	for i := from; i < len(k.streams); i++ {
+		if i%2 == 1 {
+			k.streams[i] = append(k.streams[i], s...)
+			k.work += len(s)
+			continue
+		}
+		k.streams[i] = k.view(k.streams[i], s, false)
+	}
+}
+
+// walk adds every string value, object key and number of the valid JSON text in document order.
+func (k *keyScan) walk(text string, depth int) {
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	type frame struct{ object, wantKey bool }
+	var stack []frame
+	next := func() {
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].wantKey = !stack[n-1].wantKey
+		}
+	}
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return
+		}
+		switch v := tok.(type) {
+		case json.Delim:
+			if v == '}' || v == ']' {
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			next()
+			stack = append(stack, frame{object: v == '{', wantKey: true})
+		case string:
+			n := len(stack)
+			objectKey := n > 0 && stack[n-1].object && stack[n-1].wantKey
+			next()
+			if !objectKey && depth < maxNestedJSON && k.nestedJSON(v) {
+				k.searchAlone(v)
+				k.work += len(v)
+				k.walk(v, depth+1)
+				continue
+			}
+			k.add(v, objectKey)
+		case json.Number:
+			next()
+			k.add(v.String(), false)
+		default:
+			next()
+		}
+	}
+}
+
+// nestedJSON reports whether s is a JSON object, array or string.
+func (k *keyScan) nestedJSON(s string) bool {
+	t := strings.TrimLeft(s, " \t\r\n")
+	if t == "" || t[0] != '{' && t[0] != '[' && t[0] != '"' {
+		return false
+	}
+	k.work += len(s)
+	return json.Valid([]byte(t))
 }
 
 // compatibleWireError attributes the shared codec's fixed error text without changing its classification.

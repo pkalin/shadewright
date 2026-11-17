@@ -15,9 +15,9 @@ limitations under the License.
 */
 
 // Package termtext turns untrusted text into what a terminal shows of it. The kubectl plugin prints every
-// string from the cluster or the model through [Clean], and the OpenAI-compatible provider's credential scan
-// compares on [Compact], the same transformation, so text the scan passes cannot show the key on a screen.
-// It imports only the standard library.
+// string from the cluster or the model through [Clean]. The OpenAI-compatible provider's credential scan
+// uses [EscapeEnd], the same grammar of escape sequences, so a sequence a terminal hides cannot hide a key
+// from the scan. It imports only the standard library.
 package termtext
 
 import (
@@ -46,6 +46,21 @@ func Clean(s string, maxRunes int) string {
 func Compact(s string) string {
 	out, _ := clean(s, -1, true)
 	return out
+}
+
+// EscapeEnd reports whether an escape sequence starts at s[i] (ESC, or the UTF-8 form of an 8-bit CSI, DCS,
+// SOS, OSC, PM or APC introducer), and returns the index after it as [Clean] skips it.
+func EscapeEnd(s string, i int) (int, bool) {
+	r, size := utf8.DecodeRuneInString(s[i:])
+	switch r {
+	case 0x1b:
+		return skipEscape(s, i+size), true
+	case 0x9b:
+		return skipCSI(s, i+size), true
+	case 0x90, 0x98, 0x9d, 0x9e, 0x9f:
+		return skipString(s, i+size), true
+	}
+	return i, false
 }
 
 // clean writes what a terminal shows of s, up to maxRunes runes when maxRunes is not negative, and returns

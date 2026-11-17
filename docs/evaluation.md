@@ -27,7 +27,8 @@ For each scenario in `test/eval/testdata/scenarios/`, the harness:
    for `AdjustKedaMaxReplicas`), so the context holds the policy bounds block
    ([design 3.3](design/3-observation-and-deduplication.md#the-context-builder)). In CI the model is a fake that answers with the scenario's recorded replies, in order; on
    demand it is the Foundry deployment the run names.
-3. Scores the outcome and the diagnosis against the scenario's `expected.yaml`.
+3. Scores the outcome and the diagnosis against the scenario's `expected.yaml`, and the read tool calls against the
+   reads its `rubric.yaml` expects.
 
 The harness only reads the outcome the loop returned and the reply it accepted. It runs no executor and no Git
 write, and nothing it computes authorizes anything (invariant 1): it runs the policy's preflight checks only to score
@@ -53,6 +54,30 @@ So in `oom`, under `demo-memory` (64Mi to 128Mi, at most +50%), 48Mi to 96Mi fai
 phase (`NeedsIntervention`) and the file `paths` are decided by the executor and its source mapping, so they are
 listed in the report as not scored.
 
+**Size.** Every scenario whose expected proposal has a number the model chooses inside the policy bounds must
+state the size its recorded evidence supports in `size` (`supported`, and `why`: how the evidence gives it). A
+proposal above that size fails the outcome, even when it is below the policy maximum; a value at or below the
+supported size passes. The model sees the bounds ([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)),
+but those bounds do not determine what the evidence supports (decided 2026-11-17 on
+[#505](https://github.com/pkalin/shadewright/issues/505)). The catalog actions were checked for a number the model
+chooses:
+
+| Action | Number | Who chooses it | Rubric `size` |
+| --- | --- | --- | --- |
+| `AdjustKedaMaxReplicas` | `desiredValue` (`maxReplicaCount`) | the model, inside the policy bounds; `previousValue` comes from the ScaledObject | yes |
+| `SetContainerMemoryLimit` | `desired` (the memory limit) | code, from the metrics, once [ADR-0040](adr/0040-code-sizes-a-memory-proposal-from-the-metrics.md) is built ([#508](https://github.com/pkalin/shadewright/issues/508)); its sizing rule's own tests cover it | no: the harness refuses it |
+
+`keda-at-ceiling` states 3 replicas (13 requests per second over a target of 5 per replica), which its policy's
+maximum from 2 also is; its variant `wide-policy` allows up to 6 and its reply asks for 3. In that variant 3
+passes, and 4, 5 and 6 fail against the supported size of 3, though the policy allows them
+(`TestKedaProposalAtThePolicyMaximumFails`).
+
+```yaml
+size:
+  supported: 3
+  why: the load needs 13 / 5 = 2.6, that is 3 replicas
+```
+
 **Diagnosis.** Each scenario's `rubric.yaml` names every fact of `expected.yaml` verbatim, and either the terms
 the diagnosis must contain (`all`: every term; `any`: at least one; case ignored) or why the fact is not scored
 (`unscored`, for example a planned tool or source the context cannot carry yet). The diagnosis text is the
@@ -73,7 +98,45 @@ Report schema version 3 changed what a diagnosis fact means (`anyOf` and `subjec
 version are not comparable with it: the same replies score higher under version 3 (the 45 runs of the real-model
 run of 2026-11-09 went from 30 to 36 passed).
 
-A scenario run passes when both parts pass. The run passes when the share of passing scenario runs reaches the
+**Reads.** A rubric may list the tool reads the model is expected to make, in `reads`
+([#505](https://github.com/pkalin/shadewright/issues/505)). Each expected read passes when the loop ran at least
+one call that matches it and the tool accepted the call; it fails otherwise, and so does the scenario run. A
+read the rubric does not list is counted (`extra`), never failed, and a call that read nothing, refused by the loop
+or the tool, is counted apart (`refused`). Tools are offered only on escalation, so a scenario that expects reads
+needs the escalation model.
+
+```yaml
+reads:
+  - read: get_resource Deployment/web
+```
+
+An expected read is the tool's name, then what the call must say, separated by spaces:
+
+| Form | Example | Matches a call of the tool |
+| --- | --- | --- |
+| `<tool>` | `read: list_events` | with any arguments |
+| `<tool> <Kind>/<name>` | `read: get_resource Deployment/web` | whose `kind` is `Deployment` and `name` is `web`, in any namespace |
+| `<tool> <argument>=<value> ...` | `read: query_metrics template=container_memory_working_set_bytes window_minutes=60` | whose named arguments have these values; arguments left out may have any value |
+
+The `Kind/name` form comes right after the tool and can be followed by arguments
+(`read: get_resource Deployment/web namespace=demo`). It applies only to a tool with `kind` and `name` arguments
+(`get_resource`, `list_events`, `check_missing_reference`). Values are compared exactly, case included; a value has
+no spaces and may hold `=` and `/` (`path=apps/web/values.yaml`). The harness refuses a rubric whose read
+names a tool the scenario is not offered (the tools of an evaluation run without `get_delivery_status`, and
+`query_metrics` only with a `metrics.yaml`; tools whose source the run lacks, such as `get_pod_logs`, are not
+offered), an argument the tool's schema does not have, a value outside the argument's enum (`get_resource
+Service/web`: `get_resource` reads only Pods, Deployments, StatefulSets and ReplicaSets), a boolean other than
+`true` or `false`, an integer that is not a whole number, an argument given twice, and a read listed twice. It also
+refuses a read that no accepted call can make, so that no run fails for the rubric's error: the read is checked
+by the code that checks the model's calls. The tool's own argument checks (`tools.Set.Call`: ranges such as
+`list_events limit=100` or `limit=0`, lengths, object names, the watched namespaces, `namespace=Demo`, a metric
+template with the other target) run on the read, its free arguments filled in every way the grammar leaves open,
+and the read loads when the tool accepts one of them. The loop's own rule comes first: a tool with a `namespace`
+reads only the namespace of the Incident's subject, so `namespace=` must name it. Its
+error names the read and what is wrong. The parser and its generated tests are in `test/eval/reads_test.go` and
+`test/eval/reads_corpus_test.go`.
+
+A scenario run passes when all three parts pass. The run passes when the share of passing scenario runs reaches the
 threshold (`EVAL_MIN_PASS_RATE`, 1 by default; CI always uses 1).
 
 ## Run it
@@ -126,7 +189,7 @@ Before the first run, the maintainer sets up:
 | `EVAL_API_VERSION` | no | Inference API version, `v1` by default |
 | `EVAL_TRIAGE_INFERENCE_API`, `EVAL_ESCALATION_INFERENCE_API` | no | `inferenceAPI` of the triage or escalation deployment: unset (chat completions), `ChatCompletions` or `Responses` (needs `EVAL_API_VERSION` `v1`). Set `Responses` for a model that refuses function tools on chat completions, such as `gpt-6.1-sol` on escalation ([#501](https://github.com/pkalin/shadewright/issues/501)). Any other value is an error before the identity is used; the escalation one needs `EVAL_ESCALATION_DEPLOYMENT` |
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
-| `EVAL_ESCALATION_PRICE_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_OUTPUT_PER_MTOK` | no | The escalation deployment's own prices: all three or none, and only with the ones above and `EVAL_ESCALATION_DEPLOYMENT`. Without them the escalation calls are priced as the triage ones |
+| `EVAL_ESCALATION_PRICE_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_OUTPUT_PER_MTOK` | no | The escalation deployment's own prices: all three or none, and only with the ones above and `EVAL_ESCALATION_DEPLOYMENT`. Without them the escalation calls are never priced as the triage ones: the cost of a run whose escalation used tokens, and of the totals, is unknown and left out, and the report says why (`costUnknown`) |
 | `EVAL_FORCE_ESCALATION` | no | `1` sends every run to the escalation model with its read tools (below); needs `EVAL_ESCALATION_DEPLOYMENT`. Any other value is an error, checked before the identity is used, and `make eval` (the replay) refuses it |
 
 3. **Network reach to the Foundry endpoint.** A GitHub-hosted runner calls the endpoint from GitHub's shared
@@ -141,7 +204,7 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the ten scenarios and their variants (one so far, `oom/rollout`) is eleven analyses per repeat, each bounded by the loop's limits (at most 7 model
+A run of the ten scenarios and their variants (three so far, `oom/rollout`, `oom/absorbed` and `keda-at-ceiling/wide-policy`) is thirteen analyses per repeat, each bounded by the loop's limits (at most 7 model
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
@@ -215,7 +278,8 @@ The switch lives only in the test package (`test/eval`, a wrapper around the con
 no flag, setting or code path that reaches it, and model output still never triggers an escalation. The
 manifest records it (`forcedEscalation`), so a forced run has its own digest and is never mistaken for a run of
 the deployment as configured, and the Markdown summary says so. Compare candidates on the per-role tokens and
-cost (`tokens.byRole`, `costUSDByRole`) with `EVAL_ESCALATION_PRICE_*` set to each candidate's prices.
+cost (`tokens.byRole`, `costUSDByRole`) with `EVAL_ESCALATION_PRICE_*` set to each candidate's prices, and on
+what a pass costs (`costPerPassedRunUSD`): a cheap candidate that fails more often can cost more per passed run.
 
 ## The scenario files
 
@@ -224,7 +288,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | File | Content |
 | --- | --- |
 | `expected.yaml` | The scenario's expectation, copied unchanged from `pkalin/shadewright-fleet` at the commit `source.yaml` names (schema `scenarios.shadewright.io/v1alpha1`, owned by the fleet repository) |
-| `rubric.yaml` | How each fact of `expected.yaml` is scored (above) |
+| `rubric.yaml` | How each fact of `expected.yaml` is scored, and the reads the model is expected to make and, for a proposal whose number the model chooses, the size the evidence supports (above) |
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events, and the KEDA ScaledObject of `broken-keda-trigger` and `keda-at-ceiling` (spec from the fleet's scenario file, synthetic status; decoded as unstructured JSON, as the analyzer reads it) |
 | `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom`, `statefulset-oom` and `keda-at-ceiling` have one (and the `oom/rollout` variant, below) |
@@ -236,8 +300,9 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 **Variants.** A variant is a state of a fleet scenario that the lab met and the scenario's own recording does not
 show. It is scored against the scenario's `expected.yaml` and `rubric.yaml`, unchanged, with the scenario's
 Incident, and is reported as `<scenario>/<name>`. Its directory holds `variant.yaml` (`about`: what it changes and
-why, required), its own `objects.yaml` and `replies.yaml`, and a `metrics.yaml` or `policy.yaml` when its series or
-policies differ (otherwise the scenario's are used). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
+why, required), its own `replies.yaml`, and an `incident.yaml`, `objects.yaml`, `metrics.yaml` or `policy.yaml` when
+its Incident, objects, series or policies differ (otherwise the scenario's are used; a variant's Incident must match
+`expected.yaml` as the scenario's does). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
 `oom` scenario during a rollout, as the lab met it on 2026-11-07
 ([#494](https://github.com/pkalin/shadewright/issues/494)): the pod template sets 48Mi while the old ReplicaSet's
 pod still runs with 64Mi, and the reply takes a value from a running pod (the new pod's working set, copied from
@@ -247,7 +312,25 @@ value from the pod template instead
 and passes the outcome check ([Scoring](#scoring)). The lab's model asked for 96Mi, which `demo-memory` refuses from
 48Mi. The block shows 64Mi to 72Mi from 48Mi; the reply asks for 64Mi, the smallest change the evidence supports
 (the old pod runs under 64Mi without kills), and its summary names that evidence as what sets the size
-([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)).
+([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)). `keda-at-ceiling/wide-policy` is
+synthetic, not a state the lab met: its own `policy.yaml` lets `demo-keda` go from 2 to 6 replicas, while the load
+still needs 3, the rubric's `size`. Its reply, the scenario's own, asks for 3 and passes; the test that asks for 4, 5
+or 6, all inside the policy, fails it ([Size](#scoring)).
+
+`oom/absorbed` is the `oom` Incident as the analyzer keeps it since the cause rule of
+[ADR-0039](adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) (#791): `status.cause` set and the
+kubelet's `BackOff` (5, last 11:56:10) and `Unhealthy` (4, last 11:56:00) counted in `status.absorbed`, the counts
+the grouping case takes from `grouping.yaml`. Its context's summary shows the absorbed tally (point 18,
+[#796](https://github.com/pkalin/shadewright/issues/796), [design 3.3](design/3-observation-and-deduplication.md#the-context-builder));
+everything else is the scenario's, and so is its reply, unchanged: the tally adds lines at the end of the summary block and
+moves no block ID, and none of its lines is quotable. It is the recorded scenario the evaluation gate of ADR-0025
+asked for before the tally reached the model. `TestPromptShowsTheAbsorbedTally` replays it, checks that it passes
+and that its prompt holds one line per entry of the tally.
+
+**The prompt of a scenario without a tally.** `TestPromptGolden` keeps, in `test/eval/testdata/prompt.golden`, the
+SHA-256 of the first model request (the system prompt and the context) of every scenario whose Incident has an empty
+`status.absorbed`, computed by the code before the tally block. Each must stay the same byte for byte; a change meant
+to alter every prompt writes them again with `SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/`.
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
 Prometheus adapter implements (`test/eval/metrics_test.go`). The harness refuses a recording that the adapter could
@@ -290,20 +373,23 @@ fix any rubric the harness then refuses.
 
 ## The report
 
-`report.json` (schema version 3) and `report.md`, the same content for a person. The JSON fields:
+`report.json` (schema version 4) and `report.md`, the same content for a person. A report of another schema
+version is not read as this one: the harness's reader (`readReport`) refuses it with both versions named, and a
+field the version does not know. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 3; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable |
+| `schemaVersion` | 5; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum |
 | `mode` | `fake` (recorded replies), `foundry` or `anthropic` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
-| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reply` and `error` (set when the run could not start; it fails) |
-| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out) |
+| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole`, `costIncomplete` and `costUnknown` (as in `totals`, for this run), `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |
+| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out), with `calls`, the model calls of the role, failed ones included. Each role is one deployment, named with its model in the manifest's `models`, so these are the counts per model |
+| `scenarios[].reads` | `pass` (every expected read made; true when the rubric expects none), `expected[]` (`read` as the rubric wrote it, `pass`), `extra` (accepted calls no expected read matches) and `refused` (calls that read nothing: refused by the loop or the tool, or stopped by the deadline) ([Scoring](#scoring)) |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |
 | `scenarios[].reply` | Only for a run whose last reply decoded as a result, whether the loop then accepted it or refused it (`NoEvidence`) ([#600](https://github.com/pkalin/shadewright/issues/600)): the model's `summary`, `hypotheses` (their descriptions) and `evidence[]` (`source`, `quote`), so a missed fact can be traced to what the model wrote. Redacted as the analyzer redacts the result's text (built-in rules, the Incident's name kept) and capped: the summary at 1024 bytes, each hypothesis, source and quote at 512, at most 10 hypotheses and 10 quotes (the result's own bounds, so a decoded reply is kept whole today); a cut field ends with ` [truncated]` and `truncated` is then true. In `report.json` only, not in the Markdown |
-| `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), and `costIncomplete` when calls with unknown usage are left out of the estimate, which is then a lower bound (the Markdown summary says so; compare `charged`) |
+| `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `toolCalls`, `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), `incompleteRuns` (runs with a call of unknown usage or that stopped with an error), `costIncomplete` when there is any, so the estimate is a lower bound (the Markdown summary says so; compare `charged`), and `costPerPassedRunUSD`, the cost of every run, failed ones included, over the passed runs: left out without prices or when no run passed (the Markdown says "none, no run passed", never 0), and a lower bound when `costIncomplete` is set. A failed call is never priced as zero: it counts in `usageUnknownCalls` and makes the cost incomplete. The exception is a call the adapter marks as refused before processing (a Foundry 429), which was not billed and has a known usage of 0 (#725). A role that used tokens (or made a call of unknown usage) with no prices of its own, the escalation without `EVAL_ESCALATION_PRICE_*`, is never priced at another role's prices: `costUSD` and `costPerPassedRunUSD` are then left out, `costUnknown` says why, `costUSDByRole` keeps the priced roles, and the Markdown says "unknown" |
 
 The report holds no prompt, no token and no endpoint, and no model text beyond the redacted, capped `reply`.
 
@@ -364,6 +450,14 @@ The digest has no field for the Go code of `internal/analysis` and `internal/too
 output schema and the tool definitions: a change to that code that alters behaviour without altering them (for
 example how a tool reads or how a result is checked) needs a new evaluation by hand, as ADR-0025 says for any change
 to the tools or the context.
+
+**The absorbed tally and the digest.** The tally block ([#796](https://github.com/pkalin/shadewright/issues/796))
+changes `contextBuilder.source`, since it is code in `internal/incidentcontext`, `redaction.builtInRules`, since
+`MarkerShapes` in `internal/redact` is hashed, and `scenarios`, since it adds the `oom/absorbed` variant. So every manifest digest changes, for every Incident, with or without a tally: a real-model
+result recorded before it no longer matches. No passing result is stored in this repository yet (planned), so
+nothing stored is lost; a real-model evaluation run after this change, `oom/absorbed` included, is the one that
+counts. In CI the fake model replays the recorded replies, which do not depend on the prompt: every scenario, `oom`
+and `oom/absorbed` included, still passes.
 
 The analyzer cannot yet compute the same digest at run time (it does not know the rubric, the threshold or the
 repeats, which ADR-0025 checks when the list of passing results is built); that check is the planned follow-up.

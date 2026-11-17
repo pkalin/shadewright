@@ -87,12 +87,19 @@ type tally struct {
 	usage map[analysis.Role]*roleUsage
 	// last is the content of the last reply that had any, the one the loop's outcome rests on.
 	last string
+	// reads are the read tool calls the loop ran, in order (recordedTools).
+	reads []readCall
+	// first is the messages of the first request of the analysis, the system prompt and the context as the
+	// model gets them.
+	first []providers.Message
 }
 
 // roleUsage is what the calls of one role returned.
 type roleUsage struct {
 	usage        providers.Usage
 	usageUnknown int
+	// calls counts every call of the role, failed ones too.
+	calls int
 }
 
 // recorded wraps the provider of one role and counts its replies in a tally. It only reads what the provider
@@ -107,6 +114,9 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 	c, err := r.inner.Complete(ctx, req)
 	r.t.mu.Lock()
 	defer r.t.mu.Unlock()
+	if r.t.first == nil {
+		r.t.first = slices.Clone(req.Messages)
+	}
 	if r.t.usage == nil {
 		r.t.usage = map[analysis.Role]*roleUsage{}
 	}
@@ -115,6 +125,7 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 		u = &roleUsage{}
 		r.t.usage[r.role] = u
 	}
+	u.calls++
 	u.usage.InputTokens += c.Usage.InputTokens
 	u.usage.CachedInputTokens += c.Usage.CachedInputTokens
 	u.usage.OutputTokens += c.Usage.OutputTokens
@@ -220,7 +231,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	t := &tally{}
 	a, err := analysis.New(analysis.Config{
-		Builder: cb, Tools: set, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
+		Builder: cb, Tools: recordedTools{inner: set, t: t}, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
 		Redactor: redactor, Now: now,
 		Models: func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
 			p, err := factory(role, d)
@@ -237,9 +248,22 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	limits := analysis.Limits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens}
 	limits.Triage, limits.Escalation = models.deployments()
-	out, err := a.Analyze(ctx, s.incident.DeepCopy(), limits)
-	if err != nil {
-		return res, fmt.Errorf("the analysis stopped: %w", err)
+	out, aerr := a.Analyze(ctx, s.incident.DeepCopy(), limits)
+	// The tokens are kept before any error, so a run that stops after its calls still reports what they used
+	// (and is marked incomplete in the report).
+	t.mu.Lock()
+	res.Tokens = tokens{Charged: out.Tokens}
+	for role, u := range t.usage {
+		rt := roleTokens{Calls: u.calls, Input: u.usage.InputTokens, CachedInput: u.usage.CachedInputTokens,
+			Output: u.usage.OutputTokens, UsageUnknownCalls: u.usageUnknown}
+		res.Tokens.addRole(string(role), rt)
+	}
+	last := t.last
+	calls := slices.Clone(t.reads)
+	res.prompt = t.first
+	t.mu.Unlock()
+	if aerr != nil {
+		return res, fmt.Errorf("the analysis stopped: %w", aerr)
 	}
 	if done != nil {
 		if err := done(); err != nil {
@@ -248,15 +272,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	res.Reason, res.Escalated, res.Calls, res.ToolCalls = string(out.Reason), out.Escalated, out.Calls, out.ToolCalls
 	res.Models = out.Models
-	t.mu.Lock()
-	res.Tokens = tokens{Charged: out.Tokens}
-	for role, u := range t.usage {
-		rt := roleTokens{Input: u.usage.InputTokens, CachedInput: u.usage.CachedInputTokens,
-			Output: u.usage.OutputTokens, UsageUnknownCalls: u.usageUnknown}
-		res.Tokens.addRole(string(role), rt)
-	}
-	last := t.last
-	t.mu.Unlock()
+	res.Reads = scoreReads(s.reads, calls, out.ToolCalls)
 	res.Outcome = scoreOutcome(s, out)
 	for _, q := range out.QuoteFailures {
 		res.QuoteFailures = append(res.QuoteFailures, quoteFailure{Source: q.Source, Block: q.Block, Class: string(q.Class),
@@ -271,7 +287,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		// Redacted as the analyzer redacts the result's text for its logs and record, keeping the Incident's name.
 		res.Reply = replyOf(accepted, func(t string) string { return redactor.StringKeeping(t, s.incident.Name) })
 	}
-	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass
+	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass && res.Reads.Pass
 	return res, nil
 }
 
@@ -345,6 +361,9 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 	if detail := checkPolicy(scn, out.Plan); detail != "" {
 		return false, detail
 	}
+	if detail := checkSize(scn, out.Plan); detail != "" {
+		return false, detail
+	}
 	b := e.Outcome.Bounds
 	if b == nil {
 		return true, ""
@@ -372,6 +391,18 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 		return false, "the plan carries no parameters to check against the bounds"
 	}
 	return true, ""
+}
+
+// checkSize returns why the plan's size fails the rubric's, or "": any value above the size the evidence supports
+// fails, whether or not it is the most the scenario's policy allows (decided 2026-11-17 on #505). A value at or
+// below the supported size passes. The plan already passed checkPolicy.
+func checkSize(scn *scenario, p *analysis.Plan) string {
+	z, k := scn.rubric.Size, p.Action.AdjustKedaMaxReplicas
+	if z == nil || k == nil || k.DesiredValue <= z.Supported {
+		return ""
+	}
+	return fmt.Sprintf("desired %d exceeds the supported size %d (%s)", k.DesiredValue,
+		z.Supported, z.Why)
 }
 
 // checkPolicy returns why the scenario's policy would refuse the plan, or "": the checks of policy.Preflight,

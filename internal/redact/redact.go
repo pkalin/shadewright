@@ -219,6 +219,12 @@ func (r *Redactor) Clean(s string, keep ...string) bool {
 // markerPattern matches the shapes of the markers [marker] writes; markers keeps only the exact ones.
 var markerPattern = regexp.MustCompile(`\[REDACTED(?::[a-z][a-z0-9-]{0,31})?\]|\[[a-z][a-z0-9-]{0,31}\]|\*+`)
 
+// MarkerShapes returns the byte ranges of s that have the shape of a marker a redactor writes, of any kind,
+// in order and not overlapping. It is a superset of the markers ("[info]" and a run of "*" are included):
+// a caller that must not cut inside a marker (the context builder's cut of a value, #796) loses nothing by
+// also keeping such text whole.
+func MarkerShapes(s string) [][]int { return markerPattern.FindAllStringIndex(s, -1) }
+
 // markers returns the byte ranges of the markers of r's rules in s, in order and not overlapping: a long or
 // short form naming a kind of one of r's rules, "[REDACTED]", or a run of at most three "*" (the longest
 // [marker] writes). A longer run of "*" or a marker naming another kind is not one this redactor wrote, so

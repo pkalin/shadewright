@@ -21,6 +21,7 @@ import (
 	"slices"
 	"time"
 
+	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analyzer/collector"
 )
 
@@ -287,6 +288,22 @@ func (s *sightings) remove(e *list.Element) {
 func (s *sightings) holds(fingerprint string) bool {
 	_, ok := s.items[fingerprint]
 	return ok
+}
+
+// holdsCause reports whether a first sighting of cause fingerprint holds an observation of the subject with this
+// UID: the Incident it opens has that subject, so a consequence of that subject links to it (ADR-0039 point 6).
+// An empty UID is never held for.
+func (s *sightings) holdsCause(fingerprint string, uid remediationv1alpha1.UID) bool {
+	e, ok := s.items[fingerprint]
+	if !ok || uid == "" {
+		return false
+	}
+	for _, o := range e.Value.(*sighting).held {
+		if o.Subject.UID == uid {
+			return true
+		}
+	}
+	return false
 }
 
 // len returns the number of fingerprints held.

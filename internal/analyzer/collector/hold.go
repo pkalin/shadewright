@@ -72,9 +72,9 @@ const (
 
 // heldConsequences counts the ends of consequence holds: opened (no cause shown, emitted for the gate),
 // not_opened (no cause shown, and the container recovered, or its pod is gone or replaced), released (the
-// Incident controller saw the cause during the wait, or the pod of a hold with no cause showed one it had seen:
-// emitted with it at once), cause_unseen (the hold had a cause the controller had not seen when the wait ended,
-// or when the pod went, was replaced, or its template was retired: emitted with that cause), dropped (the event
+// Incident controller saw, during the wait, a cause the consequence would be counted on, or the pod of a hold
+// with no cause showed one it had seen: emitted with it at once), cause_unseen (the hold had a cause the
+// controller had not seen when the wait ended, or when the pod went, was replaced, or its template was retired: emitted with that cause), dropped (the event
 // ended the hold itself: deleted, no longer a Warning, replaced by another event of the name, or handled without
 // an observation for another reason; for a hold with a cause only an event that no longer exists), so that these
 // five add up to the holds started; and overflow (no room to hold, emitted at once), a consequence that was
@@ -110,14 +110,15 @@ type consequenceHold struct {
 	// caused is the share the hold was admitted to: set when its first sight showed a cause. It does not change
 	// for the life of the hold.
 	caused bool
-	// released is set once the Incident controller has seen the cause (ReleaseCause, or the answer of
-	// Config.CauseSeen): the next reconcile of the event emits it. It is never cleared.
-	released  bool
-	event     types.UID
-	pod       types.UID
-	container string
-	init      bool
-	reason    string
+	// releasedFor is the cause fingerprint ReleaseCause last named for this hold while it showed that cause. It
+	// is a hint, never a verdict: the reconcile it wakes asks Config.CauseSeen with obs, and only that answer
+	// releases the hold (decided 2026-11-17, second, on #828). A sample that changes the cause forgets it (put).
+	releasedFor string
+	event       types.UID
+	pod         types.UID
+	container   string
+	init        bool
+	reason      string
 	// restarts is the container's restart count at the previous sample (at the first sight for the first one):
 	// a larger one at the next sample is a restart between the two.
 	restarts int32
@@ -185,14 +186,15 @@ func (h *consequenceHolds) ofPod(uid types.UID) []types.NamespacedName {
 	return keys
 }
 
-// release marks released every hold of cause fingerprint fp not decided yet, and returns their keys.
+// release marks every hold of cause fingerprint fp not decided yet as released for fp
+// (consequenceHold.releasedFor), and returns their keys.
 func (h *consequenceHolds) release(fp string) []types.NamespacedName {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var keys []types.NamespacedName
 	for k := range h.byCause[fp] {
-		if s := h.holds[k]; !s.opened && !s.released {
-			s.released = true
+		if s := h.holds[k]; !s.opened {
+			s.releasedFor = fp
 			h.holds[k] = s
 			keys = append(keys, k)
 		}
@@ -254,8 +256,9 @@ func (h *consequenceHolds) markOverflow(key types.NamespacedName, uid types.UID)
 
 // put stores s under key and returns the hold as stored, or false when key is new and there is no room in the
 // share of s (a cause shown at the first sight or not), in all or in its namespace. A hold stored already keeps
-// its share, and stays released when ReleaseCause released it since the caller read it, so a release between
-// get and put is never lost.
+// its share, and the release mark of the hold as stored (ReleaseCause may have set it since the caller read it)
+// while s keeps the stored cause; when s changes the cause, the mark is forgotten (decided 2026-11-17, second,
+// on #828): it was for the old cause, and the caller asks again for the new one.
 func (h *consequenceHolds) put(key types.NamespacedName, s consequenceHold) (consequenceHold, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -270,7 +273,10 @@ func (h *consequenceHolds) put(key types.NamespacedName, s consequenceHold) (con
 		h.perNS[sk]++
 		consequencesHeld.Inc()
 	} else {
-		s.caused, s.released = old.caused, s.released || old.released
+		s.caused, s.releasedFor = old.caused, ""
+		if old.cause == s.cause {
+			s.releasedFor = old.releasedFor
+		}
 		if old.pod != s.pod {
 			removeFrom(h.byPod, old.pod, key)
 		}
@@ -347,9 +353,12 @@ func (h *consequenceHolds) len() int {
 
 // ReleaseCause is how the Incident controller tells the collector that it has seen an observation of cause
 // fingerprint fp (ADR-0039 point 7, decided 2026-11-17; incidents.Controller.OnCauseSeen): the consequences
-// held for that cause are marked released and their events are added to the event controller's queue, so each
-// is emitted with its cause at its next reconcile. It reads nothing from the API server, never blocks (a lock
-// held for a few map lookups, then the queue's Add) and calls nothing back. It is safe to call from any
+// held for that cause are marked released for fp and their events are added to the event controller's queue.
+// The mark decides nothing: each of those reconciles is a sample that asks Config.CauseSeen for the cause the
+// hold shows then, with its own observation, so a hold of another subject, or one whose cause changed since, is
+// released only when the controller has seen a cause it would be counted on (decided 2026-11-17, second, on
+// #828). It reads nothing from the API server, never blocks (a lock held for a few map lookups, then the
+// queue's Add) and calls nothing back. It is safe to call from any
 // goroutine, before the collector starts too: a hold it marks is emitted at its next reconcile whatever causes
 // that, at the latest at the end of ConsequenceGrace.
 //
@@ -435,21 +444,22 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 // holdConsequence decides on a consequence (ADR-0039 points 7 and 19). obs is the event's observation and pod the
 // pod it names as fromEvent read it (nil when gone or replaced; a failed read never reaches here, it is retried).
 // A reconcile of the event is a sample, whether its event, an update of its pod (heldEventsOf) or ReleaseCause
-// caused it.
+// caused it; a sample asks Config.CauseSeen for the cause it shows, so a release for an older cause decides
+// nothing.
 //
 //   - Not a consequence, and not held: holdEmit, as before.
 //   - A hold whose decision to emit is not delivered yet: holdEmit, with the observation it decided on.
-//   - A hold that ReleaseCause released: holdEmit with its cause (released).
-//   - A held event whose pod is gone or replaced: emitted with the last cause a sample showed (cause_unseen), or,
-//     when none did, holdDrop.
+//   - A held event whose pod is gone or replaced: emitted with the last cause a sample showed (cause_unseen, or
+//     released when causeOutcome confirms a release), or, when none did, holdDrop.
 //   - No room to hold a new one: holdEmit at once, without a verdict, so it goes through the gate. The event is
 //     remembered until its delivery ends, so a delivery retry emits it again even once room has freed.
 //   - Otherwise the reconcile is a sample of the container. A hold with a cause is stored first, then the
-//     controller is asked whether it has seen the cause (Config.CauseSeen; ReleaseCause gives the order): seen at
-//     the first sight, the consequence is emitted at once and was never held; seen later, it is released. Before
-//     the end of ConsequenceGrace: holdWait until that end. At the end, a hold with a cause emits with it
-//     (cause_unseen), even when the pod shows none now. With no cause ever shown (amended 2026-11-16): holdEmit
-//     when at least minHoldSamples samples were failing and either this last one is failing or the container
+//     controller is asked whether it has seen a cause the consequence would be counted on (Config.CauseSeen,
+//     with the hold's observation; ReleaseCause gives the order): seen at the first sight, the consequence is
+//     emitted at once and was never held; seen later, it is released. Before the end of ConsequenceGrace:
+//     holdWait until that end. At the end, a hold with a cause emits with it (cause_unseen, or released when
+//     causeOutcome confirms a release), even when the pod shows none now. With no cause ever shown (amended
+//     2026-11-16): holdEmit when at least minHoldSamples samples were failing and either this last one is failing or the container
 //     restarted at least minHoldRestarts times during the hold, else holdDrop.
 //
 // A hold with a cause emits the observation of the last sample that showed it (consequenceHold.obs). A CauseSeen
@@ -469,11 +479,9 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 		return holdEmit, 0, nil
 	case !held && obs.Class != ClassConsequence:
 		return holdEmit, 0, nil
-	case held && s.released:
-		return c.endWithCause(ctx, key, s, obs, holdReleased, "the Incident controller saw its cause")
 	case held && (pod == nil || pod.UID != s.pod):
 		if s.cause != "" {
-			return c.endWithCause(ctx, key, s, obs, holdCauseUnseen, "its Pod is gone or replaced")
+			return c.endWithCause(ctx, key, s, obs, c.causeOutcome(ctx, s), "its Pod is gone or replaced")
 		}
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
 		logf.FromContext(ctx).V(1).Info("Dropped held consequence, its Pod is gone or replaced",
@@ -515,9 +523,6 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 			"limit", c.holds.max, "namespaceShare", c.holds.share, "cause", s.cause != "")
 		return holdEmit, 0, nil
 	}
-	if stored.released {
-		return c.endWithCause(ctx, key, stored, obs, holdReleased, "the Incident controller saw its cause")
-	}
 	if stored.cause == "" {
 		return holdWait, left, nil
 	}
@@ -548,7 +553,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 func (c *Collector) endOfHold(ctx context.Context, key types.NamespacedName, s consequenceHold, obs *Observation,
 	failing bool) (holdVerdict, time.Duration, error) {
 	if s.cause != "" {
-		return c.endWithCause(ctx, key, s, obs, holdCauseUnseen, "the hold ended")
+		return c.endWithCause(ctx, key, s, obs, c.causeOutcome(ctx, s), "the hold ended")
 	}
 	if s.failing < minHoldSamples || (!failing && s.restarted < minHoldRestarts) {
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
@@ -595,12 +600,23 @@ func (c *Collector) heldCause(ctx context.Context, key types.NamespacedName, uid
 	if s.opened {
 		return obs, true
 	}
-	outcome := holdCauseUnseen
-	if s.released {
-		outcome = holdReleased
-	}
-	_, _, _ = c.endWithCause(ctx, key, s, &obs, outcome, why)
+	_, _, _ = c.endWithCause(ctx, key, s, &obs, c.causeOutcome(ctx, s), why)
 	return obs, true
+}
+
+// causeOutcome is the outcome of a hold with a cause that ends by another path than a sample's answer (the end of
+// the hold, its pod gone or replaced, the event leaving the collector): released when ReleaseCause marked it for
+// the cause it shows and Config.CauseSeen confirms it, else cause_unseen. Unmarked, it does not ask, so an end
+// never waits on a controller that has not loaded its Incidents; a failed ask is cause_unseen. The consequence
+// is emitted with its cause either way: only the metric's outcome depends on it.
+func (c *Collector) causeOutcome(ctx context.Context, s consequenceHold) string {
+	if s.cause == "" || s.releasedFor != s.cause {
+		return holdCauseUnseen
+	}
+	if seen, err := c.causeSeen(ctx, s.obs); err == nil && seen {
+		return holdReleased
+	}
+	return holdCauseUnseen
 }
 
 // failingNow reports whether the held container fails in st (ADR-0039 point 19, amended 2026-11-16): its restart

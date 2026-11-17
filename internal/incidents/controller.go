@@ -259,8 +259,8 @@ type Controller struct {
 	hintsListed bool
 	// analysisRequest selects, of hintRequests, those whose hints count for an Incident (SetAnalysisRequests).
 	analysisRequest func(*remediationv1alpha1.Incident, *remediationv1alpha1.RemediationRequest) bool
-	// onCauseSeen, when set (OnCauseSeen), is told each cause fingerprint the controller has seen after it
-	// consumed an observation of it.
+	// onCauseSeen, when set (OnCauseSeen), is told each cause fingerprint that an observation of it, once
+	// consumed, makes seen for its subject (causeHeldFor).
 	onCauseSeen func(fp string)
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
@@ -429,11 +429,11 @@ func (c *Controller) SetAnalysisRequests(f func(*remediationv1alpha1.Incident, *
 }
 
 // OnCauseSeen sets the function the controller calls with the fingerprint of a cause each time it has consumed an
-// observation of it and has seen the cause ([Controller.CauseSeen] answers true for it): the collector's
-// collector.Collector.ReleaseCause, which releases the consequences held for that cause (ADR-0039 point 7,
-// decided 2026-11-17). It is called from the goroutine that consumes observations, after the observation is
-// consumed and with no lock of the controller held, so it may call CauseSeen; it must not block. Call it before
-// the manager starts.
+// observation of it that makes it seen for a consequence of the same subject ([Controller.causeHeldFor]): the
+// collector's collector.Collector.ReleaseCause, which wakes the consequences held for that cause, each of which
+// then asks [Controller.CauseSeen] with its own observation (ADR-0039 point 7, decided 2026-11-17 twice). It is
+// called from the goroutine that consumes observations, after the observation is consumed and with no lock of the
+// controller held, so it may call CauseSeen; it must not block. Call it before the manager starts.
 func (c *Controller) OnCauseSeen(f func(fp string)) {
 	c.onCauseSeen = f
 }
@@ -501,8 +501,9 @@ func (c *Controller) Start(ctx context.Context) error {
 	}
 }
 
-// handle consumes o, wakes the writer when a batch is due, and then, for a cause the controller has seen, tells
-// the collector (OnCauseSeen). The cause is recorded under mu before the call, and mu is not held across it.
+// handle consumes o, wakes the writer when a batch is due, and then, for a cause that is now seen for its subject
+// ([Controller.causeHeldFor]), tells the collector (OnCauseSeen). The cause is recorded under mu before the
+// call, and mu is not held across it.
 func (c *Controller) handle(ctx context.Context, o collector.Observation) {
 	if c.consume(ctx, o) {
 		c.wake()
@@ -511,7 +512,7 @@ func (c *Controller) handle(ctx context.Context, o collector.Observation) {
 		return
 	}
 	c.mu.Lock()
-	seen := c.causeSeen(o.Fingerprint)
+	seen := c.causeHeldFor(o)
 	c.mu.Unlock()
 	if seen {
 		c.onCauseSeen(o.Fingerprint)

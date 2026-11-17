@@ -27,6 +27,7 @@ import (
 	"time"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/analyzer/collector"
 )
 
 // The tests of the answer the collector's hold of a consequence waits for (ADR-0039 point 7, #828).
@@ -41,9 +42,9 @@ func loadedAt(t *testing.T) *Controller {
 
 // TestCauseSeenCorpus runs generated consequences against controllers that consumed generated causes, opened at
 // once (Immediate) or held by the gate as a first sighting, and checks that CauseSeen answers true exactly when
-// an observation of the consequence's cause fingerprint was consumed, whatever became of it, and false for a
-// consequence with no cause. A container name that is not a DNS label is answered true: consume could never link
-// it, so the collector has nothing to wait for.
+// an observation of the consequence's cause fingerprint for its subject was consumed, and false for a
+// consequence with no cause or of another subject UID. A container name that is not a DNS label is answered
+// true: consume could never link it, so the collector has nothing to wait for.
 func TestCauseSeenCorpus(t *testing.T) {
 	rng := rand.New(rand.NewPCG(828, 6)) // #nosec G404 -- a seeded corpus, reproducible by design
 	answers := map[bool]int{}
@@ -60,7 +61,9 @@ func TestCauseSeenCorpus(t *testing.T) {
 		case 1:
 			o.Container, want = "Not_A_Label", true
 		case 2:
-			o.Subject = subjectWith(otherSubjectUID) // the fingerprint decides, not the subject
+			// Another subject UID: the cause's Incident, or its first sighting, is of the web subject, and the
+			// consequence would not be counted on it (decided 2026-11-17, second, on #828).
+			o.Subject, want = subjectWith(otherSubjectUID), false
 		}
 		t.Run(fmt.Sprintf("%d-immediate%v", i, immediate), func(t *testing.T) {
 			c := loadedAt(t)
@@ -245,6 +248,155 @@ func TestReleasedConsequenceCountedOnce(t *testing.T) {
 			}
 			if _, ok := c.pending[fp(heldF)]; ok || c.sightings.len() != 0 {
 				t.Fatalf("the consequence is held or opened on its own: %d first sightings", c.sightings.len())
+			}
+		})
+	}
+}
+
+// causeState is one generated state of the controller's list for the cause fingerprint fp(heldCauseF), built by
+// what consume and noteState record, and the consequence asked about.
+type causeState struct {
+	opened   bool          // a cause observation was consumed at once (Immediate): its Incident is counted
+	gated    bool          // a cause observation was held by the gate as a first sighting
+	causeUID string        // the subject UID of the cause observations
+	resolved time.Duration // > 0: the Incident is Resolved this long before t0
+	unnamed  bool          // the name is not in the controller's list (the Incident was deleted)
+	o        collector.Observation
+}
+
+func genCauseState(rng *rand.Rand) causeState {
+	uids := []string{podSubjectUID, otherSubjectUID}
+	st := causeState{
+		opened: rng.IntN(3) > 0, gated: rng.IntN(3) == 0, causeUID: uids[rng.IntN(2)],
+		unnamed: rng.IntN(8) == 0,
+	}
+	if rng.IntN(2) == 0 {
+		// Around RecurrenceWindow on both sides, to the second, and far past it (#828: 48 hours).
+		ages := []time.Duration{time.Minute, RecurrenceWindow - time.Second, RecurrenceWindow,
+			RecurrenceWindow + time.Second, 48 * time.Hour}
+		st.resolved = ages[rng.IntN(len(ages))]
+	}
+	st.o = heldOnce(heldCauseF, 1+int64(rng.IntN(3)), t0.Add(time.Duration(rng.IntN(3))*time.Second))
+	st.o.Subject = subjectWith(uids[rng.IntN(2)])
+	if rng.IntN(6) == 0 {
+		st.o.Subject.UID = ""
+	}
+	return st
+}
+
+// build makes the state on a loaded controller.
+func (st causeState) build(t *testing.T) *Controller {
+	t.Helper()
+	c := loadedAt(t)
+	name := c.nameOf(fp(heldCauseF))
+	if st.opened {
+		cause := causeOf(heldCauseF, t0)
+		cause.Subject = subjectWith(st.causeUID)
+		c.consume(t.Context(), cause)
+		if _, ok := c.causes[name]; !ok {
+			t.Fatal("the cause opened no Incident, so the case proves nothing")
+		}
+	}
+	if st.gated {
+		cause := causeOf(heldCauseF, t0)
+		cause.Occurrence, cause.Immediate, cause.Subject = terminationID(9), false, subjectWith(st.causeUID)
+		if st.opened {
+			// A cause of a fingerprint whose Incident exists is counted there, never held; hold it directly.
+			c.sightings.admit(cause, t0)
+		} else {
+			c.consume(t.Context(), cause)
+		}
+		if !c.sightings.holds(fp(heldCauseF)) {
+			t.Fatal("the cause is not held as a first sighting, so the case proves nothing")
+		}
+	}
+	if st.resolved > 0 {
+		c.resolvedAt[name] = t0.Add(-st.resolved)
+	}
+	if st.unnamed {
+		delete(c.names, name)
+	}
+	return c
+}
+
+// TestCauseSeenIsTheLink runs generated states of a cause (opened or not, held by the gate or not, of one subject
+// UID or another, Resolved at ages around RecurrenceWindow, its name forgotten) and a consequence of one subject
+// UID or another, and requires that the answer to the collector's hold and the link that counts the consequence
+// agree (decided 2026-11-17, second, on #828): CauseSeen is true exactly when causeFor links the consequence, or
+// a first sighting of the cause for its subject UID is held, which links it once that Incident opens. On the
+// first build CauseSeen answered true for an Incident Resolved 48 hours ago or of another subject.
+func TestCauseSeenIsTheLink(t *testing.T) {
+	rng := rand.New(rand.NewPCG(828, 17)) // #nosec G404 -- a seeded corpus, reproducible by design
+	type pair struct{ seen, linked bool }
+	answers := map[pair]int{}
+	for i := range 600 {
+		st := genCauseState(rng)
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			c := st.build(t)
+			got, err := c.CauseSeen(t.Context(), st.o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.mu.Lock()
+			_, _, _, linked := c.causeFor(st.o)
+			gate := c.sightings.holdsCause(st.o.CauseFingerprint, st.o.Subject.UID)
+			c.mu.Unlock()
+			answers[pair{got, linked}]++
+			if want := linked || gate; got != want {
+				t.Fatalf("CauseSeen = %v, causeFor links %v, first sighting held for the subject %v; state %+v",
+					got, linked, gate, st)
+			}
+			// Known by construction, apart from either function.
+			uidOK := st.o.Subject.UID != "" && string(st.o.Subject.UID) == st.causeUID
+			at := st.o.ObservedAt // on the controller's clock, at t0, a later time is taken as now (notFuture)
+			if at.After(t0) {
+				at = t0
+			}
+			window := st.resolved == 0 || at.Sub(t0.Add(-st.resolved)) <= RecurrenceWindow
+			if want := uidOK && ((st.opened && !st.unnamed && window) || st.gated); got != want {
+				t.Fatalf("CauseSeen = %v, want %v by construction; state %+v", got, want, st)
+			}
+		})
+	}
+	for _, p := range []pair{{true, true}, {false, false}, {true, false}} {
+		if answers[p] == 0 {
+			t.Fatalf("the corpus misses a case %+v: %v", p, answers)
+		}
+	}
+	if answers[pair{false, true}] != 0 {
+		t.Fatalf("CauseSeen answered false for a consequence causeFor links: %v", answers)
+	}
+}
+
+// TestCauseResolvedLongAgoIsNotSeen is the case of #828's second decision of 2026-11-17: the cause's Incident was
+// Resolved 48 hours ago and still exists. The consequence of a crash that comes back is not counted on it, so the
+// hold waits: CauseSeen answers false, and a new observation of the cause, which opens the next occurrence or is
+// held by the gate, makes it seen and tells the collector.
+func TestCauseResolvedLongAgoIsNotSeen(t *testing.T) {
+	for _, immediate := range []bool{true, false} {
+		t.Run(fmt.Sprintf("immediate%v", immediate), func(t *testing.T) {
+			c, clock := newAt(t)
+			close(c.ready)
+			var told []string
+			c.OnCauseSeen(func(f string) { told = append(told, f) })
+			// The cause's Incident as a listing shows it: stored, a cause, Resolved at t0.
+			name := Name(fp(heldCauseF))
+			c.names[name] = struct{}{}
+			c.causes[name] = causeIncident{spec: specOf(causeOf(heldCauseF, t0))}
+			c.resolvedAt[name] = t0
+			clock.set(t0.Add(48 * time.Hour))
+			o := heldOnce(heldCauseF, 1, clock.Now())
+			if got, err := c.CauseSeen(t.Context(), o); err != nil || got {
+				t.Fatalf("CauseSeen = %v, %v for a cause Resolved 48 hours ago; want false", got, err)
+			}
+			again := causeOf(heldCauseF, clock.Now())
+			again.Occurrence, again.Immediate = terminationID(2), immediate
+			c.handle(t.Context(), again)
+			if len(told) != 1 {
+				t.Fatalf("told %v, want the cause seen once it came back", told)
+			}
+			if got, err := c.CauseSeen(t.Context(), o); err != nil || !got {
+				t.Fatalf("CauseSeen = %v, %v once the cause came back; want true", got, err)
 			}
 		})
 	}

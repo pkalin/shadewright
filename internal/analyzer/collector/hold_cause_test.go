@@ -388,9 +388,9 @@ func TestReleaseRaceBothOrders(t *testing.T) {
 }
 
 // TestReleaseKeptAcrossTheSample: a release that comes between a sample's read of the hold and its store is not
-// lost: the store keeps it, and the sample emits.
+// lost while the sample keeps the cause: the store keeps the mark, and the end of the hold counts it released.
 func TestReleaseKeptAcrossTheSample(t *testing.T) {
-	h, _, _ := causeHoldHarness(t)
+	h, book, _ := causeHoldHarness(t)
 	fp := h.causeShown()
 	h.reconcileEvent("ev-hold")
 	key := reqFor("ev-hold").NamespacedName
@@ -398,10 +398,104 @@ func TestReleaseKeptAcrossTheSample(t *testing.T) {
 	if !ok {
 		t.Fatal("not held")
 	}
-	h.c.ReleaseCause(fp)
-	if stored, _ := h.c.holds.put(key, s); !stored.released {
+	book.see(fp)
+	if stored, _ := h.c.holds.put(key, s); stored.releasedFor != fp {
 		t.Fatal("the store of a hold read before the release cleared it")
 	}
+}
+
+// TestReleaseForAnOldCauseIsForgotten (decided 2026-11-17, second, on #828): the hold showed cause A, the
+// controller sees A and tells the collector, and a sample of the same moment shows cause B, which the controller
+// has not seen. Whatever the order of the release and the sample's read and store of the hold, the release for A
+// is forgotten and the hold waits for B: nothing is emitted before the end of the hold, and at its end the
+// consequence is emitted with B as cause_unseen. On the first build a release between the read and the store was
+// kept, and the consequence left as released with B, a cause the controller had not seen; one before the read
+// emitted it with A at once.
+func TestReleaseForAnOldCauseIsForgotten(t *testing.T) {
+	// changed holds ev-hold for cause A, then has the pod show B, and returns both and the queue.
+	changed := func(t *testing.T) (*harness, *causeBook, workqueue.TypedRateLimitingInterface[reconcile.Request],
+		string, string) {
+		h, book, q := causeHoldHarness(t)
+		a := h.causeShown()
+		if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != ConsequenceGrace {
+			t.Fatalf("not held for its cause: %+v", res)
+		}
+		h.clock.add(time.Second)
+		h.setWaiting(causePullErr)
+		b := h.causeShown()
+		if a == b {
+			t.Fatal("the cause did not change, so the test proves nothing")
+		}
+		return h, book, q, a, b
+	}
+	// endsWithB checks that nothing was emitted, then ends the hold and wants it emitted with b, cause_unseen.
+	endsWithB := func(t *testing.T, h *harness, q workqueue.TypedRateLimitingInterface[reconcile.Request], b string) {
+		t.Helper()
+		h.processQueue(q)
+		h.none()
+		key := reqFor("ev-hold").NamespacedName
+		if s, ok := h.c.holds.get(key, "ev-ev-hold"); !ok || s.cause != b || s.releasedFor != "" {
+			t.Fatalf("held %+v (%v), want the cause B with no release", s, ok)
+		}
+		before := holdOutcomeCounts()
+		h.clock.add(ConsequenceGrace)
+		h.reconcileEvent("ev-hold")
+		if o := h.one(); o.CauseFingerprint != b {
+			t.Fatalf("emitted %+v at the end of the hold, want it with B", o)
+		}
+		wantOutcomes(t, before, map[string]float64{holdCauseUnseen: 1})
+	}
+	t.Run("release between the read and the store", func(t *testing.T) {
+		h, book, q, a, b := changed(t)
+		key := reqFor("ev-hold").NamespacedName
+		s, _ := h.c.holds.get(key, "ev-ev-hold")
+		book.see(a)
+		ev := &eventsv1.Event{}
+		if err := h.cl.Get(t.Context(), key, ev); err != nil {
+			t.Fatal(err)
+		}
+		obs, _, _, err := h.c.fromEvent(t.Context(), ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.cause, s.obs = b, obs
+		if stored, _ := h.c.holds.put(key, s); stored.releasedFor != "" {
+			t.Fatalf("the store of cause B kept the release for A: %+v", stored)
+		}
+		endsWithB(t, h, q, b)
+	})
+	t.Run("release before the read", func(t *testing.T) {
+		h, book, q, a, b := changed(t)
+		book.see(a)
+		if res := h.sampleByPod(); res.RequeueAfter <= 0 {
+			t.Fatalf("the sample showing B ended the hold: %+v", res)
+		}
+		endsWithB(t, h, q, b)
+	})
+	t.Run("release after the store", func(t *testing.T) {
+		h, book, q, a, b := changed(t)
+		h.sampleByPod()
+		book.see(a)
+		if n := q.Len(); n != 0 {
+			t.Fatalf("the release for A woke %d holds, want none: the hold waits for B", n)
+		}
+		endsWithB(t, h, q, b)
+	})
+	t.Run("concurrent", func(t *testing.T) {
+		for i := range 200 {
+			h, book, q, a, b := changed(t)
+			var wg sync.WaitGroup
+			wg.Go(func() { h.reconcileEvent("ev-hold") })
+			wg.Go(func() {
+				if i%2 == 0 {
+					time.Sleep(time.Duration(i%7) * time.Microsecond)
+				}
+				book.see(a)
+			})
+			wg.Wait()
+			endsWithB(t, h, q, b)
+		}
+	})
 }
 
 // TestCauseUnansweredDecidesNothing: an ask that runs out of its deadline is no answer: the hold stays and the
@@ -567,7 +661,7 @@ func TestReleasedHoldStandsAcrossADeliveryRetry(t *testing.T) {
 	before := holdOutcomeCounts()
 	h.reconcileEvent("ev-hold")
 	h.c.out <- Observation{Fingerprint: fillerFingerprint}
-	h.c.ReleaseCause(fp)
+	book.see(fp)
 	if res := h.reconcileEvent("ev-hold"); res.RequeueAfter != retryAfter {
 		t.Fatalf("requeue after %s, want the delivery retry", res.RequeueAfter)
 	}

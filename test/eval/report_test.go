@@ -47,8 +47,10 @@ import (
 // Version 5: every model-sized proposal states the evidence-supported size, and any value above it fails.
 // Version 6: rubric terms match on word boundaries (termIn, #848), so "256" is no longer taken from "256Mi";
 // diagnosis scores of version 5 or earlier are not comparable.
-// Version 8 (7 is taken by the summaryQuotes field, #857): each run gives its elapsed seconds, and the totals
-// give seconds, secondsPerPassed and tokensPerPassed; the mode can be openaicompatible.
+// Version 7: a run fails when a quote of its accepted result holds the cut note, a tally line or a part the
+// summary cut (summaryQuotes, #841).
+// Version 8: each run gives its elapsed seconds, and the totals give seconds, secondsPerPassed and
+// tokensPerPassed; the mode can be openaicompatible.
 const reportSchemaVersion = 8
 
 // report is the result of one evaluation run.
@@ -99,6 +101,10 @@ type scenarioResult struct {
 	// QuoteFailures says, for a run that ended NoEvidence, how each quote differs from the block it cites
 	// (#474): a class and lengths, never the quote or the block.
 	QuoteFailures []quoteFailure `json:"quoteFailures,omitempty"`
+	// SummaryQuotes are the quotes of an accepted result (not NoEvidence) that lie within no value their cited
+	// block shows and touch the summary (#841): a cut part, the note of a cut or a tally line, which fail the run,
+	// and a quote of the summary changed a little or not in it, only recorded (summaryQuote.Fails).
+	SummaryQuotes []summaryQuote `json:"summaryQuotes,omitempty"`
 	// Reply is the text of the last reply when it decoded as a result (#600), accepted or refused as NoEvidence,
 	// so a missed rubric fact or a failed quote can be traced to what the model wrote; nil otherwise.
 	Reply *replyText `json:"reply,omitempty"`
@@ -738,6 +744,7 @@ func (r *report) markdown() string {
 		b.WriteString("\n")
 	}
 	r.quoteFailuresMarkdown(&b)
+	r.summaryQuotesMarkdown(&b)
 	return b.String()
 }
 
@@ -797,6 +804,24 @@ func (r *report) quoteFailuresMarkdown(b *strings.Builder) {
 			}
 			fmt.Fprintf(b, "| %s | %d | %s | %s | %s | %d | %d | %d |\n", s.Name, s.Repeat, cell(q.Source), cell(q.Block),
 				cell(q.Class), q.QuoteBytes, q.BlockBytes, q.MatchedBytes)
+		}
+	}
+}
+
+// summaryQuotesMarkdown lists the quotes checkSummaryQuotes reported (#841), one row each, those that failed
+// the run and those only recorded, when there are any.
+func (r *report) summaryQuotesMarkdown(b *strings.Builder) {
+	header := false
+	for _, s := range r.Scenarios {
+		for _, q := range s.SummaryQuotes {
+			if !header {
+				b.WriteString("\n## Quotes not in the summary as shown\n\n")
+				b.WriteString("| Scenario | Run | Source | Kind | Fails | Quote bytes |\n")
+				b.WriteString("|---|---|---|---|---|---|\n")
+				header = true
+			}
+			fmt.Fprintf(b, "| %s | %d | %s | %s | %t | %d |\n", s.Name, s.Repeat, cell(q.Source), cell(q.Kind), q.Fails,
+				q.QuoteBytes)
 		}
 	}
 }

@@ -1130,3 +1130,27 @@ func TestUnknownInstanceIsUncertain(t *testing.T) {
 		})
 	}
 }
+
+// The excerpt is redacted before it is cut (#840): a cut that drops the line of a secret key, or the first
+// line of a PEM key, does not leave the lines below it bare. The marker of the part kept is never longer than
+// that part, so the excerpt keeps its bound.
+func TestExcerptRedactsBeforeTheCut(t *testing.T) {
+	r, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, in := range map[string]string{
+		"block under a key": "config loaded\npassword: |\n  Qz10001xK9w\n  Qz10002xK9w\nready\n",
+		"folded block":      "config loaded\ntoken: >-\n  Qz10001xK9w\n  Qz10002xK9w\nready\n",
+		"pem key": "key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAQz10001xK9wQz10002xK9w\n" +
+			"Qz10001xK9wQz10002xK9wQz10003xK9w\n-----END RSA PRIVATE KEY-----\nready\n",
+	} {
+		first := strings.IndexByte(in, '\n')
+		second := first + 1 + strings.IndexByte(in[first+1:], '\n')
+		keep := len(in) - second - 1
+		got, truncated := Excerpt(r, []byte(in), false, keep)
+		if strings.Contains(got, "Qz1000") || !truncated || len(got) > keep || !strings.HasSuffix(got, "ready\n") {
+			t.Errorf("%s: Excerpt(keep %d) = %q, truncated %v", name, keep, got, truncated)
+		}
+	}
+}

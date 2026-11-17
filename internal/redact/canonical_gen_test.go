@@ -30,33 +30,42 @@ import (
 )
 
 // The canonical view corpus of #845: the forms where a step changes the text before or between redaction
-// passes, so that a block value under a secret key survives. The generator writes every secret and every word
-// that must survive at a known offset, without reading any rule, so the answer is known by construction. This
-// file uses only String and the redactor's spans, so it runs unchanged in a checkout of main to write the
-// table of what main redacts (canonMainTable).
+// passes, so that a block value under a secret key survives. The generator writes every secret and every piece
+// of text that must survive at a known offset, without reading any rule, so the answer is known by
+// construction. This file uses only String and the redactor's spans, so it runs unchanged in a checkout of main
+// to write the table of what main redacts (canonMainTable).
 
 // The forms of the corpus.
 const (
 	// canonFormIndent is a block indented with characters other than plain spaces: no-break and other Unicode
-	// spaces, zero-width characters, NUL and other controls.
+	// spaces, zero-width characters, NUL and other controls, invalid UTF-8.
 	canonFormIndent = "indentation of other characters"
 	// canonFormKeys is two or three keys on one line claiming one block.
 	canonFormKeys = "keys on one line"
 	// canonFormBrackets is a flow value with a bracket inside the secret.
 	canonFormBrackets = "bracket inside the secret"
-	// canonFormSequence is a key in one string of a sequence and its value in the next string.
+	// canonFormSequence is a key in one string of a sequence and its value in the next string, or a flag and
+	// its value in one string.
 	canonFormSequence = "key and value in two strings"
+	// canonFormEnv is the name of an environment variable in one field and its value in the next.
+	canonFormEnv = "env name and value in two fields"
+	// canonFormExcerpt is an indented block in a log, whose key line a cut of the log excerpt drops before the
+	// text reaches redaction.
+	canonFormExcerpt = "block cut from its key"
 	// canonFormMixed is the forms above combined, and next to a second secret key.
 	canonFormMixed = "forms combined"
 )
 
 // canonForms lists the forms in the order the corpus writes them.
-var canonForms = []string{canonFormIndent, canonFormKeys, canonFormBrackets, canonFormSequence, canonFormMixed}
+var canonForms = []string{
+	canonFormIndent, canonFormKeys, canonFormBrackets, canonFormSequence, canonFormEnv, canonFormExcerpt,
+	canonFormMixed,
+}
 
 // canonCase is one input of the corpus. in is the text as a caller reads it. args, for a sequence, holds its
 // strings as a container's arguments hold them; in is then one rendering of that sequence. secrets and keep
 // are byte ranges of in: each secret range is a piece of a secret that must not appear in any output, each
-// keep range a word that String must leave alone.
+// keep range a piece of text (a key, a flag, a word around the secret) that must survive.
 type canonCase struct {
 	form    string
 	name    string
@@ -75,12 +84,18 @@ type canonWriter struct {
 
 func (w *canonWriter) text(s string) { w.b.WriteString(s) }
 
+// canonPartialMin is the length of a piece's prefix and suffix that counts as a leak of the piece at an entry
+// point: a generated secret is "Qz", five digits of a counter and "xK9w", so its first and last 8 bytes each
+// hold the counter's digits that tell it from the other pieces of its input. A piece shorter than that (a word
+// of a phrase) counts only whole.
+const canonPartialMin = 8
+
 // secret writes the next generated secret, which looks like a secret to the bare short keys too, and records
 // its range.
 func (w *canonWriter) secret() string {
 	*w.n++
 	start := w.b.Len()
-	fmt.Fprintf(&w.b, "Qz%dxK9w", 20000+*w.n)
+	fmt.Fprintf(&w.b, "Qz%05dxK9w", 20000+*w.n)
 	w.c.secrets = append(w.c.secrets, [2]int{start, w.b.Len()})
 	return w.b.String()[start:]
 }
@@ -136,11 +151,12 @@ func (w *canonWriter) kept(s string) {
 	w.c.keep = append(w.c.keep, [2]int{start, w.b.Len()})
 }
 
-// next writes a line break and a line at column 0 whose word must survive.
+// next writes a line break and a line at column 0 whose key and value must survive.
 func (w *canonWriter) next(nl string) {
 	w.text(nl)
 	w.kept("next")
-	w.text(": x")
+	w.text(": ")
+	w.kept("--port=8080")
 }
 
 // canonKeys are secret keys of each form the rules know, the bare short keys among them, whose values count
@@ -155,15 +171,21 @@ var canonFlagKeys = []string{"--password", "--token", "--client-secret", "--api-
 // not look like a secret, innocent keys and secret keys.
 var canonFirstKeys = strings.Fields("pass auth sig msg description password token")
 
-// canonIndicators are block scalar headers with chomping and indentation indicators.
-var canonIndicators = []string{"|", ">", "|-", ">+", "|2", ">-"}
+// canonIndicators are block scalar headers with chomping and indentation indicators, in either order.
+var canonIndicators = []string{"|", ">", "|-", ">+", "|2", ">-", "|+", ">2-", "|-2"}
+
+// canonHeaders are canonIndicators and the same headers with a comment after the indicator. A header with a
+// comment ends its line, so it stands only where nothing follows on the line.
+var canonHeaders = append(slices.Clone(canonIndicators), "| # note", ">- #x", "|2+ # folded below")
 
 // canonIndentChars are characters other than a plain space that count as indentation in the canonical view:
-// Unicode spaces, zero-width characters, the byte order mark, NUL and other C0 and C1 controls, and the
-// tab and other ASCII blanks.
+// Unicode spaces, zero-width characters and joiners, the byte order mark, the line and paragraph separators,
+// NUL and other C0 and C1 controls, the tab and other ASCII blanks, and bytes that are not valid UTF-8 (a lone
+// continuation byte, a cut sequence, an encoded surrogate).
 var canonIndentChars = []string{
 	"\u00a0", "\u200b", "\x00", "\u2007", "\u202f", "\u3000", "\u2002", "\u2009", "\u205f", "\u2060", "\ufeff",
-	"\u1680", "\u0085", "\u2028", "\t", "\v", "\f", "\x01", "\x1f", "\x7f",
+	"\u1680", "\u0085", "\u2028", "\u2029", "\u200c", "\u200d", "\u180e", "\t", "\v", "\f", "\x01", "\x1f", "\x7f",
+	"\xff", "\x80", "\xc3", "\xed\xa0\x80",
 }
 
 // canonBrackets are the brackets placed inside a secret.
@@ -175,11 +197,19 @@ var canonFlowContexts = []struct{ open, close string }{
 	{"[", "]"}, {"{", "}"}, {"- {", "}"}, {canonArgsFlow, "]"}, {"", ""}, {"[{", "}]"}, {`msg="[`, `]"`},
 }
 
-// canonNeighbours are the glue and second secret key after a first secret value: on the next line, after a
-// separator on the same line, after a quote.
-var canonNeighbours = []string{
-	"\napiKey=", "\ntoken: ", "\n  token: ", " token=", ", token: ", "; apiKey=", `" token="`, "' secret='", "\t--password ",
-	`","token":"`,
+// canonNeighbour is the glue before a second secret key after a first secret value, the key, and the glue
+// between that key and its value.
+type canonNeighbour struct{ before, key, after string }
+
+// canonTokenKey is the second secret key most neighbours use.
+const canonTokenKey = "token"
+
+// canonNeighbours are the second secret keys after a first secret value: on the next line, after a separator on
+// the same line, after a quote.
+var canonNeighbours = []canonNeighbour{
+	{"\n", apiKeyName, "="}, {"\n", canonTokenKey, ": "}, {nlIndent, canonTokenKey, ": "}, {" ", canonTokenKey, "="}, {", ", canonTokenKey, ": "},
+	{"; ", apiKeyName, "="}, {`" `, canonTokenKey, `="`}, {"' ", canonCheckSecret, "='"}, {"\t", "--password", " "},
+	{`","`, canonTokenKey, `":"`}, {"\r\n", apiKeyName, "="}, {"\r", canonTokenKey, ": "},
 }
 
 // canonServe is the first string of a sequence, which must survive, and canonArgsFlow the start of a YAML flow
@@ -200,6 +230,8 @@ func canonCorpus() []canonCase {
 	g.keysCases()
 	g.bracketCases()
 	g.sequenceCases()
+	g.envCases()
+	g.excerptCases()
 	g.mixedCases()
 	return g.out
 }
@@ -219,40 +251,56 @@ func (g *canonGen) add(form, name string, f func(w *canonWriter)) {
 	g.out = append(g.out, w.c)
 }
 
-// canonNLs are the line ends of the corpus.
-var canonNLs = []string{"\n", "\r\n"}
+// canonNLs are the line ends of the corpus: a line feed, CRLF and a lone carriage return.
+var canonNLs = []string{"\n", "\r\n", "\r"}
 
-// indentCases writes a block indented with other characters, in six shapes.
+// indentCases writes a block indented with other characters, in seven shapes.
 func (g *canonGen) indentCases() {
 	rng, add, nls := g.rng, g.add, canonNLs
 	for _, key := range canonKeys {
 		for ci, c := range canonIndentChars {
-			for v := range 6 {
-				ind := canonPick(rng, canonIndicators)
-				nl := nls[(ci+v)%2]
-				add(canonFormIndent, fmt.Sprintf("key %s, indicator %q, indent %q, shape %d", key, ind, c, v), func(w *canonWriter) {
+			for v := range 7 {
+				ind := canonPick(rng, canonHeaders)
+				nl := nls[(ci+v)%len(nls)]
+				add(canonFormIndent, fmt.Sprintf("key %s, indicator %q, indent %q, line end %q, shape %d", key, ind, c, nl, v), func(w *canonWriter) {
 					switch v {
 					case 0:
-						w.text(key + ": " + ind + nl + c + c)
+						w.kept(key)
+						w.text(": " + ind + nl + c + c)
 						w.secret()
 					case 1:
 						w.kept("warning")
-						w.text(": " + key + ": " + ind + nl + c)
+						w.text(": ")
+						w.kept(key)
+						w.text(": " + ind + nl + c)
 						w.secret()
 					case 2:
-						w.text(key + ": " + ind + nl + c + c)
+						w.kept(key)
+						w.text(": " + ind + nl + c + c)
 						w.secret()
 						w.text(nl + c + c)
 						w.secret()
 					case 3:
-						w.text("  " + key + ": " + ind + nl + "  " + c)
+						w.text("  ")
+						w.kept(key)
+						w.text(": " + ind + nl + "  " + c)
 						w.secret()
 					case 4:
-						w.text(key + ": " + ind + nl + " " + c + " ")
+						w.kept(key)
+						w.text(": " + ind + nl + " " + c + " ")
 						w.secret()
 					case 5:
 						w.kept("spec")
-						w.text(":" + nl + "  " + key + ": " + ind + nl + c + c + c + c)
+						w.text(":" + nl + "  ")
+						w.kept(key)
+						w.text(": " + ind + nl + c + c + c + c)
+						w.secret()
+					case 6:
+						// Bytes that are not valid UTF-8 next to the value, after it and before the next line's.
+						w.kept(key)
+						w.text(": " + ind + nl + "  " + c)
+						w.secret()
+						w.text("\xff" + nl + "  \xc0")
 						w.secret()
 					}
 					w.next(nl)
@@ -260,7 +308,6 @@ func (g *canonGen) indentCases() {
 			}
 		}
 	}
-
 }
 
 // keysCases writes keys on one line: two, or three, the block under the line or flattened onto it; and a secret
@@ -276,9 +323,10 @@ func (g *canonGen) keysCases() {
 						// A bare short key takes only a value that looks like a secret, and a phrase does not.
 						continue
 					}
-					i1, i2 := canonPick(rng, canonIndicators), canonPick(rng, canonIndicators)
-					nl := nls[(si+v)%2]
-					add(canonFormKeys, fmt.Sprintf("%s %q %s, %q %q, shape %d", first, sep, key, i1, i2, v), func(w *canonWriter) {
+					// Only the last header on the line may carry a comment: it would hide the keys after it.
+					i1, i2 := canonPick(rng, canonIndicators), canonPick(rng, canonHeaders)
+					nl := nls[(si+v)%len(nls)]
+					add(canonFormKeys, fmt.Sprintf("%s %q %s, %q %q, line end %q, shape %d", first, sep, key, i1, i2, nl, v), func(w *canonWriter) {
 						// Shapes 3 to 5 are 0 to 2 with a phrase for a value, which a bare short key first on the
 						// line refuses.
 						value := w.secret
@@ -287,14 +335,27 @@ func (g *canonGen) keysCases() {
 						}
 						switch v % 3 {
 						case 0:
-							w.text(first + ": " + i1 + sep + key + ": " + i2 + nl + "  ")
+							w.kept(first)
+							w.text(": " + i1 + sep)
+							w.kept(key)
+							w.text(": " + i2 + nl + "  ")
 							value()
 						case 1:
-							w.kept("level")
-							w.text("=warn " + first + ": " + i1 + sep + key + ": " + i2 + "   ")
+							w.kept("level=warn")
+							w.text(" ")
+							w.kept(first)
+							w.text(": " + i1 + sep)
+							w.kept(key)
+							// Flattened onto the line: no header comment, it would hold the value.
+							w.text(": " + i1 + "   ")
 							value()
 						case 2:
-							w.text(first + ": " + i1 + sep + canonBareKeys[1] + ": " + i1 + sep + key + ": " + i2 + nl + "    ")
+							w.kept(first)
+							w.text(": " + i1 + sep)
+							w.kept(canonBareKeys[1])
+							w.text(": " + i1 + sep)
+							w.kept(key)
+							w.text(": " + i2 + nl + "    ")
 							value()
 						}
 						w.next(nl)
@@ -308,13 +369,36 @@ func (g *canonGen) keysCases() {
 		for second := range strings.FieldsSeq("msg description pass x") {
 			ind := canonPick(rng, canonIndicators)
 			add(canonFormKeys, fmt.Sprintf("%s then %s, %q", key, second, ind), func(w *canonWriter) {
-				w.text(key + ": " + ind + " " + second + ": " + ind + "\n  ")
+				w.kept(key)
+				w.text(": " + ind + " ")
+				w.kept(second)
+				w.text(": " + ind + nlIndent)
 				w.secret()
 				w.next("\n")
 			})
 		}
 	}
-
+	// A flag and its value after an equals sign on a command line, next to a flag that must stay.
+	for _, flag := range canonFlagKeys {
+		for ni, nl := range canonNLs {
+			add(canonFormKeys, fmt.Sprintf("command line %s=, line end %q", flag, nl), func(w *canonWriter) {
+				w.kept("exec /bin/app")
+				w.text(" ")
+				w.kept(flag + "=")
+				w.secret()
+				w.text(" ")
+				w.kept("--port=8080")
+				if ni > 0 {
+					w.text(" ")
+					w.kept(flag + "=")
+					w.text(`"`)
+					w.secret()
+					w.text(`"`)
+				}
+				w.next(nl)
+			})
+		}
+	}
 }
 
 // bracketCases writes a flow value with brackets inside the secret, with or without a block indicator.
@@ -325,37 +409,39 @@ func (g *canonGen) bracketCases() {
 			for bi, br := range canonBrackets {
 				ind := []string{"", "> ", "| ", canonPick(rng, canonIndicators) + " "}[(ci+bi)%4]
 				two := (ci+bi)%3 == 0
-				add(canonFormBrackets, fmt.Sprintf("context %q, key %s, %q, bracket %q, three pieces %v", ctx.open, key, ind, br, two), func(w *canonWriter) {
+				nl := canonNLs[(ci+bi)%len(canonNLs)]
+				add(canonFormBrackets, fmt.Sprintf("context %q, key %s, %q, bracket %q, three pieces %v, line end %q", ctx.open, key, ind, br, two, nl), func(w *canonWriter) {
 					w.kept("retry")
-					w.text(" " + ctx.open + key + ": " + ind)
+					w.text(" " + ctx.open)
+					w.kept(key)
+					w.text(": " + ind)
 					glue := []string{br}
 					if two {
 						glue = append(glue, canonBrackets[(bi+5)%len(canonBrackets)])
 					}
 					w.bracketSecret(glue)
 					w.text(ctx.close)
-					w.next("\n")
+					w.next(nl)
 				})
 			}
 		}
 	}
-
 }
 
 // sequenceCases writes a key in one string of a sequence and its value in the next, in each rendering of the
-// sequence.
+// sequence; and a flag and its value in one string.
 func (g *canonGen) sequenceCases() {
 	rng, add := g.rng, g.add
 	type seqItem struct{ key, pad string }
 	var items []seqItem
 	for _, f := range canonFlagKeys {
-		items = append(items, seqItem{f, ""})
+		items = append(items, seqItem{f, ""}, seqItem{f + "=", ""})
 	}
 	for _, key := range canonKeys {
 		if strings.ContainsAny(key, `"'`) {
 			continue
 		}
-		items = append(items, seqItem{key + ": " + canonPick(rng, canonIndicators), "  "}, seqItem{key + ":", "  "})
+		items = append(items, seqItem{key + ": " + canonPick(rng, canonHeaders), "  "}, seqItem{key + ":", "  "})
 	}
 	for _, it := range items {
 		for r := range canonSeqRenderings {
@@ -369,7 +455,155 @@ func (g *canonGen) sequenceCases() {
 			}
 		}
 	}
+	for _, f := range canonFlagKeys {
+		for r := range canonSeqRenderings {
+			add(canonFormSequence, fmt.Sprintf("%q and its value in one string, rendering %d", f+"=", r), func(w *canonWriter) {
+				w.sequence(r, []string{canonServe}, func(w *canonWriter) {
+					w.kept(f + "=")
+					w.secret()
+				}, "--port=8080")
+			})
+		}
+	}
+}
 
+// canonEnvNames are names of environment variables that hold a secret.
+var canonEnvNames = strings.Fields("PASSWORD DB_PASSWORD API_TOKEN CLIENT_SECRET AWS_SECRET_ACCESS_KEY GITHUB_TOKEN")
+
+// canonEnvRenderings write an environment variable: its name in the field name and its value in the field
+// value, in the text of a manifest, of JSON and of JSON escaped inside a string, and with the value first.
+var canonEnvRenderings = []func(w *canonWriter, name, nl string){
+	func(w *canonWriter, name, _ string) {
+		w.text("{")
+		w.kept("name")
+		w.text(": ")
+		w.kept(name)
+		w.text(", ")
+		w.kept("value")
+		w.text(": ")
+		w.secret()
+		w.text("}")
+	},
+	func(w *canonWriter, name, nl string) {
+		w.text("- ")
+		w.kept("name")
+		w.text(": ")
+		w.kept(name)
+		w.text(nl + "  ")
+		w.kept("value")
+		w.text(": ")
+		w.secret()
+	},
+	func(w *canonWriter, name, nl string) {
+		w.kept("env")
+		w.text(":" + nl + "- ")
+		w.kept("name")
+		w.text(": ")
+		w.kept(name)
+		w.text(nl + "  ")
+		w.kept("value")
+		w.text(`: "`)
+		w.secret()
+		w.text(`"`)
+	},
+	func(w *canonWriter, name, nl string) {
+		w.text("- ")
+		w.kept("name")
+		w.text(": ")
+		w.kept(name)
+		w.text(nl + "  ")
+		w.kept("value")
+		w.text(": |" + nl + "    ")
+		w.secret()
+	},
+	func(w *canonWriter, name, _ string) {
+		w.text(`{"`)
+		w.kept("name")
+		w.text(`":"`)
+		w.kept(name)
+		w.text(`","`)
+		w.kept("value")
+		w.text(`":"`)
+		w.secret()
+		w.text(`"}`)
+	},
+	func(w *canonWriter, name, nl string) {
+		w.text("{" + nl + `  "`)
+		w.kept("name")
+		w.text(`": "`)
+		w.kept(name)
+		w.text(`",` + nl + `  "`)
+		w.kept("value")
+		w.text(`": "`)
+		w.secret()
+		w.text(`"` + nl + "}")
+	},
+	func(w *canonWriter, name, _ string) {
+		w.text(`{"`)
+		w.kept("env")
+		w.text(`":"[{\"`)
+		w.kept("name")
+		w.text(`\":\"`)
+		w.kept(name)
+		w.text(`\",\"`)
+		w.kept("value")
+		w.text(`\":\"`)
+		w.secret()
+		w.text(`\"}]"}`)
+	},
+	func(w *canonWriter, name, _ string) {
+		w.text("{")
+		w.kept("value")
+		w.text(": ")
+		w.secret()
+		w.text(", ")
+		w.kept("name")
+		w.text(": ")
+		w.kept(name)
+		w.text("}")
+	},
+}
+
+// envCases writes an environment variable's name and value in neighbouring fields.
+func (g *canonGen) envCases() {
+	for _, name := range canonEnvNames {
+		for r, render := range canonEnvRenderings {
+			for _, nl := range canonNLs {
+				g.add(canonFormEnv, fmt.Sprintf("%s, rendering %d, line end %q", name, r, nl), func(w *canonWriter) {
+					render(w, name, nl)
+					w.next(nl)
+				})
+			}
+		}
+	}
+}
+
+// excerptCases writes a block under a secret key in a log: lines before it, the key line, one to three value
+// lines, and a line after it. A cut of the log excerpt between the key line and the value lines leaves the
+// values without their key.
+func (g *canonGen) excerptCases() {
+	rng := g.rng
+	for _, key := range canonKeys {
+		for li, lead := range []string{"  ", "    ", "\t", " \u00a0"} {
+			for lines := 1; lines <= 3; lines++ {
+				nl := []string{"\n", "\r\n"}[(li+lines)%2]
+				ind := canonPick(rng, canonHeaders)
+				g.add(canonFormExcerpt, fmt.Sprintf("key %s, indicator %q, lead %q, %d lines, line end %q", key, ind, lead, lines, nl), func(w *canonWriter) {
+					w.kept("level=info msg=starting")
+					w.text(nl)
+					w.kept("config")
+					w.text(":" + nl + " ")
+					w.kept(key)
+					w.text(": " + ind)
+					for range lines {
+						w.text(nl + lead)
+						w.secret()
+					}
+					w.next(nl)
+				})
+			}
+		}
+	}
 }
 
 // mixedCases writes the forms combined, and next to a second secret key.
@@ -377,40 +611,56 @@ func (g *canonGen) mixedCases() {
 	rng, add := g.rng, g.add
 	for ki, key := range canonKeys {
 		for ci, c := range canonIndentChars {
-			ind := canonPick(rng, canonIndicators)
+			ind := canonPick(rng, canonHeaders)
 			nb := canonNeighbours[(ki+ci)%len(canonNeighbours)]
 			br := canonBrackets[(ki+ci)%len(canonBrackets)]
-			add(canonFormMixed, fmt.Sprintf("keys on one line, indent %q, key %s", c, key), func(w *canonWriter) {
-				w.text("pass: " + ind + " " + key + ": " + ind + "\n" + c + c)
+			nl := canonNLs[(ki+ci)%len(canonNLs)]
+			add(canonFormMixed, fmt.Sprintf("keys on one line, indent %q, key %s, line end %q", c, key, nl), func(w *canonWriter) {
+				w.kept("pass")
+				w.text(": " + canonIndicators[ci%len(canonIndicators)] + " ")
+				w.kept(key)
+				w.text(": " + ind + nl + c + c)
 				w.secret()
-				w.next("\n")
+				w.next(nl)
 			})
-			add(canonFormMixed, fmt.Sprintf("indent %q, bracket %q, key %s", c, br, key), func(w *canonWriter) {
-				w.text(key + ": " + ind + "\n" + c + c)
+			add(canonFormMixed, fmt.Sprintf("indent %q, bracket %q, key %s, line end %q", c, br, key, nl), func(w *canonWriter) {
+				w.kept(key)
+				w.text(": " + ind + nl + c + c)
 				w.bracketSecret([]string{br})
-				w.next("\n")
+				w.next(nl)
 			})
-			add(canonFormMixed, fmt.Sprintf("indent %q, then %q, key %s", c, nb, key), func(w *canonWriter) {
-				w.text(key + ": " + ind + "\n" + c + c)
+			add(canonFormMixed, fmt.Sprintf("indent %q, then %q, key %s, line end %q", c, nb, key, nl), func(w *canonWriter) {
+				w.kept(key)
+				w.text(": " + ind + nl + c + c)
 				w.secret()
-				w.text(nb)
+				w.text(nb.before)
+				w.kept(nb.key)
+				w.text(nb.after)
 				w.secret()
-				w.next("\n")
+				w.next(nl)
 			})
-			add(canonFormMixed, fmt.Sprintf("flow bracket %q, then %q, key %s", br, nb, key), func(w *canonWriter) {
+			add(canonFormMixed, fmt.Sprintf("flow bracket %q, then %q, key %s, line end %q", br, nb, key, nl), func(w *canonWriter) {
 				w.kept("retry")
-				w.text(" {" + key + ": > ")
+				w.text(" {")
+				w.kept(key)
+				w.text(": > ")
 				w.bracketSecret([]string{br})
-				w.text(nb)
+				w.text(nb.before)
+				w.kept(nb.key)
+				w.text(nb.after)
 				w.secret()
 				w.text("}")
-				w.next("\n")
+				w.next(nl)
 			})
-			add(canonFormMixed, fmt.Sprintf("keys on one line, flow bracket %q, key %s", br, key), func(w *canonWriter) {
-				w.text("[pass: " + ind + " " + key + ": > ")
+			add(canonFormMixed, fmt.Sprintf("keys on one line, flow bracket %q, key %s, line end %q", br, key, nl), func(w *canonWriter) {
+				w.text("[")
+				w.kept("pass")
+				w.text(": " + canonIndicators[ci%len(canonIndicators)] + " ")
+				w.kept(key)
+				w.text(": > ")
 				w.bracketSecret([]string{br})
 				w.text("]")
-				w.next("\n")
+				w.next(nl)
 			})
 		}
 	}
@@ -418,7 +668,7 @@ func (g *canonGen) mixedCases() {
 		for ci, c := range canonIndentChars {
 			r := (fi + ci) % len(canonSeqRenderings)
 			br := canonBrackets[(fi+ci)%len(canonBrackets)]
-			key := []string{"password: |", flag}[ci%2]
+			key := []string{"password: |", flag, flag + "="}[ci%3]
 			add(canonFormMixed, fmt.Sprintf("sequence %q, indent %q, rendering %d", key, c, r), func(w *canonWriter) {
 				w.sequence(r, []string{canonServe, key}, func(w *canonWriter) {
 					w.text(c + c)
@@ -437,17 +687,20 @@ func (g *canonGen) mixedCases() {
 }
 
 // canonSeqRenderings are the ways a text shows a sequence of strings: JSON on one line, a YAML flow sequence
-// after a key, a YAML block sequence of quoted items, pretty-printed JSON, and JSON escaped inside a string.
+// after a key, a YAML block sequence of quoted items, pretty-printed JSON, JSON escaped inside a string, and the
+// block sequence and pretty-printed JSON with CRLF line ends.
 var canonSeqRenderings = []struct{ open, sep, close, quote string }{
 	{`[`, `, `, `]`, `"`},
 	{canonArgsFlow, `, `, `]`, `"`},
 	{"args:" + nlDash, nlDash, "\n", `"`},
 	{"[\n  ", ",\n  ", "\n]", `"`},
 	{`{"args":"[`, `, `, `]"}`, `\"`},
+	{"args:\r\n- ", "\r\n- ", "\r\n", `"`},
+	{"[\r\n  ", ",\r\n  ", "\r\n]", `"`},
 }
 
 // sequence writes the strings before, then the value string val writes, then after, in rendering r, and
-// records the strings in args.
+// records the strings in args. Every string but the value's is text that must survive.
 func (w *canonWriter) sequence(r int, before []string, val func(w *canonWriter), after string) {
 	rd := canonSeqRenderings[r]
 	w.text(rd.open)
@@ -456,11 +709,7 @@ func (w *canonWriter) sequence(r int, before []string, val func(w *canonWriter),
 			w.text(rd.sep)
 		}
 		w.text(rd.quote)
-		if s == canonServe {
-			w.kept(s)
-		} else {
-			w.text(s)
-		}
+		w.kept(s)
 		w.text(rd.quote)
 		w.c.args = append(w.c.args, s)
 	}
@@ -468,7 +717,9 @@ func (w *canonWriter) sequence(r int, before []string, val func(w *canonWriter),
 	start := w.b.Len()
 	val(w)
 	w.c.args = append(w.c.args, w.b.String()[start:])
-	w.text(rd.quote + rd.sep + rd.quote + after + rd.quote)
+	w.text(rd.quote + rd.sep + rd.quote)
+	w.kept(after)
+	w.text(rd.quote)
 	w.c.args = append(w.c.args, after)
 	w.text(rd.close)
 }
@@ -500,7 +751,7 @@ func canonHash(c canonCase) string {
 }
 
 // canonMainTable holds, for each input of the corpus in order, its hash and the byte ranges main redacted
-// (commit 26a6108e). It was written once by running TestWriteCanonMainTable in a checkout of that commit with
+// (commit 7e5cedb1). It was written once by running TestWriteCanonMainTable in a checkout of that commit with
 // CANON_MAIN_TABLE set to the output path; regenerate it only from that commit.
 const canonMainTable = "testdata/canonical-main.jsonl"
 

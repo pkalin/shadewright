@@ -97,8 +97,110 @@ func getResourceOfArgs(args []string) string {
 	return r.Text
 }
 
+// canonPieceIn reports whether out holds the secret piece s, whole or in part: its first or its last
+// redact.CanonPartialMin bytes, so that a prefix or a suffix of that length or longer counts. A shorter piece (a
+// word of a phrase) counts only whole.
+func canonPieceIn(out, s string) bool {
+	n := min(len(s), redact.CanonPartialMin)
+	return strings.Contains(out, s[:n]) || strings.Contains(out, s[len(s)-n:])
+}
+
+// canonPieceIn finds a piece whole, by a prefix or a suffix of redact.CanonPartialMin bytes or more, and a
+// short piece only whole; canonKeptLost finds a kept text an output holds fewer times than the input.
+func TestCanonPieceAndKeptChecks(t *testing.T) {
+	const s, word = "Qz20001xK9w", "dune"
+	for _, tc := range []struct {
+		out, piece string
+		want       bool
+	}{
+		{"a " + s + " b", s, true},
+		{"[REDACTED]" + s[:8], s, true},
+		{s[3:] + "]", s, true},
+		{s[:7] + "[REDACTED]" + s[4:], s, false},
+		{"Qz20002xK9w Qz20001", s, false},
+		{word, word, true},
+		{word[:3], word, false},
+	} {
+		if got := canonPieceIn(tc.out, tc.piece); got != tc.want {
+			t.Errorf("canonPieceIn(%q, %q) = %v, want %v", tc.out, tc.piece, got, tc.want)
+		}
+	}
+	masked := []string{"pass: | password: |\n  \x00\x00\x00\nnext: --port=8080"}
+	keep := []string{"pass", "password", "next", "--port=8080", `"token"`}
+	for _, tc := range []struct {
+		out  string
+		want []int
+	}{
+		{"pass: | password: [REDACTED]\nnext: --port=8080", nil},
+		{"[REDACTED] password: [REDACTED]\nnext: --port=8080", []int{0}},
+		{"pass: | [REDACTED]", []int{0, 1, 2, 3}},
+		{`{"a":"pass: | password: [REDACTED]\\nnext: --port=8080"}`, nil},
+	} {
+		if got := canonKeptLost(tc.out, masked, keep); !slices.Equal(got, tc.want) {
+			t.Errorf("canonKeptLost(%q) = %v, want %v", tc.out, got, tc.want)
+		}
+	}
+}
+
+// canonEscapes are the ways an entry point writes a kept text: as it is, and escaped as a JSON string with and
+// without the HTML escapes.
+var canonEscapes = []func(s string) string{
+	func(s string) string { return s },
+	func(s string) string {
+		b, _ := json.Marshal(s)
+		return string(b[1 : len(b)-1])
+	},
+	func(s string) string {
+		var b strings.Builder
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(s)
+		out := strings.TrimSuffix(b.String(), "\n")
+		return out[1 : len(out)-1]
+	},
+}
+
+// canonKeptLost returns the indexes of the kept pieces that out lost: a kept text that out, as written or
+// escaped as JSON, holds fewer times than the input does outside its secret pieces (masked). Other text of the
+// output (the fields of a tool's answer) can only add occurrences, so the check is a lower bound.
+func canonKeptLost(out string, masked []string, keep []string) []int {
+	var lost []int
+	for i, k := range keep {
+		need := 0
+		for _, m := range masked {
+			need += strings.Count(m, k)
+		}
+		have := 0
+		for _, esc := range canonEscapes {
+			have = max(have, strings.Count(out, esc(k)))
+		}
+		if have < need {
+			lost = append(lost, i)
+		}
+	}
+	return lost
+}
+
+// canonKeptEntries are the entry points whose output must hold every kept piece of the input byte for byte (or
+// escaped as JSON): the context builder's value, the read tools, the log excerpt of the whole read. The
+// others change kept text by design: fingerprint.Normalize, fingerprint.Symptom, fingerprint.Value and
+// modules.BoundValue replace variable parts (numbers, durations) by placeholders and collapse whitespace, and
+// the context builder's value of the symptom is fingerprint.Symptom's text; the log excerpt cut after a line
+// drops the lines before the cut, so its kept pieces are checked on the excerpt of the whole read only.
+var canonKeptEntries = map[string]bool{
+	canonEntryValue: true, tools.NameGetResource: true, tools.NameListEvents: true,
+	tools.NameGetPodLogs: true, canonEntryExcerpt: true, canonSequenceEntry: true,
+}
+
+// canonEntryValue and canonEntryExcerpt are the names of two entry points in entryPoints.
+const (
+	canonEntryValue   = "incidentcontext.Value"
+	canonEntryExcerpt = "kube.Excerpt"
+)
+
 // canonEntryLeaks runs every input of cases through every entry point (entryPoints, and get_resource of the
-// strings for a sequence) and returns, for each, the inputs whose output holds a piece of secret, with the
+// strings for a sequence) and returns, for each, the pieces of each input whose secret is in an output, whole
+// or in part (canonPieceIn), and the kept pieces an output lost (canonKeptLost, at canonKeptEntries), with the
 // first such output of each entry point for the message. The entry points run side by side, one goroutine
 // each; the read tools share one tool set and take turns.
 func canonEntryLeaks(cases []redact.CanonCase) (leaks []redact.CanonLeak, firstOut map[string]string) {
@@ -106,35 +208,55 @@ func canonEntryLeaks(cases []redact.CanonCase) (leaks []redact.CanonLeak, firstO
 		leaks []redact.CanonLeak
 		first string
 	}
-	run := func(name string, f func(c redact.CanonCase) (string, bool)) result {
+	// pieces returns the items of c that the outputs leak: secret pieces in any output, kept pieces lost by
+	// the first.
+	pieces := func(name string, c redact.CanonCase, outs []string, masked []string) []string {
+		var items []string
+		for i, s := range c.Secrets {
+			for _, out := range outs {
+				if canonPieceIn(out, s) {
+					items = append(items, redact.CanonSecretItem(i))
+					break
+				}
+			}
+		}
+		if canonKeptEntries[name] && len(outs) > 0 {
+			for _, i := range canonKeptLost(outs[0], masked, c.Keep) {
+				items = append(items, redact.CanonKeptItem(i))
+			}
+		}
+		return items
+	}
+	checks := map[string]func(c redact.CanonCase) ([]string, string){}
+	for name, f := range entryPoints {
+		checks[name] = func(c redact.CanonCase) ([]string, string) {
+			outs := f(c.In)
+			items := pieces(name, c, outs, []string{c.Masked})
+			if len(items) == 0 {
+				return nil, ""
+			}
+			return items, outs[0]
+		}
+	}
+	checks[canonSequenceEntry] = func(c redact.CanonCase) ([]string, string) {
+		if c.Args == nil {
+			return nil, ""
+		}
+		out := getResourceOfArgs(c.Args)
+		return pieces(canonSequenceEntry, c, []string{out}, c.MaskedArgs), out
+	}
+	run := func(name string, f func(c redact.CanonCase) ([]string, string)) result {
 		var r result
 		for _, c := range cases {
-			if out, ok := f(c); ok {
-				r.leaks = append(r.leaks, redact.CanonLeak{Check: name, Hash: c.Hash, Name: c.Name})
-				if r.first == "" {
-					r.first = fmt.Sprintf("%s:\n  in: %q\n out: %q", c.Name, c.In, out)
-				}
+			items, out := f(c)
+			for _, it := range items {
+				r.leaks = append(r.leaks, redact.CanonLeak{Check: name, Hash: c.Hash, Name: c.Name, Item: it})
+			}
+			if len(items) > 0 && r.first == "" {
+				r.first = fmt.Sprintf("%s, pieces %v:\n  in: %q\n out: %q", c.Name, items, c.In, out)
 			}
 		}
 		return r
-	}
-	checks := map[string]func(c redact.CanonCase) (string, bool){}
-	for name, f := range entryPoints {
-		checks[name] = func(c redact.CanonCase) (string, bool) {
-			for _, out := range f(c.In) {
-				if leakedSecret(out, c.Secrets) != "" {
-					return out, true
-				}
-			}
-			return "", false
-		}
-	}
-	checks[canonSequenceEntry] = func(c redact.CanonCase) (string, bool) {
-		if c.Args == nil {
-			return "", false
-		}
-		out := getResourceOfArgs(c.Args)
-		return out, leakedSecret(out, c.Secrets) != ""
 	}
 	var (
 		mu sync.Mutex
@@ -184,7 +306,7 @@ func TestCanonCorpusThroughEveryEntryPoint(t *testing.T) {
 	cases, sampled, got, first := corpus.cases, corpus.sampled, found.leaks, found.first
 	if redact.CanonWriteTables(t, sampled) {
 		redact.WriteCanonTable(t, redact.CanonEntryLeaks, []string{
-			"# Expected leaks of the entry points on the canonical view corpus (#845), written by CANON_LEAKS_WRITE=1.",
+			"# Expected leaks of the entry points on the canonical view corpus (#845), piece by piece, written by CANON_LEAKS_WRITE=1.",
 		}, got)
 		return
 	}
@@ -193,7 +315,7 @@ func TestCanonCorpusThroughEveryEntryPoint(t *testing.T) {
 		checked[c.Hash] = c.Name
 	}
 	want, _ := redact.ReadCanonTable(t, redact.CanonEntryLeaks)
-	redact.CheckCanonLeaks(t, redact.CanonEntryLeaks, checked, want, got)
+	redact.CheckCanonLeaks(t, redact.CanonEntryLeaks, redact.CanonIndex(), checked, want, got)
 	names := make([]string, 0, len(first))
 	for n := range first {
 		names = append(names, n)
@@ -204,8 +326,9 @@ func TestCanonCorpusThroughEveryEntryPoint(t *testing.T) {
 	}
 }
 
-// No input of the corpus leaks at an entry point where it did not leak on main (redact.CanonMainEntryLeaks,
-// written at the commit of the main table with every entry point main has).
+// No piece of secret of the corpus leaks at an entry point where it did not leak on main
+// (redact.CanonMainEntryLeaks, written at the commit of the main table with every entry point main has). A row
+// of that table that names no piece of the corpus fails.
 func TestCanonEntryPointsLeakNothingMainHid(t *testing.T) {
 	_, found := canonCorpusLeaks()
 	main, comments := redact.ReadCanonTable(t, redact.CanonMainEntryLeaks)
@@ -218,28 +341,35 @@ func TestCanonEntryPointsLeakNothingMainHid(t *testing.T) {
 	if len(onMain) == 0 {
 		t.Fatalf("%s names no entry points", redact.CanonMainEntryLeaks)
 	}
+	for i, e := range redact.CanonTableErrors(main, redact.CanonIndex()) {
+		if i < 20 {
+			t.Errorf("%s: %s", redact.CanonMainEntryLeaks, e)
+		}
+	}
+	key := func(r redact.CanonLeak) string { return r.Check + "\t" + r.Hash + "\t" + r.Item }
 	mainLeak := map[string]bool{}
 	for _, r := range main {
-		mainLeak[r.Check+"\t"+r.Hash] = true
+		mainLeak[key(r)] = true
 	}
 	lost := 0
 	for _, r := range found.leaks {
-		if !slices.Contains(onMain, r.Check) || mainLeak[r.Check+"\t"+r.Hash] {
+		if !strings.HasPrefix(r.Item, "s") || !slices.Contains(onMain, r.Check) || mainLeak[key(r)] {
 			continue
 		}
 		lost++
 		if lost <= 20 {
-			t.Errorf("%s: leaks at %s, did not on main", r.Name, r.Check)
+			t.Errorf("%s: piece %s leaks at %s, did not on main", r.Name, r.Item, r.Check)
 		}
 	}
 	if lost > 0 {
-		t.Errorf("%d inputs leak at an entry point where main hid them", lost)
+		t.Errorf("%d secret pieces leak at an entry point where main hid them", lost)
 	}
 }
 
 // TestWriteCanonMainEntryTable writes redact.CanonMainEntryLeaks from the entry points it runs with, when
-// CANON_MAIN_ENTRY_TABLE names the output path; it is run once in a checkout of the commit of the main table,
-// with entryPoints reduced to the entry points that commit has.
+// CANON_MAIN_ENTRY_TABLE names the output path (and CANON_MAIN_COMMIT the commit, for its first line); it is
+// run once in a checkout of the commit of the main table, with entryPoints reduced to the entry points that
+// commit has.
 func TestWriteCanonMainEntryTable(t *testing.T) {
 	path := os.Getenv("CANON_MAIN_ENTRY_TABLE")
 	if path == "" {
@@ -257,7 +387,7 @@ func TestWriteCanonMainEntryTable(t *testing.T) {
 	names = append(names, canonSequenceEntry)
 	slices.Sort(names)
 	redact.WriteCanonTable(t, path, []string{
-		"# Leaks of the entry points on the canonical view corpus (#845) at main 26a6108e.",
+		"# Leaks of the entry points on the canonical view corpus (#845), piece by piece, at main " + os.Getenv("CANON_MAIN_COMMIT") + ".",
 		"# entry points: " + strings.Join(names, ","),
 	}, got)
 }

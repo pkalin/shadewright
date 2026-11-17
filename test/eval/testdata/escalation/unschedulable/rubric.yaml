@@ -1,0 +1,11 @@
+# How escalation/unschedulable is scored: the facts of the fleet's unschedulable expected.yaml, verbatim, the 256
+# CPU request scored from the read that shows it.
+facts:
+  - fact: the FailedScheduling event on the pending pod
+    any: ["FailedScheduling", "unschedulable", "cannot be scheduled", "could not be scheduled"]
+  - fact: the insufficient resource, Insufficient cpu
+    all: ["insufficient cpu"]
+  - fact: the 256 CPU request of the web container
+    all: ["256"]
+reads:
+  - read: get_resource Deployment/web

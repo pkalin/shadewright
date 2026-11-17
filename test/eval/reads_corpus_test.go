@@ -456,6 +456,7 @@ func TestReadRuleRealTools(t *testing.T) {
 		readEventsPods,
 		"check_missing_reference ConfigMap/web-config pod=web-0",
 		"query_metrics template=container_memory_working_set_bytes window_minutes=60",
+		"get_pod_logs pod=web-0 container=web previous=true", // offered to a scenario with a logs.yaml
 	} {
 		if _, err := parseRead(line, offered); err != nil {
 			t.Errorf("%q: %v", line, err)
@@ -464,7 +465,7 @@ func TestReadRuleRealTools(t *testing.T) {
 	for _, line := range []string{
 		"get_delivery_status Kustomization/apps", // not offered by the analysis loop
 		"get_resource Service/web",               // not a kind get_resource reads
-		"get_pod_logs pod=web-0",                 // no log source in the evaluation, so not offered
+		"get_pod_logs Pod/web-0",                 // get_pod_logs has no kind
 		"query_metrics Pod/web-0",                // query_metrics has no kind
 		"query_metrics window_minutes=1h",        // an integer argument
 		"exec command=ls",

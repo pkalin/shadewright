@@ -92,6 +92,12 @@ type tally struct {
 	// first is the messages of the first request of the analysis, the system prompt and the context as the
 	// model gets them.
 	first []providers.Message
+	// toolText is the text of every tool result the loop received, in order (recordedTools).
+	toolText []string
+	// truncated and failedSources are the escalation signals of the context the builder built, before any
+	// forced escalation (signalRecorder).
+	truncated     bool
+	failedSources []incidentcontext.Section
 }
 
 // roleUsage is what the calls of one role returned.
@@ -167,6 +173,25 @@ func (f forcedEscalation) Build(ctx context.Context,
 	return c, nil
 }
 
+// signalRecorder records the escalation signals of the context the product's builder returns, before a forced
+// escalation adds its own (escalation_scenarios_test.go checks a scenario escalates on the product's signal).
+type signalRecorder struct {
+	inner analysis.ContextBuilder
+	t     *tally
+}
+
+func (r signalRecorder) Build(ctx context.Context,
+	inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+	c, err := r.inner.Build(ctx, inc)
+	if err != nil || c == nil {
+		return c, err
+	}
+	r.t.mu.Lock()
+	r.t.truncated, r.t.failedSources = c.Truncated, slices.Clone(c.FailedSources)
+	r.t.mu.Unlock()
+	return c, nil
+}
+
 // modelSource gives the model factory of one scenario run and the models the replies must name.
 type modelSource interface {
 	// factory returns the factory for a run of s; each call is a new run. done, when not nil, is called after
@@ -193,6 +218,9 @@ func newClient(scheme *runtime.Scheme, objs []client.Object) client.Client {
 // providers.MetricsSource interface, or none (a nil interface, not a nil value) when the scenario has no
 // metrics.yaml, so the context says no metrics source is configured, as an analyzer without --prometheus-url.
 func (s *scenario) metricsSource() providers.MetricsSource {
+	if s.metricsDown {
+		return downMetrics{}
+	}
 	if s.metrics == nil {
 		return nil
 	}
@@ -209,14 +237,14 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		return res, err
 	}
 	now := func() time.Time { return fixtureNow }
-	metrics := s.metricsSource()
+	metrics, logs := s.metricsSource(), s.logSource()
 	builder, err := incidentcontext.New(incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
-		Metrics: metrics, Redactor: redactor, Now: now,
+		Metrics: metrics, Logs: logs, Limits: s.limits, Redactor: redactor, Now: now,
 		Policies: evalPolicies, PolicyReader: c, RequestNamespace: evalRequestNamespace})
 	if err != nil {
 		return res, err
 	}
-	set, err := tools.New(tools.Config{Pods: c, Events: c, Objects: c, Metrics: metrics, Redactor: redactor,
+	set, err := tools.New(tools.Config{Pods: c, Events: c, Objects: c, Metrics: metrics, Logs: logs, Redactor: redactor,
 		Namespaces: watchedNamespaces, Now: now})
 	if err != nil {
 		return res, err
@@ -225,11 +253,11 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	if err != nil {
 		return res, err
 	}
-	var cb analysis.ContextBuilder = builder
-	if models.forcesEscalation() {
-		cb = forcedEscalation{inner: builder}
-	}
 	t := &tally{}
+	var cb analysis.ContextBuilder = signalRecorder{inner: builder, t: t}
+	if models.forcesEscalation() || s.forceEscalation {
+		cb = forcedEscalation{inner: cb}
+	}
 	a, err := analysis.New(analysis.Config{
 		Builder: cb, Tools: recordedTools{inner: set, t: t}, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
 		Redactor: redactor, Now: now,
@@ -260,7 +288,8 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	last := t.last
 	calls := slices.Clone(t.reads)
-	res.prompt = t.first
+	res.prompt, res.toolText = t.first, slices.Clone(t.toolText)
+	res.truncated, res.failedSources = t.truncated, slices.Clone(t.failedSources)
 	t.mu.Unlock()
 	if aerr != nil {
 		return res, fmt.Errorf("the analysis stopped: %w", aerr)

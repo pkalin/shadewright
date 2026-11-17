@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -201,11 +202,30 @@ type scenario struct {
 	// metrics is what the scenario's Prometheus holds (metrics.yaml); nil when the scenario has no metrics
 	// source.
 	metrics *metricsRecording
+	// metricsDown configures a metrics source that fails every query, a Prometheus that is down (an escalation
+	// scenario's metricsSource: down); metrics is then nil.
+	metricsDown bool
+	// logs is what the scenario's pod logs hold (logs.yaml); nil when the scenario has no log source.
+	logs *logsRecording
+	// limits are the context builder's bounds; the zero value is incidentcontext.DefaultLimits (an escalation
+	// scenario's contextBytes sets the total).
+	limits incidentcontext.Limits
 	// policies are the RemediationPolicies of the scenario's cluster (policy.yaml, #493): the context builder
 	// shows their bounds, and a proposal they refuse fails the scenario.
 	policies []*remediationv1alpha1.RemediationPolicy
 	// reads are the rubric's expected reads, parsed against the tools the scenario is offered (checkReads).
 	reads []readRule
+	// forceEscalation sends every run of the scenario to the escalation model with the read tools, whatever
+	// the model source: an escalation scenario (escalation_scenarios_test.go), whose facts only a read shows.
+	forceEscalation bool
+	// escalates says every run of the scenario goes to the escalation model: an escalation scenario, forced
+	// or through the product's own signal (escalation_scenarios_test.go).
+	escalates bool
+	// signal is the product's escalation signal an escalation scenario relies on; empty when it is forced.
+	signal escalationSignal
+	// behindReads are the rubric facts that only the expected reads show: not scored by the first request the
+	// product builds, scored by the tool results (TestEscalationFactsOnlyBehindReads).
+	behindReads []rubricFact
 }
 
 // policyFile holds a scenario's RemediationPolicies. Every scenario has one; a variant without its own takes
@@ -283,7 +303,11 @@ func loadScenarios(scheme *runtime.Scheme) ([]*scenario, error) {
 	if len(out) == 0 {
 		return nil, errors.New("no scenarios found")
 	}
-	return out, nil
+	escalation, err := loadEscalationScenarios(scheme)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, escalation...), nil
 }
 
 func loadScenario(scheme *runtime.Scheme, name string) (*scenario, error) {
@@ -292,7 +316,16 @@ func loadScenario(scheme *runtime.Scheme, name string) (*scenario, error) {
 
 // loadScenarioDir loads the scenario called name from dir.
 func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error) {
+	return loadScenarioFiles(scheme, dir, dir, name, name)
+}
+
+// loadScenarioFiles loads the scenario called name: its expected.yaml, incident.yaml, objects.yaml, policy.yaml,
+// metrics.yaml and logs.yaml from dataDir, whose expected.yaml must be named expectedName, and its rubric.yaml and
+// replies.yaml from ownDir. A fleet scenario has one directory for both; an escalation scenario may take its
+// data from a fleet scenario (escalation_scenarios_test.go).
+func loadScenarioFiles(scheme *runtime.Scheme, dataDir, ownDir, name, expectedName string) (*scenario, error) {
 	s := &scenario{name: name}
+	dir := dataDir
 	raw, err := os.ReadFile(filepath.Join(dir, "expected.yaml"))
 	if err != nil {
 		return nil, err
@@ -301,17 +334,17 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 	if err := yaml.Unmarshal(raw, &s.expected); err != nil {
 		return nil, fmt.Errorf("expected.yaml: %w", err)
 	}
-	if s.expected.APIVersion != "scenarios.shadewright.io/v1alpha1" || s.expected.Name != name {
+	if s.expected.APIVersion != "scenarios.shadewright.io/v1alpha1" || s.expected.Name != expectedName {
 		return nil, fmt.Errorf("expected.yaml: apiVersion %q and name %q do not match the scenario",
 			s.expected.APIVersion, s.expected.Name)
 	}
-	if err := readStrict(filepath.Join(dir, "rubric.yaml"), &s.rubric); err != nil {
+	if err := readStrict(filepath.Join(ownDir, "rubric.yaml"), &s.rubric); err != nil {
 		return nil, err
 	}
 	if err := s.checkRubric(); err != nil {
 		return nil, err
 	}
-	if err := readStrict(filepath.Join(dir, "replies.yaml"), &s.recording); err != nil {
+	if err := readStrict(filepath.Join(ownDir, "replies.yaml"), &s.recording); err != nil {
 		return nil, err
 	}
 	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
@@ -322,6 +355,9 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 		return nil, err
 	}
 	if err := s.loadMetrics(dir); err != nil {
+		return nil, err
+	}
+	if err := s.loadLogs(dir); err != nil {
 		return nil, err
 	}
 	if err := s.checkReads(); err != nil {

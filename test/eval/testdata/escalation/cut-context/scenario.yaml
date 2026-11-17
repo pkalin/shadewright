@@ -1,0 +1,11 @@
+# Synthetic escalation scenario (#504), not a fleet scenario: written by hand, not observed on a cluster.
+about: >-
+  The web container exits with code 1 after its requests fail for want of a database connection. The line
+  that names the cause, DB_POOL_SIZE=0 at startup, is followed by about 11 KiB of failed requests, so the
+  context builder's total bound cuts it from the log excerpt and marks the context truncated: the product's own
+  escalation signal, not a forced one. The escalation model reads the previous instance's log with
+  get_pod_logs and finds the startup line.
+signal: truncated
+contextBytes: 8192
+behindReads:
+  - the startup line sets DB_POOL_SIZE=0, which disables the database connection pool

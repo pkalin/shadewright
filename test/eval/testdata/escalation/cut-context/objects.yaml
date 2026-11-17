@@ -1,0 +1,141 @@
+# Synthetic: the objects of the escalation scenario cut-context, written by hand, not recorded on a cluster. The
+# web container takes DB_POOL_SIZE from the ConfigMap web-env (not shown: the analyzer reads no ConfigMap); the
+# image and its registry are placeholders.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000801
+  generation: 4
+  creationTimestamp: "2026-11-04T09:00:00Z"
+  labels:
+    app.kubernetes.io/name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: web
+    spec:
+      containers:
+        - name: web
+          image: registry.invalid/demo/orders-api:2.3.1
+          envFrom:
+            - configMapRef:
+                name: web-env
+          resources:
+            limits:
+              memory: 64Mi
+status:
+  observedGeneration: 4
+  replicas: 1
+  updatedReplicas: 1
+  readyReplicas: 0
+  availableReplicas: 0
+  unavailableReplicas: 1
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-6c8d7f5b4
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000802
+  creationTimestamp: "2026-11-04T11:38:00Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 6c8d7f5b4
+  annotations:
+    deployment.kubernetes.io/revision: "4"
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: web
+      uid: 00000000-0000-4000-8000-000000000801
+      controller: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      pod-template-hash: 6c8d7f5b4
+status:
+  replicas: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-6c8d7f5b4-k2x8p
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000803
+  creationTimestamp: "2026-11-04T11:38:05Z"
+  labels:
+    app.kubernetes.io/name: web
+    pod-template-hash: 6c8d7f5b4
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: ReplicaSet
+      name: web-6c8d7f5b4
+      uid: 00000000-0000-4000-8000-000000000802
+      controller: true
+spec:
+  containers:
+    - name: web
+      image: registry.invalid/demo/orders-api:2.3.1
+      envFrom:
+        - configMapRef:
+            name: web-env
+      resources:
+        limits:
+          memory: 64Mi
+status:
+  phase: Running
+  conditions:
+    - type: Ready
+      status: "False"
+      reason: ContainersNotReady
+      message: "containers with unready status: [web]"
+      lastTransitionTime: "2026-11-04T11:57:00Z"
+  containerStatuses:
+    - name: web
+      ready: false
+      restartCount: 3
+      image: registry.invalid/demo/orders-api:2.3.1
+      imageID: ""
+      state:
+        waiting:
+          reason: CrashLoopBackOff
+          message: back-off 40s restarting failed container=web pod=web-6c8d7f5b4-k2x8p_demo(00000000-0000-4000-8000-000000000803)
+      lastState:
+        terminated:
+          reason: Error
+          exitCode: 1
+          startedAt: "2026-11-04T11:52:00Z"
+          finishedAt: "2026-11-04T11:57:00Z"
+---
+apiVersion: events.k8s.io/v1
+kind: Event
+metadata:
+  name: web-6c8d7f5b4-k2x8p.backoff
+  namespace: demo
+  uid: 00000000-0000-4000-8000-000000000804
+  creationTimestamp: "2026-11-04T11:40:00Z"
+eventTime: "2026-11-04T11:40:00.000000Z"
+series:
+  count: 6
+  lastObservedTime: "2026-11-04T11:58:00.000000Z"
+type: Warning
+reason: BackOff
+action: Restarting
+reportingController: kubelet
+reportingInstance: node-1
+note: Back-off restarting failed container web in pod web-6c8d7f5b4-k2x8p_demo(00000000-0000-4000-8000-000000000803)
+regarding:
+  apiVersion: v1
+  kind: Pod
+  namespace: demo
+  name: web-6c8d7f5b4-k2x8p
+  uid: 00000000-0000-4000-8000-000000000803

@@ -1229,6 +1229,7 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 			// settles those (and honours a delay of its own calls). The wait never passes the full recheck's period.
 			capped := *pe
 			capped.RetryAfter = min(pe.RetryAfter, freshRecheckInterval)
+			limitGitReadRetry(ctx, freshRecheckInterval)
 			return r.waitOrFail(ctx, rr, &capped)
 		}
 		if wait, ok := r.pollOnly(rr, outcome); ok {

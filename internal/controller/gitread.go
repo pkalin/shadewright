@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
@@ -52,6 +53,17 @@ type gitReadTrace struct {
 	read    bool
 	retried bool
 	failure error
+	// limit is the longest wait a bounded retry of this reconcile may get (limitGitReadRetry), zero for none.
+	limit time.Duration
+}
+
+// limitGitReadRetry bounds the wait retryGitRead returns in this reconcile to d: a retry whose path ends at a
+// known time (a grace, a cap on the host's delay) is looked at again by then, never later. The shortest limit
+// set in a reconcile wins; d <= 0 sets none.
+func limitGitReadRetry(ctx context.Context, d time.Duration) {
+	if trace, ok := ctx.Value(gitReadTraceKey{}).(*gitReadTrace); ok && d > 0 && (trace.limit == 0 || d < trace.limit) {
+		trace.limit = d
+	}
 }
 
 func readFailure(ctx context.Context, op string, err error) error {
@@ -96,6 +108,15 @@ func gitReadFailure(err error) bool {
 	return false
 }
 
+// decidedGitRead tells Reconcile that the Git read that failed in this reconcile has been decided on for good (a
+// final refusal that ended the request): nothing is left to retry, so Reconcile adds no wait and no GitReadRetry,
+// and removes one an earlier failure left.
+func decidedGitRead(ctx context.Context) {
+	if trace, ok := ctx.Value(gitReadTraceKey{}).(*gitReadTrace); ok {
+		trace.failure = nil
+	}
+}
+
 // retryGitRead is the common result of a failed Git read: a visible retry and at least one poll interval.
 // A failed Kubernetes read or status write is returned as such, never relabelled as a Git failure.
 func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api.RemediationRequest, err error) (reconcile.Result, error) {
@@ -129,6 +150,16 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	d := max(r.pullRequestPollInterval(), retryAfterOf(err))
 	if hostDelay, ok := providers.RetryAfter(err); ok {
 		d = max(d, hostDelay)
+	}
+	if trace, ok := ctx.Value(gitReadTraceKey{}).(*gitReadTrace); ok && trace.limit > 0 {
+		d = min(d, trace.limit)
+	}
+	if rr.Status.Phase == api.PhasePolicyChecked && rr.Status.Deadline != nil && staleMark(rr) == nil {
+		// The request expires on time. Once the deadline has passed, the expiry's own reads are what failed: they
+		// wait the poll interval like any other, never a hot loop of short requeues.
+		if left := rr.Status.Deadline.Sub(r.now()); left > 0 {
+			d = min(d, max(left, stepDelay))
+		}
 	}
 	logf.FromContext(ctx).Info("Retried a Git read of RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr), "operation", op, "retryAfter", d)
 	return reconcile.Result{RequeueAfter: d}, nil

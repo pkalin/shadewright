@@ -653,12 +653,19 @@ var _ = Describe("RemediationRequest Controller", func() {
 		Entry("422", providers.ErrRejected, ReasonGitRejected),
 	)
 
-	It("retries a transient mapping error and writes nothing", func() {
+	// A failed Git read of the mapping is a visible wait (decision of 2026-11-17): the retry condition is the only
+	// write, and nothing is decided.
+	It("retries a transient mapping error and writes nothing but the retry", func() {
 		create(func() {})
 		stub.err = &sourcemap.TransientError{Op: "read head of branch main"}
-		_, err := reconcileOnce()
-		Expect(errors.Is(err, sourcemap.ErrTransient)).To(BeTrue())
-		Expect(fetch().Status.Phase).To(BeEmpty())
+		res, err := reconcileOnce()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+		got := fetch()
+		Expect(got.Status.Phase).To(BeEmpty())
+		Expect(got.Status.Conditions).To(HaveLen(1))
+		Expect(got.Status.Conditions[0].Type).To(Equal(conditionGitReadRetry))
+		Expect(got.Status.Conditions[0].Message).To(ContainSubstring("read head of branch main"))
 	})
 
 	DescribeTable("denies a plan the policy refuses, with the reason of the check",

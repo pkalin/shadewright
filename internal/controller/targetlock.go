@@ -282,16 +282,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, errors.Join(err, v.err)
 	}
 	if err != nil || v.state == changeUnknown {
-		if err == nil {
-			err = v.err
-		}
-		if gitReadFailure(err) || v.state == changeUnknown && c == nil && err != nil && v.err != nil {
-			return r.retryGitRead(ctx, rr, err)
-		}
-		if c == nil && err != nil {
-			return reconcile.Result{}, err
-		}
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+		return r.heldUnsettled(ctx, rr, v, err, c != nil)
 	}
 	if res, done, err := r.settleStopException(ctx, rr, v); done {
 		return res, err
@@ -327,6 +318,33 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 			"pullRequest", holding.Number)
 	default:
 		log.Info("Recorded the open pull request of a stopped RemediationRequest", "pullRequest", v.pr.Number)
+	}
+	return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+}
+
+// heldUnsettled is checkHeld's answer to a look that settled nothing: err is the look's failure, v its verdict, and
+// said whether PullRequestUnreadable already says why no read can be made. Answers that disagree
+// (errConflictingReads) or a 404 the branch does not confirm are no failed call: the lock is kept and looked at
+// again with nothing written (a failed call under such a verdict is still paced by Reconcile, from the read it
+// traced). A failed Git read is retried visibly (retryGitRead), never sooner than heldRecheckInterval, the pace of
+// a stopped holder's looks. Any other error without a condition is returned.
+func (r *RemediationRequestReconciler) heldUnsettled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict, err error, said bool) (reconcile.Result, error) {
+	if err == nil {
+		err = v.err
+	}
+	switch {
+	case v.state == changeUnknown && !said && errors.Is(err, v.err) && answeredUnknown(v.err):
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+	case gitReadFailure(err):
+		res, err := r.retryGitRead(ctx, rr, err)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		res.RequeueAfter = max(res.RequeueAfter, heldRecheckInterval)
+		return res, nil
+	case !said && err != nil:
+		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 }
@@ -408,9 +426,16 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 			git, _, err = r.openPlanEntry(ctx, rr, repo, reinstalled)
 		}
 		if err != nil {
-			if providers.IsInvalidConfig(err) {
+			if providers.IsInvalidConfig(err) || errors.Is(err, freshness.ErrRepositoryUnusable) {
+				// openPlanEntry has mapped an entry that can never open a provider already.
 				return changeVerdict{}, nil, freshness.ErrRepositoryUnusable
 			}
+			if changed {
+				// Either branch of a changed target: checkHeld says so in PullRequestUnreadable (branchChangedOpenRead).
+				return changeVerdict{}, nil, fmt.Errorf("%w: %w", errBranchChangedUnread,
+					freshness.WrapProvider("open the repository", err))
+			}
+			// The token step, named so releaseReinstalled can say a failure of the new installation (#797).
 			return changeVerdict{}, nil, &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}
 		}
 		q := changeQuery{marker: !closedOnly(rr), openOnBranch: true, reinstalled: reinstalled}
@@ -425,6 +450,14 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 		// Prefer the request's own merge, then its own open or closed PR, over a missing answer on the other base.
 		if verdict.state == changeUnknown || verdict.state == changeGone || v.state == changeMerged {
 			verdict = v
+		}
+	}
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); changed &&
+		c != nil && repositoryReasons[c.Reason] {
+		// Both branches were read through the repository entry: a reason about the repository (it left the
+		// settings, could not be used) is disproved, as noteRead removes it after a read on one branch.
+		if err := r.setUnreadable(ctx, rr, nil); err != nil {
+			return changeVerdict{}, nil, &clusterError{err: err}
 		}
 	}
 	holding, err := r.openHolding(ctx, rr, open)

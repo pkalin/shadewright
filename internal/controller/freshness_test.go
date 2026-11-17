@@ -771,9 +771,13 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(apierrors.IsConflict(err)).To(BeTrue(), "the lost write is returned: %v", err)
 		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)).
 			To(BeNil(), "lost")
-		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
-		Expect(err).To(HaveOccurred())
+		// The next look fails its Git read again: a visible wait of at least the poll interval (decision of
+		// 2026-11-17), and the condition the lost write carried is written again.
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
 		got := fetch()
+		Expect(meta.FindStatusCondition(got.Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		Expect(got.Annotations).To(HaveKeyWithValue("example.com/touched", "797"))
 		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 		Expect(c).NotTo(BeNil(), "written by the next look")
@@ -849,9 +853,13 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		r.Recorder = recorder
 		r.CleanupTimeout = 50 * time.Millisecond
 		for range 2 {
-			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
-			Expect(err).To(MatchError(ErrTimeout), "retried with the error backoff")
+			// A step past its deadline is a failed Git read: a visible wait of at least the poll interval, not the
+			// error backoff (decision of 2026-11-17).
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
 			got := fetch()
+			Expect(meta.FindStatusCondition(got.Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not a final phase")
 			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 			Expect(c).NotTo(BeNil(), "the retry is visible")
@@ -2448,8 +2456,14 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
-		Expect(opened).To(ConsistOf(remediationv1alpha1.GitBranch(freshOtherBranch),
-			remediationv1alpha1.GitBranch(mainBranch)), "read on the configured branch first (#771), then on the recorded one")
+		Expect(len(opened)).To(BeNumerically(">=", 2))
+		Expect(opened[:2]).To(Equal([]remediationv1alpha1.GitBranch{freshOtherBranch, mainBranch}),
+			"read on the configured branch first (#771), then on the recorded one")
+		// The merge ended the request; settleTargetLock, the one decision that releases the lock, reads both
+		// branches once more (decision of 2026-11-17) and nothing else.
+		Expect(opened[2:]).To(Or(BeEmpty(), ConsistOf(remediationv1alpha1.GitBranch(freshOtherBranch),
+			remediationv1alpha1.GitBranch(mainBranch))))
+		Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "released by that read")
 		Expect(got.Status.PullRequest.MergeCommitSHA).To(Equal(sha))
 		Expect(got.Status.MergeReceipt).NotTo(BeNil())
 		Expect(got.Status.MergeReceipt.TargetBranch).To(Equal(remediationv1alpha1.GitBranch(mainBranch)))
@@ -3373,17 +3387,23 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(errors.Is(err, providers.ErrRetryable)).To(BeTrue())
 	})
 
-	It("honours the delay a Git host asks for while checking", func() {
-		git.SetFail(func(op string) error {
-			if op == opBranchHead {
-				return &providers.RetryableError{RetryAfter: 7 * time.Second, Err: errors.New("rate limited")}
-			}
-			return nil
-		})
-		res, err := reconcileOnce()
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.RequeueAfter).To(Equal(7 * time.Second))
-	})
+	// A failed read waits at least the poll interval (decision of 2026-11-17), and longer when the host asks for it.
+	DescribeTable("honours the delay a Git host asks for while checking",
+		func(asked, want time.Duration) {
+			git.SetFail(func(op string) error {
+				if op == opBranchHead {
+					return &providers.RetryableError{RetryAfter: asked, Err: errors.New("rate limited")}
+				}
+				return nil
+			})
+			res, err := reconcileOnce()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(want))
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+		},
+		Entry("shorter than the poll interval: the poll interval", 7*time.Second, DefaultPullRequestPollInterval),
+		Entry("longer than the poll interval: the host's delay", 7*time.Minute, 7*time.Minute),
+	)
 
 	It("schedules the next check of a fresh plan", func() {
 		res, err := reconcileOnce()

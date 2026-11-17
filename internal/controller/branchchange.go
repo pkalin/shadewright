@@ -581,6 +581,7 @@ func (r *RemediationRequestReconciler) lookUnsettled(ctx context.Context, rr *re
 			return ctrl.Result{}, true, &clusterError{err: err}
 		}
 		// The delay the host asked for never passes the full recheck's period, as on the look at an open one.
+		limitGitReadRetry(ctx, freshRecheckInterval)
 		if d := retryAfterOf(lookErr); d > freshRecheckInterval {
 			lookErr = errors.Join(&freshness.ProviderError{Op: "wait for the delay the Git host asked for, capped",
 				RetryAfter: freshRecheckInterval}, lookErr)

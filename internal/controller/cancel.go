@@ -310,6 +310,7 @@ func (r *RemediationRequestReconciler) cancelFailed(ctx context.Context, rr *rem
 	if werr := r.setCancelPending(ctx, rr, ReasonCancelFailing, why, false); werr != nil {
 		return reconcile.Result{}, werr
 	}
+	limitGitReadRetry(ctx, left)
 	res, werr := r.waitOrFail(ctx, rr, err)
 	if res.RequeueAfter > left {
 		res.RequeueAfter = left

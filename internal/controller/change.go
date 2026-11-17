@@ -786,7 +786,9 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 	}
 	if err := r.setUnreadable(ctx, rr, want); err != nil {
 		if v.state == changeUnknown {
-			return unknownChange(&clusterError{err: err})
+			// The failed write is a Kubernetes failure (isClusterError), and the error still says what the read
+			// showed (errOwnListed, a refusal), so no caller takes it for another verdict.
+			return unknownChange(errors.Join(&clusterError{err: err}, v.err))
 		}
 		return unknownChange(&clusterError{err: err})
 	}

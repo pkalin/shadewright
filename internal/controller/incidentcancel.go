@@ -184,7 +184,8 @@ func (r *RemediationRequestReconciler) followCancelledMerge(ctx context.Context,
 	}
 	err = boundErr(ctx, cleanCtx, "check of the merged change request", err)
 	if errors.Is(err, errStopped) {
-		return reconcile.Result{}, nil
+		// The end is written; the lock is settled by the one decision that releases it, as followHeldMerge does.
+		return r.checkHeld(ctx, rr)
 	}
 	logf.FromContext(ctx).Info("Could not record the merge of the pull request of a cancelled RemediationRequest yet; "+
 		"tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number,

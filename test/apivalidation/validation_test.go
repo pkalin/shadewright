@@ -215,15 +215,10 @@ var _ = Describe("RemediationRequest", func() {
 		}
 	})
 
-	// #678: the start of the wait for a merge commit is set once, so a restart or a write cannot move it. #771: so
-	// is the start of the reads of what a retargeted merge brought, which the wait for the merge commit therefore
-	// cannot use up either.
+	// #678: the start of the wait for a merge commit is set once, so a restart or a write cannot move it.
 	for field, at := range map[string]func(*v1alpha1.RemediationRequestStatus) **metav1.Time{
 		"mergeCommitAwaitedSince": func(s *v1alpha1.RemediationRequestStatus) **metav1.Time {
 			return &s.MergeCommitAwaitedSince
-		},
-		"mergeContentUnreadSince": func(s *v1alpha1.RemediationRequestStatus) **metav1.Time {
-			return &s.MergeContentUnreadSince
 		},
 	} {
 		It("keeps "+field+" once set", func() {
@@ -249,6 +244,35 @@ var _ = Describe("RemediationRequest", func() {
 			}
 		})
 	}
+
+	// #771: the start of the reads of what a retargeted merge brought cannot move while set, so neither a restart
+	// nor the wait for the merge commit uses up the wait. A successful content read clears it (decision of
+	// 2026-11-17), so a later failure starts its own wait.
+	It("keeps mergeContentUnreadSince from moving while set, and lets a successful read clear it", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		deleteAfterSpec(rr)
+		since := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+		rr.Status.MergeContentUnreadSince = &since
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write is allowed")
+
+		got := &v1alpha1.RemediationRequest{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+		later := metav1.NewTime(since.Add(time.Minute))
+		got.Status.MergeContentUnreadSince = &later
+		err := k8sClient.Status().Update(ctx, got)
+		Expect(err).To(HaveOccurred(), "the API server accepted a moved clock")
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+		Expect(err.Error()).To(ContainSubstring("status.mergeContentUnreadSince cannot move while set"))
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+		got.Status.MergeContentUnreadSince = nil
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a successful read clears the clock")
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+		got.Status.MergeContentUnreadSince = &later
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a later failure starts its own wait")
+	})
 
 	// ADR-0030 section 1 (#678): the merge receipt is written once and never changed, also by dropping it or the
 	// whole status and writing it again, and its merge commit is the one status.pullRequest records.

@@ -1534,10 +1534,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			faulty.failOn(opCheckMerged, &providers.RetryableError{Err: errors.New("server error")})
 		})
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
-		err := reconcileOnce()
-		Expect(err).NotTo(HaveOccurred())
-		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
-		Expect(retryable(err)).To(BeTrue(), "the read failure is the cause handed back")
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
+		Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
+			To(ContainSubstring("CheckMerged"), "the read failure is the cause named")
 		Expect(faulty.count(opClose)).To(BeZero(), "a merged pull request is not closed again")
 		faulty.failOn("", nil)
 		_ = reconcileOnce()
@@ -1589,10 +1590,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(reconcileOnce()).To(Succeed())
 		}
 		faulty.failOn(opCheckBranch, &providers.RetryableError{Err: errors.New("server error")})
-		err := reconcileOnce()
-		Expect(err).NotTo(HaveOccurred())
-		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
-		Expect(retryable(err)).To(BeTrue())
+		res, err := reconcileResult()
+		Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
+		Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
+			To(ContainSubstring("CheckBranch"))
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
 		Expect(faulty.count(opOpen)).To(BeZero())
 
@@ -1922,10 +1924,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		start := c.LastTransitionTime
 
 		// A failed read of the pull request is a failure worth a retry too, never a refusal; the condition and its
-		// start are kept.
+		// start are kept. A failed read is a visible wait of the poll interval (decision of 2026-11-17).
 		faulty.failOn(opGet, fmt.Errorf("status 403: %w", providers.ErrForbidden))
-		_, err = reconcileResult()
-		Expect(err).To(HaveOccurred())
+		res, err = reconcileResult()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(DefaultPullRequestPollInterval))
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(cancelPending().Reason).To(Equal(ReasonCancelFailing))
 		Expect(cancelPending().LastTransitionTime).To(Equal(start))
@@ -4348,7 +4352,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(reconcileOnce()).NotTo(Succeed())
 			Expect(gone()).To(BeFalse())
 			failOp(opGet, &providers.RetryableError{Err: errors.New("timeout")})
-			Expect(reconcileOnce()).NotTo(Succeed())
+			// A failed read is a visible wait, not an error (decision of 2026-11-17).
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			Expect(gone()).To(BeFalse(), "a failed read that is not a refusal is retried")
 			Expect(refusedOf().LastTransitionTime.Time).To(BeTemporally("==", first), "the first refusal is kept")
 
@@ -4943,7 +4951,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			wait, finds, heads = look(r)
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged), "the merge is seen at the next poll")
 			Expect(wait).To(BeZero())
-			Expect(finds).To(Equal(1))
+			// The look that sees the merge, then the read of settleTargetLock, the one decision that releases the
+			// lock (decision of 2026-11-17), in the same reconcile.
+			Expect(finds).To(Equal(2))
+			Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "released by that read")
 			Expect(heads).To(BeZero(), "a merge is recorded before any freshness read")
 			_, kept := r.checked.Load(key().NamespacedName)
 			Expect(kept).To(BeFalse(), "an ended request is not remembered")
@@ -5041,7 +5052,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				faulty.failOn(opGet, &providers.RetryableError{RetryAfter: 3 * time.Minute, Err: errors.New("rate limited")})
 				wait, _, heads := look(r)
 				Expect(heads).To(BeNumerically(">", 0), "the full recheck runs")
-				Expect(wait).To(Equal(DefaultPullRequestPollInterval))
+				// The failed look is a Git read retried visibly, after the host's delay when it is longer than the
+				// poll interval (decision of 2026-11-17).
+				Expect(wait).To(Equal(3 * time.Minute))
+				Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 				Expect(paused()).To(BeNil())
 				Expect(recorder.Events).To(Receive(Equal("Normal " + EventWritesResumed + " " + messageWritesResumed)))
 			})
@@ -5326,7 +5340,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			res, err := r.advanceAndWatch(ctx, fetch(), freshness.Result{Head: strings.Repeat("e", 40),
 				Git: rateLimitedReads{Git: git}}, prOpen)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(res.RequeueAfter).To(Equal(30*time.Second), "the Retry-After of the Git host stands")
+			// The failed read waits the poll interval, or the host's Retry-After when longer (decision of
+			// 2026-11-17); the conflict on the mark never shortens it.
+			Expect(res.RequeueAfter).To(Equal(max(30*time.Second, r.pullRequestPollInterval())),
+				"the wait of the failed read stands")
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			Expect(stopped()).NotTo(BeNil(), "the retry after the conflict marks")
 		})
 
@@ -5541,8 +5559,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				RetryAfter: 42 * time.Second, Err: errors.New("secondary rate limit")})
 			res, err := reconcileResult()
 			Expect(err).NotTo(HaveOccurred(), "a delay the host asked for is a wait, not an error")
-			Expect(res.RequeueAfter).To(Equal(42 * time.Second))
+			// The poll interval, or the host's delay when longer (decision of 2026-11-17).
+			Expect(res.RequeueAfter).To(Equal(max(42*time.Second, reconciler().pullRequestPollInterval())))
 			got := fetch()
+			Expect(meta.FindStatusCondition(got.Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 			Expect(got.Status.PullRequest.RenderedTargetHead).To(Equal(rendered), "a head not rendered is not recorded")
 
@@ -5720,10 +5740,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			// The read of the step, which follows its read of the branch head, not the freshness check's read.
 			faulty.failOnAfter(opReadFile+" "+sourcePath, opBranchHead+" "+branch,
 				&providers.RetryableError{Err: errors.New("server error")})
-			err = reconcileOnce()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
-			Expect(retryable(err)).To(BeTrue())
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait (decision of 2026-11-17)")
+			Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry).Message).
+				To(ContainSubstring("ReadFile"))
 			Expect(faulty.faults()).To(Equal(1))
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
 			Expect(faulty.count(opCommit)).To(BeZero())
@@ -5821,8 +5842,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			addOverlay()
 			faulty.failOn(opClose, &providers.RetryableError{Err: errors.New("server error")})
 			err := reconcileOnce()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+			Expect(err).To(HaveOccurred(), "a failed close is a write: it keeps the error backoff")
 			Expect(retryable(err)).To(BeTrue())
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a failed close is retried")
 			Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
@@ -5991,17 +6011,19 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
 				Expect(unreadable().LastTransitionTime).To(Equal(since))
 				Expect(recorder.Events).To(BeEmpty())
-				// The repository comes back with another target branch, then with an entry that cannot be used: the
-				// condition says what is true now, with one Warning Event per reason.
+				// The repository comes back with another target branch: settleTargetLock reads the recorded and the
+				// configured branch (decision of 2026-11-17), so the reads work, the lock stays while its pull request
+				// is open, and the condition, which those reads disprove, goes. Then an entry that cannot be used: the
+				// condition says what is true now, with one Warning Event.
 				changed := slices.Clone(repos)
 				changed[0].TargetBranch = "next-target"
 				setRepositories(changed)
 				_, err = reconcileResult()
 				Expect(err).NotTo(HaveOccurred())
 				Expect(fetch().Status.HoldsTarget).To(HaveValue(BeTrue()))
-				Expect(unreadable().Reason).To(Equal(reasonTargetBranchChanged))
+				Expect(unreadable()).To(BeNil(), "both branches were read")
 				Expect(recorder.Events).To(HaveLen(1))
-				Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeWarning + " " + EventPullRequestUnreadable))
+				Expect(<-recorder.Events).To(HavePrefix(corev1.EventTypeNormal + " " + EventPullRequestReadable))
 				setRepositories(repos)
 				openErr = fmt.Errorf("bad key: %w", providers.ErrInvalidConfig)
 				_, err = reconcileResult()
@@ -6061,12 +6083,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					faulty.failOn(op, fmt.Errorf("status 403 from https://github.com/example/fleet: %w", class))
 					res, err := reconcileResult()
 					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
-					if gitReads[strings.Fields(op)[0]] {
-						Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
-						Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
-						Expect(fetch().Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseNeedsIntervention))
-						return
-					}
 					Expect(res).To(Equal(reconcile.Result{}))
 					got := fetch()
 					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
@@ -6214,12 +6230,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					leak := fmt.Errorf("status 403 from https://github.com/example/fleet with token ghs_leaked: %w", class)
 					res, err := hitAfter(op, after, leak)
 					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
-					if gitReads[strings.Fields(op)[0]] {
-						Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
-						Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
-						Expect(fetch().Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseNeedsIntervention))
-						return
-					}
 					Expect(res).To(Equal(reconcile.Result{}), "and not requeued")
 					got := fetch()
 					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
@@ -6344,9 +6354,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					time.Duration(0)),
 				Entry("a rate limit with a long Retry-After on the open", opOpen, &providers.RetryableError{
 					RetryAfter: time.Hour, Err: errors.New("rate limit")}, time.Hour),
-				// The freshness check fails from the first reconcile after the policy check, before any Git write.
+				// The freshness check fails from the first reconcile after the policy check, before any Git write. A
+				// failed read is a visible wait of the poll interval (decision of 2026-11-17), within the deadline.
 				Entry("server errors in every freshness check", opBranchHead,
-					&providers.RetryableError{Err: errors.New("status 502")}, time.Duration(0)),
+					&providers.RetryableError{Err: errors.New("status 502")}, DefaultPullRequestPollInterval),
 			)
 
 			It("stores the deadline in the status write that decides the request", func() {
@@ -6719,7 +6730,14 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		staleErr := &freshness.StaleError{Reason: freshness.ReasonTargetFileChanged, Message: "stale"}
 		cleanUp := func(own, other int64) outcome {
 			GinkgoHelper()
-			return observe(own, other, reconcile.Result{}, reconciler().cleanUpStale(ctx, fetch(), staleErr))
+			r, rr := reconciler(), fetch()
+			res, err := reconcile.Result{}, r.cleanUpStale(ctx, rr, staleErr)
+			if errors.Is(err, ErrSuperseded) && rr.Status.Phase == remediationv1alpha1.PhaseMerged {
+				// As recheck and Reconcile do with a merge the cleanup found: the lock is settled by the one decision
+				// that releases it (settleTargetLock, through afterRecheckEnd), in the same reconcile.
+				res, err = r.afterRecheckEnd(ctx, rr, reconcile.Result{}, nil)
+			}
+			return observe(own, other, res, err)
 		}
 		// o builds an outcome: phase, closed, lock, finalizer, result; the other fields follow from the verdict
 		// (expect).
@@ -6831,7 +6849,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:         o(deleted, none, "-", "-", done),
 					goneOtherOpen:  o(deleted, none, "-", "-", done),
 					goneFirstLook:  o(awaiting, none, held, kept, requeue),
-					failedRead:     o(awaiting, none, held, kept, failed),
+					failedRead:     o(awaiting, none, held, kept, requeue),
 					unconfirmed404: o(awaiting, none, held, kept, failed),
 					contradicting:  o(awaiting, none, held, kept, failed),
 					// A refused read starts the grace of the deletion (#288).
@@ -6869,7 +6887,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:         o(expired, none, held, kept, done),
 					goneOtherOpen:  o(expired, none, held, kept, done),
 					goneFirstLook:  o(awaiting, none, held, kept, requeue),
-					failedRead:     o(awaiting, none, held, kept, failed),
+					failedRead:     o(awaiting, none, held, kept, requeue),
 					unconfirmed404: o(awaiting, none, held, kept, failed),
 					contradicting:  o(awaiting, none, held, kept, failed),
 					forbidden:      o(expired, none, held, kept, done),
@@ -6907,10 +6925,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:         o(created, none, held, kept, done),
 					goneOtherOpen:  o(stopped, none, held, kept, done),
 					goneFirstLook:  na,
-					failedRead:     o(checked, none, held, kept, failed),
-					unconfirmed404: o(checked, none, held, kept, failed),
+					failedRead:     o(checked, none, held, kept, requeue),
+					unconfirmed404: o(checked, none, held, kept, requeue),
 					contradicting:  na,
-					forbidden:      o(checked, none, held, kept, failed),
+					forbidden:      o(checked, none, held, kept, requeue),
 				},
 			},
 			"expire without a recorded pull request": {
@@ -6930,8 +6948,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:         o(expired, none, held, kept, done),
 					goneOtherOpen:  o(expired, none, held, kept, done),
 					goneFirstLook:  na,
-					failedRead:     o(checked, none, held, kept, failed),
-					unconfirmed404: o(checked, none, held, kept, failed),
+					failedRead:     o(checked, none, held, kept, requeue),
+					unconfirmed404: o(checked, none, held, kept, requeue),
 					contradicting:  na,
 					forbidden:      o(expired, none, held, kept, done),
 				},
@@ -6963,8 +6981,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:         o(deleted, none, "-", "-", done),
 					goneOtherOpen:  o(deleted, none, "-", "-", done),
 					goneFirstLook:  na,
-					failedRead:     o(checked, none, held, kept, failed),
-					unconfirmed404: o(checked, none, held, kept, failed),
+					failedRead:     o(checked, none, held, kept, requeue),
+					unconfirmed404: o(checked, none, held, kept, requeue),
 					contradicting:  na,
 					// A refused listing starts the grace of the deletion (#288).
 					forbidden: refusedOnDelete(checked),

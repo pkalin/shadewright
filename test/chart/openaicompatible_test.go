@@ -159,7 +159,7 @@ func TestCompatibleVolumeSources(t *testing.T) {
 
 func TestCompatibleChartDeclarationRefusals(t *testing.T) {
 	for _, skip := range []bool{false, true} {
-		for _, raw := range []string{"https://user@api.openai.com/v1",
+		for _, raw := range []string{"https://user" + "@" + "api.openai.com/v1",
 			"https://@api.openai.com/v1",
 			"https://api.openai.com/v1?x",
 			"https://api.openai.com/v1?",

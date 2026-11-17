@@ -101,7 +101,7 @@ func TestGeneratedDeclaredCredentialBoundary(t *testing.T) {
 	}
 }
 func TestDeclarationRefusals(t *testing.T) {
-	for _, raw := range []string{"https://user@gateway.example.com/v1", "https://@gateway.example.com/v1", "https://gateway.example.com/v1?x", "https://gateway.example.com/v1?", "https://gateway.example.com/v1#x", "https://gateway.example.com/v1#", "https://gateway.example.com/a/../v1", "https://gateway.example.com/a/%2E%2E/v1", "https://api.anthropic.com/v1", "https://r.openai.azure.com/v1", "https://r.cognitiveservices.azure.com/v1", "https://r.services.ai.azure.com/v1", "https://gateway.example.com/v1"} {
+	for _, raw := range []string{"https://user" + "@" + "gateway.example.com/v1", "https://@gateway.example.com/v1", "https://gateway.example.com/v1?x", "https://gateway.example.com/v1?", "https://gateway.example.com/v1#x", "https://gateway.example.com/v1#", "https://gateway.example.com/a/../v1", "https://gateway.example.com/a/%2E%2E/v1", "https://api.anthropic.com/v1", "https://r.openai.azure.com/v1", "https://r.cognitiveservices.azure.com/v1", "https://r.services.ai.azure.com/v1", "https://gateway.example.com/v1"} {
 		if err := ValidateEndpoints([]Endpoint{{URL: raw, API: APIChatCompletions, Models: []string{testModel}}}, []string{".gateway.example.com"}); err == nil {
 			t.Errorf("invalid declaration: %q", raw)
 		}

@@ -863,10 +863,15 @@ func repositoryRead(rr *remediationv1alpha1.RemediationRequest, err error) *meta
 }
 
 // putUnreadable sets condition PullRequestUnreadable to want in conds (nil removes it) and reports whether that
-// changed it.
+// changed it. A want with a lastTransitionTime (setRecoveryWait, the start of a recovery's wait) replaces the
+// condition's time too; without one, the time is kept while the condition stays True.
 func putUnreadable(conds *[]metav1.Condition, want *metav1.Condition) bool {
 	if want == nil {
 		return meta.RemoveStatusCondition(conds, remediationv1alpha1.ConditionPullRequestUnreadable)
+	}
+	if was := meta.FindStatusCondition(*conds, want.Type); was != nil && !want.LastTransitionTime.IsZero() &&
+		!was.LastTransitionTime.Equal(&want.LastTransitionTime) {
+		meta.RemoveStatusCondition(conds, want.Type)
 	}
 	return meta.SetStatusCondition(conds, *want)
 }
@@ -920,7 +925,7 @@ func (r *RemediationRequestReconciler) setUnreadable(ctx context.Context, rr *re
 	}
 	rr.ResourceVersion = live.ResourceVersion
 	if c := meta.FindStatusCondition(live.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
-		meta.SetStatusCondition(&rr.Status.Conditions, *c)
+		putUnreadable(&rr.Status.Conditions, c)
 	} else {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 	}

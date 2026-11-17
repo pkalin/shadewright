@@ -210,9 +210,13 @@ func release(rr *remediationv1alpha1.RemediationRequest) {
 //     (changeOf), and so does a repository that cannot be opened as the settings stand (reason RepositoryUnavailable,
 //     TargetBranchChanged or RepositoryUnusable).
 //
+// A replacement whose recovery waited out its bound (endedAtRecoveryBound, #786) first reads the pull request it was
+// to take over (heldRecovery): a merge of its commit is recorded, and an open one keeps the lock; only when that read
+// settles nothing does the rule above decide.
+//
 // TargetHeld is written when it changes. Every outcome but unknown is looked at again after heldRecheckInterval
-// while the lock is kept, and so is unknown; only the caller's cancellation and a failed write of
-// PullRequestUnreadable are returned as errors.
+// while the lock is kept, and so is unknown; only the caller's cancellation, a failed write of
+// PullRequestUnreadable and a failed read or write of the Kubernetes API in heldRecovery are returned as errors.
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if !ptr.Deref(rr.Status.HoldsTarget, false) || progresses(rr) || heldForVerification(rr, r.VerifyOutcomes) {
@@ -228,6 +232,12 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		}
 		log.Info("Released the target lock of RemediationRequest: its status shows the pull request closed or merged")
 		return reconcile.Result{}, nil
+	}
+	if endedAtRecoveryBound(rr) {
+		// Its commit may be on the pull request it was to take over, which may still be merged (#786).
+		if res, done, err := r.heldRecovery(ctx, rr); done {
+			return res, err
+		}
 	}
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	v, holding, err := r.lookHeld(lookCtx, rr)

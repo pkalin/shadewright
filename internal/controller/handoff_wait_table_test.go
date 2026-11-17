@@ -63,10 +63,14 @@ const (
 	kindStepDeadline failureKind = "step deadline"
 	kindCancel       failureKind = "caller's cancellation"
 	kindJoined       failureKind = "joined errors"
+	// kindAdapterNetwork is a transport failure as the GitHub adapter returns it (transportError in
+	// internal/providers/github): wrapped as a RetryableError with fixed text. On the Kubernetes side it is a raw
+	// transport error, as client-go returns one.
+	kindAdapterNetwork failureKind = "adapter network error"
 )
 
 var failureKinds = []failureKind{kindStatus, kindForbidden, kindConflict, kindTransport, kindStepDeadline, kindCancel,
-	kindJoined}
+	kindJoined, kindAdapterNetwork}
 
 // waitStepTimeout is the recovery's own deadline in the table: long enough for a whole look at the fakes, short
 // enough for the rows that run into it.
@@ -99,6 +103,11 @@ func injected(ctx context.Context, cluster bool, kind failureKind, cancel contex
 		return fmt.Errorf("status 409: %w", providers.ErrConflict)
 	case kindTransport:
 		return transportError()
+	case kindAdapterNetwork:
+		if cluster {
+			return transportError()
+		}
+		return &providers.RetryableError{Err: errors.New("get the change request: GitHub request failed (network)")}
 	case kindStepDeadline:
 		if _, ok := ctx.Deadline(); !ok {
 			// A call outside the step's own deadline (the recovery's write after the step): a client-side timeout.
@@ -752,12 +761,13 @@ func waitOutcome(cluster bool, kind failureKind) (wait, keep bool) {
 	case kind == kindForbidden:
 		// A final refusal of the Git host: watched, with the refusal's reason.
 		return true, false
-	case kind == kindStatus, kind == kindStepDeadline, kind == kindJoined:
+	case kind == kindStatus, kind == kindStepDeadline, kind == kindJoined, kind == kindAdapterNetwork:
 		// A failure of the Git host worth retrying (a 5xx, a joined one with a 5xx), or a read past the step's own
 		// deadline: the wait and its pacing.
 		return true, false
 	}
-	// Any other failure of the Git host, a conflict or a transport error that carries no class: the error backoff.
+	// Any other failure of the Git host, a conflict or a raw transport error that carries no class (the GitHub
+	// adapter never returns one: it wraps it, kindAdapterNetwork): the error backoff.
 	return false, false
 }
 

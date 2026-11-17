@@ -58,6 +58,9 @@ var watchedNamespaces = []string{nsDemo}
 // nsDemo is the namespace of the lab scenarios.
 const nsDemo = "demo"
 
+// nsOther is a namespace that is neither the scenarios' nor watched.
+const nsOther = "other"
+
 // source says where the vendored expected.yaml files come from: the rubric field of the manifest.
 type source struct {
 	// FleetRepository is the repository of the scenarios.
@@ -113,7 +116,27 @@ const (
 // at all, with the reason.
 type rubric struct {
 	Facts []rubricFact `json:"facts"`
+	// Reads are the tool reads the model is expected to make (#505, reads_test.go); a read it makes that is not
+	// listed is counted, not failed.
+	Reads []rubricRead `json:"reads,omitempty"`
+	// Size is required for a proposal of an action whose number the model chooses (sizedByModel), and states the
+	// size the evidence supports (#505, decided 2026-11-17).
+	Size *rubricSize `json:"size,omitempty"`
 }
+
+// rubricSize states the size a scenario's evidence supports. Any proposal above it fails the run (checkSize),
+// even when it is below the policy maximum.
+type rubricSize struct {
+	// Supported is the largest value the recorded evidence supports, such as the replicas a load needs.
+	Supported int32 `json:"supported"`
+	// Why says how the recorded evidence gives Supported.
+	Why string `json:"why"`
+}
+
+// sizedByModel are the catalog actions whose number the model chooses inside the policy bounds, so the only
+// ones a rubric size applies to. SetContainerMemoryLimit is not one: ADR-0040 has code size it from the
+// metrics, and that rule's own tests cover it (decided 2026-11-16 on #505).
+var sizedByModel = []remediationv1alpha1.ActionType{remediationv1alpha1.ActionAdjustKedaMaxReplicas}
 
 // rubricFact scores one fact. It passes when every term of All, at least one of Any (when Any is set), and
 // every term of at least one group of AnyOf (when AnyOf is set) appears in the diagnosis text, and every term
@@ -181,6 +204,8 @@ type scenario struct {
 	// policies are the RemediationPolicies of the scenario's cluster (policy.yaml, #493): the context builder
 	// shows their bounds, and a proposal they refuse fails the scenario.
 	policies []*remediationv1alpha1.RemediationPolicy
+	// reads are the rubric's expected reads, parsed against the tools the scenario is offered (checkReads).
+	reads []readRule
 }
 
 // policyFile holds a scenario's RemediationPolicies. Every scenario has one; a variant without its own takes
@@ -290,23 +315,16 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 		return nil, err
 	}
 	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
-	raw, err = os.ReadFile(filepath.Join(dir, "incident.yaml"))
-	if err != nil {
+	if s.incident, err = readIncident(decoder, filepath.Join(dir, "incident.yaml")); err != nil {
 		return nil, err
 	}
-	obj, _, err := decoder.Decode(raw, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("incident.yaml: %w", err)
-	}
-	inc, ok := obj.(*remediationv1alpha1.Incident)
-	if !ok {
-		return nil, fmt.Errorf("incident.yaml holds a %T, not an Incident", obj)
-	}
-	s.incident = inc
 	if err := s.checkIncident(); err != nil {
 		return nil, err
 	}
 	if err := s.loadMetrics(dir); err != nil {
+		return nil, err
+	}
+	if err := s.checkReads(); err != nil {
 		return nil, err
 	}
 	if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
@@ -323,8 +341,8 @@ const variantsDir = "variants"
 
 // variant is a variant.yaml: a state of a fleet scenario the lab met that its own recording does not show,
 // such as a rollout in progress. A variant is scored against the scenario's expected.yaml and rubric.yaml,
-// unchanged, with the scenario's Incident; its directory holds its own objects.yaml and replies.yaml, and a
-// metrics.yaml when its series differ from the scenario's.
+// unchanged; its directory holds its own replies.yaml, and an incident.yaml, objects.yaml, metrics.yaml or
+// policy.yaml when its Incident, objects, series or policies differ from the scenario's.
 type variant struct {
 	// About says what the variant changes and why, in a sentence or two.
 	About string `json:"about"`
@@ -372,9 +390,28 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 	if err := s.loadMetrics(dir); err != nil {
 		return nil, err
 	}
-	var err error
 	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
-	if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "incident.yaml")); err == nil {
+		if s.incident, err = readIncident(decoder, filepath.Join(dir, "incident.yaml")); err != nil {
+			return nil, err
+		}
+		if err := s.checkIncident(); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	// After the variant's own Incident, whose subject namespace the reads are checked against.
+	if err := s.checkReads(); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(dir, "objects.yaml")); err == nil {
+		if s.objects, err = readObjects(decoder, filepath.Join(dir, "objects.yaml")); err != nil {
+			return nil, err
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		s.objects = base.objects
+	} else {
 		return nil, err
 	}
 	if _, err := os.Stat(filepath.Join(dir, policyFile)); err == nil {
@@ -512,6 +549,22 @@ func (s *scenario) checkRubric() error {
 	if !slices.Equal(want, got) {
 		return fmt.Errorf("rubric.yaml lists the facts %q, expected.yaml has %q", got, want)
 	}
+	o := s.expected.Outcome
+	if z := s.rubric.Size; z != nil {
+		switch {
+		case o.Type != outcomePullRequest ||
+			!slices.Contains(sizedByModel, remediationv1alpha1.ActionType(o.Action)):
+			return fmt.Errorf("rubric.yaml: a size applies only to a proposal of %v, expected.yaml has %s %s",
+				sizedByModel, o.Type, o.Action)
+		case z.Supported < 1 || z.Supported > 1000:
+			return fmt.Errorf("rubric.yaml: size supported %d is outside 1 to 1000", z.Supported)
+		case strings.TrimSpace(z.Why) == "":
+			return errors.New("rubric.yaml: size needs why, how the evidence gives it")
+		}
+	} else if o.Type == outcomePullRequest && slices.Contains(sizedByModel,
+		remediationv1alpha1.ActionType(o.Action)) {
+		return fmt.Errorf("rubric.yaml: expected proposal of %s requires size", o.Action)
+	}
 	return nil
 }
 
@@ -525,6 +578,23 @@ func (s *scenario) checkIncident() error {
 			e.Reason, e.Object.Kind, e.Object.Namespace, e.Object.Name)
 	}
 	return nil
+}
+
+// readIncident decodes the Incident of an incident.yaml.
+func readIncident(decoder runtime.Decoder, path string) (*remediationv1alpha1.Incident, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	obj, _, err := decoder.Decode(raw, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("incident.yaml: %w", err)
+	}
+	inc, ok := obj.(*remediationv1alpha1.Incident)
+	if !ok {
+		return nil, fmt.Errorf("incident.yaml holds a %T, not an Incident", obj)
+	}
+	return inc, nil
 }
 
 // readStrict reads a YAML file of the harness's own, refusing unknown fields.

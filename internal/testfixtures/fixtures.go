@@ -32,12 +32,21 @@ const (
 	WorkloadName    = "orders-worker"
 )
 
+// IncidentName is the Incident the fixture requests name.
+const IncidentName = "orders-scaling"
+
+// IncidentUID is the UID the fixture requests name for IncidentName. The API server gives an object its UID, so a
+// test suite whose requests reach the executor's pull request step, which reads the Incident live and cancels a
+// request whose Incident is gone (ADR-0039 point 22), creates IncidentName in the requests' namespace and sets
+// this to its UID before it builds any request.
+var IncidentUID v1alpha1.UID = "11111111-1111-4111-8111-111111111111"
+
 // RemediationRequest returns a valid request to raise a ScaledObject's maxReplicaCount from 10 to 15.
 func RemediationRequest(namespace, name string) *v1alpha1.RemediationRequest {
 	return &v1alpha1.RemediationRequest{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 		Spec: v1alpha1.RemediationRequestSpec{
-			IncidentRef: v1alpha1.IncidentRef{Name: "orders-scaling", UID: "11111111-1111-4111-8111-111111111111"},
+			IncidentRef: v1alpha1.IncidentRef{Name: IncidentName, UID: IncidentUID},
 			TargetRef: v1alpha1.ObjectRef{
 				APIVersion: "keda.sh/v1alpha1",
 				Kind:       "ScaledObject",

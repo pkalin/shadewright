@@ -136,8 +136,10 @@ func other(git providers.GitProvider) {
 // rule only (settleLock, checkHeld with openHolding, and releaseReinstalled, the same read made before a stale plan
 // closed through a new installation ends, #290). The others release a lock that no pull request of the
 // request holds: a refusal, a queued duplicate or a request cancelled before the policy check (cancelUndecided)
-// never took it, and the two ends of a handoff (endHandoff,
-// supersedePredecessor) leave the pull request to the replacement, which holds it.
+// never took it, and the two ends of a handoff (endHandoff, supersedePredecessor) leave the pull request to the
+// replacement, which holds it. A request whose Incident was folded or is gone (endForIncident, ADR-0039 points 21
+// and 22, amended 2026-11-16) is not one of them: it ends Cancelled with no recorded pull request, so it keeps the
+// lock until the read of its branch (checkHeld) releases it, as an expired request does.
 const releaseFunc = "release"
 
 var (

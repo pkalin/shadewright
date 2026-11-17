@@ -732,10 +732,12 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 // stalePlanMerged reports whether rr, merged, carries the plan Shadewright knew was stale when its merge was
 // recorded: PlanFresh False with a stale reason, which stop keeps on Merged. It is there when the periodic check
 // marked the plan before the merge and the close did not happen or the Git host refused it (#199), or when the
-// check at the merge found the plan stale (checkAtMerge, #737).
+// check at the merge found the plan stale (checkAtMerge, #737), or when the pull request of a request cancelled
+// because of its Incident was merged after the cancel (markCancelledMerge, #794).
 func stalePlanMerged(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
-	return c != nil && c.Status == metav1.ConditionFalse && staleReasons[c.Reason] && !beforeMerge(rr.Status.Phase)
+	return c != nil && c.Status == metav1.ConditionFalse && (staleReasons[c.Reason] || incidentReasons[c.Reason]) &&
+		!beforeMerge(rr.Status.Phase)
 }
 
 // capStaleSuccess is the one place that caps the good end of a merged stale plan (stalePlanMerged): where the

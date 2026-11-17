@@ -36,13 +36,16 @@ import (
 	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
+// orderToken is a made-up token the order test places under a key.
+const orderToken = "hunter2xyzAB" // #nosec G101 -- not a credential: a made-up value the test looks for
+
 // The symptom is redacted while it still has its lines, before normalize flattens it (#840, decided
 // 2026-11-17). Each input holds a value that the redactor finds only by its layout: once flattened, the same
 // text keeps the secret, so the test fails if the order is ever swapped.
 func TestSymptomIsRedactedBeforeItIsFlattened(t *testing.T) {
 	for in, secret := range map[string]string{
 		"Back-off restarting\ncredentials:\n  user: admin\n":         "admin",
-		"Back-off restarting\ntoken:\n  - hunter2xyzAB\n":            "hunter2xyzAB",
+		"Back-off restarting\ntoken:\n  - " + orderToken + "\n":      orderToken,
 		"Back-off restarting\npassword: hunter2xyzAB\n  Tr0ub4d0r\n": "Tr0ub4d0r",
 	} {
 		flat := strings.Join(strings.Fields(in), " ")
@@ -126,7 +129,7 @@ func collectScalars(n *yaml.Node, seen map[string]bool) {
 
 // recordedObservation is the observation the table is computed for: the note and fixed other fields.
 func recordedObservation(note string) Observation {
-	return Observation{ClusterID: "c", Namespace: "demo", ResourceUID: "u", Reason: "Failed", Type: "Warning", Note: note}
+	return Observation{ClusterID: "c", Namespace: "demo", ResourceUID: "u", Reason: "Failed", Note: note}
 }
 
 // noteHash is the hash of a note that fingerprintMainTable holds.

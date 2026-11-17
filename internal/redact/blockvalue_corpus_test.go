@@ -236,7 +236,7 @@ var blockTails = []string{"", "\n", "\n{ind}[next]: [keepme]\n", "\n[Back-off] r
 // separator, quote and line break, so that a block read too far cannot hide it. "<>" is a secret.
 var blockNeighbourTails = func() []string {
 	out := make([]string, 0, 36)
-	for _, glue := range []string{" ", "\t", ",", `"`, "'", "\n", "\n{ind}", "\n{ind}  ", "   "} {
+	for _, glue := range []string{" ", "\t", ",", `"`, "'", "\n", "\n{ind}", "\n{ind}  ", threeBlanks} {
 		for _, field := range []string{"token: <>", "apiKey: |\n{ind}  <>", "'password': <>", "secret:\n{ind}  <>"} {
 			out = append(out, glue+field)
 		}
@@ -254,9 +254,9 @@ const (
 // blockSecretKeys are secret key names of every form the rules know: secret words with "_", "-", "." and
 // camelCase, quoted, and the bare short keys, which count only with a value that looks like a secret.
 var blockSecretKeys = []string{
-	passwordKey, "passwd", dbPasswordKey, "passphrase", "pwd", "secret", "client_secret", "token", "apiKey",
+	passwordKey, "passwd", dbPasswordKey, "passphrase", "pwd", "secret", "client_secret", tokenKeyName, apiKeyName,
 	"api-key", "access_key", "private_key", "credentials", "credential", "connectionString", "conn_str",
-	`"password"`, "'token'", "pass", "auth", "sig", "db.pass", "basic_auth", "storageSas", "AZURE_STORAGE_SAS",
+	`"password"`, "'token'", passKey, authKey, sigKey, "db.pass", "basic_auth", "storageSas", "AZURE_STORAGE_SAS",
 }
 
 // blockInnocentKeys are key names that hold no secret, among them words that contain a short key name.
@@ -662,7 +662,7 @@ func TestAnyKeyWorkIsLinear(t *testing.T) {
 // line, and with its line breaks flattened to blanks; the text before the key stays. A value on the next
 // lines under a key first on its line is redacted before the callers flatten the text (blockPipeline).
 func TestBlockValueAfterTextOrFlattened(t *testing.T) {
-	const pw, pass = "hunter2xyzAB", "Tr0ub4dor9"
+	const pw, pass, userValue = "hunter2xyzAB", "Tr0ub4dor9", "admin"
 	for in, secrets := range map[string][]string{
 		"Back-off restarting\nmsg: password: |\n  hunter2xyzAB\n":      {pw},
 		"Back-off restarting password: |   hunter2xyzAB":               {pw},
@@ -680,10 +680,10 @@ func TestBlockValueAfterTextOrFlattened(t *testing.T) {
 		checkRedacted(t, in, secrets, []string{"Back-off"})
 	}
 	for in, secrets := range map[string][]string{
-		"Back-off\ncredentials:\n  user: admin\n  pass: s3cr3tPW\n": {"admin", "s3cr3tPW"},
-		"Back-off\ntoken:\n  - hunter2xyzAB\n  - Tr0ub4dor9\n":      {pw, pass},
-		"Back-off\npassword: hunter2xyzAB\n  Tr0ub4dor9\n":          {pw, pass},
-		"Back-off\n'token': \"hunter two\n  three\"":                {"hunter two", "three"},
+		"Back-off\ncredentials:\n  user: " + userValue + "\n  pass: s3cr3tPW\n": {userValue, "s3cr3tPW"},
+		"Back-off\ntoken:\n  - hunter2xyzAB\n  - Tr0ub4dor9\n":                  {pw, pass},
+		"Back-off\npassword: hunter2xyzAB\n  Tr0ub4dor9\n":                      {pw, pass},
+		"Back-off\n'token': \"hunter two\n  three\"":                            {"hunter two", "three"},
 	} {
 		out := blockPipeline(in)
 		for _, sec := range secrets {

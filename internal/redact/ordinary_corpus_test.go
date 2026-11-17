@@ -129,8 +129,9 @@ func TestWriteOrdinaryMainTable(t *testing.T) {
 	if path == "" {
 		t.Skip("ORDINARY_MAIN_TABLE is not set")
 	}
-	var rows []any
-	for _, in := range ordinaryCorpus() {
+	corpus := ordinaryCorpus()
+	rows := make([]any, 0, len(corpus))
+	for _, in := range corpus {
 		rows = append(rows, ordinaryMainRow{Hash: formHash(in), Out: String(in)})
 	}
 	writeJSONLines(t, path, rows)

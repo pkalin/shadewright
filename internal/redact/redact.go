@@ -1049,84 +1049,107 @@ func anyKeyLine(s string, from, refused int, add func(start, end int)) int {
 	for text < le && (s[text] == ' ' || s[text] == '\t') {
 		text++
 	}
-	lineCol := text - ls
-	firstKey := text + dashes(s[text:le])
-	ctx := newLineContext(s, ls, le)
-	end, cursor, blockRead := le, from, false
-	// refusedFrom: under a bare short key no word from here to refusedEnd looks like a secret, so a later
-	// bare key's text up to the same end is refused without reading it again; -1 when unknown.
-	refusedFrom, refusedEnd := -1, -1
+	r := &anyKeyReader{
+		s: s, ls: ls, le: le, lineCol: text - ls, firstKey: text + dashes(s[text:le]), refused: refused, add: add,
+		ctx: newLineContext(s, ls, le), end: le, cursor: from, refusedFrom: -1, refusedEnd: -1,
+	}
 	for _, km := range anyKey.FindAllStringSubmatchIndex(s[from:le], -1) {
 		for i := range km {
 			if km[i] >= 0 {
 				km[i] += from
 			}
 		}
-		if km[0] < cursor {
-			continue
+		r.key(km)
+	}
+	return r.end
+}
+
+// anyKeyReader is what anyKeyLine knows about the line it reads, so that no part of the line is read more
+// than a fixed number of times, however many keys it holds.
+type anyKeyReader struct {
+	s                       string
+	ls, le, lineCol         int
+	firstKey, refused       int
+	add                     func(start, end int)
+	ctx                     *lineContext
+	end, cursor             int
+	blockRead               bool
+	refusedFrom, refusedEnd int
+}
+
+// key reads the match km of anyKey on the line, as anyKeyLine describes it.
+func (r *anyKeyReader) key(km []int) {
+	s, le := r.s, r.le
+	if km[0] < r.cursor {
+		return
+	}
+	keyAt := km[2]
+	if q := s[keyAt]; (q == '"' || q == '\'') && s[km[3]-1] != q {
+		// The quote opens the string the key stands in, not the key.
+		keyAt++
+	}
+	strEnd := r.ctx.stringEnd(keyAt)
+	inStr := strEnd >= 0
+	if !inStr && r.ctx.inFlow(keyAt) || keepReference(s, km) || sasRefused(s, km, true) {
+		return
+	}
+	valEnd := le
+	if inStr {
+		valEnd = strEnd
+	}
+	after, ok := afterIndicator(s, km[5], valEnd, inStr)
+	if !ok {
+		return
+	}
+	bare := bareShortColon(s, km)
+	bStart, bEnd := -1, -1
+	if !inStr && !r.blockRead && (!bare || le >= r.refused) {
+		keyCol := r.lineCol
+		if km[2] == r.firstKey {
+			keyCol = km[2] - r.ls
 		}
-		keyAt := km[2]
-		if q := s[keyAt]; (q == '"' || q == '\'') && s[km[3]-1] != q {
-			// The quote opens the string the key stands in, not the key.
-			keyAt++
-		}
-		strEnd := ctx.stringEnd(keyAt)
-		inStr := strEnd >= 0
-		if !inStr && ctx.inFlow(keyAt) || keepReference(s, km) || sasRefused(s, km, true) {
-			continue
-		}
-		valEnd := le
-		if inStr {
-			valEnd = strEnd
-		}
-		after, ok := afterIndicator(s, km[5], valEnd, inStr)
-		if !ok {
-			continue
-		}
-		bare := bareShortColon(s, km)
-		bStart, bEnd := -1, -1
-		if !inStr && !blockRead && !(bare && le < refused) {
-			keyCol := lineCol
-			if km[2] == firstKey {
-				keyCol = km[2] - ls
-			}
-			bStart, bEnd = blockBelow(s, le, keyCol)
-			blockRead = true
-		}
-		rest := after < valEnd && (s[after] != '#' || bStart < 0)
-		cursor = valEnd
-		switch {
-		case rest:
-			re := valEnd
-			for re > after && isSpace(s[re-1]) {
-				re--
-			}
-			switch {
-			case !bare:
-				add(after, re)
-			case refusedFrom >= 0 && after >= refusedFrom && valEnd == refusedEnd:
-				cursor = after
-			case wordsLookLikeSecret(s[after:re]):
-				countScan(re - after)
-				add(after, re)
-			default:
-				countScan(re - after)
-				refusedFrom, refusedEnd, cursor = after, valEnd, after
-			}
-		case bStart < 0 && !bare:
-			add(km[4], km[5])
-		}
-		if bStart >= 0 {
-			countScan(bEnd - bStart)
-			if !bare || blockLooksLikeSecret(s, bStart, bEnd) {
-				add(bStart, bEnd)
-				end = max(end, bEnd)
-			} else {
-				end = max(end, anyKeyNested(s, le, bEnd, add))
-			}
+		bStart, bEnd = blockBelow(s, le, keyCol)
+		r.blockRead = true
+	}
+	r.cursor = valEnd
+	switch {
+	case after < valEnd && (s[after] != '#' || bStart < 0):
+		r.rest(after, valEnd, bare)
+	case bStart < 0 && !bare:
+		r.add(km[4], km[5])
+	}
+	if bStart >= 0 {
+		countScan(bEnd - bStart)
+		if !bare || blockLooksLikeSecret(s, bStart, bEnd) {
+			r.add(bStart, bEnd)
+			r.end = max(r.end, bEnd)
+		} else {
+			r.end = max(r.end, anyKeyNested(s, le, bEnd, r.add))
 		}
 	}
-	return end
+}
+
+// rest redacts the text from after to valEnd that follows a block indicator: a block flattened onto the
+// line. Under a bare short key it counts only when a word looks like a secret; a refusal is remembered, so a
+// later bare key's text up to the same end is refused without reading it again, and the keys in the refused
+// text are read on their own.
+func (r *anyKeyReader) rest(after, valEnd int, bare bool) {
+	re := valEnd
+	for re > after && isSpace(r.s[re-1]) {
+		re--
+	}
+	switch {
+	case !bare:
+		r.add(after, re)
+	case r.refusedFrom >= 0 && after >= r.refusedFrom && valEnd == r.refusedEnd:
+		r.cursor = after
+	case wordsLookLikeSecret(r.s[after:re]):
+		countScan(re - after)
+		r.add(after, re)
+	default:
+		countScan(re - after)
+		r.refusedFrom, r.refusedEnd, r.cursor = after, valEnd, after
+	}
 }
 
 // anyKeyNested reads the lines after pos (a line end) up to limit, a block a bare short key refused, for

@@ -45,7 +45,7 @@ func TestValueIsRedactedBeforeItIsFlattened(t *testing.T) {
 // saw it is redacted by the one-line rule (#840). The summary's cut swept across each form, the key cut by
 // the note included, never shows a part of the secret, and the note stays intact.
 func TestSummaryCutAcrossAFlattenedBlock(t *testing.T) {
-	const secret = "Qz10001xK9wQz"
+	const secret = "Qz10001xK9wQz" // #nosec G101 -- not a credential: a made-up value the test looks for
 	b, ub := newBuilder(t, reader(t), sources{}, nil), unbounded(t, nil)
 	for name, text := range map[string]string{
 		"flattened":      "é config password: |   " + secret,

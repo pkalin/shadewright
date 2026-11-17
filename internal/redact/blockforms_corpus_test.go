@@ -81,8 +81,8 @@ func (w *formWriter) kept(s string) {
 // formKeys are secret keys of each form the rules know, the bare short keys among them ("pass", "auth",
 // "sig"), whose values count only when they look like a secret, as every generated secret does.
 var formKeys = []string{
-	"password", "DB_PASSWORD", "client_secret", "token", "apiKey", "credentials", `"password"`, "'token'", "pass",
-	"auth", "sig", "basic_auth",
+	passwordKey, dbPasswordKey, clientSecretKey, tokenKeyName, apiKeyName, "credentials", `"password"`, "'token'", passKey,
+	authKey, sigKey, "basic_auth",
 }
 
 // formPlainKeys are formKeys without quotes, for places a quote would end the enclosing string.
@@ -100,12 +100,26 @@ var formPlainKeys = func() []string {
 var formLongKeys = func() []string {
 	var out []string
 	for _, k := range formKeys {
-		if k != "pass" && k != "auth" && k != "sig" {
+		if k != passKey && k != authKey && k != sigKey {
 			out = append(out, k)
 		}
 	}
 	return out
 }()
+
+// authKey, passKey and sigKey are the bare short key names, apiKeyName and tokenKeyName secret key names, and
+// threeBlanks the blanks a flattened line break and indentation leave.
+const (
+	authKey      = "auth"
+	passKey      = "pass"
+	sigKey       = "sig"
+	apiKeyName   = "apiKey"
+	tokenKeyName = "token"
+	threeBlanks  = "   "
+)
+
+// formBareKeys are the bare short keys the forms place a block under.
+var formBareKeys = []string{authKey, passKey, sigKey}
 
 // formIndicators are block scalar headers with chomping and indentation indicators.
 var formIndicators = []string{"|", ">", "|-", ">+", "|2", ">-", "|2-", "|+"}
@@ -144,7 +158,7 @@ func formForms() []formForm {
 	nls := []string{"\n", "\r\n"}
 	return []formForm{
 		{name: "key inside a JSON string", keys: formPlainKeys, variants: 8, write: func(w *formWriter, key, ind string, v int) {
-			sep := []string{" ", "   ", `\n  `, `\n`, `\t`, " \\n    ", "  ", " "}[v]
+			sep := []string{" ", threeBlanks, `\n  `, `\n`, `\t`, " \\n    ", "  ", " "}[v]
 			w.text(`{"level":"warn","msg":"`)
 			w.kept("bad")
 			w.text(" config: " + key + ": " + ind + sep)
@@ -158,7 +172,7 @@ func formForms() []formForm {
 		{name: "key inside a logfmt string", keys: formPlainKeys, variants: 3, write: func(w *formWriter, key, ind string, v int) {
 			w.text("level=warn msg=\"")
 			w.kept("bad")
-			w.text(" config " + key + ": " + ind + []string{" ", "   ", `\n  `}[v])
+			w.text(" config " + key + ": " + ind + []string{" ", threeBlanks, `\n  `}[v])
 			w.secret()
 			w.text("\" ")
 			w.kept("ts")
@@ -167,12 +181,12 @@ func formForms() []formForm {
 		}},
 		{name: "after an unbalanced bracket", keys: formKeys, variants: 5, write: func(w *formWriter, key, ind string, v int) {
 			w.kept("retry")
-			w.text([]string{" [3/5 ", " {cfg ", " [[", " [3/5] [", " ({"}[v] + key + ": " + ind + "   ")
+			w.text([]string{" [3/5 ", " {cfg ", " [[", " [3/5] [", " ({"}[v] + key + ": " + ind + threeBlanks)
 			w.secret()
 		}},
 		{name: "after a balanced bracket", keys: formKeys, variants: 2, write: func(w *formWriter, key, ind string, v int) {
 			w.kept("retry")
-			w.text([]string{" [3/5] ", " {a: b} "}[v] + key + ": " + ind + "   ")
+			w.text([]string{" [3/5] ", " {a: b} "}[v] + key + ": " + ind + threeBlanks)
 			w.secret()
 		}},
 		{name: "no blank before the indicator", keys: formKeys, variants: 4, write: func(w *formWriter, key, ind string, v int) {
@@ -257,7 +271,7 @@ func formForms() []formForm {
 		}},
 		{name: "inside a refused bare block", keys: formKeys, variants: 12, write: func(w *formWriter, key, ind string, v int) {
 			nl := nls[v%2]
-			bare := []string{"auth", "pass", "sig"}[v/2%3]
+			bare := formBareKeys[v/2%3]
 			if v/6 == 1 {
 				w.kept("x")
 				w.text(" ")
@@ -272,9 +286,9 @@ func formForms() []formForm {
 		}},
 		{name: "flattened inside a refused bare block", keys: formKeys, variants: 6, write: func(w *formWriter, key, ind string, v int) {
 			nl := nls[v%2]
-			w.text([]string{"auth", "pass", "sig"}[v/2] + ":" + nl + "  ")
+			w.text(formBareKeys[v/2] + ":" + nl + "  ")
 			w.kept("mode")
-			w.text(": basic " + key + ": " + ind + "   ")
+			w.text(": basic " + key + ": " + ind + threeBlanks)
 			w.secret()
 			w.text(nl)
 			w.kept("next")
@@ -369,8 +383,9 @@ func TestWriteFormMainTable(t *testing.T) {
 	if path == "" {
 		t.Skip("FORM_MAIN_TABLE is not set")
 	}
-	var rows []any
-	for _, c := range formCorpus() {
+	corpus := formCorpus()
+	rows := make([]any, 0, len(corpus))
+	for _, c := range corpus {
 		row := formMainRow{Hash: formHash(c.in)}
 		for _, sp := range defaultRedactor.spans(c.in) {
 			row.Spans = append(row.Spans, [2]int{sp.start, sp.end})

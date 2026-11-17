@@ -540,4 +540,9 @@ func TestCompatibleKeySourceBelongsToOneDeclaration(t *testing.T) {
 	if !strings.Contains(out, `no item with path "k"`) {
 		t.Fatalf("wrong refusal: %s", out)
 	}
+	// An item path is compared cleaned: the kubelet writes "./api-key" as "api-key", and an Anthropic-only
+	// install with such a path rendered before the key source was resolved through items.
+	defaultRender(t, "analyzer.analysis.anthropic.apiKey.volume.secret.secretName=anthropic-key",
+		"analyzer.analysis.anthropic.apiKey.volume.secret.items[0].key=k",
+		"analyzer.analysis.anthropic.apiKey.volume.secret.items[0].path=./api-key")
 }

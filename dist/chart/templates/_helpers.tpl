@@ -527,7 +527,8 @@ secret:
 shadewright.keySourceID prints what a key source (an apiKey value: secretName and secretKey, or volume and
 fileName) mounts, so that two declarations of one key can be told apart. For a Secret, or a secret volume, it is
 the Secret and the Secret key the file comes from: through the volume's items when it has them (items that do
-not map fileName are refused, the file would not exist), else the file name. Any other volume source (projected,
+not map fileName are refused, the file would not exist; paths are compared cleaned, "./api-key" is "api-key"),
+else the file name. Any other volume source (projected,
 CSI) cannot be resolved at render: its ID is the source as written and the file name, which catches only the
 same declaration written twice, and keeping one key to one declaration there is the operator's to do. Empty
 when no source is set.
@@ -541,7 +542,7 @@ when no source is set.
 {{- with .volume.secret.items -}}
 {{- $secretKey = "" -}}
 {{- range . -}}
-{{- if and (kindIs "map" .) (eq (toString .path) $file) -}}{{- $secretKey = toString .key -}}{{- end -}}
+{{- if and (kindIs "map" .) (eq (clean (toString .path)) (clean $file)) -}}{{- $secretKey = toString .key -}}{{- end -}}
 {{- end -}}
 {{- if not $secretKey -}}
 {{- fail (printf "an apiKey secret volume has items but no item with path %q (its fileName): the key file would not exist" $file) -}}

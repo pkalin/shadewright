@@ -37,8 +37,17 @@ limitations under the License.
 // event's own time. A consequence with no cause is held (hold.go, ADR-0039 point 19): it is emitted only when,
 // ConsequenceGrace after the collector first saw it, its pod has the same UID, the container was seen failing
 // at least twice (each reconcile of the event, and each update of its pod, is a sample), and it is still failing
-// or restarted at least twice during the hold; otherwise it is handled without an observation. The holds are
-// bounded (DefaultMaxHeldConsequences, a quarter per namespace); over the bound a consequence is emitted at once.
+// or restarted at least twice during the hold; otherwise it is handled without an observation. A consequence
+// whose pod shows a cause that the Incident controller has not seen yet (Config.CauseSeen, asked with the hold's
+// observation at each sample; ADR-0039 point 7) is held too: it is emitted with its cause as soon as an answer
+// says the controller has seen a cause it would be counted on, asked again when the controller tells the
+// collector it has seen that cause fingerprint (Collector.ReleaseCause). At the end of ConsequenceGrace it is
+// judged by its samples as a hold with no cause is, and emitted with its cause only when still failing. The hold
+// keeps the last cause a sample showed, so a pod that goes or whose template is retired during it, or one that
+// recovers before the release, emits the consequence with that cause; a container that recovered with no
+// release by the end, and an event that no longer exists, end it with nothing emitted. The holds are bounded (DefaultMaxHeldConsequences, a quarter per namespace),
+// those first seen with a cause and those with none in two shares apart; over the bound a consequence is
+// emitted at once.
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the

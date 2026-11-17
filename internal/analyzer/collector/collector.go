@@ -29,6 +29,7 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
@@ -141,7 +143,7 @@ type Observation struct {
 	Container string
 	// Class is the observation's part in the consequence rule (ADR-0039): ClassCause only for a pod-status
 	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. The collector
-	// holds a consequence with no cause before it emits it (hold.go); the Incident controller does not read it yet.
+	// holds a consequence with no cause, or whose cause has no Incident yet, before it emits it (hold.go).
 	Class Class
 	// CauseFingerprint is, on a consequence, the fingerprint of the cause its pod's status shows for its
 	// container (Collector.causeFingerprint); empty when the status shows none.
@@ -183,6 +185,14 @@ func (o Observation) Increase(handled int64) int64 {
 // the Incident, not in memory alone.
 type HandledFunc func(ctx context.Context, o Observation) (handled int64, found bool, err error)
 
+// CauseSeenFunc reports whether the Incident controller has seen the cause a consequence names (ADR-0039 point
+// 7, decided 2026-11-17 three times): it has an Incident of o.CauseFingerprint that counts a cause and that it
+// would count o on. A cause it holds only as a first sighting is not seen. It answers from memory, in the same
+// process, and an error (the Incidents not loaded within the deadline) is no answer: the collector asks again.
+// The Incident controller (package incidents) supplies it, and tells the collector of each cause it sees later
+// through [Collector.ReleaseCause].
+type CauseSeenFunc func(ctx context.Context, o Observation) (bool, error)
+
 // Config configures a [Collector]. Zero values take the defaults above.
 type Config struct {
 	// ClusterID is hashed into every fingerprint. Required.
@@ -208,14 +218,20 @@ type Config struct {
 	// Handled, when set, settles observations that would be marked MayRepeat: their Count becomes what the
 	// Incident has not counted yet, and they are dropped when that is nothing.
 	Handled HandledFunc
+	// CauseSeen, when set, is asked whether the Incident controller has seen the cause a consequence names. A
+	// consequence whose cause it has not seen is held (hold.go) until [Collector.ReleaseCause] is called for that
+	// cause, at the latest for ConsequenceGrace, and then emitted with its cause (ADR-0039 point 7). Nil takes
+	// every cause as seen and emits such a consequence at once.
+	CauseSeen CauseSeenFunc
 	// Modules, when set, returns the modules active now (detection.Detector.Selection). The collector then
 	// also watches the kinds in [SourceKinds] and evaluates on each object the symptom source an active module
 	// declares for its kind (sources.go). Nil watches none of them.
 	Modules func() modules.Selection
 	// MaxObjects bounds the number of objects whose handled symptom states are remembered.
 	MaxObjects int
-	// MaxHeldConsequences bounds the consequences with no cause held at once (hold.go), a quarter of it per
-	// namespace. Over it a consequence is emitted at once, without a verdict.
+	// MaxHeldConsequences bounds the consequences held at once (hold.go), a quarter of it per namespace, for
+	// each of the two shares apart: those first seen with no cause, and those first seen with a cause the
+	// Incident controller had not seen. Over it a consequence is emitted at once, without a verdict.
 	MaxHeldConsequences int
 	// SelectionPoll is how often the collector checks whether a module became active for a kind in
 	// [SourceKinds], to evaluate then the objects of that kind it filtered out while none was, and, for a kind
@@ -254,10 +270,14 @@ type Collector struct {
 	conditions *stateTracker
 	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go).
 	probes *probeDeferrals
-	// holds remembers the consequences with no cause held for ConsequenceGrace (hold.go).
+	// holds remembers the consequences held for at most ConsequenceGrace (hold.go).
 	holds *consequenceHolds
 	// holdOff, set by tests of the observation's fields only, emits a consequence without holding it.
 	holdOff bool
+	// releaseMu guards releaseQueue, the work queue of the event controller, which ReleaseCause adds the released
+	// holds' events to. It is set when the controller starts (SetupWithManager), and nil before and in tests.
+	releaseMu    sync.Mutex
+	releaseQueue workqueue.TypedRateLimitingInterface[reconcile.Request]
 
 	// watches is the watch state of each kind of SourceKinds that is not built in (lazy.go).
 	watchMu sync.Mutex
@@ -330,6 +350,8 @@ func (c *Collector) SetupWithManager(mgr ctrl.Manager) error {
 		For(&eventsv1.Event{}, builder.WithPredicates(predicate.NewPredicateFuncs(isWarning))).
 		// An update of the pod of a held consequence is a sample of its hold (hold.go).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(c.heldEventsOf)).
+		// The events of the holds that ReleaseCause releases (hold.go).
+		WatchesRawSource(c.releases()).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(er)
 	if err != nil {

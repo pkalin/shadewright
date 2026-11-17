@@ -582,8 +582,10 @@ analyses (units taken from the daily budget, and model calls) and the requests.
   analyzed yet. When the cause's Incident opens, it is folded into it (`Resolved`, `status.foldedInto`); one
   Incident stays open, analyzed once. The case holds back every analysis until it has seen the fold, so a slow
   run cannot analyze the `Unhealthy` Incident first: the analysis controller's reads of the API wait on a gate
-  the case opens. No case covers a consequence held by the collector (ADR-0039 point 19) whose cause appears
-  during the hold: its release and the cause reach the Incident controller in either order. A consequence Incident that already has a request with no pull request is
+  the case opens. No case covers a consequence held by the collector for its cause (ADR-0039 point 7, #828):
+  these cases wire the collector without `CauseSeen`, so it emits a consequence that shows a cause at once and the
+  relays above decide the order; the hold and its release by the Incident controller are covered by the unit
+  tests of `internal/analyzer/collector` and `internal/incidents`. A consequence Incident that already has a request with no pull request is
   the executor's to cancel ([#794](https://github.com/pkalin/shadewright/issues/794)); this case does not cover it.
 - `TestGroupingStartupProbeOpensNothing`: the readiness probe failure of the new `demo/worker` pod. The collector
   skips it as part of the pod's start (its counter

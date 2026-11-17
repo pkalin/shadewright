@@ -206,6 +206,12 @@ type scenario struct {
 	policies []*remediationv1alpha1.RemediationPolicy
 	// reads are the rubric's expected reads, parsed against the tools the scenario is offered (checkReads).
 	reads []readRule
+	// forceEscalation sends every run of the scenario to the escalation model with the read tools, whatever
+	// the model source: an escalation scenario (escalation_scenarios_test.go), whose facts only a read shows.
+	forceEscalation bool
+	// behindReads are the rubric facts that only the expected reads show: not scored by the first request the
+	// product builds, scored by the tool results (TestEscalationFactsOnlyBehindReads).
+	behindReads []rubricFact
 }
 
 // policyFile holds a scenario's RemediationPolicies. Every scenario has one; a variant without its own takes
@@ -283,7 +289,11 @@ func loadScenarios(scheme *runtime.Scheme) ([]*scenario, error) {
 	if len(out) == 0 {
 		return nil, errors.New("no scenarios found")
 	}
-	return out, nil
+	escalation, err := loadEscalationScenarios(scheme)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, escalation...), nil
 }
 
 func loadScenario(scheme *runtime.Scheme, name string) (*scenario, error) {
@@ -292,7 +302,16 @@ func loadScenario(scheme *runtime.Scheme, name string) (*scenario, error) {
 
 // loadScenarioDir loads the scenario called name from dir.
 func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error) {
+	return loadScenarioFiles(scheme, dir, dir, name, name)
+}
+
+// loadScenarioFiles loads the scenario called name: its expected.yaml, incident.yaml, objects.yaml, policy.yaml
+// and metrics.yaml from dataDir, whose expected.yaml must be named expectedName, and its rubric.yaml and
+// replies.yaml from ownDir. A fleet scenario has one directory for both; an escalation scenario may take its
+// data from a fleet scenario (escalation_scenarios_test.go).
+func loadScenarioFiles(scheme *runtime.Scheme, dataDir, ownDir, name, expectedName string) (*scenario, error) {
 	s := &scenario{name: name}
+	dir := dataDir
 	raw, err := os.ReadFile(filepath.Join(dir, "expected.yaml"))
 	if err != nil {
 		return nil, err
@@ -301,17 +320,17 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 	if err := yaml.Unmarshal(raw, &s.expected); err != nil {
 		return nil, fmt.Errorf("expected.yaml: %w", err)
 	}
-	if s.expected.APIVersion != "scenarios.shadewright.io/v1alpha1" || s.expected.Name != name {
+	if s.expected.APIVersion != "scenarios.shadewright.io/v1alpha1" || s.expected.Name != expectedName {
 		return nil, fmt.Errorf("expected.yaml: apiVersion %q and name %q do not match the scenario",
 			s.expected.APIVersion, s.expected.Name)
 	}
-	if err := readStrict(filepath.Join(dir, "rubric.yaml"), &s.rubric); err != nil {
+	if err := readStrict(filepath.Join(ownDir, "rubric.yaml"), &s.rubric); err != nil {
 		return nil, err
 	}
 	if err := s.checkRubric(); err != nil {
 		return nil, err
 	}
-	if err := readStrict(filepath.Join(dir, "replies.yaml"), &s.recording); err != nil {
+	if err := readStrict(filepath.Join(ownDir, "replies.yaml"), &s.recording); err != nil {
 		return nil, err
 	}
 	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()

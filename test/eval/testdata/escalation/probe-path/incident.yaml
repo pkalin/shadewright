@@ -1,0 +1,25 @@
+# Synthetic: written by hand for the escalation scenario probe-path, not recorded on a cluster. The symptom is
+# the kubelet's Unhealthy note. UIDs and the fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-probe-path
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-000000000700
+spec:
+  fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000700
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-000000000701
+  reason: Unhealthy
+  type: Warning
+  reportingController: kubelet
+  symptom: 'Liveness probe failed: HTTP probe failed with statuscode: 404'
+status:
+  phase: Open
+  count: 12
+  firstSeen: "2026-11-04T11:50:00Z"
+  lastSeen: "2026-11-04T11:58:30Z"

@@ -92,6 +92,8 @@ type tally struct {
 	// first is the messages of the first request of the analysis, the system prompt and the context as the
 	// model gets them.
 	first []providers.Message
+	// toolText is the text of every tool result the loop received, in order (recordedTools).
+	toolText []string
 }
 
 // roleUsage is what the calls of one role returned.
@@ -226,7 +228,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		return res, err
 	}
 	var cb analysis.ContextBuilder = builder
-	if models.forcesEscalation() {
+	if models.forcesEscalation() || s.forceEscalation {
 		cb = forcedEscalation{inner: builder}
 	}
 	t := &tally{}
@@ -260,7 +262,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	last := t.last
 	calls := slices.Clone(t.reads)
-	res.prompt = t.first
+	res.prompt, res.toolText = t.first, slices.Clone(t.toolText)
 	t.mu.Unlock()
 	if aerr != nil {
 		return res, fmt.Errorf("the analysis stopped: %w", aerr)

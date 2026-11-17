@@ -444,5 +444,6 @@ func (r recordedTools) Call(ctx context.Context, call providers.ToolCall) (tools
 	defer r.t.mu.Unlock()
 	r.t.reads = append(r.t.reads, readCall{tool: call.Name, args: slices.Clone(call.Arguments),
 		accepted: res.Status != tools.StatusRefused})
+	r.t.toolText = append(r.t.toolText, res.Text)
 	return res, nil
 }

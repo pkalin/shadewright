@@ -83,7 +83,8 @@ const (
 const fakeModelName = "eval-fake-1"
 
 // replaySource replays each scenario's recorded replies, in order, for both roles. force sends every run to
-// the escalation model (tests only: the recordings are triage replies).
+// the escalation model (tests only: the fleet scenarios' recordings are triage replies; an escalation scenario
+// goes there anyway).
 type replaySource struct {
 	force bool
 }
@@ -393,11 +394,13 @@ func evaluate(t *testing.T, mode string, src modelSource, repeats int, minPassRa
 }
 
 // replayEnvError refuses the settings of a real-model run that would change a replay's meaning: the
-// recordings are triage replies, so a forced escalation is not replayed, and it is refused rather than
-// ignored.
+// recordings of the fleet scenarios are triage replies, so forcing every run to the escalation model is not
+// replayed, and it is refused rather than ignored. Only the escalation scenarios, recorded as escalation
+// replies, are replayed on the escalation model.
 func replayEnvError() error {
 	if v := os.Getenv(envForceEsc); v != "" {
-		return fmt.Errorf("%s applies to make eval-model only; the replay does not force escalation", envForceEsc)
+		return fmt.Errorf("%s applies to make eval-model only; the replay does not force escalation for every "+
+			"scenario", envForceEsc)
 	}
 	return nil
 }

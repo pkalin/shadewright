@@ -305,28 +305,8 @@ func TestCauseHoldOrderCorpus(t *testing.T) {
 					got, emittedAt = append(got, out...), step
 				}
 			}
-			// Released: seen before the first sight, or before the step of the end of the hold. Otherwise the
-			// end judges the samples (decided 2026-11-17, fifth): a container that recovered by then is not
-			// emitted.
-			released := seeAt == seenFirst || (seeAt != never && (endAt < 0 || seeAt < endAt))
-			dropped := !released && endAt >= 0 && recoverAt <= endAt
-			want := map[string]float64{}
-			switch {
-			case dropped:
-				if len(got) != 0 {
-					t.Fatalf("emitted %+v, want nothing: the container recovered before the end", got)
-				}
-				want[holdNotOpened] = 1
-			case len(got) != 1 || got[0].CauseFingerprint != fp || got[0].Count != 1:
-				t.Fatalf("emitted %+v, want one observation with its cause and a count of 1", got)
-			case emittedAt != wantAt:
-				t.Fatalf("emitted at step %d, want %d", emittedAt, wantAt)
-			case seeAt == seenFirst:
-			case seeAt == emittedAt && endAt < 0:
-				want[holdReleased] = 1
-			default:
-				want[holdCauseUnseen] = 1
-			}
+			want := corpusOutcome(t, corpusRun{seeAt: seeAt, recoverAt: recoverAt, endAt: endAt, emittedAt: emittedAt,
+				wantAt: wantAt, seenFirst: seenFirst, never: never}, got, fp)
 			wantOutcomes(t, before, want)
 			if h.c.holds.len() != 0 {
 				t.Fatalf("%d held after the emission", h.c.holds.len())
@@ -339,6 +319,39 @@ func TestCauseHoldOrderCorpus(t *testing.T) {
 	if seen[holdReleased] == 0 || seen[holdCauseUnseen] == 0 || seen[holdNotOpened] == 0 {
 		t.Fatalf("the corpus misses an outcome: %v", seen)
 	}
+}
+
+// corpusRun is what one run of TestCauseHoldOrderCorpus did: the steps of the release, the recovery, the end of
+// the hold and the emission, the step the emission was due, and the markers of a release before the first sight
+// and of none.
+type corpusRun struct {
+	seeAt, recoverAt, endAt, emittedAt, wantAt, seenFirst, never int
+}
+
+// corpusOutcome checks what a run of TestCauseHoldOrderCorpus emitted (got) and returns the outcome it must
+// have counted. Released: seen before the first sight, or before the step of the end of the hold. Otherwise the
+// end judges the samples (decided 2026-11-17, fifth): a container that recovered by then is not emitted.
+func corpusOutcome(t *testing.T, r corpusRun, got []Observation, fp string) map[string]float64 {
+	t.Helper()
+	released := r.seeAt == r.seenFirst || (r.seeAt != r.never && (r.endAt < 0 || r.seeAt < r.endAt))
+	want := map[string]float64{}
+	switch {
+	case !released && r.endAt >= 0 && r.recoverAt <= r.endAt:
+		if len(got) != 0 {
+			t.Fatalf("emitted %+v, want nothing: the container recovered before the end", got)
+		}
+		want[holdNotOpened] = 1
+	case len(got) != 1 || got[0].CauseFingerprint != fp || got[0].Count != 1:
+		t.Fatalf("emitted %+v, want one observation with its cause and a count of 1", got)
+	case r.emittedAt != r.wantAt:
+		t.Fatalf("emitted at step %d, want %d", r.emittedAt, r.wantAt)
+	case r.seeAt == r.seenFirst:
+	case r.seeAt == r.emittedAt && r.endAt < 0:
+		want[holdReleased] = 1
+	default:
+		want[holdCauseUnseen] = 1
+	}
+	return want
 }
 
 // TestReleaseRaceBothOrders proves the order that makes the release race-free (ReleaseCause): the controller

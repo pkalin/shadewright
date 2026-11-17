@@ -18,10 +18,13 @@ package models
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
 )
 
@@ -100,5 +103,35 @@ func TestCompatibleUndeclaredModel(t *testing.T) {
 	_, err = factory(analysis.RoleTriage, remediationv1alpha1.ModelDeployment{Provider: remediationv1alpha1.ModelProviderOpenAICompatible, Endpoint: compatibleBase, Deployment: "undeclared"})
 	if !errors.Is(err, analysis.ErrModelNotAllowed) {
 		t.Fatalf("wrong model refusal: %v", err)
+	}
+}
+
+// The factory gives each compatible provider the other declared key files: a declared key file that is
+// missing at start and appears later as a link to the Anthropic key file is refused at its read, before
+// any request (decision 7 of #834).
+func TestCompatibleFactoryPassesOtherKeyFiles(t *testing.T) {
+	dir := t.TempDir()
+	anthropicKey := filepath.Join(dir, "anthropic")
+	if err := os.WriteFile(anthropicKey, []byte("content-marker-834-models-0001"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	late := filepath.Join(dir, "late")
+	factory, err := NewModelFactory(ModelsConfig{DisableFoundry: true, AnthropicKeyFile: anthropicKey,
+		CompatibleEndpoints: []openaicompatible.Endpoint{{URL: "https://gateway.invalid/v1",
+			API: openaicompatible.APIChatCompletions, Models: []string{compatibleModel}, KeyFile: late}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(anthropicKey, late); err != nil {
+		t.Fatal(err)
+	}
+	p, err := factory(analysis.RoleTriage, remediationv1alpha1.ModelDeployment{
+		Provider: remediationv1alpha1.ModelProviderOpenAICompatible, Endpoint: "https://gateway.invalid/v1", Deployment: compatibleModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Complete(t.Context(), providers.CompletionRequest{Messages: []providers.Message{{Role: providers.RoleUser, Content: "x"}}})
+	if !errors.Is(err, providers.ErrCredentialUnavailable) || !providers.IsNotSent(err) || providers.IsRetryable(err) {
+		t.Fatalf("the Anthropic key reached a compatible provider's read: %v", err)
 	}
 }

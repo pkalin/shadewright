@@ -472,3 +472,39 @@ func TestCompatibleInClusterCIDRsSameVerdict(t *testing.T) {
 		})
 	}
 }
+
+// A key belongs to one declaration (decision 7 of #834): two compatible endpoints that mount one key of one
+// Secret, or an endpoint that mounts the Anthropic key, are refused at render, and the error names both. One
+// Secret with different keys is accepted.
+func TestCompatibleKeySourceBelongsToOneDeclaration(t *testing.T) {
+	second := []string{"analyzer.analysis.openAICompatible.endpoints[1].url=https://gateway.example.com/v1",
+		"analyzer.analysis.openAICompatible.endpoints[1].inferenceAPI=ChatCompletions",
+		"analyzer.analysis.openAICompatible.endpoints[1].models[0]=m"}
+	const key1 = "analyzer.analysis.openAICompatible.endpoints[1].apiKey."
+	for name, set := range map[string][]string{
+		"two endpoints, one Secret key": append(append(compatibleSet(), second...), compatibleKey,
+			key1+"secretName=model-key"),
+		"two endpoints, Secret and secret volume": append(append(compatibleSet(), second...), compatibleKey,
+			key1+"volume.secret.secretName=model-key"),
+		"endpoint and Anthropic key": append(compatibleSet(), endpointPrefix+"apiKey.secretName=anthropic-key",
+			"analyzer.analysis.anthropic.apiKey.secretName=anthropic-key"),
+		"endpoint and Anthropic key with a named key": append(compatibleSet(), endpointPrefix+"apiKey.secretName=shared",
+			endpointPrefix+"apiKey.secretKey=k", "analyzer.analysis.anthropic.apiKey.secretName=shared",
+			"analyzer.analysis.anthropic.apiKey.secretKey=k"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := helmFails(t, set...)
+			if !strings.Contains(out, "belongs to one declaration") || !strings.Contains(out, "endpoints[0]") {
+				t.Fatalf("wrong refusal: %s", out)
+			}
+		})
+	}
+	for name, set := range map[string][]string{
+		"one Secret, two keys": append(append(compatibleSet(), second...), compatibleKey, key1+"secretName=model-key",
+			key1+"secretKey=other-key"),
+		"Anthropic key in another Secret": append(compatibleSet(), compatibleKey,
+			"analyzer.analysis.anthropic.apiKey.secretName=anthropic-key"),
+	} {
+		t.Run(name, func(t *testing.T) { compatibleRender(t, set...) })
+	}
+}

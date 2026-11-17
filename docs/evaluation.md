@@ -316,7 +316,8 @@ usage is refused, sets `UsageUnknown` and charges the input estimate plus the
 output bound with a rounded-up 10% margin. Complete reported usage is charged
 at least the input estimate; reports above that ceiling are refused and charged
 the ceiling. A compatible server's 429 is
-not marked unbilled. The persistent cross-analysis daily token counter remains
+not marked unbilled, and each retried attempt the endpoint may have billed is
+charged. The persistent cross-analysis daily token counter remains
 planned (#208), as for the existing providers.
 
 ### Benchmarking escalation models

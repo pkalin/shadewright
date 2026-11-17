@@ -86,6 +86,18 @@ choose no part of the request destination.
    empty files are retryable; malformed files, including keys shorter than 16 bytes,
    are refused without retry and with a fixed message naming the minimum length.
    Fixed errors and call reports never contain keys, paths, headers or response text.
+   A key file also belongs to one declaration (decided 2026-11-17): the analyzer
+   refuses at start two declarations that name one key file, and a declaration that
+   names the file of `--anthropic-api-key-file`, by cleaned path and by file identity
+   (`os.SameFile`, so a symbolic or hard link to the same file counts), and the error
+   names the two declarations, never a path or content. A file that does not exist
+   at start is compared by path only; before each read the adapter checks the
+   identity of its file again against the other declared key files, so a file that
+   appears later as a link to another declaration's key is refused without a
+   request. The chart refuses at render what it can see: two endpoints that mount
+   the same Secret key or volume source, or one that mounts the Anthropic key. Two
+   separate copies of one key in different Secrets are different files and are not
+   detected.
 5. Both chart render and analyzer startup refuse a declaration whose host matches
    the Foundry suffix list, an Azure model host or `api.anthropic.com`; duplicate
    parsed bases (even with different APIs or keys); a base that is a segment path
@@ -96,7 +108,8 @@ choose no part of the request destination.
 6. The Foundry suffix list remains Foundry-only and never authorizes compatible
    endpoints. Foundry refuses any declared compatible host, as does Anthropic's
    fixed-host boundary. No Entra token or Anthropic key reaches the compatible
-   adapter and no compatible key reaches another provider. `--disable-foundry`
+   adapter (the key file rule of decision 4 covers the Anthropic key file) and no
+   compatible key reaches another provider. `--disable-foundry`
    prevents inference token-source creation. Compatible-only installs need no
    Azure client ID for inference; Blob records still require Azure identity.
 7. Usage is untrusted. Let `I` be the loop's conservative input estimate (one token
@@ -110,8 +123,16 @@ choose no part of the request destination.
    charged `C`. Missing, negative, incomplete or otherwise unusable usage is also
    refused with `UsageUnknown` and charged `C`. Other failed sent calls, including
    throttling, cost `C`; compatible hosts never mark a refusal unbilled. A call
-   whose every attempt sent nothing costs zero. Retried attempts with lost usage
-   keep `UsageUnknown` and cost `C`. Foundry and Anthropic accounting is unchanged.
+   whose every attempt sent nothing costs zero. Every attempt is charged, not only
+   the last (decided 2026-11-17): the adapter reports each attempt the endpoint may
+   have billed, which is every attempt that got a response or failed after its
+   request may have reached a connection, and not one that ended before: a key
+   that could not be read, a dial the guard refused, a name that did not resolve or
+   a connection that was refused. The loop charges each one, `C` for an attempt
+   with unknown usage and `max(I, R)` for one that reported usage `R`. The loop
+   passes the number of attempts its remaining analysis and daily budget covers at
+   `C`, and the adapter makes no further attempt beyond it, so one call cannot take
+   spend past `maxTokensPerDay`. Foundry and Anthropic accounting is unchanged.
    Persistent daily token reservation across analyses remains #208.
 
 8. Responses and tool calls remain untrusted. Strict response schemas are requested,
@@ -198,8 +219,14 @@ For this provider only, ADR-0042 amends decision 9 of
 2026-11-17 links back here): every usage counts at least the loop's input
 estimate, at most the ceiling `C` of decision 7; a reply that reports usage above
 `C` is refused and charged `C`; and a 429 or other refusal of a compatible host
-is never treated as unbilled, so a failed sent call costs `C`. Foundry and
+is never treated as unbilled, so a failed sent call costs `C`; and each attempt
+of a retried call the endpoint may have billed is charged on its own. Foundry and
 Anthropic accounting is unchanged.
+
+An accepted limit: an endpoint that reports less usage than it billed is charged
+the larger of the input floor `I` and its report, so it can undercount by up to
+the output ceiling of each attempt. Server-side spend caps on the dedicated key
+bound that.
 
 Two trust assumptions remain:
 
@@ -231,6 +258,8 @@ Two trust assumptions remain:
 | Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; before a completion is returned, search an allow-list view of the reply (ASCII letters, digits and the key's punctuation, every other character dropped) over the raw body and over every decoded string, number and object key in document order, with nested JSON decoded; control characters are removed from model text before storage (#852), so a key whole in stored text is whole in the view; a wrong-typed decoy field fails closed with its own fixed text. A re-encoded key (base64, percent encoding, homoglyphs) is not found: the endpoint is trusted with the key |
 | Server ignores schema or invents a tool | Shared parser, typed argument/result validation, closed catalog and deterministic policy; no output repair |
 | Server omits usage or returns 429 | Unknown usage costs the upper bound; no compatible-host unbilled exception |
+| Gateway fails each reply after the headers to multiply billed retries | Every attempt that may have been billed is charged, at `C` when its usage is unknown; no retry the remaining budget cannot cover at `C` |
+| A declaration names another provider's or endpoint's key file | Refused at start by path and file identity, and before each read by identity; the chart refuses a shared Secret key or volume source |
 | Key rotation races a call | Read per attempt, bounded retry, no cached key; update source before revoking old key |
 
 ### What is not built

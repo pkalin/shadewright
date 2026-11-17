@@ -21,8 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -274,6 +276,70 @@ func ValidateInClusterRanges(ranges []netip.Prefix) error {
 		}
 		if _, err := CheckInClusterRange(p.String()); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// NamedKeyFile is a key file declared outside the compatible endpoints, such as the Anthropic one.
+type NamedKeyFile struct {
+	// Name says where the file is declared, for example a flag name; it appears in errors.
+	Name string
+	// Path is the absolute, clean path of the file.
+	Path string
+}
+
+// ValidateKeyFiles refuses a key file that belongs to more than one declaration (ADR-0042): two compatible
+// endpoints that name one file, or an endpoint that names one of others (the Anthropic key file). Files are
+// compared by clean path and, when both exist, by identity (os.SameFile after following links), so a symbolic
+// or hard link to the same file counts. A file that does not exist yet is compared by path only; the
+// provider checks identity again before each read (Config.OtherKeyFiles). A file whose identity cannot be
+// read for another reason stops the start. The error names the two declarations, never a path or content.
+func ValidateKeyFiles(endpoints []Endpoint, others []NamedKeyFile) error {
+	type named struct {
+		name, path string
+		compatible bool
+	}
+	var files []named
+	for i, e := range endpoints {
+		if e.KeyFile == "" {
+			continue
+		}
+		name := fmt.Sprintf("compatible endpoint %d", i+1)
+		if base, err := CanonicalBase(e.URL); err == nil {
+			name += " (" + base + ")"
+		}
+		files = append(files, named{name: name, path: filepath.Clean(e.KeyFile), compatible: true})
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	for _, o := range others {
+		if o.Path != "" {
+			files = append(files, named{name: o.Name, path: filepath.Clean(o.Path)})
+		}
+	}
+	infos := make([]os.FileInfo, len(files))
+	for i, f := range files {
+		st, err := os.Stat(f.path)
+		switch {
+		case err == nil:
+			infos[i] = st
+		case !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("the key file of %s cannot be checked against the other declared key files", f.name)
+		}
+	}
+	for i := range files {
+		for j := i + 1; j < len(files); j++ {
+			if !files[i].compatible && !files[j].compatible {
+				continue
+			}
+			same := files[i].path == files[j].path ||
+				infos[i] != nil && infos[j] != nil && os.SameFile(infos[i], infos[j])
+			if same {
+				return fmt.Errorf("%s and %s name the same key file: a key file belongs to one declaration",
+					files[i].name, files[j].name)
+			}
 		}
 	}
 	return nil

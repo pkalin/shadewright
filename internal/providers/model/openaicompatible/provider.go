@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"mime"
 	"net"
@@ -30,6 +31,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -93,6 +95,9 @@ type CallReport struct {
 	UsageUnknown bool
 	// Attempts is the number of requests sent (or tried) in this call.
 	Attempts int
+	// BilledAttempts is the number of attempts the endpoint may have billed: those whose request may have
+	// reached it (Completion.BilledAttempts).
+	BilledAttempts int
 	// Duration is the time the call took, backoff included.
 	Duration time.Duration
 	// Err is the error Complete returned, nil on success.
@@ -116,6 +121,11 @@ type Config struct {
 	Deployment string
 	// KeyFile is an optional API key file, read at each attempt; never a credential in settings.
 	KeyFile string
+	// OtherKeyFiles are the key files of the other declarations (other compatible endpoints, the Anthropic
+	// key file). Before each read of KeyFile the provider refuses it when it is one of them by path or by
+	// identity, so a file that did not exist at start (ValidateKeyFiles compares it by path only) and appears
+	// later as a link to another declaration's key is never sent to this endpoint.
+	OtherKeyFiles []string
 	// Service permits private unicast addresses for this declared Service endpoint.
 	Service *Service
 	// InClusterRanges are the declared in-cluster ranges outside the private ones (ParseInClusterRanges). A
@@ -161,6 +171,7 @@ type Provider struct {
 	// api is the inference API: APIChatCompletions or APIResponses.
 	api            API
 	keyFile        string
+	otherKeyFiles  []string
 	guard          openaiwire.Guard
 	client         *http.Client
 	maxOutput      int
@@ -228,6 +239,7 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 		deployment:     cfg.Deployment,
 		api:            api,
 		keyFile:        cfg.KeyFile,
+		otherKeyFiles:  slices.Clone(cfg.OtherKeyFiles),
 		guard:          guard,
 		client:         openaiwire.NewHTTPClient(cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout), guard),
 		maxOutput:      cmpOr(cfg.MaxOutputTokens, DefaultMaxOutputTokens),
@@ -290,7 +302,7 @@ func (p *Provider) Complete(ctx context.Context, req providers.CompletionRequest
 	if p.onCall != nil {
 		p.onCall(CallReport{
 			Deployment: p.deployment, Model: c.Model, Usage: c.Usage, UsageUnknown: c.UsageUnknown,
-			Attempts: attempts, Duration: p.now().Sub(start), Err: err,
+			Attempts: attempts, BilledAttempts: len(c.BilledAttempts), Duration: p.now().Sub(start), Err: err,
 		})
 	}
 	return c, err
@@ -306,37 +318,56 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 	usageCeiling := providers.CompatibleUsageCeiling(providers.EstimateInputTokens(req), int64(cmpOr(req.MaxOutputTokens, p.maxOutput)))
 	// unknown stays set once an attempt was billed without a usage that reaches the caller.
 	unknown := false
-	sent := false
+	// billed lists every attempt the endpoint may have billed: each one whose request may have reached it
+	// (once's sent). The caller charges each one (ADR-0042 decision 7).
+	var billed []providers.BilledAttempt
+	record := func(attemptSent bool, c providers.Completion, known bool) {
+		if !attemptSent {
+			return
+		}
+		if known && !c.UsageUnknown {
+			billed = append(billed, providers.BilledAttempt{Usage: c.Usage})
+			return
+		}
+		billed = append(billed, providers.BilledAttempt{UsageUnknown: true})
+	}
 	done := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
 		c.UsageUnknown = c.UsageUnknown || unknown
-		if !sent {
+		c.AttemptsReported = true
+		c.BilledAttempts = billed
+		if len(billed) == 0 {
 			err = providers.NotSent(err)
 		}
 		return c, attempts, err
 	}
 	for attempt := 0; ; attempt++ {
-		data, billed, attemptSent, err := p.once(ctx, body)
-		sent = sent || attemptSent
+		data, answered, attemptSent, err := p.once(ctx, body)
 		if err == nil {
 			c, perr := p.parse(data, offered, len(req.ResponseSchema) > 0)
 			if !completeUsage(data, p.api) || c.Usage.InputTokens > usageCeiling || c.Usage.OutputTokens > usageCeiling-c.Usage.InputTokens {
 				c = providers.Completion{UsageUnknown: true}
 				perr = fmt.Errorf("openai-compatible: the reply has no complete bounded usage: %w", providers.ErrMalformedOutput)
 			}
+			record(attemptSent, c, true)
 			return done(c, attempt+1, perr)
 		}
 		var c providers.Completion
-		if billed {
+		if answered {
 			c = p.billedUsage(data)
 			if c.Usage.InputTokens > usageCeiling || c.Usage.OutputTokens > usageCeiling-c.Usage.InputTokens {
 				c = providers.Completion{UsageUnknown: true}
 			}
 		}
+		record(attemptSent, c, answered && data != nil)
 		if !providers.IsRetryable(err) || attempt+1 >= p.attempts {
 			return done(c, attempt+1, err)
 		}
+		if req.MaxBilledAttempts > 0 && len(billed) >= req.MaxBilledAttempts {
+			// The caller's budget does not cover a further attempt at the call's ceiling.
+			return done(c, attempt+1, err)
+		}
 		// Retrying drops this attempt's answer: if it was billed, its usage is not returned.
-		unknown = unknown || billed
+		unknown = unknown || answered
 		d, asked := providers.RetryAfter(err)
 		if asked && d > p.maxDelay {
 			return done(c, attempt+1, err) // too long to block: the caller requeues
@@ -375,7 +406,11 @@ func (p *Provider) billedUsage(data []byte) providers.Completion {
 }
 
 // once sends one attempt and returns the body of a 200 reply. Every other outcome is a classified error with
-// fixed text. billed is true once a 200 arrived before the attempt's deadline, error or not: the model
+// fixed text. sent is true when the request may have reached the endpoint, so may have been billed: every
+// attempt that got a response, and every one that failed after it began writing to a connection. It is false
+// only when no byte of the request can have left: the key could not be read, the request could not be built,
+// the call's context had ended, or the dial failed (the guard refused the address, the name did not resolve,
+// the connection was refused). billed is true once a 200 arrived before the attempt's deadline, error or not: the model
 // answered and the service bills it. A response that net/http returns after the attempt's context ended is
 // the timeout whatever its status, and not billed (#438). With an error, data is the body when it was read
 // whole within the bound (a Content-Type other than JSON), so that its usage can still be read, and nil
@@ -403,7 +438,7 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, 
 	resp, err := p.client.Do(req)
 	if err != nil {
 		// The error of http.Client.Do holds the URL and possibly response-controlled text: replace it.
-		return nil, false, true, transportError(ctx, err)
+		return nil, false, !dialFailed(err), transportError(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if actx.Err() != nil {
@@ -503,6 +538,21 @@ func transportError(ctx context.Context, err error) error {
 	return &providers.RetryableError{Err: errors.New("openai-compatible: the model request failed (network)")}
 }
 
+// dialFailed reports whether err ended an attempt before any connection carried the request: the guard
+// refused the address, the name did not resolve, or the dial itself failed. net/http does not resend a POST
+// on another connection, so a dial error means no byte of this request reached the endpoint. Any other
+// error, a TLS failure included, counts as possibly sent.
+func dialFailed(err error) bool {
+	if errors.Is(err, openaiwire.ErrDialRefused) {
+		return true
+	}
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return true
+	}
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
 // ctxError reports the end of the call's context. A deadline is retryable (a later attempt may finish); a
 // cancellation is not.
 func ctxError(ctx context.Context) error {
@@ -557,6 +607,28 @@ func ReservedHost(host string) bool {
 	return false
 }
 
+// keyFileShared reports whether the opened key file, st, is the key file of another declaration, by path or
+// by identity. A file of another declaration that does not exist is not this one; any other failure to read
+// its identity is an error (the key is unavailable for now, retried).
+func (p *Provider) keyFileShared(st os.FileInfo) (bool, error) {
+	for _, o := range p.otherKeyFiles {
+		if filepath.Clean(o) == p.keyFile {
+			return true, nil
+		}
+		ost, err := os.Stat(o)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if os.SameFile(st, ost) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (p *Provider) readKey() (string, error) {
 	if p.keyFile == "" {
 		return "", nil
@@ -578,6 +650,11 @@ func (p *Provider) readKey() (string, error) {
 	}
 	if !st.Mode().IsRegular() {
 		return "", malformed()
+	}
+	if shared, err := p.keyFileShared(st); err != nil {
+		return "", unavailable()
+	} else if shared {
+		return "", fmt.Errorf("openai-compatible: the API key file is also declared for another endpoint or provider: %w", providers.ErrCredentialUnavailable)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 4097))
 	if err != nil {

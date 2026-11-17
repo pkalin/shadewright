@@ -202,6 +202,9 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 	if err := openaicompatible.ValidateEndpoints(cfg.CompatibleEndpoints, cfg.Suffixes); err != nil {
 		return nil, err
 	}
+	if err := openaicompatible.ValidateKeyFiles(cfg.CompatibleEndpoints, AnthropicKeyFileDeclaration(cfg.AnthropicKeyFile)); err != nil {
+		return nil, err
+	}
 	if err := openaicompatible.ValidateInClusterRanges(cfg.CompatibleInClusterRanges); err != nil {
 		return nil, err
 	}
@@ -253,7 +256,8 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			log := cfg.Log.WithValues("role", role, "provider", d.ProviderName())
 			p, err := openaicompatible.New(openaicompatible.Config{
 				Endpoint: decl.URL, Deployment: d.Deployment, API: decl.API,
-				KeyFile: decl.KeyFile, Service: decl.Service, InClusterRanges: cfg.CompatibleInClusterRanges,
+				KeyFile: decl.KeyFile, OtherKeyFiles: otherKeyFiles(cfg, decl),
+				Service: decl.Service, InClusterRanges: cfg.CompatibleInClusterRanges,
 				OnCall: func(r openaicompatible.CallReport) {
 					if r.Err != nil {
 						log.Info("A call to an OpenAI-compatible endpoint failed", "attempts", r.Attempts,
@@ -316,4 +320,28 @@ func (cfg ModelsConfig) separateProviderHost(endpoint string) bool {
 		}
 	}
 	return false
+}
+
+// AnthropicKeyFileDeclaration names the Anthropic key file for openaicompatible.ValidateKeyFiles; empty when
+// no file is set.
+func AnthropicKeyFileDeclaration(path string) []openaicompatible.NamedKeyFile {
+	if path == "" {
+		return nil
+	}
+	return []openaicompatible.NamedKeyFile{{Name: "--anthropic-api-key-file", Path: path}}
+}
+
+// otherKeyFiles lists the key files declared for anything but decl: the other compatible endpoints and the
+// Anthropic key file. The provider refuses its own key file when it is one of them (ADR-0042).
+func otherKeyFiles(cfg ModelsConfig, decl openaicompatible.Endpoint) []string {
+	var out []string
+	for _, e := range cfg.CompatibleEndpoints {
+		if e.KeyFile != "" && e.URL != decl.URL {
+			out = append(out, e.KeyFile)
+		}
+	}
+	if cfg.AnthropicKeyFile != "" {
+		out = append(out, cfg.AnthropicKeyFile)
+	}
+	return out
 }

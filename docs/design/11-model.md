@@ -56,7 +56,13 @@ case, default port and one trailing slash normalize; dot segments, userinfo,
 queries and fragments are refused. Duplicate bases, segment path prefixes on the
 same authority, invalid model lists and Foundry/Azure/Anthropic host overlaps fail
 chart rendering and analyzer startup. Nonempty keys shorter than 16 bytes are
-malformed and are not retried.
+malformed and are not retried. A key file belongs to one declaration: startup
+refuses two declarations that name one file, and a declaration that names the
+`--anthropic-api-key-file` file, by path and by file identity (a link counts), and
+the adapter checks identity again before each read, so a file that appears after
+start as a link to another declared key is refused without a request. The chart
+refuses two endpoints that mount the same Secret key or volume source, or the
+Anthropic key.
 
 Set `--disable-foundry` for compatible-only inference without an Entra token
 source. The Foundry suffix list remains Foundry-only. Every declared compatible
@@ -65,6 +71,11 @@ Service with namespace, pod selector and target port; HTTPS with trusted TLS and
 address guards remain required. No redirects or proxy are used. Missing or
 unusable usage and failed sent calls cost the input estimate plus output bound
 and a rounded-up 10% margin; complete usage costs at least the input estimate.
+Every attempt the endpoint may have billed is charged, retries included (each one
+that got a response or may have reached a connection; not a refused dial or an
+unreadable key), and the adapter makes no retry the remaining analysis and daily
+budget cannot cover at that ceiling. An endpoint that reports less than it billed
+is charged the larger of the input estimate and its report.
 The raw body and joined decoded strings, numbers and object keys are scanned
 for credential echoes before any completion is returned, in a view that keeps
 only ASCII letters, digits and the key's punctuation, so no character inserted

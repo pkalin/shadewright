@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -105,5 +107,35 @@ func TestCompatibleInClusterRangesAtStart(t *testing.T) {
 				t.Fatalf("wrong startup refusal: %v, want %s", err, tc.reason)
 			}
 		})
+	}
+}
+
+// A compatible declaration that names the Anthropic key file, by path or through a link, or the key file of
+// another declaration, stops the start, and the error names both declarations (decision 7 of #834).
+func TestCompatibleKeyFileBelongsToOneDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	anthropicKey := filepath.Join(dir, "anthropic")
+	if err := os.WriteFile(anthropicKey, []byte("content-marker-834-cmd-0001"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(anthropicKey, link); err != nil {
+		t.Fatal(err)
+	}
+	decl := func(host, key string) string {
+		return `{"url":"https://` + host + `/v1","inferenceAPI":"Responses","models":["m"],"keyFile":"` + key + `"}`
+	}
+	for name, raw := range map[string]string{
+		"anthropic path": "[" + decl("api.openai.com", anthropicKey) + "]",
+		"anthropic link": "[" + decl("api.openai.com", link) + "]",
+		"two declarations": "[" + decl("api.openai.com", filepath.Join(dir, "k")) + "," +
+			decl("gw.example.com", filepath.Join(dir, "k")) + "]",
+	} {
+		f := validFlags()
+		f.disableFoundry, f.endpointSuffixes, f.anthropicKeyFile, f.compatibleEndpoints = true, "", anthropicKey, raw
+		_, err := buildAnalysis(f, testDeps(t), nil)
+		if err == nil || !strings.Contains(err.Error(), "https://api.openai.com/v1") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

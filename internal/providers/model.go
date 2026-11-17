@@ -68,6 +68,22 @@ type CompletionRequest struct {
 	ResponseSchema json.RawMessage
 	// MaxOutputTokens bounds the reply; zero means the adapter's configured limit.
 	MaxOutputTokens int
+	// MaxBilledAttempts, when above zero, bounds the attempts of the call that the service may bill: an
+	// adapter that reports its billed attempts (Completion.AttemptsReported) makes no further attempt once
+	// this many may have been billed. The caller sets it from the budget it has left, so that charging every
+	// attempt at the call's ceiling cannot pass the budget. Zero means the adapter's own bound. Adapters that do
+	// not report their attempts ignore it.
+	MaxBilledAttempts int
+}
+
+// BilledAttempt is one attempt of a call that the service may have billed.
+type BilledAttempt struct {
+	// Usage is what the attempt's reply reported; zero when UsageUnknown.
+	Usage Usage
+	// UsageUnknown is set when the attempt reported no usable usage: a failure after the request was sent, a
+	// reply that could not be read, or one without a complete usage block. The caller charges it the call's
+	// ceiling.
+	UsageUnknown bool
 }
 
 // Usage counts the tokens of one call, for cost accounting (design 12.1).
@@ -90,6 +106,17 @@ type Completion struct {
 	// Usage then counts only what was read; a budget should count the call conservatively, for example as
 	// the request's whole output limit.
 	UsageUnknown bool
+	// AttemptsReported is set by an adapter that lists in BilledAttempts every attempt of the call that the
+	// service may have billed, retries included. The caller then charges each listed attempt on its own (the
+	// call's ceiling for one with unknown usage) instead of charging the call once from Usage and
+	// UsageUnknown. Adapters that leave it false are charged as before. Only the OpenAI-compatible adapter
+	// sets it (ADR-0042). Neither field is part of the JSON form of a Completion, which records and the wire
+	// golden tests hash.
+	AttemptsReported bool `json:"-"`
+	// BilledAttempts lists, in order, the attempts the service may have billed when AttemptsReported is set;
+	// empty when no attempt was sent. The last one, when it got the reply, carries the same Usage as the
+	// Completion.
+	BilledAttempts []BilledAttempt `json:"-"`
 	// ProviderBlocks is what the adapter needs back on the assistant message that carries ToolCalls in the
 	// next request of the conversation (Message.ProviderBlocks), for example thinking blocks. The caller never
 	// reads, logs or stores it. Empty without tool calls and for adapters that need nothing back.

@@ -244,6 +244,11 @@ func buildAnalysis(f analysisFlags, d analysisDeps,
 	if err != nil {
 		return nil, err
 	}
+	// A key file belongs to one declaration: never two compatible endpoints, never the Anthropic key (ADR-0042).
+	anthropicKey := models.AnthropicKeyFileDeclaration(f.anthropicKeyFile)
+	if err := openaicompatible.ValidateKeyFiles(endpoints, anthropicKey); err != nil {
+		return nil, err
+	}
 	inCluster, err := f.compatibleInClusterRanges(endpoints)
 	if err != nil {
 		return nil, err

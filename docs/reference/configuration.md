@@ -166,7 +166,7 @@ repaired into proposals. Qualify each server and model with the
 | `analyzer.analysis.disableFoundry` / `--disable-foundry` | Default false. True disables Foundry and its inference token source. Blob records still need Azure identity |
 | `endpoints[].apiKey.secretName`, `secretKey` | Existing Secret and its key (default `api-key`), mounted whole and read-only only in the analyzer. The chart creates no Secret or RBAC |
 | `endpoints[].apiKey.volume`, `fileName` | Alternative Secret or CSI volume and file name (default `api-key`). Do not combine with `secretName` |
-| `endpoints[].keyFile` (flag only) | Absolute clean file path, read per attempt. The chart derives `/var/run/secrets/shadewright/openai-compatible/<index>/<fileName>` from each endpoint's key source. No source means no Authorization header. Unavailable/empty files are retryable; malformed files, including nonempty keys shorter than 16 bytes, are refused without retry. Fixed errors name the minimum and never quote paths or keys |
+| `endpoints[].keyFile` (flag only) | Absolute clean file path, read per attempt. The chart derives `/var/run/secrets/shadewright/openai-compatible/<index>/<fileName>` from each endpoint's key source. No source means no Authorization header. Unavailable/empty files are retryable; malformed files, including nonempty keys shorter than 16 bytes, are refused without retry. Fixed errors name the minimum and never quote paths or keys. A key file belongs to one declaration: the analyzer refuses at start two declarations naming one file, or one naming the `--anthropic-api-key-file` file, by path and by file identity (a symbolic or hard link counts), and the error names the two declarations; a file missing at start is compared by path, and identity is checked again before each read. The chart refuses two endpoints that mount the same Secret key or volume source, or the Anthropic key |
 | `endpoints[].service` | Exact Service URL's namespace, a `podSelector` of 1 to 32 labels with valid label keys and values (the chart refuses others at render, the analyzer at start) and pod target `port`. Grants private unicast dialing and one selector-based egress rule. Verified TLS, trusted certificates and address guards remain required |
 
 Duplicate parsed bases, Azure/Anthropic hosts, Foundry-listed hosts and ambiguous
@@ -179,7 +179,7 @@ proxy and follows no redirects, including to another allowed host. Missing or
 incomplete usage is refused with `UsageUnknown` and charged at the input estimate
 plus the output limit with a rounded-up 10% margin. Complete reports cost at least
 the input estimate. Above-ceiling usage is refused and charged that ceiling.
-Each endpoint owns its optional key, including separate account paths on one host. A compatible server's 429 is never assumed unbilled.
+Each endpoint owns its optional key, including separate account paths on one host. A compatible server's 429 is never assumed unbilled. Every attempt of a retried call that the endpoint may have billed is charged, and no retry is made that the remaining budget cannot cover at the call's ceiling.
 
 The dial guard treats the private, shared and link-local ranges as in-cluster. If
 the cluster's pods or Services use other addresses, list them in

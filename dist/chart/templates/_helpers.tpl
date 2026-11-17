@@ -238,7 +238,22 @@ Foundry deployment (#814). */ -}}
 {{- end -}}
 {{- end -}}
 {{- $seen := dict -}}
-{{- range $compatible.endpoints -}}
+{{- /* A key belongs to one declaration (ADR-0042): the analyzer compares key files by path and identity, but two
+mounts of one Secret key are two files to it, so the chart refuses what it can see, a Secret key or volume
+source shared by two endpoints or with the Anthropic key. */ -}}
+{{- $anthropicKeyID := include "shadewright.keySourceID" $key -}}
+{{- $keyIDs := dict -}}
+{{- range $i, $_ := $compatible.endpoints -}}
+{{- $keyID := include "shadewright.keySourceID" (.apiKey | default dict) -}}
+{{- if $keyID -}}
+{{- if eq $keyID $anthropicKeyID -}}
+{{- fail (printf "openAICompatible.endpoints[%d] and analyzer.analysis.anthropic.apiKey mount the same key: a key belongs to one declaration" $i) -}}
+{{- end -}}
+{{- if hasKey $keyIDs $keyID -}}
+{{- fail (printf "openAICompatible.endpoints[%s] and endpoints[%d] mount the same key: a key belongs to one declaration" (get $keyIDs $keyID) $i) -}}
+{{- end -}}
+{{- $_ := set $keyIDs $keyID (toString $i) -}}
+{{- end -}}
 {{- $base := include "shadewright.compatibleBase" .url -}}
 {{- if hasKey $seen $base -}}{{- fail "openAICompatible.endpoints contains duplicate base URLs" -}}{{- end -}}
 {{- range $previous, $_ := $seen -}}
@@ -506,6 +521,21 @@ secret:
 {{- define "shadewright.anthropicKeyFile" -}}
 {{- $key := ((.Values.analyzer.analysis.anthropic | default dict).apiKey | default dict) -}}
 {{- if $key.secretName -}}{{ $key.secretKey | default "api-key" }}{{- else -}}{{ $key.fileName | default "api-key" }}{{- end -}}
+{{- end }}
+
+{{/*
+shadewright.keySourceID prints what a key source (an apiKey value: secretName and secretKey, or volume and
+fileName) mounts, so that two declarations of one key can be told apart: the Secret and key, or the volume
+source and file name. Empty when no source is set.
+*/}}
+{{- define "shadewright.keySourceID" -}}
+{{- if .secretName -}}
+{{- printf "secret %s/%s" .secretName (.secretKey | default "api-key") -}}
+{{- else if and .volume (kindIs "map" .volume) (hasKey .volume "secret") (kindIs "map" .volume.secret) -}}
+{{- printf "secret %s/%s" (.volume.secret.secretName | default "") (.fileName | default "api-key") -}}
+{{- else if .volume -}}
+{{- printf "volume %s/%s" (toJson .volume) (.fileName | default "api-key") -}}
+{{- end -}}
 {{- end }}
 
 {{/* One endpoint's optional key volume. */}}

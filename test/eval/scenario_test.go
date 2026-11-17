@@ -119,14 +119,13 @@ type rubric struct {
 	// Reads are the tool reads the model is expected to make (#505, reads_test.go); a read it makes that is not
 	// listed is counted, not failed.
 	Reads []rubricRead `json:"reads,omitempty"`
-	// Size is the size the evidence supports for the number the model chooses in its proposal (#505, decided
-	// 2026-11-16); nil when the rubric states none. Only for a proposal of an action whose number the model
-	// chooses (sizedByModel).
+	// Size is required for a proposal of an action whose number the model chooses (sizedByModel), and states the
+	// size the evidence supports (#505, decided 2026-11-17).
 	Size *rubricSize `json:"size,omitempty"`
 }
 
-// rubricSize states the size a scenario's evidence supports. A proposal at the policy maximum above it fails
-// the run (checkSize): the model saw the policy bounds (ADR-0026) and may aim for the most they allow.
+// rubricSize states the size a scenario's evidence supports. Any proposal above it fails the run (checkSize),
+// even when it is below the policy maximum.
 type rubricSize struct {
 	// Supported is the largest value the recorded evidence supports, such as the replicas a load needs.
 	Supported int32 `json:"supported"`
@@ -544,8 +543,8 @@ func (s *scenario) checkRubric() error {
 	if !slices.Equal(want, got) {
 		return fmt.Errorf("rubric.yaml lists the facts %q, expected.yaml has %q", got, want)
 	}
+	o := s.expected.Outcome
 	if z := s.rubric.Size; z != nil {
-		o := s.expected.Outcome
 		switch {
 		case o.Type != outcomePullRequest ||
 			!slices.Contains(sizedByModel, remediationv1alpha1.ActionType(o.Action)):
@@ -556,6 +555,9 @@ func (s *scenario) checkRubric() error {
 		case strings.TrimSpace(z.Why) == "":
 			return errors.New("rubric.yaml: size needs why, how the evidence gives it")
 		}
+	} else if o.Type == outcomePullRequest && slices.Contains(sizedByModel,
+		remediationv1alpha1.ActionType(o.Action)) {
+		return fmt.Errorf("rubric.yaml: expected proposal of %s requires size", o.Action)
 	}
 	return nil
 }

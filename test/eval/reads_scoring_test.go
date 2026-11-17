@@ -113,6 +113,34 @@ func TestExpectedReadMissingFails(t *testing.T) {
 	}
 }
 
+// The harness and analysis loop refuse the same read when its namespace differs from the Incident subject.
+func TestHarnessAndLoopRefuseReadOutsideSubjectNamespace(t *testing.T) {
+	const read = "get_resource Deployment/web namespace=other"
+	_, s := mustScenario(t, scnOOM)
+	offered, err := offeredToolParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := parseRead(read, offered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := readCheckTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = rule.callable(set, s.incident.Spec.Subject.Namespace)
+	if err == nil || !strings.Contains(err.Error(), "namespace of the Incident's subject") {
+		t.Fatalf("harness accepted read %q: %v", read, err)
+	}
+
+	call := `  - {id: t1, name: get_resource, arguments: {kind: Deployment, namespace: other, name: web}}` + "\n"
+	res := readsRun(t, nil, call)
+	if res.Reads.Refused != 1 {
+		t.Errorf("loop did not refuse the same read %q: reads %+v", read, res.Reads)
+	}
+}
+
 // A read the rubric does not expect is counted, not failed; a call the tool refused reads nothing and is
 // counted apart.
 func TestExtraReadIsCounted(t *testing.T) {
@@ -427,8 +455,8 @@ func TestReadReportChecksTheSchemaVersion(t *testing.T) {
 		name, want string
 		edit       func(map[string]any)
 	}{
-		{"version 3", "schema version is 3, this harness reads version 4 only",
-			func(d map[string]any) { d["schemaVersion"] = 3 }},
+		{"version 4", "schema version is 4, this harness reads version 5 only",
+			func(d map[string]any) { d["schemaVersion"] = 4 }},
 		{"no version", "no schemaVersion", func(d map[string]any) { delete(d, "schemaVersion") }},
 		{"unknown field", "unknown field", func(d map[string]any) { d["costPerPass"] = 1 }},
 	} {

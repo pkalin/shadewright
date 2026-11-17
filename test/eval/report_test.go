@@ -44,7 +44,8 @@ import (
 // the Incident (docs/evaluation.md); diagnosis scores of version 2 are not comparable.
 // Version 4: a run passes only when its expected reads (reads) pass too, a run carries its own cost, a run that
 // stopped with an error makes the cost incomplete, and the totals give the cost per passed run (#505).
-const reportSchemaVersion = 4
+// Version 5: every model-sized proposal states the evidence-supported size, and any value above it fails.
+const reportSchemaVersion = 5
 
 // report is the result of one evaluation run.
 type report struct {

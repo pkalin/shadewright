@@ -54,13 +54,12 @@ So in `oom`, under `demo-memory` (64Mi to 128Mi, at most +50%), 48Mi to 96Mi fai
 phase (`NeedsIntervention`) and the file `paths` are decided by the executor and its source mapping, so they are
 listed in the report as not scored.
 
-**Size.** Where the model chooses a number inside the policy bounds, the rubric may state the size the recorded
-evidence supports, in `size` (`supported`, and `why`: how the evidence gives it), and a proposal at the policy
-maximum above that size fails the outcome, though the policy allows it: the model sees the bounds
-([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)) and may aim for the most they allow
-(decided 2026-11-16 on [#505](https://github.com/pkalin/shadewright/issues/505)). The value is the maximum when the
-scenario's policy refuses the next one up; a value above the supported size but below the maximum is not failed,
-and neither is the maximum when the evidence supports it. The catalog actions were checked for a number the model
+**Size.** Every scenario whose expected proposal has a number the model chooses inside the policy bounds must
+state the size its recorded evidence supports in `size` (`supported`, and `why`: how the evidence gives it). A
+proposal above that size fails the outcome, even when it is below the policy maximum; a value at or below the
+supported size passes. The model sees the bounds ([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)),
+but those bounds do not determine what the evidence supports (decided 2026-11-17 on
+[#505](https://github.com/pkalin/shadewright/issues/505)). The catalog actions were checked for a number the model
 chooses:
 
 | Action | Number | Who chooses it | Rubric `size` |
@@ -69,8 +68,9 @@ chooses:
 | `SetContainerMemoryLimit` | `desired` (the memory limit) | code, from the metrics, once [ADR-0040](adr/0040-code-sizes-a-memory-proposal-from-the-metrics.md) is built ([#508](https://github.com/pkalin/shadewright/issues/508)); its sizing rule's own tests cover it | no: the harness refuses it |
 
 `keda-at-ceiling` states 3 replicas (13 requests per second over a target of 5 per replica), which its policy's
-maximum from 2 also is; its variant `wide-policy` allows up to 6 and its reply asks for 3. The same reply at 6
-fails (`TestKedaProposalAtThePolicyMaximumFails`).
+maximum from 2 also is; its variant `wide-policy` allows up to 6 and its reply asks for 3. In that variant 3
+passes, and 4, 5 and 6 fail against the supported size of 3, though the policy allows them
+(`TestKedaProposalAtThePolicyMaximumFails`).
 
 ```yaml
 size:
@@ -363,7 +363,7 @@ field the version does not know. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 4; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's, and a proposal at the policy maximum above the rubric's `size` fails the outcome |
+| `schemaVersion` | 5; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum |
 | `mode` | `fake` (recorded replies), `foundry` or `anthropic` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
 | `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole`, `costIncomplete` and `costUnknown` (as in `totals`, for this run), `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |

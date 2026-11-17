@@ -386,23 +386,15 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 	return true, ""
 }
 
-// checkSize returns why the plan's size fails the rubric's, or "": a value above the size the evidence supports
-// fails when it is the most the scenario's policy allows, which the model saw (decided 2026-11-16 on #505). The
-// policy allows a range, so the value is its maximum when the policy refuses the next one up; a value above the
-// supported size but below the maximum is not failed. The plan already passed checkPolicy.
+// checkSize returns why the plan's size fails the rubric's, or "": any value above the size the evidence supports
+// fails, whether or not it is the most the scenario's policy allows (decided 2026-11-17 on #505). A value at or
+// below the supported size passes. The plan already passed checkPolicy.
 func checkSize(scn *scenario, p *analysis.Plan) string {
 	z, k := scn.rubric.Size, p.Action.AdjustKedaMaxReplicas
 	if z == nil || k == nil || k.DesiredValue <= z.Supported {
 		return ""
 	}
-	up := *p
-	next := *k
-	next.DesiredValue++
-	up.Action.AdjustKedaMaxReplicas = &next
-	if checkPolicy(scn, &up) == "" {
-		return ""
-	}
-	return fmt.Sprintf("desired %d is the most the policy allows, the evidence supports %d (%s)", k.DesiredValue,
+	return fmt.Sprintf("desired %d exceeds the supported size %d (%s)", k.DesiredValue,
 		z.Supported, z.Why)
 }
 

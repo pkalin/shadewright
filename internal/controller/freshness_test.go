@@ -690,7 +690,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			r.Recorder = recorder
 			for range 2 {
 				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
-				Expect(err).To(HaveOccurred(), "retried with the error backoff, as before")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 				got := fetch()
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "not a final phase")
 				Expect(planFresh().Reason).To(Equal(freshness.ReasonPlanChanged), "the mark stays")
@@ -1733,7 +1734,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			return nil
 		})
 		_, err := reconcileOnce()
-		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		Expect(changeRequest().State).To(Equal(providers.ChangeRequestOpen))
 		Expect(reconciler().freshErr(ctx, fetch())).NotTo(Succeed())
@@ -2489,7 +2491,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		})
 		for range 2 {
 			_, err := reconcileOnce()
-			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			got := fetch()
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 			Expect(planFresh()).To(BeNil(), "no full check on an unread pull request")
@@ -2532,7 +2535,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		logCtx, out := infoLog()
 		for range 2 {
 			_, err := r.Reconcile(logCtx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
-			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			c := unreadable()
 			Expect(c).NotTo(BeNil())
 			Expect(c.Status).To(Equal(metav1.ConditionTrue))
@@ -2561,7 +2565,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			return nil, &providers.RetryableError{Err: errors.New("token expired")}
 		}
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
-		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 		c := unreadable()
@@ -2603,7 +2608,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			return nil
 		})
 		_, err := reconcileOnce()
-		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		Expect(meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).To(BeNil())
 	})
 
@@ -2754,7 +2760,10 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		view := &failingGet{GitProvider: git.ForTarget(freshOtherBranch), fail: &fail}
 		r := retargetedReconciler(map[string]providers.GitProvider{freshOtherBranch: view})
 		for range 2 {
-			Expect(reconcileWith(r)).NotTo(Succeed())
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			got := fetch()
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 			c := unreadable()
@@ -2781,7 +2790,10 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		recorder := record.NewFakeRecorder(10)
 		r.Recorder = recorder
 		for range 3 {
-			Expect(reconcileWith(r)).NotTo(Succeed())
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			Expect(unreadable()).NotTo(BeNil())
 		}
 		Expect(recorder.Events).To(HaveLen(1), "the read on the configured branch does not remove it in between")
@@ -2802,7 +2814,10 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		recorder := record.NewFakeRecorder(10)
 		r.Recorder = recorder
 		for range 3 {
-			Expect(reconcileWith(r)).NotTo(Succeed())
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 			Expect(unreadable()).NotTo(BeNil())
 		}
@@ -3080,6 +3095,82 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(holdsLock(got)).To(BeFalse())
 	})
 
+	It("keeps the target for a second marked pull request on the configured branch (#771)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		head, err := git.BranchHead(ctx, mainBranch)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(git.CreateBranch(ctx, freshOtherBranch, head)).To(Succeed())
+		Expect(git.SetBase(cr.Number, freshOtherBranch)).To(Succeed())
+		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+		second, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(fetch()), BaseBranch: freshOtherBranch, Body: marker(fetch())})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
+		got := fetch()
+		Expect(holdsLock(got)).To(BeTrue())
+		held := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
+		Expect(held).NotTo(BeNil())
+		Expect(held.Message).To(ContainSubstring(fmt.Sprintf("#%d", second.Number)))
+	})
+
+	for _, branch := range []string{mainBranch, freshOtherBranch} {
+		It("settles an Incident cancellation after a branch change on "+branch+" (#771)", func() {
+			retarget(freshOtherBranch)
+			Expect(git.SetBase(cr.Number, branch)).To(Succeed())
+			got := fetch()
+			got.Status.Phase = remediationv1alpha1.PhaseCancelled
+			meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionApproved, Status: metav1.ConditionFalse, Reason: remediationv1alpha1.ReasonIncidentGone, Message: whyIncidentGone})
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+			Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
+			got = fetch()
+			Expect(holdsLock(got)).To(BeFalse())
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).To(Equal(remediationv1alpha1.ReasonIncidentGone))
+		})
+	}
+
+	It("paces a failed Parents read while following a held retargeted merge (#771)", func() {
+		settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+		Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
+		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		retarget(freshOtherBranch)
+		_, err := git.Merge(cr.Number)
+		Expect(err).NotTo(HaveOccurred())
+		git.Fail = func(op string) error {
+			if op == opParents {
+				return errors.New("the Git host failed")
+			}
+			return nil
+		}
+		r := retargetedReconciler(nil)
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
+		retry := meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)
+		Expect(retry).NotTo(BeNil())
+		Expect(retry.Message).To(ContainSubstring(opParents))
+		Expect(holdsLock(fetch())).To(BeTrue())
+	})
+
+	It("allows a recovered merge content clock to clear, but refuses moving a running clock (#771)", func() {
+		got := fetch()
+		first := metav1.NewTime(time.Now().Truncate(time.Second))
+		got.Status.MergeContentUnreadSince = &first
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		moved := metav1.NewTime(first.Add(time.Minute))
+		got.Status.MergeContentUnreadSince = &moved
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, got))).To(BeTrue())
+		got = fetch()
+		got.Status.MergeContentUnreadSince = nil
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+		got.Status.MergeContentUnreadSince = &moved
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+	})
+
 	// The reads of what a retargeted merge brought have their own wait: a wait for the merge commit that is over
 	// already does not end the request on the first failed read.
 	It("retries a failed read of what a retargeted merge brought after the wait for the merge commit is over (#771)",
@@ -3097,7 +3188,13 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				}
 				return nil
 			}
-			_ = reconcileWith(retargetedReconciler(nil))
+			r := retargetedReconciler(nil)
+			res, readErr := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(readErr).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">=", r.pullRequestPollInterval()))
+			retry := meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)
+			Expect(retry).NotTo(BeNil())
+			Expect(retry.Message).To(ContainSubstring(opParents))
 			got = fetch()
 			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "nothing is decided on a failed read")
 			Expect(got.Status.MergeContentUnreadSince).NotTo(BeNil())
@@ -3107,6 +3204,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			got = fetch()
 			Expect(got.Status.MergeReceipt).NotTo(BeNil(), "a read that works records the merge")
 			Expect(got.Status.MergeReceipt.MergeCommitSHA).To(Equal(sha))
+			Expect(got.Status.MergeContentUnreadSince).To(BeNil())
 		})
 
 	// Reads that keep failing end the request MergeContentUnreadable once their own wait is over: no claim about the

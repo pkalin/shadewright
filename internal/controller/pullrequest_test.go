@@ -1535,7 +1535,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		})
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
 		err := reconcileOnce()
-		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		Expect(retryable(err)).To(BeTrue(), "the read failure is the cause handed back")
 		Expect(faulty.count(opClose)).To(BeZero(), "a merged pull request is not closed again")
 		faulty.failOn("", nil)
@@ -1589,7 +1590,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		}
 		faulty.failOn(opCheckBranch, &providers.RetryableError{Err: errors.New("server error")})
 		err := reconcileOnce()
-		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		Expect(retryable(err)).To(BeTrue())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
 		Expect(faulty.count(opOpen)).To(BeZero())
@@ -2235,7 +2237,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			}
 			return nil
 		})
-		Expect(reconcileOnce()).NotTo(Succeed(), "a failing freshness check is retried")
+		Expect(reconcileOnce()).To(Succeed())
+		Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 		clock = clock.Add(DefaultPullRequestTimeout + time.Minute)
 		Expect(reconcileOnce()).To(Succeed())
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
@@ -5718,7 +5721,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			faulty.failOnAfter(opReadFile+" "+sourcePath, opBranchHead+" "+branch,
 				&providers.RetryableError{Err: errors.New("server error")})
 			err = reconcileOnce()
-			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			Expect(retryable(err)).To(BeTrue())
 			Expect(faulty.faults()).To(Equal(1))
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "a failed read decides nothing")
@@ -5817,7 +5821,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			addOverlay()
 			faulty.failOn(opClose, &providers.RetryableError{Err: errors.New("server error")})
 			err := reconcileOnce()
-			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
 			Expect(retryable(err)).To(BeTrue())
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a failed close is retried")
 			Expect(openRequests()[0].State).To(Equal(providers.ChangeRequestOpen))
@@ -6056,6 +6061,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					faulty.failOn(op, fmt.Errorf("status 403 from https://github.com/example/fleet: %w", class))
 					res, err := reconcileResult()
 					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
+					if gitReads[strings.Fields(op)[0]] {
+						Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
+						Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+						Expect(fetch().Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+						return
+					}
 					Expect(res).To(Equal(reconcile.Result{}))
 					got := fetch()
 					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
@@ -6143,11 +6154,19 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				func(op, after string) {
 					// The adapter's error text is never trusted: it could hold a URL with a token.
 					leak := "status 502 from https://github.com/example/fleet with token ghs_leaked"
-					_, err := hitAfter(op, after, &providers.RetryableError{Err: errors.New(leak)})
-					Expect(err).To(HaveOccurred(), "an error goes to the work queue's backoff")
-					Expect(retryable(err)).To(BeTrue(), "a server error is classed as retryable: %v", err)
-					Expect(err.Error()).NotTo(ContainSubstring("ghs_leaked"))
-					Expect(err.Error()).NotTo(ContainSubstring("https://"))
+					res, err := hitAfter(op, after, &providers.RetryableError{Err: errors.New(leak)})
+					if gitReads[strings.Fields(op)[0]] {
+						Expect(err).NotTo(HaveOccurred())
+						Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
+						c := meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)
+						Expect(c).NotTo(BeNil())
+						Expect(c.Message).NotTo(ContainSubstring("ghs_leaked"))
+					} else {
+						Expect(err).To(HaveOccurred(), "write failures keep the error backoff")
+						Expect(retryable(err)).To(BeTrue())
+						Expect(err.Error()).NotTo(ContainSubstring("ghs_leaked"))
+						Expect(err.Error()).NotTo(ContainSubstring("https://"))
+					}
 					waiting()
 
 					faulty.failOn("", nil)
@@ -6161,7 +6180,11 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					limited := &providers.RetryableError{RetryAfter: 42 * time.Second, Err: errors.New("secondary rate limit")}
 					res, err := hitAfter(op, after, limited)
 					Expect(err).NotTo(HaveOccurred(), "a delay the host asked for is a wait, not an error")
-					Expect(res.RequeueAfter).To(Equal(42*time.Second), "neither sooner nor later than asked")
+					if gitReads[strings.Fields(op)[0]] {
+						Expect(res.RequeueAfter).To(Equal(max(42*time.Second, reconciler().pullRequestPollInterval())))
+					} else {
+						Expect(res.RequeueAfter).To(Equal(42*time.Second), "neither sooner nor later than asked")
+					}
 					waiting()
 				}, steps)
 
@@ -6191,6 +6214,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					leak := fmt.Errorf("status 403 from https://github.com/example/fleet with token ghs_leaked: %w", class)
 					res, err := hitAfter(op, after, leak)
 					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
+					if gitReads[strings.Fields(op)[0]] {
+						Expect(res.RequeueAfter).To(BeNumerically(">=", reconciler().pullRequestPollInterval()))
+						Expect(meta.FindStatusCondition(fetch().Status.Conditions, conditionGitReadRetry)).NotTo(BeNil())
+						Expect(fetch().Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+						return
+					}
 					Expect(res).To(Equal(reconcile.Result{}), "and not requeued")
 					got := fetch()
 					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))

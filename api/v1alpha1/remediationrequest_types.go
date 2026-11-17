@@ -945,9 +945,9 @@ type RemediationRequestStatus struct {
 	// mergeContentUnreadSince is when the executor first failed to read what a merge brought, on its own clock: a
 	// pull request merged into the target branch the settings name now after the plan's branch changed (#771),
 	// whose merge counts only when it brought the planned change alone. The reads are retried for five minutes
-	// from it; after that the request ends NeedsIntervention with reason MergeContentUnreadable. Set once and never
-	// changed or removed (a validation rule on the object), so neither a restart nor the wait for the merge commit
-	// moves or uses up this wait.
+	// from it; after that the request ends NeedsIntervention with reason MergeContentUnreadable. The clock cannot
+	// move while set. A successful content read removes it, so a later failure starts its own wait; neither a
+	// restart nor the wait for the merge commit moves or uses up an uninterrupted failure wait.
 	// +optional
 	MergeContentUnreadSince *metav1.Time `json:"mergeContentUnreadSince,omitempty"`
 
@@ -1046,7 +1046,7 @@ type RemediationRequestStatus struct {
 // is neither added, removed nor changed (#748).
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck) == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck) || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))",message="status.pullRequest.reviewCheck does not change once status.mergeReceipt exists"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)",message="status.mergeCommitAwaitedSince is set once and never changed"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeContentUnreadSince) || (has(self.status) && has(self.status.mergeContentUnreadSince) && self.status.mergeContentUnreadSince == oldSelf.status.mergeContentUnreadSince)",message="status.mergeContentUnreadSince is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeContentUnreadSince) || !has(self.status) || !has(self.status.mergeContentUnreadSince) || self.status.mergeContentUnreadSince == oldSelf.status.mergeContentUnreadSince",message="status.mergeContentUnreadSince cannot move while set; clear it after a successful read"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))",message="status.mergeReceipt is set only in Merged or a phase after it"
 // WaitingForDelivery and Verifying are measured from the receipt (ADR-0030 section 2), and Verifying from the
 // applied time, which the executor writes in the same status write that sets Verifying.

@@ -407,11 +407,11 @@ func TestSettleLock(t *testing.T) {
 		rr   *remediationv1alpha1.RemediationRequest
 		want *bool
 	}{
-		"Merged releases":       {rr(remediationv1alpha1.PhaseMerged, yes, ReasonPullRequestOpened, true), no},
-		"Inconclusive releases": {rr(remediationv1alpha1.PhaseInconclusive, yes, ReasonPullRequestOpened, true), no},
+		"Merged awaits branch read":       {rr(remediationv1alpha1.PhaseMerged, yes, ReasonPullRequestOpened, true), yes},
+		"Inconclusive awaits branch read": {rr(remediationv1alpha1.PhaseInconclusive, yes, ReasonPullRequestOpened, true), yes},
 		// The stale cleanup closes only pull requests with the marker: an unmarked one may be open (#688).
 		"Superseded with none recorded keeps for a look-up": {rr(remediationv1alpha1.PhaseSuperseded, yes, "", false), yes},
-		"merged by a person releases":                       {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestMerged, true), no},
+		"merged by a person awaits branch read":             {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestMerged, true), yes},
 		"closed without a merge keeps":                      {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonChangeRequestClosed, true), yes},
 		"closed by Shadewright keeps":                       {rr(remediationv1alpha1.PhaseNeedsIntervention, yes, ReasonPullRequestClosed, true), yes},
 		"Superseded after a close keeps":                    {rr(remediationv1alpha1.PhaseSuperseded, yes, ReasonPullRequestClosed, true), yes},
@@ -426,7 +426,7 @@ func TestSettleLock(t *testing.T) {
 			meta.SetStatusCondition(&c.rr.Status.Conditions, metav1.Condition{
 				Type: remediationv1alpha1.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue,
 				Reason: ReasonGitForbidden, Message: "refused"})
-			settleLock(c.rr, false)
+			clearReleasedRead(c.rr)
 			if got := c.rr.Status.HoldsTarget; (got == nil) != (c.want == nil) || (got != nil && *got != *c.want) {
 				t.Fatalf("holdsTarget = %v, want %v", ptr.Deref(got, false), ptr.Deref(c.want, false))
 			}
@@ -473,10 +473,9 @@ func TestBackfillLock(t *testing.T) {
 	}
 }
 
-// TestCheckHeldReleasesOnStatus checks that a stopped holder whose status already shows its pull request merged
-// is released without a look-up (the reconciler here has no Git provider, so a look-up would keep the lock), and
-// that one whose status shows it closed is not: that needs the read of its branch (#688).
-func TestCheckHeldReleasesOnStatus(t *testing.T) {
+// TestCheckHeldRequiresBranchEvidence checks that neither a merged nor a closed status releases a stopped
+// holder without a read of its branch. The reconciler has no provider, so both must keep the lock.
+func TestCheckHeldRequiresBranchEvidence(t *testing.T) {
 	closed := holding(withPullRequest(otherRequest("c", limitsTarget, remediationv1alpha1.PhaseNeedsIntervention,
 		time.Minute), ReasonChangeRequestClosed), true)
 	r, _, _, _ := limitsWorld(t, 20, closed)
@@ -489,16 +488,17 @@ func TestCheckHeldReleasesOnStatus(t *testing.T) {
 		time.Minute), ReasonChangeRequestMerged), true)
 	r, c, _, _ := limitsWorld(t, 20, o)
 	res, err := r.checkHeld(context.Background(), o)
-	if err != nil || res.RequeueAfter != 0 {
-		t.Fatalf("checkHeld = %+v, %v; want released and no requeue", res, err)
+	if err != nil || res.RequeueAfter != heldRecheckInterval {
+		t.Fatalf("checkHeld = %+v, %v; want a wait for branch evidence", res, err)
 	}
 	got := &remediationv1alpha1.RemediationRequest{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(o), got); err != nil {
 		t.Fatal(err)
 	}
-	if ptr.Deref(got.Status.HoldsTarget, true) {
-		t.Fatal("the lock was kept although the status shows the pull request closed")
+	if !ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatal("status alone released the lock without reading either branch")
 	}
+
 }
 
 // TestLockWaiters checks the wake-up: a change of a request enqueues the requests queued behind the lock on the

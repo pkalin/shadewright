@@ -110,8 +110,7 @@ func notFoundIncident(err error, name string) bool {
 // so the same write takes the request out of the count under maxConcurrentRemediations (active). The target lock
 // is not released in that write (ADR-0039 points 21 and 22, amended 2026-11-16): the request has no recorded pull
 // request, so one may still exist (an earlier open whose answer was lost and that the listing does not show yet,
-// or one a person opens from the branch the cancel leaves), and the status rule keeps the lock (prMayBeOpen,
-// settleLock in stop). The write wakes the request again, and the next reconcile reads the branch (afterStop,
+// or one a person opens from the branch the cancel leaves), and stop keeps the lock for settleTargetLock. The write wakes the request again, and the next reconcile reads the branch (afterStop,
 // checkHeld), as after Expired: it releases the lock when no open pull request of the branch may deliver the
 // change, and otherwise keeps it and looks again after heldRecheckInterval; a pull request of its own that the read
 // finds open is closed then, and one found merged is followed (settleCancelled). The cancel itself writes nothing

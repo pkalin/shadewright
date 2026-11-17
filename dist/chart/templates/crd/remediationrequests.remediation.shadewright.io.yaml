@@ -1026,9 +1026,9 @@ spec:
                   mergeContentUnreadSince is when the executor first failed to read what a merge brought, on its own clock: a
                   pull request merged into the target branch the settings name now after the plan's branch changed (#771),
                   whose merge counts only when it brought the planned change alone. The reads are retried for five minutes
-                  from it; after that the request ends NeedsIntervention with reason MergeContentUnreadable. Set once and never
-                  changed or removed (a validation rule on the object), so neither a restart nor the wait for the merge commit
-                  moves or uses up this wait.
+                  from it; after that the request ends NeedsIntervention with reason MergeContentUnreadable. The clock cannot
+                  move while set. A successful content read removes it, so a later failure starts its own wait; neither a
+                  restart nor the wait for the merge commit moves or uses up an uninterrupted failure wait.
                 format: date-time
                 type: string
               mergeReceipt:
@@ -1795,10 +1795,11 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince)
             || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince
             == oldSelf.status.mergeCommitAwaitedSince)'
-        - message: status.mergeContentUnreadSince is set once and never changed
+        - message: status.mergeContentUnreadSince cannot move while set; clear it
+            after a successful read
           rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeContentUnreadSince)
-            || (has(self.status) && has(self.status.mergeContentUnreadSince) && self.status.mergeContentUnreadSince
-            == oldSelf.status.mergeContentUnreadSince)'
+            || !has(self.status) || !has(self.status.mergeContentUnreadSince) || self.status.mergeContentUnreadSince
+            == oldSelf.status.mergeContentUnreadSince'
         - message: status.mergeReceipt is set only in Merged or a phase after it
           rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
             && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',

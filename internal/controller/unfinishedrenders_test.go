@@ -506,7 +506,7 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 		"PullRequestNotClosed set":            {base, notClosed, true},
 		"its reason":                          {notClosed, notFound, true},
 		"it and a phase":                      {notClosed, notClosedAndPhase, false},
-		"it and another condition":            {base, notClosedAndOther, false},
+		"it and the unreadable condition":     {base, notClosedAndOther, true},
 		"it and the render mark":              {marked, notClosed, true},
 		// #797: a read through a new installation that fails sets PullRequestUnreadable with these reasons on
 		// every poll; its write, a change of reason and its removal must not wake the request before its delay.
@@ -515,8 +515,8 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 		"the unreadable removal":               {unreadableNotFound, base, true},
 		"it and the not-closed condition":      {notClosed, unreadable(notClosed, ReasonGitFailed), true},
 		"unreadable and a phase":               {unreadableFailed, unreadableAndPhase, false},
-		"PullRequestUnreadable with a refusal": {base, unreadableRefused, false},
-		"from a refusal to GitFailed":          {unreadableRefused, unreadableFailed, false},
+		"PullRequestUnreadable with a refusal": {base, unreadableRefused, true},
+		"from a refusal to GitFailed":          {unreadableRefused, unreadableFailed, true},
 	} {
 		if got := onlyOwnMarksChanged(tc.old, tc.new); got != tc.want {
 			t.Errorf("%s: got %v, want %v", name, got, tc.want)

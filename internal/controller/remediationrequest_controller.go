@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -378,10 +379,10 @@ var errRepositoryGone = errors.New("the repository of the plan is not configured
 // afterRecheckEnd is what reconcile does after the recheck ended the request, with the recheck's result and error.
 // A step not recorded is not retried for an ended request: the next reconcile does not run it. An end that closed
 // the recorded pull request or found it closed kept the lock, because only the read of the branch may release it
-// then (settleLock): that read is made now.
+// then (settleTargetLock): that read is made now.
 func (r *RemediationRequestReconciler) afterRecheckEnd(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	res ctrl.Result, err error) (ctrl.Result, error) {
-	if err != nil || !ptr.Deref(rr.Status.HoldsTarget, false) || !closedOnly(rr) {
+	if err != nil || !ptr.Deref(rr.Status.HoldsTarget, false) || progresses(rr) || (prMayBeOpen(rr) && !closedOnly(rr)) {
 		return res, err
 	}
 	held, err := r.checkHeld(ctx, rr)
@@ -429,10 +430,43 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 // A missing policy or settings object and a target with another UID end the request as Denied at once, so a
 // permanent refusal never becomes a retry loop. A target whose state is not known yet (a ScaledObject KEDA has
 // not reported on) is checked again after a delay, with PolicyAllowed Unknown and no phase, for at most
-// TargetStateTimeout. Only errors worth retrying (an API or Git host failure) are
-// returned.
+// TargetStateTimeout. Git read failures use a visible poll through retryGitRead. Kubernetes failures and
+// other retryable errors retain their error path.
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	trace := &gitReadTrace{}
+	ctx = context.WithValue(ctx, gitReadTraceKey{}, trace)
 	res, err := r.reconcile(ctx, req)
+	if trace.failure != nil && err != nil && !isClusterError(err) {
+		if _, gitFailure := errors.AsType[*freshness.ProviderError](err); gitFailure {
+			err = errors.Join(err, trace.failure)
+		}
+	}
+	if ctx.Err() == nil && trace.failure != nil && !isClusterError(err) && errors.Is(err, ErrTimeout) {
+		err = trace.failure
+	}
+	if ctx.Err() == nil && (gitReadFailure(err) || err == nil && trace.read) {
+		rr := &remediationv1alpha1.RemediationRequest{}
+		if readErr := r.reader().Get(ctx, req.NamespacedName, rr); readErr != nil {
+			if apierrors.IsNotFound(readErr) {
+				return res, err
+			}
+			return ctrl.Result{}, readErr
+		}
+		if gitReadFailure(err) {
+			return r.retryGitRead(ctx, rr, err)
+		}
+		// Some paths have their own successful wait after a failed read. The same retry helper paces those too.
+		if trace.failure != nil && !trace.retried && !mergedForeignStale(rr) {
+			waited, readErr := r.retryGitRead(ctx, rr, trace.failure)
+			waited.RequeueAfter = max(waited.RequeueAfter, res.RequeueAfter)
+			return waited, readErr
+		}
+		if !trace.retried && meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
+			if readErr := r.putGitReadRetry(ctx, rr, nil); readErr != nil {
+				return ctrl.Result{}, readErr
+			}
+		}
+	}
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 		// The manager cancelled the reconcile (it is shutting down): not a failure to log and retry with
 		// backoff. Whatever was cut short is found again from the status on the next start. A reconcile timeout
@@ -1794,7 +1828,8 @@ func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
 		return nil
 	}
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	v, holding, err := r.lookHeld(lookCtx, rr)
+	beforeLock := rr.Status.DeepCopy()
+	v, holding, err := r.settleTargetLock(lookCtx, rr)
 	timedOut := ctx.Err() == nil && lookCtx.Err() != nil
 	err = boundErr(ctx, lookCtx, "look-up of the change request", err)
 	cancel()
@@ -1813,23 +1848,14 @@ func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
 	case v.state == changeUnknown:
 		return r.lockPending(ctx, rr, v.err)
 	}
-	if frees(v, holding) {
-		release(rr)
+	if !ptr.Deref(rr.Status.HoldsTarget, false) {
 		return nil
 	}
 	if holding == nil {
 		// The request's own pull request reads open after its close: looked at again.
 		return r.lockPending(ctx, rr, fmt.Errorf("pull request #%d still reads open", v.pr.Number))
 	}
-	want := metav1.Condition{
-		Type:   remediationv1alpha1.ConditionTargetHeld,
-		Status: metav1.ConditionTrue,
-		Reason: ReasonOpenOnBranch,
-		Message: fmt.Sprintf("Pull request #%d is open on the request's branch and may still deliver its change; "+
-			"the target stays locked until it is closed or merged", holding.Number),
-		ObservedGeneration: rr.Generation,
-	}
-	if meta.SetStatusCondition(&rr.Status.Conditions, want) {
+	if !equality.Semantic.DeepEqual(beforeLock, &rr.Status) {
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return r.lockPending(ctx, rr, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
 				rr.Namespace, rr.Name, err))
@@ -1934,7 +1960,7 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 		ObservedGeneration: rr.Generation,
 	})
 	clearNotClosed(rr)
-	settleLock(rr, r.VerifyOutcomes)
+	clearReleasedRead(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}

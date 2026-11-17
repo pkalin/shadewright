@@ -1638,7 +1638,7 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
-	settleLock(rr, r.VerifyOutcomes)
+	clearReleasedRead(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
@@ -1733,6 +1733,9 @@ func (r *RemediationRequestReconciler) retry(ctx context.Context, rr *remediatio
 // its class: a read refused with 403 or 422 is retried, never taken for a refused write.
 func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
+	if gitReadFailure(err) {
+		return r.retryGitRead(ctx, rr, err)
+	}
 	if errors.Is(err, errStaleNotClosed) || errors.Is(err, errStaleCheckPending) || errors.Is(err, errStaleLockPending) {
 		// The close of the stale plan's pull request is refused (#199), or it went through while its failed check
 		// is still pending (#713) or its target lock is not settled through a new installation (#290): looked at,
@@ -1831,13 +1834,16 @@ func retryAfterOf(err error) time.Duration {
 	return 0
 }
 
-// waitOrFail requeues after the delay a host asked for, with a log line saying why, or returns err to the
+// waitOrFail sends failed Git reads to retryGitRead. Other failures honour the host delay or return to the
 // error backoff, which does not read Retry-After. For a request in PolicyChecked the delay ends at
 // status.deadline at the latest, so the request expires on time; expiring makes no branch, commit or pull
 // request. A request whose cleanup of a stale plan has started (staleMark) never expires, so it waits as long
 // as the host asked.
 func (r *RemediationRequestReconciler) waitOrFail(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
+	if gitReadFailure(err) {
+		return r.retryGitRead(ctx, rr, err)
+	}
 	d := retryAfterOf(err)
 	if d <= 0 {
 		return reconcile.Result{}, err

@@ -207,10 +207,9 @@ var skipOwnMarks = predicate.Funcs{UpdateFunc: func(e crevent.UpdateEvent) bool 
 	return !onlyOwnMarksChanged(e.ObjectOld, e.ObjectNew)
 }}
 
-// onlyOwnMarksChanged reports whether newObj differs from oldObj, and only in status.unfinishedRenders, condition
-// PullRequestNotClosed, condition PullRequestUnreadable while neither side has another reason than GitFailed or
-// GitNotFound (reinstalledUnreadable), the resource version and the managed fields. Anything that is not a request
-// is never such an update.
+// onlyOwnMarksChanged ignores executor bookkeeping and retry-only updates: render marks, merge-read clocks,
+// PullRequestNotClosed, PullRequestUnreadable and GitReadRetry. They must not shorten a scheduled retry.
+// Phase, lock, plan and external changes still wake the request.
 func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	o, ok1 := oldObj.(*remediationv1alpha1.RemediationRequest)
 	n, ok2 := newObj.(*remediationv1alpha1.RemediationRequest)
@@ -232,16 +231,15 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	}
 	for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 		rr.Status.UnfinishedRenders = nil
+		rr.Status.MergeContentUnreadSince = nil
+		rr.Status.MergeCommitAwaitedSince = nil
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		meta.RemoveStatusCondition(&rr.Status.Conditions, conditionGitReadRetry)
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 	}
 	if deliveryPending(o) && deliveryPending(n) {
 		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
-		}
-	}
-	if reinstalledUnreadable(o) && reinstalledUnreadable(n) {
-		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
-			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 		}
 	}
 	return equality.Semantic.DeepEqual(o, n)
@@ -262,11 +260,4 @@ func closedRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
 func deliveryPending(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
 	return c == nil || (c.Status == metav1.ConditionUnknown && c.Reason == ReasonDeliveryPending)
-}
-
-// reinstalledUnreadable reports whether rr has no condition PullRequestUnreadable, or one with reason GitFailed or
-// GitNotFound: only a read through a new installation of the GitHub App sets those (reinstalledRead, #797).
-func reinstalledUnreadable(rr *remediationv1alpha1.RemediationRequest) bool {
-	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
-	return c == nil || c.Reason == ReasonGitFailed || c.Reason == ReasonGitNotFound
 }

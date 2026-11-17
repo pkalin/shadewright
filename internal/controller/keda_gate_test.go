@@ -375,8 +375,13 @@ func TestKedaStaleCleanupFinishesAfterAFailedClose(t *testing.T) {
 				}
 				return nil
 			})
-			if err := w.reconcile(t); err == nil {
-				t.Fatal("Reconcile: want the failed cleanup to be retried, got nil")
+			r := w.reconciler()
+			res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(w.rr)})
+			if err != nil || res.RequeueAfter < r.pullRequestPollInterval() {
+				t.Fatalf("want a paced read retry: %+v %v", res, err)
+			}
+			if meta.FindStatusCondition(w.fetch(t).Status.Conditions, conditionGitReadRetry) == nil {
+				t.Fatal("read retry is not visible")
 			}
 			got := w.fetch(t)
 			c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)

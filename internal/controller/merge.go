@@ -308,16 +308,16 @@ func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alph
 
 // mergeNotRecorded is recheck's answer to a look that found the pull request merged without recording the merge:
 // merged is true, and nothing else runs, for prMergeCommitPending (looked at again until the host reports the
-// merge commit or the wait ends) and prMergeUnchecked (the plan could not be checked at the merge: lookErr is
-// returned for the error backoff). The full freshness check never runs on a merged change, which makes the plan
+// merge commit or the wait ends) and prMergeUnchecked (the plan could not be checked at the merge: Git reads use the common visible poll, while Kubernetes errors are returned). The full freshness check never runs on a merged change, which makes the plan
 // look stale.
-func (r *RemediationRequestReconciler) mergeNotRecorded(rr *remediationv1alpha1.RemediationRequest, outcome prOutcome,
+func (r *RemediationRequestReconciler) mergeNotRecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, outcome prOutcome,
 	lookErr error) (res ctrl.Result, merged bool, err error) {
 	switch outcome {
 	case prMergeCommitPending:
 		return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, true, nil
 	case prMergeUnchecked:
-		return ctrl.Result{}, true, lookErr
+		res, err := r.waitOrFail(ctx, rr, lookErr)
+		return res, true, err
 	}
 	return ctrl.Result{}, false, nil
 }
@@ -373,7 +373,7 @@ func (r *RemediationRequestReconciler) settleReceipt(ctx context.Context, rr *re
 			"merge can be checked", verified.Reason))
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseInconclusive)
-	settleLock(rr, r.VerifyOutcomes)
+	clearReleasedRead(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return false, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}

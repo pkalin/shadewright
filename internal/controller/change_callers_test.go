@@ -132,21 +132,15 @@ func other(git providers.GitProvider) {
 }
 
 // lockWriters are the functions that may assign status.holdsTarget, and releasers those that may call release.
-// release is the one place that writes it false; the release on a pull request's account goes through the lock
-// rule only (settleLock, checkHeld with openHolding, heldOnConfigured, checkHeld's read on the target branch the
-// settings name now for a request stopped with TargetBranchChanged, #771, and releaseReinstalled, the same read made
-// before a stale plan closed through a new installation ends, #290). The others release a lock that no pull request of the
-// request holds: a refusal, a queued duplicate or a request cancelled before the policy check (cancelUndecided)
-// never took it, and the two ends of a handoff (endHandoff, supersedePredecessor) leave the pull request to the
-// replacement, which holds it. A request whose Incident was folded or is gone (endForIncident, ADR-0039 points 21
-// and 22, amended 2026-11-16) is not one of them: it ends Cancelled with no recorded pull request, so it keeps the
-// lock until the read of its branch (checkHeld) releases it, as an expired request does.
+// release is the one status.holdsTarget=false writer. Only settleTargetLock may release a lock for Git work.
+// Other allowed callers never acquired a lock (admission refusal and duplicates) or transfer it at a completed
+// handoff. No stopped request, including an Incident cancellation, has a separate release rule.
 const releaseFunc = "release"
 
 var (
 	lockWriters = map[string]bool{releaseFunc: true, "reconcile": true, "backfill": true}
 	releasers   = map[string]bool{
-		"settleLock": true, "checkHeld": true, "heldOnConfigured": true, "releaseReinstalled": true, "reconcile": true, "supersedeDuplicate": true,
+		"settleTargetLock": true, "reconcile": true, "supersedeDuplicate": true,
 		"endHandoff": true, "supersedePredecessor": true, "cancelUndecided": true,
 	}
 )
@@ -177,7 +171,7 @@ func TestLockClearedInOnePlace(t *testing.T) {
 			}
 		case *ast.CallExpr:
 			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == releaseFunc && !releasers[owner] {
-				t.Errorf("%s: %q releases the lock; only the lock rule does (settleLock, checkHeld)",
+				t.Errorf("%s: %q releases the lock; only the lock rule does (settleTargetLock, checkHeld)",
 					fset.Position(id.Pos()), owner)
 			}
 		}

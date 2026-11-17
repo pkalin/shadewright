@@ -234,6 +234,15 @@ func (r *RemediationRequestReconciler) readChange(ctx context.Context, git provi
 		n = rr.Status.PullRequest.Number
 	}
 	switch {
+	case q.configuredBranch != "" && q.openOnBranch:
+		copy := rr.DeepCopy()
+		copy.Status.Source.TargetBranch = q.configuredBranch
+		if n == 0 {
+			return r.changeOnBranch(ctx, git, copy), 0
+		}
+		v := r.readOnConfigured(ctx, git, rr, n, q.configuredBranch)
+		absent := false
+		return r.checkOpenListing(ctx, git, copy, q, n, v, &absent), n
 	case q.configuredBranch != "" && n == 0:
 		return unknownChange(errors.New("no pull request recorded to read on the configured target branch")), 0
 	case q.configuredBranch != "":
@@ -756,6 +765,8 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 	var want *metav1.Condition
 	ownListed, isOwnListed := errors.AsType[*ownListedError](v.err)
 	switch reason, _, refused := refusal(v.err); {
+	case isClusterError(v.err):
+		return v
 	case v.state == changeUnknown && refused:
 		want = refusedRead(rr, reason, v.err, n)
 	case v.state == changeUnknown && isOwnListed:
@@ -775,9 +786,9 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 	}
 	if err := r.setUnreadable(ctx, rr, want); err != nil {
 		if v.state == changeUnknown {
-			return unknownChange(errors.Join(v.err, err))
+			return unknownChange(&clusterError{err: err})
 		}
-		return unknownChange(err)
+		return unknownChange(&clusterError{err: err})
 	}
 	return v
 }
@@ -785,7 +796,11 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 // isClusterError reports whether err is a failure on the Kubernetes side (a *clusterError), not of the Git host.
 func isClusterError(err error) bool {
 	_, ok := errors.AsType[*clusterError](err)
-	return ok
+	_, status := errors.AsType[interface {
+		error
+		apierrors.APIStatus
+	}](err)
+	return ok || status
 }
 
 // answeredUnknown reports whether err, the error of an unknown verdict, comes from answers the Git host gave (a 404

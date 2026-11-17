@@ -147,48 +147,59 @@ var _ providers.GitProvider = (*gatedGit)(nil)
 func (g *gatedGit) Capabilities() providers.GitCapabilities { return g.git.Capabilities() }
 
 func (g *gatedGit) ReadFile(ctx context.Context, commit, path string, limit int) (providers.File, error) {
-	return g.git.ReadFile(ctx, commit, path, limit)
+	value, err := g.git.ReadFile(ctx, commit, path, limit)
+	return value, readFailure(ctx, "ReadFile", err)
 }
 
 func (g *gatedGit) ListDir(ctx context.Context, commit, path string) ([]providers.DirEntry, error) {
-	return g.git.ListDir(ctx, commit, path)
+	value, err := g.git.ListDir(ctx, commit, path)
+	return value, readFailure(ctx, "ListDir", err)
 }
 
 func (g *gatedGit) BranchHead(ctx context.Context, branch string) (string, error) {
-	return g.git.BranchHead(ctx, branch)
+	value, err := g.git.BranchHead(ctx, branch)
+	return value, readFailure(ctx, "BranchHead", err)
 }
 
 func (g *gatedGit) CheckBranch(ctx context.Context, commit, path string) (providers.BranchState, error) {
-	return g.git.CheckBranch(ctx, commit, path)
+	value, err := g.git.CheckBranch(ctx, commit, path)
+	return value, readFailure(ctx, "CheckBranch", err)
 }
 
 func (g *gatedGit) CheckCommit(ctx context.Context, commit, path string) (providers.BranchState, string, error) {
-	return g.git.CheckCommit(ctx, commit, path)
+	value, base, err := g.git.CheckCommit(ctx, commit, path)
+	return value, base, readFailure(ctx, "CheckCommit", err)
 }
 
 func (g *gatedGit) CheckBetween(ctx context.Context, from, to, path string) (providers.BranchState, error) {
-	return g.git.CheckBetween(ctx, from, to, path)
+	value, err := g.git.CheckBetween(ctx, from, to, path)
+	return value, readFailure(ctx, "CheckBetween", err)
 }
 
 func (g *gatedGit) CountAhead(ctx context.Context, base, head string) (int, error) {
-	return g.git.CountAhead(ctx, base, head)
+	value, err := g.git.CountAhead(ctx, base, head)
+	return value, readFailure(ctx, "CountAhead", err)
 }
 
 func (g *gatedGit) CheckMerged(ctx context.Context, head, mergeCommit, path string) (providers.BranchState, string, error) {
-	return g.git.CheckMerged(ctx, head, mergeCommit, path)
+	value, base, err := g.git.CheckMerged(ctx, head, mergeCommit, path)
+	return value, base, readFailure(ctx, "CheckMerged", err)
 }
 
 func (g *gatedGit) FindChangeRequest(ctx context.Context, headBranch string) (providers.ChangeRequest, error) {
-	return g.git.FindChangeRequest(ctx, headBranch)
+	value, err := g.git.FindChangeRequest(ctx, headBranch)
+	return value, readFailure(ctx, "FindChangeRequest", err)
 }
 
 func (g *gatedGit) GetChangeRequest(ctx context.Context, number int64) (providers.ChangeRequest, error) {
-	return g.git.GetChangeRequest(ctx, number)
+	value, err := g.git.GetChangeRequest(ctx, number)
+	return value, readFailure(ctx, "GetChangeRequest", err)
 }
 
 func (g *gatedGit) ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) (
 	[]providers.ChangeRequest, error) {
-	return g.git.ListChangeRequests(ctx, headBranch, openOnly)
+	value, err := g.git.ListChangeRequests(ctx, headBranch, openOnly)
+	return value, readFailure(ctx, "ListChangeRequests", err)
 }
 
 // IsAncestor is a read and passes straight through, when the wrapped provider can answer it
@@ -198,7 +209,8 @@ func (g *gatedGit) IsAncestor(ctx context.Context, ancestor, commit string) (boo
 	if !ok {
 		return false, errNoAncestry
 	}
-	return checker.IsAncestor(ctx, ancestor, commit)
+	value, err := checker.IsAncestor(ctx, ancestor, commit)
+	return value, readFailure(ctx, "IsAncestor", err)
 }
 
 var _ providers.AncestryChecker = (*gatedGit)(nil)
@@ -280,11 +292,13 @@ func (g *gatedGit) CloseChangeRequest(ctx context.Context, number int64) error {
 }
 
 func (g *gatedGit) CheckChain(ctx context.Context, commit, path string, commits int) (providers.BranchState, error) {
-	return g.git.CheckChain(ctx, commit, path, commits)
+	value, err := g.git.CheckChain(ctx, commit, path, commits)
+	return value, readFailure(ctx, "CheckChain", err)
 }
 
 func (g *gatedGit) Parents(ctx context.Context, commit string) ([]string, error) {
-	return g.git.Parents(ctx, commit)
+	value, err := g.git.Parents(ctx, commit)
+	return value, readFailure(ctx, "Parents", err)
 }
 
 func (g *gatedGit) AppendCommit(ctx context.Context, branch, expectedHead string, change providers.FileChange) (string, error) {
@@ -319,7 +333,8 @@ func (g *gatedGit) CreateCheckRun(ctx context.Context, head string, run provider
 
 // ReviewCheckRun is a read and passes straight through, without a checkpoint.
 func (g *gatedGit) ReviewCheckRun(ctx context.Context, head string) (providers.CheckRunStatus, bool, error) {
-	return g.git.ReviewCheckRun(ctx, head)
+	value, base, err := g.git.ReviewCheckRun(ctx, head)
+	return value, base, readFailure(ctx, "ReviewCheckRun", err)
 }
 
 // waitWhilePaused records that the kill switch holds the request back and checks again after

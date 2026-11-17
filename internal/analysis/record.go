@@ -58,6 +58,8 @@ type Record struct {
 	Escalated  bool      `json:"escalated"`
 	Calls      int       `json:"calls"`
 	ToolCalls  int       `json:"toolCalls"`
+	// ToolCallsWithControls counts the tool calls refused because they held control characters (#852).
+	ToolCallsWithControls int `json:"toolCallsWithControls,omitempty"`
 	// Tokens is what the analysis was charged ([Outcome].Tokens). The key is "usage": a key named like
 	// "tokens" with a value is what the redactor takes for a credential.
 	Tokens int64 `json:"usage"`
@@ -142,7 +144,7 @@ func (c *Controller) buildRecord(claimed *remediationv1alpha1.Incident, id remed
 		FinishedAt: c.now().UTC().Truncate(time.Second),
 		Reason:     out.Reason, Escalated: out.Escalated, Calls: out.Calls, ToolCalls: out.ToolCalls,
 		Tokens: out.Tokens, Models: make([]string, 0, len(out.Models)), PromptVersion: out.PromptVersion,
-		Summary: r(out.Summary), Request: string(request),
+		Summary: r(out.Summary), Request: string(request), ToolCallsWithControls: out.ToolCallsWithControls,
 	}
 	if d := limits.Triage; d != nil {
 		rec.Deployments.Triage = r(d.Deployment)

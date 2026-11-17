@@ -352,6 +352,9 @@ type Outcome struct {
 	Calls int
 	// ToolCalls is the number of tool calls run.
 	ToolCalls int
+	// ToolCallsWithControls is the number of tool calls refused because their name, ID or arguments held a
+	// control character (#852). Each is also counted in ToolCalls and used a step, as any refused call does.
+	ToolCallsWithControls int
 	// Tokens is what the analysis was charged: reported usage, or the upper bound of a call whose usage is
 	// unknown or that failed, and nothing for a call that sent nothing or that its host refused before
 	// processing.
@@ -429,7 +432,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 		shownContext += scalerNotReadyNotice
 	}
 	if hint != "" {
-		shownContext += hintMessage(r.redact(hint))
+		shownContext += hintMessage(incidentcontext.Redact(r.redact, hint))
 	}
 	r.contextText = shownContext
 
@@ -630,7 +633,7 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 			code = retryToolCall
 			continue
 		}
-		res, action, err := decodeResult(c.Content)
+		res, action, err := decodeReply(c)
 		if err == nil {
 			return res, action, "", nil
 		}
@@ -640,6 +643,16 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 		}
 	}
 	return nil, nil, "", nil
+}
+
+// decodeReply decodes the structured result of a reply ([decodeResult]). A reply that held a control
+// character anywhere but in a free-text field of the result is refused as not matching the schema
+// ([controlsRefused], #852), before its cleaned text is read.
+func decodeReply(c providers.Completion) (*Result, *remediationv1alpha1.Action, error) {
+	if controlsRefused(c.ContentControls) {
+		return nil, nil, errInvalid
+	}
+	return decodeResult(c.Content)
 }
 
 // escalate calls the escalation model with the read tools, bound to the Incident's namespace, for at most
@@ -675,7 +688,7 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 			return nil, nil, reason, err
 		}
 		if len(c.ToolCalls) == 0 {
-			res, action, err := decodeResult(c.Content)
+			res, action, err := decodeReply(c)
 			if err != nil {
 				return nil, nil, ReasonInvalidOutput, nil
 			}
@@ -758,6 +771,11 @@ func (r *run) callTool(call providers.ToolCall, offered map[string]bool) (string
 	return "Tool result " + id + ".\n" + content, nil
 }
 
+// heldControlsRefusal is the fixed result of a tool call that held a control character. It quotes nothing of
+// the call.
+const heldControlsRefusal = "refused: the tool call held control characters in its name, ID or arguments " +
+	"and was not run\n"
+
 // boundCall runs one call within the bounds of the escalation. It returns the result as the model sees it,
 // and the parts of it a quote may cite as evidence ([tools.Result.Data]; none when none may). It records the
 // fixed status of the result on span, never its text or the call's arguments.
@@ -766,6 +784,16 @@ func (r *run) boundCall(ctx context.Context, span trace.Span, call providers.Too
 	refused := func(text string) (string, []string, error) {
 		span.SetAttributes(attrResult.String(resultRefused), attrToolStatus.String(string(tools.StatusRefused)))
 		return refusedResult(call.Name, offered, text), nil, nil
+	}
+	// A call that held a control character is never run (#852): removing the control could turn a value that
+	// would be refused into one that is accepted ("sh" ESC "op" into "shop"), and the provider blocks replayed
+	// to the model still hold what it wrote. call is the cleaned form, so the label and the log hold none.
+	if call.HeldControls {
+		r.out.ToolCallsWithControls++
+		span.SetAttributes(attrHeldControls.Bool(true))
+		log.FromContext(r.parent).Info("Refused a tool call that held control characters",
+			"incident", r.inc.Name, "tool", toolLabel(call.Name, offered))
+		return refused(heldControlsRefusal)
 	}
 	// Defence in depth: the adapter already refuses a reply that names a tool the request did not offer.
 	if !offered[call.Name] {
@@ -932,6 +960,9 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		attrAttempt.Int(attempt+1), attrMaxOutputTokens.Int(req.MaxOutputTokens)))
 	defer func() { endModelCall(span, res) }()
 	c, err := model.Complete(ctx, req)
+	// Model text is untrusted and is read without control characters, for every provider, before anything
+	// parses, redacts, logs, records or compares it (#852): what is stored is what any terminal shows.
+	c = providers.WithoutControls(c)
 	notSent := providers.IsNotSent(err)
 	if !notSent {
 		r.a.sent(r.parent, r.inc, role, d.ProviderName())

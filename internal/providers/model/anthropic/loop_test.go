@@ -48,6 +48,7 @@ func (loopContext) Build(context.Context, *remediationv1alpha1.Incident) (*incid
 type loopTools struct {
 	mu    sync.Mutex
 	calls []string
+	args  []string
 }
 
 func (*loopTools) Definitions() []providers.ToolDefinition {
@@ -62,6 +63,7 @@ func (l *loopTools) Call(_ context.Context, call providers.ToolCall) (tools.Resu
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.calls = append(l.calls, call.Name)
+	l.args = append(l.args, string(call.Arguments))
 	return tools.Result{Tool: call.Name, Status: tools.StatusOK, Text: "no events\n"}, nil
 }
 
@@ -140,8 +142,16 @@ func thinkingError(body []byte) string {
 // runLoop runs one analysis whose escalation model is the adapter, answering the calls with replies in order.
 func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools) {
 	t.Helper()
+	out, bodies, lt := runLoopBodies(t, replies...)
+	return out, len(bodies), lt
+}
+
+// runLoopBodies is runLoop that returns the body of each request the API accepted.
+func runLoopBodies(t *testing.T, replies ...string) (analysis.Outcome, []json.RawMessage, *loopTools) {
+	t.Helper()
 	var mu sync.Mutex
 	sent := 0
+	var bodies []json.RawMessage
 	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		var raw json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -159,6 +169,7 @@ func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools
 		mu.Lock()
 		defer mu.Unlock()
 		sent++
+		bodies = append(bodies, raw)
 		if sent > len(replies) {
 			http.Error(w, "no reply scripted", http.StatusBadRequest)
 			return
@@ -189,7 +200,7 @@ func runLoop(t *testing.T, replies ...string) (analysis.Outcome, int, *loopTools
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	return out, sent, lt
+	return out, bodies, lt
 }
 
 func toolUseReply(model, id string) string {

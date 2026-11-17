@@ -248,6 +248,27 @@ func TestOpenSequenceInOneValueDoesNotHideTheKeyInTheNext(t *testing.T) {
 	}
 }
 
+// TestNumberBetweenStringsDoesNotHideTheKey: the key split over two string values with a number between them
+// is contiguous in the stream of decoded string values (decided 2026-11-17, fourth, on #834), so a number
+// in the document must not interrupt that stream.
+func TestNumberBetweenStringsDoesNotHideTheKey(t *testing.T) {
+	for _, between := range []any{0, 1.5, true, nil, map[string]any{"n": 7}} {
+		args, err := json.Marshal(map[string]any{"extra": []any{secretKey[:7], between, secretKey[7:]}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, api := range []API{APIChatCompletions, APIResponses} {
+			data, err := json.Marshal(decoyReply(api, []string{"plain text"}, string(args)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !replyContainsKey(data, api, secretKey) {
+				t.Errorf("%s: key split around %v passed", api, between)
+			}
+		}
+	}
+}
+
 func parseCompletion(api API, data []byte) (providers.Completion, error) {
 	offered := map[string]bool{decoyTool: true}
 	if api == APIResponses {

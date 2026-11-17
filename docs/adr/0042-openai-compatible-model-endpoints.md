@@ -116,7 +116,9 @@ a Hangul filler or a visible letter of another script) is dropped by
 construction, so the check does not depend on a list of characters a screen
 does not show. The view is built over every decoded string value of the reply in
 document order as one stream, so a key split across fields, parts or tool-call
-arguments is found too; a second stream adds the object keys in their place, and
+arguments is found too; a second stream adds the object keys in their place,
+each of the two is also built with the numbers of the document in their place
+(a key split into a number), so a number never interrupts a stream of strings, and
 the fields the completion parser reads (text parts, content, arguments) are
 joined once more on their own. JSON text inside a string, such as tool-call
 arguments and structured content, is decoded up to three levels and takes the

@@ -718,7 +718,7 @@ func scanReplyWork(data []byte, api API, key string) (scanResult, int) {
 		if joined.nestedJSON(text) {
 			joined.walk(text, 1)
 		} else {
-			joined.add(text, false)
+			joined.add(text, false, false)
 		}
 	}
 	found = joined.result()
@@ -762,8 +762,10 @@ const maxNestedJSON = 3
 type keyScan struct {
 	key   []byte
 	allow [utf8.RuneSelf]bool
-	// streams: the views of the values, and of the values and object keys.
-	streams [2][]byte
+	// streams: the views of the string values, of the string values and object keys, and of each of the two
+	// with the numbers of the document as well. A number must not interrupt a stream of strings, and a key
+	// split into a number is found in the streams that hold them.
+	streams [4][]byte
 	scratch []byte
 	found   bool
 	work    int
@@ -822,13 +824,16 @@ func (k *keyScan) searchAlone(s string) {
 	k.found = k.found || bytes.Contains(k.scratch, k.key)
 }
 
-// add appends the view of s to the streams: to the stream of values and keys only when objectKey is set,
-// to both otherwise.
-func (k *keyScan) add(s string, objectKey bool) {
-	if !objectKey {
-		k.streams[0] = k.view(k.streams[0], s)
+// add appends the view of s to the streams: an object key to the two streams with keys, a number to the two
+// streams with numbers, a string value to all four.
+func (k *keyScan) add(s string, objectKey, number bool) {
+	for i := range k.streams {
+		withKeys, withNumbers := i%2 == 1, i >= 2
+		if objectKey && !withKeys || number && !withNumbers {
+			continue
+		}
+		k.streams[i] = k.view(k.streams[i], s)
 	}
-	k.streams[1] = k.view(k.streams[1], s)
 }
 
 // walk adds every string value, object key and number of the valid JSON text in document order.
@@ -865,10 +870,10 @@ func (k *keyScan) walk(text string, depth int) {
 				k.walk(v, depth+1)
 				continue
 			}
-			k.add(v, objectKey)
+			k.add(v, objectKey, false)
 		case json.Number:
 			next()
-			k.add(v.String(), false)
+			k.add(v.String(), false, true)
 		default:
 			next()
 		}

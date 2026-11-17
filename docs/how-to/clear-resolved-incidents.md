@@ -42,6 +42,8 @@ The gauge `shadewright_incidents` reports Incidents by `phase` <span class="sw-s
      | jq -r '.items[] | [.spec.incidentRef.name, .status.phase] | @tsv'
    ```
 
+   This step protects the fix too. A request whose Incident is deleted before its pull request opens ends `Cancelled` with reason `IncidentGone`, with no pull request ([#794](https://github.com/pkalin/shadewright/issues/794)): deleting the Incident stops that fix.
+
 4. **Export.** Keep the evidence with your incident records. An Incident holds the redacted symptom, counters and times, not logs:
 
    ```bash

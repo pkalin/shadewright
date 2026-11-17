@@ -654,6 +654,16 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	// The last step before the create, after every slow one (ADR-0039 points 21 and 22): a request whose
+	// Incident was folded into its cause's, or is gone, ends Cancelled and opens no pull request, leaving its slot
+	// in the write that ends it and its lock after the read of its branch (checkHeld); a read that fails holds it
+	// for a retry.
+	switch reason, message, err := r.incidentStanding(ctx, rr); {
+	case err != nil:
+		return reconcile.Result{}, err
+	case reason != "":
+		return reconcile.Result{}, r.endForIncident(ctx, rr, reason, message)
+	}
 	cr, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{
 		HeadBranch: branch,
 		BaseBranch: string(src.TargetBranch),
@@ -905,13 +915,23 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 		return err
 	}
 	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
+	// A request cancelled because of its Incident needs no check at the merge: its plan was stale before the merge,
+	// and it gets the mark with the reason of the cancel (markCancelledMerge), so the outcome is capped as a stale
+	// plan's is. The mark goes on a merge with another change too: the end rewrites PullRequestOpened and Approved,
+	// and PlanFresh is then the one place that keeps why it was cancelled.
+	reason, cancelled := cancelledForIncident(rr)
+	if cancelled {
+		markCancelledMerge(rr, reason)
+	}
 	if ref != nil {
 		return r.mergedForeign(ctx, rr, ref)
 	}
 	// The reduced freshness check at the merge (ADR-0041): a stale plan is marked in the write below. A check that
 	// did not answer records the pull request like an open one (mergeUnchecked) and is returned for a retry.
-	if err := r.checkAtMerge(ctx, rr); err != nil {
-		return r.mergeUnchecked(ctx, rr, cr, err)
+	if !cancelled {
+		if err := r.checkAtMerge(ctx, rr); err != nil {
+			return r.mergeUnchecked(ctx, rr, cr, err)
+		}
 	}
 	markClosed(rr, ReasonChangeRequestMerged, "was merged")
 	recordMerge(ctx, rr, cr)

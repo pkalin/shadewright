@@ -60,3 +60,54 @@ func TestStringsSeesAKeyAndItsValueInTwoStrings(t *testing.T) {
 		}
 	}
 }
+
+// The forms a review of the second round found leaking (#845, third round), each also on main: Strings reads
+// each string in its folded view, a format character between a key and its colon folds away, every colon
+// look-alike of the confusables list folds to ":", and a key written as a block scalar below "? |" reads as
+// the key.
+func TestTheFoldedViewHidesTheReportedForms(t *testing.T) {
+	const value = "s3cr3tValue" + "99"
+	for _, in := range [][]string{
+		{"--pass\u00adword", value},
+		{"pass\u200bword=", value},
+		{"password\uff1a", value},
+		{"password", "\uff1a", value},
+		{"api_key\u200b:", value},
+	} {
+		got := redact.Strings(in)
+		if strings.Contains(got[len(got)-1], value) {
+			t.Errorf("Strings(%q) = %q: the value stays", in, got)
+		}
+		for i := range len(in) - 1 {
+			if got[i] != in[i] {
+				t.Errorf("Strings(%q)[%d] = %q, want it kept", in, i, got[i])
+			}
+		}
+	}
+	for _, in := range []string{
+		"api_key\u200b: " + value,
+		"password\u02d0 " + value,
+		"password\u02f8 " + value,
+		"password\u0589 " + value,
+		"password\u05c3 " + value,
+		"password\u0703 " + value,
+		"password\u1361 " + value,
+		"password\u2e2c " + value,
+		"? |\n  password\n: " + value,
+		"? |-\n  password\n\n: " + value,
+		"spec:\n  ? >\n    password\n  : " + value,
+	} {
+		if got := redact.String(in); strings.Contains(got, value) {
+			t.Errorf("String(%q) = %q: the value stays", in, got)
+		}
+	}
+	// Not a key below "? |": two lines of key, or ":" at another column.
+	for _, in := range []string{
+		"? |\n  pass\n  word\n: " + value,
+		"? |\n  password\n  : " + value,
+	} {
+		if got := redact.String(in); got != in {
+			t.Errorf("String(%q) = %q, want it kept", in, got)
+		}
+	}
+}

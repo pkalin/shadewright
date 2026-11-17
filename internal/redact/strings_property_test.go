@@ -40,6 +40,12 @@ var seqPropertyParts = append(slices.Clone(canonFlagKeys),
 	canonTokenKey+": >-", passwordKey+"=", passwordKey+" :", "pass:", "auth:", "secretName:",
 	"", " ", "\n", "\t", ":", "=", ": |", "|", ">",
 	canonServe, "--port=8080", "-v", "x", "--verbose", "run", "name:", "words here",
+	// What the folded view reads as a key (third round of #845): a format character inside a key or a flag, or
+	// between a key and its separator, and colon look-alikes after a key or alone.
+	"--pass\u00adword", "--to\u200bken", "--client\u2060-secret", "pass\u200bword=", "pass\u200dword:",
+	"pass\ufeffword", "api_key\u200b:", "token\u00ad=", "password\u200b\u200c: |",
+	"password\uff1a", "token\u02d0", "password\u2e2c", "password\u0589 |", "client_secret\u05c3",
+	"\uff1a", "\u2236", "\u02f8", "\u0703", "\u1361", "\u2e2c", "\uff1a |",
 )
 
 // seqPropertyCases is the number of generated sequences; under the race detector and in short mode, the first
@@ -101,8 +107,9 @@ func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 	if raceDetector || testing.Short() {
 		cases /= canonSampleDivisor
 	}
-	n, failed, decided := 0, 0, 0
+	n, failed, decided, failedSeqs := 0, 0, 0, 0
 	for range cases {
+		before := failed
 		var items []string
 		for range 2 + rng.IntN(5) {
 			switch rng.IntN(4) {
@@ -131,9 +138,12 @@ func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 				}
 			}
 		}
+		if failed > before {
+			failedSeqs++
+		}
 	}
 	if failed > 0 {
-		t.Errorf("%d secrets that a joined text hides are shown apart", failed)
+		t.Errorf("%d secrets that a joined text hides are shown apart, in %d sequences", failed, failedSeqs)
 	}
 	t.Logf("%d sequences, %d secrets, %d hidden by a joined text", cases, n, decided)
 	if decided < n {

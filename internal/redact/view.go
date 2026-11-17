@@ -933,7 +933,8 @@ func seqValueStart(item string) int {
 // nothing after it, the strings that start with indentation after its value are the lines of its block.
 // A reference key or flag keeps its value, and under a bare short key the value counts only when a word of it
 // looks like a secret. Every string is also read as a key of its own, a value included ("--token",
-// "--password", "V").
+// "--password", "V"). Each string is read in its folded view (foldView), as String reads a text: a format
+// character inside a key or a flag, or before its separator, is dropped, and a colon look-alike reads as ":".
 func seqValues(items []string) []bool {
 	const (
 		none = iota
@@ -945,6 +946,10 @@ func seqValues(items []string) []bool {
 	for i, it := range items {
 		tick(1)
 		t := seqTrim(it)
+		if f, ok := foldView(t); ok {
+			// What a reader sees: a format character inside a key or before its separator, a colon look-alike.
+			t = seqTrim(f.text)
+		}
 		if t == "" {
 			continue
 		}

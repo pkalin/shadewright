@@ -197,12 +197,32 @@ f8b71a22a38109a7	bracket inside the secret	k2	kept
 f8b71a22a38109a7	bracket inside the secret	k3	kept
 fcb7d4cebfa27203	bracket inside the secret	k2	kept
 fcb7d4cebfa27203	bracket inside the secret	k3	kept
+03749a12a3d778c5	explicit key	k1	kept
+03749a12a3d778c5	explicit key	k2	kept
+24056f7701bdcd27	explicit key	k2	kept
+24056f7701bdcd27	explicit key	k3	kept
+3c93f0ef9e5a1c5e	explicit key	k1	kept
+3c93f0ef9e5a1c5e	explicit key	k2	kept
+5037b7e294141a6c	explicit key	k1	kept
+5037b7e294141a6c	explicit key	k2	kept
+5051dae630b6685a	explicit key	k1	kept
+5051dae630b6685a	explicit key	k2	kept
+55b5f882701ce6af	explicit key	k1	kept
+55b5f882701ce6af	explicit key	k2	kept
+56b0a5f1bd45712f	explicit key	k2	kept
+56b0a5f1bd45712f	explicit key	k3	kept
+6b41c3bea76e0870	explicit key	k1	kept
+6b41c3bea76e0870	explicit key	k2	kept
 7139d72879dd0f24	explicit key	k1	kept
 7139d72879dd0f24	explicit key	k2	kept
+9738c0ba7a823dbf	explicit key	k1	kept
+9738c0ba7a823dbf	explicit key	k2	kept
 990c1ce892cb7335	explicit key	k1	kept
 990c1ce892cb7335	explicit key	k2	kept
 e1058b606c1f1626	explicit key	k1	kept
 e1058b606c1f1626	explicit key	k2	kept
+ee6b4365e73910d7	explicit key	k1	kept
+ee6b4365e73910d7	explicit key	k2	kept
 fc18f182053ee0f7	explicit key	k1	kept
 fc18f182053ee0f7	explicit key	k2	kept
 002e1f8995ba0d33	forms combined	k1	kept
@@ -2133,18 +2153,59 @@ fd80d48b1bf29456	key and value in two strings	k1	kept
 ff25784aea4b6293	key and value in two strings	k1	kept
 021e30a90c3310c8	key with format characters or a colon look-alike	k2	kept
 021e30a90c3310c8	key with format characters or a colon look-alike	k3	kept
+028599dd851bca2e	key with format characters or a colon look-alike	k1	kept
+028599dd851bca2e	key with format characters or a colon look-alike	k2	kept
+05ff86cb11b1ba21	key with format characters or a colon look-alike	k1	kept
+05ff86cb11b1ba21	key with format characters or a colon look-alike	k2	kept
+06c0a91ac9f71c22	key with format characters or a colon look-alike	k1	kept
+06c0a91ac9f71c22	key with format characters or a colon look-alike	k2	kept
 0c56faaa7f487cf9	key with format characters or a colon look-alike	k2	kept
 0c56faaa7f487cf9	key with format characters or a colon look-alike	k3	kept
+10f5176763386f50	key with format characters or a colon look-alike	k1	kept
+10f5176763386f50	key with format characters or a colon look-alike	k2	kept
+12d61410140bb620	key with format characters or a colon look-alike	k1	kept
+12d61410140bb620	key with format characters or a colon look-alike	k2	kept
+153081066472c904	key with format characters or a colon look-alike	k1	kept
+153081066472c904	key with format characters or a colon look-alike	k2	kept
+17141ed8a989e0a3	key with format characters or a colon look-alike	k1	kept
+17141ed8a989e0a3	key with format characters or a colon look-alike	k2	kept
 183fa37cc294e4e9	key with format characters or a colon look-alike	k1	kept
 183fa37cc294e4e9	key with format characters or a colon look-alike	k2	kept
 1b1df3bd57cfc08f	key with format characters or a colon look-alike	k1	kept
 1b1df3bd57cfc08f	key with format characters or a colon look-alike	k2	kept
+1cc479d6367f3eb3	key with format characters or a colon look-alike	k1	kept
+1cc479d6367f3eb3	key with format characters or a colon look-alike	k2	kept
+1d60c76b3f19e776	key with format characters or a colon look-alike	k1	kept
+1d60c76b3f19e776	key with format characters or a colon look-alike	k2	kept
+1fc87238216e484b	key with format characters or a colon look-alike	k1	kept
+1fc87238216e484b	key with format characters or a colon look-alike	k2	kept
+21d491a4d6ae3b21	key with format characters or a colon look-alike	k1	kept
+21d491a4d6ae3b21	key with format characters or a colon look-alike	k2	kept
+23b2f95caf93cfb4	key with format characters or a colon look-alike	k1	kept
+23b2f95caf93cfb4	key with format characters or a colon look-alike	k2	kept
+25bc9fde67afe5e5	key with format characters or a colon look-alike	k1	kept
+25bc9fde67afe5e5	key with format characters or a colon look-alike	k2	kept
+2689564455bfe6e3	key with format characters or a colon look-alike	k1	kept
+2689564455bfe6e3	key with format characters or a colon look-alike	k2	kept
 2a758ddecc47c3b2	key with format characters or a colon look-alike	k2	kept
 2a758ddecc47c3b2	key with format characters or a colon look-alike	k3	kept
+2a84cf5ac8bfd51f	key with format characters or a colon look-alike	k1	kept
+2a84cf5ac8bfd51f	key with format characters or a colon look-alike	k2	kept
+2c1c63c88e461775	key with format characters or a colon look-alike	k1	kept
+2c1c63c88e461775	key with format characters or a colon look-alike	k2	kept
 2d7ecef6550b43b4	key with format characters or a colon look-alike	k1	kept
 2d7ecef6550b43b4	key with format characters or a colon look-alike	k2	kept
+2dbce5efc2008a20	key with format characters or a colon look-alike	k1	kept
+2dbce5efc2008a20	key with format characters or a colon look-alike	k2	kept
+30138a738f69e676	key with format characters or a colon look-alike	k1	kept
+30138a738f69e676	key with format characters or a colon look-alike	k2	kept
+328e6b8f3539b29e	key with format characters or a colon look-alike	k1	kept
+328e6b8f3539b29e	key with format characters or a colon look-alike	k2	kept
+33231a0d6fabeaa7	key with format characters or a colon look-alike	k1	kept
+33231a0d6fabeaa7	key with format characters or a colon look-alike	k2	kept
 34ddff25c83aec4f	key with format characters or a colon look-alike	k1	kept
 34ddff25c83aec4f	key with format characters or a colon look-alike	k2	kept
+36a0a63ba8e9729b	key with format characters or a colon look-alike	k3	kept
 3896d4d840b7473d	key with format characters or a colon look-alike	k1	kept
 3896d4d840b7473d	key with format characters or a colon look-alike	k2	kept
 3927d02ebab6e62d	key with format characters or a colon look-alike	k1	kept
@@ -2153,26 +2214,75 @@ ff25784aea4b6293	key and value in two strings	k1	kept
 3ea8438eb254e05d	key with format characters or a colon look-alike	k3	kept
 3ed0855176f6bfee	key with format characters or a colon look-alike	k2	kept
 3ed0855176f6bfee	key with format characters or a colon look-alike	k3	kept
+3f888a2e9e026110	key with format characters or a colon look-alike	k1	kept
+3f888a2e9e026110	key with format characters or a colon look-alike	k2	kept
+412849e2d896ef6f	key with format characters or a colon look-alike	k1	kept
+412849e2d896ef6f	key with format characters or a colon look-alike	k2	kept
+41a193fdaa4df7f0	key with format characters or a colon look-alike	k1	kept
+41a193fdaa4df7f0	key with format characters or a colon look-alike	k2	kept
+427735c68c75cadc	key with format characters or a colon look-alike	k1	kept
+427735c68c75cadc	key with format characters or a colon look-alike	k2	kept
 4721e26044c55d49	key with format characters or a colon look-alike	k1	kept
 4721e26044c55d49	key with format characters or a colon look-alike	k2	kept
 4da01577d8469fc2	key with format characters or a colon look-alike	k2	kept
 4da01577d8469fc2	key with format characters or a colon look-alike	k3	kept
+4da8b9938963ed7e	key with format characters or a colon look-alike	k1	kept
+4da8b9938963ed7e	key with format characters or a colon look-alike	k2	kept
+531cd8dee494b180	key with format characters or a colon look-alike	k1	kept
+531cd8dee494b180	key with format characters or a colon look-alike	k2	kept
+53b2b002f26bf02b	key with format characters or a colon look-alike	k1	kept
+53b2b002f26bf02b	key with format characters or a colon look-alike	k2	kept
 56e52832e2c4e562	key with format characters or a colon look-alike	k1	kept
 56e52832e2c4e562	key with format characters or a colon look-alike	k2	kept
+57462428c3e490b6	key with format characters or a colon look-alike	k1	kept
+57462428c3e490b6	key with format characters or a colon look-alike	k2	kept
+57c1eac853071689	key with format characters or a colon look-alike	k1	kept
+57c1eac853071689	key with format characters or a colon look-alike	k2	kept
+57c817a1f3595175	key with format characters or a colon look-alike	k1	kept
+57c817a1f3595175	key with format characters or a colon look-alike	k2	kept
+598c5a5ce014ccaf	key with format characters or a colon look-alike	k1	kept
+598c5a5ce014ccaf	key with format characters or a colon look-alike	k2	kept
+5b0b83892d21a020	key with format characters or a colon look-alike	k1	kept
+5b0b83892d21a020	key with format characters or a colon look-alike	k2	kept
+5b7459b45d5d49b2	key with format characters or a colon look-alike	k3	kept
 5cb140abe16390a3	key with format characters or a colon look-alike	k1	kept
 5cb140abe16390a3	key with format characters or a colon look-alike	k2	kept
+5d39c7bc984f25ee	key with format characters or a colon look-alike	k1	kept
+5d39c7bc984f25ee	key with format characters or a colon look-alike	k2	kept
 5e16ab4d7146cdb5	key with format characters or a colon look-alike	k2	kept
 5e16ab4d7146cdb5	key with format characters or a colon look-alike	k3	kept
 5ed588764c0ec9b6	key with format characters or a colon look-alike	k1	kept
 5ed588764c0ec9b6	key with format characters or a colon look-alike	k2	kept
+5fe9db966f04cec1	key with format characters or a colon look-alike	k1	kept
+5fe9db966f04cec1	key with format characters or a colon look-alike	k2	kept
+603dcb799c236fd1	key with format characters or a colon look-alike	k1	kept
+603dcb799c236fd1	key with format characters or a colon look-alike	k2	kept
 672c07c16d0a6fb5	key with format characters or a colon look-alike	k2	kept
 672c07c16d0a6fb5	key with format characters or a colon look-alike	k3	kept
+68f55967821a92e4	key with format characters or a colon look-alike	k1	kept
+68f55967821a92e4	key with format characters or a colon look-alike	k2	kept
+6d62162af46e084c	key with format characters or a colon look-alike	k1	kept
+6d62162af46e084c	key with format characters or a colon look-alike	k2	kept
 75305e9ce4315e41	key with format characters or a colon look-alike	k1	kept
 75305e9ce4315e41	key with format characters or a colon look-alike	k2	kept
 75e490071073b33a	key with format characters or a colon look-alike	k1	kept
 75e490071073b33a	key with format characters or a colon look-alike	k2	kept
+7b29c26ca7ab3ac4	key with format characters or a colon look-alike	k3	kept
+800d4a1086a9fad0	key with format characters or a colon look-alike	k1	kept
+800d4a1086a9fad0	key with format characters or a colon look-alike	k2	kept
+890458b40c4f9c2e	key with format characters or a colon look-alike	k3	kept
+8e84d44e422e782d	key with format characters or a colon look-alike	k1	kept
+8e84d44e422e782d	key with format characters or a colon look-alike	k2	kept
+94f3ad1ce9f3a441	key with format characters or a colon look-alike	k1	kept
+94f3ad1ce9f3a441	key with format characters or a colon look-alike	k2	kept
+950f703929436239	key with format characters or a colon look-alike	k1	kept
+950f703929436239	key with format characters or a colon look-alike	k2	kept
+99771b6109277090	key with format characters or a colon look-alike	k1	kept
+99771b6109277090	key with format characters or a colon look-alike	k2	kept
 9a46cffef089b4d0	key with format characters or a colon look-alike	k2	kept
 9a46cffef089b4d0	key with format characters or a colon look-alike	k3	kept
+9bcb83e102798a84	key with format characters or a colon look-alike	k1	kept
+9bcb83e102798a84	key with format characters or a colon look-alike	k2	kept
 9c6cb4abcd27fc66	key with format characters or a colon look-alike	k1	kept
 9c6cb4abcd27fc66	key with format characters or a colon look-alike	k2	kept
 9da84f55117f4e02	key with format characters or a colon look-alike	k1	kept
@@ -2181,24 +2291,76 @@ ff25784aea4b6293	key and value in two strings	k1	kept
 9e9d008dbe53850b	key with format characters or a colon look-alike	k3	kept
 a11deb83a4fa7d6e	key with format characters or a colon look-alike	k2	kept
 a11deb83a4fa7d6e	key with format characters or a colon look-alike	k3	kept
+a8a8c1b3f6cd951d	key with format characters or a colon look-alike	k1	kept
+a8a8c1b3f6cd951d	key with format characters or a colon look-alike	k2	kept
 a9da455f9b0d9f0f	key with format characters or a colon look-alike	k1	kept
 a9da455f9b0d9f0f	key with format characters or a colon look-alike	k2	kept
+ae89be6baef48927	key with format characters or a colon look-alike	k1	kept
+ae89be6baef48927	key with format characters or a colon look-alike	k2	kept
+b0a0c416cba392fe	key with format characters or a colon look-alike	k1	kept
+b0a0c416cba392fe	key with format characters or a colon look-alike	k2	kept
 b40f130fab107960	key with format characters or a colon look-alike	k1	kept
 b40f130fab107960	key with format characters or a colon look-alike	k2	kept
+b4faa5a6cd11db81	key with format characters or a colon look-alike	k1	kept
+b4faa5a6cd11db81	key with format characters or a colon look-alike	k2	kept
+b6ba05dd5f23fb9f	key with format characters or a colon look-alike	k1	kept
+b6ba05dd5f23fb9f	key with format characters or a colon look-alike	k2	kept
+b7089fafd323ce3d	key with format characters or a colon look-alike	k1	kept
+b7089fafd323ce3d	key with format characters or a colon look-alike	k2	kept
+ba3786693af43118	key with format characters or a colon look-alike	k1	kept
+ba3786693af43118	key with format characters or a colon look-alike	k2	kept
+babb6c25b79b0a15	key with format characters or a colon look-alike	k1	kept
+babb6c25b79b0a15	key with format characters or a colon look-alike	k2	kept
+bdc7736035c2fa03	key with format characters or a colon look-alike	k1	kept
+bdc7736035c2fa03	key with format characters or a colon look-alike	k2	kept
+c1859d8ba509ce18	key with format characters or a colon look-alike	k1	kept
+c1859d8ba509ce18	key with format characters or a colon look-alike	k2	kept
+c2131309647b5ded	key with format characters or a colon look-alike	k1	kept
+c2131309647b5ded	key with format characters or a colon look-alike	k2	kept
 c2f23427a06327ce	key with format characters or a colon look-alike	k1	kept
 c2f23427a06327ce	key with format characters or a colon look-alike	k2	kept
+c35224640160a937	key with format characters or a colon look-alike	k1	kept
+c35224640160a937	key with format characters or a colon look-alike	k2	kept
 c35715be66442608	key with format characters or a colon look-alike	k2	kept
 c35715be66442608	key with format characters or a colon look-alike	k3	kept
+c3c3004944a111e8	key with format characters or a colon look-alike	k1	kept
+c3c3004944a111e8	key with format characters or a colon look-alike	k2	kept
+c5d977cc9e6d7122	key with format characters or a colon look-alike	k1	kept
+c5d977cc9e6d7122	key with format characters or a colon look-alike	k2	kept
+c813c8d3d02f9246	key with format characters or a colon look-alike	k1	kept
+c813c8d3d02f9246	key with format characters or a colon look-alike	k2	kept
+ca16a92c2eb63ce9	key with format characters or a colon look-alike	k1	kept
+ca16a92c2eb63ce9	key with format characters or a colon look-alike	k2	kept
 ca2ff6c9beae7d67	key with format characters or a colon look-alike	k2	kept
 ca2ff6c9beae7d67	key with format characters or a colon look-alike	k3	kept
 cdfc3be6e1ecdab5	key with format characters or a colon look-alike	k2	kept
 cdfc3be6e1ecdab5	key with format characters or a colon look-alike	k3	kept
+ceb614dcd985d9f2	key with format characters or a colon look-alike	k3	kept
 cf22ea8a5b5a1fcc	key with format characters or a colon look-alike	k1	kept
 cf22ea8a5b5a1fcc	key with format characters or a colon look-alike	k2	kept
 d4b837190009839e	key with format characters or a colon look-alike	k1	kept
 d4b837190009839e	key with format characters or a colon look-alike	k2	kept
 d92bf91a967fa9de	key with format characters or a colon look-alike	k1	kept
 d92bf91a967fa9de	key with format characters or a colon look-alike	k2	kept
+dcfb0988b5085d84	key with format characters or a colon look-alike	k1	kept
+dcfb0988b5085d84	key with format characters or a colon look-alike	k2	kept
+dd35f0e80f6cf2fe	key with format characters or a colon look-alike	k1	kept
+dd35f0e80f6cf2fe	key with format characters or a colon look-alike	k2	kept
+dd4c854929ac9dfc	key with format characters or a colon look-alike	k1	kept
+dd4c854929ac9dfc	key with format characters or a colon look-alike	k2	kept
+e250d96b4ecbdd26	key with format characters or a colon look-alike	k1	kept
+e250d96b4ecbdd26	key with format characters or a colon look-alike	k2	kept
+eb58cdb345151a3d	key with format characters or a colon look-alike	k2	kept
+eeafa627cb97d952	key with format characters or a colon look-alike	k1	kept
+eeafa627cb97d952	key with format characters or a colon look-alike	k2	kept
+efbdcb6872cc9268	key with format characters or a colon look-alike	k1	kept
+efbdcb6872cc9268	key with format characters or a colon look-alike	k2	kept
+f0d47f608adfe768	key with format characters or a colon look-alike	k1	kept
+f0d47f608adfe768	key with format characters or a colon look-alike	k2	kept
+fc87121375cc1b36	key with format characters or a colon look-alike	k1	kept
+fc87121375cc1b36	key with format characters or a colon look-alike	k2	kept
+fcc69beadf95626d	key with format characters or a colon look-alike	k1	kept
+fcc69beadf95626d	key with format characters or a colon look-alike	k2	kept
 00b2087c694e4cb5	keys on one line	k1	kept
 00b2087c694e4cb5	keys on one line	k2	kept
 00b2087c694e4cb5	keys on one line	k3	kept

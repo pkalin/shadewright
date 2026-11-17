@@ -80,6 +80,9 @@ func TestCanonCorpusWorkIsLinear(t *testing.T) {
 var canonStairLines = []string{
 	"pass: |", "pass: | pass: |", "pass: | x", "a: | pass: |", "- pass: |", "x pass: |", "pass: '|", "pass:",
 	"? pass", "- value: |", "pass\u200b: |", "pass\uff1a |",
+	// The third round's folds: a key below "?" or "? |", a format character at the end of a key, a colon
+	// look-alike of the confusables list.
+	"? |", "? |\n\n", "?", "- ? >- # c", "pass\u200d", "pass\u2e2c |",
 }
 
 // canonStair returns the staircase of line with at least n bytes.

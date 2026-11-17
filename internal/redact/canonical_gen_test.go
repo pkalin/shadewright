@@ -253,6 +253,8 @@ func canonCorpus() []canonCase {
 	g.commentCases()
 	g.envValueFirstBlockCases()
 	g.labelCases()
+	// The forms of the third round come after those of the second, for the same reason.
+	g.foldRoundThreeCases()
 	return g.out
 }
 

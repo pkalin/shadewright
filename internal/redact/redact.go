@@ -42,7 +42,8 @@ limitations under the License.
 // the colon in a string of its own, or a flag after other words; decided once for a list and for a sequence
 // written in a text, seqValues), and an environment entry whose value comes before its name, in flow and in
 // block form; and, read on the folded view of the text (fold.go), a key name with a format character inside
-// it, a key followed by a colon look-alike, and an explicit YAML key ("? password" over ": x"),
+// it or before its colon, a key followed by a colon look-alike of Unicode's confusables list, and an explicit
+// YAML key ("? password" over ": x", also "password" alone below "?" or "? |"),
 // the value after a secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
 // argument lists and after a flag that took the flag as its value), however it reads or starts with
 // ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
@@ -95,7 +96,8 @@ limitations under the License.
 // they removed comes back. Callers redact text once, as it was read, before they replace a character, join a
 // line, escape or cut it, and never redact what they made of it (#845). A caller that holds a sequence of
 // strings (a container's arguments, the name and value of a metric label) redacts it with [Redactor.Strings],
-// which also sees a key in one string and its value in a later one. The folded view is a second reading of the
+// which also sees a key in one string and its value in a later one, each string read in its folded view as
+// well. The folded view is a second reading of the
 // same text, not of a rule's output: its matches count on the bytes they were folded from.
 package redact
 

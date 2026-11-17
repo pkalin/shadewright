@@ -313,8 +313,8 @@ and passes the outcome check ([Scoring](#scoring)). The lab's model asked for 96
 (the old pod runs under 64Mi without kills), and its summary names that evidence as what sets the size
 ([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)). `keda-at-ceiling/wide-policy` is
 synthetic, not a state the lab met: its own `policy.yaml` lets `demo-keda` go from 2 to 6 replicas, while the load
-still needs 3, the rubric's `size`. Its reply, the scenario's own, asks for 3 and passes; the test that asks for 6,
-the most the policy allows, fails it ([Size](#scoring)).
+still needs 3, the rubric's `size`. Its reply, the scenario's own, asks for 3 and passes; the test that asks for 4, 5
+or 6, all inside the policy, fails it ([Size](#scoring)).
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
 Prometheus adapter implements (`test/eval/metrics_test.go`). The harness refuses a recording that the adapter could

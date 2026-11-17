@@ -113,9 +113,15 @@ func TestExpectedReadMissingFails(t *testing.T) {
 	}
 }
 
-// The harness and analysis loop refuse the same read when its namespace differs from the Incident subject.
+// The harness and the analysis loop refuse the same read: one in a namespace the tools watch that is not the
+// Incident subject's. The tools would serve it, so only the loop's rule (and the harness's copy) refuses it.
 func TestHarnessAndLoopRefuseReadOutsideSubjectNamespace(t *testing.T) {
-	const read = "get_resource Deployment/web namespace=other"
+	const second = "second"
+	saved := watchedNamespaces
+	watchedNamespaces = []string{nsDemo, second}
+	t.Cleanup(func() { watchedNamespaces = saved })
+
+	const read = "get_resource Deployment/web namespace=" + second
 	_, s := mustScenario(t, scnOOM)
 	offered, err := offeredToolParams()
 	if err != nil {
@@ -134,7 +140,7 @@ func TestHarnessAndLoopRefuseReadOutsideSubjectNamespace(t *testing.T) {
 		t.Fatalf("harness accepted read %q: %v", read, err)
 	}
 
-	call := `  - {id: t1, name: get_resource, arguments: {kind: Deployment, namespace: other, name: web}}` + "\n"
+	call := `  - {id: t1, name: get_resource, arguments: {kind: Deployment, namespace: ` + second + `, name: web}}` + "\n"
 	res := readsRun(t, nil, call)
 	if res.Reads.Refused != 1 {
 		t.Errorf("loop did not refuse the same read %q: reads %+v", read, res.Reads)

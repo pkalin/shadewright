@@ -84,8 +84,8 @@ size:
 ```
 
 **Diagnosis.** Each scenario's `rubric.yaml` names every fact of `expected.yaml` verbatim, and either the terms
-the diagnosis must contain (`all`: every term; `any`: at least one; case ignored) or why the fact is not scored
-(`unscored`, for example a planned tool or source the context cannot carry yet). The diagnosis text is the
+the diagnosis must contain (`all`: every term; `any`: at least one; case ignored, on word boundaries as below) or
+why the fact is not scored (`unscored`, for example a planned tool or source the context cannot carry yet). The diagnosis text is the
 accepted result's summary, hypotheses and evidence quotes; when the loop accepted no result there is nothing to
 score and the diagnosis fails. The harness refuses a rubric that leaves out, rewords or repeats a fact, so a
 change of the facts in the fleet repository cannot pass unscored.
@@ -98,6 +98,29 @@ such value still fails the fact. `subject` lists terms of the Incident's subject
 scored from the Incident, not from the reply. What the model must infer and can miss stays required: that cache-0
 is healthy on the old template (`statefulset-oom`), and the pull error of `bad-image`. The hard gates are
 unchanged: the verbatim quote check, the refusal scenarios and the action bounds.
+
+Terms match on word boundaries ([#848](https://github.com/pkalin/shadewright/issues/848)), case ignored, with a
+rule that depends on the side and on how the term ends. An end of the term that is not a letter or a digit (a
+space, a colon, a brace) is a delimiter of its own and takes no check.
+
+- Left: strict. No letter or digit is glued before the term, nor, before a number, a decimal point after a
+  digit. A lower-case letter followed by an upper-case start of the term is a boundary (`cache` is in
+  `itemCache`), and underscores glue only when a letter or digit comes before them (`DB_POOL_SIZE` is not in
+  `MY_DB_POOL_SIZE`, and is in `_DB_POOL_SIZE_`, Markdown emphasis).
+- Right, a term that ends in a digit: strict, with the decimal rule, except a plural `s` that ends the word.
+  So `256` is in `requests 256 CPUs`, `"cpu": "256"`, `256-core`, `256:` and `256.` at the end of a sentence,
+  and not in `256Mi`, `sha256:`, `v256`, `2560`, `0.256` or `256.5`; `503` is in `503s`.
+- Right, a term that ends in a letter: open to letters, as the substring match was on that side, so the word
+  may go on: `restart` is in `restarted` and `restartCount`, `96Mi` in `96MiB`, `insufficient cpu` in
+  `insufficient CPUs`, `dry-run` in `dry-runs`. A digit glues (`app=web` is not in `app=web2`), and underscores
+  glue only when a letter or digit follows them. A unit term therefore takes a longer unit too (`256m` is in
+  `256Mi`), so a rubric writes the full unit.
+
+So a rubric lists a term in its base form, not each inflection. The diagnosis, the subject terms and the
+behind-reads check of the escalation scenarios use the same matcher (`termIn`). Before #848 a term matched as a
+plain substring; on the recorded replies of every scenario, variant and escalation scenario the change moves no
+score and no fact. Report schema version 6 marks the change: diagnosis scores of version 5 or earlier are not
+comparable with it.
 
 Report schema version 3 changed what a diagnosis fact means (`anyOf` and `subject` above). Scores of an earlier
 version are not comparable with it: the same replies score higher under version 3 (the 45 runs of the real-model
@@ -361,7 +384,7 @@ the owner check (design 3.3, [#480](https://github.com/pkalin/shadewright/issues
 `s0-prometheus` at 6.5 per replica, about 13 requests per second over the 2 replicas of the ceiling, against an average
 target of 5, and the backlog fact is scored from it: the current value (per replica or in all) and the target with its
 value. The rubric matches each number with a delimiter after it, so a value at the very end of the reply's text (the
-end of its last evidence quote, say) does not match. The Incident's own symptom evidence would carry the values too, but the analyzer's symptom normalization turns
+end of its last evidence quote, say) does not match. These terms were written for substring matching (before #848) and are kept. The Incident's own symptom evidence would carry the values too, but the analyzer's symptom normalization turns
 a milli quantity such as `6500m` into a placeholder, so the recorded Incident leaves them out. The request rate and
 replica history stay unscored: no template reads them.
 
@@ -394,13 +417,13 @@ fix any rubric the harness then refuses.
 
 ## The report
 
-`report.json` (schema version 4) and `report.md`, the same content for a person. A report of another schema
+`report.json` (schema version 6) and `report.md`, the same content for a person. A report of another schema
 version is not read as this one: the harness's reader (`readReport`) refuses it with both versions named, and a
 field the version does not know. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 5; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum |
+| `schemaVersion` | 6; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum. Version 6: rubric terms match on word boundaries ([Scoring](#scoring)), so diagnosis scores of version 5 or earlier are not comparable |
 | `mode` | `fake` (recorded replies), `foundry` or `anthropic` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
 | `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole`, `costIncomplete` and `costUnknown` (as in `totals`, for this run), `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |

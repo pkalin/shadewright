@@ -18,6 +18,7 @@ package openaicompatible
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
+	"github.com/pkalin/shadewright/internal/termtext"
 )
 
 // Defaults and bounds of [Config].
@@ -588,8 +590,8 @@ func (p *Provider) readKey() (string, error) {
 }
 
 // containsKey also checks escaped JSON strings: a hostile server cannot echo the header into a model ID,
-// content or arguments that could later reach records, status or telemetry. Every comparison ignores the
-// runes of [HiddenRune], so a zero-width or control character inside the key does not hide it.
+// content or arguments that could later reach records, status or telemetry. Every comparison goes through
+// hasKey, so a zero-width or control character or a terminal escape sequence inside the key does not hide it.
 func containsKey(data []byte, key string) bool {
 	if bytes.Contains(data, []byte(key)) || hasKey(string(data), key) {
 		return true
@@ -668,10 +670,11 @@ func replyContainsKey(data []byte, api API, key string) bool {
 // refuses the same reply too, so the reply is refused as scanWrongType: nothing a caller would accept is
 // refused, and no decoy field can switch the joined scans off.
 //
-// Every comparison is made on text without the runes of [HiddenRune] (whitespace, and the control and
-// format characters the kubectl plugin drops when it prints), so a key with a zero-width space, a soft
-// hyphen or a NUL inside cannot pass the scan and then show whole on a screen. Each scan is one pass over a
-// bounded reply, so the cost stays linear in its size.
+// Every comparison goes through hasKey: the text as is, the text without the runes of [HiddenRune], and the
+// text as the kubectl plugin shows it after its terminal cleaning ([termtext.Compact]), so a key with a
+// zero-width space, a NUL or a whole escape sequence such as ESC [0m inside cannot pass the scan and then
+// show whole on a screen. Other transformations (encodings, reversal) are out of scope. Each form is one
+// pass over a bounded reply, so the cost stays linear in its size.
 func scanReply(data []byte, api API, key string) scanResult {
 	if !json.Valid(data) {
 		return found(bytes.Contains(data, []byte(key)) || hasKey(string(data), key))
@@ -801,13 +804,18 @@ func withoutHidden(s string) string {
 	}, s)
 }
 
-// hasKey compares s and the key with the runes of HiddenRune removed from both.
+// hasKey reports the key in any of three forms of s: as is, with the runes of [HiddenRune] removed (from the
+// key too), and as the kubectl plugin shows it after its terminal cleaning ([termtext.Compact]: whole escape
+// sequences, control and format characters and whitespace left out, invalid UTF-8 as U+FFFD). Each form
+// is built in one pass over s and searched once, so a call costs three linear passes and three searches.
 func hasKey(s, key string) bool {
-	needle := withoutHidden(key)
-	if needle == "" {
-		needle = key
+	if strings.Contains(s, key) {
+		return true
 	}
-	return strings.Contains(withoutHidden(s), needle)
+	if strings.Contains(withoutHidden(s), cmp.Or(withoutHidden(key), key)) {
+		return true
+	}
+	return strings.Contains(termtext.Compact(s), cmp.Or(termtext.Compact(key), key))
 }
 
 // compatibleWireError attributes the shared codec's fixed error text without changing its classification.

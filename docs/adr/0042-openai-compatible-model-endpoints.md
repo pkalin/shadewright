@@ -112,7 +112,10 @@ concatenates parsed strings, numbers and object keys in wire order. Every
 comparison removes whitespace and every Unicode control (Cc) and format (Cf)
 character from the text and the key, the characters the kubectl plugin drops
 when it prints, so a zero-width space, soft hyphen or NUL inside a key cannot
-pass the scan and then show the whole key on a screen. It also scans decoded content and arguments, joining their values and
+pass the scan and then show the whole key on a screen. Each comparison also runs on the text
+as the plugin would show it after its terminal cleaning (whole escape sequences dropped, invalid
+UTF-8 as U+FFFD, whitespace removed), so the check covers the key as the plugin would print it;
+other transformations, such as encodings or reversal, are out of scope. It also scans decoded content and arguments, joining their values and
 keys across parts. It detects literal and JSON-escaped echoes, including keys split
 between content, argument keys and numeric values. It fails closed: the scan of
 every parsed value runs whatever the typed decode of content and arguments does, a
@@ -164,7 +167,7 @@ Two trust assumptions remain:
 | Redirect or proxy steals a key | No redirects of any status and no environment proxy |
 | Public DNS rebinds into the cluster or metadata | Address checks on each connection; private addresses only for explicitly named Service hosts, never metadata or loopback |
 | Service impersonation | Verified TLS with the Service DNS name; cluster operators own certificates and Service routing. Pod creation in the Service's namespace, or edits of the Service or its EndpointSlices, bypass it (a pod can mount the serving certificate): only cluster administrators may create pods there |
-| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; scan the raw body before reply parsing and concatenations, without whitespace, control or format characters, of every parsed string, number and object key, including decoded structured content and arguments, before returning a completion; a wrong-typed decoy field fails closed with its own fixed text |
+| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; scan the raw body before reply parsing and concatenations, without whitespace, control or format characters and as the plugin's terminal cleaning shows them, of every parsed string, number and object key, including decoded structured content and arguments, before returning a completion; a wrong-typed decoy field fails closed with its own fixed text |
 | Server ignores schema or invents a tool | Shared parser, typed argument/result validation, closed catalog and deterministic policy; no output repair |
 | Server omits usage or returns 429 | Unknown usage costs the upper bound; no compatible-host unbilled exception |
 | Key rotation races a call | Read per attempt, bounded retry, no cached key; update source before revoking old key |

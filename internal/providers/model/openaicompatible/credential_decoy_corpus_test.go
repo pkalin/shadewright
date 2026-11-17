@@ -130,8 +130,8 @@ func decoyReply(api API, texts []string, args string) map[string]any {
 	}
 	// Chat Completions has one content string: a second text part goes after the arguments' key.
 	content := texts[0]
-	if len(texts) == 2 {
-		args = `{"s":"` + strings.TrimSuffix(texts[1], `"}`) + `"}`
+	for _, second := range texts[1:] {
+		args = `{"s":"` + strings.TrimSuffix(second, `"}`) + `"}`
 	}
 	return map[string]any{echoModelField: testModel,
 		echoUsageField: map[string]any{decoyPromptTokens: 30, decoyCompletionTokens: 5},

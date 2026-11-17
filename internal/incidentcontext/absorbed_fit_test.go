@@ -296,6 +296,90 @@ func TestAbsorbedTallyFitUsesTheRedactedText(t *testing.T) {
 	}
 }
 
+// damagedNotes proves that the final redaction can damage a cut note even when its value is empty.
+type damagedNotes struct{ calls int }
+
+func (r *damagedNotes) String(s string) string {
+	r.calls++
+	return strings.ReplaceAll(s, "bytes cut)", "hidden)")
+}
+
+func TestFitSummarySettlesAnEmptyCutDamagedByRedaction(t *testing.T) {
+	for _, value := range []string{"first second third", "single"} {
+		t.Run(value, func(t *testing.T) {
+			r := &damagedNotes{}
+			b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = r })
+			vals := [cutValues]string{}
+			vals[cutSymptom] = value
+			done := make(chan struct{})
+			go func() {
+				var blk Block
+				b.fitSummary(&blk, vals, func(keep [cutValues]int) (*lines, [cutValues]summaryTail) {
+					var l lines
+					head, note := cutOf(value, keep[cutSymptom])
+					tail := head + note
+					l.add("symptom: %s", tail)
+					var tails [cutValues]summaryTail
+					if note != "" {
+						tails[cutSymptom] = summaryTail{line: 0, text: tail}
+					}
+					return &l, tails
+				}, 0)
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("fitSummary did not settle the damaged note of an empty value")
+			}
+		})
+	}
+}
+
+func TestFitSummaryBacksOffByWord(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+		bound int
+	}{
+		{name: "spaced words", value: strings.Repeat("word ", 60), bound: 80},
+		{name: "no spaces", value: strings.Repeat("x", maxValueBytes), bound: 80},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &damagedNotes{}
+			b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = r })
+			vals := [cutValues]string{}
+			vals[cutSymptom] = tc.value
+			var finalKeep int
+			var blk Block
+			b.fitSummary(&blk, vals, func(keep [cutValues]int) (*lines, [cutValues]summaryTail) {
+				finalKeep = keep[cutSymptom]
+				var l lines
+				head, note := cutOf(tc.value, finalKeep)
+				tail := head + note
+				l.add("symptom: %s", tail)
+				var tails [cutValues]summaryTail
+				if note != "" {
+					tails[cutSymptom] = summaryTail{line: 0, text: tail}
+				}
+				return &l, tails
+			}, tc.bound)
+			if tc.name == "spaced words" {
+				if finalKeep > 0 && tc.value[finalKeep-1] != ' ' {
+					t.Errorf("cut at byte %d is not at a word boundary", finalKeep)
+				}
+				words := strings.Fields(tc.value)
+				dropped := len(words) - len(strings.Fields(tc.value[:finalKeep]))
+				if r.calls > dropped+4 {
+					t.Errorf("%d redaction passes for %d dropped words, want at most dropped words plus 4", r.calls, dropped)
+				}
+			} else if r.calls > len(tc.value)+1 {
+				t.Errorf("%d redaction passes for a %d-byte value, want at most the documented %d", r.calls, len(tc.value), len(tc.value)+1)
+			}
+		})
+	}
+}
+
 // The total bound cuts the summary last, and only when bounds that add up to more than the total are
 // configured; when it cuts into the tally, the tally goes whole: the summary keeps a whole-line prefix of
 // the text without the tally, or that text followed by the whole tally.

@@ -98,6 +98,9 @@ type tally struct {
 	// forced escalation (signalRecorder).
 	truncated     bool
 	failedSources []incidentcontext.Section
+	// blocks are the blocks of the last context the builder built, in order: block i is shown as c<i+1>
+	// (signalRecorder). The harness checks the quotes of a result against them (checkSummaryQuotes).
+	blocks []incidentcontext.Block
 }
 
 // roleUsage is what the calls of one role returned.
@@ -174,7 +177,8 @@ func (f forcedEscalation) Build(ctx context.Context,
 }
 
 // signalRecorder records the escalation signals of the context the product's builder returns, before a forced
-// escalation adds its own (escalation_scenarios_test.go checks a scenario escalates on the product's signal).
+// escalation adds its own (escalation_scenarios_test.go checks a scenario escalates on the product's signal),
+// and its blocks, which the harness checks the quotes of a result against (checkSummaryQuotes).
 type signalRecorder struct {
 	inner analysis.ContextBuilder
 	t     *tally
@@ -188,6 +192,7 @@ func (r signalRecorder) Build(ctx context.Context,
 	}
 	r.t.mu.Lock()
 	r.t.truncated, r.t.failedSources = c.Truncated, slices.Clone(c.FailedSources)
+	r.t.blocks = slices.Clone(c.Blocks)
 	r.t.mu.Unlock()
 	return c, nil
 }
@@ -227,6 +232,14 @@ func (s *scenario) metricsSource() providers.MetricsSource {
 	return newReplayMetrics(s.metrics)
 }
 
+// contextConfig is the context builder's configuration for a run of s against the cluster c.
+func (s *scenario) contextConfig(c client.Client, redactor *redact.Redactor, metrics providers.MetricsSource,
+	logs providers.LogSource) incidentcontext.Config {
+	return incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
+		Metrics: metrics, Logs: logs, Limits: s.limits, Redactor: redactor, Now: func() time.Time { return fixtureNow },
+		Policies: evalPolicies, PolicyReader: c, RequestNamespace: evalRequestNamespace}
+}
+
 // runScenario builds the scenario's context with the real context builder and runs the real analysis loop
 // once.
 func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, models modelSource) (scenarioResult, error) {
@@ -238,9 +251,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	now := func() time.Time { return fixtureNow }
 	metrics, logs := s.metricsSource(), s.logSource()
-	builder, err := incidentcontext.New(incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
-		Metrics: metrics, Logs: logs, Limits: s.limits, Redactor: redactor, Now: now,
-		Policies: evalPolicies, PolicyReader: c, RequestNamespace: evalRequestNamespace})
+	builder, err := incidentcontext.New(s.contextConfig(c, redactor, metrics, logs))
 	if err != nil {
 		return res, err
 	}
@@ -290,6 +301,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	calls := slices.Clone(t.reads)
 	res.prompt, res.toolText = t.first, slices.Clone(t.toolText)
 	res.truncated, res.failedSources = t.truncated, slices.Clone(t.failedSources)
+	blocks := t.blocks
 	t.mu.Unlock()
 	if aerr != nil {
 		return res, fmt.Errorf("the analysis stopped: %w", aerr)
@@ -315,8 +327,13 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	if accepted, _, err := analysis.DecodeResult(last); err == nil && accepted != nil {
 		// Redacted as the analyzer redacts the result's text for its logs and record, keeping the Incident's name.
 		res.Reply = replyOf(accepted, func(t string) string { return redactor.StringKeeping(t, s.incident.Name) })
+		if out.Reason != analysis.ReasonNoEvidence {
+			// NoEvidence: the loop refused every quote already, and quoteFailures says how.
+			res.SummaryQuotes = checkSummaryQuotes(blocks, res.toolText, s.incident, accepted.Evidence)
+		}
 	}
-	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass && res.Reads.Pass
+	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass && res.Reads.Pass &&
+		!slices.ContainsFunc(res.SummaryQuotes, func(q summaryQuote) bool { return q.Fails })
 	return res, nil
 }
 

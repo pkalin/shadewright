@@ -165,7 +165,8 @@ reads only the namespace of the Incident's subject, so `namespace=` must name it
 error names the read and what is wrong. The parser and its generated tests are in `test/eval/reads_test.go` and
 `test/eval/reads_corpus_test.go`.
 
-A scenario run passes when all three parts pass. The run passes when the share of passing scenario runs reaches the
+A scenario run passes when all three parts pass and no quote of its result holds the cut note, a tally line or a
+part the summary cut ([Quotes of the summary](#the-scenario-files), [#841](https://github.com/pkalin/shadewright/issues/841)). The run passes when the share of passing scenario runs reaches the
 threshold (`EVAL_MIN_PASS_RATE`, 1 by default; CI always uses 1).
 
 ## Run it
@@ -233,8 +234,10 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the ten scenarios, their variants (three so far, `oom/rollout`, `oom/absorbed` and `keda-at-ceiling/wide-policy`)
-and the five escalation scenarios is eighteen analyses per repeat. The escalation scenarios need an escalation
+A run of the ten scenarios, their variants (four so far, `oom/rollout`, `oom/absorbed`, `keda-at-ceiling/wide-policy`
+and `unschedulable/over-bound`) and the five escalation scenarios is nineteen analyses per repeat. The real-model
+run for [#841](https://github.com/pkalin/shadewright/issues/841), before the v0.6.0 release, is a run of all of them,
+so it includes both `oom/absorbed` and `unschedulable/over-bound`. The escalation scenarios need an escalation
 model: on Foundry `EVAL_ESCALATION_DEPLOYMENT` with `EVAL_ESCALATION_MODEL` (the deployment alone is refused
 before any call), through the Anthropic API ([below](#a-claude-model-the-anthropic-api)) `EVAL_ESCALATION_MODEL`.
 Without one, each escalation scenario is handed off (`EscalationNotConfigured`) and fails. Each analysis is bounded by the loop's limits (at most 7 model
@@ -362,9 +365,62 @@ moves no block ID, and none of its lines is quotable. It is the recorded scenari
 asked for before the tally reached the model. `TestPromptShowsTheAbsorbedTally` replays it, checks that it passes
 and that its prompt holds one line per entry of the tally.
 
+`unschedulable/over-bound` is the case for the other half of #796: a summary over its bound with no tally, whose
+lines all stay while its values are shortened with a "(N bytes cut)" note. Its Incident is `unschedulable` in a
+shared cluster of 48 nodes: the scheduler's note lists thirteen distinct reasons (tainted node pools, cordoned and
+pressured nodes, `12 Insufficient cpu`) before its preemption sentence, a 953-byte symptom, and the new pod's
+`PodScheduled` message in `objects.yaml` is the same note. A symptom this long is an event's note; the scenarios
+that end in a proposal (`oom`, `statefulset-oom`, `keda-at-ceiling`) have symptoms the code writes, too short for
+any summary bound, so the variant's outcome is the scenario's refusal. The variant runs at the default summary
+bound of 2 KiB. The schema's lengths count characters and the bound counts bytes: an Incident in ASCII at the
+schema's limits has a summary of at most 1907 bytes without a tally, under the bound, and only text outside ASCII
+goes over it (2288 bytes with two-byte characters at the limits, 3050 with four-byte ones). The fields that can
+carry it are the reason, the reporting controller and the symptom; the subject's fields are ASCII by their
+patterns, and a value over 1024 bytes is left out of the summary whole. The variant's reason must stay
+`FailedScheduling` (`expected.yaml`) and its symptom is near that 1024-byte cap already, so the bytes are in its
+reporting controller: 245 characters of four-byte Han text, 980 bytes. No Kubernetes component reports such a
+name, and the analyzer's collector writes none: it takes only reasons and controller names in ASCII and cuts a
+symptom to 1024 bytes, so an Incident it writes stays within the bound. This one is an Incident another client
+writes within the schema. Its summary is 2113 bytes before shortening and 2047 after, with the symptom cut by
+81 bytes at a character boundary and its cause, `12 Insufficient cpu`, in the part shown. Its reply quotes that
+part and is scored with the scenario's rubric and expected refusal. `TestOverBoundSummaryVariant` measures the
+summary with the product's own builder and default bound (over the bound before, within it after, valid UTF-8,
+every line kept, only the symptom cut, with its note), checks that the reply passes, and that no quotable part of
+the summary holds the cut part, a quote across the cut or the note.
+
+**Quotes of the summary.** The loop checks quotes only for a proposal, and passes one on any single quote found
+([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)), so a quote of the part the
+summary cut, of the cut's note or of a tally line would pass unnoticed in a refusal, or next to a good quote in a
+proposal. The harness checks every quote of every result the loop accepted (all but `NoEvidence`, whose quotes the
+loop refused and `quoteFailures` classifies), whatever block or tool result it cites, and skips a quote shorter than
+the loop's shortest (8 bytes). A quote within a value its cited block shows (`incidentcontext.Block.Data`, as the
+loop takes it; for a tool result, within the text of any tool result of the run) is never reported. Any other quote
+gets the first of these kinds that fits, in the report's `summaryQuotes`:
+
+| Kind | The quote | Run |
+| --- | --- | --- |
+| `cut-note` | holds the "(N bytes cut)" note of a shortened value | fails |
+| `tally-line` | takes in a line of the absorbed tally, or lies within one | fails |
+| `cut-part` | is in the Incident's own symptom, reporting controller, reason or subject name, in a part the summary cut | fails |
+| `near-miss` | cites the summary, and is within a value it shows once case, runs of white space and trailing punctuation are ignored | recorded |
+| `not-shown` | cites the summary and is none of the above: a label, two values at once, a paraphrase | recorded |
+
+The three failing kinds match through the same changes, and one character changed, added or removed, so a model that
+alters a tally line or a cut part a little still fails with its kind; a quote of the cut part cited from a block
+that shows that text (the pod's status in `unschedulable/over-bound`) is not reported. A recorded kind does not
+fail the run: the loop's own rules decide whether its result passes, as for any other block, since real models
+paraphrase and the pass rate keeps its meaning. `TestSummaryQuoteCorpus` replays the replies in
+`test/eval/testdata/summary-quotes/` (the cut part and the note of `unschedulable/over-bound`, cited from the summary
+and from another block and changed a little, a tally line of `oom/absorbed`, plain and changed, a near-miss and a
+quote not shown), each otherwise passing, and checks the kind, whether the run fails, and that the report holds no
+quote. `test/eval/summary_quotes_gen_test.go` checks the check with generated quotes: against the check as first
+built, nothing it failed passes now except a near-miss, and quotes of the cut, the note and the tally whose kind is
+known by construction get it under every small change.
+
 **The prompt of a scenario without a tally.** `TestPromptGolden` keeps, in `test/eval/testdata/prompt.golden`, the
 SHA-256 of the first model request (the system prompt and the context) of every scenario whose Incident has an empty
-`status.absorbed`, computed by the code before the tally block. Each must stay the same byte for byte; a change meant
+`status.absorbed`, computed by the code before the tally block (that of `unschedulable/over-bound`, added after it,
+pins its summary as shortened at the default bound). Each must stay the same byte for byte; a change meant
 to alter every prompt writes them again with `SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/`.
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
@@ -417,21 +473,22 @@ fix any rubric the harness then refuses.
 
 ## The report
 
-`report.json` (schema version 6) and `report.md`, the same content for a person. A report of another schema
+`report.json` (schema version 7) and `report.md`, the same content for a person. A report of another schema
 version is not read as this one: the harness's reader (`readReport`) refuses it with both versions named, and a
 field the version does not know. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 6; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum. Version 6: rubric terms match on word boundaries ([Scoring](#scoring)), so diagnosis scores of version 5 or earlier are not comparable |
+| `schemaVersion` | 7; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum. Version 6: rubric terms match on word boundaries ([Scoring](#scoring)), so diagnosis scores of version 5 or earlier are not comparable. Version 7: a run also fails when a quote of its accepted result holds the cut note, a tally line or a part the summary cut (`summaryQuotes`), so pass rates of version 6 or earlier are not comparable |
 | `mode` | `fake` (recorded replies), `foundry` or `anthropic` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
-| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole`, `costIncomplete` and `costUnknown` (as in `totals`, for this run), `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |
+| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole`, `costIncomplete` and `costUnknown` (as in `totals`, for this run), `quoteFailures`, `summaryQuotes`, `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |
 | `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out), with `calls`, the model calls of the role, failed ones included. Each role is one deployment, named with its model in the manifest's `models`, so these are the counts per model |
 | `scenarios[].reads` | `pass` (every expected read made; true when the rubric expects none), `expected[]` (`read` as the rubric wrote it, `pass`), `extra` (accepted calls no expected read matches) and `refused` (calls that read nothing: refused by the loop or the tool, or stopped by the deadline) ([Scoring](#scoring)) |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |
+| `scenarios[].summaryQuotes` | Only for a run whose result the loop accepted (not `NoEvidence`): one entry per quote the summary check reports, with `source` (the cited ID), `kind` (`cut-note`, `tally-line`, `cut-part`, `near-miss` or `not-shown`, [Quotes of the summary](#the-scenario-files)), `fails` (true for the first three, which fail the run; the others are only recorded) and `quoteBytes`. No text of the quote; it is in `reply`. The Markdown report lists them in a table after the runs |
 | `scenarios[].reply` | Only for a run whose last reply decoded as a result, whether the loop then accepted it or refused it (`NoEvidence`) ([#600](https://github.com/pkalin/shadewright/issues/600)): the model's `summary`, `hypotheses` (their descriptions) and `evidence[]` (`source`, `quote`), so a missed fact can be traced to what the model wrote. Redacted as the analyzer redacts the result's text (built-in rules, the Incident's name kept) and capped: the summary at 1024 bytes, each hypothesis, source and quote at 512, at most 10 hypotheses and 10 quotes (the result's own bounds, so a decoded reply is kept whole today); a cut field ends with ` [truncated]` and `truncated` is then true. In `report.json` only, not in the Markdown |
 | `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `toolCalls`, `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), `incompleteRuns` (runs with a call of unknown usage or that stopped with an error), `costIncomplete` when there is any, so the estimate is a lower bound (the Markdown summary says so; compare `charged`), and `costPerPassedRunUSD`, the cost of every run, failed ones included, over the passed runs: left out without prices or when no run passed (the Markdown says "none, no run passed", never 0), and a lower bound when `costIncomplete` is set. A failed call is never priced as zero: it counts in `usageUnknownCalls` and makes the cost incomplete. The exception is a call the adapter marks as refused before processing (a Foundry 429), which was not billed and has a known usage of 0 (#725). A role that used tokens (or made a call of unknown usage) with no prices of its own, the escalation without `EVAL_ESCALATION_PRICE_*`, is never priced at another role's prices: `costUSD` and `costPerPassedRunUSD` are then left out, `costUnknown` says why, `costUSDByRole` keeps the priced roles, and the Markdown says "unknown" |
 

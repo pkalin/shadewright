@@ -389,6 +389,12 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		// A quoted value that never closes before the next key's value opens runs to that quote: the next key
 		// is inside it, so its value is read from the middle and loses only its first token.
 		"unclosed quote before the next key": `token="x DB_PASSWORD="hidden ` + k + `"`,
+		// The decision of 2026-11-17 on #840: a key after other text on its line reads a block below only
+		// after a block indicator ("msg: password: |"). With nothing after its colon, the lines below are
+		// left: no YAML has a key there, and reading them took prose for a block.
+		"key after text, value on the next lines": "warning: credentials:\n  user: " + k + "\n",
+		// Under a bare short key, a scalar over several lines counts by its first line only, as on main.
+		"bare short key, scalar over lines": "auth: Qz9xK9w1\n  " + k + "\n",
 	} {
 		if out := String(in); !strings.Contains(out, k) {
 			t.Errorf("%s: no longer leaks; drop it here and from design 10.3 and threat model G4.4:\n in: %q\nout: %q",

@@ -29,8 +29,12 @@ limitations under the License.
 // runs that mix letters and digits, such as Git commit hashes and container IDs, 32 characters or more of
 // mixed-case base64 that slashes cut short, or that has no slash and no digit (also a base64 blob that is not
 // a secret, and at most one short part of up to five characters on each side of it in a path), and every
-// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"), the value after a
-// secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
+// scalar value under a secret-named YAML key ("credentials:\n  user: admin" loses "admin"), the block under a
+// secret key and a block scalar indicator wherever the key stands ("msg: password: |", also inside a JSON or
+// logfmt string, with no blank or a Unicode space at the colon, after "---" lines or less indented than the
+// key's line), and the rest of the line after such an indicator when a block was flattened onto it, inside a
+// flow collection up to its closing bracket (#840),
+// the value after a secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
 // argument lists and after a flag that took the flag as its value), however it reads or starts with
 // ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
 // name of two or more words, joined by "_", "-" or in camelCase, and a blank ("aws_secret_access_key x",
@@ -72,8 +76,10 @@ limitations under the License.
 // pretty-printed escaped JSON ("\",\n  \""), the part of an
 // unquoted value after a quote inside it, the words after the first of a block sequence item after a quoted
 // flag item or of an item after a flag item that opens with a backslash or "$(", a quoted scalar after a
-// verbatim tag in an array, a value after a compound name and a blank that is no opaque token, and a secret in
-// a format no rule knows (TestKeyNameKnownLeaks).
+// verbatim tag in an array, a value after a compound name and a blank that is no opaque token, a value on
+// the lines below a secret key after other text on its line with nothing after its colon, the lines after the
+// first of a scalar over several lines under a bare short key, and a secret in a format no rule knows
+// (TestKeyNameKnownLeaks). Callers redact text while it still has its lines, before they join or cut them.
 package redact
 
 import (
@@ -86,6 +92,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -135,6 +142,7 @@ var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 func New(extra ...Pattern) (*Redactor, error) {
 	rules := builtinRules()
 	for i, p := range extra {
+		tick(1)
 		if !kindPattern.MatchString(p.Kind) {
 			return nil, fmt.Errorf("extra pattern %d: kind %q must match %s", i, p.Kind, kindPattern)
 		}
@@ -144,6 +152,7 @@ func New(extra ...Pattern) (*Redactor, error) {
 		}
 		r := rule{kind: p.Kind, re: re}
 		for g := 1; g <= re.NumSubexp(); g++ {
+			tick(1)
 			r.groups = append(r.groups, g)
 		}
 		rules = append(rules, r)
@@ -187,6 +196,7 @@ func (r *Redactor) StringKeeping(s string, keep ...string) string {
 	}
 	out := spans[:0]
 	for _, sp := range spans {
+		tick(1)
 		if !covered(sp, kept) {
 			out = append(out, sp)
 		}
@@ -206,6 +216,7 @@ func (r *Redactor) Clean(s string, keep ...string) bool {
 	}
 	ok := mergeRanges(append(wholeOccurrences(s, keep), r.markers(s)...))
 	for _, sp := range spans {
+		tick(1)
 		if !covered(sp, ok) {
 			return false
 		}
@@ -229,6 +240,7 @@ func MarkerShapes(s string) [][]int { return markerPattern.FindAllStringIndex(s,
 func (r *Redactor) markers(s string) []span {
 	var out []span
 	for _, m := range markerPattern.FindAllStringIndex(s, -1) {
+		tick(1)
 		if r.isMarker(s[m[0]:m[1]]) {
 			out = append(out, span{start: m[0], end: m[1]})
 		}
@@ -253,6 +265,7 @@ func (r *Redactor) isMarker(text string) bool {
 // hasKind reports whether one of r's rules has the kind.
 func (r *Redactor) hasKind(kind string) bool {
 	for _, ru := range r.rules {
+		tick(1)
 		if ru.kind == kind {
 			return true
 		}
@@ -265,6 +278,7 @@ func mergeRanges(rs []span) []span {
 	slices.SortFunc(rs, func(a, b span) int { return a.start - b.start })
 	out := rs[:0]
 	for _, x := range rs {
+		tick(1)
 		if n := len(out); n > 0 && x.start <= out[n-1].end {
 			out[n-1].end = max(out[n-1].end, x.end)
 			continue
@@ -279,6 +293,7 @@ func mergeRanges(rs []span) []span {
 func wholeOccurrences(s string, keep []string) []span {
 	var occ []span
 	for pos := 0; pos < len(s); {
+		tick(1)
 		at, n := firstWhole(s[pos:], keep)
 		if at < 0 {
 			break
@@ -293,6 +308,7 @@ func wholeOccurrences(s string, keep []string) []span {
 func covered(sp span, occ []span) bool {
 	pos := sp.start
 	for _, o := range occ {
+		tick(1)
 		if o.end <= pos {
 			continue
 		}
@@ -312,11 +328,13 @@ func covered(sp span, occ []span) bool {
 func firstWhole(s string, keep []string) (int, int) {
 	best, bestLen := -1, 0
 	for _, k := range keep {
+		tick(1)
 		if k == "" {
 			continue
 		}
 		for from := 0; from <= len(s)-len(k); {
-			i := strings.Index(s[from:], k)
+			tick(1)
+			i := index(s[from:], k)
 			if i < 0 {
 				break
 			}
@@ -356,13 +374,15 @@ func (r *Redactor) String(s string) string {
 func (r *Redactor) spans(s string) []span {
 	var spans []span
 	for i, ru := range r.rules {
+		tick(1)
 		prevEnd := 0
 		add := func(start, end int) {
 			if end > start {
 				spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i})
 			}
 		}
-		for _, m := range ru.re.FindAllStringSubmatchIndex(s, -1) {
+		for _, m := range ru.re.FindAllStringSubmatchIndex(counted(s), -1) {
+			tick(1)
 			if ru.spans != nil {
 				prevEnd = ru.spans(s, m, prevEnd, add)
 				continue
@@ -381,6 +401,7 @@ func (r *Redactor) spans(s string) []span {
 				continue
 			}
 			for _, g := range ru.groups {
+				tick(1)
 				if 2*g+1 < len(m) && m[2*g] >= 0 && m[2*g+1] > m[2*g] {
 					spans = append(spans, span{start: m[2*g], end: m[2*g+1], kind: ru.kind, rule: i})
 				}
@@ -402,14 +423,43 @@ func (r *Redactor) spans(s string) []span {
 
 	merged := spans[:0]
 	for i := 0; i < len(spans); {
+		tick(1)
 		cur := spans[i]
 		for i++; i < len(spans) && spans[i].start < cur.end; i++ {
+			tick(1)
 			cur.end = max(cur.end, spans[i].end)
 		}
 		merged = append(merged, cur)
 	}
 	return merged
 }
+
+// Replace redacts s with the built-in rules as [String] does, but writes repl(kind, text) for each match in
+// place of its marker and between(text) for the text between matches. A caller that rewrites text before it
+// shows it (replaces characters, joins lines, cuts) uses it to redact the text as it was read first, and to
+// rewrite only what is left.
+func Replace(s string, repl func(kind, text string) string, between func(string) string) string {
+	return defaultRedactor.Replace(s, repl, between)
+}
+
+// Replace is the package's Replace with r's rules.
+func (r *Redactor) Replace(s string, repl func(kind, text string) string, between func(string) string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pos := 0
+	for _, cur := range r.spans(s) {
+		tick(1)
+		b.WriteString(between(s[pos:cur.start]))
+		b.WriteString(repl(cur.kind, s[cur.start:cur.end]))
+		pos = cur.end
+	}
+	b.WriteString(between(s[pos:]))
+	return b.String()
+}
+
+// Marker returns the marker a redactor writes for n bytes of the given kind, never longer than n. A caller
+// of [Redactor.Replace] that keeps only part of a match writes the marker of that part.
+func Marker(kind string, n int) string { return marker(kind, n) }
 
 // render returns s with each of the sorted, disjoint spans replaced by its marker.
 func render(s string, spans []span) string {
@@ -420,6 +470,7 @@ func render(s string, spans []span) string {
 	b.Grow(len(s))
 	pos := 0
 	for _, cur := range spans {
+		tick(1)
 		b.WriteString(s[pos:cur.start])
 		b.WriteString(marker(cur.kind, cur.end-cur.start))
 		pos = cur.end
@@ -432,6 +483,7 @@ func render(s string, spans []span) string {
 // never grows its input.
 func marker(kind string, n int) string {
 	for _, m := range []string{"[REDACTED:" + kind + "]", "[" + kind + "]", "[REDACTED]", "***"} {
+		tick(1)
 		if len(m) <= n {
 			return m
 		}
@@ -477,12 +529,14 @@ func referenceKey(key string, flag bool) bool {
 	key = keySeparators.Replace(key)
 	secret := strings.Contains(key, "secret")
 	for _, suffix := range referenceSuffixes {
+		tick(1)
 		if strings.HasSuffix(key, suffix) && (suffix != "id" || !secret) {
 			return true
 		}
 	}
 	if flag {
 		for _, suffix := range flagReferenceSuffixes {
+			tick(1)
 			if strings.HasSuffix(key, suffix) {
 				return true
 			}
@@ -521,6 +575,7 @@ func sasRefused(s string, m []int, sep bool) bool {
 	}
 	end := m[3]
 	for end > m[2] && strings.IndexByte(`"'\`, s[end-1]) >= 0 {
+		tick(1)
 		end--
 	}
 	if at := end - len(sasKeyName); at > 0 {
@@ -533,6 +588,7 @@ func sasRefused(s string, m []int, sep bool) bool {
 	}
 	i := end
 	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		tick(1)
 		i++
 	}
 	switch {
@@ -555,6 +611,7 @@ func bareShortColon(s string, m []int) bool {
 	}
 	i := m[3]
 	for i < len(s) && isSpace(s[i]) {
+		tick(1)
 		i++
 	}
 	return i < len(s) && s[i] == ':'
@@ -590,6 +647,7 @@ func looksLikeQuotedSecret(v string) bool {
 	}
 	var letter, other bool
 	for i := range len(v) {
+		tick(1)
 		c := v[i]
 		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
 			letter = true
@@ -615,7 +673,8 @@ func lineLooksLikeSecret(text string) bool {
 // (lineLooksLikeSecret).
 func blockLooksLikeSecret(s string, start, end int) bool {
 	for line := range strings.SplitSeq(s[start:end], "\n") {
-		if lineLooksLikeSecret(strings.TrimLeft(line, " \t\r")) {
+		tick(1)
+		if lineLooksLikeSecret(strings.Trim(line, " \t\r")) {
 			return true
 		}
 	}
@@ -668,6 +727,7 @@ func ipv6Span(s string, m []int, _ int) (int, int, bool) {
 		ends = append(ends, end-1)
 	}
 	for a := start; a < end; a++ {
+		tick(1)
 		if a > start && (s[a-1] != ':' || s[a] == ':') {
 			continue
 		}
@@ -675,6 +735,7 @@ func ipv6Span(s string, m []int, _ int) (int, int, bool) {
 			continue
 		}
 		for _, b := range ends {
+			tick(1)
 			if b <= a || (b < len(s) && isAlnum(s[b])) {
 				continue
 			}
@@ -689,7 +750,7 @@ func ipv6Span(s string, m []int, _ int) (int, int, bool) {
 // lineEnd returns the index of the end of the line holding pos, before any "\r\n" or "\n".
 func lineEnd(s string, pos int) int {
 	end := len(s)
-	if i := strings.IndexByte(s[pos:], '\n'); i >= 0 {
+	if i := indexByte(s[pos:], '\n'); i >= 0 {
 		end = pos + i
 	}
 	if end > pos && s[end-1] == '\r' {
@@ -723,6 +784,7 @@ const (
 func blockLines(s string, pos, keyCol, kind int) iter.Seq[blockLine] {
 	return func(yield func(blockLine) bool) {
 		for {
+			tick(1)
 			l, next, ok := nextBlockLine(s, pos, keyCol, kind)
 			if !ok || !yield(l) {
 				return
@@ -736,11 +798,13 @@ func blockLines(s string, pos, keyCol, kind int) iter.Seq[blockLine] {
 // the end of that line, from which the next one is read. ok is false when the block ends first.
 func nextBlockLine(s string, pos, keyCol, kind int) (blockLine, int, bool) {
 	for pos < len(s) && (s[pos] == '\n' || s[pos] == '\r') {
+		tick(1)
 		if s[pos] == '\r' {
 			pos++
 			continue
 		}
 		l := blockLine{start: pos + 1, end: lineEnd(s, pos+1)}
+		countScan(l.end - l.start + 1)
 		pos = l.end
 		text := s[l.start:l.end]
 		trimmed := strings.TrimLeft(text, " \t")
@@ -765,8 +829,10 @@ func nextBlockLine(s string, pos, keyCol, kind int) (blockLine, int, bool) {
 func dashes(text string) int {
 	n := 0
 	for n < len(text) && text[n] == '-' && (n+1 == len(text) || text[n+1] == ' ' || text[n+1] == '\t') {
+		tick(1)
 		n++
 		for n < len(text) && (text[n] == ' ' || text[n] == '\t') {
+			tick(1)
 			n++
 		}
 	}
@@ -778,6 +844,7 @@ func dashes(text string) int {
 func indentedLines(s string, pos, keyCol int) (int, int) {
 	start, end := -1, -1
 	for l := range blockLines(s, pos, keyCol, blockScalar) {
+		tick(1)
 		if start < 0 {
 			start = l.text
 		}
@@ -820,6 +887,7 @@ func inlineValue(s string, pos, le int) (int, int) {
 	}
 	end := le
 	for end > pos && isSpace(s[end-1]) {
+		tick(1)
 		end--
 	}
 	return pos, end
@@ -855,11 +923,12 @@ var nextLineHeader = regexp.MustCompile(`(?i)^` + nextLineHeaderExpr)
 // nestedHeader returns the submatches, as offsets into s, of the next-line rule's header on line l, or nil
 // when l holds none or its key is a reference.
 func nestedHeader(s string, l blockLine) []int {
-	hm := nextLineHeader.FindStringSubmatchIndex(s[l.start:l.end])
+	hm := nextLineHeader.FindStringSubmatchIndex(counted(s[l.start:l.end]))
 	if hm == nil {
 		return nil
 	}
 	for i := range hm {
+		tick(1)
 		if hm[i] >= 0 {
 			hm[i] += l.start
 		}
@@ -890,6 +959,7 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 	// of a child with a block scalar, whose lines below are redacted whole; -1 when there is none.
 	keepBelow, redactBelow := -1, -1
 	for pos < len(s) {
+		tick(1)
 		l, next, ok := nextBlockLine(s, pos, keyCol, blockValue)
 		if !ok {
 			break
@@ -898,7 +968,7 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 		text := s[l.text:l.end]
 		if mode == undecided {
 			start, mode = l.text+dashes(text), scalar
-			if childKey.MatchString(text) {
+			if childKey.MatchString(counted(text)) {
 				mode = mapping
 			}
 		}
@@ -930,9 +1000,11 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 			addValue(inlineValue(s, l.text, l.end))
 			continue
 		}
-		cm := childKey.FindStringSubmatchIndex(text)
-		if cm == nil {
-			// A scalar line: a sequence entry, a flow collection or a continuation.
+		cm := childKey.FindStringSubmatchIndex(counted(text))
+		if cm == nil || gluedKey(text[cm[2]:cm[3]]) {
+			// A scalar line: a sequence entry, a flow collection or a continuation. A plain key holding a
+			// blank, a comma or a quote is no key of a secret's map but a value with another key glued to it
+			// ("hunter2 token: x"), and goes whole (#840).
 			addValue(inlineValue(s, l.text+dashes(text), l.end))
 			continue
 		}
@@ -957,6 +1029,12 @@ func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int
 	return end
 }
 
+// gluedKey reports whether a child key found by childKey is plain and holds a blank, a comma or a quote,
+// as a value with another key glued to it does.
+func gluedKey(key string) bool {
+	return key[0] != '"' && key[0] != '\'' && strings.ContainsAny(key, " \t,\"'")
+}
+
 // scalarValue returns the part of the scalar block value s[start:end] to redact: the text between the
 // quotes of a quoted scalar that is the whole value, so it keeps its quotes, otherwise all of it. A quoted
 // scalar that a backslash continues past the block's end (an escaped line break, #523) is redacted up to its
@@ -972,6 +1050,392 @@ func scalarValue(s string, start, end int) (int, int) {
 		}
 	}
 	return start, end
+}
+
+// keySpaceExpr is a blank on either side of the colon in the rule for block indicators: ASCII blanks, the
+// Unicode space separators (no-break, figure, ideographic and the rest of category Zs), and the zero-width
+// space, word joiner and byte order mark, which a message may carry where a blank was.
+const keySpaceExpr = `[ \t\p{Zs}\x{200B}\x{2060}\x{FEFF}]`
+
+// anyKey matches a secret key, its colon and a YAML block scalar indicator ("|", ">-", "|2+"), with or
+// without blanks around the colon, wherever the key stands on a line (group 1 is the key, group 2 the
+// indicator): the one form that says a block follows, also once the block was flattened onto the key's line
+// (#840, decided 2026-11-17). anyKeySpans checks what follows the indicator.
+var anyKey = regexp.MustCompile(`(?i)(` + secretKeyExpr + `)` + keySpaceExpr + `*:` + keySpaceExpr + `*([|>][1-9+-]{0,2})`)
+
+// countScan counts n bytes read by the rule for block indicators, or of a line by nextBlockLine, as work
+// (tick, work.go).
+func countScan(n int) { tick(n) }
+
+// anyKeySpans is the spans function of the rule for a secret key and a block indicator wherever the key
+// stands (#840). The first match on a line reads the whole line (anyKeyLine), so each line is read once by
+// this rule and later matches on it are skipped.
+func anyKeySpans(s string, m []int, prevEnd int, add func(start, end int)) int {
+	if m[0] < prevEnd {
+		return prevEnd
+	}
+	return anyKeyLine(s, m[0], -1, add)
+}
+
+// anyKeyLine reads every match of anyKey on the line of s that holds from, from there on, and returns the end
+// of what it read: the line end, or the end of a block below the line. For each key, in order:
+//
+//   - A key inside a flow collection ("{", "[" closed on the line) is left to the flow rules, unless it is
+//     inside a quoted string there (a JSON or logfmt string value), which is read like any other text, or
+//     text follows its indicator (flowKey). A bracket that never closes on the line opens nothing.
+//   - The indicator must be followed by a blank or the end of the value: the line end, or the end of the
+//     quoted string the key stands in (where "\n", "\t" and "\r" count as blanks).
+//   - The block below: the lines indented deeper than the key (its own column when it is first on its line,
+//     otherwise the column of the line's text), after any "---" or "..." lines at column 0; with none, the
+//     lines from the next one that is indented less than that column but not at column 0, if any. Its end is
+//     known, so only it goes. With no block, the indicator alone goes, as the key-value rules have it.
+//   - Text after the indicator, other than a comment over a block below: a block flattened onto the line.
+//     Its end cannot be told, so the rest of the line (or of the string) goes, besides the block below.
+//
+// Under a bare short key (bareShortColon) the text and the block count only where they look like a secret;
+// a refused block is read line by line for keys of its own (anyKeyNested), so each line is still read once.
+// Lines before refused (-1 for none) are in such a block: no line of it looks like a secret, so the block
+// of a bare short key on one of them is refused without reading it, and its lines are read by the caller.
+func anyKeyLine(s string, from, refused int, add func(start, end int)) int {
+	ls := lastIndexByte(s[:from], '\n') + 1
+	le := lineEnd(s, from)
+	countScan(le - ls)
+	text := ls
+	for text < le && (s[text] == ' ' || s[text] == '\t') {
+		tick(1)
+		text++
+	}
+	r := &anyKeyReader{
+		s: s, ls: ls, le: le, lineCol: text - ls, firstKey: text + dashes(s[text:le]), refused: refused, add: add,
+		ctx: newLineContext(s, ls, le), end: le, cursor: from, refusedFrom: -1, refusedEnd: -1,
+	}
+	for _, km := range anyKey.FindAllStringSubmatchIndex(counted(s[from:le]), -1) {
+		tick(1)
+		for i := range km {
+			tick(1)
+			if km[i] >= 0 {
+				km[i] += from
+			}
+		}
+		r.key(km)
+	}
+	return r.end
+}
+
+// anyKeyReader is what anyKeyLine knows about the line it reads, so that no part of the line is read more
+// than a fixed number of times, however many keys it holds.
+type anyKeyReader struct {
+	s                       string
+	ls, le, lineCol         int
+	firstKey, refused       int
+	add                     func(start, end int)
+	ctx                     *lineContext
+	end, cursor             int
+	blockRead               bool
+	refusedFrom, refusedEnd int
+}
+
+// key reads the match km of anyKey on the line, as anyKeyLine describes it.
+func (r *anyKeyReader) key(km []int) {
+	s, le := r.s, r.le
+	if km[0] < r.cursor {
+		return
+	}
+	keyAt := km[2]
+	if q := s[keyAt]; (q == '"' || q == '\'') && s[km[3]-1] != q {
+		// The quote opens the string the key stands in, not the key.
+		keyAt++
+	}
+	strEnd := r.ctx.stringEnd(keyAt)
+	inStr := strEnd >= 0
+	if !inStr && r.ctx.inFlow(keyAt) {
+		r.flowKey(km)
+		return
+	}
+	if keepReference(s, km) || sasRefused(s, km, true) {
+		return
+	}
+	valEnd := le
+	if inStr {
+		valEnd = strEnd
+	}
+	after, ok := afterIndicator(s, km[5], valEnd, inStr)
+	if !ok {
+		return
+	}
+	bare := bareShortColon(s, km)
+	bStart, bEnd := -1, -1
+	if !inStr && !r.blockRead && (!bare || le >= r.refused) {
+		keyCol := r.lineCol
+		if km[2] == r.firstKey {
+			keyCol = km[2] - r.ls
+		}
+		bStart, bEnd = blockBelow(s, le, keyCol)
+		r.blockRead = true
+	}
+	r.cursor = valEnd
+	switch {
+	case after < valEnd && (s[after] != '#' || bStart < 0):
+		r.rest(after, valEnd, bare)
+	case bStart < 0 && !bare:
+		r.add(km[4], km[5])
+	}
+	if bStart >= 0 {
+		countScan(bEnd - bStart)
+		if !bare || blockLooksLikeSecret(s, bStart, bEnd) {
+			r.add(bStart, bEnd)
+			r.end = max(r.end, bEnd)
+		} else {
+			r.end = max(r.end, anyKeyNested(s, le, bEnd, r.add))
+		}
+	}
+}
+
+// flowKey reads a key inside a flow collection that closes on the line. Such a key is left to the flow rules,
+// except when its indicator is followed by text ("[password: | x]"): no flow value starts with "|" or ">", so
+// that is a block flattened onto the line, and the text up to the bracket that closes the innermost
+// collection goes, as rest has it. Nothing after that bracket is read for this key.
+func (r *anyKeyReader) flowKey(km []int) {
+	end := r.ctx.flowClose()
+	if end < 0 || keepReference(r.s, km) || sasRefused(r.s, km, true) {
+		return
+	}
+	after, ok := afterIndicator(r.s, km[5], end, false)
+	if !ok || after >= end {
+		return
+	}
+	r.cursor = end
+	r.rest(after, end, bareShortColon(r.s, km))
+}
+
+// rest redacts the text from after to valEnd that follows a block indicator: a block flattened onto the
+// line. Under a bare short key it counts only when a word looks like a secret; a refusal is remembered, so a
+// later bare key's text up to the same end is refused without reading it again, and the keys in the refused
+// text are read on their own.
+func (r *anyKeyReader) rest(after, valEnd int, bare bool) {
+	re := valEnd
+	for re > after && isSpace(r.s[re-1]) {
+		tick(1)
+		re--
+	}
+	switch {
+	case !bare:
+		r.add(after, re)
+	case r.refusedFrom >= 0 && after >= r.refusedFrom && valEnd == r.refusedEnd:
+		r.cursor = after
+	case wordsLookLikeSecret(r.s[after:re]):
+		countScan(re - after)
+		r.add(after, re)
+	default:
+		countScan(re - after)
+		r.refusedFrom, r.refusedEnd, r.cursor = after, valEnd, after
+	}
+}
+
+// anyKeyNested reads the lines after pos (a line end) up to limit, a block a bare short key refused, for
+// matches of anyKey of their own (with limit as anyKeyLine's refused), and returns the end of what it read:
+// limit, or the end of a block below the last line that goes past it.
+func anyKeyNested(s string, pos, limit int, add func(start, end int)) int {
+	end := limit
+	for pos < limit {
+		tick(1)
+		nl := indexByte(s[pos:limit], '\n')
+		if nl < 0 {
+			break
+		}
+		ls := pos + nl + 1
+		le := lineEnd(s, ls)
+		countScan(le - ls)
+		pos = le
+		if m := anyKey.FindStringIndex(counted(s[ls:le])); m != nil {
+			e := anyKeyLine(s, ls+m[0], limit, add)
+			pos, end = max(pos, e), max(end, e)
+		}
+	}
+	return end
+}
+
+// afterIndicator returns where the text after a block indicator that ends at ie starts, past its blanks, when
+// a blank or the end of the value (valEnd) follows the indicator; ok is false otherwise ("|x", "|#", ">=").
+func afterIndicator(s string, ie, valEnd int, inStr bool) (int, bool) {
+	if ie == valEnd {
+		return ie, true
+	}
+	i := ie
+	for i < valEnd {
+		tick(1)
+		n := blankAt(s, i, valEnd, inStr)
+		if n == 0 {
+			break
+		}
+		i += n
+	}
+	return i, i > ie
+}
+
+// blankAt returns the length of the blank at s[i] before end, or 0: an ASCII blank, a space keySpaceExpr
+// names, or, inside a quoted string, an escaped line break or tab.
+func blankAt(s string, i, end int, inStr bool) int {
+	switch c := s[i]; {
+	case c == ' ' || c == '\t':
+		return 1
+	case c == '\\' && inStr && i+1 < end && strings.IndexByte("ntr", s[i+1]) >= 0:
+		return 2
+	case c >= utf8.RuneSelf:
+		r, n := utf8.DecodeRuneInString(s[i:end])
+		if unicode.Is(unicode.Zs, r) || r == '\u200b' || r == '\u2060' || r == '\ufeff' {
+			return n
+		}
+	}
+	return 0
+}
+
+// blockBelow returns the block under a header line that ends at le, of a key at column keyCol, as anyKeyLine
+// describes it: the start of its first line's text and the end of its last line, or -1, -1.
+func blockBelow(s string, le, keyCol int) (int, int) {
+	pos := le
+	for {
+		tick(1)
+		l, next, ok := nextBlockLine(s, pos, -1, blockScalar)
+		if !ok {
+			break
+		}
+		if t := strings.TrimRight(s[l.text:l.end], " \t"); (t != "---" && t != "...") || l.indent() != 0 {
+			break
+		}
+		pos = next
+	}
+	if start, end := indentedLines(s, pos, keyCol); start >= 0 {
+		return start, end
+	}
+	l, _, ok := nextBlockLine(s, pos, -1, blockScalar)
+	if !ok || l.indent() == 0 || l.indent() >= keyCol && pos == le {
+		return -1, -1
+	}
+	return indentedLines(s, pos, l.indent()-1)
+}
+
+// lineContext knows, for one line, the quoted strings on it and the flow collections that close on it, so
+// that anyKeyLine can ask about each key in turn, in order, reading the line once.
+type lineContext struct {
+	// strs are the quoted strings, as the offsets of their opening and closing quotes, in order.
+	strs [][2]int
+	// flows are the brackets of the flow collections that close on the line, in order: the offset, +1 at an
+	// opening bracket and -1 at its closing one, and the offset of the other bracket of the pair.
+	flows  [][3]int
+	si, fi int
+	// open holds the offsets of the closing brackets of the collections inFlow is inside, innermost last.
+	open []int
+}
+
+// newLineContext reads the line s[ls:le]. A double quote opens a string that runs to the next double quote
+// not escaped by a backslash; a single quote opens one only at the start of the line or after a blank or one
+// of "{[(,:=", and runs to the next single quote that is not doubled. A quote that does not close on the line
+// opens nothing, and no later quote of its kind does either. Brackets inside strings are not counted, and a
+// closing bracket that does not match the last open one is skipped.
+func newLineContext(s string, ls, le int) *lineContext {
+	ctx := &lineContext{}
+	var open []int
+	noDouble, noSingle := false, false
+	for i := ls; i < le; i++ {
+		tick(1)
+		switch c := s[i]; c {
+		case '"', '\'':
+			if c == '"' && noDouble || c == '\'' && (noSingle || i > ls && strings.IndexByte(" \t{[(,:=", s[i-1]) < 0) {
+				continue
+			}
+			j := closingQuote(s, i, le)
+			if j < 0 {
+				if c == '"' {
+					noDouble = true
+				} else {
+					noSingle = true
+				}
+				continue
+			}
+			ctx.strs = append(ctx.strs, [2]int{i, j})
+			i = j
+		case '{', '[':
+			open = append(open, i)
+		case '}', ']':
+			if n := len(open); n > 0 && s[open[n-1]] == c-2 {
+				// '{' and '[' are two below '}' and ']'.
+				ctx.flows = append(ctx.flows, [3]int{open[n-1], 1, i}, [3]int{i, -1, open[n-1]})
+				open = open[:n-1]
+			}
+		}
+	}
+	slices.SortFunc(ctx.flows, func(a, b [3]int) int { return a[0] - b[0] })
+	return ctx
+}
+
+// closingQuote returns the offset of the quote that closes the one at i before le, or -1.
+func closingQuote(s string, i, le int) int {
+	q := s[i]
+	for j := i + 1; j < le; j++ {
+		tick(1)
+		switch {
+		case q == '"' && s[j] == '\\':
+			j++
+		case s[j] == q && q == '\'' && j+1 < le && s[j+1] == '\'':
+			j++
+		case s[j] == q:
+			return j
+		}
+	}
+	return -1
+}
+
+// stringEnd returns the offset of the closing quote of the string pos is inside, or -1. Calls must come
+// with pos in increasing order.
+func (c *lineContext) stringEnd(pos int) int {
+	for c.si < len(c.strs) && c.strs[c.si][1] < pos {
+		tick(1)
+		c.si++
+	}
+	if c.si < len(c.strs) && c.strs[c.si][0] < pos && pos <= c.strs[c.si][1] {
+		return c.strs[c.si][1]
+	}
+	return -1
+}
+
+// inFlow reports whether pos is inside a flow collection that closes on the line. Calls must come with pos
+// in increasing order.
+func (c *lineContext) inFlow(pos int) bool {
+	for c.fi < len(c.flows) && c.flows[c.fi][0] < pos {
+		tick(1)
+		if f := c.flows[c.fi]; f[1] > 0 {
+			c.open = append(c.open, f[2])
+		} else if n := len(c.open); n > 0 {
+			c.open = c.open[:n-1]
+		}
+		c.fi++
+	}
+	return len(c.open) > 0
+}
+
+// flowClose returns the offset of the bracket that closes the innermost flow collection the last position
+// given to inFlow is inside, or -1.
+func (c *lineContext) flowClose() int {
+	if n := len(c.open); n > 0 {
+		return c.open[n-1]
+	}
+	return -1
+}
+
+// wordsLookLikeSecret reports whether the text of a line, or any blank-separated word of it, looks like a
+// secret (lineLooksLikeSecret).
+func wordsLookLikeSecret(text string) bool {
+	if lineLooksLikeSecret(strings.TrimSpace(text)) {
+		return true
+	}
+	for w := range strings.FieldsSeq(text) {
+		tick(1)
+		if lineLooksLikeSecret(w) {
+			return true
+		}
+	}
+	return false
 }
 
 // envEntryLines bounds the lines of an environment entry read to find its "value": Kubernetes writes it
@@ -991,6 +1455,7 @@ func envValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	nameCol := len(line) - len(trimmed) + dashes(trimmed)
 	read := 0
 	for l := range blockLines(s, m[1], nameCol-1, blockScalar) {
+		tick(1)
 		if read++; read > envEntryLines {
 			break
 		}
@@ -1004,6 +1469,7 @@ func envValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 		}
 		vpos := l.end - len(rest) + 1
 		for vpos < l.end && (s[vpos] == ' ' || s[vpos] == '\t') {
+			tick(1)
 			vpos++
 		}
 		if vpos >= l.end || isBlockHeader(s, vpos) {
@@ -1046,6 +1512,7 @@ func longTokenSpans(s string, m []int, _ int, add func(start, end int)) int {
 // randomRun reports whether some part of run between slashes looks random, as described for longTokenSpans.
 func randomRun(run string) bool {
 	for part := range strings.SplitSeq(run, "/") {
+		tick(1)
 		if len(part) < minTokenLength {
 			continue
 		}
@@ -1053,6 +1520,7 @@ func randomRun(run string) bool {
 			return true
 		}
 		for piece := range strings.SplitSeq(part, "-") {
+			tick(1)
 			if len(piece) >= minTokenLength && mixesLettersAndDigits(piece) {
 				return true
 			}
@@ -1097,7 +1565,9 @@ var wordScore = func() (t [numClasses][numClasses]float64) {
 	}
 	inBase64 := [numClasses]float64{5.0 / 64, 21.0 / 64, 26.0 / 64, 10.0 / 64, 2.0 / 64}
 	for a := range t {
+		tick(1)
 		for b := range t[a] {
+			tick(1)
 			t[a][b] = math.Log(inWords[a][b] / inBase64[b])
 		}
 	}
@@ -1165,6 +1635,7 @@ type windowPart struct {
 func base64Windows(run string, add func(start, end int)) {
 	var parts []windowPart
 	for pos := 0; pos <= len(run); {
+		tick(1)
 		end := pos + strings.IndexByte(run[pos:], '/')
 		if end < pos {
 			end = len(run)
@@ -1178,6 +1649,7 @@ func base64Windows(run string, add func(start, end int)) {
 	}
 	redact := make([]bool, len(parts))
 	for i, p := range parts {
+		tick(1)
 		redact[i] = covered[i] && !p.word
 	}
 	takeInKeyParts(parts, redact)
@@ -1190,12 +1662,14 @@ func coveredParts(parts []windowPart) []bool {
 	// diff counts, as a difference array, the qualifying windows over each part.
 	var diff []int
 	for lo := range parts {
+		tick(1)
 		if parts[lo].empty {
 			continue
 		}
 		var w windowPart
 		var upper, lower bool
 		for j := lo; j < len(parts) && parts[j].base64; j++ {
+			tick(1)
 			p, n := parts[j], j-lo+1
 			w.chars, w.pairs, w.score = w.chars+p.chars, w.pairs+p.pairs, w.score+p.score
 			upper, lower = upper || p.upper, lower || p.lower
@@ -1220,6 +1694,7 @@ func coveredParts(parts []windowPart) []bool {
 	}
 	covered := make([]bool, len(parts))
 	for i, n := 0, 0; i < len(parts); i++ {
+		tick(1)
 		n += diff[i]
 		covered[i] = n > 0
 	}
@@ -1258,6 +1733,7 @@ type keyStretch struct{ first, last, chars int }
 func takeInKeyParts(parts []windowPart, redact []bool) {
 	var stretches []keyStretch
 	for i := range parts {
+		tick(1)
 		if !redact[i] || parts[i].empty {
 			continue
 		}
@@ -1274,6 +1750,7 @@ func takeInKeyParts(parts []windowPart, redact []bool) {
 	// Join stretches across one short part.
 	merged := []keyStretch{stretches[0]}
 	for _, s := range stretches[1:] {
+		tick(1)
 		prev := &merged[len(merged)-1]
 		c := nextNonEmpty(parts, prev.last, 1)
 		joined := prev.chars + parts[c].chars + s.chars
@@ -1285,6 +1762,7 @@ func takeInKeyParts(parts []windowPart, redact []bool) {
 		prev.last, prev.chars = s.last, joined
 	}
 	for k, s := range merged {
+		tick(1)
 		first, last := s.first, s.last
 		// takeIn returns the part next to the stretch edge at i in direction step when it may be taken in.
 		takeIn := func(i, step int) int {
@@ -1301,6 +1779,7 @@ func takeInKeyParts(parts []windowPart, redact []bool) {
 		}
 		first, last = takeIn(first, -1), takeIn(last, 1)
 		for i := first; i <= last; i++ {
+			tick(1)
 			redact[i] = true
 		}
 	}
@@ -1309,6 +1788,7 @@ func takeInKeyParts(parts []windowPart, redact []bool) {
 // nextNonEmpty returns the index of the first non-empty part after i in direction step (1 or -1), or -1.
 func nextNonEmpty(parts []windowPart, i, step int) int {
 	for i += step; i >= 0 && i < len(parts); i += step {
+		tick(1)
 		if !parts[i].empty {
 			return i
 		}
@@ -1326,20 +1806,24 @@ func shortPart(p windowPart) bool {
 // its ends, that holds at least minBase64Stretch characters.
 func addStretches(parts []windowPart, redact []bool, add func(start, end int)) {
 	for i := 0; i < len(parts); {
+		tick(1)
 		if !redact[i] || parts[i].empty {
 			i++
 			continue
 		}
 		j := i
 		for j+1 < len(parts) && redact[j+1] {
+			tick(1)
 			j++
 		}
 		next := j + 1
 		for parts[j].empty {
+			tick(1)
 			j--
 		}
 		chars := 0
 		for k := i; k <= j; k++ {
+			tick(1)
 			chars += parts[k].chars
 		}
 		// A short stretch among path words that a long window reached over is a word, not a key.
@@ -1377,9 +1861,11 @@ func pathWord(part string) bool {
 	}
 	letters := 0
 	for letters < len(part) && part[letters] >= 'a' && part[letters] <= 'z' {
+		tick(1)
 		letters++
 	}
 	for i := letters; i < len(part); i++ {
+		tick(1)
 		if part[i] < '0' || part[i] > '9' {
 			return false
 		}
@@ -1392,6 +1878,7 @@ func pathWord(part string) bool {
 	}
 	var score float64
 	for i := 1; i < letters; i++ {
+		tick(1)
 		score += wordScore[wordClass(part[i-1])][wordClass(part[i])]
 	}
 	if letters == 3 {
@@ -1412,6 +1899,7 @@ func newWindowPart(run string, start, end int) windowPart {
 	p.empty = text == ""
 	acronym := !p.empty
 	for i := range len(text) {
+		tick(1)
 		c := text[i]
 		switch {
 		case c == '-' || c == '_' || c == '=':
@@ -1446,6 +1934,7 @@ func mixesCase(s string) bool {
 // isHex reports whether s holds only hexadecimal digits.
 func isHex(s string) bool {
 	for i := range len(s) {
+		tick(1)
 		switch c := s[i]; {
 		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
 		default:
@@ -1459,6 +1948,7 @@ func isHex(s string) bool {
 func mixesLettersAndDigits(s string) bool {
 	var letter, digit bool
 	for i := range len(s) {
+		tick(1)
 		c := s[i]
 		letter = letter || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 		digit = digit || c >= '0' && c <= '9'
@@ -1472,6 +1962,7 @@ func mixesLettersAndDigits(s string) bool {
 func quotedEnd(s string, pos int) int {
 	q := s[pos]
 	for i := pos + 1; i < len(s); i++ {
+		tick(1)
 		switch c := s[i]; {
 		case c == '\n' || c == '\r':
 			return -1
@@ -1496,6 +1987,7 @@ func quotedEnd(s string, pos int) int {
 func escapeLevel(s string, pos int) int {
 	r := 0
 	for pos+r < len(s) && s[pos+r] == '\\' && r < 8 {
+		tick(1)
 		r++
 	}
 	if pos+r >= len(s) || s[pos+r] != '"' {
@@ -1523,6 +2015,7 @@ func escapedQuotedSpan(s string, pos, level int) (int, int) {
 	start := pos + k + 1
 	run := 0
 	for i := start; i < len(s); i++ {
+		tick(1)
 		switch s[i] {
 		case '\\':
 			run++
@@ -1530,6 +2023,7 @@ func escapedQuotedSpan(s string, pos, level int) (int, int) {
 		case '"':
 			j := 0
 			for run%(2<<j) != 1<<j-1 {
+				tick(1)
 				j++
 			}
 			if j == level {
@@ -1627,6 +2121,7 @@ func extendedValueSpan(s string, pos, boundary, keyCol, ctx, keyPos int, wide bo
 func keyQuoteLevel(s string, pos int) int {
 	run := 0
 	for pos+run < len(s) && s[pos+run] == '\\' && run < 8 {
+		tick(1)
 		run++
 	}
 	if pos+run < len(s) && s[pos+run] == '"' {
@@ -1645,7 +2140,7 @@ func keyQuoteLevel(s string, pos int) int {
 // argument does not close it. With wide false such a value gives 0, as on main before #769 (keyValueSpans).
 func argumentEnd(s string, m []int, wide bool) int {
 	pos := m[1]
-	if s[m[2]] != '-' || strings.IndexByte(s[m[3]:pos], '=') < 0 || pos >= len(s) || !wide && s[pos] == '\\' {
+	if s[m[2]] != '-' || indexByte(s[m[3]:pos], '=') < 0 || pos >= len(s) || !wide && s[pos] == '\\' {
 		return 0
 	}
 	level, ok := enclosingQuote(s, m[2])
@@ -1691,6 +2186,7 @@ func clampToString(xs, xe, se int) (int, int) {
 func stringCloseFrom(s string, pos int, q byte, level int) int {
 	run := 0
 	for i := pos; i < extentLimit(s, pos); i++ {
+		tick(1)
 		switch c := s[i]; {
 		case c == '\n' || c == '\r':
 			return 0
@@ -1711,22 +2207,26 @@ func plainValueSpan(s string, pos, boundary, keyCol int) (int, int) {
 	switch boundary {
 	case boundaryWhitespace:
 		for end < len(s) && !isSpace(s[end]) {
+			tick(1)
 			end++
 		}
 	case boundaryFlow:
 		end = len(s)
-		if i := strings.IndexAny(s[pos:], ",}]\r\n"); i >= 0 {
+		if i := indexAny(s[pos:], ",}]\r\n"); i >= 0 {
 			end = pos + i
 		}
 		for end > pos && isSpace(s[end-1]) {
+			tick(1)
 			end--
 		}
 	case boundaryFlowWord:
 		for end < len(s) && !isSpace(s[end]) && strings.IndexByte(",}]", s[end]) < 0 {
+			tick(1)
 			end++
 		}
 		next := end
 		for next < len(s) && isSpace(s[next]) && s[next] != '\r' && s[next] != '\n' {
+			tick(1)
 			next++
 		}
 		if next < len(s) && strings.IndexByte(",}]\r\n", s[next]) < 0 {
@@ -1736,6 +2236,7 @@ func plainValueSpan(s string, pos, boundary, keyCol int) (int, int) {
 		le := lineEnd(s, pos)
 		end = le
 		for end > pos && isSpace(s[end-1]) {
+			tick(1)
 			end--
 		}
 		if end == pos {
@@ -1754,13 +2255,15 @@ func plainValueSpan(s string, pos, boundary, keyCol int) (int, int) {
 func isBlockHeader(s string, pos int) bool {
 	end := pos
 	for end < len(s) && end-pos < 3 && strings.IndexByte("|>123456789+-", s[end]) >= 0 {
+		tick(1)
 		end++
 	}
-	if !blockIndicator.MatchString(s[pos:end]) {
+	if !blockIndicator.MatchString(counted(s[pos:end])) {
 		return false
 	}
 	blank := end
 	for blank < len(s) && (s[blank] == ' ' || s[blank] == '\t') {
+		tick(1)
 		blank++
 	}
 	return blank == len(s) || s[blank] == '\n' || s[blank] == '\r' || (s[blank] == '#' && blank > end)
@@ -1807,7 +2310,7 @@ func keyValueSpans(boundary int, envName bool) func(s string, m []int, prevEnd i
 			add(start, end)
 			return skipEnd(prevEnd, start, end)
 		}
-		if i := strings.Index(s[m[3]:m[1]], ":="); i >= 0 {
+		if i := index(s[m[3]:m[1]], ":="); i >= 0 {
 			// Main read Go's ":=" as ":" and a value that opens with "=": that value stays redacted.
 			ms, me := valueSpan(s, m[3]+i+1, b, m[2]-m[0])
 			start, end = min(start, ms), max(end, me)
@@ -1899,7 +2402,7 @@ func flagExtendedValue(s string, m []int, closed bool) (int, int) {
 	if list {
 		if v := nodeProperties(s, pos); isBlockHeader(s, v) {
 			nl := m[3] + strings.LastIndexAny(sep, "\r\n") + 1
-			start, end := listBlockScalarSpan(s, v, strings.IndexByte(s[nl:pos], '-'))
+			start, end := listBlockScalarSpan(s, v, indexByte(s[nl:pos], '-'))
 			if v > pos {
 				start = pos
 			}
@@ -1947,6 +2450,7 @@ func blockSequenceItem(s string, m []int) bool {
 	}
 	i := m[0]
 	for i > 0 && m[0]-i < maxValueExtent && (s[i-1] == ' ' || s[i-1] == '\t') {
+		tick(1)
 		i--
 	}
 	if i == m[0] || i == 0 || s[i-1] != '-' {
@@ -1955,6 +2459,7 @@ func blockSequenceItem(s string, m []int) bool {
 	dash := i - 1
 	j := dash
 	for j > 0 && dash-j < maxValueExtent && (s[j-1] == ' ' || s[j-1] == '\t') {
+		tick(1)
 		j--
 	}
 	if j > 0 && s[j-1] != '\n' && s[j-1] != '\r' {
@@ -2019,6 +2524,7 @@ var blankReferenceSuffixes = []string{"volume"}
 func hasSuffixFold(key string, suffixes []string) bool {
 	key = strings.ToLower(key)
 	for _, suffix := range suffixes {
+		tick(1)
 		if strings.HasSuffix(key, suffix) {
 			return true
 		}
@@ -2034,6 +2540,7 @@ func opaqueToken(v string) bool {
 	}
 	marked := false
 	for i := range len(v) {
+		tick(1)
 		switch c := v[i]; {
 		case c >= '0' && c <= '9', c == '/', c == '+', c == '=':
 			marked = true
@@ -2056,6 +2563,7 @@ func isCamelCase(key string) bool {
 		return false
 	}
 	for i := 1; i < len(key); i++ {
+		tick(1)
 		if key[i] >= 'A' && key[i] <= 'Z' && (key[i-1] >= 'a' && key[i-1] <= 'z' || key[i-1] >= '0' && key[i-1] <= '9') {
 			return true
 		}
@@ -2077,6 +2585,7 @@ func flagWord(v string) bool {
 		return false
 	}
 	for i := range len(w) {
+		tick(1)
 		if c := w[i]; (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
 			return false
 		}
@@ -2120,6 +2629,7 @@ func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int
 		start, end := escapedQuotedSpan(s, pos, level)
 		q := end
 		for q < len(s) && s[q] == '\\' {
+			tick(1)
 			q++
 		}
 		if q < len(s) && s[q] == '"' {
@@ -2141,6 +2651,7 @@ func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int
 	// quote that does not close.
 	q := pos
 	for q < len(s) && s[q] == '\\' {
+		tick(1)
 		q++
 	}
 	return pos, tokenEnd(s, q+1)
@@ -2197,12 +2708,14 @@ const (
 // told apart from one of the text around it ("--password abc,def").
 func tokenEnd(s string, pos int) int {
 	for i := pos; i < len(s); i++ {
+		tick(1)
 		switch c := s[i]; {
 		case isSpace(c), c == '"', c == '\'':
 			return i
 		case c == '\\':
 			j := i
 			for j < len(s) && s[j] == '\\' {
+				tick(1)
 				j++
 			}
 			if j < len(s) && (s[j] == '"' || s[j] == '\'') {
@@ -2226,6 +2739,7 @@ func enclosingQuote(s string, keyStart int) (int, bool) {
 	}
 	r := 0
 	for keyStart-1-r > 0 && s[keyStart-2-r] == '\\' && r < 8 {
+		tick(1)
 		r++
 	}
 	switch {
@@ -2255,6 +2769,7 @@ func commentOverBlock(s string, m []int) bool {
 	}
 	sep := pos - 1
 	for sep > m[3] && (s[sep] == ' ' || s[sep] == '\t') {
+		tick(1)
 		sep--
 	}
 	if s[sep] != ':' {
@@ -2262,6 +2777,7 @@ func commentOverBlock(s string, m []int) bool {
 	}
 	ls := m[2]
 	for ls > 0 && (s[ls-1] == ' ' || s[ls-1] == '\t' || s[ls-1] == '-') {
+		tick(1)
 		ls--
 	}
 	if ls > 0 && s[ls-1] != '\n' {
@@ -2348,9 +2864,12 @@ func builtinRules() []rule {
 			`[A-Za-z0-9_~.-]{3}[0-9]Q(?:~|%7[Ee])(?:[A-Za-z0-9_~.-]|%7[Ee]){31,34}` +
 				`(?:(?:[A-Za-z0-9_~.-]|%7[Ee])*(?:[A-Za-z0-9_~-]|%7[Ee]))?`)},
 		// URLs with any userinfo part, such as postgres://user:pass@host/db, https://token:@host/repo or
-		// https://token@host/repo: a user name alone may be a token.
+		// https://token@host/repo: a user name alone may be a token. The user info may hold "<" and ">" (a
+		// password such as "Hunter<2"), which a JSON or HTML encoder would have escaped and text read raw
+		// does not (#840); it still ends at "/", so it never reaches into the next URL. The host part ends at
+		// "<" and ">", so a bracket of the markup around the URL ("<postgres://u:p@h/x>") stays.
 		{kind: KindConnectionString, re: regexp.MustCompile(
-			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"<>]+@[^\s'"<>]+`)},
+			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"]+@[^\s'"<>]+`)},
 		// Secret fields of semicolon-separated connection strings (Azure Storage, Service Bus, SQL Server):
 		// quoted with doubled quotes, or bare up to the next ";" or line end, spaces included.
 		{kind: KindConnectionString, groups: []int{1, 2, 3}, re: regexp.MustCompile(
@@ -2403,6 +2922,9 @@ func builtinRules() []rule {
 		// Kubernetes environment variables in YAML block form: "- name: DB_PASSWORD" and its "value".
 		{kind: KindCredential, span: envValueSpan, re: regexp.MustCompile(
 			`(?im)^[ \t]*-[ \t]+name[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?[ \t]*\r?$`)},
+		// A secret key and a YAML block scalar indicator wherever the key stands on a line (#840): the block
+		// below, and the rest of the line when a block was flattened onto it (anyKeySpans).
+		{kind: KindCredential, spans: anyKeySpans, re: anyKey},
 		// Long random tokens without a known prefix: a run of base64, base64url or hex characters (see
 		// longTokenSpans).
 		{kind: KindToken, spans: longTokenSpans, re: regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}=*`)},

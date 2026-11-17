@@ -20,7 +20,6 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/pkalin/shadewright/internal/redact/testdata/mainredact"
 )
@@ -201,19 +200,18 @@ func checkTableInput(t *testing.T, path string, n int, in string, gen []string) 
 	}
 }
 
-// Reading each value twice (with and without the extents #769 widens) keeps the time linear: on inputs that
-// repeat each hiddenKeyInputs line to 4 and 64 KiB, sixteen times the input takes at most 64 times as long
-// (256 times would be quadratic).
+// Reading each value twice (with and without the extents #769 widens) keeps the work linear: on inputs that
+// repeat each hiddenKeyInputs line to 64 KiB and 1 MiB, the work per byte ([Work]) of the larger input is at
+// most that of the smaller one and a little more (sixteen times the work per byte would be quadratic). Below
+// about 16 KiB the work per byte still grows, as the extent rule's window (maxValueExtent) fills.
 func TestMonotonicStaysLinear(t *testing.T) {
 	skipLarge(t)
 	for _, line := range hiddenKeyInputs {
 		unit := line + " "
-		times := make([]time.Duration, 0, 3)
-		for _, size := range []int{4 << 10, 16 << 10, 64 << 10} {
-			times = append(times, timeString(t, line, rep(unit, size/len(unit))))
-		}
-		if times[2] > 64*max(times[0], 2*time.Millisecond) {
-			t.Errorf("%q: 4, 16 and 64 KiB took %v", line, times)
+		small, smallSize := workString(t, line, rep(unit, (64<<10)/len(unit)))
+		large, largeSize := workString(t, line, rep(unit, (1<<20)/len(unit)))
+		if float64(large)/float64(largeSize) > 1.125*float64(max(small, 1))/float64(smallSize)+0.5 {
+			t.Errorf("%q: %d steps for %d bytes, %d for %d: more than linear", line, small, smallSize, large, largeSize)
 		}
 	}
 }

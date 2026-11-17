@@ -45,9 +45,11 @@ import (
 // Version 4: a run passes only when its expected reads (reads) pass too, a run carries its own cost, a run that
 // stopped with an error makes the cost incomplete, and the totals give the cost per passed run (#505).
 // Version 5: every model-sized proposal states the evidence-supported size, and any value above it fails.
-// Version 6: each run gives its elapsed seconds, and the totals give seconds, secondsPerPassed and
-// tokensPerPassed; the mode can be openaicompatible.
-const reportSchemaVersion = 6
+// Version 6: rubric terms match on word boundaries (termIn, #848), so "256" is no longer taken from "256Mi";
+// diagnosis scores of version 5 or earlier are not comparable.
+// Version 8 (7 is taken by the summaryQuotes field, #857): each run gives its elapsed seconds, and the totals
+// give seconds, secondsPerPassed and tokensPerPassed; the mode can be openaicompatible.
+const reportSchemaVersion = 8
 
 // report is the result of one evaluation run.
 type report struct {

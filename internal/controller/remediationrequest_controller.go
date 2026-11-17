@@ -440,8 +440,8 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.gitRetries().take(req.NamespacedName)
 	res, err := r.reconcile(ctx, req)
-	if err == nil && ctx.Err() == nil && !r.gitRetries().take(req.NamespacedName) {
-		// The reads of this reconcile worked, or were decided on for good: a retry shown earlier is over.
+	if m := r.gitRetries().take(req.NamespacedName); err == nil && ctx.Err() == nil && m.shown && !m.retried {
+		// The reads of this reconcile worked, or were decided on for good: the retry the request showed is over.
 		if clearErr := r.clearGitReadRetry(ctx, req.NamespacedName); clearErr != nil {
 			return ctrl.Result{}, clearErr
 		}
@@ -516,6 +516,10 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 			r.looks().forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
+		// Reconcile removes it after this reconcile if no read is retried; a request without it costs no read.
+		r.gitRetries().shown(req.NamespacedName)
 	}
 	if !rr.DeletionTimestamp.IsZero() {
 		r.forget(req.NamespacedName)

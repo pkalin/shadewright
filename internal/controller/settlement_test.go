@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -619,5 +620,65 @@ func TestSettlementGitWritesKeepTheirErrorPath(t *testing.T) {
 				t.Fatalf("write was labelled as a read: %+v %v", result, err)
 			}
 		})
+	}
+}
+
+// TestReconcileReadsForTheRetryClearOnlyWhenShown checks that a reconcile reads the request again to remove
+// GitReadRetry only when the request it read showed the condition: every reconcile of a request without it made
+// that extra read before, which slowed each reconcile by an API round trip.
+func TestReconcileReadsForTheRetryClearOnlyWhenShown(t *testing.T) {
+	for _, shown := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shown=%v", shown), func(t *testing.T) {
+			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			ctx := context.Background()
+			if shown {
+				meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: conditionGitReadRetry,
+					Status: metav1.ConditionTrue, Reason: "GitReadFailed", Message: "an earlier read failed"})
+				if err := r.Status().Update(ctx, rr); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clearReads := 0
+			base := r.Client.(client.WithWatch)
+			r.Client = interceptor.NewClient(base, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch,
+				key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*api.RemediationRequest); ok && calledFrom("clearGitReadRetry") {
+					clearReads++
+				}
+				return c.Get(ctx, key, obj, opts...)
+			}})
+			request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+			if _, err := r.Reconcile(ctx, request); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if shown {
+				want = 1
+			}
+			if clearReads != want {
+				t.Fatalf("reads of the request to clear the retry = %d, want %d", clearReads, want)
+			}
+			if err := base.Get(ctx, request.NamespacedName, rr); err != nil {
+				t.Fatal(err)
+			}
+			if meta.FindStatusCondition(rr.Status.Conditions, conditionGitReadRetry) != nil {
+				t.Fatal("a reconcile without a failed read left the retry condition")
+			}
+		})
+	}
+}
+
+// calledFrom reports whether a function whose name ends in name is on the caller's stack.
+func calledFrom(name string) bool {
+	pcs := make([]uintptr, 64)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.HasSuffix(f.Function, "."+name) {
+			return true
+		}
+		if !more {
+			return false
+		}
 	}
 }

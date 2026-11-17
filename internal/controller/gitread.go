@@ -225,30 +225,52 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	return reconcile.Result{RequeueAfter: d}, nil
 }
 
-// gitRetryMarks holds the requests whose reconcile in progress scheduled a Git read retry (retryGitRead).
-// Reconcile empties a request's entry before it runs and, when the reconcile ends without an error and without a
-// retry, removes condition GitReadRetry: the reads that ran worked. It holds no failure and changes no result.
+// gitRetryMarks holds, per request, what its reconcile in progress knows about condition GitReadRetry: whether
+// it scheduled a Git read retry (retryGitRead), and whether the request it read at its start showed the
+// condition. Reconcile empties a request's entry before it runs and, when the reconcile ends without an error and
+// without a retry, removes a condition it saw: the reads that ran worked. A reconcile that saw no condition makes
+// no extra read for it. It holds no failure and changes no result.
 type gitRetryMarks struct {
 	mu   sync.Mutex
-	keys map[types.NamespacedName]bool
+	keys map[types.NamespacedName]gitRetryMark
 }
 
-func (m *gitRetryMarks) mark(key types.NamespacedName) {
+// gitRetryMark is one request's entry in gitRetryMarks.
+type gitRetryMark struct {
+	// retried: this reconcile scheduled a Git read retry.
+	retried bool
+	// shown: the request read at the start of this reconcile carried condition GitReadRetry.
+	shown bool
+}
+
+func (m *gitRetryMarks) update(key types.NamespacedName, f func(*gitRetryMark)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.keys == nil {
-		m.keys = map[types.NamespacedName]bool{}
+		m.keys = map[types.NamespacedName]gitRetryMark{}
 	}
-	m.keys[key] = true
+	e := m.keys[key]
+	f(&e)
+	m.keys[key] = e
 }
 
-// take reports whether key was marked, and forgets it.
-func (m *gitRetryMarks) take(key types.NamespacedName) bool {
+// mark records that key's reconcile scheduled a Git read retry.
+func (m *gitRetryMarks) mark(key types.NamespacedName) {
+	m.update(key, func(e *gitRetryMark) { e.retried = true })
+}
+
+// shown records that the request key's reconcile read carries condition GitReadRetry.
+func (m *gitRetryMarks) shown(key types.NamespacedName) {
+	m.update(key, func(e *gitRetryMark) { e.shown = true })
+}
+
+// take returns key's entry and forgets it.
+func (m *gitRetryMarks) take(key types.NamespacedName) gitRetryMark {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	marked := m.keys[key]
+	e := m.keys[key]
 	delete(m.keys, key)
-	return marked
+	return e
 }
 
 func (r *RemediationRequestReconciler) gitRetries() *gitRetryMarks {

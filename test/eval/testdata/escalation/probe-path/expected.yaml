@@ -1,0 +1,29 @@
+# Synthetic, not from the fleet repository: the expectation of the escalation scenario probe-path (#504), in the
+# fleet's scenario schema. No lab run has observed it.
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: probe-path
+summary: The web Deployment's liveness probe requests /healthz, which the application does not serve, so the probe fails with 404 and the container restarts.
+incident:
+  reason: Unhealthy
+  status: synthetic
+  source: The kubelet's Warning event Unhealthy on the pod, attributed to Deployment demo/web through ReplicaSet.
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: synthetic
+  evidence:
+    - fact: the liveness probe fails with HTTP status 404
+      source: the Incident symptom, the kubelet's Unhealthy note
+    - fact: the container restarts after the failed probes
+      source: the pod's container status in the context
+    - fact: the probe requests the path /healthz of the web container
+      source: the Deployment's pod template, read with get_resource
+outcome:
+  type: refusal
+  status: synthetic
+  reason: Changing a probe is not in the catalog, and more memory would not help; a person is notified.
+  phase: NeedsIntervention

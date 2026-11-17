@@ -5,7 +5,7 @@ replays recorded replies, and on demand against the real model ([design 11.2](de
 [ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 3, [#78](https://github.com/pkalin/shadewright/issues/78)).
 
 <span class="sw-status sw-built">built</span> The harness, the recorded contexts of ten fleet scenarios and of
-their variants, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
+their variants, three [escalation scenarios](#the-escalation-scenarios) whose deciding fact only a read tool shows, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
 <span class="sw-status sw-planned">planned</span> Contexts and replies recorded from lab runs instead of written by
 hand, passing results stored in this repository, and the analyzer's run-time check that refuses automatic analysis
 without a passing result for its manifest digest. Until that check exists, a run with a real model in the lab is an
@@ -13,7 +13,8 @@ evaluation run, not production use.
 
 ## What a run does
 
-For each scenario in `test/eval/testdata/scenarios/`, the harness:
+For each scenario in `test/eval/testdata/scenarios/` and each escalation scenario in `test/eval/testdata/escalation/`
+([below](#the-escalation-scenarios)), the harness:
 
 1. Loads the recorded Incident, the cluster objects and the scenario's RemediationPolicies (`policy.yaml`) into a fake
    API server, with a `RemediationSettings` that enables the KEDA module, and the scenario's recorded metrics, if it
@@ -103,7 +104,8 @@ run of 2026-11-09 went from 30 to 36 passed).
 one call that matches it and the tool accepted the call; it fails otherwise, and so does the scenario run. A
 read the rubric does not list is counted (`extra`), never failed, and a call that read nothing, refused by the loop
 or the tool, is counted apart (`refused`). Tools are offered only on escalation, so a scenario that expects reads
-needs the escalation model.
+needs the escalation model: today the [escalation scenarios](#the-escalation-scenarios), which run on it from their
+first call.
 
 ```yaml
 reads:
@@ -190,7 +192,7 @@ Before the first run, the maintainer sets up:
 | `EVAL_TRIAGE_INFERENCE_API`, `EVAL_ESCALATION_INFERENCE_API` | no | `inferenceAPI` of the triage or escalation deployment: unset (chat completions), `ChatCompletions` or `Responses` (needs `EVAL_API_VERSION` `v1`). Set `Responses` for a model that refuses function tools on chat completions, such as `gpt-6.1-sol` on escalation ([#501](https://github.com/pkalin/shadewright/issues/501)). Any other value is an error before the identity is used; the escalation one needs `EVAL_ESCALATION_DEPLOYMENT` |
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
 | `EVAL_ESCALATION_PRICE_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_OUTPUT_PER_MTOK` | no | The escalation deployment's own prices: all three or none, and only with the ones above and `EVAL_ESCALATION_DEPLOYMENT`. Without them the escalation calls are never priced as the triage ones: the cost of a run whose escalation used tokens, and of the totals, is unknown and left out, and the report says why (`costUnknown`) |
-| `EVAL_FORCE_ESCALATION` | no | `1` sends every run to the escalation model with its read tools (below); needs `EVAL_ESCALATION_DEPLOYMENT`. Any other value is an error, checked before the identity is used, and `make eval` (the replay) refuses it |
+| `EVAL_FORCE_ESCALATION` | no | `1` sends every run to the escalation model with its read tools (below); needs `EVAL_ESCALATION_DEPLOYMENT`. Any other value is an error, checked before the identity is used, and `make eval` (the replay) refuses it. The escalation scenarios go to the escalation model without it |
 
 3. **Network reach to the Foundry endpoint.** A GitHub-hosted runner calls the endpoint from GitHub's shared
    address ranges. If the Foundry resource accepts only selected networks, as the reference lab's does (its AKS
@@ -204,7 +206,9 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the ten scenarios and their variants (three so far, `oom/rollout`, `oom/absorbed` and `keda-at-ceiling/wide-policy`) is thirteen analyses per repeat, each bounded by the loop's limits (at most 7 model
+A run of the ten scenarios, their variants (three so far, `oom/rollout`, `oom/absorbed` and `keda-at-ceiling/wide-policy`)
+and the three escalation scenarios is sixteen analyses per repeat. The escalation scenarios need
+`EVAL_ESCALATION_DEPLOYMENT`: without it each is handed off (`EscalationNotConfigured`) and fails. Each analysis is bounded by the loop's limits (at most 7 model
 calls with 4 tool steps, 2048 output tokens per call, 500,000 tokens per analysis). The report is rewritten after every run, and `make eval-model` stops after 50 minutes (the `go test`
 timeout), before the job's own 60, so a long run that is cut off still leaves its report. The workflow cannot be tested on a fork or
 locally without such an identity; run it once by hand after setting it up.
@@ -265,8 +269,9 @@ How the numbers read:
 
 Escalation runs only on the deterministic signals (a context cut to its total bound, a configured source that
 failed, or a triage result that failed the schema twice; [design 3.3](design/3-observation-and-deduplication.md)),
-and the recorded scenarios almost never raise them, so a normal run hardly ever calls the escalation model. To
-compare escalation candidates ([#80](https://github.com/pkalin/shadewright/issues/80)), run `make eval-model`
+and the recorded fleet scenarios almost never raise them, so they hardly ever call the escalation model; the
+[escalation scenarios](#the-escalation-scenarios) always do, and score the reads it makes. To
+compare escalation candidates on every scenario ([#80](https://github.com/pkalin/shadewright/issues/80)), run `make eval-model`
 by hand, with the identity and network reach above (the Evaluation workflow does not pass these variables),
 with `EVAL_FORCE_ESCALATION=1` and the candidate as `EVAL_ESCALATION_DEPLOYMENT` and `EVAL_ESCALATION_MODEL`:
 the harness marks every built context with a failed source, the builder's own signal, so the loop calls the
@@ -439,10 +444,10 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 | `outputSchema` | Hash of the generated output schema and the action catalog |
 | `contextBuilder` | `source` (hash of the Go sources of `internal/incidentcontext`, which has no version of its own), `limits` (the byte bounds), `sources` (what the context reads in the run: `pods`, `objects`, `recorded metrics`, `policies`) |
 | `runLimits` | The loop limits of the run: `maxToolSteps` and `maxOutputTokens` |
-| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml`, `replies.yaml` and `policy.yaml`, and of every file of its variants (what the model is shown) |
+| `scenarios` | Hash of every scenario's `incident.yaml`, `objects.yaml`, `metrics.yaml`, `replies.yaml` and `policy.yaml`, of every file of its variants, and of the same files and the `scenario.yaml` of every escalation scenario (what the model is shown, and that the run escalates) |
 | `redaction` | `builtInRules` (hash of the Go sources of `internal/redact`), `operatorPatterns` (their number: 0, nothing configures them yet) |
-| `rubric` | `fleetRepository`, `fleetCommit`, and `files` (hash of every `expected.yaml` and `rubric.yaml`) |
-| `forcedEscalation` | `true` when the run forced every analysis to the escalation model (`EVAL_FORCE_ESCALATION`); left out otherwise |
+| `rubric` | `fleetRepository`, `fleetCommit`, and `files` (hash of every `expected.yaml` and `rubric.yaml`, the escalation scenarios' included) |
+| `forcedEscalation` | `true` when the run forced every analysis to the escalation model (`EVAL_FORCE_ESCALATION`); left out otherwise, though the escalation scenarios escalate in every run |
 | `minPassRate`, `repeats` | The threshold and the number of runs of each scenario |
 | `digest` | `sha256:` and the hex digest |
 
@@ -461,6 +466,49 @@ and `oom/absorbed` included, still passes.
 
 The analyzer cannot yet compute the same digest at run time (it does not know the rubric, the threshold or the
 repeats, which ADR-0025 checks when the list of passing results is built); that check is the planned follow-up.
+
+## The escalation scenarios
+
+The fleet scenarios hold every fact of their diagnosis in the context, so a model escalated on them never needs a
+tool (the forced-escalation benchmark of 2026-11-07 escalated 27 times and called none,
+[#503](https://github.com/pkalin/shadewright/issues/503)). Each escalation scenario under
+`test/eval/testdata/escalation/` has a fact that only a read tool shows
+([#504](https://github.com/pkalin/shadewright/issues/504)). Its report name is `escalation/<directory>`.
+
+No deterministic signal of the context fires for a fact that is merely missing (a `missingData` entry is never
+one, design 3.3), so the harness sends every run of an escalation scenario to the escalation model with the read
+tools from its first call, in the replay and with a real model, through the same failed-source signal as
+`EVAL_FORCE_ESCALATION` ([Benchmarking escalation models](#benchmarking-escalation-models)): the model is shown the
+context triage would have been shown. As with that switch, the analyzer has no path to it.
+
+Each directory holds `scenario.yaml`, `rubric.yaml` and `replies.yaml`, and, unless it takes them from a fleet
+scenario, `expected.yaml`, `incident.yaml`, `objects.yaml` and `policy.yaml`:
+
+| `scenario.yaml` field | Meaning |
+| --- | --- |
+| `about` | Required: what the scenario tests and which read shows the deciding fact |
+| `fleetScenario` | The fleet scenario whose `expected.yaml`, `incident.yaml`, `objects.yaml`, `policy.yaml` and `metrics.yaml` it takes, unchanged; the directory may not hold its own. Left out, the scenario is synthetic: its own `expected.yaml`, in the fleet's schema, under a name no fleet scenario has |
+| `behindReads` | Required: values of the diagnosis that only the expected reads show |
+
+The harness refuses an escalation scenario whose rubric lists no `reads`, or that has variants. The tests check,
+for every escalation scenario, that it passes on its recorded replies (`TestEscalationScenariosPass`); that each
+value of `behindReads` is absent from the first model request, the system prompt and the context the builder made,
+and present in a tool result of the run (`TestEscalationFactsOnlyBehindReads`); and that taking any one expected
+read out of the replies fails the run, with that read reported missing (`TestEscalationScenarioFailsWithoutItsRead`).
+
+| Scenario | What it tests | Expected reads | Outcome |
+| --- | --- | --- | --- |
+| `escalation/unschedulable` | The fleet's `unschedulable`: the context shows `3 Insufficient cpu` but not the pod template's requests. Its third fact, the 256 CPU request of the web container, unscored in the fleet scenario, is scored here from the Deployment | `get_resource Deployment/web` | refusal |
+| `escalation/probe-path` | Synthetic. The liveness probe fails with HTTP 404 and the container restarts (exit code 137, which can pass for a memory kill). The probe's path, `/healthz`, is only in the Deployment's pod template | `get_resource Deployment/web` | refusal: changing a probe is not in the catalog |
+| `escalation/secret-key` | Synthetic. The Secret `web-credentials` exists, but its key `api-token` was renamed, so the container stays in `CreateContainerConfigError`. The kubelet's error in the context names the key; the environment variable that reads it (`API_TOKEN`) is only in the Deployment, and only the yes/no check tells a missing key from a missing Secret, without reading the Secret. No Secret value appears in the scenario, only key names | `get_resource Deployment/web`, `check_missing_reference Secret/web-credentials` | refusal: Secrets are excluded |
+
+Every file is `source: synthetic` or says it is synthetic: written by hand, not recorded, with placeholder UIDs and
+an image on the reserved `.invalid` domain.
+
+A fourth case of #504, a Service selector that does not match the pod labels, is not built: no read tool reads a
+Service (`get_resource` reads Pods, Deployments, StatefulSets and ReplicaSets) and the analyzer has no RBAC on
+Services, so the selector cannot sit behind a read. The other groups of #504 (a context cut past the logs bound, a
+failed source, a plausible wrong first guess) follow in a second change.
 
 ## The grouping cases
 

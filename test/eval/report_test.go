@@ -61,9 +61,11 @@ type report struct {
 type scenarioResult struct {
 	// prompt is the messages of the first model request: the system prompt and the context (not reported).
 	prompt []providers.Message
-	Name   string `json:"name"`
-	Repeat int    `json:"repeat"`
-	Pass   bool   `json:"pass"`
+	// toolText is the text of every tool result of the run, in order (not reported).
+	toolText []string
+	Name     string `json:"name"`
+	Repeat   int    `json:"repeat"`
+	Pass     bool   `json:"pass"`
 	// Recording is the recording's source (fake mode only).
 	Recording string         `json:"recording,omitempty"`
 	Reason    string         `json:"reason"`
@@ -364,7 +366,8 @@ type manifest struct {
 	// RunLimits are the loop limits of the run (the sample settings' maxToolSteps and maxOutputTokens).
 	RunLimits manifestRunLimits `json:"runLimits"`
 	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml, metrics.yaml, replies.yaml and
-	// policy.yaml, and of every file of its variants: what the model is shown (and, in fake mode, answers).
+	// policy.yaml, and of every file of its variants, and of the same files and the scenario.yaml of every
+	// escalation scenario: what the model is shown (and, in fake mode, answers).
 	Scenarios string         `json:"scenarios"`
 	Rubric    manifestRubric `json:"rubric"`
 	// ForcedEscalation says every run went to the escalation model (EVAL_FORCE_ESCALATION): a benchmark of
@@ -428,18 +431,18 @@ type manifestRedaction struct {
 type manifestRubric struct {
 	FleetRepository string `json:"fleetRepository"`
 	FleetCommit     string `json:"fleetCommit"`
-	// Files is the hash of every scenario's expected.yaml and rubric.yaml.
+	// Files is the hash of every scenario's and escalation scenario's expected.yaml and rubric.yaml.
 	Files string `json:"files"`
 }
 
 // buildManifest fills the manifest of a run and its digest.
 func buildManifest(src source, models modelSource, defs []providers.ToolDefinition, minPassRate float64,
 	repeats int) (manifest, error) {
-	return buildManifestIn(scenariosDir, src, models, defs, minPassRate, repeats)
+	return buildManifestIn(scenariosDir, escalationDir, src, models, defs, minPassRate, repeats)
 }
 
-// buildManifestIn is buildManifest over the scenarios in dir.
-func buildManifestIn(dir string, src source, models modelSource, defs []providers.ToolDefinition,
+// buildManifestIn is buildManifest over the scenarios in dir and the escalation scenarios in escDir.
+func buildManifestIn(dir, escDir string, src source, models modelSource, defs []providers.ToolDefinition,
 	minPassRate float64, repeats int) (manifest, error) {
 	l := incidentcontext.DefaultLimits()
 	m := manifest{
@@ -483,13 +486,19 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 	if m.Redaction.BuiltInRules, err = hashFiles("../../internal/redact/*.go"); err != nil {
 		return m, err
 	}
+	// An escalation scenario's expected.yaml (a synthetic one's) and rubric.yaml are the rubric; its other files,
+	// scenario.yaml included, what the model is shown and how the run is made.
 	if m.Rubric.Files, err = hashFiles(filepath.Join(dir, "*", "expected.yaml"),
-		filepath.Join(dir, "*", "rubric.yaml")); err != nil {
+		filepath.Join(dir, "*", "rubric.yaml"), filepath.Join(escDir, "*", "expected.yaml"),
+		filepath.Join(escDir, "*", "rubric.yaml")); err != nil {
 		return m, err
 	}
 	if m.Scenarios, err = hashFiles(filepath.Join(dir, "*", "incident.yaml"), filepath.Join(dir, "*", "objects.yaml"),
 		filepath.Join(dir, "*", metricsFile), filepath.Join(dir, "*", "replies.yaml"), filepath.Join(dir, "*", policyFile),
-		filepath.Join(dir, "*", variantsDir, "*", "*.yaml")); err != nil {
+		filepath.Join(dir, "*", variantsDir, "*", "*.yaml"), filepath.Join(escDir, "*", "incident.yaml"),
+		filepath.Join(escDir, "*", "objects.yaml"), filepath.Join(escDir, "*", metricsFile),
+		filepath.Join(escDir, "*", "replies.yaml"), filepath.Join(escDir, "*", policyFile),
+		filepath.Join(escDir, "*", escalationFile)); err != nil {
 		return m, err
 	}
 	if m.Digest, err = manifestDigest(m); err != nil {

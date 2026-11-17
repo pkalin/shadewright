@@ -1,0 +1,10 @@
+# The unschedulable fleet scenario as an escalation scenario (#504): the same Incident, objects and policy, and
+# the fleet's expected.yaml, with the 256 CPU request scored. The context shows the scheduler's "Insufficient
+# cpu" but not the pod template's requests; only get_resource on the Deployment (or the pending pod) shows them.
+about: >-
+  The web Deployment requests 256 CPUs, which no node has. Triage sees the FailedScheduling note and can name
+  the insufficient resource, but not the request; the escalation model reads the Deployment with get_resource
+  and names the 256 CPU request of the web container.
+fleetScenario: unschedulable
+behindReads:
+  - '"cpu": "256"'

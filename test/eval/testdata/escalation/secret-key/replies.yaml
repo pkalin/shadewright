@@ -1,0 +1,21 @@
+# Synthetic: escalation replies written by hand to the output schema for the recorded context and the tool
+# results of the reads, not a model's. The first asks for the Deployment and the yes/no check of the Secret, the
+# second quotes the env reference and the check's key.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2400, outputTokens: 90}
+    toolCalls:
+      - {id: call-1, name: get_resource, arguments: {kind: Deployment, namespace: demo, name: web}}
+      - {id: call-2, name: check_missing_reference, arguments: {namespace: demo, pod: web-7b6c5d4f9-m5r8t, kind: Secret, name: web-credentials}}
+  - model: eval-fake-1
+    usage: {inputTokens: 3700, outputTokens: 300}
+    content: |
+      {"summary": "The web container of Deployment demo/web cannot be created (CreateContainerConfigError): its environment variable API_TOKEN reads key api-token of the Secret web-credentials. The Secret exists; only the key is missing, as the existence check reports from the kubelet's status, so the key was likely renamed. Changing a Secret or an env reference is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "The key api-token was renamed or removed in the Secret web-credentials while the Deployment still reads it."}],
+       "evidence": [{"source": "c2", "quote": "CreateContainerConfigError"},
+                    {"source": "t1", "quote": "\"name\": \"API_TOKEN\""},
+                    {"source": "t2", "quote": "api-token"}],
+       "missingData": [],
+       "uncertainty": "The key's new name is not visible: the analyzer never reads Secrets.",
+       "proposal": null}

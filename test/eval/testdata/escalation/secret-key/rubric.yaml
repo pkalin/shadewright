@@ -1,0 +1,16 @@
+# How the diagnosis of escalation/secret-key is scored: each fact of expected.yaml, verbatim, with the terms the
+# result's summary, hypotheses or evidence quotes must contain (case ignored).
+facts:
+  - fact: the container state reason CreateContainerConfigError
+    all: ["CreateContainerConfigError"]
+  - fact: the environment variable API_TOKEN of the web container reads the key api-token
+    all: ["API_TOKEN", "api-token"]
+  - fact: the Secret is there and only its key is missing, learned through the yes/no check, never by reading Secrets
+    anyOf:
+      - ["secret exists"]
+      - ["secret is there"]
+      - ["only the key", "missing"]
+      - ["key is missing", "not the secret"]
+reads:
+  - read: get_resource Deployment/web
+  - read: check_missing_reference Secret/web-credentials

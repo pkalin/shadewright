@@ -79,7 +79,7 @@ func userMessages(req providers.CompletionRequest) []providers.Message {
 
 // With escalation forced, every scenario goes to the escalation model with the read tools from its first call,
 // is reported as escalated, and the model is shown the same context as without it; without it, the
-// replayed scenarios stay on triage.
+// replayed fleet scenarios stay on triage and the escalation scenarios escalate all the same.
 func TestForcedEscalationSendsEveryScenarioToEscalation(t *testing.T) {
 	scheme, err := newScheme()
 	if err != nil {
@@ -101,7 +101,12 @@ func TestForcedEscalationSendsEveryScenarioToEscalation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if pres.Escalated || len(plain.roles) == 0 || plain.roles[0] != analysis.RoleTriage {
+			if s.forceEscalation {
+				// An escalation scenario goes to the escalation model with or without the source forcing it.
+				if !pres.Escalated || len(plain.roles) == 0 || plain.roles[0] != analysis.RoleEscalation {
+					t.Fatalf("an escalation scenario did not escalate: %v, roles %v", pres.Escalated, plain.roles)
+				}
+			} else if pres.Escalated || len(plain.roles) == 0 || plain.roles[0] != analysis.RoleTriage {
 				t.Fatalf("without forcing, the scenario escalated or called no triage: %v, roles %v", pres.Escalated, plain.roles)
 			}
 			if !res.Escalated || len(forced.roles) == 0 {

@@ -1,0 +1,7 @@
+# Synthetic escalation scenario (#504), not a fleet scenario: written by hand, not observed on a cluster.
+about: >-
+  The web container's liveness probe asks for a path the application does not serve, so it fails with HTTP
+  404 and the kubelet restarts the container. The context shows the failed probe and the restarts but not the
+  probe's path; the escalation model reads the Deployment with get_resource and names the path /healthz.
+behindReads:
+  - '"path": "/healthz"'

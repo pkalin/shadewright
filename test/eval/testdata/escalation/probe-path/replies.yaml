@@ -1,0 +1,18 @@
+# Synthetic: escalation replies written by hand to the output schema for the recorded context and the tool
+# result of the read, not a model's. The first asks for the Deployment, the second quotes the probe's path.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2500, outputTokens: 60}
+    toolCalls:
+      - {id: call-1, name: get_resource, arguments: {kind: Deployment, namespace: demo, name: web}}
+  - model: eval-fake-1
+    usage: {inputTokens: 3800, outputTokens: 290}
+    content: |
+      {"summary": "The liveness probe of the web container in Deployment demo/web fails with HTTP 404 and the kubelet restarts the container (4 restarts). The probe requests the path /healthz on port 8080, which the application does not appear to serve. Changing a probe is not in the action catalog, and more memory would not help, so no change is proposed.",
+       "hypotheses": [{"description": "The probe path /healthz does not match the application's health endpoint."}],
+       "evidence": [{"source": "c1", "quote": "Liveness probe failed: HTTP probe failed with statuscode: 404"},
+                    {"source": "t1", "quote": "\"path\": \"/healthz\""}],
+       "missingData": [],
+       "uncertainty": "Which path the application serves for health is not visible without its logs or documentation.",
+       "proposal": null}

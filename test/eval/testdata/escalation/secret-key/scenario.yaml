@@ -1,0 +1,10 @@
+# Synthetic escalation scenario (#504), not a fleet scenario: written by hand, not observed on a cluster.
+about: >-
+  The Secret web-credentials exists, but the key api-token the web container's env reads was renamed in it, so
+  the container stays in CreateContainerConfigError. The context shows the kubelet's error with the key; only
+  get_resource shows which environment variable reads it, and only check_missing_reference tells a missing key
+  from a missing Secret, without reading the Secret. Its values never appear anywhere in the scenario, only key
+  names.
+behindReads:
+  - '"name": "API_TOKEN"'
+  - 'what is missing: key'

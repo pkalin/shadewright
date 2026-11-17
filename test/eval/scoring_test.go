@@ -343,17 +343,23 @@ func TestManifestDigestCoversRunLimitsAndScenarioFiles(t *testing.T) {
 			t.Errorf("%s: digest unchanged (%v)", name, err)
 		}
 	}
-	for _, file := range []string{"incident.yaml", "objects.yaml", metricsFile, "replies.yaml", policyFile,
-		filepath.Join(variantsDir, "rollout", "objects.yaml"), filepath.Join(variantsDir, "rollout", "variant.yaml")} {
-		dir := t.TempDir()
-		if err := os.CopyFS(dir, os.DirFS(scenariosDir)); err != nil {
-			t.Fatal(err)
-		}
-		same, err := buildManifestIn(dir, src, replaySource{}, defs, 1, 1)
+	esc := filepath.Join("..", "escalation")
+	for _, file := range []string{filepath.Join(scnOOM, "incident.yaml"), filepath.Join(scnOOM, "objects.yaml"),
+		filepath.Join(scnOOM, metricsFile), filepath.Join(scnOOM, "replies.yaml"), filepath.Join(scnOOM, policyFile),
+		filepath.Join(scnOOM, variantsDir, "rollout", "objects.yaml"),
+		filepath.Join(scnOOM, variantsDir, "rollout", "variant.yaml"),
+		filepath.Join(esc, "probe-path", "objects.yaml"), filepath.Join(esc, "probe-path", "replies.yaml"),
+		filepath.Join(esc, "probe-path", escalationFile), filepath.Join(esc, "probe-path", "rubric.yaml"),
+		filepath.Join(esc, "probe-path", "expected.yaml"), filepath.Join(esc, "unschedulable", escalationFile)} {
+		root := t.TempDir()
+		copyTestdata(t, root)
+		dir := filepath.Join(root, scenariosDir)
+		escDir := filepath.Join(root, escalationDir)
+		same, err := buildManifestIn(dir, escDir, src, replaySource{}, defs, 1, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		f, err := os.OpenFile(filepath.Join(dir, scnOOM, file), os.O_APPEND|os.O_WRONLY, 0)
+		f, err := os.OpenFile(filepath.Join(dir, file), os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -363,7 +369,7 @@ func TestManifestDigestCoversRunLimitsAndScenarioFiles(t *testing.T) {
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
-		m, err := buildManifestIn(dir, src, replaySource{}, defs, 1, 1)
+		m, err := buildManifestIn(dir, escDir, src, replaySource{}, defs, 1, 1)
 		if err != nil || m.Digest == same.Digest {
 			t.Errorf("%s: digest unchanged (%v)", file, err)
 		}

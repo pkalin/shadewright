@@ -29,10 +29,11 @@ import (
 // RedactFunc redacts text. Its output must never be longer than its input, as package redact guarantees.
 type RedactFunc func(string) string
 
-// Redact redacts s with r as it was read, makes the result valid UTF-8 (each invalid run becomes one "?", so
-// it never grows) and redacts it again: no character is replaced before redaction has seen the text (#840).
+// Redact redacts s with r once, as it was read, and makes the result valid UTF-8 (each invalid run becomes one
+// "?", so it never grows): no character is replaced before redaction has seen the text (#840), and the repaired
+// text is not redacted again, since redaction decides on the text as it was read (#845).
 func Redact(r RedactFunc, s string) string {
-	return r(strings.ToValidUTF8(r(s), "?"))
+	return strings.ToValidUTF8(r(s), "?")
 }
 
 // Value redacts one value from the cluster for a result line: a value longer than maxValueBytes once redacted
@@ -125,11 +126,12 @@ func RenderLog(r RedactFunc, title string, ex providers.LogExcerpt, err error, a
 	return v
 }
 
-// FitLog bounds a rendered log text again after a second redaction pass: the first headLen bytes are the
-// header, redacted and kept from its start; the rest is the excerpt, redacted and cut to its newest lines in
-// what the header leaves of n. It returns the text, the new header length and whether anything was cut.
-func FitLog(r RedactFunc, text string, headLen, n int) (string, int, bool) {
-	head, headCut := keepHead(Redact(r, text[:headLen]), n)
-	tail, tailCut := keepTail(Redact(r, text[headLen:]), n-len(head))
+// FitLog bounds a rendered log text again: the first headLen bytes are the header, kept from its start; the
+// rest is the excerpt, cut to its newest lines in what the header leaves of n. The text was redacted when it
+// was rendered and is not redacted again (#845). It returns the text, the new header length and whether
+// anything was cut.
+func FitLog(text string, headLen, n int) (string, int, bool) {
+	head, headCut := keepHead(text[:headLen], n)
+	tail, tailCut := keepTail(text[headLen:], n-len(head))
 	return head + tail, len(head), headCut || tailCut
 }

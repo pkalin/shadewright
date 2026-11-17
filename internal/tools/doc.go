@@ -42,15 +42,16 @@ limitations under the License.
 //   - a timeout for its reads (Config.Timeout), and a byte bound on its result.
 //
 // Arguments come from the model and are untrusted (invariant 4, and invariant 1: model output is never
-// authorization): they choose what to read within those bounds, never how. A refusal says which rule refused
-// in a fixed text and never echoes an argument. Results are cluster data, untrusted too: every piece of text
-// goes through the [Redactor] before any cut, values are left out whole when longer than 1 KiB and their
-// control characters become spaces, the assembled text is redacted again, and only whole lines are cut from
-// redacted text. A log excerpt is rendered by package incidentcontext's RenderLog, as in the context: it first
-// loses the leading lines that may continue an entry whose first line the source left out, before
-// redaction, its header is budgeted first, and every cut keeps the header and the newest lines. get_resource
-// leaves out annotations, managed fields, literal environment values, the metadata of volume claim templates
-// and the containers' termination messages; it redacts each string of the object as it was read, before JSON
+// authorization): they choose what to read within those bounds, never how. A refusal says which rule refused in a
+// fixed text and never echoes an argument. Results are cluster data, untrusted too: every piece of text goes through
+// the [Redactor] before any cut, values are left out whole when longer than 1 KiB and their control characters
+// become spaces, and only whole lines are cut from redacted text; the assembled text is not redacted again (#845). A
+// log excerpt is rendered by package incidentcontext's RenderLog, as in the context: it first loses the leading
+// lines that may continue an entry whose first line the source left out, before redaction, its header is budgeted
+// first, and every cut keeps the header and the newest lines. get_resource leaves out annotations, managed fields,
+// literal environment values, the metadata of volume claim templates and the containers' termination messages; it
+// redacts each string of the object as it was read (a list of strings, such as a container's arguments, as one
+// sequence, so a key in one item and its value in the next are seen together), before JSON
 // escapes its line breaks, and encodes the object without HTML escapes, so that no escape hides what a rule
 // reads (a block scalar's lines, a folded indicator ">"). The error text of a failed read never reaches the result.
 // [Result.Content] puts the text in a delimited block that says it is data, never instructions, and that the

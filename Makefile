@@ -121,7 +121,8 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -coverprofile cover.out
 	@# The redact timing tests and the 100,000 seeded keys skip under -race, and the generated corpora check a seeded
-	@# sample there (internal/redact/race_test.go, racesample_test.go): run the whole package again without it, so
+	@# sample there (internal/redact/race_test.go, racesample_test.go), and so do the log source's tests on logs of
+	@# about 1 MiB (internal/providers/logs/kube/racesample_test.go): run both packages again without it, so
 	@# that no test is selected by name and a renamed one cannot drop out. The
 	@# linearity tests count redaction work only in a build with the tag redactwork (internal/redact/work_counted.go,
 	@# no counter in the product build), so this run and the log excerpt's package get it.

@@ -185,9 +185,6 @@ func normalize(o Observation, mode quantityMode) string {
 	// at once, and only the text between matches is sanitized.
 	s := redact.Replace(o.Note, rawPlaceholder, sanitize)
 	s = expandShortIPv6(s)
-	// Redact again while line breaks and indentation are still there: YAML block scalars and continuation
-	// lines are recognized by their layout.
-	s = redactText(s)
 	s = flatten(s)
 	s = apply(s, identifierRules)
 	s = apply(s, timeRules)

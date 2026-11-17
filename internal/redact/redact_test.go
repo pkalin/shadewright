@@ -555,11 +555,13 @@ const maxWorkPerByte = 1024
 
 // Repeating the shapes the scanning rules look for must cost linear work: each value is scanned once and
 // keys inside a value already redacted are skipped. The work ([Work]) is counted, not timed, so a busy machine
-// cannot fail the test (#825): on 1 MiB it is at most maxWorkPerByte per byte, and its work per byte is at
+// cannot fail the test (#825): on 256 KiB it is at most maxWorkPerByte per byte, and its work per byte is at
 // most an eighth more than on an eighth of the input (a quadratic scan does eight times the work per byte).
+// 256 KiB, not 1 MiB, since #845: the ratio shows a quadratic scan at any size, and the larger input took most
+// of the tagged run's time.
 func TestRepeatedPatternsStayLinear(t *testing.T) {
 	skipLarge(t)
-	const size = 1 << 20
+	const size = 1 << 18
 	// tails close the units that open a quote, once, at the end of the text.
 	tails := map[string]string{"quote closed at the end": "'", "flag quote closed at end": `"`}
 	for name, unit := range map[string]string{
@@ -678,10 +680,28 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"blanks escaped punctuation": `--password "a"\!`,
 		"blanks backslash arguments": `["--password=\a `,
 		"blanks comma secret keys":   `TOKEN="a",DB_PASSWORD= "b",x-token= `,
+		// Issue #845: the canonical view. Keys on one line, bare short keys whose blocks are refused, brackets
+		// inside a flow value, other indentation and line ends, keys and values in two strings, and environment
+		// entries in either order.
+		"view keys on a line":      "pass: | token: | ",
+		"view bare keys on a line": "pass: > a b ",
+		"view bare nested blocks":  "pass: |\n \u00a0",
+		"view refused blocks":      "sig: >\r\u2007a b\r",
+		"view flow brackets":       "[password: > a]b{",
+		"view flow plain brackets": "{token: a]b[",
+		"view open flows":          "[{",
+		"view neighbour keys":      "token=a ",
+		"view wide indentation":    "password: |\r\u3000\x00",
+		"view sequence items":      `"password:", "`,
+		"view escaped items":       `\"token: |\", \"`,
+		"view env value first":     "{value: a, name: TOKEN}",
+		"view env lines":           "- name: TOKEN\r",
+		"view autolinks":           "<https://a>,<b:c@",
 	} {
 		tail := tails[name]
 		small, smallSize := workString(t, name, rep(unit, size/8/len(unit))+tail)
 		large, largeSize := workString(t, name, rep(unit, size/len(unit))+tail)
+		t.Logf("%s: %.1f steps per byte", name, float64(large)/float64(largeSize))
 		if large > maxWorkPerByte*int64(largeSize) {
 			t.Errorf("%s: %d steps for %d bytes, more than %d per byte", name, large, largeSize, maxWorkPerByte)
 		}

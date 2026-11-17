@@ -34,6 +34,11 @@ limitations under the License.
 // logfmt string, with no blank or a Unicode space at the colon, after "---" lines or less indented than the
 // key's line), and the rest of the line after such an indicator when a block was flattened onto it, inside a
 // flow collection up to its closing bracket (#840),
+// and, read on one canonical view of the text (view.go, #845): the block under each secret key and indicator
+// of a line that holds several, with every Unicode space, control and format character and invalid byte as
+// indentation and LF, CRLF and a lone CR as line ends, a flow value up to the bracket that closes it after any
+// brackets inside the secret, a value in the string of a sequence after the string that holds its key
+// ("password:", "--password="), and an environment entry whose value comes before its name,
 // the value after a secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
 // argument lists and after a flag that took the flag as its value), however it reads or starts with
 // ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
@@ -64,8 +69,8 @@ limitations under the License.
 // "basic internationalization": over-redaction kept by decision (#194), because these cannot be told apart
 // from a password or token.
 //
-// Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes before
-// its "name" or more than 16 lines after it, a base64 secret cut short by slashes with no secret key name
+// Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes more
+// than 16 lines after its "name", a base64 secret cut short by slashes with no secret key name
 // before it whose parts read as words or acronyms (whole or in part, see base64Windows), a secret after a
 // one-word key name and a blank without a dash ("set secret x", which only the long-token rule judges,
 // because "kubectl get secret foo" has the same shape), after a single-letter flag ("-p x"), after a key or
@@ -79,7 +84,15 @@ limitations under the License.
 // verbatim tag in an array, a value after a compound name and a blank that is no opaque token, a value on
 // the lines below a secret key after other text on its line with nothing after its colon, the lines after the
 // first of a scalar over several lines under a bare short key, and a secret in a format no rule knows
-// (TestKeyNameKnownLeaks). Callers redact text while it still has its lines, before they join or cut them.
+// (TestKeyNameKnownLeaks).
+//
+// Every rule reads the text as it was given and reports spans of it; the spans of all rules are merged and
+// replaced once ([Redactor.String]), so no rule reads another's output and no pass comes before another. The
+// rules of #840 and before are kept as they were, and the view rules only add spans to theirs, so nothing
+// they removed comes back. Callers redact text once, as it was read, before they replace a character, join a
+// line, escape or cut it, and never redact what they made of it (#845). A caller that holds a sequence of
+// strings (a container's arguments) redacts it with [Redactor.Strings], which also sees a key in one string
+// and its value in the next.
 package redact
 
 import (
@@ -128,6 +141,9 @@ type rule struct {
 	// spans, when set, replaces span for a rule that redacts several ranges per match: it calls add for
 	// each and returns the end of what it read, which later matches of the rule before it skip.
 	spans func(s string, m []int, prevEnd int, add func(start, end int)) int
+	// scan, when set, replaces re and the functions above: a rule that reads the whole text on the canonical
+	// view (view.go) and calls add for each range to redact.
+	scan func(s string, add func(start, end int))
 }
 
 // Redactor replaces sensitive data in text. It is safe for concurrent use.
@@ -380,6 +396,10 @@ func (r *Redactor) spans(s string) []span {
 			if end > start {
 				spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i})
 			}
+		}
+		if ru.scan != nil {
+			ru.scan(s, add)
+			continue
 		}
 		for _, m := range ru.re.FindAllStringSubmatchIndex(counted(s), -1) {
 			tick(1)
@@ -2868,7 +2888,9 @@ func builtinRules() []rule {
 		// password such as "Hunter<2"), which a JSON or HTML encoder would have escaped and text read raw
 		// does not (#840); it still ends at "/", so it never reaches into the next URL. The host part ends at
 		// "<" and ">", so a bracket of the markup around the URL ("<postgres://u:p@h/x>") stays.
-		{kind: KindConnectionString, re: regexp.MustCompile(
+		// A URL in angle brackets ("<https://example.com>,<mailto:ops@corp.io>") ends at its closing bracket
+		// when that bracket stands before the "@" and is not glued to more text (autolinkClosed, #845).
+		{kind: KindConnectionString, span: connStringSpan, re: regexp.MustCompile(
 			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"]+@[^\s'"<>]+`)},
 		// Secret fields of semicolon-separated connection strings (Azure Storage, Service Bus, SQL Server):
 		// quoted with doubled quotes, or bare up to the next ";" or line end, spaces included.
@@ -2896,6 +2918,10 @@ func builtinRules() []rule {
 		// (flagValueSpan). "--name=value" is the rule above.
 		{kind: KindCredential, span: flagValueSpan, re: regexp.MustCompile(
 			`(?i)--?(` + bareKeyExpr + `)` + flagSeparatorExpr)},
+		// Kubernetes environment variables in flow form with the value before the name (#845, view.go).
+		{kind: KindCredential, span: envValueFirstSpan, re: envValueFirst},
+		// A key in one string of a sequence and its value in the next (#845, view.go).
+		{kind: KindCredential, span: sequenceSpan, re: sequenceKey},
 		// A key name of two or more words joined by "_", blanks and one token: "aws_secret_access_key <value>"
 		// (compoundValueSpans).
 		{kind: KindCredential, spans: compoundValueSpans, re: regexp.MustCompile(
@@ -2925,6 +2951,10 @@ func builtinRules() []rule {
 		// A secret key and a YAML block scalar indicator wherever the key stands on a line (#840): the block
 		// below, and the rest of the line when a block was flattened onto it (anyKeySpans).
 		{kind: KindCredential, spans: anyKeySpans, re: anyKey},
+		// The block-value rule on the canonical view (#845, view.go): a secret key with a block indicator
+		// wherever it stands, indented with any Unicode space or control character, after any line end, with
+		// several keys on one line, and a value in a flow collection followed to the end of its brackets.
+		{kind: KindCredential, scan: viewBlockSpans},
 		// Long random tokens without a known prefix: a run of base64, base64url or hex characters (see
 		// longTokenSpans).
 		{kind: KindToken, spans: longTokenSpans, re: regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}=*`)},

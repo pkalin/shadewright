@@ -229,6 +229,11 @@ func TestConnStringWiderUserInfoKeepsItsNeighbours(t *testing.T) {
 		"postgres://app:Hunter<2Secret@db/x>mysql://app:Q>2Secret@e" + ".prod": m + ">" + m,
 		"--dsn=postgres://app:Hunter<2Secret@db:5432/x":                        "--dsn=" + m,
 		"<url>redis://:Hunter<2Secret@cache:6379/0</url>":                      "<url>" + m + "</url>",
+		// The two cases of the review of #842 (#845): a list of links in angle brackets stays, as its first
+		// link closes before the "@" of the second; a tag inside the user info cannot be told from a password
+		// such as "Hun<ter>2Sec<ret" (connByConstruction), so it stays redacted, a known over-redaction.
+		"<https://example.com>,<mailto:ops@corp.io>": "<https://example.com>,<mailto:[email]>",
+		"http://host:8080<b>user@example.com</b>":    m + "</b>",
 	} {
 		if got := redact.String(in); got != want {
 			t.Errorf("String(%q) = %q, want %q", in, got, want)

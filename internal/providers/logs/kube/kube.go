@@ -353,8 +353,8 @@ func fewerLines(data []byte) int64 {
 // older lines were dropped: the newest whole lines that fit in keep bytes of data ([cut]), valid UTF-8.
 // Redaction runs first, on data as it was read (#840): a match that starts in a line the cut drops, such as a
 // block scalar under a key whose line is dropped, is still redacted in the lines kept, by the marker of the
-// part kept, which is never longer than that part. Invalid bytes are replaced after that, and the excerpt is
-// redacted again. The cut is counted in bytes of data, as before redaction, so the excerpt never holds more
+// part kept, which is never longer than that part. Invalid bytes are replaced after that; the excerpt is not
+// redacted again, since what to redact is decided once, on the text as it was read (#845). The cut is counted in bytes of data, as before redaction, so the excerpt never holds more
 // lines than when it was redacted after the cut. Redacting all of data costs work linear in its size, which
 // the reads bound by MaxReadBytes (1 MiB): at most about 710 steps of redaction work per byte on the most
 // costly input known, so at most about 750 million steps, a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput).
@@ -386,7 +386,7 @@ func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string
 			})
 		},
 		func(seg string) string { return part(len(seg), func(skip int) string { return seg[skip:] }) })
-	return r.String(strings.ToValidUTF8(text, "?")), truncated
+	return strings.ToValidUTF8(text, "?"), truncated
 }
 
 // cut returns the newest whole lines of data that fit in keep bytes. When endMissing, the last line, which

@@ -125,10 +125,10 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		return nil
 	}
 	// Every string of the object is redacted as it was read, before JSON escapes its line breaks and quotes
-	// (a block under a secret key is found by its lines), and the encoding leaves out HTML escapes (an
-	// escaped ">" hid a folded block indicator from the second pass over the whole answer, #840).
+	// (a block under a secret key is found by its lines), each list of strings as one sequence (#845), and the
+	// encoding leaves out HTML escapes (an escaped ">" hid a folded block indicator from the rules, #840).
 	view := reflect.ValueOf(strip(obj))
-	redactStrings(view, s.redact)
+	redactStrings(view, s.redact, s.redactSequence)
 	var b strings.Builder
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
@@ -175,10 +175,12 @@ func strip(obj client.Object) any {
 	return nil
 }
 
-// redactStrings replaces every exported string reachable from v with f of it. It writes through pointers,
-// slices and maps into new copies, never into what v shares with the object that was read (a cache's).
-// Unexported fields (a time, a quantity) hold no free text and are left as they are.
-func redactStrings(v reflect.Value, f func(string) string) {
+// redactStrings replaces every exported string reachable from v with f of it, and every slice of strings (a
+// container's command or arguments) with seq of it, which decides on the sequence as a whole: a key in one
+// string and its value in the next (#845). It writes through pointers, slices and maps into new copies, never
+// into what v shares with the object that was read (a cache's). Unexported fields (a time, a quantity) hold no
+// free text and are left as they are.
+func redactStrings(v reflect.Value, f func(string) string, seq func([]string) []string) {
 	switch v.Kind() {
 	case reflect.Pointer:
 		if v.IsNil() {
@@ -186,7 +188,7 @@ func redactStrings(v reflect.Value, f func(string) string) {
 		}
 		c := reflect.New(v.Elem().Type())
 		c.Elem().Set(v.Elem())
-		redactStrings(c.Elem(), f)
+		redactStrings(c.Elem(), f, seq)
 		if v.CanSet() {
 			v.Set(c)
 		} else {
@@ -195,7 +197,7 @@ func redactStrings(v reflect.Value, f func(string) string) {
 	case reflect.Struct:
 		for _, field := range v.Fields() {
 			if field.CanSet() {
-				redactStrings(field, f)
+				redactStrings(field, f, seq)
 			}
 		}
 	case reflect.Slice:
@@ -204,8 +206,19 @@ func redactStrings(v reflect.Value, f func(string) string) {
 		}
 		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
 		reflect.Copy(c, v)
+		if v.Type().Elem().Kind() == reflect.String {
+			items := make([]string, c.Len())
+			for i := range items {
+				items[i] = c.Index(i).String()
+			}
+			for i, it := range seq(items) {
+				c.Index(i).SetString(it)
+			}
+			v.Set(c)
+			return
+		}
 		for i := range c.Len() {
-			redactStrings(c.Index(i), f)
+			redactStrings(c.Index(i), f, seq)
 		}
 		v.Set(c)
 	case reflect.Map:
@@ -216,7 +229,7 @@ func redactStrings(v reflect.Value, f func(string) string) {
 		for it := v.MapRange(); it.Next(); {
 			e := reflect.New(v.Type().Elem()).Elem()
 			e.Set(it.Value())
-			redactStrings(e, f)
+			redactStrings(e, f, seq)
 			c.SetMapIndex(it.Key(), e)
 		}
 		v.Set(c)

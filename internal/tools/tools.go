@@ -398,15 +398,16 @@ func (s *Set) Call(ctx context.Context, call providers.ToolCall) (Result, error)
 	if r.Status == StatusCouldNotFetch && errors.Is(cctx.Err(), context.DeadlineExceeded) {
 		r.addLabel(LabelTimedOut)
 	}
-	// The whole text is redacted again, then cut to the tool's bound: from its end, or for a log excerpt from
-	// its oldest lines after the header.
+	// The text is cut to the tool's bound: from its end, or for a log excerpt from its oldest lines after the
+	// header. Each value in it was redacted as it was read, before it was encoded or cut, and the assembled text
+	// is not redacted again (#845): what to redact is decided once, on the text as it was read.
 	var text string
 	var cut bool
 	head := 0
 	if r.headLen > 0 {
-		text, head, cut = incidentcontext.FitLog(s.redactor.String, r.Text, r.headLen, t.maxBytes)
+		text, head, cut = incidentcontext.FitLog(r.Text, r.headLen, t.maxBytes)
 	} else {
-		text, cut = incidentcontext.KeepHead(s.redact(r.Text), t.maxBytes)
+		text, cut = incidentcontext.KeepHead(r.Text, t.maxBytes)
 	}
 	if cut {
 		r.addLabel(LabelCut)
@@ -435,6 +436,29 @@ func done(ctx context.Context) error {
 		return fmt.Errorf("calling a tool: %w", err)
 	}
 	return nil
+}
+
+// sequenceRedactor is a [Redactor] that also decides on a sequence of strings as a whole (*redact.Redactor's
+// Strings, #845).
+type sequenceRedactor interface {
+	Strings(items []string) []string
+}
+
+// redactSequence redacts the strings of a sequence: with the redactor's Strings when it has one, so that a
+// key in one string and its value in the next are seen together, otherwise each string on its own. Each string
+// is then made valid UTF-8, as redact does.
+func (s *Set) redactSequence(items []string) []string {
+	out := make([]string, len(items))
+	if sr, ok := s.redactor.(sequenceRedactor); ok {
+		for i, it := range sr.Strings(items) {
+			out[i] = strings.ToValidUTF8(it, "?")
+		}
+		return out
+	}
+	for i, it := range items {
+		out[i] = s.redact(it)
+	}
+	return out
 }
 
 // redact makes text valid UTF-8 and redacts it, as package incidentcontext does.

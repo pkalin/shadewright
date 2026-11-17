@@ -25,7 +25,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"unicode"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
@@ -310,55 +309,6 @@ func factReached(f rubricFact, text string) bool {
 		return len(f.All) > 0 || len(f.Any) > 0 || len(f.AnyOf) > 0
 	}
 	return false
-}
-
-// termIn reports whether term is in text, without case, with no letter or digit glued to an end of the term
-// that is itself a letter or digit: "256" is in "requests 256 CPUs" and in `"cpu": "256"`, not in "256Mi".
-func termIn(term, text string) bool {
-	word := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
-	t, l := []rune(strings.ToLower(term)), []rune(strings.ToLower(text))
-	if len(t) == 0 {
-		return false
-	}
-	for i := 0; i+len(t) <= len(l); i++ {
-		if !slices.Equal(l[i:i+len(t)], t) {
-			continue
-		}
-		if word(t[0]) && i > 0 && word(l[i-1]) {
-			continue
-		}
-		if end := i + len(t); word(t[len(t)-1]) && end < len(l) && word(l[end]) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-// termIn matches a term on word boundaries without case, so a value glued to a unit or another word is not taken
-// for it.
-func TestTermIn(t *testing.T) {
-	const path = "/healthz"
-	for _, c := range []struct {
-		term, text string
-		want       bool
-	}{
-		{"256", "the web container requests 256 CPUs", true},
-		{"256", `"cpu": "256"`, true},
-		{"256", "cpu request 256", true},
-		{"256", "a limit of 256Mi", false},
-		{"256", "sha256:00", false},
-		{"256", "2560 bytes", false},
-		{path, "GET /healthz returned 404", true},
-		{path, `"path": "/healthz"`, true},
-		{path, "/healthzcheck", false},
-		{"Insufficient cpu", "3 insufficient CPU.", true},
-		{"", "anything", false},
-	} {
-		if got := termIn(c.term, c.text); got != c.want {
-			t.Errorf("termIn(%q, %q) = %v, want %v", c.term, c.text, got, c.want)
-		}
-	}
 }
 
 // withoutRead returns a copy of s whose replies make no call that matches r: such calls are taken out of their

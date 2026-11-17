@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/kedaready"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -201,6 +202,14 @@ type scenario struct {
 	// metrics is what the scenario's Prometheus holds (metrics.yaml); nil when the scenario has no metrics
 	// source.
 	metrics *metricsRecording
+	// metricsDown configures a metrics source that fails every query, a Prometheus that is down (an escalation
+	// scenario's metricsSource: down); metrics is then nil.
+	metricsDown bool
+	// logs is what the scenario's pod logs hold (logs.yaml); nil when the scenario has no log source.
+	logs *logsRecording
+	// limits are the context builder's bounds; the zero value is incidentcontext.DefaultLimits (an escalation
+	// scenario's contextBytes sets the total).
+	limits incidentcontext.Limits
 	// policies are the RemediationPolicies of the scenario's cluster (policy.yaml, #493): the context builder
 	// shows their bounds, and a proposal they refuse fails the scenario.
 	policies []*remediationv1alpha1.RemediationPolicy
@@ -209,6 +218,11 @@ type scenario struct {
 	// forceEscalation sends every run of the scenario to the escalation model with the read tools, whatever
 	// the model source: an escalation scenario (escalation_scenarios_test.go), whose facts only a read shows.
 	forceEscalation bool
+	// escalates says every run of the scenario goes to the escalation model: an escalation scenario, forced
+	// or through the product's own signal (escalation_scenarios_test.go).
+	escalates bool
+	// signal is the product's escalation signal an escalation scenario relies on; empty when it is forced.
+	signal escalationSignal
 	// behindReads are the rubric facts that only the expected reads show: not scored by the first request the
 	// product builds, scored by the tool results (TestEscalationFactsOnlyBehindReads).
 	behindReads []rubricFact
@@ -305,8 +319,8 @@ func loadScenarioDir(scheme *runtime.Scheme, dir, name string) (*scenario, error
 	return loadScenarioFiles(scheme, dir, dir, name, name)
 }
 
-// loadScenarioFiles loads the scenario called name: its expected.yaml, incident.yaml, objects.yaml, policy.yaml
-// and metrics.yaml from dataDir, whose expected.yaml must be named expectedName, and its rubric.yaml and
+// loadScenarioFiles loads the scenario called name: its expected.yaml, incident.yaml, objects.yaml, policy.yaml,
+// metrics.yaml and logs.yaml from dataDir, whose expected.yaml must be named expectedName, and its rubric.yaml and
 // replies.yaml from ownDir. A fleet scenario has one directory for both; an escalation scenario may take its
 // data from a fleet scenario (escalation_scenarios_test.go).
 func loadScenarioFiles(scheme *runtime.Scheme, dataDir, ownDir, name, expectedName string) (*scenario, error) {
@@ -341,6 +355,9 @@ func loadScenarioFiles(scheme *runtime.Scheme, dataDir, ownDir, name, expectedNa
 		return nil, err
 	}
 	if err := s.loadMetrics(dir); err != nil {
+		return nil, err
+	}
+	if err := s.loadLogs(dir); err != nil {
 		return nil, err
 	}
 	if err := s.checkReads(); err != nil {

@@ -321,8 +321,9 @@ func (a *anthropicSource) deployments() (*remediationv1alpha1.ModelDeployment, *
 
 // toolDefinitions are the definitions the loop offers on escalation in an evaluation run, for the manifest:
 // the same list as the loop's own (analysis offers every tool but get_delivery_status), with query_metrics,
-// which a scenario with a metrics.yaml is offered. A scenario without one is offered the list without
-// query_metrics; which scenarios have one is covered by the manifest's scenarios hash.
+// which a scenario with a metrics.yaml (or a metrics source that is down) is offered, and get_pod_logs, which a
+// scenario with a logs.yaml is offered. A scenario without them is offered the list without those tools;
+// which scenarios have them is covered by the manifest's scenarios hash.
 func toolDefinitions(scheme *runtime.Scheme) ([]providers.ToolDefinition, error) {
 	r, err := redact.New()
 	if err != nil {
@@ -330,7 +331,7 @@ func toolDefinitions(scheme *runtime.Scheme) ([]providers.ToolDefinition, error)
 	}
 	c := newClient(scheme, nil)
 	set, err := tools.New(tools.Config{Pods: c, Events: c, Objects: c, Redactor: r, Namespaces: watchedNamespaces,
-		Metrics: newReplayMetrics(&metricsRecording{})})
+		Metrics: newReplayMetrics(&metricsRecording{}), Logs: replayLogs{rec: &logsRecording{}}})
 	if err != nil {
 		return nil, err
 	}

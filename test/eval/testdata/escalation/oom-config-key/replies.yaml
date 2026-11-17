@@ -1,0 +1,19 @@
+# Synthetic: escalation replies written by hand to the output schema for the recorded context and the tool
+# result of the read, not a model's. The first asks for the current instance's log, the second quotes the
+# startup line that names the missing key and proposes no memory change.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 8600, outputTokens: 70}
+    toolCalls:
+      - {id: call-1, name: get_pod_logs, arguments: {namespace: demo, pod: web-5f6b8c9d7-m4n6q, container: web, previous: false}}
+  - model: eval-fake-1
+    usage: {inputTokens: 9000, outputTokens: 340}
+    content: |
+      {"summary": "The web container of Deployment demo/web is OOMKilled (exit code 137) and restarts, but not because its 64Mi limit is too low: its item cache grows without bound until the kill. The current instance logs at startup that the ConfigMap web-config mounted at /etc/web has no key cache.yaml, so the cache has no size bound. A higher memory limit would only delay the next kill, and adding the key is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "The missing key cache.yaml in ConfigMap web-config leaves the item cache unbounded."}],
+       "evidence": [{"source": "c2", "quote": "OOMKilled"},
+                    {"source": "t1", "quote": "the ConfigMap web-config mounted at /etc/web has no key cache.yaml; the item cache has no size bound"}],
+       "missingData": [],
+       "uncertainty": "",
+       "proposal": null}

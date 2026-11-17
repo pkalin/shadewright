@@ -17,6 +17,7 @@ limitations under the License.
 package eval
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -30,18 +31,28 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 )
 
 // The escalation scenarios (#504): recorded cases whose diagnosis rests on a fact only a read tool shows, so
 // triage alone cannot reach it. Each runs on the escalation model with the read tools from its first call,
-// whatever the model source, through the same failed-source signal as EVAL_FORCE_ESCALATION (forcedEscalation):
-// no deterministic signal of the context fires for them, and they measure what the escalation model reads.
+// whatever the model source. A scenario without a signal escalates through the same failed-source signal as
+// EVAL_FORCE_ESCALATION (forcedEscalation): no deterministic signal of the context fires for it. A scenario
+// with a signal is not forced: the product's own builder raises it (a context cut to its total bound, a
+// configured source that failed), and TestEscalationScenarioSignal checks that it does.
 
 // escalationDir holds one directory per escalation scenario.
 const escalationDir = "testdata/escalation"
 
 // escalationPrefix starts the report name of an escalation scenario: escalation/<directory>.
 const escalationPrefix = "escalation/"
+
+// The escalation scenarios that tests name.
+const (
+	escCutContext   = "cut-context"
+	escMetricsDown  = "metrics-down"
+	escOOMConfigKey = "oom-config-key"
+)
 
 // escalationFile describes an escalation scenario.
 const escalationFile = "scenario.yaml"
@@ -56,10 +67,31 @@ type escalationScenario struct {
 	// BehindReads names the facts of rubric.yaml, verbatim, that only the expected reads show: their terms are
 	// never in the first request the product builds, and always in a tool result of the recorded run.
 	BehindReads []string `json:"behindReads"`
+	// Signal is the product's own escalation signal the scenario relies on: "truncated" (the builder cut the
+	// context to its total bound) or "failedSource" (a configured source failed). Empty: no signal fires, and
+	// the harness forces the escalation.
+	Signal escalationSignal `json:"signal,omitempty"`
+	// ContextBytes is the builder's total bound on the context, the others staying at their defaults; it is
+	// required with signal truncated and refused otherwise. The default bounds add up to the default total, so
+	// only a total below their sum (one maxContextBytes allows, 4096 to 262144) can cut the context.
+	ContextBytes int `json:"contextBytes,omitempty"`
+	// MetricsSource "down" configures a metrics source that fails every query, a Prometheus that is down. It
+	// is required with signal failedSource and refused with a metrics.yaml.
+	MetricsSource string `json:"metricsSource,omitempty"`
 }
 
+// escalationSignal is the product's escalation signal an escalation scenario relies on.
+type escalationSignal string
+
+const (
+	signalTruncated    escalationSignal = "truncated"
+	signalFailedSource escalationSignal = "failedSource"
+	// metricsDown is the one value of metricsSource.
+	metricsDown = "down"
+)
+
 // dataFiles are the files an escalation scenario of a fleet scenario takes from it, and may not hold itself.
-var dataFiles = []string{"expected.yaml", "incident.yaml", "objects.yaml", metricsFile, policyFile}
+var dataFiles = []string{"expected.yaml", "incident.yaml", "objects.yaml", metricsFile, logsFile, policyFile}
 
 // loadEscalationScenarios reads every escalation scenario directory, sorted by name.
 func loadEscalationScenarios(scheme *runtime.Scheme) ([]*scenario, error) {
@@ -105,6 +137,9 @@ func loadEscalationScenario(scheme *runtime.Scheme, name string) (*scenario, err
 	if len(meta.BehindReads) == 0 {
 		return nil, fmt.Errorf("%s: behindReads needs at least one fact", escalationFile)
 	}
+	if err := meta.checkSignal(); err != nil {
+		return nil, err
+	}
 	variants, err := exists(filepath.Join(dir, variantsDir))
 	if err != nil {
 		return nil, err
@@ -137,6 +172,19 @@ func loadEscalationScenario(scheme *runtime.Scheme, name string) (*scenario, err
 	if err != nil {
 		return nil, err
 	}
+	if meta.MetricsSource == metricsDown {
+		if s.metrics != nil {
+			return nil, fmt.Errorf("%s: metricsSource down and a %s exclude each other", escalationFile, metricsFile)
+		}
+		s.metricsDown = true
+	}
+	if meta.ContextBytes != 0 {
+		s.limits = incidentcontext.DefaultLimits()
+		s.limits.Total = meta.ContextBytes
+		if err := s.limits.Validate(); err != nil {
+			return nil, fmt.Errorf("%s: contextBytes: %w", escalationFile, err)
+		}
+	}
 	if len(s.reads) == 0 {
 		return nil, errors.New("rubric.yaml: an escalation scenario must list the reads it expects")
 	}
@@ -148,8 +196,29 @@ func loadEscalationScenario(scheme *runtime.Scheme, name string) (*scenario, err
 		}
 		s.behindReads = append(s.behindReads, s.rubric.Facts[i])
 	}
-	s.forceEscalation = true
+	s.forceEscalation, s.escalates, s.signal = meta.Signal == "", true, meta.Signal
 	return s, nil
+}
+
+// checkSignal checks the signal and the settings that raise it: contextBytes only with truncated, a metrics
+// source that is down with failedSource and only there.
+func (m *escalationScenario) checkSignal() error {
+	switch m.Signal {
+	case "", signalTruncated, signalFailedSource:
+	default:
+		return fmt.Errorf("%s: signal %q is not truncated or failedSource", escalationFile, m.Signal)
+	}
+	if (m.Signal == signalTruncated) != (m.ContextBytes != 0) {
+		return fmt.Errorf("%s: contextBytes is required with signal truncated and refused otherwise", escalationFile)
+	}
+	if m.MetricsSource != "" && m.MetricsSource != metricsDown {
+		return fmt.Errorf("%s: metricsSource %q is not down", escalationFile, m.MetricsSource)
+	}
+	if (m.Signal == signalFailedSource) != (m.MetricsSource == metricsDown) {
+		return fmt.Errorf("%s: metricsSource down is required with signal failedSource and refused otherwise",
+			escalationFile)
+	}
+	return nil
 }
 
 // mustEscalationScenarios loads the escalation scenarios, and fails when there are none.
@@ -346,7 +415,8 @@ func TestEscalationScenarioFailsWithoutItsRead(t *testing.T) {
 
 // The loader refuses an escalation scenario that is not one, each with its own message: no reads, no facts
 // behind reads or one the rubric does not score, no about, a variant, a synthetic one under a fleet scenario's
-// name, and a fleet one that holds its own copy of the fleet's files.
+// name, a fleet one that holds its own copy of the fleet's files, a signal without the setting that raises it
+// (or such a setting without its signal), and a logs.yaml it does not accept.
 func TestEscalationScenarioRefused(t *testing.T) {
 	scheme, err := newScheme()
 	if err != nil {
@@ -401,6 +471,50 @@ func TestEscalationScenarioRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"an unknown signal", synthetic, "is not truncated or failedSource", func(t *testing.T, dir string) {
+			changeMeta(t, dir, func(m *escalationScenario) { m.Signal = "cut" })
+		}},
+		{"truncated without contextBytes", escCutContext, "contextBytes is required with signal truncated",
+			func(t *testing.T, dir string) { changeMeta(t, dir, func(m *escalationScenario) { m.ContextBytes = 0 }) }},
+		{"contextBytes without truncated", synthetic, "contextBytes is required with signal truncated",
+			func(t *testing.T, dir string) {
+				changeMeta(t, dir, func(m *escalationScenario) { m.ContextBytes = 8192 })
+			}},
+		{"contextBytes below the minimum", escCutContext, "contextBytes: context bound 1024 is outside",
+			func(t *testing.T, dir string) {
+				changeMeta(t, dir, func(m *escalationScenario) { m.ContextBytes = 1024 })
+			}},
+		{"an unknown metricsSource", synthetic, `metricsSource "flaky" is not down`, func(t *testing.T, dir string) {
+			changeMeta(t, dir, func(m *escalationScenario) { m.MetricsSource = "flaky" })
+		}},
+		{"failedSource without a source down", escMetricsDown, "metricsSource down is required with signal failedSource",
+			func(t *testing.T, dir string) {
+				changeMeta(t, dir, func(m *escalationScenario) { m.MetricsSource = "" })
+			}},
+		{"a source down without failedSource", synthetic, "metricsSource down is required with signal failedSource",
+			func(t *testing.T, dir string) {
+				changeMeta(t, dir, func(m *escalationScenario) { m.MetricsSource = metricsDown })
+			}},
+		{"a source down with metrics.yaml", escMetricsDown, "exclude each other", func(t *testing.T, dir string) {
+			raw, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(dir)), "scenarios", scnOOM, metricsFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// #nosec G703 -- a fixture copied into the test's own temporary directory.
+			if err := os.WriteFile(filepath.Join(dir, metricsFile), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"own logs.yaml in a fleet one", fleet, "logs.yaml comes from the fleet scenario", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, logsFile), []byte("# copy\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"logs.yaml without a source", escCutContext, "logs.yaml: source is required", func(t *testing.T, dir string) {
+			rewrite(t, filepath.Join(dir, logsFile), func(s string) string {
+				return strings.Replace(s, "source: synthetic\n", "", 1)
+			})
+		}},
 		// Only the name changes: a fleet scenario directory appears under the synthetic one's name, so the
 		// scenario is otherwise the one that loads below.
 		{"synthetic under a fleet name", synthetic, "may not take the fleet scenario name",
@@ -427,7 +541,7 @@ func TestEscalationScenarioRefused(t *testing.T) {
 		root := t.TempDir()
 		copyTestdata(t, root)
 		t.Chdir(root)
-		for _, n := range []string{fleet, synthetic} {
+		for _, n := range []string{fleet, synthetic, escCutContext, escMetricsDown} {
 			if _, err := loadEscalationScenario(scheme, n); err != nil {
 				t.Errorf("%s: %v", n, err)
 			}
@@ -471,5 +585,171 @@ func rewrite(t *testing.T, path string, change func(string) string) {
 	}
 	if err := os.WriteFile(path, []byte(change(string(raw))), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A scenario with a signal escalates on the product's own signal, not a forced one: the context the builder
+// returns is cut to its total bound (truncated) or names the failed metrics source (failedSource), every call
+// goes to the escalation model, and without the cause (the default bounds, or no metrics source) the same
+// scenario starts on triage.
+func TestEscalationScenarioSignal(t *testing.T) {
+	scheme, all := mustEscalationScenarios(t)
+	signals := map[escalationSignal]bool{}
+	for _, s := range all {
+		if s.signal == "" {
+			continue
+		}
+		signals[s.signal] = true
+		t.Run(s.name, func(t *testing.T) {
+			if s.forceEscalation {
+				t.Fatal("a scenario with a signal is forced")
+			}
+			spy := &roleSpy{}
+			res, err := runScenario(t.Context(), scheme, s, spy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch s.signal {
+			case signalTruncated:
+				if !res.truncated || len(res.failedSources) > 0 {
+					t.Errorf("truncated %v, failed sources %v: want only the total cut", res.truncated, res.failedSources)
+				}
+			case signalFailedSource:
+				if res.truncated || !slices.Equal(res.failedSources, []incidentcontext.Section{incidentcontext.SectionMetrics}) {
+					t.Errorf("truncated %v, failed sources %v: want only the metrics source failed", res.truncated,
+						res.failedSources)
+				}
+			}
+			if !res.Escalated || len(spy.roles) == 0 || slices.ContainsFunc(spy.roles, func(r analysis.Role) bool {
+				return r != analysis.RoleEscalation
+			}) {
+				t.Errorf("escalated %v, roles %v", res.Escalated, spy.roles)
+			}
+
+			// Without the cause the signal does not fire, so the run starts on triage. The recorded replies are
+			// escalation replies, so only the first role and the signal are checked.
+			c := *s
+			switch s.signal {
+			case signalTruncated:
+				c.limits = incidentcontext.Limits{}
+			case signalFailedSource:
+				c.metricsDown = false
+			}
+			spy = &roleSpy{}
+			res, _ = runScenario(t.Context(), scheme, &c, spy)
+			if res.truncated || len(res.failedSources) > 0 || len(spy.roles) == 0 ||
+				spy.roles[0] != analysis.RoleTriage {
+				t.Errorf("without the cause: truncated %v, failed sources %v, roles %v", res.truncated,
+					res.failedSources, spy.roles)
+			}
+		})
+	}
+	for _, want := range []escalationSignal{signalTruncated, signalFailedSource} {
+		if !signals[want] {
+			t.Errorf("no escalation scenario relies on the signal %s", want)
+		}
+	}
+}
+
+// withFinalReply returns a copy of s whose last recorded reply has content instead.
+func withFinalReply(s *scenario, content string) *scenario {
+	c := *s
+	c.recording.Replies = slices.Clone(s.recording.Replies)
+	last := &c.recording.Replies[len(c.recording.Replies)-1]
+	last.Content, last.ToolCalls = content, nil
+	return &c
+}
+
+// memoryProposal is a final reply that keeps the diagnosis and proposes a memory limit within the scenario's
+// policy, from previous to desired.
+func memoryProposal(t *testing.T, s *scenario, previous, desired string) string {
+	t.Helper()
+	var r map[string]any
+	if err := json.Unmarshal([]byte(s.recording.Replies[len(s.recording.Replies)-1].Content), &r); err != nil {
+		t.Fatal(err)
+	}
+	r["missingData"] = []string{}
+	r["proposal"] = map[string]any{
+		"action": map[string]any{"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": nil,
+			"setContainerMemoryLimit": map[string]any{"container": oomWorkload, "previous": previous, "desired": desired}},
+		"expectedEffect": "The container stays under its limit and stops being OOMKilled.", "verificationChecks": []any{},
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// The plausible wrong first guess and the failed source fail a memory proposal: the loop proposes it (the
+// policy allows it), and the scenario fails on its outcome, not on the policy or the diagnosis.
+func TestEscalationMemoryProposalFails(t *testing.T) {
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ name, previous, desired string }{
+		{escMetricsDown, "48Mi", "72Mi"},
+		{escOOMConfigKey, "64Mi", "80Mi"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, err := loadEscalationScenario(scheme, c.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := runScenario(t.Context(), scheme, withFinalReply(s, memoryProposal(t, s, c.previous, c.desired)),
+				replaySource{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Reason != string(analysis.ReasonProposed) || res.Outcome.Pass || res.Pass {
+				t.Errorf("reason %s, outcome %+v, pass %v: want a proposal that fails the outcome", res.Reason,
+					res.Outcome, res.Pass)
+			}
+			if !res.Diagnosis.Pass || !res.Reads.Pass {
+				t.Errorf("only the outcome should fail: diagnosis %+v, reads %+v", res.Diagnosis, res.Reads)
+			}
+		})
+	}
+}
+
+// The failed source accepts a diagnosis without a proposal as well as the recorded hand-off for the missing
+// metrics: both are refusals with the facts.
+func TestEscalationFailedSourceAcceptsDiagnosisAndHandOff(t *testing.T) {
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := loadEscalationScenario(scheme, escMetricsDown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r map[string]any
+	if err := json.Unmarshal([]byte(s.recording.Replies[len(s.recording.Replies)-1].Content), &r); err != nil {
+		t.Fatal(err)
+	}
+	r["missingData"] = []string{}
+	diagnosis, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name   string
+		s      *scenario
+		reason analysis.Reason
+	}{
+		{"hand-off", s, analysis.ReasonMissingData},
+		{"diagnosis", withFinalReply(s, string(diagnosis)), analysis.ReasonNoProposal},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := runScenario(t.Context(), scheme, c.s, replaySource{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Reason != string(c.reason) || !res.Pass {
+				t.Errorf("reason %s, pass %v (outcome %+v, diagnosis %+v)", res.Reason, res.Pass, res.Outcome,
+					res.Diagnosis)
+			}
+		})
 	}
 }

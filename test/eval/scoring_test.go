@@ -350,7 +350,8 @@ func TestManifestDigestCoversRunLimitsAndScenarioFiles(t *testing.T) {
 		filepath.Join(scnOOM, variantsDir, "rollout", "variant.yaml"),
 		filepath.Join(esc, "probe-path", "objects.yaml"), filepath.Join(esc, "probe-path", "replies.yaml"),
 		filepath.Join(esc, "probe-path", escalationFile), filepath.Join(esc, "probe-path", "rubric.yaml"),
-		filepath.Join(esc, "probe-path", "expected.yaml"), filepath.Join(esc, "unschedulable", escalationFile)} {
+		filepath.Join(esc, "probe-path", "expected.yaml"), filepath.Join(esc, "unschedulable", escalationFile),
+		filepath.Join(esc, "cut-context", logsFile)} {
 		root := t.TempDir()
 		copyTestdata(t, root)
 		dir := filepath.Join(root, scenariosDir)
@@ -433,7 +434,8 @@ func (s *spySource) factory(sc *scenario) (analysis.ModelFactory, func() error, 
 	}, done, err
 }
 
-// The manifest hashes the tools the loop really offers on escalation, which leave out get_delivery_status.
+// The manifest hashes the tools the loop really offers on escalation with every source the harness has (metrics
+// and logs), which leave out get_delivery_status.
 func TestManifestToolsAreTheOnesTheLoopOffers(t *testing.T) {
 	scheme, err := newScheme()
 	if err != nil {
@@ -450,6 +452,8 @@ func TestManifestToolsAreTheOnesTheLoopOffers(t *testing.T) {
 	}
 	// Two invalid triage replies escalate; the escalation request carries the tools the loop offers.
 	_, sc := mustScenario(t, scnOOM)
+	// oom has metrics but no logs: give it an empty log recording, so get_pod_logs is offered too.
+	sc.logs = &logsRecording{Source: sourceSynthetic, Namespace: sc.incident.Spec.Subject.Namespace}
 	bad := recordedReply{Model: fakeModelName, Content: "not json"}
 	sc.recording.Replies = append([]recordedReply{bad, bad}, sc.recording.Replies...)
 	spy := &spySource{}

@@ -1,0 +1,132 @@
+# Synthetic: the log of the previous instance of the web container, written by hand for the escalation
+# scenario cut-context (#504), not recorded on a cluster. The startup line that names the cause comes first;
+# about 11 KiB of failed requests follow it, so the context's total bound keeps only their tail. Replayed
+# through the LogSource interface for the harness only (test/eval/logs_test.go).
+source: synthetic
+namespace: demo
+excerpts:
+  - pod: web-6c8d7f5b4-k2x8p
+    container: web
+    previous: true
+    podUID: 00000000-0000-4000-8000-000000000803
+    containerID: containerd://web-803
+    restartCount: 3
+    text: |
+      2026-11-04T11:52:00Z info starting orders-api 2.3.1
+      2026-11-04T11:52:00Z info config: DB_POOL_SIZE=0 read from the environment, the database connection pool is disabled
+      2026-11-04T11:52:01Z info listening on :8080
+      2026-11-04T11:52:02Z error GET /orders/1001 answered 503: no free database connection after 5s
+      2026-11-04T11:52:02Z error GET /orders/1002 answered 503: no free database connection after 5s
+      2026-11-04T11:52:05Z error GET /orders/1003 answered 503: no free database connection after 5s
+      2026-11-04T11:52:05Z error GET /orders/1004 answered 503: no free database connection after 5s
+      2026-11-04T11:52:08Z error GET /orders/1005 answered 503: no free database connection after 5s
+      2026-11-04T11:52:08Z error GET /orders/1006 answered 503: no free database connection after 5s
+      2026-11-04T11:52:11Z error GET /orders/1007 answered 503: no free database connection after 5s
+      2026-11-04T11:52:11Z error GET /orders/1008 answered 503: no free database connection after 5s
+      2026-11-04T11:52:14Z error GET /orders/1009 answered 503: no free database connection after 5s
+      2026-11-04T11:52:14Z error GET /orders/1010 answered 503: no free database connection after 5s
+      2026-11-04T11:52:17Z error GET /orders/1011 answered 503: no free database connection after 5s
+      2026-11-04T11:52:17Z error GET /orders/1012 answered 503: no free database connection after 5s
+      2026-11-04T11:52:20Z error GET /orders/1013 answered 503: no free database connection after 5s
+      2026-11-04T11:52:20Z error GET /orders/1014 answered 503: no free database connection after 5s
+      2026-11-04T11:52:23Z error GET /orders/1015 answered 503: no free database connection after 5s
+      2026-11-04T11:52:23Z error GET /orders/1016 answered 503: no free database connection after 5s
+      2026-11-04T11:52:26Z error GET /orders/1017 answered 503: no free database connection after 5s
+      2026-11-04T11:52:26Z error GET /orders/1018 answered 503: no free database connection after 5s
+      2026-11-04T11:52:29Z error GET /orders/1019 answered 503: no free database connection after 5s
+      2026-11-04T11:52:29Z error GET /orders/1020 answered 503: no free database connection after 5s
+      2026-11-04T11:52:32Z error GET /orders/1021 answered 503: no free database connection after 5s
+      2026-11-04T11:52:32Z error GET /orders/1022 answered 503: no free database connection after 5s
+      2026-11-04T11:52:35Z error GET /orders/1023 answered 503: no free database connection after 5s
+      2026-11-04T11:52:35Z error GET /orders/1024 answered 503: no free database connection after 5s
+      2026-11-04T11:52:38Z error GET /orders/1025 answered 503: no free database connection after 5s
+      2026-11-04T11:52:38Z error GET /orders/1026 answered 503: no free database connection after 5s
+      2026-11-04T11:52:41Z error GET /orders/1027 answered 503: no free database connection after 5s
+      2026-11-04T11:52:41Z error GET /orders/1028 answered 503: no free database connection after 5s
+      2026-11-04T11:52:44Z error GET /orders/1029 answered 503: no free database connection after 5s
+      2026-11-04T11:52:44Z error GET /orders/1030 answered 503: no free database connection after 5s
+      2026-11-04T11:52:47Z error GET /orders/1031 answered 503: no free database connection after 5s
+      2026-11-04T11:52:47Z error GET /orders/1032 answered 503: no free database connection after 5s
+      2026-11-04T11:52:50Z error GET /orders/1033 answered 503: no free database connection after 5s
+      2026-11-04T11:52:50Z error GET /orders/1034 answered 503: no free database connection after 5s
+      2026-11-04T11:52:53Z error GET /orders/1035 answered 503: no free database connection after 5s
+      2026-11-04T11:52:53Z error GET /orders/1036 answered 503: no free database connection after 5s
+      2026-11-04T11:52:56Z error GET /orders/1037 answered 503: no free database connection after 5s
+      2026-11-04T11:52:56Z error GET /orders/1038 answered 503: no free database connection after 5s
+      2026-11-04T11:52:59Z error GET /orders/1039 answered 503: no free database connection after 5s
+      2026-11-04T11:52:59Z error GET /orders/1040 answered 503: no free database connection after 5s
+      2026-11-04T11:53:02Z error GET /orders/1041 answered 503: no free database connection after 5s
+      2026-11-04T11:53:02Z error GET /orders/1042 answered 503: no free database connection after 5s
+      2026-11-04T11:53:05Z error GET /orders/1043 answered 503: no free database connection after 5s
+      2026-11-04T11:53:05Z error GET /orders/1044 answered 503: no free database connection after 5s
+      2026-11-04T11:53:08Z error GET /orders/1045 answered 503: no free database connection after 5s
+      2026-11-04T11:53:08Z error GET /orders/1046 answered 503: no free database connection after 5s
+      2026-11-04T11:53:11Z error GET /orders/1047 answered 503: no free database connection after 5s
+      2026-11-04T11:53:11Z error GET /orders/1048 answered 503: no free database connection after 5s
+      2026-11-04T11:53:14Z error GET /orders/1049 answered 503: no free database connection after 5s
+      2026-11-04T11:53:14Z error GET /orders/1050 answered 503: no free database connection after 5s
+      2026-11-04T11:53:17Z error GET /orders/1051 answered 503: no free database connection after 5s
+      2026-11-04T11:53:17Z error GET /orders/1052 answered 503: no free database connection after 5s
+      2026-11-04T11:53:20Z error GET /orders/1053 answered 503: no free database connection after 5s
+      2026-11-04T11:53:20Z error GET /orders/1054 answered 503: no free database connection after 5s
+      2026-11-04T11:53:23Z error GET /orders/1055 answered 503: no free database connection after 5s
+      2026-11-04T11:53:23Z error GET /orders/1056 answered 503: no free database connection after 5s
+      2026-11-04T11:53:26Z error GET /orders/1057 answered 503: no free database connection after 5s
+      2026-11-04T11:53:26Z error GET /orders/1058 answered 503: no free database connection after 5s
+      2026-11-04T11:53:29Z error GET /orders/1059 answered 503: no free database connection after 5s
+      2026-11-04T11:53:29Z error GET /orders/1060 answered 503: no free database connection after 5s
+      2026-11-04T11:53:32Z error GET /orders/1061 answered 503: no free database connection after 5s
+      2026-11-04T11:53:32Z error GET /orders/1062 answered 503: no free database connection after 5s
+      2026-11-04T11:53:35Z error GET /orders/1063 answered 503: no free database connection after 5s
+      2026-11-04T11:53:35Z error GET /orders/1064 answered 503: no free database connection after 5s
+      2026-11-04T11:53:38Z error GET /orders/1065 answered 503: no free database connection after 5s
+      2026-11-04T11:53:38Z error GET /orders/1066 answered 503: no free database connection after 5s
+      2026-11-04T11:53:41Z error GET /orders/1067 answered 503: no free database connection after 5s
+      2026-11-04T11:53:41Z error GET /orders/1068 answered 503: no free database connection after 5s
+      2026-11-04T11:53:44Z error GET /orders/1069 answered 503: no free database connection after 5s
+      2026-11-04T11:53:44Z error GET /orders/1070 answered 503: no free database connection after 5s
+      2026-11-04T11:53:47Z error GET /orders/1071 answered 503: no free database connection after 5s
+      2026-11-04T11:53:47Z error GET /orders/1072 answered 503: no free database connection after 5s
+      2026-11-04T11:53:50Z error GET /orders/1073 answered 503: no free database connection after 5s
+      2026-11-04T11:53:50Z error GET /orders/1074 answered 503: no free database connection after 5s
+      2026-11-04T11:53:53Z error GET /orders/1075 answered 503: no free database connection after 5s
+      2026-11-04T11:53:53Z error GET /orders/1076 answered 503: no free database connection after 5s
+      2026-11-04T11:53:56Z error GET /orders/1077 answered 503: no free database connection after 5s
+      2026-11-04T11:53:56Z error GET /orders/1078 answered 503: no free database connection after 5s
+      2026-11-04T11:53:59Z error GET /orders/1079 answered 503: no free database connection after 5s
+      2026-11-04T11:53:59Z error GET /orders/1080 answered 503: no free database connection after 5s
+      2026-11-04T11:54:02Z error GET /orders/1081 answered 503: no free database connection after 5s
+      2026-11-04T11:54:02Z error GET /orders/1082 answered 503: no free database connection after 5s
+      2026-11-04T11:54:05Z error GET /orders/1083 answered 503: no free database connection after 5s
+      2026-11-04T11:54:05Z error GET /orders/1084 answered 503: no free database connection after 5s
+      2026-11-04T11:54:08Z error GET /orders/1085 answered 503: no free database connection after 5s
+      2026-11-04T11:54:08Z error GET /orders/1086 answered 503: no free database connection after 5s
+      2026-11-04T11:54:11Z error GET /orders/1087 answered 503: no free database connection after 5s
+      2026-11-04T11:54:11Z error GET /orders/1088 answered 503: no free database connection after 5s
+      2026-11-04T11:54:14Z error GET /orders/1089 answered 503: no free database connection after 5s
+      2026-11-04T11:54:14Z error GET /orders/1090 answered 503: no free database connection after 5s
+      2026-11-04T11:54:17Z error GET /orders/1091 answered 503: no free database connection after 5s
+      2026-11-04T11:54:17Z error GET /orders/1092 answered 503: no free database connection after 5s
+      2026-11-04T11:54:20Z error GET /orders/1093 answered 503: no free database connection after 5s
+      2026-11-04T11:54:20Z error GET /orders/1094 answered 503: no free database connection after 5s
+      2026-11-04T11:54:23Z error GET /orders/1095 answered 503: no free database connection after 5s
+      2026-11-04T11:54:23Z error GET /orders/1096 answered 503: no free database connection after 5s
+      2026-11-04T11:54:26Z error GET /orders/1097 answered 503: no free database connection after 5s
+      2026-11-04T11:54:26Z error GET /orders/1098 answered 503: no free database connection after 5s
+      2026-11-04T11:54:29Z error GET /orders/1099 answered 503: no free database connection after 5s
+      2026-11-04T11:54:29Z error GET /orders/1100 answered 503: no free database connection after 5s
+      2026-11-04T11:54:32Z error GET /orders/1101 answered 503: no free database connection after 5s
+      2026-11-04T11:54:32Z error GET /orders/1102 answered 503: no free database connection after 5s
+      2026-11-04T11:54:35Z error GET /orders/1103 answered 503: no free database connection after 5s
+      2026-11-04T11:54:35Z error GET /orders/1104 answered 503: no free database connection after 5s
+      2026-11-04T11:54:38Z error GET /orders/1105 answered 503: no free database connection after 5s
+      2026-11-04T11:54:38Z error GET /orders/1106 answered 503: no free database connection after 5s
+      2026-11-04T11:54:41Z error GET /orders/1107 answered 503: no free database connection after 5s
+      2026-11-04T11:54:41Z error GET /orders/1108 answered 503: no free database connection after 5s
+      2026-11-04T11:54:44Z error GET /orders/1109 answered 503: no free database connection after 5s
+      2026-11-04T11:54:44Z error GET /orders/1110 answered 503: no free database connection after 5s
+      2026-11-04T11:54:47Z error GET /orders/1111 answered 503: no free database connection after 5s
+      2026-11-04T11:54:47Z error GET /orders/1112 answered 503: no free database connection after 5s
+      2026-11-04T11:54:50Z error GET /orders/1113 answered 503: no free database connection after 5s
+      2026-11-04T11:54:50Z error GET /orders/1114 answered 503: no free database connection after 5s
+      2026-11-04T11:57:00Z fatal 114 consecutive requests failed, exiting with code 1

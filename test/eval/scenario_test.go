@@ -208,7 +208,7 @@ type scenario struct {
 	// logs is what the scenario's pod logs hold (logs.yaml); nil when the scenario has no log source.
 	logs *logsRecording
 	// limits are the context builder's bounds; the zero value is incidentcontext.DefaultLimits (an escalation
-	// scenario's contextBytes sets the total, a variant's summaryBytes the summary bound).
+	// scenario's contextBytes sets the total).
 	limits incidentcontext.Limits
 	// policies are the RemediationPolicies of the scenario's cluster (policy.yaml, #493): the context builder
 	// shows their bounds, and a proposal they refuse fails the scenario.
@@ -382,11 +382,6 @@ const variantsDir = "variants"
 type variant struct {
 	// About says what the variant changes and why, in a sentence or two.
 	About string `json:"about"`
-	// SummaryBytes is the context builder's summary bound for the variant, the other bounds staying at their
-	// defaults; zero keeps the default. It must be within what incidentcontext.Limits.Validate accepts. A
-	// summary over its bound without an absorbed tally needs one below the default (unschedulable/over-bound,
-	// #841).
-	SummaryBytes int `json:"summaryBytes,omitempty"`
 }
 
 // loadVariants reads the variants of the scenario base loaded from dir, sorted by name. Each is named
@@ -424,16 +419,7 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 		return nil, errors.New("variant.yaml: about is required")
 	}
 	s := &scenario{expected: base.expected, rubric: base.rubric, incident: base.incident.DeepCopy(),
-		metrics: base.metrics, policies: base.policies, limits: base.limits}
-	if v.SummaryBytes != 0 {
-		if s.limits == (incidentcontext.Limits{}) {
-			s.limits = incidentcontext.DefaultLimits()
-		}
-		s.limits.Summary = v.SummaryBytes
-		if err := s.limits.Validate(); err != nil {
-			return nil, fmt.Errorf("variant.yaml: summaryBytes: %w", err)
-		}
-	}
+		metrics: base.metrics, policies: base.policies}
 	if err := readStrict(filepath.Join(dir, "replies.yaml"), &s.recording); err != nil {
 		return nil, err
 	}

@@ -1,6 +1,6 @@
 # Synthetic: the scenario's triage reply (../../replies.yaml) for the shortened summary: it quotes the cause from
 # the part of the symptom the summary (c1) shows, and the pod's condition reason from the status (c2). A quote of
-# the part cut from the summary, cited from c1, is refused (TestOverBoundSummaryVariant).
+# the part cut from the summary, cited from c1, fails the run (testdata/summary-quotes, TestSummaryQuoteCorpus).
 source: synthetic
 replies:
   - model: eval-fake-1

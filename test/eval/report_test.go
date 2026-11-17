@@ -53,6 +53,8 @@ type report struct {
 
 // scenarioResult is one run of one scenario.
 type scenarioResult struct {
+	// prompt is the messages of the first model request: the system prompt and the context (not reported).
+	prompt  []providers.Message
 	Name    string  `json:"name"`
 	Seconds float64 `json:"seconds,omitempty"`
 	Repeat  int     `json:"repeat"`

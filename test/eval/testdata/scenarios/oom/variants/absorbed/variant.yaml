@@ -1,0 +1,4 @@
+about: >-
+  The oom Incident as the analyzer keeps it since the cause rule of ADR-0039 (#791): a cause, with the kubelet's
+  BackOff and readiness probe failures of the web container counted in its status.absorbed, so the context's
+  summary shows the absorbed tally (point 18, #796). The objects, series and policies are the scenario's.

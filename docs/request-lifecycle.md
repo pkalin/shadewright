@@ -27,6 +27,14 @@ stateDiagram-v2
     PolicyChecked --> Superseded: a plan input changed
     PRCreated --> Superseded: a plan input changed
     AwaitingApproval --> Superseded: a plan input changed
+    Pending --> Cancelled: spec.cancel (CancelRequested)
+    PolicyChecked --> Cancelled: spec.cancel (CancelRequested)
+    PRCreated --> Cancelled: spec.cancel, pull request closed (CancelRequested)
+    AwaitingApproval --> Cancelled: spec.cancel, pull request closed (CancelRequested)
+    PolicyChecked --> Cancelled: a replacement's handoff did not happen (HandoffRefused, HandoffAborted, HintsTurnedOff)
+    PolicyChecked --> Cancelled: its Incident was folded or is gone before the pull request (IncidentFolded, IncidentGone)
+    Cancelled --> Merged: its own pull request of a lost open found merged after the cancel (IncidentFolded, IncidentGone)
+    Cancelled --> NeedsIntervention: that pull request merged with another change (MergedWithForeignChange)
     PolicyChecked --> NeedsIntervention: cannot continue alone
     PRCreated --> NeedsIntervention: cannot continue alone
     AwaitingApproval --> NeedsIntervention: pull request closed, head moved or not found
@@ -47,6 +55,7 @@ stateDiagram-v2
     Merged --> [*]
     Failed --> [*]
     Inconclusive --> [*]
+    Cancelled --> [*]
 ```
 
 ## What each phase means and what you do
@@ -67,7 +76,7 @@ stateDiagram-v2
 | `Expired` | No pull request opened within 30 minutes of the decision | Nothing, final | Find why the Git calls failed, apply a new request |
 | `Inconclusive` | Merged, and neither success nor failure could be shown; `Verified=Unknown` says why: `NoMergeReceipt` (the Git host reported no full merge commit within five minutes of the executor first seeing the merge), `DeliveryNotObserved`, `DeliveryBlocked`, `DeliverySuspended`, `DeliveryNotChecked`, `TargetGone`, `TargetReplaced`, `ValueChanged`, `RolloutSuperseded`, `TargetNotChecked`, `ClearingNotChecked`, `CheckNotAvailable`, `StalePlanMerged` (a person merged a plan that was stale when the merge was recorded; never `Succeeded`), the no-evidence reasons of the stable window (`StaleReport`, `ReportMismatch`, `PartialRollout`, `NotAvailable`, `PodNotReady`, `EvidenceMissing`, `ScaledToZero`, `ObservationGap`), `RevertApplied` (a revert ran its course; the change it undid had failed, so the Incident stays with a person) or `VerificationDisabled` (see [troubleshooting](troubleshooting.md#after-the-merge)) | Nothing, final. The circuit breaker reads it like `Expired`; the Incident is escalated | Check by hand what the merge put on the target branch and whether it was applied ([troubleshooting](troubleshooting.md#merge-receipt)) |
 
-The API also defines `AutoMergeQueued`, which nothing sets yet (planned). `Cancelled` is final: a person set `spec.cancel` before the merge (reason `CancelRequested`; the executor closed the pull request, if one was open, and left the branch), or a replacement's handoff did not happen ([troubleshooting](troubleshooting.md#how-to-read-the-result)). `Succeeded` is set after `Verifying` (`Cleared=True` and `Verified=True`, reason `NoRecurrence`; `Cleared` has `ResolvedBeforeRollout` instead when the Incident's count did not move from the merge to the rollout); it is final, and the circuit breaker clears older outcomes by it. Auto-merge is not built: even with a policy that has `approval: Optional` and a request with `approvalRequired: false`, a person decides.
+The API also defines `AutoMergeQueued`, which nothing sets yet (planned). `Cancelled` is final, except that a request cancelled for its Incident whose own pull request is found merged moves on to `Merged`. A request is cancelled when a person set `spec.cancel` before the merge (reason `CancelRequested`; the executor closed the pull request, if one was open, and left the branch), or a replacement's handoff did not happen, or the request's Incident was folded into its cause's Incident or is gone before the pull request opened (`IncidentFolded`, `IncidentGone`; no pull request was opened, and the target stays locked until the next read of the branch finds no open pull request that may deliver the change; a pull request of its own that this read finds open, from an earlier open whose answer was lost, is recorded and closed first, one found closed is recorded with the reason moved to `Approved`, and one found merged moves the request on to `Merged` and then `Inconclusive` with `StalePlanMerged`, or to `NeedsIntervention` with `MergedWithForeignChange` when another change was merged with it, with the reason kept on `PlanFresh`; that is the exception above) ([troubleshooting](troubleshooting.md#how-to-read-the-result)). `Succeeded` is set after `Verifying` (`Cleared=True` and `Verified=True`, reason `NoRecurrence`; `Cleared` has `ResolvedBeforeRollout` instead when the Incident's count did not move from the merge to the rollout); it is final, and the circuit breaker clears older outcomes by it. Auto-merge is not built: even with a policy that has `approval: Optional` and a request with `approvalRequired: false`, a person decides.
 
 Conditions give the reasons: `PolicyAllowed` (the policy check), `PullRequestOpened`, `Approved`, `PlanFresh` (the plan is still current, checked every five minutes before merge), `Delivered`, `Configured` and `RolledOut` (after the merge) and `Verified` (after the merge: `False` for `Failed`, `Unknown` for `Inconclusive` and for `MergedBeforeVerification`). A request that stopped and keeps the lock on its target because another pull request is open on its branch has `TargetHeld`, which names that pull request. A pause adds `WritesPaused`, see [pause and resume](how-to/pause-and-resume.md). A request waiting for review whose Incident stopped counting has `IncidentStopped` ([troubleshooting](troubleshooting.md#pull-request-step)).
 

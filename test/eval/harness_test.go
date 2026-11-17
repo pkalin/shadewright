@@ -87,6 +87,9 @@ type tally struct {
 	usage map[analysis.Role]*roleUsage
 	// last is the content of the last reply that had any, the one the loop's outcome rests on.
 	last string
+	// first is the messages of the first request of the analysis, the system prompt and the context as the
+	// model gets them.
+	first []providers.Message
 }
 
 // roleUsage is what the calls of one role returned.
@@ -107,6 +110,9 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 	c, err := r.inner.Complete(ctx, req)
 	r.t.mu.Lock()
 	defer r.t.mu.Unlock()
+	if r.t.first == nil {
+		r.t.first = slices.Clone(req.Messages)
+	}
 	if r.t.usage == nil {
 		r.t.usage = map[analysis.Role]*roleUsage{}
 	}
@@ -256,6 +262,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		res.Tokens.addRole(string(role), rt)
 	}
 	last := t.last
+	res.prompt = t.first
 	t.mu.Unlock()
 	res.Outcome = scoreOutcome(s, out)
 	for _, q := range out.QuoteFailures {

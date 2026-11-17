@@ -280,7 +280,8 @@ func TestServiceAddressBoundary(t *testing.T) {
 			t.Fatal("redirects permitted")
 		}
 	}
-	for _, addr := range []string{"127.0.0.1:443", "169.254.169.254:443", "[::1]:443", "224.0.0.1:443"} {
+	// Shared address space (100.64.0.0/10) is refused too: cloud infrastructure such as a metadata service uses it.
+	for _, addr := range []string{"127.0.0.1:443", "169.254.169.254:443", "[::1]:443", "224.0.0.1:443", "100.64.0.1:443", "100.100.100.200:80", "[::ffff:100.127.255.254]:443"} {
 		if err := openaiwire.PrivateServiceControl("tcp", addr, nil); err == nil {
 			t.Errorf("unsafe Service address %s accepted", addr)
 		}

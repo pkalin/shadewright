@@ -497,6 +497,15 @@ An Incident's `Analyzed` condition reports these reasons before any request is s
 | `ModelNotAllowed` | Settings `deployment` is absent from that endpoint's `models` list. Choose a declared name byte for byte or have the installation administrator change the declaration after qualifying the model and its gateway alias |
 | `ProviderNotConfigured` | The key source is unavailable or malformed. Missing or empty files are retried within the call bound; nonempty keys shorter than 16 bytes are malformed and are not retried. Fixed errors name the minimum without exposing the key |
 
+After a reply arrives, two fixed texts in the analyzer log refuse it as malformed
+model output (reason `InvalidOutput`, retried and handed off like any other
+malformed reply):
+
+| Log text | Meaning and action |
+| --- | --- |
+| `openai-compatible: the reply contains a credential` | The endpoint's key appeared in the reply, also split across parts or with whitespace, control or format characters inside. Rotate the key, then find out why the server or gateway echoes request headers |
+| `openai-compatible: the reply has a field of the wrong type` | A content or argument field has the wrong JSON type, so the reply could not be checked for a split key; no key was seen. Do not rotate the key for this. Check the server and its model against the declared inference API with the qualification runbook |
+
 An empty or invalid model list, duplicate base or segment path prefix on the same
 scheme, host and port stops chart rendering and analyzer startup. Model names
 match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. See the

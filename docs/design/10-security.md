@@ -105,7 +105,14 @@ is a read-only Secret or CSI mount in the analyzer only, read at every attempt;
 executor and verifier never receive it and no Secret RBAC is added.
 For each `analyzer.analysis.openAICompatible.endpoints[].service` declaration the chart adds
 one egress rule to its `namespace` and `podSelector` (1 to 32 valid labels, refused otherwise at render and at analyzer startup) on the pod target
-`port`. The declared Service base uses verified HTTPS (443 by default). This explicit selector rule
+`port`. The declared Service base uses verified HTTPS (443 by default). A Service
+address in 100.64.0.0/10 is refused at dial even when declared: carrier-grade NAT
+and cloud infrastructure share that range (one cloud serves its instance metadata
+at 100.100.100.200), so the guard cannot tell a Service there from a host outside
+the cluster; use an RFC 1918 Service address. Anyone who may create pods in the
+Service's namespace, or edit the Service or its EndpointSlices, can take the key
+and the redacted context (a pod there can mount the serving certificate), so run
+the inference Service in a namespace where only cluster administrators create pods. This explicit selector rule
 is necessary on CNIs such as Cilium where CIDR rules exclude in-cluster pods.
 Public compatible declarations add their explicit TCP ports other than 443 to a
 separate rule whose `0.0.0.0/0` peer excludes 10.0.0.0/8, 172.16.0.0/12,

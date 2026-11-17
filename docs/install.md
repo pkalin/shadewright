@@ -172,5 +172,8 @@ For an analyzer using only OpenAI-compatible endpoints, set
 leave `analyzer.identity.azure.clientId` empty unless Blob records are enabled.
 The optional key is an existing Secret or CSI file mounted in the analyzer only;
 attach its source to that endpoint. A keyless cluster Service needs verified HTTPS
-and `service` egress fields on its endpoint declaration.
+and `service` egress fields on its endpoint declaration. Run that Service in a
+namespace where only cluster administrators create pods: the right to create pods
+there, or to edit the Service or its EndpointSlices, is equivalent to holding the
+key and the redacted context. A Service address in 100.64.0.0/10 is refused.
 Plain HTTP is refused. Follow the [installation and qualification runbook](how-to/qualify-openai-compatible.md).

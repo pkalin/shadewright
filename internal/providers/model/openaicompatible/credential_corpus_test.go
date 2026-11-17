@@ -149,6 +149,65 @@ func TestSplitCredentialCorpus(t *testing.T) {
 	}
 }
 
+// A key split across two parts with an invisible character at the cut, or with one inside a part, is
+// refused for both APIs. The old scan missed every case; the text around the key is left as it was.
+func TestSplitInvisibleCredentialCorpus(t *testing.T) {
+	var data []byte
+	for _, api := range []API{APIChatCompletions, APIResponses} {
+		p, err := newProvider(Config{Endpoint: endpoint, Deployment: testModel, API: api,
+			KeyFile: keyFile(t, secretKey)}, testHooks{transport: roundTrip(func(*http.Request) (*http.Response, error) {
+			return response(200, "application/json", string(data)), nil
+		})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, sep := range invisibleRunes {
+			for cut := 1; cut < len(secretKey); cut++ {
+				for _, visible := range []bool{false, true} {
+					insert := sep
+					if visible {
+						insert = "-"
+					}
+					first, second := "before "+secretKey[:cut]+insert, secretKey[cut:]+" after"
+					var reply map[string]any
+					if api == APIResponses {
+						reply = map[string]any{echoModelField: testModel, echoStatusField: echoCompleted,
+							echoUsageField: map[string]int64{decoyInputTokens: 30, decoyOutputTokens: 5},
+							echoOutputField: []any{map[string]any{echoTypeField: echoMessageType, decoyRoleField: decoyAssistant, echoContentField: []any{
+								map[string]any{echoTypeField: echoOutputText, echoTextField: first},
+								map[string]any{echoTypeField: echoOutputText, echoTextField: second},
+							}}}}
+					} else {
+						reply = map[string]any{echoModelField: testModel,
+							echoUsageField: map[string]int64{decoyPromptTokens: 30, decoyCompletionTokens: 5},
+							echoChoicesField: []any{map[string]any{decoyFinishReason: "stop", echoMessageType: map[string]any{
+								decoyRoleField: decoyAssistant, echoContentField: first + second}}}}
+					}
+					data, err = json.Marshal(reply)
+					if err != nil {
+						t.Fatal(err)
+					}
+					before := string(data)
+					c, err := p.Complete(t.Context(), request())
+					if visible {
+						// The structured request refuses the prose for its schema, never as a credential.
+						if err == nil || strings.Contains(err.Error(), "credential") {
+							t.Fatalf("%s: a key broken by a visible character at %d was refused: %v", api, cut, err)
+						}
+						continue
+					}
+					if !providers.IsMalformedOutput(err) || !strings.Contains(err.Error(), "contains a credential") || c.Content != "" {
+						t.Fatalf("%s: key with invisible %d at %d was returned: %v", api, i, cut, err)
+					}
+					if string(data) != before {
+						t.Fatal("the detector modified the reply")
+					}
+				}
+			}
+		}
+	}
+}
+
 // baselineReplyContainsKey retains the field-by-field matcher for differential coverage.
 func baselineReplyContainsKey(data []byte, api API, key string) bool {
 	var r struct {

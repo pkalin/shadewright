@@ -17,10 +17,30 @@ limitations under the License.
 package main
 
 import (
+	"strings"
 	"testing"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
 )
+
+// Every rune that clean drops or prints as a space is one the compatible provider's credential scan ignores,
+// so a key with such a rune inside cannot pass the scan and then show whole on the screen.
+func TestCleanDropsOnlyRunesTheCredentialScanIgnores(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if !utf8.ValidRune(r) {
+			continue
+		}
+		in := "a" + string(r) + "b"
+		if out := clean(in, 100); out != in && !openaicompatible.HiddenRune(r) {
+			t.Fatalf("clean(%U) = %q, but the credential scan does not ignore the rune", r, out)
+		}
+		if strings.TrimSpace(clean(string(r), 100)) == "" && !openaicompatible.HiddenRune(r) {
+			t.Fatalf("clean hides %U, but the credential scan does not ignore it", r)
+		}
+	}
+}
 
 func TestClean(t *testing.T) {
 	cases := map[string]struct{ in, want string }{

@@ -50,7 +50,12 @@ choose no part of the request destination.
    checked at each dial. Only a declaration with `service` permits private unicast
    addresses, and only for its exact `service.namespace.svc` or
    `service.namespace.svc.cluster.local` name. Loopback, metadata, link-local,
-   multicast and reserved addresses remain refused. Each chart Service declaration
+   multicast and reserved addresses remain refused. A Service address in
+   100.64.0.0/10 is refused too, even for a declared Service: carrier-grade NAT
+   and cloud infrastructure share that range (one cloud serves its instance
+   metadata at 100.100.100.200), so the dial guard cannot tell a Service there from
+   a host outside the cluster. Such a cluster needs the inference Service on an
+   RFC 1918 address. Each chart Service declaration
    adds one namespace/pod-selector egress rule on its target TCP port. Operators
    provision serving certificates, access controls and trusted roots. Declared
    HTTPS ports are bounded to 1 through 65535; the chart also opens each declared
@@ -103,13 +108,17 @@ choose no part of the request destination.
    A transport smoke result is not a passing scenario evaluation.
 
 The credential echo check scans raw reply bytes before parsing a completion, then
-concatenates parsed strings, numbers and object keys in wire order with whitespace
-removed. It also scans decoded content and arguments, joining their values and
+concatenates parsed strings, numbers and object keys in wire order. Every
+comparison removes whitespace and every Unicode control (Cc) and format (Cf)
+character from the text and the key, the characters the kubectl plugin drops
+when it prints, so a zero-width space, soft hyphen or NUL inside a key cannot
+pass the scan and then show the whole key on a screen. It also scans decoded content and arguments, joining their values and
 keys across parts. It detects literal and JSON-escaped echoes, including keys split
 between content, argument keys and numeric values. It fails closed: the scan of
 every parsed value runs whatever the typed decode of content and arguments does, a
 reply that is not JSON is scanned as raw bytes, and a reply whose content or
-argument fields have a wrong JSON type counts as containing a credential (the
+argument fields have a wrong JSON type is refused with its own fixed text, "the
+reply has a field of the wrong type", as malformed output like an echo (the
 completion parser refuses such a reply too). It does not detect transformed
 keys such as base64 or a key split across two replies. Outputs remain untrusted:
 the redactor checks records and telemetry, typed result and tool argument validation
@@ -138,10 +147,14 @@ Two trust assumptions remain:
   than 100.64.0.0/10 has those addresses treated as public, both by the dial guard
   and by the except list of the egress rule for declared public ports. A declared
   public endpoint could then reach such a pod or Service address.
-- A tenant who can create pods that match a declared Service's `podSelector` in
-  that Service's namespace is inside the egress rule and can receive the
-  analyzer's connections. Only verified TLS with the Service DNS name stops it from
-  reading the key and the redacted context.
+- The right to create pods in a declared Service's namespace, or to edit that
+  Service or its EndpointSlices, is equivalent to holding the key and the redacted
+  context. Such a pod can mount the namespace's Secrets, including the Service's
+  serving certificate, so verified TLS does not stop it; routing follows the
+  Service's own selector and EndpointSlices, not the declared `podSelector`; and
+  where the CNI applies `ipBlock` rules to pod addresses, the 443 rule admits any
+  pod. Run the inference Service in a namespace where only cluster administrators
+  create pods.
 
 ### Adversarial analysis
 
@@ -150,8 +163,8 @@ Two trust assumptions remain:
 | Settings points at an attacker host | Exact parsed install-time base, API and model matching; requests use declaration data only, including the fixed inference route |
 | Redirect or proxy steals a key | No redirects of any status and no environment proxy |
 | Public DNS rebinds into the cluster or metadata | Address checks on each connection; private addresses only for explicitly named Service hosts, never metadata or loopback |
-| Service impersonation | Verified TLS with the Service DNS name; cluster operators own certificates and Service routing |
-| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; scan the raw body before reply parsing and whitespace-free concatenations of every parsed string, number and object key, including decoded structured content and arguments, before returning a completion; a wrong-typed decoy field fails closed |
+| Service impersonation | Verified TLS with the Service DNS name; cluster operators own certificates and Service routing. Pod creation in the Service's namespace, or edits of the Service or its EndpointSlices, bypass it (a pod can mount the serving certificate): only cluster administrators may create pods there |
+| Error or output echoes the key | Fixed errors, bounded discarded error bodies, no wrapped transport or filesystem errors; scan the raw body before reply parsing and concatenations, without whitespace, control or format characters, of every parsed string, number and object key, including decoded structured content and arguments, before returning a completion; a wrong-typed decoy field fails closed with its own fixed text |
 | Server ignores schema or invents a tool | Shared parser, typed argument/result validation, closed catalog and deterministic policy; no output repair |
 | Server omits usage or returns 429 | Unknown usage costs the upper bound; no compatible-host unbilled exception |
 | Key rotation races a call | Read per attempt, bounded retry, no cached key; update source before revoking old key |

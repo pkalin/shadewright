@@ -418,8 +418,15 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, 
 	if int64(len(data)) > p.maxBody {
 		return nil, true, true, tooLarge
 	}
-	if key != "" && (containsKey(data, key) || replyContainsKey(data, p.api, key)) {
-		return nil, true, true, fmt.Errorf("openai-compatible: the reply contains a credential: %w", providers.ErrMalformedOutput)
+	if key != "" {
+		// Both texts are fixed and both are malformed output, retried the same way. Only the first says a
+		// key was seen; the second is a reply the caller's decode would refuse anyway.
+		switch scanReply(data, p.api, key) {
+		case scanKey:
+			return nil, true, true, fmt.Errorf("openai-compatible: the reply contains a credential: %w", providers.ErrMalformedOutput)
+		case scanWrongType:
+			return nil, true, true, fmt.Errorf("openai-compatible: the reply has a field of the wrong type: %w", providers.ErrMalformedOutput)
+		}
 	}
 	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		return data, true, true, fmt.Errorf("openai-compatible: the reply is not JSON: %w", providers.ErrMalformedOutput)
@@ -581,9 +588,10 @@ func (p *Provider) readKey() (string, error) {
 }
 
 // containsKey also checks escaped JSON strings: a hostile server cannot echo the header into a model ID,
-// content or arguments that could later reach records, status or telemetry.
+// content or arguments that could later reach records, status or telemetry. Every comparison ignores the
+// runes of [HiddenRune], so a zero-width or control character inside the key does not hide it.
 func containsKey(data []byte, key string) bool {
-	if bytes.Contains(data, []byte(key)) {
+	if bytes.Contains(data, []byte(key)) || hasKey(string(data), key) {
 		return true
 	}
 	var value any
@@ -594,12 +602,12 @@ func containsKey(data []byte, key string) bool {
 	has = func(v any) bool {
 		switch x := v.(type) {
 		case string:
-			return strings.Contains(x, key)
+			return hasKey(x, key)
 		case []any:
 			return slices.ContainsFunc(x, has)
 		case map[string]any:
 			for k, e := range x {
-				if strings.Contains(k, key) || has(e) {
+				if hasKey(k, key) || has(e) {
 					return true
 				}
 			}
@@ -631,7 +639,24 @@ func completeUsage(data []byte, api API) bool {
 	return true
 }
 
-// replyContainsKey checks the text and arguments in the form the caller will decode: Responses text is
+// scanResult is what scanReply found.
+type scanResult int
+
+const (
+	scanClean scanResult = iota
+	// scanKey: the key is in the reply.
+	scanKey
+	// scanWrongType: a field of the caller's decode has the wrong JSON type, so the joined scans could
+	// not run; the caller's decode refuses the same reply.
+	scanWrongType
+)
+
+// replyContainsKey reports whether scanReply refuses the reply, for either reason.
+func replyContainsKey(data []byte, api API, key string) bool {
+	return scanReply(data, api, key) != scanClean
+}
+
+// scanReply checks the text and arguments in the form the caller will decode: Responses text is
 // joined across parts, and structured content and tool arguments carry another JSON escape layer.
 // This check never changes the reply or repairs an invalid result.
 //
@@ -640,17 +665,22 @@ func completeUsage(data []byte, api API) bool {
 // decode reads only the fields of the caller's later decode for this API (openaiwire's responsesReply or
 // chatResponse), with the same JSON types, so a field of the other API, or any field the caller ignores,
 // cannot make it fail. When it does fail (a wrong type in one of those fields), the caller's decode
-// refuses the same reply too, so the reply is treated as containing a credential: nothing a caller
-// would accept is refused, and no decoy field can switch the joined scans off.
-func replyContainsKey(data []byte, api API, key string) bool {
+// refuses the same reply too, so the reply is refused as scanWrongType: nothing a caller would accept is
+// refused, and no decoy field can switch the joined scans off.
+//
+// Every comparison is made on text without the runes of [HiddenRune] (whitespace, and the control and
+// format characters the kubectl plugin drops when it prints), so a key with a zero-width space, a soft
+// hyphen or a NUL inside cannot pass the scan and then show whole on a screen. Each scan is one pass over a
+// bounded reply, so the cost stays linear in its size.
+func scanReply(data []byte, api API, key string) scanResult {
 	if !json.Valid(data) {
-		return bytes.Contains(data, []byte(key))
+		return found(bytes.Contains(data, []byte(key)) || hasKey(string(data), key))
 	}
 	var all, allValues strings.Builder
 	appendJSONValues(&all, json.NewDecoder(bytes.NewReader(data)), true)
 	appendJSONValues(&allValues, json.NewDecoder(bytes.NewReader(data)), false)
-	if strings.Contains(withoutWhitespace(all.String()), key) || strings.Contains(withoutWhitespace(allValues.String()), key) {
-		return true
+	if hasKey(all.String(), key) || hasKey(allValues.String(), key) {
+		return scanKey
 	}
 
 	var joined, keyed, rawJoined, messageText strings.Builder
@@ -679,7 +709,7 @@ func replyContainsKey(data []byte, api API, key string) bool {
 			} `json:"output"`
 		}
 		if json.Unmarshal(data, &r) != nil {
-			return true
+			return scanWrongType
 		}
 		for _, item := range r.Output {
 			for _, part := range item.Content {
@@ -704,7 +734,7 @@ func replyContainsKey(data []byte, api API, key string) bool {
 			} `json:"choices"`
 		}
 		if json.Unmarshal(data, &r) != nil {
-			return true
+			return scanWrongType
 		}
 		for _, choice := range r.Choices {
 			if choice.Message.Content != nil {
@@ -715,8 +745,15 @@ func replyContainsKey(data []byte, api API, key string) bool {
 			}
 		}
 	}
-	return strings.Contains(withoutWhitespace(keyed.String()), key) || matched || containsKey([]byte(rawJoined.String()), key) ||
-		strings.Contains(withoutWhitespace(joined.String()), key) || containsKey([]byte(messageText.String()), key)
+	return found(hasKey(keyed.String(), key) || matched || containsKey([]byte(rawJoined.String()), key) ||
+		hasKey(joined.String(), key) || containsKey([]byte(messageText.String()), key))
+}
+
+func found(b bool) scanResult {
+	if b {
+		return scanKey
+	}
+	return scanClean
 }
 
 // appendJSONValues joins scalar values in wire order, including object keys and numbers.
@@ -747,13 +784,30 @@ func appendJSONValues(dst *strings.Builder, dec *json.Decoder, includeKeys bool)
 	}
 }
 
-func withoutWhitespace(s string) string {
+// HiddenRune reports a rune the credential scan ignores when it compares: whitespace and every Unicode
+// control (Cc) and format (Cf) character. It covers every rune the kubectl plugin drops or prints as a
+// space (a test of that package checks all runes), so text the scan passes cannot show the key there.
+func HiddenRune(r rune) bool {
+	return unicode.IsSpace(r) || unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r)
+}
+
+// withoutHidden removes every rune of HiddenRune in one pass.
+func withoutHidden(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
+		if HiddenRune(r) {
 			return -1
 		}
 		return r
 	}, s)
+}
+
+// hasKey compares s and the key with the runes of HiddenRune removed from both.
+func hasKey(s, key string) bool {
+	needle := withoutHidden(key)
+	if needle == "" {
+		needle = key
+	}
+	return strings.Contains(withoutHidden(s), needle)
 }
 
 // compatibleWireError attributes the shared codec's fixed error text without changing its classification.

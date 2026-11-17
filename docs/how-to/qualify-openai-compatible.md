@@ -84,6 +84,15 @@ the namespace and pod selectors in the same peer. Cilium CIDR rules may exclude
 in-cluster pods, so the public HTTPS rule alone is insufficient. Verify the
 Service selector and target port against your deployment.
 
+Run the inference Service in a namespace where only cluster administrators
+create pods. The right to create pods in that namespace, or to edit the Service
+or its EndpointSlices, is equivalent to holding the key and the redacted context:
+such a pod can mount the namespace's Secrets, the Service's serving certificate
+among them, the Service routes by its own selector and EndpointSlices rather than
+the declared `podSelector`, and where the CNI applies `ipBlock` rules to pod
+addresses the 443 rule admits any pod. The Service address must be in an RFC 1918
+range: one in 100.64.0.0/10 is refused even when declared.
+
 Leave `apiKey` empty for no Authorization header. A supplied key must be at least
 16 bytes after surrounding whitespace is removed; a shorter nonempty key is
 malformed and is not retried. Provision a serving certificate

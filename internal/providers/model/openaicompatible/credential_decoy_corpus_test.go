@@ -23,10 +23,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
 )
 
 const (
+	decoyPlainArgs        = `{"a":1}`
+	textCredential        = "the reply contains a credential"
+	textWrongType         = "the reply has a field of the wrong type"
 	decoyTool             = "tool"
 	decoyCallID           = "call_1"
 	decoyNumKey           = "sk-ABCDEF123456XYZ" // #nosec G101 -- synthetic marker split into a number
@@ -52,7 +56,7 @@ type decoyShape struct {
 
 func decoyShapes() []decoyShape {
 	shapes := []decoyShape{{name: "whole", key: secretKey, parts: func(k string) ([]string, string) {
-		return []string{"before " + k + " after"}, `{"a":1}`
+		return []string{"before " + k + " after"}, decoyPlainArgs
 	}}}
 	for _, cut := range []int{1, len(secretKey) / 2, len(secretKey) - 1} {
 		shapes = append(shapes,
@@ -63,9 +67,51 @@ func decoyShapes() []decoyShape {
 				return []string{k[:cut]}, `{"` + k[cut:] + `":1}`
 			}})
 	}
-	return append(shapes, decoyShape{name: "split-number", key: decoyNumKey, parts: func(k string) ([]string, string) {
+	shapes = append(shapes, decoyShape{name: "split-number", key: decoyNumKey, parts: func(k string) ([]string, string) {
 		return []string{k[:9]}, `{"a":` + k[9:15] + `,"b":"` + k[15:] + `"}`
 	}})
+	return append(shapes, invisibleShapes()...)
+}
+
+// invisibleRunes are characters a terminal does not show and the kubectl plugin drops when it prints
+// (Unicode Cc and Cf), plus whitespace. One inside the key may not hide it from the scan.
+var invisibleRunes = []string{"\u200b", "\u00ad", "\x00", "\x7f", "\u0085", "\u2060", "\ufeff", "\u202e", "\u200d", "\U000e0001", "\u2028", " "}
+
+// withInvisible inserts sep into k at cut.
+func withInvisible(k, sep string, cut int) string { return k[:cut] + sep + k[cut:] }
+
+// jsonText marshals v and returns the JSON text, so that a control character inside it stays valid JSON.
+func jsonText(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// invisibleShapes put an invisible character inside the key in each slot the scan compares: the message
+// text, an argument value, an argument object key, and a key split across two text parts.
+func invisibleShapes() []decoyShape {
+	cuts := []int{1, len(secretKey) / 2, len(secretKey) - 1}
+	shapes := make([]decoyShape, 0, 4*len(cuts)*len(invisibleRunes))
+	for i, sep := range invisibleRunes {
+		for _, cut := range cuts {
+			shapes = append(shapes,
+				decoyShape{name: fmt.Sprintf("invisible-%d-content-%d", i, cut), key: secretKey, parts: func(k string) ([]string, string) {
+					return []string{"before " + withInvisible(k, sep, cut) + " after"}, decoyPlainArgs
+				}},
+				decoyShape{name: fmt.Sprintf("invisible-%d-argument-%d", i, cut), key: secretKey, parts: func(k string) ([]string, string) {
+					return []string{"x"}, jsonText(map[string]string{"s": withInvisible(k, sep, cut)})
+				}},
+				decoyShape{name: fmt.Sprintf("invisible-%d-argument-key-%d", i, cut), key: secretKey, parts: func(k string) ([]string, string) {
+					return []string{"x"}, jsonText(map[string]int{withInvisible(k, sep, cut): 1})
+				}},
+				decoyShape{name: fmt.Sprintf("invisible-%d-split-%d", i, cut), key: secretKey, parts: func(k string) ([]string, string) {
+					return []string{k[:cut] + sep, k[cut:]}, decoyPlainArgs
+				}})
+		}
+	}
+	return shapes
 }
 
 // decoyReply builds a reply the caller accepts (with the tool offered) that carries the shape's text.
@@ -240,7 +286,8 @@ func TestDecoyFieldCredentialCorpus(t *testing.T) {
 					t.Fatalf("%s: the key was missed", name)
 				}
 				c, err := provider(api, shape.key).Complete(t.Context(), request())
-				if err == nil || !strings.Contains(err.Error(), "contains a credential") || c.Content != "" || len(c.ToolCalls) != 0 {
+				refused := err != nil && (strings.Contains(err.Error(), textCredential) || !d.accepted && strings.Contains(err.Error(), textWrongType))
+				if !refused || !providers.IsMalformedOutput(err) || c.Content != "" || len(c.ToolCalls) != 0 {
 					t.Fatalf("%s: the key was not refused: %v", name, err)
 				}
 				if string(data) != before {
@@ -267,6 +314,13 @@ func TestDecoyFieldCredentialCorpus(t *testing.T) {
 				if !replyContainsKey(cleanData, api, shape.key) {
 					t.Fatalf("%s: a reply the typed decode refuses did not fail closed", name)
 				}
+				// No key was seen, so the refusal does not say there was one.
+				data = cleanData
+				c, err = provider(api, shape.key).Complete(t.Context(), request())
+				if err == nil || !strings.Contains(err.Error(), textWrongType) || strings.Contains(err.Error(), textCredential) ||
+					!providers.IsMalformedOutput(err) || c.Content != "" {
+					t.Fatalf("%s: a wrong-typed clean reply was not refused as one: %v", name, err)
+				}
 			}
 		}
 	}
@@ -280,6 +334,17 @@ func TestInvalidJSONReplyIsScannedRaw(t *testing.T) {
 		}
 		if replyContainsKey([]byte(`{"output":"sk-FAKE`), api, secretKey) {
 			t.Fatalf("%s: clean invalid reply matched", api)
+		}
+		for i, sep := range invisibleRunes {
+			for cut := 1; cut < len(secretKey); cut++ {
+				if !replyContainsKey([]byte(`{"output":"`+withInvisible(secretKey, sep, cut)), api, secretKey) {
+					t.Fatalf("%s: raw key with invisible %d at %d missed", api, i, cut)
+				}
+				// A visible character in the same place leaves the text around it alone and matches nothing.
+				if replyContainsKey([]byte(`{"output":"`+withInvisible(secretKey, "-", cut)), api, secretKey) {
+					t.Fatalf("%s: raw key broken by a visible character at %d matched", api, cut)
+				}
+			}
 		}
 	}
 }

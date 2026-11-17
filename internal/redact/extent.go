@@ -62,7 +62,7 @@ const noKey = -1
 // starts further back it returns maxValueExtent, so no line is indented deeper.
 func lineColumn(s string, pos int) int {
 	from := max(0, pos-maxValueExtent)
-	i := strings.LastIndexByte(s[from:pos], '\n')
+	i := lastIndexByte(s[from:pos], '\n')
 	if i < 0 {
 		if from > 0 {
 			return maxValueExtent
@@ -82,6 +82,7 @@ func lineIndent(s string, pos int) int {
 	start := pos - col
 	t := start
 	for t < pos && (s[t] == ' ' || s[t] == '\t') {
+		tick(1)
 		t++
 	}
 	return t - start
@@ -92,6 +93,7 @@ func lineIndent(s string, pos int) int {
 func indentedBeyond(s string, pos, limit, col int) bool {
 	t := pos
 	for t < limit && (s[t] == ' ' || s[t] == '\t') {
+		tick(1)
 		t++
 	}
 	return t >= limit || s[t] == '\n' || s[t] == '\r' || t-pos > col
@@ -108,6 +110,7 @@ func extentLimit(s string, pos int) int {
 func quoteLevel(run int) int {
 	j := 0
 	for run&(1<<j) != 0 {
+		tick(1)
 		j++
 	}
 	return j
@@ -139,6 +142,7 @@ func groupScanEnd(g groupScan, pos, keyPos int) (int, bool) {
 	s, limit := g.s, g.limit
 	keyCol := -1
 	for i := pos; i < limit; i++ {
+		tick(1)
 		if s[i] == '\n' && g.quote != 0 && keyPos != noKey {
 			if keyCol < 0 {
 				keyCol = lineColumn(s, keyPos)
@@ -411,6 +415,7 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, l
 	}
 	last = s[pos] == '"' || s[pos] == '\''
 	for end < limit {
+		tick(1)
 		c := s[end]
 		if opensGroup(s, end) {
 			e, closed := groupEnd(s, end, limit, 0, keyPos, true)
@@ -429,6 +434,7 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, l
 		if c == ')' || c == ']' || c == '}' {
 			j := end
 			for j < limit && (s[j] == ')' || s[j] == ']' || s[j] == '}') {
+				tick(1)
 				j++
 			}
 			if j < limit && !isSpace(s[j]) && strings.IndexByte(wordStops+"\"'`$", s[j]) < 0 {
@@ -458,10 +464,11 @@ func fieldAfterComma(s string, i, limit int) bool {
 	if j >= limit || isSpace(s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
 		return true
 	}
-	if commaSecretKey.MatchString(s[j:limit]) {
+	if commaSecretKey.MatchString(counted(s[j:limit])) {
 		return true
 	}
 	for j < limit && (isAlnum(s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
+		tick(1)
 		j++
 	}
 	switch {
@@ -489,6 +496,7 @@ var commaSecretKey = regexp.MustCompile(`(?i)^(?:` + bareKeyExpr + `)(?:[ \t]*[:
 func plainWordEnd(s string, pos, limit, keyPos int, wide bool) int {
 	end, glued := pos, false
 	for end < limit {
+		tick(1)
 		c := s[end]
 		switch {
 		case c == '$' && end+1 < limit && s[end+1] == '(', c == '`':
@@ -525,7 +533,7 @@ func gluedQuoteEnd(s string, q, limit, keyPos int) int {
 		return -1
 	}
 	e, ok := groupEnd(s, q, limit, 0, keyPos, true)
-	if !ok || strings.ContainsAny(s[q:e], "\r\n") {
+	if !ok || containsAny(s[q:e], "\r\n") {
 		return -1
 	}
 	return e
@@ -554,16 +562,18 @@ const wordStops = ",;|&<>(){}[]\\"
 // line gives 0: it may sit inside a JSON string, whose fields after it stay.
 func unclosedQuoteEnd(s string, pos int) int {
 	end := lineItemEnd(s, pos)
-	if s[pos] == '\'' && strings.IndexByte(s[pos:end], '"') >= 0 {
+	if s[pos] == '\'' && indexByte(s[pos:end], '"') >= 0 {
 		return 0
 	}
 	for i := pos + 1; i+1 < end; i++ {
+		tick(1)
 		if (s[i] == ' ' || s[i] == '\t') && s[i+1] == '-' {
 			end = i
 			break
 		}
 	}
 	for end > pos && isSpace(s[end-1]) {
+		tick(1)
 		end--
 	}
 	return end
@@ -618,8 +628,9 @@ func commentEnd(s string, pos int) int {
 	limit := extentLimit(s, pos)
 	i := pos
 	for i+1 < limit && s[i] == '/' && (s[i+1] == '/' || s[i+1] == '*') {
+		tick(1)
 		if s[i+1] == '/' {
-			j := strings.IndexByte(s[i:limit], '\n')
+			j := indexByte(s[i:limit], '\n')
 			if j < 0 {
 				if limit < len(s) {
 					return i
@@ -628,13 +639,14 @@ func commentEnd(s string, pos int) int {
 			}
 			i += j
 		} else {
-			j := strings.Index(s[i+2:limit], "*/")
+			j := index(s[i+2:limit], "*/")
 			if j < 0 {
 				return i
 			}
 			i += j + 4
 		}
 		for i < limit && isSpace(s[i]) {
+			tick(1)
 			i++
 		}
 	}
@@ -650,7 +662,8 @@ func flowItemEnd(s string, pos int) int {
 	indent := -1
 	end := pos
 	for {
-		i := strings.IndexAny(s[end:limit], ",]}\r\n")
+		tick(1)
+		i := indexAny(s[end:limit], ",]}\r\n")
 		if i < 0 {
 			end = limit
 			break
@@ -668,6 +681,7 @@ func flowItemEnd(s string, pos int) int {
 		}
 		t := next
 		for t < limit && (s[t] == ' ' || s[t] == '\t') {
+			tick(1)
 			t++
 		}
 		if t >= limit || s[t] == '\r' || s[t] == '\n' || t-next <= indent {
@@ -676,6 +690,7 @@ func flowItemEnd(s string, pos int) int {
 		end = t
 	}
 	for end > pos && isSpace(s[end-1]) {
+		tick(1)
 		end--
 	}
 	return end
@@ -686,10 +701,11 @@ func flowItemEnd(s string, pos int) int {
 func lineItemEnd(s string, pos int) int {
 	limit := extentLimit(s, pos)
 	end := limit
-	if i := strings.IndexAny(s[pos:limit], "\r\n"); i >= 0 {
+	if i := indexAny(s[pos:limit], "\r\n"); i >= 0 {
 		end = pos + i
 	}
 	for end > pos && isSpace(s[end-1]) {
+		tick(1)
 		end--
 	}
 	return end
@@ -700,6 +716,7 @@ func lineItemEnd(s string, pos int) int {
 func inFlowSequence(s string, flagStart int) bool {
 	i := flagStart
 	for i > 0 && flagStart-i < maxValueExtent && (s[i-1] == ' ' || s[i-1] == '\t') {
+		tick(1)
 		i--
 	}
 	return i > 0 && (s[i-1] == '[' || s[i-1] == ',')
@@ -710,16 +727,19 @@ func inFlowSequence(s string, flagStart int) bool {
 func nodeProperties(s string, pos int) int {
 	i := pos
 	for range 2 {
+		tick(1)
 		if i+1 >= len(s) || s[i] != '&' && s[i] != '!' || isSpace(s[i+1]) {
 			break
 		}
 		limit := extentLimit(s, i)
 		j := i + 1
 		for j < limit && !isSpace(s[j]) {
+			tick(1)
 			j++
 		}
 		k := j
 		for k < limit && (s[k] == ' ' || s[k] == '\t') {
+			tick(1)
 			k++
 		}
 		if k == j || k >= limit || s[k] == '\n' || s[k] == '\r' {
@@ -738,17 +758,21 @@ func listBlockScalarSpan(s string, pos, col int) (int, int) {
 	limit := extentLimit(s, pos)
 	i := pos
 	for i < limit && s[i] != '\n' {
+		tick(1)
 		i++
 	}
 	start, end := -1, -1
 	for i < limit && s[i] == '\n' {
+		tick(1)
 		ls := i + 1
 		t := ls
 		for t < limit && (s[t] == ' ' || s[t] == '\t') {
+			tick(1)
 			t++
 		}
 		le := t
 		for le < limit && s[le] != '\n' {
+			tick(1)
 			le++
 		}
 		text := le

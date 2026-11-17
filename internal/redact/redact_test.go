@@ -543,14 +543,20 @@ func skipLarge(t *testing.T) {
 		t.Skip("large inputs")
 	}
 	if raceDetector {
-		t.Skip("timing test: runs without -race")
+		t.Skip("large inputs: run without -race")
 	}
 }
 
-// Repeating the shapes the scanning rules look for must cost linear time: each value is scanned once and
-// keys inside a value already redacted are skipped. Each input takes about a second; a quadratic scan of
-// them takes minutes. Each unit is also timed at an eighth of the size: eight times the input may take at
-// most sixteen times as long (a quadratic scan takes 64 times as long).
+// maxWorkPerByte bounds the work ([Work]) of redaction per byte of input on every hostile input of the tests.
+// The largest, about 710 on runs of commas after a quoted value ("blanks commas"), comes from the extent rule,
+// which reads up to maxValueExtent bytes from each value; the rules that read every byte a fixed number of
+// times account for 30 to 75.
+const maxWorkPerByte = 1024
+
+// Repeating the shapes the scanning rules look for must cost linear work: each value is scanned once and
+// keys inside a value already redacted are skipped. The work ([Work]) is counted, not timed, so a busy machine
+// cannot fail the test (#825): on 1 MiB it is at most maxWorkPerByte per byte, and its work per byte is at
+// most an eighth more than on an eighth of the input (a quadratic scan does eight times the work per byte).
 func TestRepeatedPatternsStayLinear(t *testing.T) {
 	skipLarge(t)
 	const size = 1 << 20
@@ -674,24 +680,27 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"blanks comma secret keys":   `TOKEN="a",DB_PASSWORD= "b",x-token= `,
 	} {
 		tail := tails[name]
-		small := timeString(t, name, rep(unit, size/8/len(unit))+tail)
-		large := timeString(t, name, rep(unit, size/len(unit))+tail)
-		if large > 10*time.Second || large > 16*max(small, 20*time.Millisecond) {
-			t.Errorf("%s: %d bytes took %s, an eighth of them %s", name, size, large, small)
+		small, smallSize := workString(t, name, rep(unit, size/8/len(unit))+tail)
+		large, largeSize := workString(t, name, rep(unit, size/len(unit))+tail)
+		if large > maxWorkPerByte*int64(largeSize) {
+			t.Errorf("%s: %d steps for %d bytes, more than %d per byte", name, large, largeSize, maxWorkPerByte)
+		}
+		if float64(large)/float64(largeSize) > 1.125*float64(max(small, 1))/float64(smallSize)+0.5 {
+			t.Errorf("%s: %d steps for %d bytes, %d for %d: more than linear", name, small, smallSize, large, largeSize)
 		}
 	}
 }
 
-// timeString returns how long String takes on in, and fails when the output is longer than the input.
-func timeString(t *testing.T, name, in string) time.Duration {
+// workString returns the work of String on in and the size of in, and fails when the output is longer
+// than the input.
+func workString(t *testing.T, name, in string) (int64, int) {
 	t.Helper()
-	start := time.Now()
-	out := String(in)
-	d := time.Since(start)
+	var out string
+	w := Work(func() { out = String(in) })
 	if len(out) > len(in) {
 		t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
 	}
-	return d
+	return w, len(in)
 }
 
 // Nested entries whose lines all belong to the first one: each match reads a bounded part of them.

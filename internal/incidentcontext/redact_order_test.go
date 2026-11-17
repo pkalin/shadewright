@@ -41,6 +41,26 @@ func TestValueIsRedactedBeforeItIsFlattened(t *testing.T) {
 	}
 }
 
+// Redact shows the redactor the text as it was read, before an invalid byte becomes "?" (#840). A "?" ends the
+// user information of a URL, so replacing the byte first hides the password from the connection string
+// rule; the test fails if the replacement runs first again.
+func TestRedactSeesInvalidBytesBeforeTheyAreReplaced(t *testing.T) {
+	for in, secret := range map[string]string{
+		"dial https://admin:Hunter\xff2Secret@db.shop.svc:5432/x": "Hunter",
+		"postgres://app:pw\xff@db/x":                              "pw",
+	} {
+		if !strings.Contains(redact.String(strings.ToValidUTF8(in, "?")), secret) {
+			t.Fatalf("%q: replacing first loses %q too, so this input proves nothing about the order", in, secret)
+		}
+		if got := Redact(redact.String, in); strings.Contains(got, secret) {
+			t.Errorf("Redact(%q) = %q, leaks %q", in, got, secret)
+		}
+		if got := Value(redact.String, in); strings.Contains(got, secret) {
+			t.Errorf("Value(%q) = %q, leaks %q", in, got, secret)
+		}
+	}
+}
+
 // A symptom an Incident stores is one line: a block scalar a source flattened onto it before the collector
 // saw it is redacted by the one-line rule (#840). The summary's cut swept across each form, the key cut by
 // the note included, never shows a part of the secret, and the note stays intact.

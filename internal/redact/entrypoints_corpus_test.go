@@ -25,6 +25,7 @@ import (
 	"github.com/pkalin/shadewright/internal/modules"
 	"github.com/pkalin/shadewright/internal/providers/logs/kube"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/tools"
 )
 
 // entryPoints are the functions that turn text read from the cluster into text for the model, a status, an
@@ -32,10 +33,10 @@ import (
 // each must redact the text as it was read first (#840, decision of 2026-11-17, second).
 var entryPoints = map[string]func(in string) []string{
 	"fingerprint.Normalize": func(in string) []string {
-		return []string{fingerprint.Normalize(fingerprint.Observation{Reason: "BackOff", Note: in})}
+		return []string{fingerprint.Normalize(fingerprint.Observation{Reason: toolReason, Note: in})}
 	},
 	"fingerprint.Symptom": func(in string) []string {
-		return []string{fingerprint.Symptom(fingerprint.Observation{Reason: "BackOff", Note: in})}
+		return []string{fingerprint.Symptom(fingerprint.Observation{Reason: toolReason, Note: in})}
 	},
 	"fingerprint.Value":  func(in string) []string { return []string{fingerprint.Value(in)} },
 	"modules.BoundValue": func(in string) []string { return []string{modules.BoundValue(in)} },
@@ -46,6 +47,14 @@ var entryPoints = map[string]func(in string) []string{
 	"incidentcontext.Value of the symptom": func(in string) []string {
 		return []string{incidentcontext.Value(redact.String, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
 	},
+	// The read tools of the model: the answer of get_resource is JSON, whose escapes must not hide an
+	// indicator (an HTML-escaped ">" did, #840).
+	tools.NameGetResource: toolText(tools.NameGetResource,
+		map[string]any{"kind": toolKind, argNamespace: toolNS, "name": toolPod}),
+	tools.NameListEvents: toolText(tools.NameListEvents,
+		map[string]any{argNamespace: toolNS, "kind": toolKind, "name": toolPod, "limit": 5}),
+	tools.NameGetPodLogs: toolText(tools.NameGetPodLogs,
+		map[string]any{argNamespace: toolNS, "pod": toolPod, "container": toolContainer}),
 	// The log excerpt, whole and cut after each of its lines: a cut that drops the key's line must not
 	// leave its block bare.
 	"kube.Excerpt": func(in string) []string {

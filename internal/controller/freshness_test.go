@@ -1546,10 +1546,10 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			condition, event, what, answer := remediationv1alpha1.ConditionPullRequestNotClosed,
 				EventPullRequestNotClosed, fmt.Sprintf("the close of pull request #%d", cr.Number), "403"
 			switch step {
-			case "token":
+			case stepTokenRefused:
 				condition, event, what = remediationv1alpha1.ConditionPullRequestUnreadable, EventPullRequestUnreadable,
 					"the access token for the plan's repository"
-			case "listing":
+			case stepListingRefused:
 				condition, event, what = remediationv1alpha1.ConditionPullRequestUnreadable, EventPullRequestUnreadable,
 					"the listing of the pull requests of branch "
 			}
@@ -1561,9 +1561,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			refused.Store(true)
 			git.SetFail(func(op string) error {
 				switch {
-				case step == "close" && op == opClose && refused.Load():
+				case step == stepCloseRefused && op == opClose && refused.Load():
 					return fmt.Errorf("status secret-host-text: %w", class)
-				case step == "listing" && op == opList && refused.Load():
+				case step == stepListingRefused && op == opList && refused.Load():
 					return fmt.Errorf("status secret-host-text: %w", class)
 				case op == opClose:
 					closes.Add(1)
@@ -1575,7 +1575,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			r.PullRequestPollInterval = 2 * time.Minute
 			open := r.OpenRepository
 			r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
-				if step == "token" && refused.Load() {
+				if step == stepTokenRefused && refused.Load() {
 					return nil, fmt.Errorf("installation token secret-host-text: %w", class)
 				}
 				return open(ctx, repo)
@@ -1615,11 +1615,11 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				// The person's close goes past the refusal the fake answers Shadewright with.
 				refused.Store(false)
 				Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
-				refused.Store(step == "close")
+				refused.Store(step == stepCloseRefused)
 			case "merged by a person":
 				_, err := git.Merge(cr.Number)
 				Expect(err).NotTo(HaveOccurred())
-				if step != "close" {
+				if step != stepCloseRefused {
 					refused.Store(false)
 				}
 			case "closed by the retried close":
@@ -1643,35 +1643,35 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged))
 			Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
 		},
-		Entry("close, same installation, 403, closed by a person", "close", false, providers.ErrForbidden,
+		Entry("close, same installation, 403, closed by a person", stepCloseRefused, false, providers.ErrForbidden,
 			ReasonGitForbidden, "closed by a person"),
-		Entry("close, same installation, 422, merged", "close", false, providers.ErrRejected, ReasonGitRejected,
+		Entry("close, same installation, 422, merged", stepCloseRefused, false, providers.ErrRejected, ReasonGitRejected,
 			"merged by a person"),
-		Entry("close, new installation, 403, merged", "close", true, providers.ErrForbidden, ReasonGitForbidden,
+		Entry("close, new installation, 403, merged", stepCloseRefused, true, providers.ErrForbidden, ReasonGitForbidden,
 			"merged by a person"),
-		Entry("close, new installation, 422, closed by a person", "close", true, providers.ErrRejected,
+		Entry("close, new installation, 422, closed by a person", stepCloseRefused, true, providers.ErrRejected,
 			ReasonGitRejected, "closed by a person"),
-		Entry("close, new installation, 403, closed by the retried close", "close", true, providers.ErrForbidden,
+		Entry("close, new installation, 403, closed by the retried close", stepCloseRefused, true, providers.ErrForbidden,
 			ReasonGitForbidden, "closed by the retried close"),
-		Entry("token, same installation, 403, closed by a person", "token", false, providers.ErrForbidden,
+		Entry("token, same installation, 403, closed by a person", stepTokenRefused, false, providers.ErrForbidden,
 			ReasonGitForbidden, "closed by a person"),
-		Entry("token, same installation, 422, merged", "token", false, providers.ErrRejected, ReasonGitRejected,
+		Entry("token, same installation, 422, merged", stepTokenRefused, false, providers.ErrRejected, ReasonGitRejected,
 			"merged by a person"),
-		Entry("token, new installation, 403, merged", "token", true, providers.ErrForbidden, ReasonGitForbidden,
+		Entry("token, new installation, 403, merged", stepTokenRefused, true, providers.ErrForbidden, ReasonGitForbidden,
 			"merged by a person"),
-		Entry("token, new installation, 422, closed by a person", "token", true, providers.ErrRejected,
+		Entry("token, new installation, 422, closed by a person", stepTokenRefused, true, providers.ErrRejected,
 			ReasonGitRejected, "closed by a person"),
-		Entry("token, new installation, 403, closed by the retried close", "token", true, providers.ErrForbidden,
+		Entry("token, new installation, 403, closed by the retried close", stepTokenRefused, true, providers.ErrForbidden,
 			ReasonGitForbidden, "closed by the retried close"),
-		Entry("listing, same installation, 403, closed by a person", "listing", false, providers.ErrForbidden,
+		Entry("listing, same installation, 403, closed by a person", stepListingRefused, false, providers.ErrForbidden,
 			ReasonGitForbidden, "closed by a person"),
-		Entry("listing, same installation, 422, merged", "listing", false, providers.ErrRejected, ReasonGitRejected,
+		Entry("listing, same installation, 422, merged", stepListingRefused, false, providers.ErrRejected, ReasonGitRejected,
 			"merged by a person"),
-		Entry("listing, new installation, 403, merged", "listing", true, providers.ErrForbidden, ReasonGitForbidden,
+		Entry("listing, new installation, 403, merged", stepListingRefused, true, providers.ErrForbidden, ReasonGitForbidden,
 			"merged by a person"),
-		Entry("listing, new installation, 422, closed by a person", "listing", true, providers.ErrRejected,
+		Entry("listing, new installation, 422, closed by a person", stepListingRefused, true, providers.ErrRejected,
 			ReasonGitRejected, "closed by a person"),
-		Entry("listing, new installation, 403, closed by the retried close", "listing", true, providers.ErrForbidden,
+		Entry("listing, new installation, 403, closed by the retried close", stepListingRefused, true, providers.ErrForbidden,
 			ReasonGitForbidden, "closed by the retried close"),
 	)
 
@@ -1730,9 +1730,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			git.SetFail(func(op string) error {
 				calls.Add(1)
 				switch {
-				case step == "close" && op == opClose:
+				case step == stepCloseRefused && op == opClose:
 					return fmt.Errorf("close: %w", providers.ErrForbidden)
-				case step == "listing" && op == opList:
+				case step == stepListingRefused && op == opList:
 					return fmt.Errorf("listing: %w", providers.ErrForbidden)
 				}
 				return nil
@@ -1752,7 +1752,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				open := r.OpenRepository
 				r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
 					calls.Add(1)
-					if step == "token" {
+					if step == stepTokenRefused {
 						return nil, fmt.Errorf("installation token: %w", providers.ErrForbidden)
 					}
 					return open(ctx, repo)
@@ -1790,9 +1790,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			run()
 			Expect(calls.Load()).To(Equal(2*once), "one attempt per start, no burst")
 		},
-		Entry("a refused close", "close", remediationv1alpha1.ConditionPullRequestNotClosed),
-		Entry("a refused token", "token", remediationv1alpha1.ConditionPullRequestUnreadable),
-		Entry("a refused listing", "listing", remediationv1alpha1.ConditionPullRequestUnreadable),
+		Entry("a refused close", stepCloseRefused, remediationv1alpha1.ConditionPullRequestNotClosed),
+		Entry("a refused token", stepTokenRefused, remediationv1alpha1.ConditionPullRequestUnreadable),
+		Entry("a refused listing", stepListingRefused, remediationv1alpha1.ConditionPullRequestUnreadable),
 	)
 
 	It("closes nothing through the new installation when the pull request lacks this request's marker (#290)", func() {
@@ -3453,6 +3453,13 @@ func (s *bumpingStatus) Update(ctx context.Context, obj client.Object, opts ...c
 	s.bump(obj)
 	return s.SubResourceWriter.Update(ctx, obj, opts...)
 }
+
+// The steps the cleanup tests of #808 make the Git host refuse.
+const (
+	stepTokenRefused   = "token"
+	stepListingRefused = "listing"
+	stepCloseRefused   = "close"
+)
 
 // touchedAnnotation is the annotation a test writes to change a request between a read and a status write.
 const touchedAnnotation = "example.com/touched"

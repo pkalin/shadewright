@@ -46,7 +46,41 @@ var seqPropertyParts = append(slices.Clone(canonFlagKeys),
 	"pass\ufeffword", "api_key\u200b:", "token\u00ad=", "password\u200b\u200c: |",
 	"password\uff1a", "token\u02d0", "password\u2e2c", "password\u0589 |", "client_secret\u05c3",
 	"\uff1a", "\u2236", "\u02f8", "\u0703", "\u1361", "\u2e2c", "\uff1a |",
+	// The fourth round (decision of 2026-11-18): an explicit key, an env entry's name, a quoted key and a flag
+	// with text glued in front, each in one string with its value in the next; the separators and invisible
+	// characters of their classes come from seqClassParts.
+	"? "+passwordKey, "? "+canonTokenKey, "- name: DB_PASSWORD", "- name: API_TOKEN", `"password":`, `'token':`,
+	"--args=--client-secret", `"--password`, ":--password", "=--password", "--args=--token", ":", ": |",
 )
+
+// seqClassParts are strings drawn from the classes of the fourth round: a key and a separator run of the class
+// (canonSepFound and runs drawn as the corpus draws them), a separator run alone, and a key with an invisible
+// character inside it.
+func seqClassParts(rng *rand.Rand) []string {
+	g := &canonGen{rng: rng}
+	var out []string
+	for i, run := range canonSepFound {
+		key := canonSepKeys[i%len(canonSepKeys)]
+		out = append(out, key+run, run)
+	}
+	for range 40 {
+		run := g.sepRun()
+		if sepRunPlain(run) {
+			continue
+		}
+		out = append(out, canonPick(rng, canonSepKeys)+run, run)
+	}
+	for i, x := range canonInvisibles {
+		key := canonGlyphKeys[i%len(canonGlyphKeys)]
+		at := 1 + i%(len(key)-1)
+		out = append(out, key[:at]+x+key[at:]+":", key+x+" :", "--"+key[:at]+x+key[at:])
+	}
+	return out
+}
+
+// seqValuePrefixes are what a value string holds before the value: nothing, indentation, an env entry's value
+// key, the colon of an explicit key.
+var seqValuePrefixes = []string{"", "  ", "  value: ", ": ", "\t"}
 
 // seqPropertyCases is the number of generated sequences; under the race detector and in short mode, the first
 // one in canonSampleDivisor of them.
@@ -84,13 +118,14 @@ func seqJoins(items []string) []seqJoined {
 	return out
 }
 
-// seqDecided reports whether String's spans of the joined text j hide the string at index i whole: a span that
-// covers it and, in a rendering with quotes, stays inside it. A span that runs on through the quotes and
+// seqDecided reports whether String's spans of the joined text j hide the value of the string at index i,
+// which starts at byte at of it: a span that reaches into the value and, in a rendering with quotes, stays
+// inside the string. A span that runs on through the quotes and
 // separators of the sequence (a value read to the end of the text) is no decision about one string.
-func seqDecided(j seqJoined, quoted bool, i int, spans []span) bool {
+func seqDecided(j seqJoined, quoted bool, i, at int, spans []span) bool {
 	it := j.items[i]
 	for _, sp := range spans {
-		if sp.start >= it[1] || sp.end <= it[0] {
+		if sp.start >= it[1] || sp.end <= it[0]+at {
 			continue
 		}
 		if quoted && (sp.start < it[0]-1 || sp.end > it[1]+1) {
@@ -107,6 +142,7 @@ func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 	if raceDetector || testing.Short() {
 		cases /= canonSampleDivisor
 	}
+	parts := append(slices.Clone(seqPropertyParts), seqClassParts(rand.New(rand.NewPCG(845, 4)))...) //nolint:gosec // a fixed seed
 	n, failed, decided, failedSeqs := 0, 0, 0, 0
 	for range cases {
 		before := failed
@@ -116,19 +152,20 @@ func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 			case 0:
 				n++
 				v := fmt.Sprintf("Qz%05dxK9w", 40000+n)
-				items = append(items, []string{"", "  "}[rng.IntN(2)]+v)
+				items = append(items, canonPick(rng, seqValuePrefixes)+v)
 			default:
-				items = append(items, canonPick(rng, seqPropertyParts))
+				items = append(items, canonPick(rng, parts))
 			}
 		}
 		got := Strings(items)
 		for ji, j := range seqJoins(items) {
 			spans := defaultRedactor.spans(j.text)
 			for i, it := range items {
-				v := strings.TrimLeft(it, " ")
-				if !strings.HasPrefix(v, "Qz") || !seqDecided(j, ji > 0, i, spans) {
+				at := strings.Index(it, "Qz")
+				if at < 0 || !seqDecided(j, ji > 0, i, at, spans) {
 					continue
 				}
+				v := it[at:]
 				decided++
 				if !strings.Contains(got[i], v) {
 					continue

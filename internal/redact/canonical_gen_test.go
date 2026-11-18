@@ -69,7 +69,8 @@ const (
 // canonForms lists the forms in the order the corpus writes them.
 var canonForms = []string{
 	canonFormIndent, canonFormKeys, canonFormBrackets, canonFormSequence, canonFormEnv, canonFormExcerpt,
-	canonFormMixed, canonFormGlyph, canonFormExplicit, canonFormComment, canonFormLabels,
+	canonFormMixed, canonFormGlyph, canonFormExplicit, canonFormComment, canonFormLabels, canonFormSeparator,
+	canonFormAutolink,
 }
 
 // canonCase is one input of the corpus. in is the text as a caller reads it. args, for a sequence, holds its
@@ -255,6 +256,8 @@ func canonCorpus() []canonCase {
 	g.labelCases()
 	// The forms of the third round come after those of the second, for the same reason.
 	g.foldRoundThreeCases()
+	// The forms of the fourth round come after those of the third.
+	g.foldRoundFourCases()
 	return g.out
 }
 

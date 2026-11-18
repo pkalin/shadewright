@@ -479,8 +479,20 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 		return bStart, bEnd, bNext, false
 	}
 	countScan(bEnd - bStart)
+	// The block is read for secrets at most once for the line, however many bare short keys claim it (#845,
+	// fourth round: each key read it again, quadratic in a line of many "pass: |").
+	looks, read := false, false
 	for _, k := range keys {
-		if k.block && k.strEnd < 0 && (!k.bare || viewLooksLikeSecret(s, bStart, bEnd)) {
+		if !k.block || k.strEnd >= 0 {
+			continue
+		}
+		if !k.bare {
+			return bStart, bEnd, bNext, true
+		}
+		if !read {
+			looks, read = viewLooksLikeSecret(s, bStart, bEnd), true
+		}
+		if looks {
 			return bStart, bEnd, bNext, true
 		}
 	}
@@ -827,30 +839,48 @@ func envValueFirstSpan(s string, m []int, _ int) (int, int, bool) {
 	return start, end, end > start
 }
 
-// The strings of a sequence (#845, second round): a key in one string and its value in a later one, decided on
-// the sequence as a whole by one function (seqValues), for a caller that holds the strings ([Redactor.Strings])
-// and for a sequence written in a text (seqScan). Between the key and its value may stand blank strings, and the
-// colon or equals sign may stand in a string of its own; a flag may follow other words in its string, and a
-// key's string may end with a line break. What String finds in the strings joined by a blank or by a line break
-// is found in them apart (TestStringsDecidesAsTheJoinedText).
+// The strings of a sequence (#845, second to fourth rounds): a key in one string and its value in a later one.
+// [Redactor.Strings] takes the decision String takes on the strings joined by line breaks, mapped back to each
+// string, so what String finds in the strings joined is found in them apart by construction
+// (TestStringsDecidesAsTheJoinedText). On top of it, and for a sequence written in a text (seqScan), one function
+// (seqValues) reads what a joined text does not show as a key and value: blank strings between the key and its
+// value, a separator in a string of its own, a flag after other text in its string, a key's string that ends
+// with a line break.
 
-// seqKeyEnd matches the end of a string whose next non-blank string is its value: a secret key and a colon,
-// with a block indicator (group 2) and a comment after it if there are any, or "=" (group 1 is the key).
-var seqKeyEnd = regexp.MustCompile(`(?i)(` + bareKeyExpr + `)(?:` + keySpaceExpr + `*:(?:` + keySpaceExpr +
+// seqKeyEnd matches the end of a string whose next non-blank string is its value: a secret key, its closing
+// quote if it has one, and a colon, with a block indicator (group 2) and a comment after it if there are any, or
+// "=" (group 1 is the key).
+var seqKeyEnd = regexp.MustCompile(`(?i)(` + bareKeyExpr + `)(?:\\*["'])?(?:` + keySpaceExpr + `*:(?:` + keySpaceExpr +
 	`*([|>][1-9+-]{0,2})(?:` + keySpaceExpr + `+#.*)?)?|` + keySpaceExpr + `*=)$`)
 
-// seqFlagEnd matches a secret-named flag at the end of a string, alone or after other words; group 1 is the
-// name.
-var seqFlagEnd = regexp.MustCompile(`(?i)(?:^|\s)-{1,2}(` + bareKeyExpr + `)$`)
+// seqFlagEnd matches a secret-named flag at the end of a string, alone or after other text that does not run
+// into its dashes (a blank, "=", a quote, a colon: "app --password", "--args=--password", "\"--password");
+// group 1 is the name.
+var seqFlagEnd = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])-{1,2}(` + bareKeyExpr + `)$`)
 
 // seqWordEnd matches a secret key at the end of a string with no colon after it, alone or after other words
-// (group 1): its colon or equals sign may come in a string of its own.
-var seqWordEnd = regexp.MustCompile(`(?i)(?:^|\s)(` + bareKeyExpr + `)$`)
+// (group 1): its colon or equals sign may come in a string of its own, or at the start of the next.
+var seqWordEnd = regexp.MustCompile(`(?i)(?:^|\s)(` + bareKeyExpr + `)(?:\\*["'])?$`)
 
-// seqSeparator matches a string that holds only a colon, with a block indicator (group 1) and a comment if
-// there are any, or an equals sign: the separator of a key in the string before it.
-var seqSeparator = regexp.MustCompile(`^(?::(?:` + keySpaceExpr + `*([|>][1-9+-]{0,2})(?:` + keySpaceExpr +
-	`+#.*)?)?|=)$`)
+// seqBlockHeader matches what may follow a separator in a string of its own: nothing, or a block indicator and
+// a comment.
+var seqBlockHeader = regexp.MustCompile(`^(?:[|>][1-9+-]{0,2}(?:` + keySpaceExpr + `+#.*)?)?$`)
+
+// seqEnvValue matches the start of the string after an environment entry's name (viewEnvName): its "value" key
+// and separator, quoted or not.
+var seqEnvValue = regexp.MustCompile(`(?i)^\\*["']?value\\*["']?` + keySpaceExpr + `*:` + keySpaceExpr + `*`)
+
+// seqSeparator reports whether the string t holds only a separator run of the class (sepRunAt: blanks, control
+// and invisible characters, colons and their look-alikes, equals signs and arrows, with at least one mark), with
+// a block indicator and a comment after it if there are any; and whether it holds a colon, which may open a
+// block.
+func seqSeparator(t string) (ok, colon bool) {
+	r, found := sepRunAt(t, 0)
+	if !found || !seqBlockHeader.MatchString(counted(t[r.end:])) {
+		return false, false
+	}
+	return true, strings.Contains(r.marks, ":")
+}
 
 // seqTrim returns t without blanks at either end: indentation characters (indentLen), line breaks, and line
 // breaks and tabs escaped with backslashes, as a string written inside another holds them.
@@ -926,54 +956,83 @@ func seqValueStart(item string) int {
 }
 
 // seqValues decides, for the strings of a sequence, which are the value of a secret key in an earlier string
-// (#845). A string is a value when the non-blank string before it, blank strings skipped, ends with a secret
-// key and ":" or "=" (seqKeyEnd), or with a secret-named flag (seqFlagEnd), or when a string that holds only
-// ":" or "=" (seqSeparator) stands between it and a string that ends with a secret key (seqWordEnd), or between
-// it and a key that already took it ("--password", "=", "V"). After a key and a colon, with a block indicator or
-// nothing after it, the strings that start with indentation after its value are the lines of its block.
-// A reference key or flag keeps its value, and under a bare short key the value counts only when a word of it
-// looks like a secret. Every string is also read as a key of its own, a value included ("--token",
-// "--password", "V"). Each string is read in its folded view (foldView), as String reads a text: a format
-// character inside a key or a flag, or before its separator, is dropped, and a colon look-alike reads as ":".
-func seqValues(items []string) []bool {
+// (#845), and returns where the value starts in each, or -1. A string is a value when the non-blank string
+// before it, blank strings skipped, ends with a secret key and ":" or "=" (seqKeyEnd), or with a secret-named
+// flag (seqFlagEnd), or when a string that holds only a separator (seqSeparator) stands between it and a string
+// that ends with a secret key (seqWordEnd), or between it and a key that already took it ("--password", "=",
+// "V"). After a string that ends with a secret key, a string that starts with a separator holds the value after
+// it ("? password", ": V"), and after an environment entry's name ("- name: DB_PASSWORD"), a string that starts
+// with its "value" key holds the value after that ("  value: V"). After a key and a colon, with a block
+// indicator or nothing after it, the strings that start with indentation after its value are the lines of its
+// block. A reference key or flag keeps its value, and under a bare short key the value counts only when a word
+// of it looks like a secret. Every string is also read as a key of its own, a value included ("--token",
+// "--password", "V"). Each string is read in its folded view (foldView), as String reads a text: an invisible
+// character inside a key or a flag, or before its separator, is dropped, a colon look-alike reads as ":", and a
+// separator of other characters reads as ": ".
+func seqValues(items []string) []int {
 	const (
 		none = iota
 		value
 		word
+		env
 	)
-	out := make([]bool, len(items))
+	out := make([]int, len(items))
 	pending, bare, block, inBlock := none, false, false, false
 	for i, it := range items {
 		tick(1)
+		out[i] = -1
 		t := seqTrim(it)
 		if f, ok := foldView(t); ok {
-			// What a reader sees: a format character inside a key or before its separator, a colon look-alike.
+			// What a reader sees: an invisible character inside a key or before its separator, a colon
+			// look-alike, a separator of other characters.
 			t = seqTrim(f.text)
 		}
 		if t == "" {
 			continue
 		}
 		if inBlock && seqValueStart(it) > 0 {
-			out[i] = true
+			out[i] = seqValueStart(it)
 			continue
 		}
 		inBlock = false
+		take := func(start int, v string) {
+			if !bare || wordsLookLikeSecret(v) {
+				out[i] = start
+			}
+		}
 		switch pending {
 		case value:
-			if seqSeparator.MatchString(counted(t)) {
+			if ok, colon := seqSeparator(t); ok {
 				// "--password", "=", "V": the separator in a string of its own.
-				block = block || t[0] == ':'
+				block = block || colon
 				continue
 			}
-			out[i] = !bare || wordsLookLikeSecret(t)
-			inBlock = block && out[i]
+			take(seqValueStart(it), t)
+			inBlock = block && out[i] >= 0
 			pending = none
 		case word:
 			pending = none
-			if seqSeparator.MatchString(counted(t)) {
-				pending, block = value, t[0] == ':'
+			if ok, colon := seqSeparator(t); ok {
+				pending, block = value, colon
 				continue
 			}
+			// "? password", ": V": the separator and the value in the next string.
+			start := seqValueStart(it)
+			if r, ok := sepRunAt(it, start); ok && r.end < len(it) {
+				take(r.end+seqValueStart(it[r.end:]), it[r.end:])
+			}
+		case env:
+			pending = none
+			start := seqValueStart(it)
+			if m := seqEnvValue.FindStringIndex(counted(it[start:])); m != nil && start+m[1] < len(it) {
+				take(start+m[1], it[start+m[1]:])
+			}
+		}
+		if m := viewEnvName.FindStringSubmatchIndex(counted(t)); m != nil {
+			if !isReference(t[m[2]:m[3]]) {
+				pending, bare = env, false
+			}
+			continue
 		}
 		if m := seqKeyEnd.FindStringSubmatchIndex(counted(t)); m != nil {
 			if !isReference(t[m[2]:m[3]]) {
@@ -995,20 +1054,39 @@ func seqValues(items []string) []bool {
 	return out
 }
 
-// Strings redacts the strings of a sequence, such as a container's arguments, as [Redactor.String] redacts
-// each, and decides on the sequence as a whole what no single string shows (seqValues): a string that is the
-// value of a key in an earlier one is redacted after its indentation. Callers that walk an object (the read
-// tool get_resource) call it for every sequence of strings instead of redacting the strings one by one.
+// Strings redacts the strings of a sequence, such as a container's arguments, with the one decision String
+// takes on them joined by line breaks: each string loses what String redacts of it in the joined text, what
+// String redacts of it alone, and, after its indentation, the value seqValues finds in it (the rule for a key,
+// a separator or a flag in one string and the value in a later one, which String also applies to a sequence
+// written in a text). So what String hides in the strings joined, Strings hides in them apart. Callers that walk
+// an object (the read tool get_resource) call it for every sequence of strings instead of redacting the strings
+// one by one.
 func (r *Redactor) Strings(items []string) []string {
+	joined := r.spans(strings.Join(items, "\n"))
+	starts := seqValues(items)
 	out := make([]string, len(items))
-	for i, take := range seqValues(items) {
-		it := items[i]
-		if !take {
-			out[i] = r.String(it)
-			continue
+	off, next := 0, 0
+	for i, it := range items {
+		end := off + len(it)
+		var own []span
+		for next < len(joined) && joined[next].end <= off {
+			tick(1)
+			next++
 		}
-		start := seqValueStart(it)
-		out[i] = r.String(it[:start]) + marker(KindCredential, len(it)-start)
+		for k := next; k < len(joined) && joined[k].start < end; k++ {
+			tick(1)
+			sp := joined[k]
+			sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
+			if sp.end > sp.start {
+				own = append(own, sp)
+			}
+		}
+		own = append(own, r.spans(it)...)
+		if starts[i] >= 0 && starts[i] < len(it) {
+			own = append(own, span{start: starts[i], end: len(it), kind: KindCredential, rule: len(r.rules)})
+		}
+		out[i] = render(it, mergeSpans(own))
+		off = end + 1
 	}
 	return out
 }
@@ -1068,9 +1146,9 @@ func seqScan(s string, add func(start, end int)) {
 		for k, it := range items {
 			texts[k] = s[it[0]:it[1]]
 		}
-		for k, take := range seqValues(texts) {
-			if take {
-				add(items[k][0]+seqValueStart(texts[k]), items[k][1])
+		for k, start := range seqValues(texts) {
+			if start >= 0 {
+				add(items[k][0]+start, items[k][1])
 			}
 		}
 		floor = ms[j][1]
@@ -1140,7 +1218,8 @@ func connStringSpan(s string, m []int, _ int) (int, int, bool) {
 // then the end, a blank or the "<" of the next link, as the bracket that closes a link in a list is. A ">"
 // glued to more text ("Hunter>2", "Hunter><2", "Hunter>,2") is part of the user info, as in a password. Such
 // brackets are not allowed unencoded in a URL's user info; a raw password holding ">" and then one of these
-// closers inside angle brackets is the one form this leaves out (#845).
+// closers inside angle brackets is the one form this leaves out (#845). A URL whose text before the bracket
+// holds a user and a password (autolinkPassword) is not closed there.
 func autolinkClosed(s string, start, end int) bool {
 	if start == 0 || s[start-1] != '<' {
 		return false
@@ -1155,10 +1234,33 @@ func autolinkClosed(s string, start, end int) bool {
 		if j < len(s) && (s[j] == ',' || s[j] == ';') {
 			j++
 			if j < len(s) && s[j] == '<' {
-				return true
+				return !autolinkPassword(s, start, i)
 			}
 		}
 		if j == len(s) || indentLen(s, j) > 0 {
+			return !autolinkPassword(s, start, i)
+		}
+	}
+	return false
+}
+
+// autolinkPassword reports whether the URL in angle brackets from start to its closing bracket at gt holds a
+// user and a password ("<postgres://alice:mint>"): a colon after its "://" with text after it that is no port
+// number. Such a URL is no link of a list: its match is kept whole, as main kept it (#845, fourth round).
+func autolinkPassword(s string, start, gt int) bool {
+	sep := strings.Index(s[start:gt], "://")
+	if sep < 0 {
+		return false
+	}
+	auth := s[start+sep+3 : gt]
+	c := strings.IndexByte(auth, ':')
+	if c < 0 || strings.HasPrefix(auth, "[") {
+		// No password, or an IPv6 address.
+		return false
+	}
+	for i := c + 1; i < len(auth); i++ {
+		tick(1)
+		if auth[i] < '0' || auth[i] > '9' {
 			return true
 		}
 	}

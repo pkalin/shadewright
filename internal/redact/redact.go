@@ -41,9 +41,10 @@ limitations under the License.
 // sequence after the string that holds its key ("password:", "--password=", also with blank strings between,
 // the colon in a string of its own, or a flag after other words; decided once for a list and for a sequence
 // written in a text, seqValues), and an environment entry whose value comes before its name, in flow and in
-// block form; and, read on the folded view of the text (fold.go), a key name with a format character inside
-// it or before its colon, a key followed by a colon look-alike of Unicode's confusables list, and an explicit
-// YAML key ("? password" over ": x", also "password" alone below "?" or "? |"),
+// block form; and, read on the folded view of the text (fold.go), a key name with an invisible character
+// inside it or before its colon, a key followed by a colon look-alike of Unicode's confusables list, an explicit
+// YAML key ("? password" over ": x", also "password" alone below "?" or "? |"), and a key followed by a
+// separator of other characters ("userPassword:: x", "password => x", "token\x00: x"),
 // the value after a secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
 // argument lists and after a flag that took the flag as its value), however it reads or starts with
 // ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
@@ -87,8 +88,9 @@ limitations under the License.
 // flag item or of an item after a flag item that opens with a backslash or "$(", a quoted scalar after a
 // verbatim tag in an array, a value after a compound name and a blank that is no opaque token, a value on
 // the lines below a secret key after other text on its line with nothing after its colon, the lines after the
-// first of a scalar over several lines under a bare short key, and a secret in a format no rule knows
-// (TestKeyNameKnownLeaks).
+// first of a scalar over several lines under a bare short key, a value after a secret key and blanks alone
+// with no colon, "=" or arrow ("userPassword x", read as prose like "password reset failed"), a value after a
+// separator of more than maxSepRun characters, and a secret in a format no rule knows (TestKeyNameKnownLeaks).
 //
 // Every rule reads the text as it was given and reports spans of it; the spans of all rules are merged and
 // replaced once ([Redactor.String]), so no rule reads another's output and no pass comes before another. The
@@ -96,9 +98,9 @@ limitations under the License.
 // they removed comes back. Callers redact text once, as it was read, before they replace a character, join a
 // line, escape or cut it, and never redact what they made of it (#845). A caller that holds a sequence of
 // strings (a container's arguments, the name and value of a metric label) redacts it with [Redactor.Strings],
-// which also sees a key in one string and its value in a later one, each string read in its folded view as
-// well. The folded view is a second reading of the
-// same text, not of a rule's output: its matches count on the bytes they were folded from.
+// which takes the decision String takes on the strings joined by line breaks and so also sees a key in one
+// string and its value in a later one. The folded view is a second reading of the same text, not of a rule's
+// output: its matches count on the bytes they were folded from.
 package redact
 
 import (
@@ -394,8 +396,9 @@ func (r *Redactor) String(s string) string {
 
 // spans returns the matches of every rule in s, sorted, with overlapping matches merged into one named after
 // the match that starts first (the first rule, on a tie). The rules read s, and also its folded view when it
-// has one (foldView: a key with a format character inside it, a colon look-alike, an explicit key), whose
-// matches count on the bytes of s they were folded from.
+// has one (foldView: a key with an invisible character inside it, a colon look-alike, an explicit key, a
+// separator of other characters), whose matches count on the bytes of s they were folded from. A merged range
+// takes the invisible characters right after it.
 func (r *Redactor) spans(s string) []span {
 	spans := r.ruleSpans(s, nil, false)
 	if f, ok := foldView(s); ok {
@@ -405,6 +408,30 @@ func (r *Redactor) spans(s string) []span {
 			spans[i].start, spans[i].end, spans[i].folded = f.from[spans[i].start], f.to[spans[i].end-1], false
 		}
 	}
+	merged := mergeSpans(spans)
+	for i := range merged {
+		// Invisible characters right after a match belong to it (#845, fourth round): the folded view drops
+		// them, and kept apart from the replacement they would be the one visible trace of where it ended. The
+		// merged ranges are disjoint, so each byte is read at most once here.
+		limit := len(s)
+		if i+1 < len(merged) {
+			limit = merged[i+1].start
+		}
+		for merged[i].end < limit {
+			tick(1)
+			n := invisibleLen(s, merged[i].end)
+			if n == 0 {
+				break
+			}
+			merged[i].end += n
+		}
+	}
+	return merged
+}
+
+// mergeSpans sorts spans and merges the overlapping ones into one named after the span that starts first (the
+// first rule, on a tie).
+func mergeSpans(spans []span) []span {
 	if len(spans) == 0 {
 		return nil
 	}
@@ -2964,7 +2991,7 @@ func builtinRules() []rule {
 		// password such as "Hunter<2"), which a JSON or HTML encoder would have escaped and text read raw
 		// does not (#840); it still ends at "/", so it never reaches into the next URL. The host part ends at
 		// "<" and ">", so a bracket of the markup around the URL ("<postgres://u:p@h/x>") stays.
-		// A URL in angle brackets ("<https://example.com>,<mailto:ops@corp.io>") ends at its closing bracket
+		// A URL in angle brackets ("<https://example.com>,<mailto:ops@example.com>") ends at its closing bracket
 		// when that bracket stands before the "@" and is not glued to more text (autolinkClosed, #845).
 		{kind: KindConnectionString, span: connStringSpan, re: regexp.MustCompile(
 			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"]+@[^\s'"<>]+`)},

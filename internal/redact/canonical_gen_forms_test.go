@@ -72,7 +72,7 @@ var canonSplitKeys = func() [][][]canonSeqPart {
 
 // sequenceParts writes "serve", the strings of items, then the value strings (each written by one of vals),
 // then after, in rendering r, and records the strings in args.
-func (w *canonWriter) sequenceParts(r int, items [][]canonSeqPart, vals []func(w *canonWriter), after string) {
+func (w *canonWriter) sequenceParts(r int, items [][]canonSeqPart, vals []func(w *canonWriter), after string) { //nolint:unparam // every generated sequence ends with the same flag, text that must stay
 	rd := canonSeqRenderings[r]
 	w.text(rd.open + rd.quote)
 	w.kept(canonServe)

@@ -20,27 +20,32 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
-// The folded view of a text (#845, second and third rounds): the text a reader sees, where the rules read the
-// text as written. Three things are folded, and nothing else:
+// The folded view of a text (#845, second to fourth rounds): the text a reader sees, where the rules read the
+// text as written. Four things are folded, and nothing else:
 //
-//   - A run of format characters (Unicode category Cf: the zero-width space and joiners, the word joiner, the
-//     byte order mark, the soft hyphen, the Mongolian vowel separator) after a byte of a key name is dropped
-//     when a key byte, a colon, an equals sign, a quote, a colon look-alike or the end of the line follows it
-//     ("pass\u200bword", "api_key\u200b: V"): a reader does not see it, and it split the key from itself or
-//     from its colon for every rule.
+//   - A run of invisible characters (invisibleRanges: Unicode's default ignorable code points and category Cf,
+//     such as the zero-width space and joiners, the soft hyphen, the combining grapheme joiner, the Hangul
+//     fillers and the variation selectors) after a byte of a key name is dropped when a key byte, a colon, an
+//     equals sign, a quote, a colon look-alike or the end of the line follows it ("pass​word",
+//     "api_key​: V"): a reader does not see it, and it split the key from itself or from its colon for
+//     every rule.
 //   - Each character of foldColons becomes ":".
 //   - An explicit YAML key, "? key" with ":" at the same column on the next line, becomes "key:" on one line;
 //     so does a key on its own line below "?" or below "? |" (a block scalar: one line of key, more indented
 //     than the "?", blank lines around it), with ":" at the column of the "?" after it.
+//   - The separator after a secret key, read on the view the three folds above give (sepRunAt): a run of at
+//     most maxSepRun characters that are blanks, controls, invisible characters, colons, equals signs and the
+//     arrows "->" and "=>", with at least one colon, equals sign or arrow in it, becomes ": ", which every rule
+//     for a key and its value reads. A run the rules have always read (one ":", "=" or ":=" between spaces and
+//     tabs) stays as it is, and a run of blanks alone is no separator ("password reset failed" is prose).
 //
 // The rules read the folded view as well as the text ([Redactor.spans]); each of its matches counts on the
 // bytes of the text it was folded from, so a redacted range still starts and ends on the original bytes and
-// covers the characters folded away inside it. A text with nothing to fold is read once. [Redactor.Strings]
-// reads each string of a sequence in its folded view too (seqValues).
+// covers the characters folded away inside it. A text with nothing to fold is read once. seqValues reads each
+// string of a sequence in its folded view too.
 
 // foldColons are the characters that Unicode's confusables list maps to a colon, or to two (U+2237 PROPORTION
 // and U+2E2C SQUARED FOUR DOT PUNCTUATION read "::"), each folded to one ":": every line of confusables.txt
@@ -65,27 +70,72 @@ func isKeyByte(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-'
 }
 
-// foldView returns the folded view of s, and false when it is s itself. A first pass only looks for something to
-// fold, so a text with nothing to fold costs one read and no allocation.
+// foldView returns the folded view of s, and false when it is s itself: the glyph folds (foldWalk), then the
+// separator fold (sepWalk) on their result. A first pass of each only looks for something to fold, so a text
+// with nothing to fold costs one read of each and no allocation.
 func foldView(s string) (foldedView, bool) {
-	if !foldWalk(s, nil) {
-		return foldedView{}, false
+	var g foldedView
+	glyphs := foldWalk(s, nil)
+	if glyphs {
+		g = newFoldBuilder(len(s)).build(func(emit func(text string, from, to int, copied bool)) {
+			foldWalk(s, func(text string, from, to int) { emit(text, from, to, to-from == len(text)) })
+		})
 	}
-	var b strings.Builder
-	b.Grow(len(s))
-	f := foldedView{from: make([]int, 0, len(s)), to: make([]int, 0, len(s))}
-	foldWalk(s, func(text string, from, to int) {
-		b.WriteString(text)
+	t := s
+	if glyphs {
+		t = g.text
+	}
+	if !sepWalk(t, nil) {
+		return g, glyphs
+	}
+	from := func(i int) int { return i }
+	to := func(i int) int { return i + 1 }
+	if glyphs {
+		from = func(i int) int { return g.from[i] }
+		to = func(i int) int { return g.to[i] }
+	}
+	return newFoldBuilder(len(t)).build(func(emit func(text string, from, to int, copied bool)) {
+		sepWalk(t, func(text string, a, b int, copied bool) {
+			if copied {
+				for i := a; i < b; i++ {
+					emit(t[i:i+1], from(i), to(i), true)
+				}
+				return
+			}
+			emit(text, from(a), to(b-1), false)
+		})
+	}), true
+}
+
+// foldBuilder writes a folded view piece by piece.
+type foldBuilder struct {
+	b strings.Builder
+	f foldedView
+}
+
+// newFoldBuilder returns a builder for a view of about n bytes.
+func newFoldBuilder(n int) *foldBuilder {
+	fb := &foldBuilder{f: foldedView{from: make([]int, 0, n), to: make([]int, 0, n)}}
+	fb.b.Grow(n)
+	return fb
+}
+
+// build calls walk with an emit function and returns the view of what it emitted: a piece copied from the
+// original (copied) maps each byte to its own, a folded piece maps each byte to all of from to to.
+func (fb *foldBuilder) build(walk func(emit func(text string, from, to int, copied bool))) foldedView {
+	walk(func(text string, from, to int, copied bool) {
+		tick(1)
+		fb.b.WriteString(text)
 		for i := range len(text) {
-			if to-from == len(text) {
-				f.from, f.to = append(f.from, from+i), append(f.to, from+i+1)
+			if copied {
+				fb.f.from, fb.f.to = append(fb.f.from, from+i), append(fb.f.to, from+i+1)
 				continue
 			}
-			f.from, f.to = append(f.from, from), append(f.to, to)
+			fb.f.from, fb.f.to = append(fb.f.from, from), append(fb.f.to, to)
 		}
 	})
-	f.text = b.String()
-	return f, true
+	fb.f.text = fb.b.String()
+	return fb.f
 }
 
 // foldWalk reads s line by line and calls emit for each piece of the folded view: its text and the range of s
@@ -202,7 +252,7 @@ func explicitKeyBelow(s string, at int, l viewLine, q col) (k, c viewLine, ok bo
 	return k, c, true
 }
 
-// foldChars emits s[from:to] with the format characters inside key names dropped and the colon look-alikes
+// foldChars emits s[from:to] with the invisible characters inside key names dropped and the colon look-alikes
 // folded to ":", and reports whether it folded anything. With emit nil it stops at the first fold.
 func foldChars(s string, from, to int, emit func(text string, from, to int)) bool {
 	changed := false
@@ -228,14 +278,14 @@ func foldChars(s string, from, to int, emit func(text string, from, to int)) boo
 			flush(i)
 			emit(":", i, i+n)
 			plain = i + n
-		case unicode.Is(unicode.Cf, r) && i > from && isKeyByte(s[i-1]):
-			// A run of format characters after a byte of a key name, before another, a separator, a quote or the
-			// end of the line.
+		case isInvisible(r) && i > from && isKeyByte(s[i-1]):
+			// A run of invisible characters after a byte of a key name, before another, a separator, a quote or
+			// the end of the line.
 			j := i + n
 			for j < to {
 				tick(1)
 				r2, n2 := utf8.DecodeRuneInString(s[j:])
-				if !unicode.Is(unicode.Cf, r2) {
+				if !isInvisible(r2) {
 					break
 				}
 				j += n2
@@ -266,4 +316,145 @@ func isFoldColonAt(s string, i int) bool {
 	}
 	r, _ := utf8.DecodeRuneInString(s[i:])
 	return isFoldColon(r)
+}
+
+// invisibleRanges are the invisible characters of the folded view, as sorted, merged ranges: every code point
+// that Unicode 18.0.0 marks Default_Ignorable_Code_Point (DerivedCoreProperties.txt) or puts in category Cf
+// (DerivedGeneralCategory.txt). testdata/invisible.txt holds those lines of both files, and
+// TestInvisibleIsDefaultIgnorableOrFormat checks this table and the version named here against it.
+var invisibleRanges = [][2]rune{
+	{0x00AD, 0x00AD}, {0x034F, 0x034F}, {0x0600, 0x0605}, {0x061C, 0x061C}, {0x06DD, 0x06DD}, {0x070F, 0x070F},
+	{0x0890, 0x0891}, {0x08E2, 0x08E2}, {0x115F, 0x1160}, {0x17B4, 0x17B5}, {0x180B, 0x180F}, {0x200B, 0x200F},
+	{0x202A, 0x202E}, {0x2060, 0x206F}, {0x3164, 0x3164}, {0xFE00, 0xFE0F}, {0xFEFF, 0xFEFF}, {0xFFA0, 0xFFA0},
+	{0xFFF0, 0xFFFB}, {0x110BD, 0x110BD}, {0x110CD, 0x110CD}, {0x13430, 0x1343F}, {0x1BCA0, 0x1BCA3},
+	{0x1D173, 0x1D17A}, {0xE0000, 0xE0FFF},
+}
+
+// isInvisible reports whether r is in invisibleRanges.
+func isInvisible(r rune) bool {
+	if r < invisibleRanges[0][0] {
+		return false
+	}
+	_, found := slices.BinarySearchFunc(invisibleRanges, r, func(rg [2]rune, r rune) int {
+		switch {
+		case rg[1] < r:
+			return -1
+		case rg[0] > r:
+			return 1
+		}
+		return 0
+	})
+	return found
+}
+
+// invisibleLen returns the length of the invisible character at s[i], or 0.
+func invisibleLen(s string, i int) int {
+	if s[i] < utf8.RuneSelf {
+		return 0
+	}
+	r, n := utf8.DecodeRuneInString(s[i:])
+	if isInvisible(r) {
+		return n
+	}
+	return 0
+}
+
+// sepKey matches a secret key and the closing quote after it, plain or escaped, if there is one: where the
+// separator fold looks for a separator.
+var sepKey = regexp.MustCompile(`(?i)` + bareKeyExpr + `(?:\\*["'])?`)
+
+// maxSepRun bounds the characters of a separator run, so that a long run of punctuation after a key is no
+// separator (a heading underlined with "=" after "Password"). A key followed by a longer run keeps its value.
+const maxSepRun = 16
+
+// sepRun is a run of separator characters (sepRunAt): where it ends, and what it holds.
+type sepRun struct {
+	end   int
+	marks string // its colons, equals signs and arrows, in order
+	plain bool   // nothing but marks, spaces and tabs
+}
+
+// sepRunAt reads the run of separator characters at s[i]: blanks and other indentation characters but line
+// breaks (indentLen), invisible characters, ":" and its look-alikes, "=", "->" and "=>", at most maxSepRun of
+// them. ok is false when there is no mark in it, or when the run goes on past maxSepRun characters.
+func sepRunAt(s string, i int) (r sepRun, ok bool) {
+	r.plain = true
+	j := i
+	for n := 0; j < len(s); n++ {
+		tick(1)
+		k := 0
+		switch c := s[j]; {
+		case c == ':' || c == '=':
+			k = 1
+			if c == '=' && j+1 < len(s) && s[j+1] == '>' {
+				k, r.plain = 2, false
+			}
+			r.marks += s[j : j+k]
+		case c == '-' && j+1 < len(s) && s[j+1] == '>':
+			k, r.plain = 2, false
+			r.marks += "->"
+		case c == ' ' || c == '\t':
+			k = 1
+		case isFoldColonAt(s, j):
+			// A colon look-alike, read where the glyph folds have not run (a string of a sequence as written).
+			k, r.plain = charLen(s, j), false
+			r.marks += ":"
+		default:
+			if k = indentLen(s, j); k == 0 {
+				k = invisibleLen(s, j)
+			}
+			if k == 0 {
+				r.end = j
+				return r, r.marks != ""
+			}
+			r.plain = false
+		}
+		if n == maxSepRun {
+			return r, false
+		}
+		j += k
+	}
+	r.end = j
+	return r, r.marks != ""
+}
+
+// foldsAsSeparator reports whether the separator fold rewrites the run r: it holds a mark, and it is not one
+// ":", "=" or ":=" between spaces and tabs.
+func (r sepRun) foldsAsSeparator() bool {
+	return !r.plain || r.marks != ":" && r.marks != "=" && r.marks != ":="
+}
+
+// sepWalk calls emit for each piece of the separator fold of s: the text between separators, copied, and each
+// separator run after a secret key (sepKey) that folds (foldsAsSeparator), folded. With emit nil it only
+// reports, as soon as it finds one, whether any run folds.
+func sepWalk(s string, emit func(text string, from, to int, copied bool)) bool {
+	changed, pos := false, 0
+	for _, m := range sepKey.FindAllStringIndex(counted(s), -1) {
+		tick(1)
+		at := m[1]
+		if s[at-1] == '-' && at < len(s) && s[at] == '>' {
+			// The key took the dash of an arrow.
+			at--
+		}
+		if at < pos {
+			continue
+		}
+		r, ok := sepRunAt(s, at)
+		if !ok || !r.foldsAsSeparator() {
+			continue
+		}
+		changed = true
+		if emit == nil {
+			return true
+		}
+		if at > pos {
+			emit(s[pos:at], pos, at, true)
+		}
+		emit(": ", at, r.end, false)
+		pos = r.end
+	}
+	if changed && pos < len(s) {
+		emit(s[pos:], pos, len(s), true)
+	}
+	return changed
 }

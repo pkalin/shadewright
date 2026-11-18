@@ -60,9 +60,17 @@ func TestCanonCorpusWorkIsLinear(t *testing.T) {
 	}
 	t.Logf("String on the %d inputs one by one: %d steps for %d bytes, %.1f per byte", len(cases), total, size,
 		float64(total)/float64(size))
+	sizes := map[string]int{}
+	for _, c := range cases {
+		sizes[c.form] += len(c.in) + 1
+	}
 	for _, form := range canonForms {
-		ws, small := canonWork(t, canonFormText(cases, form, 16<<10))
-		wl, large := canonWork(t, canonFormText(cases, form, 128<<10))
+		// The smaller text holds every input of the form once (at least 16 KiB), the larger eight times as
+		// much, so both hold the same mix: a form whose later inputs have something to fold (the whole text is
+		// then read twice) costs more per byte than its first inputs alone, which is no growth with size.
+		n := max(16<<10, sizes[form])
+		ws, small := canonWork(t, canonFormText(cases, form, n))
+		wl, large := canonWork(t, canonFormText(cases, form, 8*n))
 		perSmall, perLarge := float64(ws)/float64(small), float64(wl)/float64(large)
 		t.Logf("%s: %.1f steps per byte on %d bytes, %.1f on %d", form, perSmall, small, perLarge, large)
 		if wl > int64(maxWorkPerByte*large) {

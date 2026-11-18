@@ -469,8 +469,8 @@ func TestReadReportChecksTheSchemaVersion(t *testing.T) {
 		name, want string
 		edit       func(map[string]any)
 	}{
-		{"version 6", "schema version is 6, this harness reads version 7 only",
-			func(d map[string]any) { d["schemaVersion"] = 6 }},
+		{"version 7", "schema version is 7, this harness reads version 8 only",
+			func(d map[string]any) { d["schemaVersion"] = 7 }},
 		{"no version", "no schemaVersion", func(d map[string]any) { delete(d, "schemaVersion") }},
 		{"unknown field", "unknown field", func(d map[string]any) { d["costPerPass"] = 1 }},
 	} {

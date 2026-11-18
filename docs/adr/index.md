@@ -43,5 +43,6 @@
 | [0039](0039-consequence-symptoms-attach-to-their-causes-incident.md) | Consequence symptoms attach to their cause's Incident | Accepted, amended |
 | [0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md) | Code sizes a memory proposal from the metrics, and the pull request shows the evidence | Accepted, amended |
 | [0041](0041-a-freshness-check-at-the-merge-of-a-pull-request.md) | A freshness check at the merge of a pull request | Proposed |
+| [0042](0042-openai-compatible-model-endpoints.md) | OpenAI-compatible model endpoints and an optional API key | Accepted |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

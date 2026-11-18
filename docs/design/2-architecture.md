@@ -13,7 +13,7 @@ sequenceDiagram
     autonumber
     participant K as Cluster
     participant A as Analyzer
-    participant M as Model (Foundry)
+    participant M as Configured model provider
     participant R as RemediationRequest
     participant E as Executor
     participant G as GitHub
@@ -79,7 +79,7 @@ Their roles are generated from kubebuilder RBAC markers (`internal/analyzer`, `i
 
 A third binary in the module, `cmd/kubectl-shadewright`, is not deployed: it is a kubectl plugin that a person runs with their own kubeconfig and permissions (`kubectl shadewright status`, which `-w` repeats at an interval with the same reads, `explain <name>` for one request or Incident, and `doctor` for read-only checks of an install). It only gets and lists Incidents, RemediationRequests, the RemediationSettings, the analysis budget ConfigMap and the version label of the Shadewright CRDs, and for `doctor` the Shadewright CRDs, the analyzer and executor Deployments and the Flux GitRepositories and Kustomizations; it shows the detection reported in the RemediationSettings status but decides nothing from it (invariant 6). It holds no identity of its own, and cleans every string from the cluster of control characters and terminal escape sequences before printing it (invariant 4); see [check status with kubectl](../how-to/check-status.md). It links only what a read-only client needs: client-go's dynamic and metadata clients, `clientcmd` with its authentication plugins, the API types it reads and its own code, through a reader interface that has no write method. It tells a kind the cluster does not serve (Flux not installed) from a missing object or a missing grant as the operator's controller-runtime client does: a 404 that names no object is an unserved kind, and on a 403 it reads the discovery document of that group version (open to every authenticated user) and keeps the 403 unless the resource is not listed there or the group version is not served. It shares the Flux source rules, the analysis budget parser and the analyzer's flag names with the operator through leaf packages (`internal/gitops/sourcemap/fluxrules`, `internal/incidents/analysisdue`, `internal/cmdutil/sharedflags`) that import neither controller-runtime nor the typed clientset. `make lint` fails when it links one of them, or when its stripped linux/amd64 binary grows past a ceiling (`hack/check-plugin-deps.sh`, #756).
 
-No model runs in the cluster and no GPU is needed: the analyzer calls a managed model endpoint (Microsoft Foundry first). The call, and the bounded tool loop on escalation, are our own code, not a hosted agent service.
+The analyzer calls a configured model endpoint: Foundry, the Anthropic API or an OpenAI-compatible HTTPS server. Shadewright deploys no model or GPU; an operator may allow a separately managed cluster Service (ADR-0042). The call, and the bounded tool loop on escalation, are our own code, not a hosted agent service.
 
 ### 2.2.2. Analyzer permissions
 
@@ -188,7 +188,7 @@ Every external system sits behind a Go interface with one adapter per product ([
 | `GitProvider` | GitHub (GitHub App) | Azure DevOps, GitLab |
 | `FeedbackSource` (built, behind `GitProvider`, 2.3.3) | GitHub pull request comments | Azure DevOps, GitLab |
 | `DeliveryVerifier` | Flux (`Kustomization`, `HelmRelease`) | Argo CD |
-| `ModelProvider` | Microsoft Foundry (OpenAI and Anthropic models) | Direct vendor APIs, other gateways |
+| `ModelProvider` | Microsoft Foundry, Anthropic API, OpenAI-compatible HTTPS endpoints | Additional wire protocols |
 | `MetricsSource` | Prometheus HTTP API | Grafana Cloud, Azure Monitor managed Prometheus |
 | `LogSource` | Kubernetes pod logs API | Loki, Azure Monitor Logs |
 | `Notifier` | GitHub issue in the fleet repo | Microsoft Teams, Slack, generic webhook |

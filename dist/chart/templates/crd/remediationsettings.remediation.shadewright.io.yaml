@@ -134,6 +134,7 @@ spec:
                               to 12, day 01 to 31), optionally followed by -preview. Required for provider Foundry. For provider
                               Anthropic leave it out: that adapter's API version is fixed in code, so a value is accepted (an object
                               stored when the field was required stays valid) but never sent.
+                              OpenAICompatible forbids this field: the endpoint includes its API prefix, such as /v1.
                             maxLength: 32
                             minLength: 2
                             pattern: ^(v1|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(-preview)?)$
@@ -142,7 +143,8 @@ spec:
                             description: |-
                               deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting
                               with a letter or digit. For provider Anthropic it is the model ID exactly as the replies name it, such as
-                              claude-haiku-5-5.
+                              claude-haiku-5-5. For OpenAICompatible it is the server's model name and must equal a name in the
+                              endpoint declaration's models list byte for byte (ModelNotAllowed otherwise).
                             maxLength: 64
                             minLength: 1
                             pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
@@ -159,7 +161,11 @@ spec:
                               --model-endpoint-suffixes flag (not in this object) or a port other than 443, refuses private, loopback
                               and link-local addresses when it dials, and requests a token for the Cognitive Services audience only.
                               For provider Anthropic it must be https://api.anthropic.com, the adapter's fixed host, and the allow-list
-                              does not apply; for Foundry that host is refused whatever the allow-list says.
+                              does not apply; for Foundry that host is refused whatever the allow-list says. OpenAICompatible also
+                              requires HTTPS and an exact parsed base and API from --openai-compatible-endpoints. The request uses only
+                              declared destination data, never a settings path. Foundry refuses declared compatible hosts. Private
+                              addresses require a declared Service with egress fields, never loopback or link-local. Each optional
+                              key belongs to its declared base. No redirects or environment proxy are used.
                             maxLength: 256
                             minLength: 1
                             pattern: ^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$
@@ -170,7 +176,8 @@ spec:
                               out) or Responses, which needs apiVersion v1 and posts to <endpoint>/openai/v1/responses. Both carry the
                               same redacted context, tool definitions, response schema and output limit; the Responses request asks the
                               service to store nothing. Set Responses for a model that refuses function tools on chat completions,
-                              such as the gpt-6.1 models, whose escalation calls need the read tools (#501). Only for provider Foundry.
+                              such as the gpt-6.1 models, whose escalation calls need the read tools (#501). OpenAICompatible also
+                              accepts this field and appends /responses or /chat/completions to its endpoint without an Azure prefix.
                             enum:
                             - ChatCompletions
                             - Responses
@@ -195,8 +202,8 @@ spec:
                           provider:
                             default: Foundry
                             description: |-
-                              provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default) or
-                              Anthropic. It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
+                              provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default),
+                              Anthropic or OpenAICompatible (ADR-0042). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
                               Anthropic the endpoint must be https://api.anthropic.com, the analyzer reads its API key from the file
                               of its --anthropic-api-key-file flag (not in this object) and refuses the deployment without it,
                               deployment must equal the role's --triage-model or --escalation-model value, apiVersion may be left out
@@ -204,9 +211,13 @@ spec:
                               deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
                               started without them refuses it (ProviderNotConfigured). A Foundry deployment may
                               not name the host api.anthropic.com. There is no fallback between providers.
+                              OpenAICompatible matches --openai-compatible-endpoints declarations and their allowed models lists (ModelNotAllowed for an undeclared model), with no Azure identity and an optional API key
+                              read from its endpoint's own mounted file. The key is bound to its full install-time base URL, never an Azure model host
+                              or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.
                             enum:
                             - Foundry
                             - Anthropic
+                            - OpenAICompatible
                             type: string
                         required:
                         - deployment
@@ -215,10 +226,9 @@ spec:
                         type: object
                         x-kubernetes-validations:
                         - fieldPath: .apiVersion
-                          message: a deployment with a provider other than Anthropic
-                            needs apiVersion
+                          message: a Foundry deployment needs apiVersion
                           rule: has(self.apiVersion) || (has(self.provider) && self.provider
-                            == 'Anthropic')
+                            in ['Anthropic', 'OpenAICompatible'])
                         - message: a deployment with provider Anthropic must have
                             the endpoint https://api.anthropic.com
                           rule: '!has(self.provider) || self.provider != ''Anthropic''
@@ -229,12 +239,26 @@ spec:
                             || !isURL(self.endpoint) || url(self.endpoint).getHostname()
                             != 'api.anthropic.com'
                         - message: inferenceAPI is only for a deployment with provider
-                            Foundry
+                            Foundry or OpenAICompatible
                           rule: '!has(self.inferenceAPI) || !has(self.provider) ||
-                            self.provider == ''Foundry'''
+                            self.provider in [''Foundry'', ''OpenAICompatible'']'
                         - message: inferenceAPI Responses needs apiVersion v1
-                          rule: '!has(self.inferenceAPI) || self.inferenceAPI != ''Responses''
-                            || (has(self.apiVersion) && self.apiVersion == ''v1'')'
+                          rule: (has(self.provider) && self.provider == 'OpenAICompatible')
+                            || !has(self.inferenceAPI) || self.inferenceAPI != 'Responses'
+                            || (has(self.apiVersion) && self.apiVersion == 'v1')
+                        - message: OpenAICompatible does not allow apiVersion
+                          rule: '!has(self.provider) || self.provider != ''OpenAICompatible''
+                            || !has(self.apiVersion)'
+                        - message: OpenAICompatible does not allow Azure model hosts
+                          rule: '!has(self.provider) || self.provider != ''OpenAICompatible''
+                            || !isURL(self.endpoint) || ![''openai.azure.com'', ''cognitiveservices.azure.com'',
+                            ''services.ai.azure.com''].exists(s, url(self.endpoint).getHostname()
+                            == s || url(self.endpoint).getHostname().endsWith(''.''
+                            + s))'
+                        - message: the host api.openai.com needs provider OpenAICompatible
+                          rule: (has(self.provider) && self.provider != 'Foundry')
+                            || !isURL(self.endpoint) || url(self.endpoint).getHostname()
+                            != 'api.openai.com'
                       triage:
                         description: |-
                           triage is the small model for the one structured call on the prepared context, without tools. Left out,
@@ -247,6 +271,7 @@ spec:
                               to 12, day 01 to 31), optionally followed by -preview. Required for provider Foundry. For provider
                               Anthropic leave it out: that adapter's API version is fixed in code, so a value is accepted (an object
                               stored when the field was required stays valid) but never sent.
+                              OpenAICompatible forbids this field: the endpoint includes its API prefix, such as /v1.
                             maxLength: 32
                             minLength: 2
                             pattern: ^(v1|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(-preview)?)$
@@ -255,7 +280,8 @@ spec:
                             description: |-
                               deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting
                               with a letter or digit. For provider Anthropic it is the model ID exactly as the replies name it, such as
-                              claude-haiku-5-5.
+                              claude-haiku-5-5. For OpenAICompatible it is the server's model name and must equal a name in the
+                              endpoint declaration's models list byte for byte (ModelNotAllowed otherwise).
                             maxLength: 64
                             minLength: 1
                             pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
@@ -272,7 +298,11 @@ spec:
                               --model-endpoint-suffixes flag (not in this object) or a port other than 443, refuses private, loopback
                               and link-local addresses when it dials, and requests a token for the Cognitive Services audience only.
                               For provider Anthropic it must be https://api.anthropic.com, the adapter's fixed host, and the allow-list
-                              does not apply; for Foundry that host is refused whatever the allow-list says.
+                              does not apply; for Foundry that host is refused whatever the allow-list says. OpenAICompatible also
+                              requires HTTPS and an exact parsed base and API from --openai-compatible-endpoints. The request uses only
+                              declared destination data, never a settings path. Foundry refuses declared compatible hosts. Private
+                              addresses require a declared Service with egress fields, never loopback or link-local. Each optional
+                              key belongs to its declared base. No redirects or environment proxy are used.
                             maxLength: 256
                             minLength: 1
                             pattern: ^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$
@@ -283,7 +313,8 @@ spec:
                               out) or Responses, which needs apiVersion v1 and posts to <endpoint>/openai/v1/responses. Both carry the
                               same redacted context, tool definitions, response schema and output limit; the Responses request asks the
                               service to store nothing. Set Responses for a model that refuses function tools on chat completions,
-                              such as the gpt-6.1 models, whose escalation calls need the read tools (#501). Only for provider Foundry.
+                              such as the gpt-6.1 models, whose escalation calls need the read tools (#501). OpenAICompatible also
+                              accepts this field and appends /responses or /chat/completions to its endpoint without an Azure prefix.
                             enum:
                             - ChatCompletions
                             - Responses
@@ -308,8 +339,8 @@ spec:
                           provider:
                             default: Foundry
                             description: |-
-                              provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default) or
-                              Anthropic. It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
+                              provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default),
+                              Anthropic or OpenAICompatible (ADR-0042). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
                               Anthropic the endpoint must be https://api.anthropic.com, the analyzer reads its API key from the file
                               of its --anthropic-api-key-file flag (not in this object) and refuses the deployment without it,
                               deployment must equal the role's --triage-model or --escalation-model value, apiVersion may be left out
@@ -317,9 +348,13 @@ spec:
                               deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
                               started without them refuses it (ProviderNotConfigured). A Foundry deployment may
                               not name the host api.anthropic.com. There is no fallback between providers.
+                              OpenAICompatible matches --openai-compatible-endpoints declarations and their allowed models lists (ModelNotAllowed for an undeclared model), with no Azure identity and an optional API key
+                              read from its endpoint's own mounted file. The key is bound to its full install-time base URL, never an Azure model host
+                              or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.
                             enum:
                             - Foundry
                             - Anthropic
+                            - OpenAICompatible
                             type: string
                         required:
                         - deployment
@@ -328,10 +363,9 @@ spec:
                         type: object
                         x-kubernetes-validations:
                         - fieldPath: .apiVersion
-                          message: a deployment with a provider other than Anthropic
-                            needs apiVersion
+                          message: a Foundry deployment needs apiVersion
                           rule: has(self.apiVersion) || (has(self.provider) && self.provider
-                            == 'Anthropic')
+                            in ['Anthropic', 'OpenAICompatible'])
                         - message: a deployment with provider Anthropic must have
                             the endpoint https://api.anthropic.com
                           rule: '!has(self.provider) || self.provider != ''Anthropic''
@@ -342,12 +376,26 @@ spec:
                             || !isURL(self.endpoint) || url(self.endpoint).getHostname()
                             != 'api.anthropic.com'
                         - message: inferenceAPI is only for a deployment with provider
-                            Foundry
+                            Foundry or OpenAICompatible
                           rule: '!has(self.inferenceAPI) || !has(self.provider) ||
-                            self.provider == ''Foundry'''
+                            self.provider in [''Foundry'', ''OpenAICompatible'']'
                         - message: inferenceAPI Responses needs apiVersion v1
-                          rule: '!has(self.inferenceAPI) || self.inferenceAPI != ''Responses''
-                            || (has(self.apiVersion) && self.apiVersion == ''v1'')'
+                          rule: (has(self.provider) && self.provider == 'OpenAICompatible')
+                            || !has(self.inferenceAPI) || self.inferenceAPI != 'Responses'
+                            || (has(self.apiVersion) && self.apiVersion == 'v1')
+                        - message: OpenAICompatible does not allow apiVersion
+                          rule: '!has(self.provider) || self.provider != ''OpenAICompatible''
+                            || !has(self.apiVersion)'
+                        - message: OpenAICompatible does not allow Azure model hosts
+                          rule: '!has(self.provider) || self.provider != ''OpenAICompatible''
+                            || !isURL(self.endpoint) || ![''openai.azure.com'', ''cognitiveservices.azure.com'',
+                            ''services.ai.azure.com''].exists(s, url(self.endpoint).getHostname()
+                            == s || url(self.endpoint).getHostname().endsWith(''.''
+                            + s))'
+                        - message: the host api.openai.com needs provider OpenAICompatible
+                          rule: (has(self.provider) && self.provider != 'Foundry')
+                            || !isURL(self.endpoint) || url(self.endpoint).getHostname()
+                            != 'api.openai.com'
                     type: object
                     x-kubernetes-validations:
                     - message: an escalation model needs a triage model

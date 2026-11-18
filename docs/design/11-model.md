@@ -8,7 +8,7 @@ The model is one part of the analyzer, not the part that makes it safe. Code and
 
 ## 11.1. Setup
 
-The analyzer runs locally during development and in the cluster later, always against a managed endpoint. Seven rules apply.
+The analyzer runs locally during development and in the cluster later, against a configured endpoint. For Foundry, seven rules apply.
 
 1. **Own resource and budget.** A separate Foundry resource and budget for the lab.
 2. **A capable model.** It is available in the chosen region and deployment type, with structured outputs and tool calling.
@@ -21,7 +21,7 @@ The analyzer runs locally during development and in the cluster later, always ag
 ### Rule 5: what is configured where
 
 - Deployment name, model ID and version, API version and TPM/RPM limits are config.
-- The provider, endpoint, deployment name, API version and daily token cap of the triage and escalation models are fields of `RemediationSettings` `spec.analysis.models` (5.4), with no key. `provider` is `Foundry` (the default) or `Anthropic` and names the API the adapter speaks, not the model family: a Claude model on Microsoft Foundry is still `Foundry` ([ADR-0037](../adr/0037-the-anthropic-api-as-a-second-model-provider.md)). Each role has its own deployment, so triage and escalation may use different providers; there is no fallback between them.
+- The provider, endpoint, deployment name, API version and daily token cap of the triage and escalation models are fields of `RemediationSettings` `spec.analysis.models` (5.4), with no key. `provider` is `Foundry` (the default), `Anthropic` or `OpenAICompatible` and names the API the adapter speaks, not the model family: a Claude model on Microsoft Foundry is still `Foundry` ([ADR-0037](../adr/0037-the-anthropic-api-as-a-second-model-provider.md)). Each role has its own deployment, so triage and escalation may use different providers; there is no fallback between them.
 - TPM/RPM limits are set on the deployment itself.
 - The model ID and version come from the reply. The operator names the one each role must answer with (`--triage-model`, `--escalation-model`), and a reply naming another is refused (`UnexpectedModel`); the check against the evaluation list is planned (11.2).
 
@@ -39,9 +39,61 @@ For an `Anthropic` deployment the host is fixed in code, `api.anthropic.com`, an
 
 - the API server refuses an `Anthropic` deployment whose `endpoint` is not exactly `https://api.anthropic.com`, and a deployment of any other provider whose host is `api.anthropic.com`, so a provider added later inherits that ban (two CEL rules on `ModelDeployment`);
 - the analyzer checks both again: its Foundry path refuses that host whatever `--model-endpoint-suffixes` lists, before a provider is built or a token requested (`EndpointNotAllowed`);
-- it refuses an `Anthropic` deployment when it runs without `--anthropic-api-key-file` (`ProviderNotConfigured`), one at an endpoint other than the API's fixed one (`EndpointNotAllowed`; the allow-list is not consulted), and one whose `deployment` is not the model ID of its role's `--triage-model` or `--escalation-model` (`UnexpectedModel`), before any call and without using a unit of the daily budget. `apiVersion` may be left out of an `Anthropic` deployment (the CRD requires it for every other provider, [#814](https://github.com/pkalin/shadewright/issues/814)); a value there is not sent: the adapter's API version is a constant.
+- it refuses an `Anthropic` deployment when it runs without `--anthropic-api-key-file` (`ProviderNotConfigured`), one at an endpoint other than the API's fixed one (`EndpointNotAllowed`; the allow-list is not consulted), and one whose `deployment` is not the model ID of its role's `--triage-model` or `--escalation-model` (`UnexpectedModel`), before any call and without using a unit of the daily budget. `apiVersion` may be left out of an `Anthropic` deployment (the CRD requires it for Foundry and forbids it for OpenAICompatible, [#814](https://github.com/pkalin/shadewright/issues/814)); a value there is not sent: the adapter's API version is a constant.
 
 <span class="sw-status sw-built">built</span> in `internal/analyzer/models` and the API types ([#729](https://github.com/pkalin/shadewright/issues/729)).
+
+### OpenAI-compatible endpoints
+
+<span class="sw-status sw-built">built</span> `OpenAICompatible` matches settings
+against exact install-time `--openai-compatible-endpoints` declarations, including
+the nonempty allowed `models` list. An undeclared model alias ends
+`ModelNotAllowed` before any request. Each owns
+its base URL, inference API and optional key file; no settings path is used to
+construct a request. The shared `internal/providers/model/openaiwire` codec keeps
+Foundry wire behavior unchanged. No compatible suffix list exists. Scheme/host
+case, default port and one trailing slash normalize; dot segments, userinfo,
+queries and fragments are refused. Duplicate bases, segment path prefixes on the
+same authority, invalid model lists and Foundry/Azure/Anthropic host overlaps fail
+chart rendering and analyzer startup. Nonempty keys shorter than 16 bytes are
+malformed and are not retried. A key file belongs to one declaration: startup
+refuses two declarations that name one file, and a declaration that names the
+`--anthropic-api-key-file` file, by path and by file identity (a link counts), and
+the compatible and Anthropic adapters check identity again before each read, so a
+file that appears after start as a link to another declared key is refused without
+a request. The chart refuses two endpoints that mount the same Secret key (through
+a secret volume's `items` too), or the Anthropic key; for a projected or CSI volume
+it refuses only the same source written twice, and one key to one declaration is
+the operator's to keep.
+
+Set `--disable-foundry` for compatible-only inference without an Entra token
+source. The Foundry suffix list remains Foundry-only. Every declared compatible
+host is refused for Foundry and Anthropic. Private addresses require a declared
+Service with namespace, pod selector and target port; HTTPS with trusted TLS and
+address guards remain required. No redirects or proxy are used. Missing or
+unusable usage and failed sent calls cost the input estimate plus output bound
+and a rounded-up 10% margin; complete usage costs at least the input estimate.
+Every attempt the endpoint may have billed is charged, retries included (each one
+that got a response or may have reached a connection; not a refused dial or an
+unreadable key), and the adapter makes no retry the remaining analysis and daily
+budget cannot cover at that ceiling. An endpoint that reports less than it billed
+is charged the larger of the input estimate and its report.
+The raw body and joined decoded strings, numbers and object keys are scanned
+for credential echoes before any completion is returned, in a view that keeps
+only ASCII letters, digits and the key's punctuation, so no character inserted
+into the key hides it. Model text is stored without control characters (Unicode
+Cc except newline and tab, [#852](https://github.com/pkalin/shadewright/issues/852)),
+and the view drops a superset of them, so a key contiguous in stored text is
+refused; the provider must not ship before #852. A reply
+whose content or argument fields have a wrong JSON type is refused as malformed
+output with its own fixed text. Re-encoded keys (base64,
+percent encoding, homoglyphs) and splits across replies remain outside this check:
+the endpoint is trusted with the key at install. Output redaction, typed
+validation and deterministic policy still apply. [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md)
+remains Proposed.
+
+The [harness](../evaluation.md#openai-compatible-models-and-servers) qualifies a
+model and server together, including the Responses tool path of #501.
 
 ### Where inference runs
 

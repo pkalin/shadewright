@@ -297,6 +297,55 @@ How the numbers read:
   the tool calls back unchanged, as the API expects; the loop carries them without reading them, and they never
   reach a log line, an error or the report.
 
+### OpenAI-compatible models and servers
+
+`EVAL_MODEL=openaicompatible make eval-model` uses the analyzer's own factory,
+shared wire parsers, redaction, validators and scenario scoring, without Azure
+identity. This mode qualifies a model and server together: "compatible" servers
+differ, including whether they honour tool and response schemas or report usage.
+No provider fallback or output repair is attempted. Use ordinary runs and forced
+escalation to cover read tools and multi-turn Responses calls.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `EVAL_ENDPOINT` | yes | HTTPS API base, such as `https://api.openai.com/v1`; the adapter appends `/responses` or `/chat/completions` |
+| `EVAL_COMPATIBLE_ENDPOINTS` | yes | JSON array as `--openai-compatible-endpoints`: each has `url`, `inferenceAPI`, a nonempty `models` list, optional `keyFile` and optional `service` (namespace, podSelector, port). Each key belongs only to its exact base |
+| `EVAL_COMPATIBLE_SERVER_ID` | yes | Operator-recorded server release or dated service identifier, using model-name characters. Included in the qualification digest along with an endpoint hash, never the endpoint URL |
+| `EVAL_TRIAGE_DEPLOYMENT`, `EVAL_TRIAGE_MODEL` | yes | Request model name and exact model ID replies must name |
+| `EVAL_TRIAGE_INFERENCE_API` | no | `ChatCompletions` (default) or `Responses` |
+| `EVAL_ESCALATION_DEPLOYMENT`, `EVAL_ESCALATION_MODEL`, `EVAL_ESCALATION_INFERENCE_API` | no | Same fields for escalation; a model or API needs its deployment |
+| `EVAL_PRICE_*`, `EVAL_ESCALATION_PRICE_*`, `EVAL_REPEATS`, `EVAL_MIN_PASS_RATE`, `EVAL_FORCE_ESCALATION` | no | Existing harness controls. Prices are operator-supplied, not built in. Unknown usage makes the estimate a lower bound |
+
+Do not set `EVAL_API_VERSION` or Anthropic-only variables. Example for a future
+live run with an inference key already held in a private file:
+
+```bash
+EVAL_MODEL=openaicompatible \
+EVAL_ENDPOINT=https://api.openai.com/v1 \
+EVAL_COMPATIBLE_ENDPOINTS='[{"url":"https://api.openai.com/v1","inferenceAPI":"Responses","models":["gpt-6.1-sol"],"keyFile":"/mounted/model-key"}]' \
+EVAL_COMPATIBLE_SERVER_ID=openai-2026-11-16 \
+EVAL_TRIAGE_DEPLOYMENT=gpt-6.1-sol EVAL_TRIAGE_MODEL=gpt-6.1-sol \
+EVAL_TRIAGE_INFERENCE_API=Responses make eval-model
+```
+
+Set the expected ID to the exact snapshot the service reports. For the tool path
+also set the escalation fields, `EVAL_ESCALATION_INFERENCE_API=Responses` and
+`EVAL_FORCE_ESCALATION=1`. Retain both reports. The observation of 2026-11-16 that
+three gpt-6.x models returned one schema-conforming required tool call is a smoke
+observation only, not a passing scenario evaluation.
+
+Reports include elapsed seconds per scenario, and total elapsed seconds, charged
+tokens and estimated cost divided by the number of passed runs. Failed attempts
+remain in the numerator. With no passed runs the per-passed fields are absent,
+never zero or infinity. With no prices cost is absent. Missing or incomplete
+usage is refused, sets `UsageUnknown` and charges the input estimate plus the
+output bound with a rounded-up 10% margin. Complete reported usage is charged
+at least the input estimate; reports above that ceiling are refused and charged
+the ceiling. A compatible server's 429 is
+not marked unbilled, and each retried attempt the endpoint may have billed is
+charged. The persistent cross-analysis daily token counter remains
+planned (#208), as for the existing providers.
+
 ### Benchmarking escalation models
 
 Escalation runs only on the deterministic signals (a context cut to its total bound, a configured source that
@@ -473,24 +522,24 @@ fix any rubric the harness then refuses.
 
 ## The report
 
-`report.json` (schema version 7) and `report.md`, the same content for a person. A report of another schema
+`report.json` (schema version 8) and `report.md`, the same content for a person. A report of another schema
 version is not read as this one: the harness's reader (`readReport`) refuses it with both versions named, and a
 field the version does not know. The JSON fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | 7; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum. Version 6: rubric terms match on word boundaries ([Scoring](#scoring)), so diagnosis scores of version 5 or earlier are not comparable. Version 7: a run also fails when a quote of its accepted result holds the cut note, a tally line or a part the summary cut (`summaryQuotes`), so pass rates of version 6 or earlier are not comparable |
-| `mode` | `fake` (recorded replies), `foundry` or `anthropic` (a real model through that provider) |
+| `schemaVersion` | 8; raised on any change of a field's meaning. Version 2: `costUSD` prices each role at its own deployment's prices, and `usageUnknownCalls` counts failed calls too. Version 3: a diagnosis fact is scored on its value from any source of the context (`anyOf`) and the subject from the Incident, so diagnosis scores of version 2 or earlier are not comparable. Version 4: a run passes only when its expected reads pass too (`reads`), each run carries its own cost, a run that stopped with an error makes the cost incomplete, and the totals give `toolCalls`, `incompleteRuns` and `costPerPassedRunUSD`; the cost of a role without prices is unknown (`costUnknown`), never priced as another role's. Version 5: every model-sized proposal has a rubric `size`, and a value above the size supported by evidence fails the outcome even when it is below the policy maximum. Version 6: rubric terms match on word boundaries ([Scoring](#scoring)), so diagnosis scores of version 5 or earlier are not comparable. Version 7: a run also fails when a quote of its accepted result holds the cut note, a tally line or a part the summary cut (`summaryQuotes`), so pass rates of version 6 or earlier are not comparable. Version 8: each run gives its elapsed `seconds`, the totals give `seconds`, `secondsPerPassed` and `tokensPerPassed`, and the mode can be `openaicompatible` |
+| `mode` | `fake` (recorded replies), `foundry`, `anthropic` or `openaicompatible` (a real model through that provider) |
 | `manifest` | The evaluation manifest, below |
-| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole`, `costIncomplete` and `costUnknown` (as in `totals`, for this run), `quoteFailures`, `summaryQuotes`, `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |
-| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out), with `calls`, the model calls of the role, failed ones included. Each role is one deployment, named with its model in the manifest's `models`, so these are the counts per model |
+| `scenarios[]` | One entry per scenario run: `name`, `repeat`, `pass`, `seconds` (elapsed time, monotonic clock), `recording` (fake mode), the loop's `reason`, `escalated`, `calls`, `toolCalls`, `models` (as the replies named them), `tokens`, `outcome`, `diagnosis`, `reads`, `costUSD`, `costUSDByRole`, `costIncomplete` and `costUnknown` (as in `totals`, for this run), `quoteFailures`, `summaryQuotes`, `reply` and `error` (set when the run could not start or stopped; it fails, keeps the tokens of the calls it made, and its cost is marked incomplete) |
+| `scenarios[].tokens` | `input`, `cachedInput`, `output` as the replies reported them; `charged`, what the loop counted against its bounds (OpenAICompatible has an input-estimate floor and a ceiling of input plus output bound with a rounded-up 10% margin, and refuses above-ceiling reports; a call with unknown usage, or one that failed, at its upper bound; a call the adapter marks as refused before processing, a Foundry 429 from a Microsoft host, at 0, design 12.3); `usageUnknownCalls`, the calls without a usage to price: unknown usage, or a call that failed other than with a malformed reply or a refusal before processing; `byRole`, the same counts except `charged`, per role of the calls (`triage`, `escalation`; a role without a call is left out), with `calls`, the model calls of the role, failed ones included. Each role is one deployment, named with its model in the manifest's `models`, so these are the counts per model |
 | `scenarios[].reads` | `pass` (every expected read made; true when the rubric expects none), `expected[]` (`read` as the rubric wrote it, `pass`), `extra` (accepted calls no expected read matches) and `refused` (calls that read nothing: refused by the loop or the tool, or stopped by the deadline) ([Scoring](#scoring)) |
 | `scenarios[].outcome` | `pass`, `expected` (refusal or pull-request), `reason`, `action` (the planned action type), `detail` (why it failed), `notScored` |
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |
 | `scenarios[].summaryQuotes` | Only for a run whose result the loop accepted (not `NoEvidence`): one entry per quote the summary check reports, with `source` (the cited ID), `kind` (`cut-note`, `tally-line`, `cut-part`, `near-miss` or `not-shown`, [Quotes of the summary](#the-scenario-files)), `fails` (true for the first three, which fail the run; the others are only recorded) and `quoteBytes`. No text of the quote; it is in `reply`. The Markdown report lists them in a table after the runs |
 | `scenarios[].reply` | Only for a run whose last reply decoded as a result, whether the loop then accepted it or refused it (`NoEvidence`) ([#600](https://github.com/pkalin/shadewright/issues/600)): the model's `summary`, `hypotheses` (their descriptions) and `evidence[]` (`source`, `quote`), so a missed fact can be traced to what the model wrote. Redacted as the analyzer redacts the result's text (built-in rules, the Incident's name kept) and capped: the summary at 1024 bytes, each hypothesis, source and quote at 512, at most 10 hypotheses and 10 quotes (the result's own bounds, so a decoded reply is kept whole today); a cut field ends with ` [truncated]` and `truncated` is then true. In `report.json` only, not in the Markdown |
-| `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `tokens` (summed, with `byRole`), `toolCalls`, `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), `incompleteRuns` (runs with a call of unknown usage or that stopped with an error), `costIncomplete` when there is any, so the estimate is a lower bound (the Markdown summary says so; compare `charged`), and `costPerPassedRunUSD`, the cost of every run, failed ones included, over the passed runs: left out without prices or when no run passed (the Markdown says "none, no run passed", never 0), and a lower bound when `costIncomplete` is set. A failed call is never priced as zero: it counts in `usageUnknownCalls` and makes the cost incomplete. The exception is a call the adapter marks as refused before processing (a Foundry 429), which was not billed and has a known usage of 0 (#725). A role that used tokens (or made a call of unknown usage) with no prices of its own, the escalation without `EVAL_ESCALATION_PRICE_*`, is never priced at another role's prices: `costUSD` and `costPerPassedRunUSD` are then left out, `costUnknown` says why, `costUSDByRole` keeps the priced roles, and the Markdown says "unknown" |
+| `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `seconds` (every run, failed ones included, on a monotonic clock), `secondsPerPassed` and `tokensPerPassed` (charged), each over the passed runs with failed runs counted in, and left out when no run passed, `tokens` (summed, with `byRole`), `toolCalls`, `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), `incompleteRuns` (runs with a call of unknown usage or that stopped with an error), `costIncomplete` when there is any, so the estimate is a lower bound (the Markdown summary says so; compare `charged`), and `costPerPassedRunUSD`, the cost of every run, failed ones included, over the passed runs: left out without prices or when no run passed (the Markdown says "none, no run passed", never 0), and a lower bound when `costIncomplete` is set. A failed call is never priced as zero: it counts in `usageUnknownCalls` and makes the cost incomplete. The exception is a call the adapter marks as refused before processing (a Foundry 429), which was not billed and has a known usage of 0 (#725). A role that used tokens (or made a call of unknown usage) with no prices of its own, the escalation without `EVAL_ESCALATION_PRICE_*`, is never priced at another role's prices: `costUSD` and `costPerPassedRunUSD` are then left out, `costUnknown` says why, `costUSDByRole` keeps the priced roles, and the Markdown says "unknown" |
 
 The report holds no prompt, no token and no endpoint, and no model text beyond the redacted, capped `reply`.
 
@@ -532,7 +581,8 @@ and `digest` is the SHA-256 of its JSON without the digest, so a change to any f
 
 | Field | Content |
 | --- | --- |
-| `provider` | `anthropic` with the Anthropic API; left out for fake and Foundry runs, so their digests are those they had before the field |
+| `provider` | `anthropic` with the Anthropic API or `openaicompatible` with the compatible adapter; left out for fake and Foundry runs, so their digests are those they had before the field |
+| `openAICompatible` | With compatible endpoints only: `serverID` and `endpointHash`, identifying the server qualification without storing a URL or key |
 | `anthropic` | With the Anthropic API only: `effort` and `thinkingAllowance` (tokens added to the output limit in `max_tokens`) |
 | `models` | Per role: `deployment` (with `anthropic`, the model ID), `model` (the ID and version replies must name), `apiVersion`, and `inferenceAPI` when it is set (left out for chat completions, so earlier digests stay the same) |
 | `promptVersion` | `analysis.PromptVersion()`: the prompt templates, the generated schema and the catalog |

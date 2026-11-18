@@ -486,3 +486,27 @@ kubectl -n shadewright-system logs deploy/shadewright-analyzer | grep -i -E 'for
 A missing add-on CRD (Flux, KEDA, Kyverno) or a module grant that is off never keeps a Pod not Ready: see [No Incident appears](#no-incident-appears) for how those show.
 
 After five minutes without a sync the kubelet restarts the container: the restart count rises, and `kubectl logs --previous` shows the run before. Once a Pod has been Ready, it stays Ready until the container stops, also through a later API server outage; such an outage shows in the log and the metrics, not in readiness. A standby replica is Ready like the leader once it has synced; one that is not Ready has one of the causes above, not a missing Lease.
+
+## OpenAI-compatible model refusals
+
+An Incident's `Analyzed` condition reports these reasons before any request is sent:
+
+| Reason | Meaning and action |
+| --- | --- |
+| `EndpointNotAllowed` | Settings do not match an install-time compatible base URL and inference API. Check the declared host, port and path; the Foundry suffix list does not allow compatible endpoints |
+| `ModelNotAllowed` | Settings `deployment` is absent from that endpoint's `models` list. Choose a declared name byte for byte or have the installation administrator change the declaration after qualifying the model and its gateway alias |
+| `ProviderNotConfigured` | The key source is unavailable or malformed. Missing or empty files are retried within the call bound; nonempty keys shorter than 16 bytes are malformed and are not retried. Fixed errors name the minimum without exposing the key |
+
+After a reply arrives, two fixed texts in the analyzer log refuse it as malformed
+model output (reason `InvalidOutput`, retried and handed off like any other
+malformed reply):
+
+| Log text | Meaning and action |
+| --- | --- |
+| `openai-compatible: the reply contains a credential` | The endpoint's key appeared in the reply, also split across fields or parts, or with other characters (of any kind but ASCII letters, digits and the key's own punctuation) between its characters. Control characters inside the key are dropped too; the visible remains of an escape sequence (`[0m`) are letters like any other and break the key, as they do in the stored text. Rotate the key, then find out why the server or gateway echoes request headers |
+| `openai-compatible: the reply has a field of the wrong type` | A content or argument field has the wrong JSON type, so the reply could not be checked for a split key; no key was seen. Do not rotate the key for this. Check the server and its model against the declared inference API with the qualification runbook |
+
+An empty or invalid model list, duplicate base or segment path prefix on the same
+scheme, host and port stops chart rendering and analyzer startup. Model names
+match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. See the
+[qualification runbook](how-to/qualify-openai-compatible.md).

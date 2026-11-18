@@ -197,7 +197,7 @@ type Hint struct {
 	// ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise, or
 	// HintsTurnedOff when the executor runs with reviewer hints off, which declines every Pending or Reserved
 	// hint. HintDeclineReasons lists them.
-	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;ScalerNotReady;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;ProviderNotConfigured;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded;ReplacementDenied;HandoffAborted;HintsTurnedOff
+	// +kubebuilder:validation:Enum=NoModelConfigured;BudgetSpent;BudgetUnavailable;NoProposal;MissingData;NoEvidence;TargetNotSupported;PreviousValueUnknown;NoChange;DirectionReversed;ScalerNotReady;NoPolicyForAction;ActionOutOfBounds;InvalidOutput;EscalationNotConfigured;StepLimit;TokenLimit;DeadlineExceeded;ModelUnavailable;ModelNotFound;ModelForbidden;ModelError;UnexpectedModel;EndpointNotAllowed;ModelNotAllowed;ProviderNotConfigured;PlanUnchanged;HintNotPending;RequestNotCreated;CoolingDown;NoAnswer;PullRequestMerged;PullRequestClosed;RequestEnded;ReplacementDenied;HandoffAborted;HintsTurnedOff
 	// +optional
 	Reason string `json:"reason,omitempty"`
 
@@ -247,7 +247,7 @@ var HintDeclineReasons = []string{"NoModelConfigured", "BudgetSpent", "BudgetUna
 	"MissingData", "NoEvidence", "TargetNotSupported", "PreviousValueUnknown", "NoChange", "DirectionReversed",
 	"ScalerNotReady", "NoPolicyForAction", "ActionOutOfBounds", "InvalidOutput", "EscalationNotConfigured", "StepLimit",
 	"TokenLimit", "DeadlineExceeded", "ModelUnavailable", "ModelNotFound", "ModelForbidden", "ModelError",
-	"UnexpectedModel", "EndpointNotAllowed", "ProviderNotConfigured", "PlanUnchanged", "HintNotPending", "RequestNotCreated",
+	"UnexpectedModel", "EndpointNotAllowed", "ModelNotAllowed", "ProviderNotConfigured", "PlanUnchanged", "HintNotPending", "RequestNotCreated",
 	"CoolingDown", "NoAnswer", "PullRequestMerged", "PullRequestClosed", "RequestEnded", "ReplacementDenied",
 	"HandoffAborted", "HintsTurnedOff"}
 

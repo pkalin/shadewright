@@ -137,7 +137,7 @@ EVAL_REPORT_DIR ?= $(LOCALBIN)/eval
 eval: ## Replay every lab scenario's recorded context and replies through the analysis loop; report in EVAL_REPORT_DIR.
 	EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run '^TestEvalReplay$$' -count=1 -v
 
-# The provider of make eval-model: foundry (Azure workload identity) or anthropic (an API key file).
+# The provider of make eval-model: foundry (Azure workload identity), anthropic or openaicompatible (an API key file).
 EVAL_MODEL ?= foundry
 
 .PHONY: eval-model

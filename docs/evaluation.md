@@ -306,18 +306,45 @@ differ, including whether they honour tool and response schemas or report usage.
 No provider fallback or output repair is attempted. Use ordinary runs and forced
 escalation to cover read tools and multi-turn Responses calls.
 
+There are two ways to name the endpoint. The short form covers one API base with one key file, which is
+enough for the public OpenAI API:
+
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `EVAL_ENDPOINT` | yes | HTTPS API base, such as `https://api.openai.com/v1`; the adapter appends `/responses` or `/chat/completions` |
-| `EVAL_COMPATIBLE_ENDPOINTS` | yes | JSON array as `--openai-compatible-endpoints`: each has `url`, `inferenceAPI`, a nonempty `models` list, optional `keyFile` and optional `service` (namespace, podSelector, port). Each key belongs only to its exact base |
+| `EVAL_MODEL` | yes | `openaicompatible` |
+| `EVAL_OPENAI_ENDPOINT` | no | HTTPS API base; default `https://api.openai.com/v1`. The adapter appends `/responses` or `/chat/completions` |
+| `EVAL_OPENAI_KEY_FILE` | no | Path of a private file holding the API key; a relative path is made absolute. The harness passes only the path: the provider opens the file at every call, so the key is never in a variable, on a command line, in a log line or in the report. Left out, calls carry no key (a server that needs none) |
 | `EVAL_COMPATIBLE_SERVER_ID` | yes | Operator-recorded server release or dated service identifier, using model-name characters. Included in the qualification digest along with an endpoint hash, never the endpoint URL |
 | `EVAL_TRIAGE_DEPLOYMENT`, `EVAL_TRIAGE_MODEL` | yes | Request model name and exact model ID replies must name |
 | `EVAL_TRIAGE_INFERENCE_API` | no | `ChatCompletions` (default) or `Responses` |
-| `EVAL_ESCALATION_DEPLOYMENT`, `EVAL_ESCALATION_MODEL`, `EVAL_ESCALATION_INFERENCE_API` | no | Same fields for escalation; a model or API needs its deployment |
+| `EVAL_ESCALATION_DEPLOYMENT`, `EVAL_ESCALATION_MODEL`, `EVAL_ESCALATION_INFERENCE_API` | no | Same fields for escalation; a model or API needs its deployment. In the short form both roles use the same inference API |
 | `EVAL_PRICE_*`, `EVAL_ESCALATION_PRICE_*`, `EVAL_REPEATS`, `EVAL_MIN_PASS_RATE`, `EVAL_FORCE_ESCALATION` | no | Existing harness controls. Prices are operator-supplied, not built in. Unknown usage makes the estimate a lower bound |
 
-Do not set `EVAL_API_VERSION` or Anthropic-only variables. Example for a future
-live run with an inference key already held in a private file:
+The harness turns the short form into the one declaration the analyzer would get from
+`--openai-compatible-endpoints` (the base, the inference API, the deployments of both roles as `models`, the key
+file) and builds each role through the analyzer's factory, so the endpoint, model and key-file checks are the
+analyzer's. No in-cluster ranges are declared, and the provider's dialer refuses an address that is not public
+as it does in a cluster with `--openai-compatible-in-cluster-cidrs` empty, so a server on the developer's own
+machine or a private network cannot be evaluated this way.
+
+The full form takes the declarations as an install does, for two APIs on separate bases or a declared Service:
+`EVAL_COMPATIBLE_ENDPOINTS` is the JSON array of `--openai-compatible-endpoints` (each has `url`,
+`inferenceAPI`, a nonempty `models` list, optional `keyFile` and optional `service` with namespace, podSelector
+and port; each key belongs only to its exact base), and `EVAL_ENDPOINT` is the base the deployments use. The two
+forms do not mix: `EVAL_OPENAI_*` next to `EVAL_COMPATIBLE_ENDPOINTS`, or `EVAL_ENDPOINT` without it, fails
+before any call. Do not set `EVAL_API_VERSION`, `EVAL_ENDPOINT_SUFFIXES` or the Anthropic-only variables.
+
+A run against the public OpenAI API with the key in a private file:
+
+```bash
+EVAL_MODEL=openaicompatible \
+EVAL_OPENAI_KEY_FILE="$HOME/.config/shadewright/openai-key" \
+EVAL_COMPATIBLE_SERVER_ID=openai-2026-11-18 \
+EVAL_TRIAGE_DEPLOYMENT=gpt-6.1-sol EVAL_TRIAGE_MODEL=gpt-6.1-sol \
+EVAL_TRIAGE_INFERENCE_API=Responses make eval-model
+```
+
+The same with the full form:
 
 ```bash
 EVAL_MODEL=openaicompatible \
@@ -327,6 +354,11 @@ EVAL_COMPATIBLE_SERVER_ID=openai-2026-11-16 \
 EVAL_TRIAGE_DEPLOYMENT=gpt-6.1-sol EVAL_TRIAGE_MODEL=gpt-6.1-sol \
 EVAL_TRIAGE_INFERENCE_API=Responses make eval-model
 ```
+
+The report's first lines name the provider (`Mode: openaicompatible`), the server identifier and the endpoint
+hash. What a run costs is not known yet: no live run through this provider has been made. Set the
+`EVAL_PRICE_*` variables from the provider's price list so the report estimates it, and start with
+`EVAL_REPEATS=1`.
 
 Set the expected ID to the exact snapshot the service reports. For the tool path
 also set the escalation fields, `EVAL_ESCALATION_INFERENCE_API=Responses` and

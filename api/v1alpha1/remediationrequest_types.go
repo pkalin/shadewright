@@ -367,7 +367,8 @@ const (
 	// ConditionPullRequestUnreadable is True while the executor cannot read the request's pull requests (#688):
 	// with reason GitForbidden or GitRejected while the Git host refuses the read (403 or 422), and, on a request
 	// that keeps the lock on its target, with reason RepositoryUnavailable while the repository of the plan is not
-	// in RemediationSettings any more, TargetBranchChanged while its entry names another target branch, or
+	// in RemediationSettings any more, SettingsNotFound while the RemediationSettings object does not exist (the
+	// lock and any wait for a read are kept), TargetBranchChanged while its entry names another target branch, or
 	// RepositoryUnusable while its entry cannot be used, with reason TargetBranchChanged also while a pull request
 	// that waits cannot be read on the recorded target branch, or on the one the entry names, after the entry named
 	// another one (#754, #771), and with

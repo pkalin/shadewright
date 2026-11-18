@@ -71,11 +71,11 @@ func mainMergedAndEnded(rr *api.RemediationRequest) bool {
 
 // TestRecordedMergeIsMainsRule builds every combination of phase, recorded pull request, reason of PullRequestOpened,
 // reason of Approved, receipt, plan digest, handoff and verification, and checks that the branch releases the lock from
-// recorded status exactly where main's settleLock did, less the two stops whose merge did not deliver the plan as shown
-// (tenth decision of 2026-11-18 on #771, point 3): NeedsIntervention with MergedWithForeignChange or
-// MergeContentUnreadable, which only a read of the branch releases. No more (a closed pull request needs the read of its
-// branch) and no less (a Superseded request whose handoff is done and whose pull request is marked merged is released,
-// point 4).
+// recorded status exactly where main's settleLock did, less the three stops whose merge did not deliver the plan as
+// shown (tenth decision of 2026-11-18 on #771, point 3, and the eleventh, point 2): NeedsIntervention with
+// MergedWithForeignChange, MergeContentUnreadable or MergeNotCheckable, which only a read of the branch releases. No
+// more (a closed pull request needs the read of its branch) and no less (a Superseded request whose handoff is done
+// and whose pull request is marked merged is released, point 4).
 func TestRecordedMergeIsMainsRule(t *testing.T) {
 	phases := []api.RemediationPhase{api.PhasePending, api.PhasePolicyChecked, api.PhasePRCreated,
 		api.PhaseAwaitingApproval, api.PhaseAutoMergeQueued, api.PhaseMerged, api.PhaseWaitingForDelivery,
@@ -122,10 +122,11 @@ func TestRecordedMergeIsMainsRule(t *testing.T) {
 									_, got := r.settleRecordedMerge(rr)
 									got = got && !progresses(rr)
 									undelivered := phase == api.PhaseNeedsIntervention &&
-										(approval == ReasonMergedWithForeignChange || approval == ReasonMergeContentUnreadable)
+										(approval == ReasonMergedWithForeignChange || approval == ReasonMergeContentUnreadable ||
+											approval == ReasonMergeNotCheckable)
 									if want := mainReleasesFromStatus(rr, verify) && !undelivered; got != want {
 										t.Errorf("phase %s, pull request %t, PullRequestOpened %q, Approved %q, receipt %t, "+
-											"digest %t, handoff %v, verify %t: the branch releases %t, main less the two "+
+											"digest %t, handoff %v, verify %t: the branch releases %t, main less the three "+
 											"stops %t", phase, pr, reason, approval, receipt, digest, handoff, verify, got, want)
 									}
 									n++

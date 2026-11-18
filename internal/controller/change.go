@@ -915,12 +915,18 @@ func repositoryGoneRead(rr *remediationv1alpha1.RemediationRequest) *metav1.Cond
 }
 
 // repositoryRead is condition PullRequestUnreadable for err, the failure to open the repository of the plan, when
-// it says that the request's pull requests cannot be read there as the settings stand now: the repository left
-// the settings (RepositoryUnavailable), its entry names another target branch (TargetBranchChanged), or its entry
-// cannot be used (RepositoryUnusable). Any other failure gives nil.
+// it says that the request's pull requests cannot be read there as the settings stand now: the settings object does
+// not exist (SettingsNotFound), the repository left the settings (RepositoryUnavailable), its entry names another
+// target branch (TargetBranchChanged), or its entry cannot be used (RepositoryUnusable). Any other failure gives nil.
 func repositoryRead(rr *remediationv1alpha1.RemediationRequest, err error) *metav1.Condition {
 	var reason, message string
 	switch {
+	case errors.Is(err, errNoSettings):
+		// Not in unstartableReads: a missing settings object ends no wait for a read (eleventh decision of 2026-11-18
+		// on #771, point 3).
+		reason, message = ReasonSettingsNotFound, "RemediationSettings "+remediationv1alpha1.SettingsName+" does not "+
+			"exist, so the request's pull requests cannot be read; the target stays locked and the look is tried "+
+			"again until the settings exist or the request is deleted"
 	case errors.Is(err, errRepositoryGone):
 		return repositoryGoneRead(rr)
 	case errors.Is(err, errTargetBranchChanged):

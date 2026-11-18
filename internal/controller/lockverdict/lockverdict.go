@@ -199,9 +199,10 @@ func RecordedMerge(status *api.RemediationRequestStatus, markedMerged, undeliver
 }
 
 // UndeliveredRepositoryGone is the verdict of a merge that did not deliver the plan as shown (undelivered:
-// MergedWithForeignChange, MergeContentUnreadable) whose repository is gone from the settings (repositoryGone): the
-// read that would show no other open pull request of the branch cannot start, and nobody can see such a pull request
-// any more (tenth decision of 2026-11-18 on #771, point 3).
+// MergedWithForeignChange, MergeContentUnreadable, MergeNotCheckable) whose repository is gone from the settings
+// (repositoryGone): the read that would show no other open pull request of the branch cannot start, and nobody can
+// see such a pull request any more (tenth decision of 2026-11-18 on #771, point 3, and the eleventh, points 2 and 3).
+// A settings object that is missing is not that: the caller keeps the lock (planEntry returns no errRepositoryGone).
 func UndeliveredRepositoryGone(undelivered, repositoryGone bool) (*Verdict, bool) {
 	if !undelivered || !repositoryGone {
 		return nil, false

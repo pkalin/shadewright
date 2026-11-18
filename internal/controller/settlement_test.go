@@ -819,3 +819,128 @@ func TestSettlementBranchChangeAdoptedForeignHead(t *testing.T) {
 		t.Fatalf("Approved = %+v; want MergedWithForeignChange", c)
 	}
 }
+
+// The eleventh decision of 2026-11-18 on #771, point 2: a request that ended MergeNotCheckable on its retargeted
+// merge did not show what the merge delivered. Another pull request of its branch is open on the branch the settings
+// name now: the lock is kept, reconcile after reconcile, and named in TargetHeld. Once that pull request is closed, a
+// read of the branch releases it.
+func TestSettlementMergeNotCheckableWithAnotherOpen(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	ctx := context.Background()
+	n := rr.Status.PullRequest.Number
+	if err := g.SetBase(n, freshOtherBranch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Merge(n); err != nil {
+		t.Fatal(err)
+	}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionPROpened,
+		Status: metav1.ConditionFalse, Reason: ReasonChangeRequestMerged, Message: "merged by a person"})
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionApproved,
+		Status: metav1.ConditionFalse, Reason: ReasonMergeNotCheckable, Message: "not checkable"})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	other, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(rr),
+		BaseBranch: freshOtherBranch, Body: marker(rr)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(rr)
+	live := &api.RemediationRequest{}
+	for i := range 3 {
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		if err != nil {
+			t.Fatalf("reconcile %d: %v", i+1, err)
+		}
+		if err := r.Get(ctx, key, live); err != nil {
+			t.Fatal(err)
+		}
+		held := meta.FindStatusCondition(live.Status.Conditions, api.ConditionTargetHeld)
+		switch {
+		case live.Status.HoldsTarget == nil || !*live.Status.HoldsTarget:
+			t.Fatalf("reconcile %d: the lock was released while #%d is open on the branch (phase %s)", i+1,
+				other.Number, live.Status.Phase)
+		case held == nil || !strings.Contains(held.Message, fmt.Sprintf("#%d", other.Number)):
+			t.Fatalf("reconcile %d: TargetHeld %+v does not name #%d", i+1, held, other.Number)
+		case res.RequeueAfter <= 0:
+			t.Fatalf("reconcile %d: the kept lock asks for no time to run again", i+1)
+		}
+	}
+	if err := g.CloseChangeRequest(ctx, other.Number); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, key, live); err != nil {
+		t.Fatal(err)
+	}
+	if live.Status.HoldsTarget != nil && *live.Status.HoldsTarget {
+		t.Fatalf("the lock is held after the other pull request was closed (phase %s)", live.Status.Phase)
+	}
+}
+
+// The eleventh decision of 2026-11-18 on #771, point 3: a settings object that is missing is not "the repository is
+// gone from the settings". A request that ended on a merge that did not deliver the plan as shown keeps its lock while
+// RemediationSettings does not exist, says so in PullRequestUnreadable and comes back at a time; only a repository
+// absent from settings that exist releases it without a read of the branch.
+func TestSettlementUndeliveredKeepsTheLockWithoutSettings(t *testing.T) {
+	for _, gone := range []string{"settings object missing", "repository removed"} {
+		t.Run(gone, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			ctx := context.Background()
+			n := rr.Status.PullRequest.Number
+			if err := g.SetBase(n, freshOtherBranch); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.Merge(n); err != nil {
+				t.Fatal(err)
+			}
+			meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionApproved,
+				Status: metav1.ConditionFalse, Reason: ReasonMergeContentUnreadable, Message: "unreadable"})
+			if err := r.Status().Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			settings := &api.RemediationSettings{}
+			if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+				t.Fatal(err)
+			}
+			if gone == "settings object missing" {
+				if err := r.Delete(ctx, settings); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				settings.Spec.Repositories[0].URL += "-elsewhere"
+				if err := r.Update(ctx, settings); err != nil {
+					t.Fatal(err)
+				}
+			}
+			key := client.ObjectKeyFromObject(rr)
+			live := &api.RemediationRequest{}
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if err := r.Get(ctx, key, live); err != nil {
+				t.Fatal(err)
+			}
+			holds := live.Status.HoldsTarget != nil && *live.Status.HoldsTarget
+			unreadable := meta.FindStatusCondition(live.Status.Conditions, api.ConditionPullRequestUnreadable)
+			if gone == "repository removed" {
+				if holds {
+					t.Fatalf("the repository left settings that exist and the lock is held (phase %s)", live.Status.Phase)
+				}
+				return
+			}
+			switch {
+			case !holds:
+				t.Fatalf("the lock was released while RemediationSettings does not exist (phase %s)", live.Status.Phase)
+			case unreadable == nil || unreadable.Reason != ReasonSettingsNotFound:
+				t.Fatalf("PullRequestUnreadable %+v; want reason %s", unreadable, ReasonSettingsNotFound)
+			case res.RequeueAfter <= 0:
+				t.Fatalf("the kept lock asks for no time to run again")
+			}
+		})
+	}
+}

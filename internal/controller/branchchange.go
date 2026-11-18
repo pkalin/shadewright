@@ -293,8 +293,9 @@ const mergeContentWait = mergeCommitWait
 //
 // A read that fails is an error of the content wait about cr (readOfContent), for a retry: retryGitRead records its
 // entry in status.gitWaits, with cr, with the parent context, so a read that runs out of the step's time starts it
-// too (keepGitRead), and the check at the start of a reconcile past its end ends the request MergeContentUnreadable
-// (endPassedWait), recording cr when the status holds no pull request. A successful content read removes the
+// too (keepGitRead). Past its end the reconcile makes one more read, and the wait ends after it on evidence about that
+// read (endAfterLastRead, not endPassedWait, which ends only the deadline and the handoff grace): MergeContentUnreadable,
+// recording cr when the status holds no pull request. A successful content read removes the
 // entry, so a later failure starts a new wait.
 func (r *RemediationRequestReconciler) checkRetargeted(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, branch remediationv1alpha1.GitBranch) (

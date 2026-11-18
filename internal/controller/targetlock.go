@@ -440,16 +440,21 @@ func (r *RemediationRequestReconciler) settleRecordedMerge(rr *remediationv1alph
 
 // settleUndeliveredGone is the verdict of a merge that did not deliver the plan as shown (undeliveredMerge) whose
 // look found the repository of the plan gone from the settings (err from lookHeld): no read can show another open
-// pull request of its branch any more, so it is released (tenth decision of 2026-11-18 on #771, point 3).
+// pull request of its branch any more, so it is released (tenth decision of 2026-11-18 on #771, point 3). A settings
+// object that is missing (errNoSettings) is not that: the lock is kept until the settings exist again (eleventh
+// decision, point 3).
 func settleUndeliveredGone(rr *remediationv1alpha1.RemediationRequest, err error) (*lockverdict.Verdict, bool) {
-	return lockverdict.UndeliveredRepositoryGone(undeliveredMerge(rr), errors.Is(err, errRepositoryGone))
+	return lockverdict.UndeliveredRepositoryGone(undeliveredMerge(rr),
+		errors.Is(err, errRepositoryGone) && !errors.Is(err, errNoSettings))
 }
 
 // undeliveredReasons are the reasons of Approved False of a request that ended NeedsIntervention on a merge that did
-// not deliver the plan as shown: it brought another change, or what it brought could not be read. The rule of
-// 2026-11-17 on #771 holds for them: the lock is released only after a read shows that no other open pull request of
-// the branch can still deliver the change (tenth decision of 2026-11-18, point 3).
-var undeliveredReasons = map[string]bool{ReasonMergedWithForeignChange: true, ReasonMergeContentUnreadable: true}
+// not deliver the plan as shown: it brought another change, what it brought could not be read, or it could not be
+// checked against the plan. The rule of 2026-11-17 on #771 holds for them: the lock is released only after a read
+// shows that no other open pull request of the branch can still deliver the change (tenth decision of 2026-11-18,
+// point 3, and the eleventh, point 2, for MergeNotCheckable, a stop main does not have).
+var undeliveredReasons = map[string]bool{ReasonMergedWithForeignChange: true, ReasonMergeContentUnreadable: true,
+	ReasonMergeNotCheckable: true}
 
 // undeliveredMerge reports whether rr ended NeedsIntervention on a merge that did not deliver the plan as shown
 // (undeliveredReasons).
@@ -485,7 +490,7 @@ func markedMerged(rr *remediationv1alpha1.RemediationRequest) bool {
 // removes condition PullRequestUnreadable of a request that is settled (clearReleasedRead). It reads nothing, so the
 // write that records the merge or ends the verification releases the lock under a pause too. A request held for its verification keeps
 // the lock until that ends. Every other release needs its read (checkHeld), the end of a merge that did not deliver
-// the plan as shown (MergedWithForeignChange, MergeContentUnreadable) among them.
+// the plan as shown (MergedWithForeignChange, MergeContentUnreadable, MergeNotCheckable) among them.
 func (r *RemediationRequestReconciler) settleRecorded(rr *remediationv1alpha1.RemediationRequest) {
 	if s, ok := r.settleRecordedMerge(rr); ok && ptr.Deref(rr.Status.HoldsTarget, false) {
 		// Release refuses only a nil verdict, which ok rules out.
@@ -496,8 +501,8 @@ func (r *RemediationRequestReconciler) settleRecorded(rr *remediationv1alpha1.Re
 
 // mergeRecorded reports whether the status records the merge of the request's pull request: a merge receipt, a
 // phase only a recorded merge reaches (Merged and after it, Inconclusive), Failed with a receipt, or the end of a
-// merge that brought another change than the plan's (MergedWithForeignChange, MergeContentUnreadable: no receipt by
-// design). PullRequestOpened with reason ChangeRequestMerged alone is not one: recordFound sets it on what a read
+// merge that brought another change than the plan's (MergedWithForeignChange, MergeContentUnreadable,
+// MergeNotCheckable: no receipt by design). PullRequestOpened with reason ChangeRequestMerged alone is not one: recordFound sets it on what a read
 // found, before anything records the merge.
 func mergeRecorded(rr *remediationv1alpha1.RemediationRequest) bool {
 	if rr.Status.MergeReceipt != nil || slices.Contains(successPhases, rr.Status.Phase) || undecided(rr.Status.Phase) ||

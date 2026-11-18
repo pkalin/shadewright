@@ -359,8 +359,10 @@ func TestRetargetedContentComparesWithTheRealParent(t *testing.T) {
 	}
 }
 
-// A merge that ends MergeNotCheckable is recorded as the request's merge, as MergedWithForeignChange is: the lock is
-// settled on it (mergeRecorded), and on a stale plan it counts for nothing (mergedForeignStale).
+// A merge that ends MergeNotCheckable is recorded as the request's merge, as MergedWithForeignChange is
+// (mergeRecorded), and on a stale plan it counts for nothing (mergedForeignStale). It did not show what it delivered,
+// so its lock waits for a read of the branch (undeliveredMerge), never released from status alone (eleventh decision
+// of 2026-11-18 on #771, point 2).
 func TestMergeNotCheckableIsARecordedMerge(t *testing.T) {
 	for _, reason := range []string{ReasonMergedWithForeignChange, ReasonMergeContentUnreadable, ReasonMergeNotCheckable} {
 		rr := &remediationv1alpha1.RemediationRequest{}
@@ -371,6 +373,11 @@ func TestMergeNotCheckableIsARecordedMerge(t *testing.T) {
 		if !mergeRecorded(rr) || !mergedForeignStale(rr) {
 			t.Errorf("%s: mergeRecorded %v, mergedForeignStale %v; want both", reason, mergeRecorded(rr),
 				mergedForeignStale(rr))
+		}
+		rr.Status.HoldsTarget = new(true)
+		if v, ok := (&RemediationRequestReconciler{}).settleRecordedMerge(rr); !undeliveredMerge(rr) || ok || v != nil {
+			t.Errorf("%s: undeliveredMerge %v, released from status %v; want the lock left to a read of the branch",
+				reason, undeliveredMerge(rr), ok)
 		}
 	}
 }

@@ -223,7 +223,8 @@ func (r *RemediationRequestReconciler) openPlanRepositoryFor(ctx context.Context
 }
 
 // planEntry returns the entry of the plan's repository in RemediationSettings, read live, or the same errors as
-// openPlanRepositoryOf but for the provider's. With errTargetBranchChanged it also returns the entry, which then
+// openPlanRepositoryOf but for the provider's. A missing settings object is errNoSettings, which is errRepositoryGone
+// too. With errTargetBranchChanged it also returns the entry, which then
 // names another target branch than the recorded one (status.source), for the look at a merge (watchBranchChanged).
 // reinstalled says that the entry is the plan's URL under a new installation of the GitHub App (#290): only while rr
 // carries the stale mark, so only for the cleanup of a stale plan (cleanupRepository).
@@ -232,8 +233,9 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
-		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableReads[reasonRepositoryUnavailable])
-		return remediationv1alpha1.GitRepository{}, false, errRepositoryGone
+		// As errRepositoryGone everywhere main decided on it, but no evidence that the repository left the settings:
+		// no end of a wait as not startable, no release of an undelivered merge (errNoSettings).
+		return remediationv1alpha1.GitRepository{}, false, errNoSettings
 	case err != nil:
 		return remediationv1alpha1.GitRepository{}, false, fmt.Errorf("get RemediationSettings %s: %w",
 			remediationv1alpha1.SettingsName, err)

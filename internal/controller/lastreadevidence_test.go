@@ -25,6 +25,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 )
@@ -41,35 +42,89 @@ func contentWaitPassed(t *testing.T) *modelWorld {
 	return m
 }
 
-// Point 1: the last read of a content wait meets answers that disagree (the pull request is missing by its number and
-// the branch does not confirm it). Every read answered, none failed, none was refused a start: the wait is kept and the
-// request comes back at the poll pace, never ended as "no read could be made".
-func TestLastReadKeepsTheWaitOnAnswersThatDisagree(t *testing.T) {
-	m := contentWaitPassed(t)
-	m.fault = opGet404
-	res, live, err := m.once()
-	approved := meta.FindStatusCondition(live.Status.Conditions, api.ConditionApproved)
-	switch {
-	case err != nil:
-		t.Fatalf("reconcile: %v", err)
-	case approved != nil && approved.Reason == ReasonMergeContentUnreadable:
-		m.fatalf("end: answers that disagree ended the content wait: %q", approved.Message)
-	case gitWait(live, waitMergeContent) == nil:
-		m.fatalf("end: the content wait was removed without evidence about its last read (phase %s)", live.Status.Phase)
-	case res.RequeueAfter <= 0 || res.RequeueAfter > m.r.pullRequestPollInterval():
-		m.fatalf("pace: the kept wait comes back after %v; want at most the poll interval", res.RequeueAfter)
-	case res.RequeueAfter < time.Second:
-		m.fatalf("pace: the kept wait comes back at once (%v)", res.RequeueAfter)
+// The eleventh decision of 2026-11-18 on #771, point 1: before the end of a wait for a read, answers that disagree
+// keep it; past its end they are evidence that the read was made, and the wait ends as a failure saying so. The
+// sequence: a request stopped after its target branch changed, its pull request retargeted to the branch the settings
+// name now and merged there, the content wait (and in the second case the merge check) recorded; then every read of
+// the pull request by its number answers 404 while the listing of its branch still reports it, for 48 hours with the
+// repository configured and no pause. The wait ends at the first reconcile past its end, and the lock then settles by
+// its rule.
+func TestPassedReadWaitEndsOnAnswersThatDisagree(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(t *testing.T) *modelWorld
+		kind  waitKind
+	}{
+		{"content wait", contentWaitWithFailingReads, waitMergeContent},
+		{"merge check", stoppedMergeCheck, waitMergeCheck},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := c.setup(t)
+			m.fault, m.lastingUntil = opGet404, m.clock.at.Add(72*time.Hour)
+			// Before the end the answers that disagree keep the wait: the bound gives them time to agree.
+			if end := gitWait(m.live(), c.kind).Ends.Add(-time.Minute); m.clock.at.After(end) {
+				m.clock.at = end
+			}
+			res, live, err := m.once()
+			switch {
+			case err != nil:
+				t.Fatalf("reconcile before the end: %v", err)
+			case gitWait(live, c.kind) == nil:
+				m.fatalf("before the end: answers that disagree ended the %s wait (phase %s)", gitWaitKinds[c.kind],
+					live.Status.Phase)
+				m.report()
+				return
+			case res.RequeueAfter <= 0:
+				m.fatalf("before the end: the kept wait asks for no time to run again")
+			}
+			m.clock.at = gitWait(live, c.kind).Ends.Add(time.Second)
+			// One reconcile a minute for 48 hours, at most.
+			const reconciles = 48 * 60
+			n := 0
+			for ; n < reconciles && gitWait(m.live(), c.kind) != nil; n++ {
+				if _, _, err := m.once(); err != nil {
+					t.Fatalf("reconcile %d past the end: %v", n+1, err)
+				}
+				m.clock.advance(time.Minute)
+			}
+			live = m.live()
+			switch {
+			case gitWait(live, c.kind) != nil:
+				m.fatalf("end: the %s wait stands %d reconciles past its end while the answers disagree (holds %t)",
+					gitWaitKinds[c.kind], n, holdsLock(live))
+			case n != 1:
+				m.fatalf("end: the %s wait ended after %d reconciles past its end; want the first", gitWaitKinds[c.kind], n)
+			case !conditionSays(live, "answers about its pull request disagreed"):
+				m.fatalf("end: no condition says the answers disagreed (phase %s%s)", live.Status.Phase, conditionsOf(live))
+			}
+			// The lock then settles by its rule once the answers agree: a read of the branch shows no other open pull
+			// request (answers that disagree keep a lock, heldUnsettled).
+			m.fault, m.lastingUntil = faultNone, time.Time{}
+			for range 5 {
+				if !holdsLock(m.live()) {
+					break
+				}
+				if _, _, err := m.once(); err != nil {
+					t.Fatalf("reconcile after the end: %v", err)
+				}
+				m.clock.advance(time.Minute)
+			}
+			if live = m.live(); holdsLock(live) {
+				m.fatalf("lock: the lock is held after the wait ended (phase %s%s)", live.Status.Phase, conditionsOf(live))
+			}
+			m.report()
+		})
 	}
-	// The reads then fail: that last read is evidence, and the wait ends there, saying so.
-	m.fault = faultBetween
-	_, live, err = m.once()
-	approved = meta.FindStatusCondition(live.Status.Conditions, api.ConditionApproved)
-	if err != nil || approved == nil || approved.Reason != ReasonMergeContentUnreadable ||
-		!strings.Contains(approved.Message, "the read after the wait failed") {
-		m.fatalf("end: the failed last read did not end the wait (err %v, %s)", err, reasonOf(approved))
+}
+
+// conditionSays reports whether a condition of rr has text in its message.
+func conditionSays(rr *api.RemediationRequest, text string) bool {
+	for _, c := range rr.Status.Conditions {
+		if strings.Contains(c.Message, text) {
+			return true
+		}
 	}
-	m.report()
+	return false
 }
 
 // Point 1: a pause set after the check at the start of the reconcile (endPassedWait) and lifted before the end of the
@@ -218,4 +273,37 @@ func TestFailedLastReadIsNoRetry(t *testing.T) {
 		t.Fatalf("end after the failed last read: %v, outcome %d, %s; want MergeContentUnreadable naming the read",
 			err, outcome, reasonOf(approved))
 	}
+}
+
+// The eleventh decision of 2026-11-18 on #771, point 3: with the RemediationSettings object missing, the last read of
+// a content wait past its end cannot be made, but that is no evidence that the repository left the settings. The wait
+// is kept and the request comes back at the poll pace; once the settings are back, the wait ends on its read.
+func TestLastReadKeepsTheWaitWithoutSettings(t *testing.T) {
+	m := contentWaitPassed(t)
+	ctx := context.Background()
+	settings := &api.RemediationSettings{}
+	if err := m.base.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.base.Delete(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		res, live, err := m.once()
+		approved := meta.FindStatusCondition(live.Status.Conditions, api.ConditionApproved)
+		switch {
+		case err != nil:
+			t.Fatalf("reconcile: %v", err)
+		case gitWait(live, waitMergeContent) == nil:
+			m.fatalf("end: the content wait ended while RemediationSettings does not exist (phase %s, %s)",
+				live.Status.Phase, reasonOf(approved))
+		case !holdsLock(live):
+			m.fatalf("lock: the lock was released while RemediationSettings does not exist")
+		case res.RequeueAfter < time.Second || res.RequeueAfter > m.r.pullRequestPollInterval():
+			m.fatalf("pace: the kept wait comes back after %v; want between a second and the poll interval",
+				res.RequeueAfter)
+		}
+		m.clock.advance(time.Minute)
+	}
+	m.report()
 }

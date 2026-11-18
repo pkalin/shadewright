@@ -382,6 +382,14 @@ const (
 // recorded), so its change request cannot be closed safely.
 var errRepositoryGone = errors.New("the repository of the plan is not configured")
 
+// errNoSettings is errRepositoryGone when the RemediationSettings object itself does not exist. Every path that
+// decided on errRepositoryGone on main still does; the paths new on #771 tell it apart: it is no evidence that the
+// repository left the settings, so it keeps the lock of a merge that did not deliver the plan as shown
+// (settleUndeliveredGone) and the waits for a read (no noteUnstartable), says so in PullRequestUnreadable with reason
+// SettingsNotFound, and the request comes back (eleventh decision of 2026-11-18 on #771, point 3).
+var errNoSettings = fmt.Errorf("%w: RemediationSettings %s does not exist", errRepositoryGone,
+	remediationv1alpha1.SettingsName)
+
 // afterRecheckEnd is what reconcile does after the recheck ended the request, with the recheck's result and error.
 // A step not recorded is not retried for an ended request: the next reconcile does not run it. An end that closed
 // the recorded pull request or found it closed kept the lock, because only the read of the branch may release it

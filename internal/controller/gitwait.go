@@ -506,12 +506,15 @@ const (
 //   - the read failed (m.failed, from retryGitRead): it ends there, as a failure, with no retry, saying which read;
 //   - the read provably could not start (m.unstartable, from setUnreadable: the repository of the plan left the
 //     settings or its entry cannot be used): it ends there, saying why;
+//   - the answers about the pull request disagreed (m.disagreed, which outweighs an answer of the same reconcile): the
+//     read was made, and the bound gave the answers their time to agree; it ends there, saying they disagreed
+//     (eleventh decision of 2026-11-18 on #771, point 1);
 //   - the read answered (m.answered: the pull request read by changeOf, the merge commit, what the merge brought) and
 //     settled nothing: it ends there, saying so.
 //
 // Without such evidence the entry is kept (lastReadKept) and the caller requeues the request at the poll pace: a pause
-// the reconcile met at any point (m.paused, waitWhilePaused, or one found here), answers that disagree (m.disagreed,
-// which outweighs an answer of the same reconcile), or a path that read nothing. A failed Kubernetes read or write is returned for the error backoff.
+// the reconcile met at any point (m.paused, waitWhilePaused, or one found here), or a path that read nothing. A failed
+// Kubernetes read or write is returned for the error backoff.
 func (r *RemediationRequestReconciler) endAfterLastRead(ctx context.Context, key types.NamespacedName,
 	m gitRetryMark) (ctrl.Result, lastReadOutcome, error) {
 	rr := &api.RemediationRequest{}
@@ -551,15 +554,16 @@ func (r *RemediationRequestReconciler) endAfterLastRead(ctx context.Context, key
 	case m.unstartable != "":
 		why = "no read of the Git host could start after the wait: " + m.unstartable
 	case m.disagreed:
-		log.Info("Kept the Git wait of RemediationRequest past its end: the answers about its pull request disagree")
-		return ctrl.Result{}, lastReadKept, nil
+		// Before the end, answers that disagree keep a wait and its bound gives them time to agree; past the end they
+		// show the read was made (eleventh decision of 2026-11-18 on #771, point 1).
+		why = "the answers about its pull request disagreed after the wait"
 	case m.answered:
 		// The read answered and its answers agree, yet the wait stands: nothing the answer shows records the merge the
 		// wait is about (it is not on a branch the plan or the settings name, or it is gone).
 		why = "the read after the wait answered without settling it"
 	default:
 		log.Info("Kept the Git wait of RemediationRequest past its end: the reconcile made no read that answered, " +
-			"failed or could not start (answers that disagree, or a path that read nothing)")
+			"failed or could not start (a path that read nothing)")
 		return ctrl.Result{}, lastReadKept, nil
 	}
 	res, _, err := r.endWait(ctx, rr, left[0], now, why)

@@ -193,9 +193,11 @@ func fieldLiteralResults(t *testing.T, sample, checkJSON bool) ([]fieldResult, m
 }
 
 // fieldRowGroup names the group of a row for the counts of TestFieldsOfEveryToolHideWhatMainHid: a key place, a
-// number or a boolean, or any other.
+// number or a boolean, a hidden text with a signal, or any other.
 func fieldRowGroup(r fieldResult) string {
 	switch {
+	case strings.HasPrefix(r.form, "signal "):
+		return "signals"
 	case strings.HasPrefix(r.form, "in the key, "):
 		return "keys"
 	case r.form == "a number" || r.form == "true":

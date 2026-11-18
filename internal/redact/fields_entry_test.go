@@ -677,9 +677,10 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	marshaled, byType := fieldMarshaledResults(t, true)
 	keys, maps := fieldKeyResults(t, true)
 	literals, literalsByType := fieldLiteralResults(t, true, true)
-	results = append(append(append(append(results, relations...), marshaled...), keys...), literals...)
-	t.Logf("relation calls per tool %v; places of types that write their own JSON %v; maps per tool %v; literal places per type %v",
-		calls, byType, maps, literalsByType)
+	signals, signalCalls := signalFieldResults(t, true)
+	results = append(append(append(append(append(results, relations...), marshaled...), keys...), literals...), signals...)
+	t.Logf("relation calls per tool %v; places of types that write their own JSON %v; maps per tool %v; literal places per type %v; signal calls per tool %v",
+		calls, byType, maps, literalsByType, signalCalls)
 	main := readFieldsMainTable(t)
 	lost, hidden, mainHidden := 0, 0, 0
 	rows, lostBy := map[string]int{}, map[string]int{}
@@ -733,7 +734,8 @@ func TestWriteFieldsMainTable(t *testing.T) {
 	marshaled, _ := fieldMarshaledResults(t, false)
 	keys, _ := fieldKeyResults(t, false)
 	literals, _ := fieldLiteralResults(t, false, false)
-	results = append(append(append(append(results, relations...), marshaled...), keys...), literals...)
+	signals, _ := signalFieldResults(t, false)
+	results = append(append(append(append(append(results, relations...), marshaled...), keys...), literals...), signals...)
 	var b strings.Builder
 	b.WriteString("# Whether each read tool hid a secret placed in each field of the objects it reads, at main " +
 		os.Getenv("FIELDS_MAIN_COMMIT") + " (#845).\n# row (the first 16 hex digits of the SHA-256 of \"tool<TAB>place<TAB>form\")\thidden or shown\n")

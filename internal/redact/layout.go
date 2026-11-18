@@ -106,36 +106,37 @@ func SecretCollection(name string) bool {
 
 // Pieces takes the one decision on the answer the pieces make, each data piece written in its Form and all
 // joined as they are, and returns each piece as the answer writes it with what is redacted in it replaced; a
-// piece the tool writes comes back as it was. A data piece loses, in the units it was written as:
+// piece the tool writes comes back as it was.
 //
-//   - what String redacts of the answer, cut at the piece's ends and widened to whole units (an escape is
-//     hidden whole or kept whole);
-//   - what String redacts of the value alone, as it was read (with its line breaks: a block under a key in the
-//     value is found by its lines), as main redacted each value before it wrote its answer;
-//   - the value the rule for the strings of a sequence (seqValues) finds in it, read over the values in their
-//     order: a key, a separator or a flag in one value and its value in a later one. The string after a secret
-//     flag is its value, whatever it looks like ("--token", "--verbose" hides "--verbose");
-//   - for a map key (MapKey), also what String hides of the key as the answer writes it, as main hid it;
-//   - all of it when it is marked Whole or its Key is a secret key (SecretKey): the object says where the value
-//     ends, and nothing beyond it is hidden: a match of the answer that reaches into such a value ends with it
-//     (endAtObjectValues), so a block or a flow collection that the value opens takes no later entry (sixth
-//     decision, point 2);
-//   - all of it from its first byte that is no blank when a match of the answer takes it as the value of a key
-//     outside it (valueOfKey: a header's value after its name in the field before).
+// What is hidden is the union of three readings of the same answer (#845, ninth decision of 2026-11-18). The
+// readings only find spans; nothing is replaced until all three have run, and no reading takes another's
+// replaced text as its only input, so a rule that hides a carrier (a connection string in a map key) never takes
+// away the signal another rule reads after it (the word "authorization" that hides the value):
 //
-// A key found inside a value hides as far as String hides it on the answer and on the value alone, and no
-// further: on a line of the answer (Line) its value ends where the rule ends it on that line, in JSON a line
-// break is "\n" and the next blank ends it, as main read each answer (sixth decision, point 3). The work is
-// linear in the length of the pieces, apart from the sorts of the matches (mergeSpans, valueOfKey): m log m
-// comparisons for m matches, and m is at most linear in that length.
-func (r *Redactor) Pieces(ps []Piece) []string { return r.pieces(ps, false) }
-
-// pieces is Pieces; with joined set, the first step also takes what String hides of the answer as written
-// before any marker, cut at each value's ends, so that what String hides in the values joined is hidden in them
-// apart whatever the markers change (Strings).
-func (r *Redactor) pieces(ps []Piece, joined bool) []string {
-	// First each value alone, as main redacted each value before it wrote its answer: what String hides of it as
-	// it was read, the value seqValues finds in it, or all of it when the object says so.
+//  1. Each piece alone. A data piece loses what String redacts of the value as it was read (with its line
+//     breaks: a block under a key in the value is found by its lines), as main redacted each value before it
+//     wrote its answer; the value the rule for the strings of a sequence (seqValues) finds in it, read over the
+//     values in their order (a key, a separator or a flag in one value and its value in a later one; the string
+//     after a secret flag is its value, whatever it looks like: "--token", "--verbose" hides "--verbose"); for a
+//     map key (MapKey), what String hides of the key as the answer writes it; and all of it when it is marked
+//     Whole or its Key is a secret key (SecretKey).
+//  2. The whole answer as the tool writes it: what String redacts of it, cut at each piece's ends and widened
+//     to whole units (an escape is hidden whole or kept whole).
+//  3. The whole answer with the markers of reading 1 in place, the markers main's first pass made (what String
+//     redacts of each value alone as it was read; main redacted no map key alone): what String redacts of it,
+//     carried back to the units the markers stand for, and all of a data piece from its first byte that is no
+//     blank when a match takes it as the value of a key outside it (valueOfKey: a header's value after its name
+//     in the field before).
+//
+// main hid what readings 1 and 3 find, so the union shows nothing main hid; reading 2 can only add. Where the
+// object says a value ends (Whole, a secret Key), a match of readings 2 and 3 that reaches into it ends with it
+// (endAtObjectValues), so a block or a flow collection that the value opens takes no later entry (sixth
+// decision, point 2). A key found inside a value hides as far as String hides it on the answer and on the value
+// alone, and no further: on a line of the answer (Line) its value ends where the rule ends it on that line, in
+// JSON a line break is "\n" and the next blank ends it, as main read each answer (sixth decision, point 3). The
+// work is linear in the length of the pieces (three passes over the answer), apart from the sorts of the matches
+// (mergeSpans, valueOfKey): m log m comparisons for m matches, and m is at most linear in that length.
+func (r *Redactor) Pieces(ps []Piece) []string {
 	var data []string
 	for _, p := range ps {
 		tick(1)
@@ -145,103 +146,150 @@ func (r *Redactor) pieces(ps []Piece, joined bool) []string {
 	}
 	starts := seqValues(data)
 	ws := make([]written, len(ps))
+	var raw strings.Builder
 	for i, p := range ps {
 		tick(1)
 		ws[i] = write(p)
+		raw.WriteString(ws[i].text)
 	}
-	var plain []span
-	if joined {
-		var b strings.Builder
-		for _, w := range ws {
-			tick(1)
-			b.WriteString(w.text)
-		}
-		plain = r.spans(b.String())
-	}
-	var b strings.Builder
-	k, off, next := 0, 0, 0
+	// own holds, by piece, the spans found in its written text; reading 1 first.
+	own := make([][]span, len(ps))
+	marks := make([]marked, len(ps))
+	k := 0
 	for i, p := range ps {
 		tick(1)
 		w := ws[i]
-		end := off + len(w.text)
-		if p.Data {
-			var own []span
-			for next < len(plain) && plain[next].end <= off {
+		marks[i] = marked{text: w.text}
+		if !p.Data {
+			continue
+		}
+		var alone []span
+		if hiddenByObject(p) {
+			own[i] = []span{{start: 0, end: len(w.text), kind: KindCredential, rule: len(r.rules)}}
+		} else {
+			for _, sp := range r.spans(p.Text) {
 				tick(1)
-				next++
+				alone = append(alone, w.carry(sp))
 			}
-			for j := next; j < len(plain) && plain[j].start < end; j++ {
-				tick(1)
-				sp := plain[j]
-				sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
-				if sp.end > sp.start {
-					own = append(own, w.widen(sp))
-				}
-			}
-			if hiddenByObject(p) {
-				own = []span{{start: 0, end: len(w.text), kind: KindCredential, rule: len(r.rules)}}
-			} else {
-				for _, sp := range r.spans(p.Text) {
+			own[i] = append(own[i], alone...)
+			if p.MapKey {
+				// main redacted no key alone: the key keeps no marker for reading 3.
+				for _, sp := range r.spans(w.text) {
 					tick(1)
-					own = append(own, w.carry(sp))
+					own[i] = append(own[i], w.widen(sp))
 				}
-				if p.MapKey {
-					for _, sp := range r.spans(w.text) {
-						tick(1)
-						own = append(own, w.widen(sp))
-					}
-				}
-				if s := starts[k]; s >= 0 && s < len(p.Text) {
-					own = append(own, w.carry(span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))
-				}
+				alone = nil
 			}
-			w = w.marked(mergeSpans(own))
-			k++
+			if s := starts[k]; s >= 0 && s < len(p.Text) {
+				own[i] = append(own[i], w.carry(span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))
+			}
 		}
-		ws[i] = w
-		b.WriteString(w.text)
-		off = end
+		marks[i] = w.mark(mergeSpans(alone))
+		k++
 	}
-	// Then the answer, as written with those markers: what String hides of it, cut at each value's ends and
-	// widened to whole units, and a value that a key outside it takes.
+	// Reading 2: the answer as the tool writes it.
+	wsize := func(i int) int { return len(ws[i].text) }
+	r.cutAnswer(ps, own, endAtObjectValues(ps, wsize, r.spans(raw.String())), func(i int, sp span) span { return ws[i].widen(sp) }, wsize)
+	// Reading 3: the answer with the markers of reading 1.
+	var b strings.Builder
+	for _, m := range marks {
+		tick(1)
+		b.WriteString(m.text)
+	}
 	text := b.String()
-	matches := r.ruleMatches(text)
-	firsts := firstBytes(ps, ws)
+	msize := func(i int) int { return len(marks[i].text) }
+	matches := endAtObjectValues(ps, msize, r.ruleMatches(text))
+	firsts := firstBytes(ps, marks)
 	whole := valueOfKey(firsts, slices.Clone(matches))
-	settled := settle(text, matches)
+	r.cutAnswer(ps, own, settle(text, matches), func(i int, sp span) span {
+		if marks[i].from == nil {
+			return ws[i].widen(sp)
+		}
+		return marks[i].back(sp)
+	}, msize)
 	out := make([]string, len(ps))
-	off, next = 0, 0
+	off := 0
 	for i, p := range ps {
 		tick(1)
 		w := ws[i]
-		end := off + len(w.text)
-		switch {
-		case !p.Data || len(w.text) == 0:
-			out[i] = w.text
-		case whole[i]:
-			// The value of a key outside the piece: all of it from its first byte that is no blank, the
-			// blanks before that kept as the indentation they are.
-			v := firsts[i] - off
-			out[i] = w.text[:v] + render(w.text[v:], []span{{start: 0, end: len(w.text) - v, kind: KindCredential, rule: len(r.rules)}})
-		default:
-			var own []span
-			for next < len(settled) && settled[next].end <= off {
-				tick(1)
-				next++
-			}
-			for j := next; j < len(settled) && settled[j].start < end; j++ {
-				tick(1)
-				sp := settled[j]
-				sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
-				if sp.end > sp.start {
-					own = append(own, w.widen(sp))
-				}
-			}
-			out[i] = render(w.text, mergeSpans(own))
+		if p.Data && whole[i] && len(w.text) > 0 {
+			// The value of a key outside the piece: all of it from its first byte that is no blank, the blanks
+			// before that kept as the indentation they are.
+			v := marks[i].back(span{start: firsts[i] - off, end: firsts[i] - off + 1}).start
+			own[i] = append(own[i], span{start: v, end: len(w.text), kind: KindCredential, rule: len(r.rules)})
 		}
-		off = end
+		off += len(marks[i].text)
+		out[i] = w.text
+		if p.Data {
+			out[i] = render(w.text, mergeSpans(own[i]))
+		}
 	}
 	return out
+}
+
+// cutAnswer adds to own, by data piece, the spans of a reading of the whole answer (sorted, disjoint, on the
+// text of that reading), cut at each piece's ends (of length size(i) in that text) and carried to the piece's
+// written text by to. A piece the object hides whole takes nothing more: it is hidden whole already. The work is
+// linear in the number of pieces and spans.
+func (r *Redactor) cutAnswer(ps []Piece, own [][]span, spans []span, to func(i int, sp span) span, size func(i int) int) {
+	off, next := 0, 0
+	for i, p := range ps {
+		tick(1)
+		end := off + size(i)
+		if p.Data && !hiddenByObject(p) {
+			for next < len(spans) && spans[next].end <= off {
+				tick(1)
+				next++
+			}
+			for j := next; j < len(spans) && spans[j].start < end; j++ {
+				tick(1)
+				sp := spans[j]
+				sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
+				if sp.end > sp.start {
+					own[i] = append(own[i], to(i, sp))
+				}
+			}
+		}
+		off = end
+	}
+}
+
+// endAtObjectValues cuts each span of a reading of the whole answer (pieces of length size(i) in that reading's
+// text) that reaches into a data piece the object hides whole (hiddenByObject) at that piece's end: the object
+// says where the value ends, so a block or a flow collection that the value opens, or a key inside it, takes no
+// later piece (#845, sixth decision of 2026-11-18, point 2). The spans are changed in place and returned. The work
+// and the allocation are linear in the length of the text and the number of spans.
+func endAtObjectValues(ps []Piece, size func(i int) int, spans []span) []span {
+	var starts, ends []int // the hidden pieces, in order
+	off := 0
+	for i, p := range ps {
+		tick(1)
+		if n := size(i); hiddenByObject(p) && n > 0 {
+			starts, ends = append(starts, off), append(ends, off+n)
+		}
+		off += size(i)
+	}
+	if len(starts) == 0 {
+		return spans
+	}
+	// first[x] is the first hidden piece that ends after byte x, len(starts) for none.
+	first := make([]int, off+1)
+	j := len(starts)
+	for x := off; x >= 0; x-- {
+		tick(1)
+		for j > 0 && ends[j-1] > x {
+			tick(1)
+			j--
+		}
+		first[x] = j
+	}
+	for i := range spans {
+		tick(1)
+		if h := first[min(spans[i].start, off)]; h < len(starts) && starts[h] < spans[i].end {
+			spans[i].end = min(spans[i].end, ends[h])
+		}
+	}
+	return spans
 }
 
 // hiddenByObject reports whether the object says the data piece p is hidden whole: it is marked Whole or its
@@ -336,12 +384,19 @@ func writeUnit(b *strings.Builder, f Form, raw string, c rune, size int) {
 	}
 }
 
-// marked returns w with each of the sorted, disjoint spans of its text replaced by its marker, a marker one unit
-// of the new text. The units of the value it was written from map to the units they were written as, a unit
-// inside a marker to the marker.
-func (w written) marked(spans []span) written {
+// marked is the written text of a piece with the markers of reading 1 in place, as reading 3 reads it: from and
+// to give, for each byte of text, the unit of the written text it stands for (a byte of a marker stands for the
+// whole span the marker replaced). nil from and to: text is the written text.
+type marked struct {
+	text     string
+	from, to []int
+}
+
+// mark returns w with each of the sorted, disjoint spans of its text replaced by its marker. The work and the
+// allocation are linear in the length of w.
+func (w written) mark(spans []span) marked {
 	if len(spans) == 0 {
-		return w
+		return marked{text: w.text}
 	}
 	n := len(w.text)
 	// unit returns the unit of w.text that holds byte j: the bytes of a value written as it is are units of their
@@ -353,20 +408,16 @@ func (w written) marked(spans []span) written {
 		return w.unitStart[j], w.unitEnd[j]
 	}
 	var b strings.Builder
-	m := written{unitStart: make([]int, 0, n), unitEnd: make([]int, 0, n)}
-	at := make([]int, n+1) // the offset in the new text of each unit start of w.text; a byte in a marker maps to it
-	ends := make([]int, n+1)
+	m := marked{from: make([]int, 0, n), to: make([]int, 0, n)}
 	pos := 0
 	keep := func(to int) {
 		for pos < to {
 			tick(1)
 			s, e := unit(pos)
-			from := b.Len()
 			b.WriteString(w.text[s:e])
-			for j := s; j < e; j++ {
+			for range e - s {
 				tick(1)
-				at[j], ends[j] = from, b.Len()
-				m.unitStart, m.unitEnd = append(m.unitStart, from), append(m.unitEnd, b.Len())
+				m.from, m.to = append(m.from, s), append(m.to, e)
 			}
 			pos = e
 		}
@@ -374,28 +425,25 @@ func (w written) marked(spans []span) written {
 	for _, sp := range spans {
 		tick(1)
 		keep(sp.start)
-		from := b.Len()
-		b.WriteString(marker(sp.kind, sp.end-sp.start))
-		for j := sp.start; j < sp.end; j++ {
+		mk := marker(sp.kind, sp.end-sp.start)
+		b.WriteString(mk)
+		for range len(mk) {
 			tick(1)
-			at[j], ends[j] = from, b.Len()
-		}
-		for range b.Len() - from {
-			tick(1)
-			m.unitStart, m.unitEnd = append(m.unitStart, from), append(m.unitEnd, b.Len())
+			m.from, m.to = append(m.from, sp.start), append(m.to, sp.end)
 		}
 		pos = sp.end
 	}
 	keep(n)
 	m.text = b.String()
-	if w.start != nil {
-		m.start, m.end = make([]int, len(w.start)), make([]int, len(w.end))
-		for j := range w.start {
-			tick(1)
-			m.start[j], m.end[j] = at[w.start[j]], ends[w.end[j]-1]
-		}
-	}
 	return m
+}
+
+// back carries a span of the marked text to the units of the written text it stands for.
+func (m marked) back(sp span) span {
+	if m.from != nil {
+		sp.start, sp.end = m.from[sp.start], m.to[sp.end-1]
+	}
+	return sp
 }
 
 // widen widens a span of the written text to the whole units it touches.
@@ -416,7 +464,7 @@ func (w written) carry(sp span) span {
 
 // firstBytes returns, for each piece, the offset in the answer of its first written byte that is no blank and
 // no line break; -1 for a piece the tool writes or a piece of blanks only.
-func firstBytes(ps []Piece, ws []written) []int {
+func firstBytes(ps []Piece, ws []marked) []int {
 	out := make([]int, len(ps))
 	off := 0
 	for i, p := range ps {

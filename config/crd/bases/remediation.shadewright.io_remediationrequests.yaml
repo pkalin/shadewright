@@ -882,6 +882,7 @@ spec:
                       - ModelError
                       - UnexpectedModel
                       - EndpointNotAllowed
+                      - ModelNotAllowed
                       - ProviderNotConfigured
                       - PlanUnchanged
                       - HintNotPending

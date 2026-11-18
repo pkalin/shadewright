@@ -1,5 +1,8 @@
 {{- $_ := include "shadewright.validate" (dict "component" "analyzer" "context" $) }}
 {{- $c := .Values.analyzer }}
+{{- $compatibleEndpoints := $c.analysis.openAICompatible.endpoints }}
+{{- $compatibleKeys := false }}
+{{- range $compatibleEndpoints }}{{- if include "shadewright.compatibleKeyVolume" . }}{{- $compatibleKeys = true }}{{- end }}{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -83,6 +86,15 @@ spec:
         - --triage-model={{ . }}
         {{- with $c.analysis.escalationModel }}
         - --escalation-model={{ . }}
+        {{- end }}
+        {{- if $c.analysis.disableFoundry }}
+        - --disable-foundry=true
+        {{- end }}
+        {{- with $compatibleEndpoints }}
+        - {{ printf "--openai-compatible-endpoints=%s" (include "shadewright.compatibleEndpoints" .) | quote }}
+        {{- end }}
+        {{- with $c.analysis.openAICompatible.inClusterCIDRs }}
+        - --openai-compatible-in-cluster-cidrs={{ join "," . }}
         {{- end }}
         {{- with $c.analysis.endpointSuffixes }}
         - --model-endpoint-suffixes={{ join "," . }}
@@ -168,12 +180,19 @@ spec:
         resources:
           {{- toYaml $c.resources | nindent 10 }}
         {{- $keyVolume := include "shadewright.anthropicKeyVolume" $ }}
-        {{- if or $c.metricsTLS.secretName $keyVolume }}
+        {{- if or $c.metricsTLS.secretName $keyVolume $compatibleKeys }}
         volumeMounts:
         {{- with $c.metricsTLS.secretName }}
         - name: metrics-tls
           mountPath: /etc/shadewright/metrics-tls
           readOnly: true
+        {{- end }}
+        {{- range $i, $e := $compatibleEndpoints }}
+        {{- if include "shadewright.compatibleKeyVolume" $e }}
+        - name: openai-compatible-key-{{ $i }}
+          mountPath: /var/run/secrets/shadewright/openai-compatible/{{ $i }}
+          readOnly: true
+        {{- end }}
         {{- end }}
         {{- if $keyVolume }}
         - name: anthropic-api-key
@@ -181,13 +200,19 @@ spec:
           readOnly: true
         {{- end }}
         {{- end }}
-      {{- if or $c.metricsTLS.secretName $keyVolume }}
+      {{- if or $c.metricsTLS.secretName $keyVolume $compatibleKeys }}
       volumes:
       {{- with $c.metricsTLS.secretName }}
       - name: metrics-tls
         secret:
           secretName: {{ . | quote }}
           defaultMode: 0444
+      {{- end }}
+      {{- range $i, $e := $compatibleEndpoints }}
+      {{- with (include "shadewright.compatibleKeyVolume" $e) }}
+      - name: openai-compatible-key-{{ $i }}
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- end }}
       {{- if $keyVolume }}
       - name: anthropic-api-key

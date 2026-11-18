@@ -30,11 +30,13 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/model/keyfile"
 )
 
 // The API this adapter calls. The URL is a constant: no setting can point the key at another host.
@@ -124,6 +126,10 @@ type Config struct {
 	Model string
 	// KeyFile is the path of a file that holds the API key, read at every attempt. Required.
 	KeyFile string
+	// OtherKeyFiles are the key files of the other declarations (the OpenAI-compatible endpoints). Before each
+	// read the provider refuses its key file when it is one of them, by path or by identity (ADR-0042), so a
+	// file missing at start that appears later as a link to another declaration's key is never sent.
+	OtherKeyFiles []string
 	// MaxOutputTokens is the output limit of a request that leaves its own at zero. Zero means
 	// DefaultMaxOutputTokens; at most MaxOutputTokens.
 	MaxOutputTokens int
@@ -163,6 +169,7 @@ type testHooks struct {
 type Provider struct {
 	model             string
 	keyFile           string
+	otherKeyFiles     []string
 	client            *http.Client
 	maxOutput         int
 	thinkingAllowance int
@@ -217,6 +224,7 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	p := &Provider{
 		model:             cfg.Model,
 		keyFile:           cfg.KeyFile,
+		otherKeyFiles:     slices.Clone(cfg.OtherKeyFiles),
 		client:            newHTTPClient(h.transport, cmpOr(cfg.AttemptTimeout, DefaultAttemptTimeout)),
 		maxOutput:         cmpOr(cfg.MaxOutputTokens, DefaultMaxOutputTokens),
 		thinkingAllowance: cmpOr(cfg.ThinkingAllowance, DefaultThinkingAllowance),
@@ -360,7 +368,8 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 // readKey reads the API key from the key file. Every error matches [providers.ErrCredentialUnavailable]. A
 // file that cannot be read, or holds only white space, is retryable (a mounted Secret may be between two
 // versions); a file too large, or a key too long or with characters a header cannot carry, is malformed and
-// permanent until a person fixes the file. Errors never hold the path, the file's content or the os error.
+// permanent until a person fixes the file, and so is a key file that is another declaration's key file
+// (Config.OtherKeyFiles). Errors never hold the path, the file's content or the os error.
 func (p *Provider) readKey() (string, error) {
 	unreadable := func(what string) error {
 		return &providers.RetryableError{Err: fmt.Errorf("anthropic: the API key file %s: %w", what,
@@ -374,6 +383,17 @@ func (p *Provider) readKey() (string, error) {
 		return "", unreadable("could not be read")
 	}
 	defer func() { _ = f.Close() }()
+	// The identity is checked on the handle that is read, against the other declarations' key files.
+	st, err := f.Stat()
+	if err != nil {
+		return "", unreadable("could not be read")
+	}
+	if shared, err := keyfile.Shared(p.keyFile, st, p.otherKeyFiles); err != nil {
+		return "", unreadable("could not be read")
+	} else if shared {
+		return "", fmt.Errorf("anthropic: the API key file is also declared for another endpoint: %w",
+			providers.ErrCredentialUnavailable)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileBytes+1))
 	if err != nil {
 		return "", unreadable("could not be read")

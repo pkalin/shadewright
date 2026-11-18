@@ -87,7 +87,7 @@ A standard NetworkPolicy cannot match host names, and the API server has no labe
 
 What keeps the analyzer away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential (`AGENTS.md` invariant 6), not the policy. The lab confirmed on 2026-11-07 that the network does not stop it (the binary itself was not tested there). A test pod in the operator namespace with the analyzer's labels (`app.kubernetes.io/name=shadewright`, `app.kubernetes.io/component=analyzer`), so under the same NetworkPolicies, with the restricted security context and no service account token, got HTTP 200 from `https://github.com` and `https://api.github.com` (`curl -sS -m 10 -o /dev/null -w '%{http_code}' <url>`), and could not connect to `http://github.com` (port 80). The port rules are enforced, the destination is not.
 
-This is accepted ([#391](https://github.com/pkalin/shadewright/issues/391)): the analyzer may open TCP 443 to any address, including GitHub, and is kept from GitHub by having no GitHub client in its binary and no GitHub identity or credential, not by the network. The acceptance also covers reaching any other HTTPS host, so a compromised analyzer could send what it holds (redacted context, its own Entra ID token for the model) to an attacker-chosen host; no analyzer path takes a URL from cluster data or model output (the model endpoints come from `RemediationSettings` and the `--model-endpoint-suffixes` allow-list). Narrowing egress by host name stays the operator's choice, not shipped (below). The lab uses none of the ways to do it.
+This is accepted ([#391](https://github.com/pkalin/shadewright/issues/391)): the analyzer may open TCP 443 to any address, including GitHub, and is kept from GitHub by having no GitHub client in its binary and no GitHub identity or credential, not by the network. The acceptance also covers reaching any other HTTPS host, so a compromised analyzer could send what it holds (redacted context, its own Entra ID token for the model) to an attacker-chosen host; no analyzer path takes a URL from cluster data or model output (the model endpoints come from `RemediationSettings` and the Foundry `--model-endpoint-suffixes` list and exact compatible `--openai-compatible-endpoints` declarations). Narrowing egress by host name stays the operator's choice, not shipped (below). The lab uses none of the ways to do it.
 
 The API server rule is 443 and 6443 to any address because its address is unknown when the chart renders and differs per cluster. The manifests in `config/` follow the same established pattern. The trade-off is that a pod of the component can reach any HTTPS address too.
 
@@ -98,6 +98,38 @@ The per-component split exists so that narrowing is possible without touching th
     - A CNI with FQDN rules. Upstream Cilium (`CiliumNetworkPolicy` `toFQDNs`), including as a bring-your-own CNI on AKS. Calico with domain rules. On AKS's managed Azure CNI powered by Cilium, FQDN rules are part of Advanced Container Networking Services, a paid add-on ([FQDN filtering](https://learn.microsoft.com/azure/aks/container-network-security-fqdn-filtering-concepts)).
     - An egress firewall with FQDN rules (Azure Firewall or a network virtual appliance, reached by a route table). It sees node addresses, not Pods, so rules per component need the components on separate node pools or subnets.
     - An egress proxy or gateway with an allow-list (an HTTP proxy, or a service mesh egress gateway), with the components' egress allowed only to it.
+
+The built OpenAICompatible provider ([ADR-0042](../adr/0042-openai-compatible-model-endpoints.md))
+uses exact install-time base declarations, each with a nonempty allowed model
+list and its own optional key. Settings cannot choose an undeclared model alias.
+Declarations with segment path prefixes on the same authority are refused. The key
+is a read-only Secret or CSI mount in the analyzer only, read at every attempt;
+executor and verifier never receive it and no Secret RBAC is added.
+For each `analyzer.analysis.openAICompatible.endpoints[].service` declaration the chart adds
+one egress rule to its `namespace` and `podSelector` (1 to 32 valid labels, refused otherwise at render and at analyzer startup) on the pod target
+`port`. The declared Service base uses verified HTTPS (443 by default). A Service
+address in 100.64.0.0/10 is refused at dial even when declared: carrier-grade NAT
+and cloud infrastructure share that range (one cloud serves its instance metadata
+at 100.100.100.200), so the guard cannot tell a Service there from a host outside
+the cluster; use an RFC 1918 Service address. Anyone who may create pods in the
+Service's namespace, or edit the Service or its EndpointSlices, can take the key
+and the redacted context (a pod there can mount the serving certificate), so run
+the inference Service in a namespace where only cluster administrators create pods. This explicit selector rule
+is necessary on CNIs such as Cilium where CIDR rules exclude in-cluster pods.
+Public compatible declarations add their explicit TCP ports other than 443 to a
+separate rule whose `0.0.0.0/0` peer excludes 10.0.0.0/8, 172.16.0.0/12,
+192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 and the IPv4 ranges of
+`analyzer.analysis.openAICompatible.inClusterCIDRs`. Those declared in-cluster
+ranges (the cluster's pod and Service ranges when they are routable addresses,
+IPv4 or IPv6) are refused by the dial guard of every compatible endpoint that is
+not a declared Service, like the private ranges; the install declares them,
+the analyzer does not read them from Nodes. The existing 443/6443 rule
+remains unchanged, including its API-server access: it excepts no range, so on 443
+the dial guard alone keeps a compatible endpoint off the private and declared
+ranges, and neither rule allows an IPv6 address. The chart and the analyzer refuse
+the same entries: a CIDR that is not canonical, has host bits, is a /0, or is an
+IPv6 form of IPv4 addresses ([rule](../reference/configuration.md#in-cluster-ranges)). These rules do not enforce DNS identity.
+Keep the selectors narrow and consistent with the Service and trusted certificate.
 
 ### What can go wrong
 

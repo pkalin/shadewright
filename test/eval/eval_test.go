@@ -267,7 +267,7 @@ func newAnthropicSource() (*anthropicSource, error) {
 	}
 	src.force = force
 	src.settings.Effort = cmp.Or(os.Getenv(envEffort), anthropic.DefaultEffort)
-	if src.settings.ThinkingAllowance, err = envInt(envAllowance, anthropic.DefaultThinkingAllowance, 1,
+	if src.settings.ThinkingAllowance, err = envInt(envAllowance, anthropic.DefaultThinkingAllowance,
 		anthropic.MaxThinkingAllowance); err != nil {
 		return nil, err
 	}
@@ -372,7 +372,9 @@ func evaluate(t *testing.T, mode string, src modelSource, repeats int, minPassRa
 	for _, s := range scenarios {
 		for i := 1; i <= repeats; i++ {
 			ctx, cancel := context.WithTimeout(t.Context(), scenarioTimeout)
+			start := time.Now()
 			res, err := runScenario(ctx, scheme, s, src)
+			res.Seconds = time.Since(start).Seconds()
 			cancel()
 			res.Repeat = i
 			if err != nil {
@@ -428,7 +430,7 @@ func TestEvalFoundry(t *testing.T) {
 	if os.Getenv(envModel) != providerFoundry {
 		t.Skip("set EVAL_MODEL=foundry to evaluate the real model")
 	}
-	repeats, err := envInt(envRepeats, 1, 1, maxRepeats)
+	repeats, err := envInt(envRepeats, 1, maxRepeats)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +459,7 @@ func TestEvalAnthropic(t *testing.T) {
 	if os.Getenv(envModel) != providerAnthropic {
 		t.Skip("set EVAL_MODEL=anthropic to evaluate a Claude model")
 	}
-	repeats, err := envInt(envRepeats, 1, 1, maxRepeats)
+	repeats, err := envInt(envRepeats, 1, maxRepeats)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,14 +481,14 @@ func TestEvalAnthropic(t *testing.T) {
 	}
 }
 
-func envInt(name string, def, lo, hi int) (int, error) {
+func envInt(name string, def, hi int) (int, error) {
 	v := os.Getenv(name)
 	if v == "" {
 		return def, nil
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n < lo || n > hi {
-		return 0, fmt.Errorf("%s must be an integer from %d to %d", name, lo, hi)
+	if err != nil || n < 1 || n > hi {
+		return 0, fmt.Errorf("%s must be an integer from %d to %d", name, 1, hi)
 	}
 	return n, nil
 }

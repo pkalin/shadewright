@@ -19,7 +19,6 @@ package foundry
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -32,10 +31,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
 	"github.com/pkalin/shadewright/internal/providers/retryafter"
 )
 
@@ -64,9 +63,6 @@ const (
 	// DefaultMaxResponseBytes bounds the body of a reply that is read. 16384 output tokens are about 64 KiB
 	// of text, so a larger reply is not a chat completion of this adapter's requests.
 	DefaultMaxResponseBytes = 1 << 20
-	// maxRequestBytes bounds the encoded request. The context the analyzer sends is at most 256 KiB
-	// (spec.analysis.maxContextBytes), so anything near this is a caller's bug.
-	maxRequestBytes = 4 << 20
 	// maxConfigDelay, maxConfigTimeout and maxConfigResponseBytes bound what Config may ask for.
 	maxConfigDelay         = 5 * time.Minute
 	maxConfigTimeout       = 15 * time.Minute
@@ -114,7 +110,7 @@ type CallReport struct {
 }
 
 // API names the inference API a [Provider] speaks to its deployment.
-type API string
+type API = openaiwire.API
 
 // The inference APIs.
 const (
@@ -391,113 +387,6 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// errDialRefused marks a connection refused by refusePrivate.
-var errDialRefused = errors.New("the address is not a public unicast address")
-
-// refusePrivate is the dialer's control: it runs on the resolved address of every connection, so a host name
-// that resolves (or is rebound) to an address that is not public unicast gets no connection and no token
-// (design 11.1). See publicAddress.
-func refusePrivate(_, address string, _ syscall.RawConn) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return errDialRefused
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil || ip.Zone() != "" || !publicAddress(ip) {
-		return errDialRefused
-	}
-	return nil
-}
-
-// publicAddress reports whether ip is a public unicast address. IPv4 (also mapped into IPv6) must be global
-// unicast, not private and outside reservedIPv4. An IPv6 address that embeds an IPv4 address the standard way
-// (NAT64 64:ff9b::/96, 6to4 2002::/16, IPv4-compatible ::/96) is judged by that IPv4 address, so a DNS64
-// answer for a public endpoint still connects while one for 10.0.0.1 does not. Any other IPv6 address must be
-// global unicast, not unique-local and outside reservedIPv6, which refuses outright the forms whose IPv4
-// cannot be read reliably (local-use NAT64 64:ff9b:1::/48, Teredo 2001::/32, SIIT ::ffff:0:0:0/96).
-func publicAddress(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	if ip.Is4() {
-		return ip.IsGlobalUnicast() && !ip.IsPrivate() && !inAny(reservedIPv4, ip)
-	}
-	b := ip.As16()
-	switch {
-	case nat64WellKnown.Contains(ip), ipv4Compatible.Contains(ip):
-		return publicAddress(netip.AddrFrom4([4]byte(b[12:16])))
-	case sixToFour.Contains(ip):
-		return publicAddress(netip.AddrFrom4([4]byte(b[2:6])))
-	}
-	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !inAny(reservedIPv6, ip)
-}
-
-func inAny(prefixes []netip.Prefix, ip netip.Addr) bool {
-	for _, p := range prefixes {
-		if p.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// Address ranges refused besides those the netip predicates cover (loopback, private, link-local, multicast,
-// unspecified, unique-local).
-var (
-	nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
-	ipv4Compatible = netip.MustParsePrefix("::/96")
-	sixToFour      = netip.MustParsePrefix("2002::/16")
-	reservedIPv4   = mustPrefixes(
-		"0.0.0.0/8",       // this network
-		"100.64.0.0/10",   // shared address space (carrier-grade NAT, some cluster networks)
-		"192.0.0.0/24",    // IETF protocol assignments
-		"192.0.2.0/24",    // documentation
-		"192.88.99.0/24",  // 6to4 relay anycast
-		"198.18.0.0/15",   // benchmarking
-		"198.51.100.0/24", // documentation
-		"203.0.113.0/24",  // documentation
-		"240.0.0.0/4",     // reserved, and broadcast
-	)
-	reservedIPv6 = mustPrefixes(
-		"::/8",          // reserved, after the embedded forms above: SIIT, local-use NAT64 64:ff9b:1::/48
-		"100::/64",      // discard
-		"2001::/23",     // IETF protocol assignments, Teredo 2001::/32 included
-		"2001:db8::/32", // documentation
-		"3fff::/20",     // documentation
-		"fec0::/10",     // deprecated site-local
-	)
-)
-
-func mustPrefixes(s ...string) []netip.Prefix {
-	ps := make([]netip.Prefix, len(s))
-	for i, p := range s {
-		ps[i] = netip.MustParsePrefix(p)
-	}
-	return ps
-}
-
-func isASCIILetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
-
-// newHTTPClient never follows redirects (the bearer token must reach the configured host only), requires
-// TLS 1.2 or later, connects to public unicast addresses only (refusePrivate), and bounds connection setup
-// and the wait for headers (headerTimeout, the attempt timeout of the caller). Each attempt has its own
-// deadline on its context.
-func newHTTPClient(rt http.RoundTripper, headerTimeout time.Duration) *http.Client {
-	if rt == nil {
-		t := http.DefaultTransport.(*http.Transport).Clone()
-		t.Proxy = nil
-		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-		t.TLSHandshakeTimeout = 10 * time.Second
-		t.ResponseHeaderTimeout = headerTimeout
-		t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: refusePrivate}).DialContext
-		rt = t
-	}
-	return &http.Client{
-		Transport: rt,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
 // Complete sends one chat completion request, retrying transient failures. See the package documentation
 // for the classes of its errors.
 func (p *Provider) Complete(ctx context.Context, req providers.CompletionRequest) (providers.Completion, error) {
@@ -578,17 +467,17 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 // parse is parseResponse or parseResponses, after the Provider's API.
 func (p *Provider) parse(data []byte, offered map[string]bool, structured bool) (providers.Completion, error) {
 	if p.api == APIResponses {
-		return parseResponses(data, offered, structured)
+		return openaiwire.ParseResponses(data, offered, structured)
 	}
-	return parseResponse(data, offered, structured)
+	return openaiwire.ParseResponse(data, offered, structured)
 }
 
 // billedUsage is billedUsage or billedResponsesUsage, after the Provider's API.
 func (p *Provider) billedUsage(data []byte) providers.Completion {
 	if p.api == APIResponses {
-		return billedResponsesUsage(data)
+		return openaiwire.BilledResponsesUsage(data)
 	}
-	return billedUsage(data)
+	return openaiwire.BilledUsage(data)
 }
 
 // once sends one attempt and returns the body of a 200 reply. Every other outcome is a classified error with
@@ -704,7 +593,7 @@ func transportError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctxError(ctx)
 	}
-	if errors.Is(err, errDialRefused) {
+	if errors.Is(err, openaiwire.ErrDialRefused) {
 		return fmt.Errorf("foundry: the endpoint resolves to an address that is not public: %w", providers.ErrInvalidConfig)
 	}
 	var ne net.Error
@@ -738,3 +627,17 @@ func ctxError(ctx context.Context) error {
 	}
 	return fmt.Errorf("foundry: model call: %w", context.Canceled)
 }
+
+func (p *Provider) encode(req providers.CompletionRequest) ([]byte, map[string]bool, error) {
+	return (openaiwire.Codec{API: p.api, Deployment: p.deployment, SendModel: p.sendModel, MaxOutput: p.maxOutput}).Encode(req)
+}
+
+func newHTTPClient(rt http.RoundTripper, headerTimeout time.Duration) *http.Client {
+	c := openaiwire.NewHTTPClient(headerTimeout, openaiwire.Guard{})
+	if rt != nil {
+		c.Transport = rt
+	}
+	return c
+}
+
+func isASCIILetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }

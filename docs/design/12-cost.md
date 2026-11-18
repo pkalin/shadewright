@@ -11,7 +11,7 @@ inference cost =
   + output tokens         / 1,000,000 * output price
 ```
 
-Count every call of an analysis: tool steps, retries and escalations. Check how reasoning tokens and long context are billed for the chosen model. A call with unknown usage is counted at its upper bound, except a call the host refused before processing it, such as a Foundry 429, which is counted as 0 tokens (12.3).
+Count every call of an analysis: tool steps, retries and escalations. OpenAICompatible usage is untrusted: charge at least the input estimate, with a ceiling of input plus output bound and a rounded-up 10% margin. Above-ceiling reports are refused and charged that ceiling, and every attempt of a retried call that the endpoint may have billed is charged on its own ([ADR-0042](../adr/0042-openai-compatible-model-endpoints.md)). Check how reasoning tokens and long context are billed for the chosen model. A call with unknown usage is counted at its upper bound, except a call the host refused before processing it, such as a Foundry 429, which is counted as 0 tokens (12.3).
 
 ## 12.2. Illustration (made-up prices, not a quote)
 
@@ -77,8 +77,21 @@ The lab itself (AKS node, Key Vault, storage, Foundry) is priced in `shadewright
 | --- | --- |
 | Illustration volume | 100 analyses a day, 30 days, 6,000 input and 1,500 output tokens each |
 | Illustration escalation rate | 5% to variant B |
-| Failed or timed-out call | Charged at input estimate plus `MaxOutputTokens` (plus the thinking allowance with the Anthropic adapter) |
-| Throttled call (Foundry 429 on every attempt, Microsoft host suffixes only) | Charged 0 tokens, still uses its analysis's unit of `maxAnalysesPerDay` (#725); an Anthropic 429 keeps the upper bound |
+| Failed or timed-out call | Charged at input estimate plus `MaxOutputTokens` (plus the thinking allowance with the Anthropic adapter); OpenAICompatible instead charges `C = I + O + ceil((I + O) / 10)` |
+| Throttled call (Foundry 429 on every attempt, Microsoft host suffixes only) | Charged 0 tokens, still uses its analysis's unit of `maxAnalysesPerDay` (#725); an Anthropic or OpenAICompatible 429 keeps the upper bound |
 | Spend limit unit | Tokens per model deployment and UTC day (`maxTokensPerDay`), no default |
 | Budget ConfigMap | `shadewright-analysis-budget`, operator namespace, writable by the analyzer and admins only |
 | Count unreadable, unwritable or missing | Refuse |
+
+For `OpenAICompatible`, missing or incomplete usage is refused with `UsageUnknown`
+and charged the ceiling `C = I + O + ceil((I + O) / 10)`, where `I` is the input
+estimate and `O` is `maxOutputTokens`. A gateway's 429 is not
+assumed unbilled. The adapter lists every attempt the endpoint may have billed
+(each one that got a response or may have reached a connection; not a refused
+dial or an unreadable key file), and the loop charges each: `C` when its usage is
+unknown, `max(I, R)` when it reported `R`. The loop tells the adapter how many
+attempts its remaining analysis and daily budget covers at `C`, and the adapter
+retries no further, so one call cannot pass `maxTokensPerDay`. An endpoint that
+reports less than it billed is charged the larger of `I` and its report, so it
+can undercount by up to `O` per attempt. These counts feed the existing
+per-analysis deployment token bounds; persistent daily reservation across analyses remains planned (#208).

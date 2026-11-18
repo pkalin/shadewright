@@ -164,3 +164,26 @@ An install that calls only `Anthropic` deployments needs no Azure settings for t
 For development, install from a clone with `./dist/chart` in place of the OCI reference. A clone has no image digests: pass `--set executor.image.digest=sha256:<digest> --set analyzer.image.digest=sha256:<digest> --set verifier.image.digest=sha256:<digest>` for the release whose tag you checked out, or `--set image.allowTag=true` to run the `appVersion` tag with images built from that same clone.
 
 The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values, only when it does not exist; Helm never changes it afterwards). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive. The commands to upgrade the release and to uninstall it, what stays behind (the CRDs and the settings object) and how to remove it are in [upgrade with Helm](upgrade-uninstall.md#upgrade-with-helm), [uninstall with Helm](upgrade-uninstall.md#uninstall-with-helm) and [the settings object](upgrade-uninstall.md#the-settings-object-and-helm).
+
+## OpenAI-compatible inference
+
+For an analyzer using only OpenAI-compatible endpoints, set
+`analyzer.analysis.disableFoundry=true`, declare exact bases, APIs and nonempty allowed model lists under `openAICompatible.endpoints`, and
+leave `analyzer.identity.azure.clientId` empty unless Blob records are enabled.
+The optional key is an existing Secret or CSI file mounted in the analyzer only;
+attach its source to that endpoint. A keyless cluster Service needs verified HTTPS
+and `service` egress fields on its endpoint declaration. Run that Service in a
+namespace where only cluster administrators create pods: the right to create pods
+there, or to edit the Service or its EndpointSlices, is equivalent to holding the
+key and the redacted context. A Service address in 100.64.0.0/10 is refused.
+If the cluster's pod or Service ranges are routable addresses outside the private
+ones, list them in `openAICompatible.inClusterCIDRs`: the analyzer then refuses to
+connect a public endpoint to them, and the egress rule of a declared port other
+than 443 excepts them. To find a cluster's ranges: the pod ranges are in
+`kubectl get nodes -o jsonpath='{.items[*].spec.podCIDRs}'` (empty with some CNIs,
+which keep them in their own configuration, such as the Cilium `IPPool` or the
+Calico `IPPool` objects); the Service range is the API server's
+`--service-cluster-ip-range`, `kubectl get servicecidrs` on clusters that serve
+that API, or the cluster's settings at your cloud (for AKS,
+`az aks show --query networkProfile`).
+Plain HTTP is refused. Follow the [installation and qualification runbook](how-to/qualify-openai-compatible.md).

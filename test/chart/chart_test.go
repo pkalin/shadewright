@@ -107,7 +107,7 @@ func tool(t *testing.T, envVar, name string) string {
 
 func run(t *testing.T, dir string, name string, args ...string) []byte {
 	t.Helper()
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) // #nosec G702 -- test caller selects the local Helm or Kustomize tool
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

@@ -47,12 +47,16 @@ import (
 // Version 5: every model-sized proposal states the evidence-supported size, and any value above it fails.
 // Version 6: rubric terms match on word boundaries (termIn, #848), so "256" is no longer taken from "256Mi";
 // diagnosis scores of version 5 or earlier are not comparable.
-const reportSchemaVersion = 6
+// Version 7: a run fails when a quote of its accepted result holds the cut note, a tally line or a part the
+// summary cut (summaryQuotes, #841).
+// Version 8: each run gives its elapsed seconds, and the totals give seconds, secondsPerPassed and
+// tokensPerPassed; the mode can be openaicompatible.
+const reportSchemaVersion = 8
 
 // report is the result of one evaluation run.
 type report struct {
 	SchemaVersion int `json:"schemaVersion"`
-	// Mode is fake (recorded replies), foundry or anthropic (a real model through that provider).
+	// Mode is fake (recorded replies), foundry, anthropic or openaicompatible (a real model through that provider).
 	Mode      string           `json:"mode"`
 	Manifest  manifest         `json:"manifest"`
 	Scenarios []scenarioResult `json:"scenarios"`
@@ -69,9 +73,10 @@ type scenarioResult struct {
 	// forced escalation (not reported).
 	truncated     bool
 	failedSources []incidentcontext.Section
-	Name          string `json:"name"`
-	Repeat        int    `json:"repeat"`
-	Pass          bool   `json:"pass"`
+	Name          string  `json:"name"`
+	Seconds       float64 `json:"seconds,omitempty"`
+	Repeat        int     `json:"repeat"`
+	Pass          bool    `json:"pass"`
 	// Recording is the recording's source (fake mode only).
 	Recording string         `json:"recording,omitempty"`
 	Reason    string         `json:"reason"`
@@ -96,6 +101,10 @@ type scenarioResult struct {
 	// QuoteFailures says, for a run that ended NoEvidence, how each quote differs from the block it cites
 	// (#474): a class and lengths, never the quote or the block.
 	QuoteFailures []quoteFailure `json:"quoteFailures,omitempty"`
+	// SummaryQuotes are the quotes of an accepted result (not NoEvidence) that lie within no value their cited
+	// block shows and touch the summary (#841): a cut part, the note of a cut or a tally line, which fail the run,
+	// and a quote of the summary changed a little or not in it, only recorded (summaryQuote.Fails).
+	SummaryQuotes []summaryQuote `json:"summaryQuotes,omitempty"`
 	// Reply is the text of the last reply when it decoded as a result (#600), accepted or refused as NoEvidence,
 	// so a missed rubric fact or a failed quote can be traced to what the model wrote; nil otherwise.
 	Reply *replyText `json:"reply,omitempty"`
@@ -273,8 +282,14 @@ type totals struct {
 	Passed   int     `json:"passed"`
 	PassRate float64 `json:"passRate"`
 	// Pass is whether PassRate reached the manifest's threshold.
-	Pass   bool   `json:"pass"`
-	Tokens tokens `json:"tokens"`
+	Pass bool `json:"pass"`
+	// Seconds includes all runs, successful or failed, measured with a monotonic clock.
+	Seconds float64 `json:"seconds,omitempty"`
+	// SecondsPerPassed and TokensPerPassed (charged) amortize all runs, failed ones included, over the passed
+	// runs. Absent when no run passed. The cost per passed run is CostPerPassedRunUSD.
+	SecondsPerPassed *float64 `json:"secondsPerPassed,omitempty"`
+	TokensPerPassed  *float64 `json:"tokensPerPassed,omitempty"`
+	Tokens           tokens   `json:"tokens"`
 	// ToolCalls sums the runs' tool calls.
 	ToolCalls int `json:"toolCalls"`
 	// CostUSD is the estimated cost from the prices the run was given, nil without prices.
@@ -359,6 +374,8 @@ type manifest struct {
 	Provider string `json:"provider,omitempty"`
 	// Anthropic holds the settings of the anthropic provider; left out for the others.
 	Anthropic *manifestAnthropic `json:"anthropic,omitempty"`
+	// Compatible identifies the server and endpoint without storing its URL or credential.
+	Compatible *manifestCompatible `json:"openAICompatible,omitempty"`
 	// Models are the deployments by role: deployment name and the model ID and version the replies must name.
 	Models map[string]manifestModel `json:"models"`
 	// PromptVersion is analysis.PromptVersion: the prompt templates and their generated parts.
@@ -384,6 +401,12 @@ type manifest struct {
 	Repeats     int     `json:"repeats"`
 	// Digest is the SHA-256 of the manifest's JSON without this field (see manifestDigest).
 	Digest string `json:"digest,omitempty"`
+}
+
+// manifestCompatible identifies the qualified server without storing its endpoint URL.
+type manifestCompatible struct {
+	ServerID     string `json:"serverID"`
+	EndpointHash string `json:"endpointHash"`
 }
 
 // manifestAnthropic are the settings of the Anthropic API adapter that change the replies.
@@ -467,6 +490,9 @@ func buildManifestIn(dir, escDir string, src source, models modelSource, defs []
 		Rubric:    manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
 	}
 	m.Provider, m.Anthropic = models.manifestProvider()
+	if c, ok := models.(*compatibleSource); ok {
+		m.Compatible = &manifestCompatible{ServerID: c.serverID, EndpointHash: c.endpointHash}
+	}
 	triage, escalation := models.deployments()
 	expectedModels := models.expectedModels()
 	for role, d := range map[analysis.Role]*remediationv1alpha1.ModelDeployment{
@@ -571,6 +597,7 @@ func (r *report) summarise(p *prices) {
 			t.Passed++
 		}
 		t.Tokens.add(s.Tokens)
+		t.Seconds += s.Seconds
 		t.ToolCalls += s.ToolCalls
 		// A failed call has no usage to price, and a run that stopped with an error may have used more than it
 		// counted: its cost is a lower bound, never a zero.
@@ -603,6 +630,11 @@ func (r *report) summarise(p *prices) {
 			t.CostPerPassedRunUSD = &per
 		}
 	}
+	if t.Passed > 0 {
+		seconds := t.Seconds / float64(t.Passed)
+		tokens := float64(t.Tokens.Charged) / float64(t.Passed)
+		t.SecondsPerPassed, t.TokensPerPassed = &seconds, &tokens
+	}
 	r.Totals = t
 }
 
@@ -623,6 +655,10 @@ func (r *report) markdown() string {
 		r.Manifest.Rubric.FleetCommit[:min(12, len(r.Manifest.Rubric.FleetCommit))])
 	fmt.Fprintf(&b, "- Passed %d of %d runs (%.0f%%, threshold %.0f%%, %d repeat(s))\n", r.Totals.Passed, r.Totals.Runs,
 		100*r.Totals.PassRate, 100*r.Manifest.MinPassRate, r.Manifest.Repeats)
+	if r.Totals.SecondsPerPassed != nil && r.Totals.Seconds > 0 {
+		fmt.Fprintf(&b, "- Per passed run (all attempts included): %.2f seconds, %.0f charged tokens\n",
+			*r.Totals.SecondsPerPassed, *r.Totals.TokensPerPassed)
+	}
 	tk := r.Totals.Tokens
 	if r.Manifest.ForcedEscalation {
 		b.WriteString("- Escalation forced (EVAL_FORCE_ESCALATION): every run went to the escalation model\n")
@@ -708,6 +744,7 @@ func (r *report) markdown() string {
 		b.WriteString("\n")
 	}
 	r.quoteFailuresMarkdown(&b)
+	r.summaryQuotesMarkdown(&b)
 	return b.String()
 }
 
@@ -767,6 +804,24 @@ func (r *report) quoteFailuresMarkdown(b *strings.Builder) {
 			}
 			fmt.Fprintf(b, "| %s | %d | %s | %s | %s | %d | %d | %d |\n", s.Name, s.Repeat, cell(q.Source), cell(q.Block),
 				cell(q.Class), q.QuoteBytes, q.BlockBytes, q.MatchedBytes)
+		}
+	}
+}
+
+// summaryQuotesMarkdown lists the quotes checkSummaryQuotes reported (#841), one row each, those that failed
+// the run and those only recorded, when there are any.
+func (r *report) summaryQuotesMarkdown(b *strings.Builder) {
+	header := false
+	for _, s := range r.Scenarios {
+		for _, q := range s.SummaryQuotes {
+			if !header {
+				b.WriteString("\n## Quotes not in the summary as shown\n\n")
+				b.WriteString("| Scenario | Run | Source | Kind | Fails | Quote bytes |\n")
+				b.WriteString("|---|---|---|---|---|---|\n")
+				header = true
+			}
+			fmt.Fprintf(b, "| %s | %d | %s | %s | %t | %d |\n", s.Name, s.Repeat, cell(q.Source), cell(q.Kind), q.Fails,
+				q.QuoteBytes)
 		}
 	}
 }

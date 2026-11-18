@@ -1,0 +1,31 @@
+# Synthetic: the unschedulable Incident in a shared cluster of 48 nodes, most of them in tainted pools the pod
+# does not tolerate (not observed). The symptom is the scheduler's FailedScheduling note of objects.yaml as
+# fingerprint.Symptom leaves it (953 bytes, unchanged). UIDs and the fingerprint are the scenario's placeholders.
+# The reporting controller is 245 characters of four-byte Han text (CJK Extension B), 980 bytes: within the
+# schema, whose lengths count characters, and the only field left that can carry the bytes that put the summary
+# over its default bound of 2048 (the reason must stay FailedScheduling, as expected.yaml says, a symptom over
+# 1024 bytes is left out of the summary, and the subject's fields are ASCII by their patterns). No Kubernetes
+# component reports such a name and the collector refuses it, so this is an Incident another client writes.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-unschedulable
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000005e0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000005e0
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-0000000005e1
+  reason: FailedScheduling
+  type: Warning
+  reportingController: 𠀋𠂉𠂢𠂤𠆢𠈓𠌫𠎁𠍱𠏹𠑊𠔉𠗖𠘨𠝏𠠇𠠺𠢹𠥼𠦝𠫓𠬝𠵅𠷡𠺕𠹭𠹤𠽟𡈁𡉕𡉻𡉴𡋤𡋗𡋽𡌶𡍄𡏄𡑮𡑭𡗗𦰩𡙇𡜆𡝂𡧃𡱖𡴭𡵅𡵸𡵢𡶡𡶜𡶒𡶷𡷠𡸳𡼞𡽶𡿺𢅻𢌞𢎭𢛳𢡛𢢫𢦏𢪸𢭏𢭐𢭆𢰝𢮦𢰤𢷡𣇃𣇵𣆶𣍲𣏓𣏒𣏐𣏤𣏕𣏚𣏟𣑊𣑑𣑋𣑥𣓤𣕚𣖔𣘹𣙇𣘸𣘺𣜜𣜌𣝤𣟿𣟧𣠤𣠽𣪘𣱿𣴀𣵀𣷺𣷹𣷓𣽾𤂖𤄃𤇆𤇾𤎼𤘩𤚥𤢖𤩍𤭖𤭯𤰖𤴔𤸎𤸷𤹪𤺋𥁊𥁕𥄢𥆩𥇥𥇍𥈞𥉌𥐮𥓙𥖧𥞩𥞴𥧄𥧌𥫤𥫣𥫱𥮲𥱋𥱤𥸮𥹖𥹥𥹢𥻘𥻂𥻨𥼣𥽜𥿠𥿔𦀌𥿻𦀗𦁠𦃭𦉰𦊆𦍌𣴎𦐂𦙾𦚰𦜝𦣝𦣪𦥑𦥯𦧝𦨞𦩘𦪌𦪷𦱳𦳝𦹥𦾔𦿸𦿶𦿷𧄍𧄹𧏛𧏚𧏾𧐐𧑉𧘕𧘔𧘱𧚓𧜎𧜣𧝒𧦅𧪄𧮳𧮾𧯇𧲸𧶠𧸐𧾷𨂊𨂻𨊂𨋳𨐌𨑕𨕫𨗈𨗉𨛗𨛺𨥉𨥆𨥫𨦇𨦈𨦺𨦻𨨞𨨩𨩱𨩃𨪙𨫍𨫤𨫝𨯁𨯯𨴐𨵱𨷻𨸟
+  symptom: '0/48 nodes are available: 1 node(s) had untolerated taint {node.kubernetes.io/disk-pressure: }, 1 node(s) had untolerated taint {node.kubernetes.io/memory-pressure: }, 1 node(s) were unschedulable, 12 Insufficient cpu, 2 node(s) had untolerated taint {CriticalAddonsOnly: true}, 2 node(s) had untolerated taint {node.cloudprovider.kubernetes.io/shutdown: }, 3 node(s) had untolerated taint {node-role.kubernetes.io/control-plane: }, 3 node(s) had untolerated taint {team.example.com/payments: dedicated}, 4 node(s) had untolerated taint {dedicated: monitoring}, 4 node(s) had untolerated taint {nvidia.com/gpu: present}, 4 node(s) had untolerated taint {workload.example.com/pool: ingress}, 5 node(s) had untolerated taint {dedicated: batch}, 6 node(s) had untolerated taint {kubernetes.azure.com/scalesetpriority: spot}. preemption: 0/48 nodes are available: 12 No preemption victims found for incoming pod, 36 Preemption is not helpful for scheduling.'
+status:
+  phase: Open
+  count: 4
+  firstSeen: "2026-11-04T11:50:00Z"
+  lastSeen: "2026-11-04T11:58:00Z"

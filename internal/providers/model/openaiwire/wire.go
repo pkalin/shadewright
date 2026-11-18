@@ -14,17 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package foundry
+package openaiwire
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
-	"strings"
 
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -35,8 +33,6 @@ const (
 	maxToolCalls = 16
 	// maxModelName bounds the model name a reply reports.
 	maxModelName = 128
-	// maxTokenBytes bounds an access token: an Entra ID JWT is a few KiB.
-	maxTokenBytes = 16 << 10
 )
 
 // toolTypeFunction is the only kind of tool and tool call: a function.
@@ -135,16 +131,16 @@ type checkedRequest struct {
 // encode checks a request and builds its body in the Provider's API. It returns the names of the tools
 // offered, against which the reply's tool calls are checked. Errors are fixed text matching
 // providers.ErrRejected (or ErrTooLarge), and never quote the request.
-func (p *Provider) encode(req providers.CompletionRequest) ([]byte, map[string]bool, error) {
+func (p *Codec) encode(req providers.CompletionRequest) ([]byte, map[string]bool, error) {
 	cr, err := p.check(req)
 	if err != nil {
 		return nil, nil, err
 	}
 	var body any
-	if p.api == APIResponses {
-		body = responsesBody(cr, p.deployment)
+	if p.API == APIResponses {
+		body = responsesBody(cr, p.Deployment)
 	} else {
-		body = chatBody(cr, p.deployment, p.sendModel)
+		body = chatBody(cr, p.Deployment, p.SendModel)
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -158,14 +154,14 @@ func (p *Provider) encode(req providers.CompletionRequest) ([]byte, map[string]b
 
 // check checks a request against the rules both APIs share. Errors are fixed text matching
 // providers.ErrRejected.
-func (p *Provider) check(req providers.CompletionRequest) (checkedRequest, error) {
+func (p *Codec) check(req providers.CompletionRequest) (checkedRequest, error) {
 	rejected := func(msg string) error { return fmt.Errorf("foundry: %s: %w", msg, providers.ErrRejected) }
 	if len(req.Messages) == 0 {
 		return checkedRequest{}, rejected("the request has no messages")
 	}
 	maxOut := req.MaxOutputTokens
 	if maxOut == 0 {
-		maxOut = p.maxOutput
+		maxOut = p.MaxOutput
 	}
 	if maxOut < 1 || maxOut > MaxOutputTokens {
 		return checkedRequest{}, rejected("the output token limit is out of range")
@@ -390,49 +386,4 @@ func billedOf(model string, cu *chatUsage) providers.Completion {
 func isJSONObject(b []byte) bool {
 	t := bytes.TrimSpace(b)
 	return len(t) > 0 && t[0] == '{' && json.Valid(t)
-}
-
-// checkToken checks an access token before it is sent: a header-safe JWT whose audience is Cognitive
-// Services. The payload is decoded, not verified: the endpoint verifies the signature; this check only keeps
-// a token for another resource (or anything that is not a token) from being sent. Errors are fixed text
-// matching providers.ErrForbidden, whichever TokenSource the token came from: the token is the identity's
-// credential, so a wrong one is fixed by a person on the identity (its federation, scope or source), like a
-// 401 or 403. ErrInvalidConfig stays for the settings the Provider is built from.
-func checkToken(tok string) error {
-	refuse := func(msg string) error { return fmt.Errorf("foundry: %s: %w", msg, providers.ErrForbidden) }
-	if tok == "" || len(tok) > maxTokenBytes {
-		return refuse("the access token is empty or too large")
-	}
-	parts := strings.Split(tok, ".")
-	if len(parts) != 3 {
-		return refuse("the access token is not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return refuse("the access token is not a JWT")
-	}
-	for _, p := range []string{parts[0], parts[2]} {
-		if _, err := base64.RawURLEncoding.DecodeString(p); err != nil || p == "" {
-			return refuse("the access token is not a JWT")
-		}
-	}
-	var claims struct {
-		Aud json.RawMessage `json:"aud"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return refuse("the access token is not a JWT")
-	}
-	var auds []string
-	var one string
-	if err := json.Unmarshal(claims.Aud, &one); err == nil {
-		auds = []string{one}
-	} else if err := json.Unmarshal(claims.Aud, &auds); err != nil {
-		return refuse("the access token has no audience")
-	}
-	for _, a := range auds {
-		if strings.TrimSuffix(a, "/") == cognitiveServicesAudience {
-			return nil
-		}
-	}
-	return refuse("the access token is not for the Cognitive Services audience")
 }

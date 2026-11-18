@@ -17,6 +17,39 @@ spec:
     to:
     - ipBlock:
         cidr: 0.0.0.0/0
+  {{- $ports := dict }}
+  {{- range .Values.analyzer.analysis.openAICompatible.endpoints }}
+  {{- if not .service }}
+  {{- $authority := (urlParse .url).host }}
+  {{- $port := last (splitList ":" $authority) }}
+  {{- if and (contains ":" $authority) (ne $port "443") }}
+  {{- $_ := set $ports $port true }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if $ports }}
+  - ports:
+    {{- range $port, $_ := $ports }}
+    - port: {{ int $port }}
+      protocol: TCP
+    {{- end }}
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 100.64.0.0/10
+        - 169.254.0.0/16
+        {{- /* Declared in-cluster ranges outside the private ones (ADR-0042). This rule allows no IPv6
+        address, so only the IPv4 ranges need an exception. */}}
+        {{- range .Values.analyzer.analysis.openAICompatible.inClusterCIDRs }}
+        {{- if not (contains ":" .) }}
+        - {{ . }}
+        {{- end }}
+        {{- end }}
+  {{- end }}
   {{- with .Values.networkPolicy.analyzer.prometheus }}
   {{- if .enabled }}
   {{- if not .namespace }}
@@ -52,6 +85,20 @@ spec:
       podSelector:
         matchLabels:
           {{- toYaml .podLabels | nindent 10 }}
+  {{- end }}
+  {{- end }}
+  {{- range .Values.analyzer.analysis.openAICompatible.endpoints }}
+  {{- with .service }}
+  - ports:
+    - port: {{ .port }}
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .namespace | quote }}
+      podSelector:
+        matchLabels:
+          {{- toYaml .podSelector | nindent 10 }}
   {{- end }}
   {{- end }}
   podSelector:

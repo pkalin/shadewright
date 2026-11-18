@@ -157,7 +157,9 @@ func heldForVerification(rr *remediationv1alpha1.RemediationRequest, verify bool
 //     Shadewright did not push); one merged into the recorded branch records it as #754 (recordHeldMerge) or, when
 //     cancelled, as #794 (settleCancelled); any other stopped holder records it as a stale plan's merge
 //     (recordStoppedMerge, decision of 2026-11-17 on #808);
-//   - a request cancelledForIncident whose own pull request is found open is settled by settleCancelled (#794).
+//   - a request cancelledForIncident whose own pull request is found open is settled by settleCancelled (#794);
+//   - a request whose stale plan's cleanup stopped on a refusal (staleCleanupStopped) whose own pull request is found
+//     open tries the close again (closeAfterStaleStop, #808).
 //
 // A pull request found by the request's marker with none recorded (its status write was lost, #827) is adopted only
 // after its head is proven to be one Shadewright pushed for this request (checkAdoptedHead, or checkMerged on the
@@ -185,6 +187,12 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 			res, err := r.cleanUpExpired(ctx, rr)
 			return res, true, err
 		}
+	}
+	if staleCleanupStopped(rr) && !handingOver && v.state == changeOpen {
+		// The cleanup of its stale plan stopped on a refusal of the Git host and its own pull request is open: the
+		// close is tried again (#808).
+		res, err := r.closeAfterStaleStop(ctx, rr)
+		return res, true, err
 	}
 	if v.state == changeMerged && !mergeRecorded(rr) && rr.Status.Source != nil && !handingOver {
 		if v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
@@ -230,6 +238,59 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 		return res, true, err
 	}
 	return reconcile.Result{}, false, nil
+}
+
+// closeAfterStaleStop is the close of the request's own pull request, found open by the read after the stop, of a
+// request whose stale plan's cleanup stopped on a refusal of the Git host (staleCleanupStopped, decision of 2026-11-17
+// on #808). The request keeps its phase and its lock; only the read that follows releases the lock, with a verdict:
+//   - a close that works: the next look, a second later, finds the pull request closed and settles the lock;
+//   - a close still refused (403, 422): nothing is written, the stop already says so, and it is tried again at the
+//     pace of a stopped holder's looks (heldRecheckInterval);
+//   - a close or a read that fails otherwise: retried through the shared record of Git retries (retriedClose,
+//     heldUnsettled), without an end, as every look of a stopped holder;
+//   - a pause of the kill switch holds it (waitWhilePaused); a failure of the Kubernetes side, and the caller's
+//     cancellation, go to the error backoff;
+//   - a merge the close met, a pull request that is not this request's or is being handed over, or an entry that is
+//     gone or can no longer be used (nothingToClose): nothing is closed, and the look that follows decides from what
+//     it reads;
+//   - any other error is returned to the work queue.
+func (r *RemediationRequestReconciler) closeAfterStaleStop(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (reconcile.Result, error) {
+	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
+	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	err := r.closeChangeRequest(cleanCtx, rr)
+	err = keepGitRead(ctx, cleanCtx, "close after the stop", retriedClose(err))
+	cancel()
+	switch reason, _, refused := refusal(err); {
+	case err == nil:
+		log.Info("Closed the pull request of a RemediationRequest whose stale plan's cleanup had stopped")
+		return reconcile.Result{RequeueAfter: stepDelay}, nil
+	case ctx.Err() != nil || isClusterError(err):
+		return reconcile.Result{}, err
+	case errors.Is(err, freshness.ErrPaused):
+		return r.waitWhilePaused(ctx, rr)
+	case gitReadFailure(err):
+		return r.heldUnsettled(ctx, rr, changeVerdict{state: changeUnknown}, err, false)
+	case refused:
+		log.Info("The Git host still refuses to close the pull request of a stopped stale RemediationRequest",
+			"reason", reason)
+	case nothingToClose(err):
+		log.Info("Did not close the pull request of a stopped stale RemediationRequest", "error", err.Error())
+	default:
+		// Not a failure this function knows: returned, so the work queue retries it and the retry is not silent.
+		return reconcile.Result{}, err
+	}
+	return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, nil
+}
+
+// nothingToClose reports whether err, from the close after a stale stop, means there is nothing for that close to
+// do: the pull request merged while it was being closed (a conflict), it is not this request's or its handoff is in
+// flight, or the plan's repository entry is gone, changed its target branch or can no longer be used. The look that
+// follows decides from what it reads. Any other error is a failure and is not one of these.
+func nothingToClose(err error) bool {
+	return providers.IsConflict(err) || errors.Is(err, errChangeRequestNotOurs) || errors.Is(err, errHandoffInFlight) ||
+		errors.Is(err, errRepositoryGone) || errors.Is(err, errTargetBranchChanged) ||
+		errors.Is(err, freshness.ErrRepositoryUnusable)
 }
 
 // recordMergeOnConfigured records cr, the request's pull request found merged into the target branch the settings

@@ -3484,6 +3484,172 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Entry("longer than the poll interval: the host's delay", 7*time.Minute, 7*time.Minute),
 	)
 
+	// #808: the cleanup of a stale plan with no pull request recorded. A step that fails without a refusal for good is
+	// retried through the shared record of Git retries (a Paced entry of status.gitWaits, condition GitReadRetry) at the
+	// poll interval, never through the controller's rate limiter, and the close is such a step too. The retry has the
+	// request's bound (requestBound: the cleanup of a stale plan has none).
+	unrecorded := func() {
+		GinkgoHelper()
+		markCleanup(func(got *remediationv1alpha1.RemediationRequest) {
+			got.Status.Phase = remediationv1alpha1.PhasePolicyChecked
+			got.Status.PullRequest = nil
+		})
+	}
+	const (
+		opOpenRepository = "open the repository"
+		opListBranch     = "list the change requests of the branch"
+		opCloseChange    = "close the change request"
+	)
+	DescribeTable("retries a failed step of the cleanup with no pull request recorded through the shared record (#808)",
+		func(reinstalled bool, tokenErr, listErr, closeErr error, op string) {
+			if reinstalled {
+				reinstall()
+			}
+			unrecorded()
+			failing := atomic.Bool{}
+			failing.Store(true)
+			git.SetFail(func(o string) error {
+				switch {
+				case o == opList && failing.Load() && listErr != nil:
+					return listErr
+				case o == opClose && failing.Load() && closeErr != nil:
+					return closeErr
+				case o == opClose:
+					closes.Add(1)
+				}
+				return nil
+			})
+			r := reconciler()
+			open := r.OpenRepository
+			r.OpenRepository = func(ctx context.Context, repo remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+				if failing.Load() && tokenErr != nil {
+					return nil, tokenErr
+				}
+				return open(ctx, repo)
+			}
+			for range 2 {
+				res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+				Expect(err).NotTo(HaveOccurred(), "never the controller's rate limiter")
+				Expect(res.RequeueAfter).To(BeNumerically(">=", DefaultPullRequestPollInterval), "paced")
+				got := fetch()
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "not a final phase")
+				Expect(planFresh().Reason).To(Equal(freshness.ReasonTargetFileChanged), "the mark stays")
+				c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
+				Expect(c).NotTo(BeNil(), "the retry is visible")
+				Expect(c.Message).To(ContainSubstring(op), "names the step")
+				Expect(c.Message).NotTo(ContainSubstring("secret-host-text"), "no text of the host")
+				Expect(got.Status.GitWaits).To(HaveLen(1))
+				Expect(got.Status.GitWaits[0].Kind).To(Equal(remediationv1alpha1.GitWaitPaced), "the request's bound: none")
+				Expect(closes.Load()).To(BeZero())
+			}
+			failing.Store(false)
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+			Expect(err).NotTo(HaveOccurred())
+			got := fetch()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).
+				To(BeNil(), "removed once the step works")
+			Expect(got.Status.GitWaits).To(BeEmpty())
+		},
+		Entry("a token of the new installation the host answers with 404", true,
+			fmt.Errorf("installation token: %w", providers.ErrNotFound), nil, nil, opOpenRepository),
+		Entry("an unclassified token failure of the new installation", true,
+			errors.New("installation token: secret-host-text"), nil, nil, opOpenRepository),
+		Entry("a listing through the new installation the host answers with 404", true, nil,
+			fmt.Errorf("listing: %w", providers.ErrNotFound), nil, opListBranch),
+		Entry("a listing through the new installation that fails with a server error", true, nil,
+			fmt.Errorf("listing: %w", providers.ErrRetryable), nil, opListBranch),
+		Entry("a close through the new installation that fails with a server error", true, nil, nil,
+			fmt.Errorf("close: %w", providers.ErrRetryable), opCloseChange),
+		Entry("a close through the new installation the host answers with 404", true, nil, nil,
+			fmt.Errorf("close: %w", providers.ErrNotFound), opCloseChange),
+		Entry("an unclassified close failure through the new installation", true, nil, nil,
+			errors.New("close: secret-host-text"), opCloseChange),
+		Entry("a close through the plan's installation that fails with a server error", false, nil, nil,
+			fmt.Errorf("close: %w", providers.ErrRetryable), opCloseChange),
+	)
+
+	// #808, decision of 2026-11-17: a step of that cleanup the Git host refuses for good ends the request
+	// NeedsIntervention at once, and it keeps the target lock while a pull request of its own may be open. The read
+	// that settles the lock (checkHeld) goes on through the installation the cleanup used, the new one included: it
+	// tries the close again, releases the lock once the pull request is closed, by Shadewright or a person, and records
+	// a merge as a stale plan's merge.
+	DescribeTable("settles the lock of a cleanup with no pull request recorded that the Git host refused (#808)",
+		func(reinstalled bool, then string) {
+			if reinstalled {
+				reinstall()
+			}
+			unrecorded()
+			refuse := atomic.Bool{}
+			refuse.Store(true)
+			git.SetFail(func(o string) error {
+				if o == opClose {
+					if refuse.Load() {
+						return fmt.Errorf("close: %w", providers.ErrForbidden)
+					}
+					closes.Add(1)
+				}
+				return nil
+			})
+			r := reconciler()
+			look := func() *remediationv1alpha1.RemediationRequest {
+				GinkgoHelper()
+				res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
+				Expect(err).NotTo(HaveOccurred())
+				got := fetch()
+				if holdsLock(got) {
+					Expect(res.RequeueAfter).To(BeNumerically(">", 0), "a holder is looked at again")
+				}
+				return got
+			}
+			got := look()
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention), "ended at once")
+			Expect(planFresh().Reason).To(Equal(ReasonGitForbidden))
+			Expect(holdsLock(got)).To(BeTrue(), "its pull request may be open")
+			for range 2 {
+				got = look()
+				Expect(holdsLock(got)).To(BeTrue(), "the close is still refused")
+				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)).
+					To(BeNil(), "the repository is in the settings, under the installation the cleanup used")
+			}
+			Expect(closes.Load()).To(BeZero())
+			switch then {
+			case thenCloseAllowed:
+				refuse.Store(false)
+			case foundClosed:
+				refuse.Store(false)
+				Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+				closes.Store(0)
+				refuse.Store(true)
+			case thenMergedByHand:
+				_, err := git.Merge(cr.Number)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			for range 4 {
+				got = look()
+			}
+			Expect(holdsLock(got)).To(BeFalse(), "settled by a verdict")
+			switch then {
+			case thenCloseAllowed:
+				Expect(closes.Load()).To(Equal(int32(1)), "closed by the look after the stop")
+				Expect(changeRequest().State).To(Equal(providers.ChangeRequestClosed))
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			case foundClosed:
+				Expect(closes.Load()).To(BeZero())
+				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			case thenMergedByHand:
+				Expect(mergeRecorded(got)).To(BeTrue(), "the merge is recorded")
+				Expect(markedStale(got)).To(BeTrue(), "as a stale plan's merge")
+			}
+		},
+		Entry("through the new installation, then allowed", true, thenCloseAllowed),
+		Entry("through the new installation, then closed by a person", true, foundClosed),
+		Entry("through the new installation, then merged", true, thenMergedByHand),
+		Entry("through the plan's installation, then allowed", false, thenCloseAllowed),
+		Entry("through the plan's installation, then merged", false, thenMergedByHand),
+	)
+
 	It("schedules the next check of a fresh plan", func() {
 		res, err := reconcileOnce()
 		Expect(err).NotTo(HaveOccurred())

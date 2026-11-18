@@ -1391,6 +1391,13 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 			m.excused["replacement deleted before it recorded, predecessor handed off"]++
 			return
 		}
+		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && m.releasedAtReopen[hmPred] {
+			// The fallback is the predecessor, and a verdict released its lock before the reopen: it records nothing
+			// of the reopened pull request either (design 6.5), so the merge of the deleted replacement's commit
+			// stays unrecorded.
+			m.excused["reopen after a release"]++
+			return
+		}
 		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && !m.foreignForGone(reqs) {
 			m.fail("P1", "the merge of the deleted replacement's commit %s is recorded on neither request (pred: %s)",
 				short(mg.head), describe(reqs[hmPred]))

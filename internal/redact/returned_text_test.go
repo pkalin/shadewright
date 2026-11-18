@@ -231,6 +231,7 @@ func TestASecretMapValueTakesNoOtherEntry(t *testing.T) {
 		{name: "a flow mapping", shape: func(v string) string { return "{" + v }},
 		{name: "an open quote", shape: func(v string) string { return "\"" + v }},
 	}, fieldShapes...)
+	const after = "keepme2"
 	keys := fieldSecretKeys()
 	n, maps, lost := 0, 0, 0
 	for _, ft := range fieldTools {
@@ -254,14 +255,14 @@ func TestASecretMapValueTakesNoOtherEntry(t *testing.T) {
 					ft.call(t, e, typ, v, func(obj reflect.Value) {
 						cur := p.at(obj)
 						m := reflect.MakeMap(cur.Type())
-						for key, val := range map[string]string{"aaa-before": "keepme1", k: sh.shape(v), "zzz-other": "keepme2"} {
+						for key, val := range map[string]string{"aaa-before": "keepme1", k: sh.shape(v), "zzz-other": after} {
 							m.SetMapIndex(reflect.ValueOf(key).Convert(cur.Type().Key()), reflect.ValueOf(val).Convert(cur.Type().Elem()))
 						}
 						cur.Set(m)
 					})
 					text := ft.answer(t, e)
-					for _, w := range []string{"keepme1", "keepme2"} {
-						if w == "keepme2" && ft.name == tools.NameQueryMetrics && sh.name == "a flow mapping" {
+					for _, w := range []string{"keepme1", after} {
+						if w == after && ft.name == tools.NameQueryMetrics && sh.name == "a flow mapping" {
 							// The labels of a series share one line, and main read a flow mapping under a secret key
 							// on it to the brace that closes the labels: the reading of the release before hides the
 							// next label as main did (#845, thirteenth decision of 2026-11-18).

@@ -76,6 +76,9 @@ const (
 	noBoundStaleCleanup noBoundReason = "the cleanup of a stale plan has no deadline"
 	// noBoundAfterStop: a request that no longer progresses is read again until the read works.
 	noBoundAfterStop noBoundReason = "a stopped request is read again until the read works"
+	// noBoundCancelWatch: a cancel whose close cannot be made after a change of the target branch reads its pull
+	// requests on both branches until a read settles them (cancelLook).
+	noBoundCancelWatch noBoundReason = "a cancel after a change of the target branch is watched until a read settles it"
 	// noBoundRefusedWatch: a refusal while a pull request waits is watched until the next full recheck.
 	noBoundRefusedWatch noBoundReason = "a refused freshness check is watched without an end"
 )

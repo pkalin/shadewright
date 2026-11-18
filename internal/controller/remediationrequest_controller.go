@@ -523,11 +523,27 @@ func (r *RemediationRequestReconciler) endWaitFirst(ctx context.Context, req ctr
 	return res, true, err
 }
 
-// reconcile is Reconcile before its handling of a cancellation.
-func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// lookAgainWhileHeld is res for a reconcile of rr that ended without an error and without a time to run again while
+// rr, stopped, still holds its target lock (seventh decision of 2026-11-18 on #771, point 3): the look that settles
+// the lock (checkHeld) runs a second later, never left to an event. A request held for its verification, being
+// deleted, or still progressing keeps res: its own steps say when they run again.
+func (r *RemediationRequestReconciler) lookAgainWhileHeld(rr *remediationv1alpha1.RemediationRequest, res ctrl.Result,
+	err error) ctrl.Result {
+	if err != nil || res.RequeueAfter > 0 || !rr.DeletionTimestamp.IsZero() || !holdsLock(rr) || progresses(rr) ||
+		heldForVerification(rr, r.VerifyOutcomes) {
+		return res
+	}
+	res.RequeueAfter = stepDelay
+	return res
+}
+
+// reconcile is Reconcile before its handling of a cancellation. Every answer that leaves a stopped request holding
+// its target lock asks to run again at a time (lookAgainWhileHeld).
+func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
 	log := logf.FromContext(ctx)
 
 	rr := &remediationv1alpha1.RemediationRequest{}
+	defer func() { res = r.lookAgainWhileHeld(rr, res, err) }()
 	if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.forget(req.NamespacedName)

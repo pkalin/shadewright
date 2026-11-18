@@ -650,8 +650,7 @@ spec:
                       description: |-
                         ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
                         request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
-                        the merge was first seen (MergeCheck) or after the start (MergeContent). It does not move while the entry
-                        stands.
+                        the start (MergeCheck, MergeContent). It does not move while the entry stands.
                       format: date-time
                       type: string
                     kind:
@@ -1121,7 +1120,9 @@ spec:
                 description: |-
                   mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
                   merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
-                  from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a
+                  (GitHub computes it after the merge), bounded by the MergeCheck entry of gitWaits recorded with it, which
+                  counts from its own start and starts again after a pause of writes, keeping the phase, and then records the
+                  merge without a
                   receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
                   change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot
                   read what it needs, the executor records the start here if it is unset, retries until the wait is over, and

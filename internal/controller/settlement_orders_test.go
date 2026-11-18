@@ -41,14 +41,19 @@ import (
 )
 
 // slowGit runs out the caller's time on the methods slow names: the call waits for the context and fails with it,
-// as a read the step's deadline cuts short.
+// as a read the step's deadline cuts short. With expired set it does not wait: it fails at once with the error a
+// read cut short by its deadline returns, so a test needs no timer that a loaded machine could run out elsewhere.
 type slowGit struct {
 	providers.GitProvider
-	slow func(op string) bool
+	slow    func(op string) bool
+	expired bool
 }
 
 func (g slowGit) wait(ctx context.Context, op string) error {
 	if g.slow != nil && g.slow(op) {
+		if g.expired {
+			return freshness.WrapProvider("read "+op, context.DeadlineExceeded)
+		}
 		<-ctx.Done()
 		return freshness.WrapProvider("read "+op, ctx.Err())
 	}
@@ -567,13 +572,11 @@ func orderReadFailure(r *RemediationRequestReconciler, g *fakegit.Git, read stri
 		return nil
 	})
 	r.OpenRepository = func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
-		return slowGit{GitProvider: g.ForTarget(string(repo.TargetBranch)), slow: func(name string) bool {
+		// The slow read fails at once with the deadline's error: no step runs against a clock of the machine.
+		return slowGit{GitProvider: g.ForTarget(string(repo.TargetBranch)), expired: true, slow: func(name string) bool {
 			return timeout && name == op && failsNow()
 		}}, nil
 	}
-	// Long enough for every step that does not wait on a slow read, also under the race detector: only the slow
-	// read runs out of the step's time.
-	r.CleanupTimeout = 250 * time.Millisecond
 	return always
 }
 

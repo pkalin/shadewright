@@ -22,7 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 )
@@ -143,4 +145,183 @@ func TestSequenceLongBranchContentWait(t *testing.T) {
 		m.fatalf("end: the merge is not recorded: phase %s", live.Status.Phase)
 	}
 	m.report()
+}
+
+// The seventh decision of 2026-11-18 on #771, point 1: a merge recorded with its receipt and the lock held through
+// verification, then verification turned off and writes paused. As on main, the pause does not hold the release
+// that the recorded status proves: the reconcile under the pause releases the lock, without a read of the Git host.
+func TestSequenceReceiptReleasesTheLockUnderAPause(t *testing.T) {
+	m := scripted(t, modelStart{start: startRunning, fresh: true, verify: true})
+	m.steps(1)
+	sha, err := m.g.Merge(m.number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.merge = sha
+	m.steps(1)
+	if live := m.live(); live.Status.MergeReceipt == nil || !holdsLock(live) {
+		t.Fatalf("setup: want the merge recorded with its receipt and the lock held, got phase %s, holds %t",
+			live.Status.Phase, holdsLock(live))
+	}
+	m.r.VerifyOutcomes = false
+	m.pause(true)
+	m.steps(1)
+	if live := m.live(); holdsLock(live) {
+		m.fatalf("receipt: writes are paused and the lock of a merge recorded with its receipt is held: phase %s",
+			live.Status.Phase)
+	}
+	m.report()
+}
+
+// The seventh decision of 2026-11-18 on #771, point 3: a request in PolicyChecked whose pull request was opened while
+// the write that would record it was lost, a failed opening of the repository that starts the deadline's wait, a
+// pause, the deadline passing and the pull request closed by hand during it, the lift, and (cancel) a person's cancel
+// set during the pause. After the lift every reconcile that leaves the lock held by the stopped request asks to run
+// again at a time, and the lock is free within a few reconciles.
+func TestSequenceLockSettlesAfterAPauseOverTheDeadline(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		cancel bool
+	}{{"deadline", false}, {"cancel", true}} {
+		cancel := c.cancel
+		t.Run(c.name, func(t *testing.T) {
+			m := scripted(t, modelStart{start: startPolicyChecked, open: true, lasting: time.Minute})
+			m.steps(1)
+			if live := m.live(); gitWait(live, waitRequestDeadline) == nil {
+				t.Fatalf("setup: want the deadline's wait recorded, got waits %v", live.Status.GitWaits)
+			}
+			m.fault, m.lastingUntil = faultNone, time.Time{}
+			m.pause(true)
+			if cancel {
+				m.cancel()
+			}
+			m.steps(5)
+			if err := m.g.CloseChangeRequest(context.Background(), m.number); err != nil {
+				t.Fatal(err)
+			}
+			m.logf("close the pull request by hand")
+			m.pause(false)
+			settledIn(m, 3)
+			m.report()
+		})
+	}
+}
+
+// settledIn runs up to n reconciles; each that leaves the lock held by a stopped request must ask to run again at a
+// time, and the lock must be free after them.
+func settledIn(m *modelWorld, n int) {
+	m.t.Helper()
+	for i := range n {
+		res, err := m.r.Reconcile(context.Background(), reconcile.Request{NamespacedName: m.key})
+		live := m.live()
+		m.logf("reconcile: phase %s, holds %t, wait %v, err %v", live.Status.Phase, holdsLock(live), res.RequeueAfter, err)
+		if !holdsLock(live) {
+			return
+		}
+		if err == nil && res.RequeueAfter <= 0 && !progresses(live) {
+			m.fatalf("requeue: reconcile %d after the lift leaves the lock held (phase %s) with no time to run again", i,
+				live.Status.Phase)
+		}
+		if err != nil {
+			m.clock.advance(time.Second)
+		} else {
+			m.clock.advance(max(res.RequeueAfter, time.Second))
+		}
+	}
+	m.fatalf("settled: the lock is held %d reconciles after the lift (phase %s)", n, m.live().Status.Phase)
+}
+
+// The seventh decision of 2026-11-18 on #771, point 2: the reads of what a retargeted merge brought fail and start
+// the content wait; writes are then paused for longer than what is left of it, and lifted while the reads still fail.
+// Time paused counts against no read wait: the wait starts again at the lift, so the request does not end before a
+// full window of reads after the lift, and it ends within one poll interval after that window.
+func TestSequenceContentWaitStartsAgainAfterAPause(t *testing.T) {
+	m := scripted(t, modelStart{start: stopPlanFresh})
+	if err := m.g.SetBase(m.number, m.configured); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := m.g.Merge(m.number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.merge = sha
+	m.fault = faultBetween
+	m.steps(2)
+	if live := m.live(); gitWait(live, waitMergeContent) == nil {
+		t.Fatalf("setup: want the content wait recorded, got waits %v, phase %s", live.Status.GitWaits, live.Status.Phase)
+	}
+	m.pause(true)
+	m.steps(2 * int(mergeContentWait/freshRecheckDelay))
+	m.pause(false)
+	lift := m.clock.at
+	for i := range 20 {
+		m.step()
+		live := m.live()
+		ended := mergeRecorded(live)
+		if w := gitWait(live, waitMergeContent); i == 0 && (w == nil || w.Since.Time.Before(lift.Truncate(time.Second))) {
+			m.fatalf("restart: after the first reconcile after the lift the content wait is %+v; want it started again "+
+				"at the lift", w)
+		}
+		if ended && m.clock.at.Before(lift.Add(mergeContentWait)) {
+			m.fatalf("early: the request ended %v after the lift, before a full window of reads after it (phase %s)",
+				m.clock.at.Sub(lift), live.Status.Phase)
+		}
+		if ended {
+			break
+		}
+	}
+	live := m.live()
+	if !mergeRecorded(live) {
+		m.fatalf("end: the reads kept failing for a full window after the lift and the request has not ended")
+	}
+	m.report()
+}
+
+// The seventh decision of 2026-11-18 on #771, point 6: the cancel watch after a change of the target branch
+// (cancelLook) reads the pull requests on two branches, a read new on this branch. A pause set after the close was
+// tried (closeChangeRequest stops at a pause first, so only a pause set between the two gets here) holds the look:
+// no call to the Git host, WritesPaused shown, the phase kept, and the look again after freshRecheckDelay.
+func TestSequenceCancelLookWaitsForAPause(t *testing.T) {
+	m := scripted(t, modelStart{start: startRunning, fresh: true})
+	m.steps(1)
+	m.cancel()
+	m.setConfigured(freshOtherBranch)
+	m.pause(true)
+	rr := m.live()
+	m.calls = 0
+	res, done, err := m.r.cancelLook(context.Background(), rr, nil)
+	live := m.live()
+	switch {
+	case err != nil || !done || res.RequeueAfter != freshRecheckDelay:
+		t.Fatalf("the look under a pause: %+v, done %t, %v; want the wait for the pause", res, done, err)
+	case m.calls > 0:
+		t.Fatalf("the look under a pause called the Git host %d times", m.calls)
+	case meta.FindStatusCondition(live.Status.Conditions, api.ConditionWritesPaused) == nil:
+		t.Fatal("the look under a pause does not show WritesPaused")
+	case live.Status.Phase != rr.Status.Phase:
+		t.Fatalf("the look under a pause changed the phase from %s to %s", rr.Status.Phase, live.Status.Phase)
+	}
+}
+
+// Point 5: a failed read of the cancel watch after a change of the target branch is recorded like every other
+// failed Git read (retryGitRead, without an end): condition GitReadRetry, a Paced entry, a wait of at least the poll
+// interval and no error for the rate limiter.
+func TestSequenceCancelLookRecordsAFailedRead(t *testing.T) {
+	m := scripted(t, modelStart{start: startRunning, fresh: true})
+	m.steps(1)
+	m.cancel()
+	m.setConfigured(freshOtherBranch)
+	m.fault = opList
+	res, done, err := m.r.cancelLook(context.Background(), m.live(), nil)
+	live := m.live()
+	switch {
+	case err != nil || !done || res.RequeueAfter < m.r.pullRequestPollInterval():
+		t.Fatalf("the failed look: %+v, done %t, %v; want a visible wait of at least the poll interval", res, done, err)
+	case gitWait(live, waitNone) == nil:
+		t.Fatalf("the failed look records no wait: %v", live.Status.GitWaits)
+	case meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) == nil:
+		t.Fatal("the failed look does not show GitReadRetry")
+	case meta.FindStatusCondition(live.Status.Conditions, api.ConditionCancelPending) == nil:
+		t.Fatal("the failed look does not show why the cancel waits (CancelPending)")
+	}
 }

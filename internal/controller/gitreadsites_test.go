@@ -130,6 +130,7 @@ var gitReadSites = map[string]gitReadSite{
 		}},
 	"branchchange.go:followHeldMerge:1": {bound: heldLockBound},
 	"branchchange.go:lookUnsettled:1":   {bound: callerBound},
+	"cancel.go:cancelLookFailed:1":      {bound: "unboundedRead(noBoundCancelWatch)"},
 	"cancel.go:cancelFailed:1": {bound: "paceWithin(left)",
 		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, _, rr := settlementWorld(t, api.PhaseAwaitingApproval)
@@ -156,6 +157,9 @@ var gitReadSites = map[string]gitReadSite{
 			cr := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
 				State: providers.ChangeRequestMerged, BaseBranch: mainBranch}
 			setMergeWait(rr, clock.at.Add(-mergeCommitWait+c.left))
+			if err := r.Status().Update(context.Background(), rr); err != nil {
+				t.Fatal(err)
+			}
 			clock.advance(c.during)
 			err := r.mergeCheckFailed(context.Background(), rr, cr, failedRead())
 			res, err := r.waitOrFail(context.Background(), rr, err, unboundedRead(noBoundHeldLock))

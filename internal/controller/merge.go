@@ -111,8 +111,8 @@ var errMergeCheck = errors.New("the pull request was merged, and its merge is no
 // close (#199). An input that can never be checked (no plan digest or source, a malformed target apiVersion) is
 // such a verdict too (freshness.CheckAtMerge). A request that already carries the mark keeps it, unchecked.
 //
-// A read that fails, or a context that ended, is retried within the wait of the merge commit (mergeCommitWait,
-// from status.mergeCommitAwaitedSince, which the first failure records when awaitMergeCommit did not): until the
+// A read that fails, or a context that ended, is retried within the wait of the merge commit (mergeCommitWait from
+// the start of its entry in status.gitWaits, which the first failure records when awaitMergeCommit did not): until the
 // wait is over it returns the error wrapped in errMergeCheck with nothing set in rr; once it is over, the plan
 // was not shown fresh, and it gets the mark with reason PlanChanged and a Warning Event, so the merge is recorded,
 // the target lock goes, and the outcome is capped. A failed write of the start is returned wrapped the same way.
@@ -286,11 +286,12 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 
 // startMergeWait records the wait for a merge of cr seen but not recorded (the merge commit, or the check of the plan
 // at the merge, op naming which), on the executor's own clock: its entry in status.gitWaits (wholeWait), with the
-// pull request and its end, and status.mergeCommitAwaitedSince when unset (kept as before the entry existed; the
-// entry's end counts from it when it records an earlier start). Both go in one patch with the resourceVersion of rr,
-// so a copy read earlier than the server's is refused as a conflict, and rr takes only these fields and the new
-// resourceVersion: a caller's unwritten changes to rr stay for its own write. A failed write leaves rr as it was
-// and is returned for a retry.
+// pull request and its end, and status.mergeCommitAwaitedSince when unset (kept as before the entry existed, as the
+// time the merge was first seen; the entry's end counts from the entry's own start, wholeWait). Both go in one patch
+// with the resourceVersion of rr, so a copy read earlier than the server's is refused as a conflict, and rr takes
+// only these fields and the new resourceVersion: a caller's unwritten changes to rr stay for its own write. A read
+// wait recorded while rr still shows WritesPaused takes the condition away in the same patch (readWaitAfterLift). A
+// failed write leaves rr as it was and is returned for a retry.
 func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, op string) error {
 	now := r.now()
@@ -301,8 +302,10 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 	}
 	w, ok := wholeWait(upd, remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
 		PullRequest: waitPullRequest(cr)}, op, now)
+	lifted := false
 	if ok && gitWait(upd, waitMergeCheck) == nil {
 		upd.Status.GitWaits = append(upd.Status.GitWaits, w)
+		lifted = readWaitAfterLift(upd, w)
 		gitWaitSummary(upd, now)
 	}
 	if err := r.Status().Patch(ctx, upd, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -315,6 +318,10 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 		meta.SetStatusCondition(&rr.Status.Conditions, *c)
 	}
 	rr.ResourceVersion = upd.ResourceVersion
+	if lifted {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)
+		r.resumed(ctx, rr)
+	}
 	return nil
 }
 

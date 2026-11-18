@@ -467,16 +467,15 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, nil
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
+	if expiredCleanupOver(rr, r.now()) {
+		// The cutoff of an expired request's cleanup is decided from recorded state, before any read.
+		log.Info("Ended the cleanup of an expired RemediationRequest: its close kept failing")
+		return r.endExpiredCleanupFailed(ctx, rr)
+	}
 	if s, ok := r.settleByReceipt(rr); ok {
 		// The recorded merge with its receipt settles the lock: no read of the branch, so neither a repository that
-		// cannot be opened nor a failing Git host keeps it. A pause holds it as it holds every settlement (sixth
-		// decision of 2026-11-18 on #771): the first reconcile after the pause releases it.
-		switch paused, err := r.writesPaused(ctx); {
-		case err != nil:
-			return reconcile.Result{}, err
-		case paused:
-			return r.waitWhilePaused(ctx, rr)
-		}
+		// cannot be opened nor a failing Git host keeps it. A pause does not hold it, as on main, where the release
+		// from recorded status reads nothing either (seventh decision of 2026-11-18 on #771, point 1).
 		if err := lockverdict.Release(&rr.Status, s); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -579,7 +578,7 @@ func (r *RemediationRequestReconciler) heldUnsettled(ctx context.Context, rr *re
 	}
 	switch {
 	case v.state == changeUnknown && !said && errors.Is(err, v.err) && answeredUnknown(v.err):
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+		return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, nil
 	case gitReadFailure(err):
 		res, err := r.retryGitRead(ctx, rr, err, unboundedRead(noBoundHeldLock))
 		if err != nil {
@@ -591,7 +590,8 @@ func (r *RemediationRequestReconciler) heldUnsettled(ctx context.Context, rr *re
 	case !said && err != nil:
 		return reconcile.Result{}, err
 	}
-	return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+	// Never past the end of a wait the request records (the content wait): its end decides from the entry alone.
+	return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, nil
 }
 
 // settleTargetLock is the only decision that releases a lock held for Git work.

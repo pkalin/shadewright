@@ -64,19 +64,25 @@ import (
 //
 // After each reconcile:
 //   - pause: a reconcile that starts while writes are paused calls the Git host nothing (opening the repository
-//     included) and leaves the phase of a request whose merge is not recorded as it was: a pause stops the look at a recorded pull request, the settlement,
-//     the cancel watch, the deadline's end and the end of every other wait (sixth decision of 2026-11-18 on #771);
-//   - lift: the first reconcile after the pause is lifted ends every wait that passed meanwhile (time paused counts
-//     against a started bound) and, with reads working and no write made to fail, settles the lock of a stopped holder
-//     whose pull request is closed, before any other step;
-//   - waits (not while paused): every entry of status.gitWaits has not passed the end of its kind by more than one poll interval: the
-//     request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after its
-//     start or the merge clock (MergeCheck), five minutes after its start (MergeContent);
+//     included) and leaves the phase of a request whose merge is not recorded as it was: a pause stops the look at a
+//     recorded pull request, the settlement by a read, the cancel watch, the deadline's end and the end of every other
+//     wait (sixth decision of 2026-11-18 on #771); a release on a merge receipt reads nothing and goes on (seventh
+//     decision, point 1);
+//   - lift: the first reconcile after the pause is lifted ends every deadline's wait that passed meanwhile (time
+//     paused counts against RequestDeadline and HandoffGrace only), and, with reads working and no write made to fail,
+//     a stopped holder whose pull request is closed holds no lock within three reconciles (liftSettleSteps);
+//   - requeue: a reconcile that leaves a stopped request holding its lock, without an error, asks to run again at a
+//     time (seventh decision, point 3);
+//   - waits (not while paused): every entry of status.gitWaits has not passed the end of its kind by more than one
+//     poll interval: the request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five
+//     minutes after its start (MergeCheck, MergeContent), where a read wait a pause overlapped is due five minutes
+//     after the first reconcile after the lift (readWaitDue, seventh decision, point 2);
 //   - clocks (not while paused): every time field of the status that bounds a wait has not passed its end by more than one poll
 //     interval (gitWaitClocks): a request in PolicyChecked past its deadline, a merge seen without its commit
-//     (mergeCommitAwaitedSince) whose merge is not recorded;
+//     (mergeCommitAwaitedSince, due as a read wait) whose merge is not recorded;
 //   - content (not while paused): the reads of what a merge brought that kept failing since a time T end the request
-//     (MergeContentUnreadable or the merge recorded) by T plus mergeContentWait plus one poll interval;
+//     (MergeContentUnreadable or the merge recorded) by T plus mergeContentWait plus one poll interval, the wait
+//     starting again after a pause (readWaitDue);
 //   - errors: no three reconciles in a row return an error while no write is made to fail;
 //   - pace: no three reconciles in a row ask to be run again within a second without an error (a wait that ends
 //     and is not ended runs hot, and the clock that bounds it never moves);
@@ -284,7 +290,19 @@ type modelWorld struct {
 	// lifted: an end that passed during it is due by then (afterPause).
 	lifted             bool
 	pausedAt, liftedAt time.Time
+	// pauses are the pauses lifted so far, in order.
+	pauses []pauseSpan
+	// afterLift counts the reconciles since the last lift with reads working and no write made to fail; -1 when
+	// none is counted (no lift yet, or a fault since).
+	afterLift int
 }
+
+// pauseSpan is a pause from its start to its lift.
+type pauseSpan struct{ from, to time.Time }
+
+// liftSettleSteps is how many reconciles after a lift, with reads working, a stopped holder whose pull request is
+// closed may keep the lock: the end the lift lets through (an expiry, a cancel), then the look that settles it.
+const liftSettleSteps = 3
 
 // modelStart is how a run of the model begins: drawn from the seed (drawStart), or given by a scripted test.
 type modelStart struct {
@@ -345,7 +363,7 @@ func newModel(t *testing.T, seed uint64, schema *statusSchema) *modelWorld {
 
 func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchema, st modelStart) *modelWorld {
 	m := &modelWorld{t: t, seed: seed, rng: rng, fault: faultNone, schema: schema, configured: freshOtherBranch,
-		focus: st.focus}
+		focus: st.focus, afterLift: -1}
 	start := st.start
 	phase := api.PhaseNeedsIntervention
 	switch start {
@@ -821,8 +839,13 @@ func (m *modelWorld) pause(on bool) {
 	switch {
 	case m.paused && !on:
 		m.lifted, m.liftedAt = true, m.clock.at
+		m.pauses = append(m.pauses, pauseSpan{from: m.pausedAt, to: m.clock.at})
 	case !m.paused && on && m.clock != nil:
 		m.pausedAt = m.clock.at
+		// No read is made while paused: the content wait starts again with the first failed read after the lift.
+		m.mu.Lock()
+		m.contentFailing, m.contentTried = time.Time{}, time.Time{}
+		m.mu.Unlock()
 	}
 	m.paused = on
 	m.logf("the kill switch: writes paused %t", on)
@@ -1240,11 +1263,8 @@ func modelWaitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Time, bool) {
 		}
 		return w.Since.Add(handoffRecoveryGrace), true
 	case api.GitWaitMergeCheck:
-		since := w.Since.Time
-		if c := rr.Status.MergeCommitAwaitedSince; c != nil && c.Before(&w.Since) {
-			since = c.Time
-		}
-		return since.Add(mergeCommitWait), true
+		// From its own start: a pause removes it, and the wait recorded after the lift has its full window.
+		return w.Since.Add(mergeCommitWait), true
 	case api.GitWaitMergeContent:
 		return w.Since.Add(mergeContentWait), true
 	}
@@ -1255,6 +1275,7 @@ func modelWaitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Time, bool) {
 func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Result, err error, faulted, paused bool) {
 	now := m.clock.at
 	poll := m.r.pullRequestPollInterval()
+	m.requeueProperty(live, res, err, faulted)
 	if paused {
 		// A pause holds every wait and every clock (property "pause"); the reconcile after the lift answers for them
 		// (property "lift").
@@ -1263,7 +1284,12 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 		return
 	}
 	for _, w := range live.Status.GitWaits {
-		if end, ok := modelWaitEnd(live, w); ok && now.After(m.afterPause(end).Add(poll)) {
+		end, ok := modelWaitEnd(live, w)
+		due := m.afterPause(end)
+		if ok && (w.Kind == api.GitWaitMergeCheck || w.Kind == api.GitWaitMergeContent) {
+			due = m.readWaitDue(w.Since.Time, end.Sub(w.Since.Time))
+		}
+		if ok && now.After(due.Add(poll)) {
 			m.fatalf("waits: the %s wait passed its end %v ago and stands (phase %s)", w.Kind, now.Sub(end),
 				live.Status.Phase)
 		}
@@ -1276,19 +1302,45 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 		m.fatalf("clocks: the request is in PolicyChecked %v after its deadline", now.Sub(d.Time))
 	}
 	if since := live.Status.MergeCommitAwaitedSince; since != nil && progresses(live) && !mergeRecorded(live) &&
-		now.After(m.afterPause(since.Add(mergeCommitWait)).Add(poll)) {
+		now.After(m.readWaitDue(since.Time, mergeCommitWait).Add(poll)) {
 		m.fatalf("clocks: the merge seen at +%v is not recorded %v later (phase %s)", since.Sub(m.start()),
 			now.Sub(since.Time), live.Status.Phase)
 	}
 	m.mu.Lock()
 	since := m.contentFailing
 	m.mu.Unlock()
-	if !since.IsZero() && now.After(m.afterPause(since.Add(mergeContentWait)).Add(poll)) && !mergeRecorded(live) {
+	if !since.IsZero() && now.After(m.readWaitDue(since, mergeContentWait).Add(poll)) && !mergeRecorded(live) {
 		m.fatalf("content: the reads of what the merge brought have failed since +%v and the request has not ended",
 			since.Sub(m.start()))
 	}
 	m.paceProperties(live, res, err, faulted)
 	m.lockProperties(live)
+}
+
+// requeueProperty: a reconcile that leaves the lock held by a stopped request (one that is not held for its
+// verification) returns an error or a time to run again (seventh decision of 2026-11-18 on #771, point 3).
+func (m *modelWorld) requeueProperty(live *api.RemediationRequest, res reconcile.Result, err error, faulted bool) {
+	if err == nil && res.RequeueAfter <= 0 && !faulted && holdsLock(live) && !progresses(live) &&
+		!heldForVerification(live, m.r.VerifyOutcomes) {
+		m.fatalf("requeue: the reconcile leaves the lock held by the stopped request with no time to run again "+
+			"(phase %s)", live.Status.Phase)
+	}
+}
+
+// readWaitDue is when a read wait (the merge check, the content wait) started at start is due: start plus wait, or,
+// for each lifted pause that began before that (or within a poll interval after it), the lift plus a poll interval
+// (the first look after the lift, which starts it again) plus wait: the wait starts again after a pause and has its
+// full window of reads (seventh decision of 2026-11-18 on #771, point 2).
+func (m *modelWorld) readWaitDue(start time.Time, wait time.Duration) time.Time {
+	due, poll := start.Add(wait), m.r.pullRequestPollInterval()
+	for _, p := range m.pauses {
+		if !p.from.Before(start) && !p.from.After(due.Add(poll)) {
+			// Each pause that began before the wait was due starts it again after its lift (or, when it began before
+			// the look after the previous lift, after its own lift).
+			start, due = p.to, p.to.Add(poll+wait)
+		}
+	}
+	return due
 }
 
 // afterPause is end, or the time the last pause was lifted when end was not overdue by a poll interval when the pause
@@ -1303,14 +1355,16 @@ func (m *modelWorld) afterPause(end time.Time) time.Time {
 
 // pauseProperties checks the properties of the pause (see the top of this file): while paused, no call to the Git
 // host and no phase change; at the first reconcile after the lift (lifted), no wait past its end at the start of that
-// reconcile stands, and a stopped holder whose pull request is closed holds no lock, unless a read or a write was made
-// to fail.
+// reconcile stands; and liftSettleSteps reconciles after the lift a stopped holder whose pull request is closed holds
+// no lock, unless a read or a write was made to fail since the lift (seventh decision of 2026-11-18 on #771, point 3:
+// settlement may take more than one reconcile, each with a time to run again, property "requeue").
 func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, paused, lifted bool, startedAt time.Time,
 	faulted bool) {
 	m.mu.Lock()
 	calls, fault := m.calls, m.fault
 	m.mu.Unlock()
 	if paused {
+		m.afterLift = -1
 		if calls > 0 {
 			m.fatalf("pause call: writes are paused and the reconcile called the Git host %d times (phase %s)", calls,
 				live.Status.Phase)
@@ -1323,7 +1377,23 @@ func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, pause
 		}
 		return
 	}
-	if !lifted || faulted {
+	if lifted {
+		m.afterLift = 0
+	}
+	if m.afterLift < 0 || faulted || fault != faultNone {
+		// Only reconciles with reads working and no write made to fail count towards the settlement after a lift.
+		m.afterLift = -1
+		return
+	}
+	m.afterLift++
+	cr, found := m.pr()
+	if m.afterLift >= liftSettleSteps && m.repo == nil && !m.handoff && found && !m.deleted &&
+		cr.State == providers.ChangeRequestClosed && holdsLock(live) && !progresses(live) &&
+		!heldForVerification(live, m.r.VerifyOutcomes) {
+		m.fatalf("lift lock: the pull request is closed and the stopped holder keeps the lock %d reconciles "+
+			"after the lift (phase %s)", m.afterLift, live.Status.Phase)
+	}
+	if !lifted {
 		return
 	}
 	for _, w := range live.Status.GitWaits {
@@ -1331,13 +1401,6 @@ func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, pause
 			m.fatalf("lift wait: the %s wait passed its end during the pause and stands after the first reconcile "+
 				"after the lift (phase %s)", w.Kind, live.Status.Phase)
 		}
-	}
-	cr, found := m.pr()
-	if fault == faultNone && m.repo == nil && !m.handoff && found && !m.deleted &&
-		cr.State == providers.ChangeRequestClosed && holdsLock(live) && !progresses(live) &&
-		!heldForVerification(live, m.r.VerifyOutcomes) {
-		m.fatalf("lift lock: the pull request is closed and the stopped holder keeps the lock after the first "+
-			"reconcile after the lift (phase %s)", live.Status.Phase)
 	}
 }
 

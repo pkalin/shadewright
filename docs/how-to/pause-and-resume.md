@@ -24,7 +24,7 @@ kubectl get events -n shadewright-system --field-selector reason=WritesPaused
 kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":false}}'
 ```
 
-Each request goes on from where it stopped, the condition is removed and an Event `WritesResumed` is recorded. Time paused counts against a request's deadline and other waits, so the first look after the pause ends what passed meanwhile (a request whose deadline passed ends `Expired`) and releases the target of a request whose pull request can no longer merge, before any other step.
+Each request goes on from where it stopped, the condition is removed and an Event `WritesResumed` is recorded. Time paused counts against a request's deadline and the grace of a handoff recovery, as before, so the first look after the pause ends what passed meanwhile (a request whose deadline passed ends `Expired`). It counts against no wait for a read of the Git host: a wait for the merge commit or for what a merge brought (`MergeCheck`, `MergeContent` in `status.gitWaits`) starts again with its full five minutes at the first look after the pause, since no read was made while it lasted. A request whose pull request can no longer merge frees its target within a few looks after the pause, each scheduled, never left waiting for an event. A merge recorded with its receipt frees its target during a pause too: that release reads nothing from the Git host.
 
 ## What to know
 

@@ -110,8 +110,9 @@ func TestExpiredCloseFailingIsShownAndBounded(t *testing.T) {
 	}
 	m.clock.at = first.Add(cleanupFailingBound + time.Second)
 	res, rr, err = m.reconcileExpired(t)
-	if err != nil || res != (reconcile.Result{}) {
-		t.Fatalf("the end of the bound: %+v, %v", res, err)
+	if err != nil || res.RequeueAfter != stepDelay {
+		// The lock stays: the look that settles it comes a second later (seventh decision of 2026-11-18 on #771).
+		t.Fatalf("the end of the bound: %+v, %v; want the look a second later", res, err)
 	}
 	if got := deadlineCondition(rr); !strings.HasPrefix(got, ReasonPullRequestDeadlineCleanupFailed+": ") ||
 		!strings.Contains(got, "close it by hand") {
@@ -248,5 +249,50 @@ func TestDeadlineWaitsForThePause(t *testing.T) {
 	}
 	if m.calls > 0 {
 		t.Fatalf("the end after the lift called the Git host %d times; it reads nothing", m.calls)
+	}
+}
+
+// Seventh decision of 2026-11-18 on #771, point 4: the cutoff of the cleanup is checked before any read. The close
+// fails (CleanupFailing recorded), 24 hours pass, and from then on the reads of the branch's pull requests fail too:
+// the cleanup still ends with PullRequestDeadlineCleanupFailed, without a read of the Git host.
+func TestExpiredCleanupCutoffBeforeAnyRead(t *testing.T) {
+	m := expiredWorld(t)
+	m.g.SetFail(func(op string) error {
+		if op == opClose {
+			return &providers.RetryableError{Err: errors.New("status 503")}
+		}
+		return nil
+	})
+	for range 2 {
+		res, _, err := m.reconcileExpired(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.clock.advance(max(res.RequeueAfter, time.Second))
+	}
+	rr := m.live()
+	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionCleanupFailing); c == nil {
+		t.Fatalf("setup: CleanupFailing is not recorded: phase %s, %s", rr.Status.Phase, deadlineCondition(rr))
+	}
+	m.clock.advance(cleanupFailingBound + time.Second)
+	m.fault = opList
+	m.calls = 0
+	calls := 0
+	m.g.SetFail(func(string) error {
+		calls++
+		return &providers.RetryableError{Err: errors.New("status 503")}
+	})
+	res, rr, err := m.reconcileExpired(t)
+	if err != nil {
+		t.Fatalf("the end of the bound: %+v, %v", res, err)
+	}
+	if got := deadlineCondition(rr); !strings.HasPrefix(got, ReasonPullRequestDeadlineCleanupFailed+": ") {
+		t.Fatalf("24 hours after the first failed close, with the reads failing, the deadline's condition says %q", got)
+	}
+	if calls > 0 || m.calls > 0 {
+		t.Fatalf("the end of the bound read the Git host (%d, %d calls)", calls, m.calls)
+	}
+	if holdsLock(rr) && res.RequeueAfter <= 0 {
+		t.Fatalf("the lock is held and the reconcile asks for no time to run again: %+v", res)
 	}
 }

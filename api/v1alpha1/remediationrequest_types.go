@@ -425,12 +425,17 @@ const (
 	// the failure (a refusal, a failure worth a retry, a token the Git App cannot get, a signer that cannot sign, a
 	// 404). The reason is GitForbidden or GitRejected for a refusal, RecordedMissingOtherListed for that read and
 	// CleanupFailed for anything else; the message names the step and the recorded pull request, if any, never the
-	// Git host's answer. It is set only while the request is being deleted, so its lastTransitionTime is the first
-	// failure after the deletion began, on the executor's clock, and it is kept while failures go on. It is removed
+	// Git host's answer. It is set while the request is being deleted, so its lastTransitionTime is the first
+	// failure after the deletion began, on the executor's clock, and it is kept while failures go on; it is removed
 	// only when the cleanup finishes. 24 hours after lastTransitionTime the finalizer lets the request go with a
 	// Warning Event PullRequestLeftOpen saying that the cleanup could not be finished, that the state of the pull
-	// request is not known and that it may be open. Paused writes (RemediationSettings spec.paused) hold the
-	// deletion and never set it. One Warning Event, CleanupFailing, is recorded when it is set.
+	// request is not known and that it may be open. An Expired request sets it too (reason CleanupFailed) when the
+	// close of a pull request it opened while the write that would record it was lost fails for a reason worth a
+	// retry: 24 hours after lastTransitionTime the cleanup ends with reason PullRequestDeadlineCleanupFailed, decided
+	// before any read of the Git host, and the condition goes then, when the close works, or when the look-up finds
+	// none of its pull requests open; a deletion that follows counts its own bound from the same condition. Paused
+	// writes (RemediationSettings spec.paused) hold the deletion and the close and never set it. One Warning Event,
+	// CleanupFailing, is recorded when it is set.
 	ConditionCleanupFailing = "CleanupFailing"
 	// ConditionCancelPending is True while spec.cancel is set and the cancel cannot finish (#289): the request keeps
 	// its phase, before the merge, and its pull request is still watched, so a merge ends it Merged and a close ends
@@ -477,12 +482,14 @@ const (
 	// GitWaitHandoffGrace ends a grace after status.deadline of a replacement recovering a handoff: the request ends
 	// NeedsIntervention with HandoffRecoveryFailed.
 	GitWaitHandoffGrace GitWaitKind = "HandoffGrace"
-	// GitWaitMergeCheck ends five minutes after the executor first saw the pull request merged without the merge
-	// commit or without an answer of the check at the merge: the merge it names is recorded, with the plan not
-	// shown fresh, and without a receipt when no merge commit was seen.
+	// GitWaitMergeCheck ends five minutes after its start, a wait for the merge commit of a pull request seen merged
+	// without one or for an answer of the check at the merge: the merge it names is recorded, with the plan not
+	// shown fresh, and without a receipt when no merge commit was seen. A pause of writes counts against it no
+	// time: the first reconcile after the lift records it again with its full five minutes.
 	GitWaitMergeCheck GitWaitKind = "MergeCheck"
 	// GitWaitMergeContent ends five minutes after its start: the request ends NeedsIntervention with
-	// MergeContentUnreadable. It names the pull request whose merge it reads.
+	// MergeContentUnreadable. It names the pull request whose merge it reads. Like MergeCheck it starts again, with
+	// its full five minutes, at the first reconcile after a pause of writes.
 	GitWaitMergeContent GitWaitKind = "MergeContent"
 )
 
@@ -501,8 +508,7 @@ type GitWait struct {
 
 	// ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
 	// request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
-	// the merge was first seen (MergeCheck) or after the start (MergeContent). It does not move while the entry
-	// stands.
+	// the start (MergeCheck, MergeContent). It does not move while the entry stands.
 	// +optional
 	Ends *metav1.Time `json:"ends,omitempty"`
 
@@ -1032,7 +1038,9 @@ type RemediationRequestStatus struct {
 
 	// mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
 	// merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
-	// from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a
+	// (GitHub computes it after the merge), bounded by the MergeCheck entry of gitWaits recorded with it, which
+	// counts from its own start and starts again after a pause of writes, keeping the phase, and then records the
+	// merge without a
 	// receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
 	// change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot
 	// read what it needs, the executor records the start here if it is unset, retries until the wait is over, and

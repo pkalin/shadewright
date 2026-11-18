@@ -2409,7 +2409,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		}
 		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.RequeueAfter).To(BeZero())
+		// The stop keeps the lock, so the reconcile asks to run again (lookAgainWhileHeld, seventh decision of 2026-11-18 on #771).
+		Expect(res.RequeueAfter).To(Equal(stepDelay))
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
@@ -3376,7 +3377,8 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		}
 		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.RequeueAfter).To(BeZero())
+		// The stop keeps the lock, so the reconcile asks to run again (lookAgainWhileHeld, seventh decision of 2026-11-18 on #771).
+		Expect(res.RequeueAfter).To(Equal(stepDelay))
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)

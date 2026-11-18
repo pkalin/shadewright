@@ -6212,7 +6212,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					Expect(res.RequeueAfter).To(Equal(stepDelay))
 					res, err = reconcileResult()
 					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
-					Expect(res).To(Equal(reconcile.Result{}))
+					// The stop keeps the lock, so the reconcile asks to run again (lookAgainWhileHeld, seventh decision of 2026-11-18 on #771).
+					Expect(res).To(Equal(reconcile.Result{RequeueAfter: stepDelay}))
 					got := fetch()
 					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
 					c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPROpened)
@@ -6358,7 +6359,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					leak := fmt.Errorf("status 403 from https://github.com/example/fleet with token ghs_leaked: %w", class)
 					res, err := hitAfter(op, after, leak)
 					Expect(err).NotTo(HaveOccurred(), "a final refusal is not handed back for a retry")
-					Expect(res).To(Equal(reconcile.Result{}), "and not requeued")
+					// The stop keeps the lock, so the reconcile asks to run again (lookAgainWhileHeld, seventh decision of 2026-11-18 on #771).
+					Expect(res).To(Equal(reconcile.Result{RequeueAfter: stepDelay}), "only to settle the lock")
 					got := fetch()
 					Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 					Expect(got.Status.Deadline.Time).To(BeTemporally(">", clock), "the deadline has not passed")
@@ -6445,7 +6447,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				openErr = fmt.Errorf("client ID: %w", providers.ErrInvalidConfig)
 				res, err := reconcileResult()
 				Expect(err).NotTo(HaveOccurred(), "a permanent refusal is not retried")
-				Expect(res).To(Equal(reconcile.Result{}))
+				// The stop keeps the lock, so the reconcile asks to run again (lookAgainWhileHeld, seventh decision of 2026-11-18 on #771).
+				Expect(res).To(Equal(reconcile.Result{RequeueAfter: stepDelay}))
 				got := fetch()
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh).Reason).
@@ -6501,7 +6504,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(err).NotTo(HaveOccurred())
 				res, err := reconcileResult()
 				Expect(err).NotTo(HaveOccurred())
-				Expect(res).To(Equal(reconcile.Result{}))
+				// The stop keeps the lock, so the reconcile asks to run again (lookAgainWhileHeld, seventh decision of 2026-11-18 on #771).
+				Expect(res).To(Equal(reconcile.Result{RequeueAfter: stepDelay}))
 				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded), "no other write comes first")
 			})
 
@@ -6878,6 +6882,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// wait sets the delay of a requeue; seenAgain the first look kept at a number seen missing.
 		wait := func(out outcome, d time.Duration) outcome { out.delay = d; return out }
 		seenAgain := func(out outcome) outcome { out.seen = 9999; return out }
+		// lookAgain is a stop through Reconcile that leaves the request holding its lock: the reconcile asks to run
+		// again after stepDelay (lookAgainWhileHeld, seventh decision of 2026-11-18 on #771, point 3).
+		lookAgain := func(out outcome) outcome { out.result, out.delay = requeue, stepDelay; return out }
 		// delayOf is the delay a requeue asks for: a stopped holder looks again after heldRecheckInterval, a first look
 		// that finds the number missing after the confirmation wait, and the watch after its poll interval.
 		delayOf := func(vc verdictCase, base outcome) time.Duration {
@@ -6945,8 +6952,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:         o(awaiting, none, held, kept, requeue),
 					isMerged:       o(merged, none, released, kept, done),
 					isClosed:       o(stopped, none, released, kept, done),
-					isGone:         o(stopped, none, held, kept, done),
-					goneOtherOpen:  o(stopped, none, held, kept, done),
+					isGone:         lookAgain(o(stopped, none, held, kept, done)),
+					goneOtherOpen:  lookAgain(o(stopped, none, held, kept, done)),
 					goneFirstLook:  o(awaiting, none, held, kept, requeue),
 					failedRead:     o(awaiting, none, held, kept, requeue),
 					unconfirmed404: o(awaiting, none, held, kept, requeue),
@@ -7070,9 +7077,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				want: map[verdictCase]outcome{
 					isOpen:         o(created, none, held, kept, done),
 					isMerged:       o(merged, none, released, kept, done),
-					isClosed:       o(stopped, none, held, kept, done),
+					isClosed:       lookAgain(o(stopped, none, held, kept, done)),
 					isGone:         o(created, none, held, kept, done),
-					goneOtherOpen:  o(stopped, none, held, kept, done),
+					goneOtherOpen:  lookAgain(o(stopped, none, held, kept, done)),
 					goneFirstLook:  na,
 					failedRead:     o(checked, none, held, kept, requeue),
 					unconfirmed404: o(checked, none, held, kept, requeue),

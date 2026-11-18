@@ -181,7 +181,7 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	case errors.Is(err, errRepositoryGone):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnavailable, "the repository it was made for is not configured any more")
 	case errors.Is(err, errTargetBranchChanged):
-		return r.cancelWatch(ctx, rr, reasonTargetBranchChanged, "its repository now targets another branch")
+		return r.cancelWatchBranchChanged(ctx, rr)
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnusable, "the settings of its repository cannot be used")
 	case errors.Is(err, errChangeRequestNotOurs):
@@ -206,8 +206,10 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 //     lock. A review check that waits for a pause keeps the request in its phase until the pause ends.
 //
 // A pause set since the close was tried stops the look before any read of the Git host (planEntry): the request
-// waits for the pause (waitWhilePaused). done is false when the look settles nothing (the pull request is open, or
-// the read failed): the caller's cancel watch after a branch change stands.
+// waits for the pause (waitWhilePaused). A failed Git read is retried visibly and without an end, with the cancel
+// watch recorded (cancelLookFailed); a failed Kubernetes read and the caller's cancellation are returned. done is
+// false when the look settles nothing (the pull request is open, or the answers disagree): the caller's cancel watch
+// after a branch change stands.
 func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	checkErr error) (reconcile.Result, bool, error) {
 	if rr.Status.Source == nil || intent(rr) != nil {
@@ -224,10 +226,19 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 		if err == nil {
 			err = v.err
 		}
-		if err != nil {
-			logf.FromContext(ctx).Info("Could not read the pull request of a cancelled RemediationRequest",
-				"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		switch {
+		case ctx.Err() != nil:
+			return reconcile.Result{}, true, ctx.Err()
+		case isClusterError(err):
+			return reconcile.Result{}, true, err
+		case gitReadFailure(err) && !answeredUnknown(err):
+			// A failed read is recorded like every other (seventh decision of 2026-11-18 on #771, point 5): a Paced
+			// wait with GitReadRetry, and the cancel watch with CancelPending, retried at the longer of the two
+			// paces (the poll interval, or the delay the host asked for).
+			return r.cancelLookFailed(ctx, rr, err)
 		}
+		// Answers that disagree, or a 404 the branch does not confirm: every read was answered and nothing is
+		// settled; the caller's cancel watch stands.
 		return reconcile.Result{}, false, nil
 	}
 	switch v.state {
@@ -249,6 +260,31 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 		return res, true, err
 	}
 	return reconcile.Result{}, false, nil
+}
+
+// cancelLookFailed is cancelLook's answer to a failed Git read: the read is retried without an end
+// (retryGitRead, noBoundCancelWatch), the cancel watch after the change of the target branch is recorded
+// (CancelPending), and the request is looked at again after the longer of the two waits, so neither a Retry-After
+// nor the poll interval is shortened. Failed writes are returned for the error backoff.
+func (r *RemediationRequestReconciler) cancelLookFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	readErr error) (reconcile.Result, bool, error) {
+	res, err := r.retryGitRead(ctx, rr, readErr, unboundedRead(noBoundCancelWatch))
+	if err != nil {
+		return reconcile.Result{}, true, err
+	}
+	watch, err := r.cancelWatchBranchChanged(ctx, rr)
+	if err != nil {
+		return reconcile.Result{}, true, err
+	}
+	res.RequeueAfter = max(res.RequeueAfter, watch.RequeueAfter)
+	return res, true, nil
+}
+
+// cancelWatchBranchChanged is the cancel watch of a request whose close cannot be made because the target branch of
+// its repository changed (cancelWatch, reason TargetBranchChanged).
+func (r *RemediationRequestReconciler) cancelWatchBranchChanged(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (reconcile.Result, error) {
+	return r.cancelWatch(ctx, rr, reasonTargetBranchChanged, "its repository now targets another branch")
 }
 
 // endCancelClosed ends rr, whose pull request is known closed (found closed, or just closed by the cancel),
@@ -321,7 +357,7 @@ func (r *RemediationRequestReconciler) cancelRecoveryFailed(ctx context.Context,
 	case errors.Is(err, errRepositoryGone):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnavailable, "the repository it was made for is not configured any more")
 	case errors.Is(err, errTargetBranchChanged):
-		return r.cancelWatch(ctx, rr, reasonTargetBranchChanged, "its repository now targets another branch")
+		return r.cancelWatchBranchChanged(ctx, rr)
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnusable, "the settings of its repository cannot be used")
 	case isUnknownChange(err):

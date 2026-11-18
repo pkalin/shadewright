@@ -63,13 +63,13 @@ const (
 	// waitHandoffGrace ends handoffRecoveryGrace after status.deadline of a request recovering a handoff: it ends
 	// NeedsIntervention with HandoffRecoveryFailed.
 	waitHandoffGrace
-	// waitMergeCheck ends mergeCommitWait after the executor first saw the pull request merged without the merge
-	// commit or an answer of the check at the merge (status.mergeCommitAwaitedSince when set before, the entry's
-	// start otherwise): the merge the entry names is recorded with the plan not shown fresh (endMergeWait).
+	// waitMergeCheck ends mergeCommitWait after the entry's start, a wait for the merge commit or an answer of the
+	// check at the merge: the merge the entry names is recorded with the plan not shown fresh (endMergeWait). It starts
+	// again after a pause (restartReadWaits).
 	waitMergeCheck
 	// waitMergeContent ends mergeContentWait after the entry's start, the reads of what a merge into the target
 	// branch the settings name now brought (#771): the request ends NeedsIntervention with MergeContentUnreadable,
-	// with the pull request the entry names.
+	// with the pull request the entry names. It starts again after a pause (restartReadWaits).
 	waitMergeContent
 )
 
@@ -158,24 +158,22 @@ func newWait(rr *api.RemediationRequest, k waitKind, op string, now time.Time) (
 
 // wholeWait completes tmpl, an entry of a merge wait with its pull request (readOfMergeCheck, readOfContent,
 // mergeWaitEntry), for a read op that failed at now: its start, the operation, and its end, mergeContentWait after
-// the start for the content wait, mergeCommitWait after the merge was first seen for the merge wait
-// (status.mergeCommitAwaitedSince when it records an earlier start, the entry's start otherwise). ok is false for an
-// entry without its pull request.
-func wholeWait(rr *api.RemediationRequest, tmpl api.GitWait, op string, now time.Time) (api.GitWait, bool) {
+// the start for the content wait, mergeCommitWait after the start for the merge wait. Both count from the entry's own
+// start, never from status.mergeCommitAwaitedSince: the wait recorded again after a pause (restartReadWaits) has its
+// full window of reads (seventh decision of 2026-11-18 on #771, point 2). ok is false for an entry without its pull
+// request.
+func wholeWait(_ *api.RemediationRequest, tmpl api.GitWait, op string, now time.Time) (api.GitWait, bool) {
 	k := kindOfEntry(tmpl)
 	if tmpl.PullRequest == nil || (k != waitMergeCheck && k != waitMergeContent) {
 		return api.GitWait{}, false
 	}
 	w := *tmpl.DeepCopy()
 	w.Since, w.Operation = metav1.NewTime(now.Truncate(time.Second)), cutOperation(op)
-	from, wait := w.Since.Time, mergeContentWait
+	wait := mergeContentWait
 	if k == waitMergeCheck {
 		wait = mergeCommitWait
-		if s := rr.Status.MergeCommitAwaitedSince; s != nil && s.Before(&w.Since) {
-			from = s.Time
-		}
 	}
-	w.Ends = &metav1.Time{Time: from.Add(wait)}
+	w.Ends = &metav1.Time{Time: w.Since.Add(wait)}
 	return w, true
 }
 
@@ -196,23 +194,15 @@ func (k waitKind) applies(rr *api.RemediationRequest) bool {
 }
 
 // boundEnd is when a wait of kind k bounds rr: its entry's end (end), or, before an entry is recorded, the end the
-// entry would record from rr's status (newWait for the deadline kinds, mergeCommitWait after
-// status.mergeCommitAwaitedSince for the merge wait). ok is false when nothing bounds it.
+// entry would record from rr's status (newWait for the deadline kinds). ok is false when nothing bounds it: the read
+// waits have no end before their entry, which counts from its own start.
 func (k waitKind) boundEnd(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
 	if gitWait(rr, k) != nil || !k.applies(rr) {
 		return k.end(rr, now)
 	}
-	switch k {
-	case waitRequestDeadline, waitHandoffGrace:
+	if k == waitRequestDeadline || k == waitHandoffGrace {
 		if w, ok := newWait(rr, k, "bound", now); ok {
 			return w.Ends.Time, true
-		}
-	case waitMergeCheck:
-		if s := rr.Status.MergeCommitAwaitedSince; s != nil {
-			if s.After(now.Add(mergeCommitClockSlack)) {
-				return now, true
-			}
-			return s.Add(mergeCommitWait), true
 		}
 	}
 	return time.Time{}, false
@@ -302,6 +292,77 @@ func dropWait(rr *api.RemediationRequest, k waitKind, now time.Time) {
 	gitWaitSummary(rr, now)
 }
 
+// readWaits are the kinds of wait for reads of the Git host: no read is made while writes are paused, so a pause
+// counts against none of them, and each starts again when the pause is lifted (restartReadWaits).
+var readWaits = []waitKind{waitMergeCheck, waitMergeContent}
+
+func isReadWait(w api.GitWait) bool { return slices.Contains(readWaits, kindOfEntry(w)) }
+
+// restartReadWaits is the first reconcile after a pause is lifted (seventh decision of 2026-11-18 on #771, point 2),
+// before any wait is ended: rr shows WritesPaused (a reconcile saw the pause and recorded it, waitWhilePaused), records
+// a read wait (readWaits), and the settings, read live, no longer pause writes. Each read wait starts again: the
+// entries are removed in one write and recorded again in a second, each with the same pull request and operation,
+// its start now and its full window (wholeWait), as the validation rule keeps an entry's start and end while it
+// stands. WritesPaused goes in the second write, with the Event WritesResumed, so the waits start again once per
+// pause; a read wait recorded after the lift takes the condition away with it (readWaitAfterLift), so it is never
+// started again. A request without a read wait keeps WritesPaused for the path that resumes it (a full recheck
+// follows). Both writes read the request from the API server and change nothing unless it still shows WritesPaused,
+// so an older copy the cache served starts nothing again. Time paused so counts against no read wait, and none ends without a window of reads
+// after the pause; the request deadline and the handoff grace are not restarted (time paused counts against them, as
+// on main). A failed read of the settings or a failed write is returned for the error backoff. A second write that
+// fails leaves the read waits removed and WritesPaused shown: the next failed read about the merge records its wait
+// again.
+func (r *RemediationRequestReconciler) restartReadWaits(ctx context.Context, rr *api.RemediationRequest) error {
+	if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionWritesPaused) == nil ||
+		!slices.ContainsFunc(rr.Status.GitWaits, isReadWait) {
+		return nil
+	}
+	switch paused, err := r.writesPaused(ctx); {
+	case err != nil:
+		return err
+	case paused:
+		return nil
+	}
+	var old []api.GitWait
+	if err := r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) {
+		old = nil
+		if meta.FindStatusCondition(live.Status.Conditions, api.ConditionWritesPaused) == nil {
+			return
+		}
+		for _, w := range live.Status.GitWaits {
+			if isReadWait(w) {
+				old = append(old, *w.DeepCopy())
+			}
+		}
+		live.Status.GitWaits = slices.DeleteFunc(live.Status.GitWaits, isReadWait)
+		if len(live.Status.GitWaits) == 0 {
+			live.Status.GitWaits = nil
+		}
+	}); err != nil || len(old) == 0 {
+		return err
+	}
+	now := r.now()
+	if err := r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) {
+		for _, o := range old {
+			k := kindOfEntry(o)
+			if gitWait(live, k) != nil || !k.applies(live) {
+				continue
+			}
+			if w, ok := wholeWait(live, o, o.Operation, now); ok {
+				live.Status.GitWaits = append(live.Status.GitWaits, w)
+			}
+		}
+		meta.RemoveStatusCondition(&live.Status.Conditions, api.ConditionWritesPaused)
+	}); err != nil {
+		return err
+	}
+	logf.FromContext(ctx).Info("Started the read waits of RemediationRequest again after the pause of Git writes",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "waits", len(old))
+	meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionWritesPaused)
+	r.resumed(ctx, rr)
+	return nil
+}
+
 // dropEnded removes, in memory, the entries of rr whose kind no longer applies to it (waitKind.applies: a merge
 // recorded ends the merge waits, a final phase the deadline's), so the status write of a stop never leaves an entry
 // that only the next reconcile would remove.
@@ -323,9 +384,13 @@ func dropEnded(rr *api.RemediationRequest, now time.Time) {
 // putGitWaits records adds in status.gitWaits: an entry of a kind that stands keeps its start and its pull request
 // and takes the read that failed now; any other is added whole, as Paced when its kind no longer applies to the live
 // request (waitKind.applies). Only the entries and their summary are written, in
-// a patch with the resourceVersion read, retried on a conflict from a fresh read.
+// a patch with the resourceVersion read, retried on a conflict from a fresh read. A read wait added to a request that
+// still shows WritesPaused takes the condition away in the same patch (readWaitAfterLift), with the Event
+// WritesResumed.
 func (r *RemediationRequestReconciler) putGitWaits(ctx context.Context, rr *api.RemediationRequest, adds []api.GitWait) error {
-	return r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) {
+	lifted := false
+	err := r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) {
+		lifted = false
 		for _, a := range adds {
 			if k := kindOfEntry(a); k != waitNone && !k.applies(live) {
 				// The live request has left the state this kind bounds (a step after the read ended it, or the cache
@@ -337,8 +402,26 @@ func (r *RemediationRequestReconciler) putGitWaits(ctx context.Context, rr *api.
 				continue
 			}
 			live.Status.GitWaits = append(live.Status.GitWaits, a)
+			lifted = readWaitAfterLift(live, a) || lifted
 		}
 	})
+	if err == nil && lifted {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionWritesPaused)
+		r.resumed(ctx, rr)
+	}
+	return err
+}
+
+// readWaitAfterLift removes WritesPaused from live, in memory, when w is a read wait (readWaits) newly added to it
+// and live still shows the condition, and reports whether it did. The read behind w ran, so writes were not paused
+// for it: the pause is over, and the wait, recorded after the lift with its full window, is not started again by
+// restartReadWaits. A request without a read wait keeps the condition for the path that resumes it.
+func readWaitAfterLift(live *api.RemediationRequest, w api.GitWait) bool {
+	if !isReadWait(w) || meta.FindStatusCondition(live.Status.Conditions, api.ConditionWritesPaused) == nil {
+		return false
+	}
+	meta.RemoveStatusCondition(&live.Status.Conditions, api.ConditionWritesPaused)
+	return true
 }
 
 // dropGitWaits removes the entries drop names, and the summary with the last.
@@ -399,8 +482,10 @@ func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *ap
 //
 // While writes are paused (the kill switch, read live) a passed wait is not ended: the request keeps its phase and
 // waits for the pause (waitWhilePaused), as every other step does (sixth decision of 2026-11-18 on #771). Time spent
-// paused counts against the bound, so the first reconcile after the pause ends every wait that passed meanwhile,
-// before any other step. A failed read of the settings is returned for the error backoff.
+// paused counts against the request deadline and the handoff grace, as on main, so the first reconcile after the
+// pause ends those that passed meanwhile, before any other step; it counts against nothing else: that reconcile
+// first starts the read waits again (restartReadWaits, seventh decision of 2026-11-18 on #771, point 2). A failed
+// read of the settings is returned for the error backoff.
 func (r *RemediationRequestReconciler) endPassedWait(ctx context.Context, rr *api.RemediationRequest) (
 	ctrl.Result, bool, error) {
 	now := r.now()
@@ -417,6 +502,10 @@ func (r *RemediationRequestReconciler) endPassedWait(ctx context.Context, rr *ap
 		if err := r.dropGitWaits(ctx, rr, func(w api.GitWait) bool { return slices.Contains(stale, kindOfEntry(w)) }); err != nil {
 			return ctrl.Result{}, true, err
 		}
+	}
+	// The first reconcile after a pause starts the read waits again, before any of them could end.
+	if err := r.restartReadWaits(ctx, rr); err != nil {
+		return ctrl.Result{}, true, err
 	}
 	if _, ok := passedWait(rr, now); ok {
 		paused, err := r.writesPaused(ctx)

@@ -1832,12 +1832,33 @@ func (r *RemediationRequestReconciler) expiredCloseFailed(ctx context.Context, r
 	left := boundLeft(c, cleanupFailingBound, now)
 	if left <= 0 {
 		log.Info("Ended the cleanup of an expired RemediationRequest: its close kept failing", "error", err.Error())
-		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
-			ReasonPullRequestDeadlineCleanupFailed, "The pull request was not opened before the deadline, and "+
-				"closing a pull request Shadewright opened on the branch kept failing for 24 hours; if one is open, "+
-				"close it by hand. The target stays locked until none is found open"))
+		return r.endExpiredCleanupFailed(ctx, rr)
 	}
 	return reconcile.Result{RequeueAfter: min(max(retryAfterOf(err), heldRecheckInterval), left)}, nil
+}
+
+// expiredCleanupOver reports whether the cleanup of an expired request (expiredUncleaned) has a close that failed
+// (condition CleanupFailing True) for cleanupFailingBound, on the executor's clock: decided from the recorded condition
+// alone, so checkHeld checks it before any read of the Git host, and failing reads cannot keep the cleanup from ending
+// (seventh decision of 2026-11-18 on #771, point 4).
+func expiredCleanupOver(rr *remediationv1alpha1.RemediationRequest, now time.Time) bool {
+	if !expiredUncleaned(rr) {
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
+	return c != nil && c.Status == metav1.ConditionTrue && boundLeft(c, cleanupFailingBound, now) <= 0
+}
+
+// endExpiredCleanupFailed ends the cleanup of an expired request whose close kept failing for cleanupFailingBound:
+// reason PullRequestDeadlineCleanupFailed, with a message that asks a person to close the pull request, in one status
+// write and with no read of the Git host. The lock stays until the read of the branch finds none open; the next look
+// comes a second later (lookAgainWhileHeld). A failed write is returned for the error backoff.
+func (r *RemediationRequestReconciler) endExpiredCleanupFailed(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (reconcile.Result, error) {
+	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
+		ReasonPullRequestDeadlineCleanupFailed, "The pull request was not opened before the deadline, and "+
+			"closing a pull request Shadewright opened on the branch kept failing for 24 hours; if one is open, "+
+			"close it by hand. The target stays locked until none is found open"))
 }
 
 // setDeadlineMessage sets message on the condition that holds reason PullRequestDeadline of an expired request

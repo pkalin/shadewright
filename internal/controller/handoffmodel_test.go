@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
@@ -1725,4 +1726,48 @@ func TestHandoffModelMergeAfterThePredecessorIsDeleted(t *testing.T) {
 	hmDirected(t, hmStartPushed,
 		[]hmStep{{Kind: hRestart}, stClock(clockDeadline), stSticky(503), stRecRepl, stAnswer, stClock(clockGrace),
 			{Kind: hDelete, Obj: hmPred}, stRecPred, stMerge, stRecRepl, stRecPred})
+}
+
+// Third round of #786, seed 16384: both requests are deleted while the replacement's commit is on the open pull request
+// and the settings entry cannot be used. The predecessor's finalizer must not let go as if the repository were gone: the
+// entry may be fixed, so the cleanup fails within the bound of CleanupFailing (reason RepositoryUnusable), keeps the
+// finalizer and the lock, and closes the pull request once the entry works again.
+func TestHandoffModelDeletionWithAnUnusableEntry(t *testing.T) {
+	steps := []hmStep{{Kind: hDelete, Obj: hmRepl}, stRecRepl, {Kind: hSettings, Variant: settingsUnusable},
+		{Kind: hDelete, Obj: hmPred}, stRecPred}
+	m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
+	for i, s := range steps {
+		m.stepNo = i + 1
+		m.apply(s)
+		m.observe()
+	}
+	p := m.get(hmPred)
+	if p == nil || !controllerutil.ContainsFinalizer(p, FinalizerName) {
+		t.Fatalf("the predecessor let go of its finalizer with an unusable entry and its pull request open: %s", describe(p))
+	}
+	if c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionCleanupFailing); c == nil ||
+		c.Reason != reasonRepositoryUnusable {
+		t.Fatalf("CleanupFailing = %+v, want reason %s", c, reasonRepositoryUnusable)
+	}
+	hmDirected(t, hmStartPushed, steps)
+}
+
+// Third round of #786, seeds 29586, 30458, 54201 and 9008: the settings name another target branch, then both requests
+// are deleted while the replacement's commit is on the open pull request. The finalizer closes that pull request on the
+// branch the plan recorded instead of letting go with it open and no request holding its target.
+func TestHandoffModelDeletionAfterABranchChange(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{{Kind: hSettings, Variant: settingsBranch}, {Kind: hDelete, Obj: hmRepl},
+		{Kind: hDelete, Obj: hmPred}})
+	if st := m.pr().State; st != providers.ChangeRequestClosed {
+		t.Fatalf("the pull request is %s after both requests were deleted, want closed", st)
+	}
+}
+
+// Third round of #786, seeds 27632 and 41857: after the takeover a person puts the predecessor's commit back and merges
+// it, the predecessor records the merge with its receipt and is then deleted, and the replacement looks before the
+// predecessor's finalizer runs. The merge is the predecessor's (it holds the receipt), so the replacement ends
+// MergedForPredecessor and records no foreign change.
+func TestHandoffModelPredecessorMergeWhileItIsDeleted(t *testing.T) {
+	hmDirected(t, hmStartIntent, []hmStep{stRecRepl, {Kind: hForce, Variant: forceDrop}, stMerge, stRecPred,
+		{Kind: hDelete, Obj: hmPred}, stRecRepl})
 }

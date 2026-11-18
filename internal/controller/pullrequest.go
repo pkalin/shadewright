@@ -2193,8 +2193,11 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 }
 
 // finalize closes the request's pull request when the request is deleted, then removes the finalizer. It
-// never touches the cluster. Settings that cannot reach the plan's repository any more do not block the
-// deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
+// never touches the cluster. A repository that left the settings does not block the deletion: there is nothing this
+// executor can close there. One whose entry names another target branch now is closed on the branch the plan recorded
+// (closeOwn). An entry that cannot be used (a bad key, client ID or installation) is a failure of the cleanup within
+// the bound of CleanupFailing, since the pull request may be open and the entry may be fixed (#786, third round). A
+// request that stopped (NeedsIntervention,
 // Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
 // request that holds the lock on its target (status.holdsTarget), whatever its phase, except a merged request
 // that holds it only while its outcome is verified (heldForVerification, #719); a merged one refuses the
@@ -2258,10 +2261,12 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			}
 			left = release
 		case err == nil, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
-			errors.Is(err, freshness.ErrRepositoryUnusable), isMergedUnrecorded(err),
-			errors.Is(err, errChangeRequestNotOurs):
+			isMergedUnrecorded(err), errors.Is(err, errChangeRequestNotOurs):
 			// Closed, nothing reachable to close, the open ones closed and a merged one read as merged, or not
-			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
+			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried. An
+			// entry that cannot be used (freshness.ErrRepositoryUnusable) is not among them: the repository is still
+			// in the settings and its pull request may be open, so it is a failure of the cleanup, retried within
+			// the bound of CleanupFailing like any other (#786, third round).
 			if err := r.clearCleanupConditions(ctx, rr); err != nil {
 				return reconcile.Result{}, err
 			}

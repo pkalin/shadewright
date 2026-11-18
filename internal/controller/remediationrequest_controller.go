@@ -2164,7 +2164,8 @@ func (e *clusterError) Unwrap() error { return e.err }
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
 // settings (for a stale plan's cleanup, also not under a new installation of the GitHub App: cleanupRepository,
-// #290, whose failures come wrapped in a *reinstalledError), [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
+// #290, whose failures come wrapped in a *reinstalledError), [errTargetBranchChanged] when its entry now names another
+// target branch (the finalizer instead closes on the branch the plan recorded), [errChangeRequestNotOurs]
 // when a recorded pull request is gone (changeOf: not this request's, or without its marker), and
 // [freshness.ErrPaused] when the settings read now pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
 // request is, or may become, its replacement's ([errChangeRequestNotOurs] when handed over,
@@ -2209,7 +2210,13 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		return errRepositoryGone
 	}
 	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {
-		return errTargetBranchChanged
+		if !deleting {
+			return errTargetBranchChanged
+		}
+		// The finalizer closes the request's pull request on the branch the plan was made for: it is still in the
+		// plan's repository and may be open, and a deletion that let go of it would leave it open with no request
+		// holding its target (#786, third round). Every close reads the pull request with this request's marker first.
+		repo.TargetBranch = src.TargetBranch
 	}
 	if reinstalled {
 		// Writes nothing but the close and a failed check run; every close below reads the pull request with this

@@ -666,11 +666,11 @@ func (r *RemediationRequestReconciler) predecessorMergeOwner(ctx context.Context
 }
 
 // replacementMergeOwner is the rule for who records a merge with head of the pull request rr, a replacement, took over
-// (tookOver), seen from rr: a head that is the one its predecessor recorded, with the predecessor alive (its UID, not
-// being deleted) and not handed off (it records its own merge, mergedHeadOwner), is the predecessor's
-// (ownerPredecessorRecords once it holds the receipt, ownerPredecessorPending before); anything else, a predecessor
-// gone, being deleted or handed off included, is ownerForeign, rr's to record as before. A failed read of the
-// predecessor is the Kubernetes API's (a *clusterError).
+// (tookOver), seen from rr: a head that is the one its predecessor recorded is the predecessor's once it holds the
+// receipt of that merge (ownerPredecessorRecords), also while it is being deleted, and before that while it is alive
+// (its UID, not being deleted) and not handed off (ownerPredecessorPending: it records its own merge, mergedHeadOwner);
+// anything else, a predecessor gone, or being deleted or handed off without that receipt, is ownerForeign, rr's to
+// record as before. A failed read of the predecessor is the Kubernetes API's (a *clusterError).
 func (r *RemediationRequestReconciler) replacementMergeOwner(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	head string) (mergeOwner, error) {
 	if !tookOver(rr) {
@@ -684,12 +684,16 @@ func (r *RemediationRequestReconciler) replacementMergeOwner(ctx context.Context
 	case err != nil:
 		return ownerForeign, &clusterError{err: fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)}
 	}
-	if pred.UID != types.UID(from.UID) || !pred.DeletionTimestamp.IsZero() || handedOff(pred) ||
-		pred.Status.PullRequest == nil || pred.Status.PullRequest.HeadSHA != head {
+	if pred.UID != types.UID(from.UID) || pred.Status.PullRequest == nil || pred.Status.PullRequest.HeadSHA != head {
 		return ownerForeign, nil
 	}
 	if pred.Status.MergeReceipt != nil && pred.Status.MergeReceipt.HeadSHA == head {
+		// A merge the predecessor recorded is its own, also while it is being deleted: its finalizer ends this request
+		// on it (supersedeReplacementAfterMerge) before it goes (third round of #786).
 		return ownerPredecessorRecords, nil
+	}
+	if !pred.DeletionTimestamp.IsZero() || handedOff(pred) {
+		return ownerForeign, nil
 	}
 	return ownerPredecessorPending, nil
 }

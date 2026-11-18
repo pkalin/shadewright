@@ -73,10 +73,6 @@ const (
 	// replacementMerge: the read found the request's pull request merged with the handoff commit of its replacement,
 	// which records that merge (#786): the pull request can deliver nothing more, and the merge is not this request's.
 	replacementMerge
-	// recoveryGone: a replacement that ended before it took the pull request over (it holds the lock only for a pull
-	// request of its predecessor that may carry its commit), whose repository is gone from the settings: no read of
-	// that pull request can start any more.
-	recoveryGone
 	// otherRequestMerge: the read found the pull request a replacement took over merged with its predecessor's
 	// recorded head, which the predecessor records (second round of #786).
 	otherRequestMerge
@@ -87,7 +83,7 @@ var proofNames = map[proof]string{
 	neverHeld: "never held", handedOver: "handed over", handoffAborted: "handoff aborted",
 	releasedBeforeField: "released before the field", recordedMerge: "recorded merge",
 	undeliveredGone: "undelivered merge, repository gone", replacementMerge: "merged with the replacement's commit",
-	recoveryGone: "ended before the takeover, repository gone", otherRequestMerge: "merged with the other request's commit",
+	otherRequestMerge: "merged with the other request's commit",
 }
 
 // String names what v proves, for logs.
@@ -238,17 +234,6 @@ func OtherRequestMerge(found Found, byPredecessor bool) (*Verdict, bool) {
 		return nil, false
 	}
 	return &Verdict{proof: otherRequestMerge}, true
-}
-
-// RecoveryRepositoryGone is the verdict of a replacement that ended before it took its predecessor's pull request over
-// (endedBeforeTakeover) whose repository is gone from the settings (repositoryGone, a settings object that exists
-// without the plan's repository): the read of that pull request cannot start, and nobody can see it any more, as for
-// UndeliveredRepositoryGone (second round of #786).
-func RecoveryRepositoryGone(endedBeforeTakeover, repositoryGone bool) (*Verdict, bool) {
-	if !endedBeforeTakeover || !repositoryGone {
-		return nil, false
-	}
-	return &Verdict{proof: recoveryGone}, true
 }
 
 // Release clears the lock in status, about to be written, for the verdict v, with the condition TargetHeld that

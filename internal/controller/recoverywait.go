@@ -566,8 +566,8 @@ func (r *RemediationRequestReconciler) openRecovery(ctx context.Context, rr *rem
 // records a merge a stopped predecessor found (stoppedMergeOwner). When the settings name another target branch, the
 // pull request is read on the branch the plan recorded, as lookHeld reads it, through a provider that writes nothing
 // (openRecordedBranch), so a merge or a close there settles the lock (second round of #786). Anything else is
-// openRecovery's: a repository gone from the settings is errRepositoryGone (heldRecovery releases on it), and a failed
-// read of the settings is the Kubernetes API's.
+// openRecovery's: a repository gone from the settings is errRepositoryGone (heldRecovery keeps the lock on it), and a
+// failed read of the settings is the Kubernetes API's.
 func (r *RemediationRequestReconciler) openStoppedRead(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	providers.GitProvider, error) {
 	repo, _, err := r.planEntry(ctx, rr)
@@ -651,14 +651,10 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 	case isClusterError(err):
 		return reconcile.Result{}, true, err
 	}
-	if s, ok := settleRecoveryGone(rr, err); ok {
-		// The repository left the settings: no read of the pull request it was to take over can start, and nobody can
-		// see that pull request through Shadewright any more, so the lock goes as for an undelivered merge
-		// (settleUndeliveredGone). A missing settings object is no such evidence: the lock is kept.
-		rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
-		return reconcile.Result{}, true, r.releaseUnread(ctx, rr, s, "it ended before it took the pull request over "+
-			"and its repository is not in the settings any more")
-	}
+	// A repository that left the settings releases nothing: no read of the pull request can start, so no verdict
+	// can be stored, and the replacement keeps the lock with PullRequestUnreadable (RepositoryUnavailable) until the
+	// repository is back and a read settles it, or the request is deleted, as every stopped holder (decision of
+	// 2026-11-19 on #786: a release there lost the record of a merge of its commit made meanwhile).
 	if want := recoveryUnreadable(rr, err); want != nil {
 		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
 			return reconcile.Result{}, true, werr
@@ -675,15 +671,6 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 	// The pace of a stopped holder's looks, never past the end of a wait it records.
 	res.RequeueAfter = r.withinWaits(rr, max(res.RequeueAfter, heldRecheckInterval))
 	return res, true, nil
-}
-
-// settleRecoveryGone is the verdict of rr, a replacement that ended before it took the pull request over
-// (endedBeforeTakeover), whose look found the repository of the plan gone from the settings (err): no read of that
-// pull request can start any more, so the lock is released, as settleUndeliveredGone releases an undelivered merge
-// (second round of #786). A settings object that is missing (errNoSettings) is not that: the lock is kept.
-func settleRecoveryGone(rr *remediationv1alpha1.RemediationRequest, err error) (*lockverdict.Verdict, bool) {
-	return lockverdict.RecoveryRepositoryGone(endedBeforeTakeover(rr),
-		errors.Is(err, errRepositoryGone) && !errors.Is(err, errNoSettings))
 }
 
 // heldRecoveryAlone is heldRecovery's read once the predecessor is gone (NotFound), so neither its recorded pull

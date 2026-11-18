@@ -334,7 +334,7 @@ func restoreStatus(rr *R, before *S) { rr.Status = *before }
 var settlementBuilders = map[string]bool{
 	"settleByRead": true, "settleNeverHeld": true, "settleHandedOver": true, "settleHandoffAborted": true,
 	"settleReleasedBeforeField": true, "settleRecordedMerge": true, "settleUndeliveredGone": true,
-	"settleReplacementMerge": true, "settlePredecessorMerge": true, "settleRecoveryGone": true,
+	"settleReplacementMerge": true, "settlePredecessorMerge": true,
 }
 
 // isPackage reports whether e is the package name pkg.

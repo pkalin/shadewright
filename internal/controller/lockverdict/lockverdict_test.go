@@ -96,12 +96,9 @@ func TestEachVerdictOnlyFromItsProof(t *testing.T) {
 		"undelivered, repository there":    {of(UndeliveredRepositoryGone(true, false)), false},
 		"delivered, repository gone":       {of(UndeliveredRepositoryGone(false, true)), false},
 		"merged by the replacement":        {of(ReplacementMerge(FoundMerged, true)), true},
-		"ended before takeover, gone":      {of(RecoveryRepositoryGone(true, true)), true},
 		"merged by the predecessor":        {of(OtherRequestMerge(FoundMerged, true)), true},
 		"merged, not by the predecessor":   {of(OtherRequestMerge(FoundMerged, false)), false},
 		"open, predecessor's head":         {of(OtherRequestMerge(FoundOther, true)), false},
-		"ended before takeover, there":     {of(RecoveryRepositoryGone(true, false)), false},
-		"took over, repository gone":       {of(RecoveryRepositoryGone(false, true)), false},
 		"merged, not by the replacement":   {of(ReplacementMerge(FoundMerged, false)), false},
 		"open, replacement's commit":       {of(ReplacementMerge(FoundOther, true)), false},
 	} {

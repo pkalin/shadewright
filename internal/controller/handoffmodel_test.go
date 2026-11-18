@@ -420,8 +420,8 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		personCommits: map[string]bool{}, replCommits: map[string]bool{}, once: map[string]error{},
 		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{},
 		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
-		waitingAtRemoval: map[string]bool{},
-		expected: map[string]int{}, lastErr: map[string]error{}, lastRes: map[string]reconcile.Result{}}
+		waitingAtRemoval: map[string]bool{}, expected: map[string]int{}, lastErr: map[string]error{},
+		lastRes: map[string]reconcile.Result{}}
 	base, err := g.BranchHead(ctx, mainBranch)
 	if err != nil {
 		t.Fatal(err)
@@ -1019,8 +1019,10 @@ func (m *hmWorld) note(p, rr *api.RemediationRequest) {
 // observeLock checks P3 after every step.
 func (m *hmWorld) observeLock(reqs map[string]*api.RemediationRequest) {
 	cr := m.pr()
-	// P3. A repository that left the settings releases the lock (decision of the second round, 2026-11-18): P3 asks
-	// nothing of it.
+	// P3. While the repository is not in the settings P3 asks nothing of the lock: a merge that did not deliver the
+	// plan as shown releases it (tenth decision of 2026-11-18 on #771), and so does the finalizer of a request
+	// deleted then. The release of a replacement that ended before its takeover there was withdrawn (decision of
+	// 2026-11-19 on #786); P6 checks that it keeps the lock, and the run after the repository's return checks P3.
 	repoGone := m.settings == settingsRemoved
 	free := true
 	for who, x := range reqs {
@@ -1538,9 +1540,9 @@ func (m *hmWorld) liveness() {
 // keptWhileMissing names the expectation a holder of the lock meets while the repository is not in the settings, ""
 // for none. A holder with no verdict stored keeps the lock, as nothing can read its pull request any more (design 6,
 // the table of stops; tenth decision of 2026-11-18 on #771; decision of 2026-11-19 on #786, points 1 and 3): one that
-// had stopped, and one that waited for the other request's merge record when the repository left. Only the
-// replacement whose recovery holds the lock releases it (second round of #786); a request still at work, or one with a
-// verdict stored, has no such expectation.
+// had stopped (the replacement whose recovery holds the lock included, whose release there the same decision
+// withdrew), and one that waited for the other request's merge record when the repository left. A request still at
+// work, or one with a verdict stored, has no such expectation.
 func (m *hmWorld) keptWhileMissing(who string, x *api.RemediationRequest) string {
 	switch {
 	case m.settings != settingsRemoved || verdictStored(x):
@@ -1574,16 +1576,9 @@ func (m *hmWorld) expectMissingShown(who string, x *api.RemediationRequest, name
 	m.expected[name]++
 }
 
-// stopped reports whether x had stopped: ended, or NeedsIntervention, and not the replacement whose recovery watches.
+// stopped reports whether x had stopped: ended, or NeedsIntervention.
 func (m *hmWorld) stopped(x *api.RemediationRequest) bool {
-	return (ended(x.Status.Phase) || x.Status.Phase == api.PhaseNeedsIntervention) && !m.recovering(x)
-}
-
-// recovering reports whether x is the replacement before its takeover: its handoff from Reserved, its lock held for
-// the pull request it was to take over (the watch of its recovery, or a stop after it).
-func (m *hmWorld) recovering(x *api.RemediationRequest) bool {
-	return x.Name == m.keys[hmRepl].Name && x.Status.Handoff != nil && x.Status.Handoff.From != nil &&
-		x.Status.Handoff.From.Phase == api.HandoffReserved
+	return ended(x.Status.Phase) || x.Status.Phase == api.PhaseNeedsIntervention
 }
 
 // hmRun runs start and steps and returns the world, with its violations.

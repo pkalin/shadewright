@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -48,12 +49,37 @@ func TestHandoffModelTakeoverMergeDeletedReplacement(t *testing.T) {
 	}
 }
 
-// A replacement stopped after its recovery watch whose repository leaves the settings releases the lock (P6).
-func TestHandoffModelRecoveryRepositoryGoneReleases(t *testing.T) {
-	m := hmDirected(t, hmStartPushed, []hmStep{{Kind: hSettings, Variant: settingsRemoved}, stRecRepl, stRecPred,
-		stClock(clockDay), stRecRepl, stRecRepl})
-	if rr := m.get(hmRepl); rr == nil || ptr.Deref(rr.Status.HoldsTarget, false) {
-		t.Fatalf("the replacement keeps the lock: %s", describe(rr))
+// A replacement stopped after its recovery watch whose repository leaves the settings keeps the lock and shows
+// PullRequestUnreadable with reason RepositoryUnavailable; a person merges its commit meanwhile, and once the
+// repository is back the merge is recorded on the replacement with its receipt, which frees the lock (decision of
+// 2026-11-19 on #786; seeds 2 and 2542 of the model with the repository put back, where the release lost that record).
+func TestHandoffModelRecoveryRepositoryGoneKeepsTheLock(t *testing.T) {
+	steps := []hmStep{{Kind: hSettings, Variant: settingsRemoved}, stRecRepl, stRecPred, stClock(clockDay), stRecRepl,
+		stRecRepl, stMerge, stRecRepl, stRecPred}
+	m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
+	for i, s := range steps {
+		m.stepNo = i + 1
+		m.apply(s)
+		m.observe()
+	}
+	rr := m.get(hmRepl)
+	c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable)
+	if !ptr.Deref(rr.Status.HoldsTarget, false) || c == nil || c.Reason != reasonRepositoryUnavailable {
+		t.Fatalf("want the lock kept with PullRequestUnreadable %s; got %s, PullRequestUnreadable %v\n  %s",
+			reasonRepositoryUnavailable, describe(rr), c, strings.Join(m.trace, "\n  "))
+	}
+	m.apply(hmStep{Kind: hSettings, Variant: settingsRestored})
+	m.apply(stRecRepl)
+	m.apply(stRecPred)
+	m.observe()
+	rr = m.get(hmRepl)
+	if rr.Status.MergeReceipt == nil || rr.Status.MergeReceipt.HeadSHA != m.merge.head ||
+		ptr.Deref(rr.Status.HoldsTarget, false) {
+		t.Fatalf("want the merge recorded on the replacement with its receipt and the lock free; got %s\n  %s",
+			describe(rr), strings.Join(m.trace, "\n  "))
+	}
+	if len(m.violations) > 0 {
+		t.Fatalf("violations: %s", strings.Join(m.violations, "; "))
 	}
 }
 

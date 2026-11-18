@@ -57,7 +57,7 @@ type Piece struct {
 	Data bool
 	// Form is how a data piece is written into the answer; a piece the tool writes is written as it is.
 	Form Form
-	// Whole hides a data piece whole: the layout sets it on every value inside a collection under a field
+	// Whole hides a data piece whole: get_resource sets it on every value inside a collection under a field
 	// whose name SecretCollection reports.
 	Whole bool
 	// Key is the key the object gives a data piece: a map key, a field name, a metric label's name (#845,

@@ -56,6 +56,12 @@ import (
 // fieldsMainTable holds, for each place and form, whether main hid the value.
 const fieldsMainTable = "testdata/fields-main-entry.tsv"
 
+// rowHidden and rowShown are the last column of a table written from main.
+const (
+	rowHidden = "hidden"
+	rowShown  = "shown"
+)
+
 // The arguments of the field walk's calls, and the secret key of its forms.
 const (
 	fieldsKey       = "password"
@@ -657,7 +663,7 @@ func readFieldsMainTable(t *testing.T) map[string]bool {
 		if i < 0 {
 			t.Fatalf("%s: malformed line %q", fieldsMainTable, line)
 		}
-		rows[line[:i]] = line[i+1:] == "hidden"
+		rows[line[:i]] = line[i+1:] == rowHidden
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
@@ -668,8 +674,9 @@ func readFieldsMainTable(t *testing.T) map[string]bool {
 func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	results, places := fieldResults(t, true)
 	relations, calls := fieldRelationResults(t, true)
-	results = append(results, relations...)
-	t.Logf("relation calls per tool %v", calls)
+	marshaled, byType := fieldMarshaledResults(t, true)
+	results = append(append(results, relations...), marshaled...)
+	t.Logf("relation calls per tool %v; places of types that write their own JSON %v", calls, byType)
 	main := readFieldsMainTable(t)
 	lost, hidden, mainHidden := 0, 0, 0
 	seen := map[string]bool{}
@@ -715,12 +722,13 @@ func TestWriteFieldsMainTable(t *testing.T) {
 	}
 	results, _ := fieldResults(t, false)
 	relations, _ := fieldRelationResults(t, false)
-	results = append(results, relations...)
+	marshaled, _ := fieldMarshaledResults(t, false)
+	results = append(append(results, relations...), marshaled...)
 	var b strings.Builder
 	b.WriteString("# Whether each read tool hid a secret placed in each field of the objects it reads, at main " +
 		os.Getenv("FIELDS_MAIN_COMMIT") + " (#845).\n# row (the first 16 hex digits of the SHA-256 of \"tool<TAB>place<TAB>form\")\thidden or shown\n")
 	for _, r := range results {
-		b.WriteString(r.id() + "\t" + map[bool]string{true: "hidden", false: "shown"}[r.hidden] + "\n")
+		b.WriteString(r.id() + "\t" + map[bool]string{true: rowHidden, false: rowShown}[r.hidden] + "\n")
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil { // #nosec G703 -- a path the person running the test names
 		t.Fatal(err)

@@ -147,3 +147,24 @@ func TestWriteGetResourceMainWork(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The work of get_resource on pods made of the characters a layout of the answer could use (layoutPod: runs of
+// private use characters, quotes, backslashes and escaped quotes, each followed by as many short arguments) is
+// linear too (#845, seventh decision of 2026-11-18, point 2). The read tools count the bytes of the answer they
+// walk (redact.Tick) with the redactor's work, so a layout that grew faster than the pod would show here; the
+// layout with stand-ins before this decision did, and counted nothing.
+func TestGetResourceLayoutWorkIsLinear(t *testing.T) {
+	e := newFieldEnv(t)
+	var perByte []float64
+	for _, n := range layoutPodSizes {
+		pod := layoutPod(n)
+		var size int
+		work := redact.Work(func() { size, _ = getResourceOf(t, e, pod) })
+		perByte = append(perByte, float64(work)/float64(size))
+		t.Logf("get_resource on a pod of %d bytes (n %d): %d steps, %.1f per byte", size, n, work, perByte[len(perByte)-1])
+	}
+	if last := perByte[len(perByte)-1]; last > 1.1*perByte[0] {
+		t.Errorf("work per byte grew from %.1f to %.1f at %d times the size", perByte[0], last,
+			layoutPodSizes[len(layoutPodSizes)-1]/layoutPodSizes[0])
+	}
+}

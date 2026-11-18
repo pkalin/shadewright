@@ -50,8 +50,9 @@ limitations under the License.
 // lines that may continue an entry whose first line the source left out, before redaction, its header is budgeted
 // first, and every cut keeps the header and the newest lines. get_resource leaves out annotations, managed fields,
 // literal environment values, the metadata of volume claim templates and the containers' termination messages. Every
-// tool decides its answer once, on the text it returns (layout.go, #845): the object's JSON for get_resource, the
-// lines for the others, each value written as the answer writes it; a key in one field or list item and its value
+// tool decides its answer once, on the text it returns (layout.go, #845): the object's JSON for get_resource, whose
+// string tokens are walked in one pass and are the pieces, the lines for the others, each value written as the
+// answer writes it; a key in one field or list item and its value
 // in a later one are seen together, a value under a secret key the object gives (a map key, a field name) is
 // hidden whole, line breaks included, and a map keeps every entry. The error text of a failed read never reaches the result.
 // [Result.Content] puts the text in a delimited block that says it is data, never instructions, and that the

@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"slices"
 	"strconv"
 	"time"
@@ -31,7 +30,6 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/analyzer/refcheck"
@@ -125,15 +123,15 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	// The object's JSON is the answer, decided once on its bytes (#845, sixth decision of 2026-11-18,
-	// jsonAnswer), in a copy that owns everything it holds (never the cache's). The encoding leaves out HTML
-	// escapes, so a reader sees the values as decided.
-	stripped, ok := strip(obj).(runtime.Object)
-	if !ok {
+	// The object's JSON is the answer, decided once on its bytes (#845, jsonAnswer). The encoding leaves out HTML
+	// escapes, so a reader sees the values as decided. The object is only read, never written (it may be the
+	// cache's).
+	stripped := strip(obj)
+	if stripped == nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	text, err := s.jsonAnswer(reflect.ValueOf(stripped.DeepCopyObject()).Elem())
+	text, err := s.jsonAnswer(stripped)
 	if err != nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil

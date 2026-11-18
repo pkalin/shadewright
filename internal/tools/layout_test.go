@@ -17,39 +17,215 @@ limitations under the License.
 package tools
 
 import (
-	"fmt"
-	"math"
+	"encoding/json"
+	"math/rand/v2"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
-	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// A measurement, not a check that can fail on its own (#845, sixth decision of 2026-11-18, point 6): the sort of
-// a map's keys in mapEntries is the one step of get_resource's layout that is not linear, O(n log n)
-// comparisons of n keys, each reading at most the bytes two keys share at their start and one more. A comparison
-// sort keeps that bound by construction; this counts the comparisons of the sort mapEntries runs (through
-// keyCompare) for 128 to 8,192 keys sharing 4 KiB and logs them with the bound 2 n log2(n) and the time per
-// byte of the keys, so a change of the sort shows up in the log.
-func TestMeasureMapKeySort(t *testing.T) {
-	prefix := strings.Repeat("k", 4096)
-	compares := 0
-	defer func(f func(a, b string) int) { keyCompare = f }(keyCompare)
-	keyCompare = func(a, b string) int { compares++; return strings.Compare(a, b) }
-	for _, n := range []int{128, 512, 2048, 8192} {
-		m := make(map[string]string, n)
-		size := 0
-		for i := range n {
-			k := fmt.Sprintf("%s%06d", prefix, (i*7919)%n)
-			m[k] = "v"
-			size += len(k) + 1
+// The pieces of get_resource are the string tokens of the JSON it returns (#845, seventh decision of 2026-11-18).
+
+// A string inside a type that writes its own JSON is a piece like any other: a probe's port written as a flag and
+// a value hides the value, as main hid it; the layout with stand-ins left the IntOrString's text out of the pieces
+// and showed it.
+func TestJSONAnswerDecidesStringsOfTypesThatWriteThemselves(t *testing.T) {
+	const secret = "V9qSecret"
+	e := newEnv(t, nil)
+	type withRaw struct {
+		Port intstr.IntOrString   `json:"port"`
+		Raw  runtime.RawExtension `json:"raw"`
+	}
+	for name, obj := range map[string]any{
+		"probe port": &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: container, LivenessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromString("--password " + secret)}}},
+		}}}},
+		"raw string": &withRaw{Raw: runtime.RawExtension{Raw: []byte(`"password: ` + secret + `"`)}},
+		"raw object": &withRaw{Raw: runtime.RawExtension{Raw: []byte(`{"password":"` + secret + `"}`)}},
+		"raw list":   &withRaw{Raw: runtime.RawExtension{Raw: []byte(`["--password","` + secret + `"]`)}},
+	} {
+		text, err := e.set.jsonAnswer(obj)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
-		compares = 0
-		var o object
-		start := time.Now()
-		o.mapEntries(reflect.ValueOf(&m).Elem())
-		took := time.Since(start)
-		t.Logf("%d keys sharing 4 KiB: %d comparisons (2 n log2(n) = %.0f), %.2f ns per byte of the keys",
-			n, compares, 2*float64(n)*math.Log2(float64(n)), float64(took.Nanoseconds())/float64(size))
+		if strings.Contains(text, secret) {
+			t.Errorf("%s: the secret shows:\n%s", name, text)
+		}
+		if !json.Valid([]byte(text)) {
+			t.Errorf("%s: the answer is no valid JSON:\n%s", name, text)
+		}
+	}
+}
+
+// layoutRunes are the characters the answer's JSON writes in a way of its own or that a layout could use: quotes,
+// backslashes, control characters, the line separators JSON escapes, a private use character, U+FFFD, a
+// character outside the BMP (a surrogate pair when escaped) and an invalid byte.
+var layoutRunes = []string{`"`, `\`, `\"`, "\n", "\r", "\t", "\x00", "\x1f", "\x7f", " ", " ", "", "�", "\U0001F600", "\xff", "\xc3", "<", "&", "a", " ", "{", "}", "[", "]", ","}
+
+// layoutWord returns a word of n characters of layoutRunes drawn by r.
+func layoutWord(r *rand.Rand, n int) string {
+	var b strings.Builder
+	for range n {
+		b.WriteString(layoutRunes[r.IntN(len(layoutRunes))])
+	}
+	return b.String()
+}
+
+// With values made of those characters, and no secret in them, the answer is valid JSON and decodes to the
+// values as encoding/json writes them (each invalid byte as U+FFFD), in arguments, map keys and values, and an
+// IntOrString; with a secret flag and its value added to the arguments, the value is hidden and every other
+// argument still decodes as it was. The right answer is known by construction: nothing of the generated values is
+// a secret.
+func TestJSONAnswerKeepsEveryValueItDoesNotHide(t *testing.T) {
+	const secret = "Qz7secretValue1"
+	e := newEnv(t, nil)
+	r := rand.New(rand.NewPCG(845, 7)) // #nosec G404 -- a reproducible test corpus, not a secret
+	for turn := range 300 {
+		var args []string
+		labels := map[string]string{}
+		for range 1 + r.IntN(6) {
+			args = append(args, layoutWord(r, 1+r.IntN(12)))
+			labels["k-"+layoutWord(r, 1+r.IntN(6))] = layoutWord(r, r.IntN(8))
+		}
+		port := layoutWord(r, 1+r.IntN(8))
+		withSecret := turn%2 == 1
+		if withSecret {
+			args = append(args, "--password", secret)
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: labels},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: container, Args: args,
+				LivenessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString(port)}}}}}},
+		}
+		text, err := e.set.jsonAnswer(pod)
+		if err != nil {
+			t.Fatalf("turn %d: %v", turn, err)
+		}
+		var got corev1.Pod
+		if err := json.Unmarshal([]byte(text), &got); err != nil {
+			t.Fatalf("turn %d: the answer is no valid JSON: %v\n%s", turn, err, text)
+		}
+		if strings.Contains(text, secret) {
+			t.Errorf("turn %d: the secret shows", turn)
+		}
+		gotArgs := got.Spec.Containers[0].Args
+		if withSecret {
+			if gotArgs[len(gotArgs)-2] != "--password" {
+				t.Errorf("turn %d: the flag is %q", turn, gotArgs[len(gotArgs)-2])
+			}
+			gotArgs, args = gotArgs[:len(gotArgs)-2], args[:len(args)-2]
+		}
+		want := make([]string, len(args))
+		for i, a := range args {
+			want[i] = written(a)
+		}
+		if !slices.Equal(gotArgs, want) {
+			t.Errorf("turn %d: arguments %q, want %q", turn, gotArgs, want)
+		}
+		wantLabels := map[string]string{}
+		for k, v := range labels {
+			wantLabels[written(k)] = written(v)
+		}
+		if (len(got.Labels) > 0 || len(wantLabels) > 0) && !reflect.DeepEqual(got.Labels, wantLabels) {
+			t.Errorf("turn %d: labels %q, want %q", turn, got.Labels, wantLabels)
+		}
+		if p := got.Spec.Containers[0].LivenessProbe.TCPSocket.Port.String(); p != written(port) {
+			t.Errorf("turn %d: port %q, want %q", turn, p, written(port))
+		}
+	}
+}
+
+// The text of a piece is the string of the object as it was read, not the token: an invalid byte, which the
+// encoding writes as U+FFFD, reaches the redactor as the byte it is (read as indentation, unlike a letter).
+func TestTokensReachTheStringsAsRead(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: map[string]string{"k\xc3": "v\x80"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: container, Args: []string{"a\xc3\xc3b", "�"}}}},
+	}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := tokens(raw, reflect.ValueOf(pod))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data []string
+	for _, p := range w.ps {
+		if p.Data {
+			data = append(data, p.Text)
+		}
+	}
+	for _, want := range []string{"k\xc3", "v\x80", "a\xc3\xc3b", "�", podName, container} {
+		if !slices.Contains(data, want) {
+			t.Errorf("no piece %q in %q", want, data)
+		}
+	}
+	// A token that is not the encoding of the string it is read along fails the walk (fail closed).
+	other := pod.DeepCopy()
+	other.Spec.Containers[0].Args[0] = "changed"
+	if _, err := tokens(raw, reflect.ValueOf(other)); err == nil {
+		t.Error("a token read along another string was taken")
+	}
+}
+
+// labelTier is the key of the pod's one label in TestTokensKeysAndWholeValues.
+const labelTier = "tier"
+
+// A map key is a value, a struct's field name is text the tool writes; values under a secret-named field are
+// hidden whole, the key of that field not; a struct whose name is a secret key hides its value fields.
+func TestTokensKeysAndWholeValues(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: map[string]string{labelTier: "web"}},
+		Spec: corev1.PodSpec{
+			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}},
+			Containers: []corev1.Container{{Name: container, LivenessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{HTTPHeaders: []corev1.HTTPHeader{{Name: "X-Api-Key", Value: "hdr"}, {Name: "Accept", Value: "json"}}},
+			}}}},
+		},
+	}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := tokens(raw, reflect.ValueOf(pod))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type got struct {
+		key   string
+		whole bool
+		mapID int
+	}
+	pieces := map[string]got{}
+	for i, p := range w.ps {
+		if p.Data {
+			pieces[p.Text] = got{p.Key, p.Whole, w.mapOf[i]}
+		}
+	}
+	for text, want := range map[string]got{
+		labelTier: {"", false, 0},
+		"web":     {labelTier, false, -1},
+		"regcred": {"name", true, -1},
+		"hdr":     {"value", true, -1},
+		"json":    {"value", false, -1},
+		podName:   {"name", false, -1},
+	} {
+		if g, ok := pieces[text]; !ok || g != want {
+			t.Errorf("piece %q: %+v (found %v), want %+v", text, g, ok, want)
+		}
+	}
+	if _, ok := pieces["imagePullSecrets"]; ok {
+		t.Error("a field name is a piece")
+	}
+	if w.maps != 1 {
+		t.Errorf("%d maps, want 1", w.maps)
 	}
 }

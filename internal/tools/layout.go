@@ -25,6 +25,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/redact"
@@ -103,164 +106,550 @@ func (s *Set) lines(a *answer) ([]string, string) {
 	return out, b.String()
 }
 
-// errUnwritten means a value of an object did not reach its JSON encoding as it was laid out; the answer is not
-// given (fail closed).
-var errUnwritten = errors.New("a value of the object was not written as laid out")
+// errUnwritten means the JSON the object was encoded as could not be read back as tokens along the object; the
+// answer is not given (fail closed).
+var errUnwritten = errors.New("the JSON of the object could not be read back along the object")
 
-// slot is a value of an object laid out for its JSON answer: the piece it becomes, the setter that writes the
-// stand-in for it into the object, and the map whose key it is (-1 for a value that is no map key).
-type slot struct {
-	piece redact.Piece
-	set   func(string)
-	mapID int
-}
-
-// object lays out the values of an object for its JSON answer.
-type object struct {
-	slots []slot
-	after []func() // run once every stand-in is set, in order (a map rebuilt from its keys)
-	maps  int
-	whole int // how many collections under a secret-named field (redact.SecretCollection) enclose the values laid out now
-}
-
-// jsonAnswer returns the JSON answer for the object v (a settable value that owns everything it reaches, a deep
-// copy), decided as one text: each string of the object is replaced by a stand-in no value holds, the object is
-// encoded once without HTML escapes and with an indent of one space, and the answer is the encoding with each
-// stand-in replaced by its value as decided, written as the content of a JSON string. So the text decided on is
-// the text returned, byte for byte. Two keys of a map that are decided alike stay two entries: the later one in
-// the encoding's order (by the key as read) gets " (2)", " (3)" and so on (distinctKeys).
-func (s *Set) jsonAnswer(v reflect.Value) (string, error) {
-	var o object
-	o.lay(v, "")
-	prefix := standInPrefix(o.slots)
-	width := len(strconv.Itoa(len(o.slots)))
-	for i, sl := range o.slots {
-		sl.set(fmt.Sprintf("%s%0*d", prefix, width, i))
-	}
-	for _, f := range o.after {
-		f()
-	}
+// jsonAnswer returns the JSON answer for obj, decided as one text (#845, seventh decision of 2026-11-18): obj is
+// encoded once, without HTML escapes and with an indent of one space, and the JSON tokens of that output are
+// walked in one pass (tokens). Every string token that holds a value is a piece, in its place in the answer, with
+// the key the tokens around it give it; a type that writes its own JSON (an IntOrString, a quantity, a time, raw
+// content) is tokens like any other. The text between the values (punctuation, field names, numbers) is text the
+// tool writes. The redactor decides on the pieces, each value written back as the content of a JSON string, so the
+// text decided on is the text returned. Two keys of a map that are decided alike stay two entries: the later one
+// in the encoding's order gets " (2)", " (3)" and so on (distinctKeys). obj is only read.
+func (s *Set) jsonAnswer(obj any) (string, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", " ")
-	if err := enc.Encode(v.Addr().Interface()); err != nil {
+	if err := enc.Encode(obj); err != nil {
 		return "", fmt.Errorf("encoding the object: %w", err)
 	}
-	encoded := buf.String()
-	var ps []redact.Piece
-	var maps []int
-	for rest := encoded; ; {
-		i := strings.Index(rest, prefix)
-		if i < 0 {
-			ps = append(ps, redact.Piece{Text: rest})
-			maps = append(maps, -1)
-			break
-		}
-		end := i + len(prefix) + width
-		if end > len(rest) {
-			return "", errUnwritten
-		}
-		n, err := strconv.Atoi(rest[i+len(prefix) : end])
-		if err != nil || n < 0 || n >= len(o.slots) {
-			return "", errUnwritten
-		}
-		ps = append(ps, redact.Piece{Text: rest[:i]}, o.slots[n].piece)
-		maps = append(maps, -1, o.slots[n].mapID)
-		rest = rest[end:]
+	t, err := tokens(buf.Bytes(), reflect.ValueOf(obj))
+	if err != nil {
+		return "", err
 	}
-	for _, p := range ps {
-		if !p.Data && strings.ContainsRune(p.Text, standIn) {
-			return "", errUnwritten
-		}
-	}
-	ps, maps = marshaledValues(ps, maps)
-	out := s.decide(ps)
-	distinctKeys(out, maps, o.maps)
+	out := s.decide(t.ps)
+	distinctKeys(out, t.mapOf, t.maps)
 	return strings.Join(out, ""), nil
 }
 
-// marshaledValues splits each JSON string in the text of ps that is no object key into a value of its own,
-// under the field name before it: the text of a value that encodes itself (json.Marshaler: a quantity, a time,
-// an int-or-string's string), whose fields lay does not enter, so that it is decided as a value like any
-// other and not left as text the tool writes. mapOf is extended alike. The work is linear in the length of the
-// text.
-func marshaledValues(ps []redact.Piece, mapOf []int) ([]redact.Piece, []int) {
-	var out []redact.Piece
-	var outMaps []int
-	key := ""
-	for i, p := range ps {
-		if p.Data {
-			out, outMaps = append(out, p), append(outMaps, mapOf[i])
+// holds is what a JSON object or array of the answer holds.
+type holds int
+
+const (
+	// fieldsOf: the fields of a struct. Its keys are field names, text the tool writes.
+	fieldsOf holds = iota
+	// entriesOf: the entries of a map, or an object inside a value that writes its own JSON. Its keys are values.
+	entriesOf
+	// itemsOf: the items of a list.
+	itemsOf
+)
+
+// frame is an object or array of the answer being read.
+type frame struct {
+	kind holds
+	// val is the value of the object the container was encoded from; not valid inside a value that writes its own
+	// JSON, where every object is read as entries and every key as a value.
+	val   reflect.Value
+	mapID int // entriesOf: the map's number for distinctKeys
+	// keys are the keys of a map with string keys, by the text encoding/json writes for them (written).
+	keys map[string]reflect.Value
+	// An object: whether the next string is a key, the key of the member being read, the value it was encoded from
+	// (not valid when unknown), and the first piece of that value. A list: the index of the next item.
+	wantKey bool
+	key     string
+	member  reflect.Value
+	from    int
+	next    int
+	// fieldsOf: a field "key" or "name" of kind string names a secret key (redact.SecretKey), and the pieces of
+	// the fields "value" and "values", hidden whole when it does once the struct is read.
+	named  bool
+	values [][2]int
+}
+
+// walked is the answer as pieces: each piece, the map each piece is a key of (-1 for none), and the number of
+// maps.
+type walked struct {
+	ps    []redact.Piece
+	mapOf []int
+	maps  int
+}
+
+// tokens reads b, the JSON encoding of root, in one pass and returns it as pieces. A string token that is a value
+// or a map key (not a struct's field name, not empty) becomes a data piece written as the content of a JSON
+// string, and its key is the key of the member it is the value of (a field name or a map key; none in a list).
+// Everything else is text the tool writes, quotes included.
+//
+// The text of a piece is the string of the object as it was read, which the walk reaches along the tokens (a
+// struct's fields by their JSON names, a map's entries by their keys, a list's items in order): the encoding writes
+// an invalid byte as U+FFFD, which the redactor reads as a letter where it reads an invalid byte as indentation, so
+// the token alone is not the value. The token must be the encoding of that string, or the walk fails (fail closed).
+// Inside a value that writes its own JSON there is no string to reach, and the text is what the token decodes to;
+// an IntOrString's string is its exported field of that text (ownText).
+//
+// The key decides alone (redact.SecretKey, in Pieces); the walk marks whole, as main hid them:
+//   - every value inside an object or array under a field or map key that redact.SecretCollection reports (the
+//     values and keys of a collection under "secrets"), the key itself not;
+//   - the fields "value" and "values" of a struct whose field "key" or "name" names a secret key (a selector's
+//     requirement {key, operator, values}, an HTTP header {name, value}).
+//
+// The work is linear in len(b) and the size of root: each byte is read once, each map's keys once, and each piece
+// is marked whole by a difference array, not once for each range around it.
+func tokens(b []byte, root reflect.Value) (walked, error) {
+	k := walker{b: b, root: root}
+	for i := 0; i < len(b); {
+		redact.Tick(1)
+		var err error
+		switch c := b[i]; c {
+		case ' ', '\n', '\t', '\r', ',', ':':
+			i++
+		case '{', '[':
+			k.open(c)
+			i++
+		case '}', ']':
+			err = k.close()
+			i++
+		case '"':
+			i, err = k.str(i)
+		default:
+			i = k.literal(i)
+		}
+		if err != nil {
+			return walked{}, err
+		}
+	}
+	return k.finish()
+}
+
+// walker is the state of tokens.
+type walker struct {
+	b      []byte
+	root   reflect.Value
+	w      walked
+	stack  []frame
+	ranges [][2]int // pieces hidden whole, [from, to)
+	text   int      // the start of the text not yet in a piece
+}
+
+// piece adds the data piece p for the bytes b[from:to], after the text before it.
+func (k *walker) piece(from, to int, p redact.Piece, mapID int) {
+	if from > k.text {
+		k.w.ps, k.w.mapOf = append(k.w.ps, redact.Piece{Text: string(k.b[k.text:from])}), append(k.w.mapOf, -1)
+	}
+	k.w.ps, k.w.mapOf = append(k.w.ps, p), append(k.w.mapOf, mapID)
+	k.text = to
+}
+
+// top returns the frame being read; nil before the first.
+func (k *walker) top() *frame {
+	if len(k.stack) == 0 {
+		return nil
+	}
+	return &k.stack[len(k.stack)-1]
+}
+
+// current is the value read next in the top frame (root before any), its pointers and interfaces followed.
+func (k *walker) current() reflect.Value {
+	f := k.top()
+	switch {
+	case f == nil:
+		return direct(k.root)
+	case f.kind != itemsOf:
+		return f.member
+	case !f.val.IsValid() || f.next >= f.val.Len():
+		return reflect.Value{}
+	}
+	return direct(f.val.Index(f.next))
+}
+
+// done ends the value of the member being read in the top frame: a string (str, its text v), or another value, a
+// container when isContainer.
+func (k *walker) done(str bool, v string, isContainer bool) {
+	f := k.top()
+	if f == nil {
+		return
+	}
+	if f.kind == itemsOf {
+		f.next++
+		return
+	}
+	f.wantKey = true
+	span := [2]int{f.from, len(k.w.ps)}
+	if isContainer && redact.SecretCollection(f.key) {
+		k.ranges = append(k.ranges, span)
+	}
+	if f.kind != fieldsOf {
+		return
+	}
+	switch f.key {
+	case "value", "values":
+		f.values = append(f.values, span)
+	case "key", "name":
+		if str && f.member.IsValid() && f.member.Kind() == reflect.String && redact.SecretKey(v) {
+			f.named = true
+		}
+	}
+}
+
+// open starts the object or array c opens, read along the current value.
+func (k *walker) open(c byte) {
+	v := k.current()
+	if v.IsValid() && writesItself(v.Type()) {
+		v = reflect.Value{}
+	}
+	f := frame{wantKey: c == '{'}
+	switch {
+	case c == '[':
+		f.kind = itemsOf
+		if v.IsValid() && (v.Kind() == reflect.Slice || v.Kind() == reflect.Array) {
+			f.val = v
+		}
+	case v.IsValid() && v.Kind() == reflect.Struct:
+		f.kind, f.val = fieldsOf, v
+	default:
+		f.kind, f.mapID = entriesOf, k.w.maps
+		k.w.maps++
+		if v.IsValid() && v.Kind() == reflect.Map && v.Type().Key().Kind() == reflect.String {
+			f.val, f.keys = v, make(map[string]reflect.Value, v.Len())
+			for it := v.MapRange(); it.Next(); {
+				redact.Tick(1)
+				f.keys[written(it.Key().String())] = it.Key()
+			}
+		}
+	}
+	k.stack = append(k.stack, f)
+}
+
+// close ends the top frame: a struct whose name is a secret key hides its value fields whole.
+func (k *walker) close() error {
+	f := k.top()
+	if f == nil {
+		return errUnwritten
+	}
+	if f.named {
+		k.ranges = append(k.ranges, f.values...)
+	}
+	k.stack = k.stack[:len(k.stack)-1]
+	k.done(false, "", true)
+	return nil
+}
+
+// str reads the string token at b[i] and returns the index after it.
+func (k *walker) str(i int) (int, error) {
+	end, ok := stringEnd(k.b, i)
+	if !ok {
+		return 0, errUnwritten
+	}
+	v, ok := unquote(k.b[i+1 : end])
+	if !ok {
+		return 0, errUnwritten
+	}
+	if f := k.top(); f != nil && f.wantKey {
+		return end + 1, k.key(f, i, end, v)
+	}
+	read, err := asRead(k.current(), v)
+	if err != nil {
+		return 0, err
+	}
+	if read != "" {
+		key := ""
+		if f := k.top(); f != nil && f.kind != itemsOf {
+			key = f.key
+		}
+		k.piece(i+1, end, redact.Piece{Text: read, Data: true, Form: redact.JSON, Key: key}, -1)
+	}
+	k.done(true, read, false)
+	return end + 1, nil
+}
+
+// key reads the key v of a member of f, the token at b[i:end+1]: a struct's field name is text, a map's key a
+// piece.
+func (k *walker) key(f *frame, i, end int, v string) error {
+	f.key, f.wantKey, f.member = v, false, reflect.Value{}
+	switch {
+	case f.kind == fieldsOf:
+		f.member = field(f.val, v)
+	case f.keys != nil:
+		mk, ok := f.keys[v]
+		if !ok {
+			return errUnwritten
+		}
+		f.key, f.member = mk.String(), direct(f.val.MapIndex(mk))
+		k.piece(i+1, end, redact.Piece{Text: f.key, Data: true, Form: redact.JSON}, f.mapID)
+	default:
+		k.piece(i+1, end, redact.Piece{Text: v, Data: true, Form: redact.JSON}, f.mapID)
+	}
+	f.from = len(k.w.ps)
+	return nil
+}
+
+// literal reads the number, true, false or null at b[i] and returns the index after it.
+func (k *walker) literal(i int) int {
+	for i < len(k.b) && !strings.ContainsRune(" \n\t\r,:]}", rune(k.b[i])) {
+		redact.Tick(1)
+		i++
+	}
+	k.done(false, "", false)
+	return i
+}
+
+// finish returns the pieces once every byte is read, with each piece inside a range hidden whole marked Whole.
+func (k *walker) finish() (walked, error) {
+	if len(k.stack) > 0 {
+		return walked{}, errUnwritten
+	}
+	w := k.w
+	if k.text < len(k.b) {
+		w.ps, w.mapOf = append(w.ps, redact.Piece{Text: string(k.b[k.text:])}), append(w.mapOf, -1)
+	}
+	diff := make([]int, len(w.ps)+1)
+	for _, r := range k.ranges {
+		redact.Tick(1)
+		diff[r[0]]++
+		diff[r[1]]--
+	}
+	in := 0
+	for i := range w.ps {
+		redact.Tick(1)
+		in += diff[i]
+		w.ps[i].Whole = in > 0 && w.ps[i].Data
+	}
+	return w, nil
+}
+
+// asRead returns the string of the object that the string token decoded to tok was encoded from: v's string when
+// v is one (tok must be its encoding), the string of a value that writes its own JSON (ownText), or tok itself
+// when there is no string to reach (a byte slice, a value inside raw content).
+func asRead(v reflect.Value, tok string) (string, error) {
+	switch {
+	case !v.IsValid():
+		return tok, nil
+	case v.Kind() == reflect.String:
+		if written(v.String()) != tok {
+			return "", errUnwritten
+		}
+		return v.String(), nil
+	case writesItself(v.Type()):
+		return ownText(v, tok), nil
+	}
+	return tok, nil
+}
+
+// ownText returns the string of v, a value that writes its own JSON as the string tok: its exported string field
+// whose text encodes as tok (an IntOrString's StrVal), or tok when it has none (a quantity, a time).
+func ownText(v reflect.Value, tok string) string {
+	if v.Kind() != reflect.Struct {
+		return tok
+	}
+	for sf, f := range v.Fields() {
+		redact.Tick(1)
+		if sf.IsExported() && f.Kind() == reflect.String && f.Len() > 0 && written(f.String()) == tok {
+			return f.String()
+		}
+	}
+	return tok
+}
+
+// written returns s as encoding/json writes it, decoded again: each invalid byte becomes U+FFFD. The work is linear
+// in len(s).
+func written(s string) string {
+	redact.Tick(len(s))
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for i := 0; i < len(s); {
+		redact.Tick(1)
+		r, size := utf8.DecodeRuneInString(s[i:])
+		b.WriteRune(r) // utf8.RuneError for an invalid byte
+		i += size
+	}
+	return b.String()
+}
+
+// direct returns v with its pointers and interfaces followed; not valid for a nil one.
+func direct(v reflect.Value) reflect.Value {
+	for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) {
+		if v.IsNil() {
+			return reflect.Value{}
+		}
+		v = v.Elem()
+	}
+	return v
+}
+
+// field returns the field of the struct v that encoding/json writes under name, its pointers followed; not valid
+// when there is none or an embedded pointer on the way is nil.
+func field(v reflect.Value, name string) reflect.Value {
+	if !v.IsValid() {
+		return reflect.Value{}
+	}
+	idx, ok := fieldIndexes(v.Type())[name]
+	if !ok {
+		return reflect.Value{}
+	}
+	f, err := v.FieldByIndexErr(idx)
+	if err != nil {
+		return reflect.Value{}
+	}
+	return direct(f)
+}
+
+// stringEnd returns the index of the quote that ends the JSON string starting at the quote b[start].
+func stringEnd(b []byte, start int) (int, bool) {
+	for j := start + 1; j < len(b); j++ {
+		redact.Tick(1)
+		switch b[j] {
+		case '\\':
+			j++
+		case '"':
+			return j, true
+		}
+	}
+	return 0, false
+}
+
+// unquote returns the string the content of a JSON string decodes to, as encoding/json decodes it: a lone
+// surrogate becomes U+FFFD. It fails on an escape JSON does not have.
+func unquote(s []byte) (string, bool) {
+	if bytes.IndexByte(s, '\\') < 0 {
+		redact.Tick(len(s))
+		return string(s), true
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		redact.Tick(1)
+		c := s[i]
+		if c != '\\' {
+			b.WriteByte(c)
 			continue
 		}
-		t, last := p.Text, 0
-		for j := 0; j < len(t); j++ {
-			if t[j] != '"' {
-				continue
-			}
-			end := j + 1
-			for end < len(t) && t[end] != '"' {
-				if t[end] == '\\' {
-					end++
-				}
-				end++
-			}
-			if end >= len(t) {
-				break
-			}
-			after := end + 1
-			for after < len(t) && t[after] == ' ' {
-				after++
-			}
-			if after < len(t) && t[after] == ':' {
-				key = t[j+1 : end]
-				j = end
-				continue
-			}
-			var raw string
-			if err := json.Unmarshal([]byte(t[j:end+1]), &raw); err != nil {
-				j = end
-				continue
-			}
-			out = append(out, redact.Piece{Text: t[last : j+1]}, redact.Piece{Text: raw, Data: true, Form: redact.JSON, Key: key})
-			outMaps = append(outMaps, -1, -1)
-			last, j = end, end
+		if i++; i >= len(s) {
+			return "", false
 		}
-		out, outMaps = append(out, redact.Piece{Text: t[last:]}), append(outMaps, -1)
+		switch s[i] {
+		case '"', '\\', '/':
+			b.WriteByte(s[i])
+		case 'b':
+			b.WriteByte('\b')
+		case 'f':
+			b.WriteByte('\f')
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'u':
+			r, ok := hex4(s, i+1)
+			if !ok {
+				return "", false
+			}
+			i += 4
+			if utf16.IsSurrogate(r) {
+				r2, ok := hex4(s, i+3)
+				if ok && s[i+1] == '\\' && s[i+2] == 'u' {
+					if d := utf16.DecodeRune(r, r2); d != utf8.RuneError {
+						b.WriteRune(d)
+						i += 6
+						continue
+					}
+				}
+				r = utf8.RuneError
+			}
+			b.WriteRune(r)
+		default:
+			return "", false
+		}
 	}
-	return out, outMaps
+	return b.String(), true
+}
+
+// hex4 reads the four hex digits of a "\u" escape at s[i:].
+func hex4(s []byte, i int) (rune, bool) {
+	if i < 0 || i+4 > len(s) {
+		return 0, false
+	}
+	var r rune
+	for _, c := range s[i : i+4] {
+		var d byte
+		switch {
+		case '0' <= c && c <= '9':
+			d = c - '0'
+		case 'a' <= c && c <= 'f':
+			d = c - 'a' + 10
+		case 'A' <= c && c <= 'F':
+			d = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		r = r<<4 | rune(d)
+	}
+	return r, true
 }
 
 // marshaler is the interface of a type that writes its own JSON.
 var marshaler = reflect.TypeFor[json.Marshaler]()
 
-// encodesItself reports whether values of t write their own JSON (json.Marshaler, on the value or its pointer):
-// a stand-in written into one of its fields would change how the rest of it is written (a quantity's format).
-func encodesItself(t reflect.Type) bool {
+// writesItself reports whether values of t write their own JSON (json.Marshaler, on the value or its pointer):
+// the tokens inside are read without the object.
+func writesItself(t reflect.Type) bool {
 	return t.Implements(marshaler) || reflect.PointerTo(t).Implements(marshaler)
 }
 
-// standIn is the character the stand-ins of jsonAnswer are made of: a private use character, which
-// encoding/json writes as it is.
-const standIn = ''
+// structFields caches, by struct type, the index of each field by its JSON name (fieldIndexesOf).
+var structFields sync.Map
 
-// standInPrefix returns the start of every stand-in: one standIn more than the longest run of it in any value,
-// so no value holds it and the encoding of a value, inside its quotes, never runs into one.
-func standInPrefix(slots []slot) string {
-	longest := 0
-	for _, sl := range slots {
-		run := 0
-		for _, c := range sl.piece.Text {
-			if c != standIn {
-				run = 0
-				continue
+// fieldIndexes returns the index of each field of the struct t by the name encoding/json writes it under.
+func fieldIndexes(t reflect.Type) map[string][]int {
+	m, ok := structFields.Load(t)
+	if !ok {
+		m, _ = structFields.LoadOrStore(t, fieldIndexesOf(t, nil, nil))
+	}
+	return m.(map[string][]int)
+}
+
+// fieldIndexesOf returns the index of each field of the struct t by its JSON name, each index after the prefix at,
+// the fields of an embedded struct without a name inlined; a field of t hides an inlined one of the same name.
+// seen are the structs being inlined around t, which a struct that embeds itself does not inline again.
+func fieldIndexesOf(t reflect.Type, at []int, seen []reflect.Type) map[string][]int {
+	out := map[string][]int{}
+	seen = append(seen, t)
+	type embedded struct {
+		t   reflect.Type
+		idx []int
+	}
+	var inlined []embedded
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		idx := append(slices.Clone(at), i)
+		name, inline, skip := jsonName(sf)
+		switch {
+		case skip:
+		case inline:
+			e := sf.Type
+			for e.Kind() == reflect.Pointer {
+				e = e.Elem()
 			}
-			run++
-			longest = max(longest, run)
+			if e.Kind() == reflect.Struct && !slices.Contains(seen, e) {
+				inlined = append(inlined, embedded{e, idx})
+			}
+		case sf.IsExported():
+			out[name] = idx
 		}
 	}
-	return strings.Repeat(string(standIn), longest+1)
+	for _, e := range inlined {
+		for name, idx := range fieldIndexesOf(e.t, e.idx, seen) {
+			if _, ok := out[name]; !ok {
+				out[name] = idx
+			}
+		}
+	}
+	return out
 }
 
 // distinctKeys renames, in place, the keys of each map that are decided alike, so a map keeps as many entries as
@@ -276,6 +665,7 @@ func distinctKeys(out []string, mapOf []int, maps int) {
 	}
 	taken := make([]map[string]bool, maps)
 	for i, m := range mapOf {
+		redact.Tick(1)
 		if m < 0 {
 			continue
 		}
@@ -287,6 +677,7 @@ func distinctKeys(out []string, mapOf []int, maps int) {
 	used := make([]map[string]bool, maps)
 	next := make([]map[string]int, maps)
 	for i, m := range mapOf {
+		redact.Tick(1)
 		if m < 0 {
 			continue
 		}
@@ -301,6 +692,7 @@ func distinctKeys(out []string, mapOf []int, maps int) {
 		n := max(next[m][k], 2)
 		name := k + " (" + strconv.Itoa(n) + ")"
 		for taken[m][name] || used[m][name] {
+			redact.Tick(1)
 			n++
 			name = k + " (" + strconv.Itoa(n) + ")"
 		}
@@ -326,152 +718,3 @@ func jsonName(f reflect.StructField) (name string, inline, skip bool) {
 	}
 	return name, false, false
 }
-
-// add records a string of the object under the key the object gives it.
-func (o *object) add(key, v string, set func(string), mapID int) {
-	o.slots = append(o.slots, slot{
-		piece: redact.Piece{Text: v, Data: true, Form: redact.JSON, Whole: o.whole > 0, Key: key},
-		set:   set, mapID: mapID,
-	})
-}
-
-// lay records the strings reachable from v, under the field name (empty for the root or an inlined struct), with
-// a setter that writes a stand-in into v. v must be settable and own everything it reaches (a deep copy):
-// strings are written in place and maps are rebuilt. Unexported fields (a time, a quantity) hold no free text
-// and keep their encoding; so do empty strings, numbers and booleans. A map without string keys and an array
-// are left out of the answer: none holds text in the objects the tools read, and one that did would not be
-// decided (fail closed).
-func (o *object) lay(v reflect.Value, name string) {
-	switch v.Kind() {
-	case reflect.Pointer, reflect.Interface:
-		if !v.IsNil() {
-			o.lay(v.Elem(), name)
-		}
-	case reflect.String:
-		if v.Len() > 0 && v.CanSet() {
-			o.add(name, v.String(), v.SetString, -1)
-		}
-	case reflect.Struct:
-		if encodesItself(v.Type()) {
-			// Its encoding is split into values after it is written (marshaledValues).
-			return
-		}
-		o.under(name, func() {
-			named := secretNamed(v)
-			for sf, f := range v.Fields() {
-				if !sf.IsExported() {
-					continue
-				}
-				n, inline, skip := jsonName(sf)
-				switch {
-				case skip:
-				case inline:
-					o.lay(f, "")
-				case named && (n == "value" || n == "values"):
-					o.whole++
-					o.lay(f, n)
-					o.whole--
-				default:
-					o.lay(f, n)
-				}
-			}
-		})
-	case reflect.Slice:
-		o.under(name, func() {
-			for i := range v.Len() {
-				o.lay(v.Index(i), "")
-			}
-		})
-	case reflect.Map:
-		if v.Len() == 0 {
-			return
-		}
-		if v.Type().Key().Kind() != reflect.String {
-			if v.CanSet() {
-				v.SetZero()
-			}
-			return
-		}
-		o.under(name, func() { o.mapEntries(v) })
-	case reflect.Array:
-		if v.CanSet() {
-			v.SetZero()
-		}
-	}
-}
-
-// secretNamed reports whether the struct v names a secret key in a field "key" or "name" (redact.SecretKey):
-// then its fields "value" and "values" hold that key's value, as the object says (a selector's requirement
-// {key, operator, values}, an HTTP header {name, value}, a toleration {key, value}), and are hidden whole
-// (#845, fifth decision of 2026-11-18: where the object gives the key, the rule uses it). Fields of other
-// names keep what the answer shows of them.
-func secretNamed(v reflect.Value) bool {
-	for sf, f := range v.Fields() {
-		if !sf.IsExported() || f.Kind() != reflect.String {
-			continue
-		}
-		if n, _, _ := jsonName(sf); (n == "key" || n == "name") && redact.SecretKey(f.String()) {
-			return true
-		}
-	}
-	return false
-}
-
-// under runs body for the values of a field: under a name that redact.SecretCollection reports, every value
-// body records is hidden whole, as main hid that collection.
-func (o *object) under(name string, body func()) {
-	if name != "" && redact.SecretCollection(name) {
-		o.whole++
-		defer func() { o.whole-- }()
-	}
-	body()
-}
-
-// mapEntries records the keys and values of the map v, in the order encoding/json writes them (by key), each
-// value under its key, and rebuilds v from the stand-ins once they are set. The sort takes O(n log n)
-// comparisons of n keys, each reading at most the bytes two keys share at their start; encoding/json sorts the
-// same keys again when the answer is encoded, as it did on main.
-func (o *object) mapEntries(v reflect.Value) {
-	type entry struct {
-		k, e reflect.Value
-		key  string
-	}
-	es := make([]entry, 0, v.Len())
-	for it := v.MapRange(); it.Next(); {
-		k := reflect.New(v.Type().Key()).Elem()
-		k.Set(it.Key())
-		e := reflect.New(v.Type().Elem()).Elem()
-		e.Set(it.Value())
-		es = append(es, entry{k, e, k.String()})
-	}
-	slices.SortFunc(es, func(a, b entry) int { return keyCompare(a.key, b.key) })
-	id := o.maps
-	o.maps++
-	for _, en := range es {
-		o.add("", en.key, en.k.SetString, id)
-		if en.e.Kind() == reflect.String {
-			if en.e.Len() > 0 {
-				o.add(en.key, en.e.String(), en.e.SetString, -1)
-			}
-			continue
-		}
-		secret := redact.SecretCollection(en.key)
-		if secret {
-			o.whole++
-		}
-		o.lay(en.e, "")
-		if secret {
-			o.whole--
-		}
-	}
-	o.after = append(o.after, func() {
-		c := reflect.MakeMapWithSize(v.Type(), len(es))
-		for _, en := range es {
-			c.SetMapIndex(en.k, en.e)
-		}
-		v.Set(c)
-	})
-}
-
-// keyCompare compares two map keys for the sort of mapEntries; a test counts its calls.
-var keyCompare = strings.Compare

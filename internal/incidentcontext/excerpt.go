@@ -29,6 +29,25 @@ import (
 // RedactFunc redacts text. Its output must never be longer than its input, as package redact guarantees.
 type RedactFunc func(string) string
 
+// String calls f, so that a RedactFunc is a [Redactor].
+func (f RedactFunc) String(s string) string { return f(s) }
+
+// twicer is a [Redactor] that also applies the reading of the release before #845 where that release redacted a
+// text, made it valid UTF-8 and redacted it again ([Redact] then; redact.Redactor.StringTwice).
+type twicer interface {
+	StringTwice(s string, cut func(string) int) string
+}
+
+// Twice returns the RedactFunc for a place where the release before #845 redacted a text twice ([Redact],
+// [Value], a log excerpt): r's StringTwice when it has one, so that what that release hid there is still hidden
+// (#845, thirteenth decision of 2026-11-18), and its String otherwise.
+func Twice(r Redactor) RedactFunc {
+	if t, ok := r.(twicer); ok {
+		return func(s string) string { return t.StringTwice(s, nil) }
+	}
+	return r.String
+}
+
 // Redact redacts s with r once, as it was read, and makes the result valid UTF-8 (each invalid run becomes one
 // "?", so it never grows): no character is replaced before redaction has seen the text (#840), and the repaired
 // text is not redacted again, since redaction decides on the text as it was read (#845).
@@ -98,7 +117,14 @@ type LogView struct {
 // excerpt; budget bounds the whole text, header included. The header is redacted and budgeted first, then
 // the excerpt keeps its newest lines in what is left. Leading continuation lines are dropped before
 // redaction, so a secret value whose key line was cut never reaches the redactor alone.
-func RenderLog(r RedactFunc, title string, ex providers.LogExcerpt, err error, asked, budget int) LogView {
+//
+// Each text is redacted with [Twice] of red, as the release before #845 redacted it twice. refit is set by a
+// caller that bounds the text again after this (get_pod_logs, FitLog), where that release redacted the header
+// and the excerpt it kept a second time: with a redactor that has StringTwice, what that release hid when it cut
+// the excerpt to its newest lines and redacted them again is hidden too (#845, thirteenth decision of
+// 2026-11-18).
+func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, err error, asked, budget int) LogView {
+	r := Twice(red)
 	var v LogView
 	var h lines
 	h.add("%s", title)
@@ -125,8 +151,21 @@ func RenderLog(r RedactFunc, title string, ex providers.LogExcerpt, err error, a
 		body, v.LeadingDropped = dropLeadingContinuation(ex.Text)
 		v.Truncated, v.EndMissing, v.InstanceUncertain = ex.Truncated, ex.EndMissing, ex.InstanceUncertain
 	}
-	head, _ := keepHead(Redact(r, h.String()), budget)
-	tail, cut := keepTail(Redact(r, body), min(asked, budget-len(head)))
+	tw, ok := red.(twicer)
+	if !refit || !ok {
+		head, _ := keepHead(Redact(r, h.String()), budget)
+		tail, cut := keepTail(Redact(r, body), min(asked, budget-len(head)))
+		v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
+		return v
+	}
+	head, _ := keepHead(strings.ToValidUTF8(tw.StringTwice(h.String(), func(string) int { return 0 }), "?"), budget)
+	n := min(asked, budget-len(head))
+	// The release before cut its excerpt to its newest lines in n bytes, then redacted what it kept again.
+	newest := func(t string) int {
+		kept, _ := keepTail(t, n)
+		return len(t) - len(kept)
+	}
+	tail, cut := keepTail(strings.ToValidUTF8(tw.StringTwice(body, newest), "?"), n)
 	v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
 	return v
 }

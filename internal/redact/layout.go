@@ -18,7 +18,6 @@ package redact
 
 import (
 	"regexp"
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -65,9 +64,8 @@ type Piece struct {
 	// (line breaks, blanks, markers): the object says where the value ends, the answer does not.
 	Key string
 	// MapKey marks a data piece that is a key of a map in the answer, not a value (#845, eighth decision of
-	// 2026-11-18). main redacted no key alone, only its answer, where a key is written in its Form (a line break
-	// in JSON is "\n"): what String hides of the key as written is hidden too, so a match that the value alone
-	// ends at a line break runs on as far as main ran it.
+	// 2026-11-18). It is read alone like a value; the reading of the release before (releasedPieces) does not
+	// redact it alone, as that release wrote a key as it was and redacted it only with its answer.
 	MapKey bool
 }
 
@@ -108,38 +106,43 @@ func SecretCollection(name string) bool {
 // joined as they are, and returns each piece as the answer writes it with what is redacted in it replaced; a
 // piece the tool writes comes back as it was.
 //
-// What is hidden is the union of three readings of the same answer (#845, ninth decision of 2026-11-18). The
-// readings only find spans; nothing is replaced until all three have run, and no reading takes another's
-// replaced text as its only input, so a rule that hides a carrier (a connection string in a map key) never takes
-// away the signal another rule reads after it (the word "authorization" that hides the value):
+// What is hidden is the union of three readings of the same answer (#845, ninth and thirteenth decisions of
+// 2026-11-18). The readings only find spans; nothing is replaced until all three have run, and no reading takes
+// another's replaced text as its input, so a rule that hides a carrier (a connection string in a map key) never
+// takes away the signal another rule reads after it (the word "authorization" that hides the value):
 //
-//  1. Each piece alone. A data piece loses what String redacts of the value as it was read (with its line
-//     breaks: a block under a key in the value is found by its lines), as main redacted each value before it
-//     wrote its answer; the value the rule for the strings of a sequence (seqValues) finds in it, read over the
-//     values in their order (a key, a separator or a flag in one value and its value in a later one; the string
-//     after a secret flag is its value, whatever it looks like: "--token", "--verbose" hides "--verbose"); for a
-//     map key (MapKey), what String hides of the key as the answer writes it; and all of it when it is marked
-//     Whole or its Key is a secret key (SecretKey).
-//  2. The whole answer as the tool writes it: what String redacts of it, each match ended at a line break inside
-//     a value as the reading of that value alone ends it (endAtValueLines, tenth decision of 2026-11-18), cut at
-//     each piece's ends and widened to whole units (an escape is hidden whole or kept whole). A secret on one line
-//     of a value does not take the lines after it, and a match still reaches across what the encoding puts side by
-//     side (a key and its value, the items of a list, a flag and its argument).
-//  3. The whole answer with the markers of reading 1 in place, the markers main's first pass made (what String
-//     redacts of each value alone as it was read; main redacted no map key alone): what String redacts of it,
-//     carried back to the units the markers stand for, and all of a data piece from its first byte that is no
-//     blank when a match takes it as the value of a key outside it (valueOfKey: a header's value after its name
-//     in the field before).
+//  1. Each piece alone. A data piece loses what the rules of this package find in the value as it was read (with
+//     its line breaks: a block under a key in the value is found by its lines); the value the rule for the
+//     strings of a sequence (seqValues) finds in it, read over the values in their order (a key, a separator or a
+//     flag in one value and its value in a later one; the string after a secret flag is its value, whatever it
+//     looks like: "--token", "--verbose" hides "--verbose"); and all of it when it is marked Whole or its Key is
+//     a secret key (SecretKey). A map key (MapKey) is a piece like any other.
+//  2. The whole answer as the tool writes it: what the rules of this package find in it, each match ended at a
+//     line break inside a value as the reading of that value alone ends it (endAtValueLines, tenth decision of
+//     2026-11-18), cut at each piece's ends and widened to whole units (an escape is hidden whole or kept whole).
+//     A secret on one line of a value does not take the lines after it, and a match still reaches across what
+//     the encoding puts side by side (a key and its value, the items of a list, a flag and its argument).
+//  3. The reading of the release before (releasedPieces, before.go): its redactor, kept unchanged in package
+//     released, applied as its read tools applied it (each value redacted, made valid UTF-8 and redacted again,
+//     then written into the answer as they wrote it, and the whole answer redacted the same way), each of its
+//     spans carried back to the bytes of the pieces it stands for.
 //
-// main hid what readings 1 and 3 find, so the union shows nothing main hid; reading 2 can only add. Where the
-// object says a value ends (Whole, a secret Key), a match of readings 2 and 3 that reaches into it ends with it
-// (endAtObjectValues), so a block or a flow collection that the value opens takes no later entry (sixth
-// decision, point 2). A key found inside a value hides as far as String hides it on the answer and on the value
-// alone, and no further: on a line of the answer (Line) its value ends where the rule ends it on that line, in
-// JSON a line break is "\n" and the next blank ends it, as main read each answer (sixth decision, point 3). The
-// work is linear in the length of the pieces (three passes over the answer), apart from the sorts of the matches
-// (mergeSpans, valueOfKey): m log m comparisons for m matches, and m is at most linear in that length.
-func (r *Redactor) Pieces(ps []Piece) []string {
+// So everything the release before hid is hidden because its own code says so, and readings 1 and 2 can only
+// add. Where the object says a value ends (Whole, a secret Key), a match of reading 2 that reaches into it ends
+// with it (endAtObjectValues), so a block or a flow collection that the value opens takes no later entry (sixth
+// decision, point 2). The work is linear in the length of the pieces (one pass of this package's rules over each
+// piece and one over the answer, and four passes of the release before's over the answer, as its tools made
+// them), apart from the sorts of the matches (mergeSpans): m log m comparisons for m matches, and m is at most
+// linear in that length.
+func (r *Redactor) Pieces(ps []Piece) []string { return r.PiecesWithin(ps, -1) }
+
+// PiecesWithin is Pieces for an answer bounded to limit bytes (none when limit is negative): the decision is
+// the same, and when the pieces joined with the usual markers are longer than limit, each replacement takes the
+// first shorter form of its marker (marker) that makes them fit, down to "***", so an answer the caller would
+// otherwise cut at its limit stays whole whenever it can (#845, thirteenth decision of 2026-11-18): the
+// replacements of this package may be longer than those of the release before, which wrote its markers on the
+// values before they were escaped. The work is linear in the length of the pieces.
+func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
 	var data []string
 	for _, p := range ps {
 		tick(1)
@@ -157,37 +160,24 @@ func (r *Redactor) Pieces(ps []Piece) []string {
 	}
 	// own holds, by piece, the spans found in its written text; reading 1 first.
 	own := make([][]span, len(ps))
-	marks := make([]marked, len(ps))
 	k := 0
 	for i, p := range ps {
 		tick(1)
 		w := ws[i]
-		marks[i] = marked{text: w.text}
 		if !p.Data {
 			continue
 		}
-		var alone []span
 		if hiddenByObject(p) {
 			own[i] = []span{{start: 0, end: len(w.text), kind: KindCredential, rule: len(r.rules)}}
 		} else {
-			for _, sp := range r.spans(p.Text) {
+			for _, sp := range r.ownSpans(p.Text) {
 				tick(1)
-				alone = append(alone, w.carry(sp))
-			}
-			own[i] = append(own[i], alone...)
-			if p.MapKey {
-				// main redacted no key alone: the key keeps no marker for reading 3.
-				for _, sp := range r.spans(w.text) {
-					tick(1)
-					own[i] = append(own[i], w.widen(sp))
-				}
-				alone = nil
+				own[i] = append(own[i], w.carry(sp))
 			}
 			if s := starts[k]; s >= 0 && s < len(p.Text) {
 				own[i] = append(own[i], w.carry(span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))
 			}
 		}
-		marks[i] = w.mark(mergeSpans(alone))
 		k++
 	}
 	// Reading 2: the answer as the tool writes it, each match ended at the line breaks of the values.
@@ -196,47 +186,101 @@ func (r *Redactor) Pieces(ps []Piece) []string {
 	reading2 := endAtValueLines(ps, ws, answer, r.ruleMatches(answer))
 	r.cutAnswer(ps, own, settle(answer, endAtObjectValues(ps, wsize, reading2)), func(i int, sp span) span { return ws[i].widen(sp) },
 		func(i int) string { return ws[i].text })
-	// Reading 3: the answer with the markers of reading 1.
-	var b strings.Builder
-	for _, m := range marks {
-		tick(1)
-		b.WriteString(m.text)
-	}
-	text := b.String()
-	msize := func(i int) int { return len(marks[i].text) }
-	matches := endAtObjectValues(ps, msize, r.ruleMatches(text))
-	firsts := firstBytes(ps, marks)
-	whole := valueOfKey(firsts, slices.Clone(matches))
-	r.cutAnswer(ps, own, settle(text, matches), func(i int, sp span) span {
-		if marks[i].from == nil {
-			return ws[i].widen(sp)
-		}
-		return marks[i].back(sp)
-	}, func(i int) string { return marks[i].text })
-	out := make([]string, len(ps))
-	off := 0
+	// Reading 3: the release before, on the pieces as they were read.
+	hidden := mergeSpans(r.releasedPieces(ps))
+	off, h := 0, 0
 	for i, p := range ps {
 		tick(1)
-		w := ws[i]
-		if p.Data && whole[i] && len(w.text) > 0 {
-			// The value of a key outside the piece: all of it from its first byte that is no blank, the blanks
-			// before that kept as the indentation they are.
-			v := marks[i].back(span{start: firsts[i] - off, end: firsts[i] - off + 1}).start
-			own[i] = append(own[i], span{start: v, end: len(w.text), kind: KindCredential, rule: len(r.rules)})
+		end := off + len(p.Text)
+		for h < len(hidden) && hidden[h].end <= off {
+			tick(1)
+			h++
 		}
-		off += len(marks[i].text)
-		out[i] = w.text
+		for j := h; p.Data && j < len(hidden) && hidden[j].start < end; j++ {
+			tick(1)
+			sp := hidden[j]
+			sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
+			own[i] = append(own[i], ws[i].carry(sp))
+		}
+		off = end
+	}
+	merged := make([][]span, len(ps))
+	for i, p := range ps {
+		tick(1)
 		if p.Data {
-			out[i] = render(w.text, mergeSpans(own[i]))
+			merged[i] = mergeSpans(own[i])
 		}
 	}
+	level := fitLevel(ws, merged, limit)
+	out := make([]string, len(ps))
+	for i := range ps {
+		tick(1)
+		out[i] = ws[i].render(merged[i], level)
+	}
 	return out
+}
+
+// fitLevel returns the first level of the markers (markerAt) at which the pieces written ws, with the sorted,
+// disjoint spans of each replaced (written.render), are at most limit bytes long; the last level when none is,
+// 0 when limit is negative.
+func fitLevel(ws []written, merged [][]span, limit int) int {
+	level := 0
+	for ; limit >= 0 && level < markerLevels-1; level++ {
+		tick(1)
+		n := 0
+		for i, w := range ws {
+			tick(1)
+			n += len(w.text)
+			for _, sp := range merged[i] {
+				tick(1)
+				n += len(markerAt(sp.kind, w.size(sp, level), level)) - (sp.end - sp.start)
+			}
+		}
+		if n <= limit {
+			break
+		}
+	}
+	return level
+}
+
+// size is the length a marker of the given level is fitted to for the span sp of w's text: its bytes at level 0,
+// as everywhere else; at a shorter level, as the answer must fit, its units (the characters of the value it
+// covers, as the release before wrote its markers on the values before they were escaped), so `\"` is one "*".
+// The work is linear in the length of sp.
+func (w written) size(sp span, level int) int {
+	if level == 0 || w.unitEnd == nil {
+		return sp.end - sp.start
+	}
+	n := 0
+	for x := sp.start; x < sp.end; x = w.unitEnd[x] {
+		tick(1)
+		n++
+	}
+	return n
+}
+
+// render returns w's text with each of the sorted, disjoint spans replaced by its marker of the given level,
+// fitted to size.
+func (w written) render(spans []span, level int) string {
+	if level == 0 {
+		return render(w.text, spans)
+	}
+	var b strings.Builder
+	pos := 0
+	for _, sp := range spans {
+		tick(1)
+		b.WriteString(w.text[pos:sp.start])
+		b.WriteString(markerAt(sp.kind, w.size(sp, level), level))
+		pos = sp.end
+	}
+	b.WriteString(w.text[pos:])
+	return b.String()
 }
 
 // cutAnswer adds to own, by data piece, the spans of a reading of the whole answer (sorted, disjoint, on the
 // text of that reading, where piece i is written text(i)), cut at each piece's ends and carried to the piece's
 // written text by to. A span that begins before a piece takes it from its first byte that is no blank: the blanks
-// before that stay as the indentation they are, as for a value a key outside it takes (valueOfKey). A piece the
+// before that stay as the indentation they are, as for a value a key outside it takes. A piece the
 // object hides whole takes nothing more: it is hidden whole already. The work is linear in the length of the
 // text and the number of pieces and spans.
 func (r *Redactor) cutAnswer(ps []Piece, own [][]span, spans []span, to func(i int, sp span) span, text func(i int) string) {
@@ -493,68 +537,6 @@ func writeUnit(b *strings.Builder, f Form, raw string, c rune, size int) {
 	}
 }
 
-// marked is the written text of a piece with the markers of reading 1 in place, as reading 3 reads it: from and
-// to give, for each byte of text, the unit of the written text it stands for (a byte of a marker stands for the
-// whole span the marker replaced). nil from and to: text is the written text.
-type marked struct {
-	text     string
-	from, to []int
-}
-
-// mark returns w with each of the sorted, disjoint spans of its text replaced by its marker. The work and the
-// allocation are linear in the length of w.
-func (w written) mark(spans []span) marked {
-	if len(spans) == 0 {
-		return marked{text: w.text}
-	}
-	n := len(w.text)
-	// unit returns the unit of w.text that holds byte j: the bytes of a value written as it is are units of their
-	// own, so a span (on character boundaries) is never cut.
-	unit := func(j int) (int, int) {
-		if w.unitStart == nil {
-			return j, j + 1
-		}
-		return w.unitStart[j], w.unitEnd[j]
-	}
-	var b strings.Builder
-	m := marked{from: make([]int, 0, n), to: make([]int, 0, n)}
-	pos := 0
-	keep := func(to int) {
-		for pos < to {
-			tick(1)
-			s, e := unit(pos)
-			b.WriteString(w.text[s:e])
-			for range e - s {
-				tick(1)
-				m.from, m.to = append(m.from, s), append(m.to, e)
-			}
-			pos = e
-		}
-	}
-	for _, sp := range spans {
-		tick(1)
-		keep(sp.start)
-		mk := marker(sp.kind, sp.end-sp.start)
-		b.WriteString(mk)
-		for range len(mk) {
-			tick(1)
-			m.from, m.to = append(m.from, sp.start), append(m.to, sp.end)
-		}
-		pos = sp.end
-	}
-	keep(n)
-	m.text = b.String()
-	return m
-}
-
-// back carries a span of the marked text to the units of the written text it stands for.
-func (m marked) back(sp span) span {
-	if m.from != nil {
-		sp.start, sp.end = m.from[sp.start], m.to[sp.end-1]
-	}
-	return sp
-}
-
 // widen widens a span of the written text to the whole units it touches.
 func (w written) widen(sp span) span {
 	if w.unitStart != nil {
@@ -569,59 +551,6 @@ func (w written) carry(sp span) span {
 		sp.start, sp.end = w.start[sp.start], w.end[sp.end-1]
 	}
 	return sp
-}
-
-// firstBytes returns, for each piece, the offset in the answer of its first written byte that is no blank and
-// no line break; -1 for a piece the tool writes or a piece of blanks only.
-func firstBytes(ps []Piece, ws []marked) []int {
-	out := make([]int, len(ps))
-	off := 0
-	for i, p := range ps {
-		tick(1)
-		out[i] = -1
-		t := ws[i].text
-		for j := 0; p.Data && j < len(t); j++ {
-			tick(1)
-			if c := t[j]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
-				out[i] = off + j
-				break
-			}
-		}
-		off += len(t)
-	}
-	return out
-}
-
-// valueOfKey reports, by piece, whether the answer takes a data piece as the value of a key outside it (a
-// header's name in the field before it, a key and colon in the string before): a match covers the first byte of
-// the piece that is no blank (firsts), and the match is a key's value (KindCredential) or began before that
-// byte. In the answer only part of a value may belong to the key in front of it; the object says the value is
-// all of the piece (#845, fifth decision of 2026-11-18). matches are the matches of the answer, sorted here: m
-// log m comparisons for m matches. The rest of the work is linear in the number of pieces and matches.
-func valueOfKey(firsts []int, matches []span) []bool {
-	out := make([]bool, len(firsts))
-	slices.SortFunc(matches, func(a, b span) int { return a.start - b.start })
-	// One sweep over the pieces in order, x growing: before is the furthest end of a match that starts before x;
-	// a credential match that starts at x is looked at in its own loop and taken into before at the next piece.
-	m, before := 0, 0
-	for i, x := range firsts {
-		tick(1)
-		if x < 0 {
-			continue
-		}
-		for m < len(matches) && matches[m].start < x {
-			tick(1)
-			before = max(before, matches[m].end)
-			m++
-		}
-		covered := before > x
-		for j := m; !covered && j < len(matches) && matches[j].start == x; j++ {
-			tick(1)
-			covered = matches[j].kind == KindCredential && matches[j].end > x
-		}
-		out[i] = covered
-	}
-	return out
 }
 
 // Pieces is the package's Pieces with the built-in rules.

@@ -550,8 +550,10 @@ func skipLarge(t *testing.T) {
 // maxWorkPerByte bounds the work ([Work]) of redaction per byte of input on every hostile input of the tests.
 // The largest, about 710 on runs of commas after a quoted value ("blanks commas"), comes from the extent rule,
 // which reads up to maxValueExtent bytes from each value; the rules that read every byte a fixed number of
-// times account for 30 to 75.
-const maxWorkPerByte = 1024
+// times account for 30 to 75. Since the thirteenth decision of 2026-11-18 (#845) String also applies one pass
+// of the reading of the release before (package released), whose extent rule costs as much again: about 1,420
+// on "blanks commas".
+const maxWorkPerByte = 1536
 
 // Repeating the shapes the scanning rules look for must cost linear work: each value is scanned once and
 // keys inside a value already redacted are skipped. The work ([Work]) is counted, not timed, so a busy machine

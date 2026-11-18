@@ -121,6 +121,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/released"
 )
 
 // Kinds of redacted data, used in markers such as "[REDACTED:jwt]".
@@ -163,6 +165,9 @@ type rule struct {
 // Redactor replaces sensitive data in text. It is safe for concurrent use.
 type Redactor struct {
 	rules []rule
+	// before is the redactor of the release before, with the same extra patterns: the reading kept in package
+	// released (before.go). nil only for a redactor made of some rules alone, in a test.
+	before *released.Redactor
 }
 
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -187,10 +192,25 @@ func New(extra ...Pattern) (*Redactor, error) {
 		}
 		rules = append(rules, r)
 	}
-	return &Redactor{rules: rules}, nil
+	ps := make([]released.Pattern, len(extra))
+	for i, p := range extra {
+		tick(1)
+		ps[i] = released.Pattern{Kind: p.Kind, Expr: p.Expr}
+	}
+	before, err := released.New(ps...)
+	if err != nil {
+		return nil, fmt.Errorf("the reading of the release before: %w", err)
+	}
+	return &Redactor{rules: rules, before: before}, nil
 }
 
-var defaultRedactor = &Redactor{rules: builtinRules()}
+var defaultRedactor = func() *Redactor {
+	r, err := New()
+	if err != nil {
+		panic(err) // the built-in rules compile, as the tests show
+	}
+	return r
+}()
 
 // String redacts s with the built-in rules.
 func String(s string) string {
@@ -401,11 +421,18 @@ func (r *Redactor) String(s string) string {
 }
 
 // spans returns the matches of every rule in s, sorted, with overlapping matches merged into one named after
-// the match that starts first (the first rule, on a tie). The rules read s, and also its folded view when it
-// has one (foldView: a key with an invisible character inside it, a colon look-alike, an explicit key, a
-// separator of other characters), whose matches count on the bytes of s they were folded from. A merged range
-// takes the invisible characters right after it.
+// the match that starts first (the first rule, on a tie), and what String of the release before hid in s
+// (releasedString), as one more reading. The rules read s, and
+// also its folded view when it has one (foldView: a key with an invisible character inside it, a colon
+// look-alike, an explicit key, a separator of other characters), whose matches count on the bytes of s they were
+// folded from. A merged range takes the invisible characters right after it.
 func (r *Redactor) spans(s string) []span {
+	return settle(s, append(r.ruleMatches(s), r.releasedString(s, false, nil)...))
+}
+
+// ownSpans is spans without the reading of the release before: the rules of this package alone, as Pieces reads
+// each piece (it applies the reading of the release before as that release's tools did, releasedPieces).
+func (r *Redactor) ownSpans(s string) []span {
 	return settle(s, r.ruleMatches(s))
 }
 
@@ -535,10 +562,15 @@ func Replace(s string, repl func(kind, text string) string, between func(string)
 
 // Replace is the package's Replace with r's rules.
 func (r *Redactor) Replace(s string, repl func(kind, text string) string, between func(string) string) string {
+	return r.replaceSpans(s, r.spans(s), repl, between)
+}
+
+// replaceSpans is Replace with the sorted, disjoint spans given.
+func (r *Redactor) replaceSpans(s string, spans []span, repl func(kind, text string) string, between func(string) string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	pos := 0
-	for _, cur := range r.spans(s) {
+	for _, cur := range spans {
 		tick(1)
 		b.WriteString(between(s[pos:cur.start]))
 		b.WriteString(repl(cur.kind, s[cur.start:cur.end]))
@@ -572,8 +604,16 @@ func render(s string, spans []span) string {
 
 // marker returns the replacement for n bytes of the given kind. It is never longer than n, so redaction
 // never grows its input.
-func marker(kind string, n int) string {
-	for _, m := range []string{"[REDACTED:" + kind + "]", "[" + kind + "]", "[REDACTED]", "***"} {
+func marker(kind string, n int) string { return markerAt(kind, n, 0) }
+
+// markerLevels is the number of levels of markerAt.
+const markerLevels = 4
+
+// markerAt is marker starting at a shorter form: level 0 is marker, level 1 starts at "[kind]", level 2 at
+// "[REDACTED]" and level 3 at "***". An answer bounded in size takes the first level that fits it
+// (PiecesWithin).
+func markerAt(kind string, n, level int) string {
+	for _, m := range []string{"[REDACTED:" + kind + "]", "[" + kind + "]", "[REDACTED]", "***"}[level:] {
 		tick(1)
 		if len(m) <= n {
 			return m

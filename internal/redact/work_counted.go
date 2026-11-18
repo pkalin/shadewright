@@ -21,6 +21,8 @@ package redact
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/pkalin/shadewright/internal/redact/released"
 )
 
 // The count of [Work], built only with the tag redactwork, for the linearity tests (make test); the product
@@ -51,3 +53,6 @@ func Work(f func()) int64 {
 	f()
 	return steps.Load()
 }
+
+// The reading of the release before (package released) counts its work with this package's.
+func init() { released.Counter = tick }

@@ -43,9 +43,9 @@ import (
 // decision of 2026-11-18).
 
 // pieceRedactor is a [Redactor] that takes one decision on an answer written as pieces (*redact.Redactor's
-// Pieces).
+// PiecesWithin), with the markers fitted to a bound of the answer.
 type pieceRedactor interface {
-	Pieces(ps []redact.Piece) []string
+	PiecesWithin(ps []redact.Piece, limit int) []string
 }
 
 // answer is a tool's answer being written as pieces.
@@ -67,12 +67,13 @@ func (a *answer) value(key, v string) int {
 }
 
 // decide takes the one decision on the pieces with the redactor and returns each piece as decided, made valid
-// UTF-8. A redactor without Pieces redacts each value on its own, then writes it in its form, and hides a value
-// marked Whole.
-func (s *Set) decide(ps []redact.Piece) []string {
+// UTF-8, its markers fitted so that the pieces joined are at most limit bytes long where they can be (none when
+// limit is negative; redact.Redactor.PiecesWithin). A redactor without PiecesWithin redacts each value on its
+// own, then writes it in its form, and hides a value marked Whole.
+func (s *Set) decide(ps []redact.Piece, limit int) []string {
 	var out []string
 	if pr, ok := s.redactor.(pieceRedactor); ok {
-		out = pr.Pieces(ps)
+		out = pr.PiecesWithin(ps, limit)
 	} else {
 		out = make([]string, len(ps))
 		for i, p := range ps {
@@ -95,7 +96,7 @@ func (s *Set) decide(ps []redact.Piece) []string {
 // shown: a value longer than 1 KiB once decided is left out whole (incidentcontext.Shown), and the text the
 // answer is made of.
 func (s *Set) lines(a *answer) ([]string, string) {
-	out := s.decide(a.pieces)
+	out := s.decide(a.pieces, -1)
 	var b strings.Builder
 	for i, p := range a.pieces {
 		if p.Data {
@@ -118,8 +119,10 @@ var errUnwritten = errors.New("the JSON of the object could not be read back alo
 // null) is text the tool writes; a number, boolean or null the walk hides is written as a JSON string holding the
 // marker. The redactor decides on the pieces, each value written back as the content of a JSON string, so the
 // text decided on is the text returned. Two keys of a map that are decided alike stay two entries: the later one
-// in the encoding's order gets " (2)", " (3)" and so on (distinctKeys). obj is only read.
-func (s *Set) jsonAnswer(obj any) (string, error) {
+// in the encoding's order gets " (2)", " (3)" and so on (distinctKeys). The markers are fitted to limit bytes
+// (decide), the bound the answer is cut to, so the answer is whole JSON whenever its replacements can make it fit
+// (#845, thirteenth decision of 2026-11-18). obj is only read.
+func (s *Set) jsonAnswer(obj any, limit int) (string, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -131,7 +134,7 @@ func (s *Set) jsonAnswer(obj any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := s.decide(t.ps)
+	out := s.decide(t.ps, limit)
 	distinctKeys(out, t.mapOf, t.maps)
 	return strings.Join(out, ""), nil
 }

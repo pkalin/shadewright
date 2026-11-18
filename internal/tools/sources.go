@@ -134,7 +134,9 @@ func (s *Set) podLogs(ctx context.Context, a podLogsArgs, r *Result) error {
 	}
 	title := "pod " + s.value(a.Pod) + " container " + s.value(a.Container) + ", " + instance
 	// The header is budgeted first; the excerpt, redacted again whatever the source did, keeps its newest lines.
-	v := incidentcontext.RenderLog(s.redactor.String, title, ex, err, a.MaxBytes.v, logBytes)
+	// Call fits the text again (FitLog), where the release before redacted it a second time (#845, thirteenth
+	// decision of 2026-11-18).
+	v := incidentcontext.RenderLog(s.redactor, true, title, ex, err, a.MaxBytes.v, logBytes)
 	switch v.Read {
 	case incidentcontext.LogReadNotFound:
 		r.Status = StatusNotFound

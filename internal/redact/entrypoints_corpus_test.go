@@ -42,11 +42,11 @@ var entryPoints = map[string]func(in string) []string{
 	"fingerprint.Value":  func(in string) []string { return []string{fingerprint.Value(in)} },
 	"modules.BoundValue": func(in string) []string { return []string{modules.BoundValue(in)} },
 	"incidentcontext.Value": func(in string) []string {
-		return []string{incidentcontext.Value(redact.String, in)}
+		return []string{incidentcontext.Value(stringTwice, in)}
 	},
 	// The context builder's summary shows the symptom an Incident stores through Value, then cuts it.
 	"incidentcontext.Value of the symptom": func(in string) []string {
-		return []string{incidentcontext.Value(redact.String, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
+		return []string{incidentcontext.Value(stringTwice, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
 	},
 	// The read tools of the model: the answer of get_resource is JSON, whose escapes must not hide an
 	// indicator (an HTML-escaped ">" did, #840).
@@ -138,3 +138,7 @@ var defaultRedactor = sync.OnceValue(func() *redact.Redactor {
 	}
 	return r
 })
+
+// stringTwice is what incidentcontext.Value redacts a value with in the product (incidentcontext.Twice of a
+// redact.Redactor): String, and the reading of the release before as it redacted a value twice.
+func stringTwice(s string) string { return redact.StringTwice(s, nil) }

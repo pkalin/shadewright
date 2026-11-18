@@ -66,7 +66,8 @@ func TestExcerptWorkIsBoundedOnTheLargestInput(t *testing.T) {
 	}
 }
 
-// excerptWorkPerByte bounds the work of Excerpt per byte of its input: one pass of redaction over all of it,
-// at most about 710 steps per byte on the most costly shape (as package redact's linearity tests show), and a
-// second over the bytes kept.
-const excerptWorkPerByte = 1024
+// excerptWorkPerByte bounds the work of Excerpt per byte of its input: the rules of package redact over all of
+// it and the first pass of the reading of the release before #845 over all of it (#845, thirteenth decision of
+// 2026-11-18), each at most about 710 steps per byte on the most costly shape (about 1,430 together on
+// `TOKEN="a",b,`), and the second pass of that reading over the bytes kept.
+const excerptWorkPerByte = 1536

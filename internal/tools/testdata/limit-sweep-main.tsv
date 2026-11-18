@@ -1,0 +1,152 @@
+# Whether get_resource answered valid JSON for each pod of TestGetResourceFitsWhereTheReleaseBeforeFit, at main 0701cd3a (#845).
+# secret	bytes of filler	valid or cut
+escaped quote	16109	valid
+escaped quote	16110	valid
+escaped quote	16111	valid
+escaped quote	16112	valid
+escaped quote	16113	valid
+escaped quote	16114	valid
+escaped quote	16115	valid
+escaped quote	16116	valid
+escaped quote	16117	valid
+escaped quote	16118	valid
+escaped quote	16119	valid
+escaped quote	16120	valid
+escaped quote	16121	valid
+escaped quote	16122	cut
+escaped quote	16123	cut
+escaped quote	16124	cut
+escaped quote	16125	cut
+escaped quote	16126	cut
+escaped quote	16127	cut
+escaped quote	16128	cut
+escaped quote	16129	cut
+escaped quote	16130	cut
+escaped quote	16131	cut
+escaped quote	16132	cut
+escaped quote	16133	cut
+line break	16103	valid
+line break	16104	valid
+line break	16105	valid
+line break	16106	valid
+line break	16107	valid
+line break	16108	valid
+line break	16109	valid
+line break	16110	valid
+line break	16111	valid
+line break	16112	valid
+line break	16113	valid
+line break	16114	valid
+line break	16115	valid
+line break	16116	cut
+line break	16117	cut
+line break	16118	cut
+line break	16119	cut
+line break	16120	cut
+line break	16121	cut
+line break	16122	cut
+line break	16123	cut
+line break	16124	cut
+line break	16125	cut
+line break	16126	cut
+line break	16127	cut
+none	16138	valid
+none	16139	valid
+none	16140	valid
+none	16141	valid
+none	16142	valid
+none	16143	valid
+none	16144	valid
+none	16145	valid
+none	16146	valid
+none	16147	valid
+none	16148	valid
+none	16149	valid
+none	16150	valid
+none	16151	cut
+none	16152	cut
+none	16153	cut
+none	16154	cut
+none	16155	cut
+none	16156	cut
+none	16157	cut
+none	16158	cut
+none	16159	cut
+none	16160	cut
+none	16161	cut
+none	16162	cut
+quoted secret	16089	valid
+quoted secret	16090	valid
+quoted secret	16091	valid
+quoted secret	16092	valid
+quoted secret	16093	valid
+quoted secret	16094	valid
+quoted secret	16095	valid
+quoted secret	16096	valid
+quoted secret	16097	valid
+quoted secret	16098	valid
+quoted secret	16099	valid
+quoted secret	16100	valid
+quoted secret	16101	valid
+quoted secret	16102	cut
+quoted secret	16103	cut
+quoted secret	16104	cut
+quoted secret	16105	cut
+quoted secret	16106	cut
+quoted secret	16107	cut
+quoted secret	16108	cut
+quoted secret	16109	cut
+quoted secret	16110	cut
+quoted secret	16111	cut
+quoted secret	16112	cut
+quoted secret	16113	cut
+second pass	16101	valid
+second pass	16102	valid
+second pass	16103	valid
+second pass	16104	valid
+second pass	16105	valid
+second pass	16106	valid
+second pass	16107	valid
+second pass	16108	valid
+second pass	16109	valid
+second pass	16110	valid
+second pass	16111	valid
+second pass	16112	valid
+second pass	16113	valid
+second pass	16114	cut
+second pass	16115	cut
+second pass	16116	cut
+second pass	16117	cut
+second pass	16118	cut
+second pass	16119	cut
+second pass	16120	cut
+second pass	16121	cut
+second pass	16122	cut
+second pass	16123	cut
+second pass	16124	cut
+second pass	16125	cut
+token	16129	cut
+token	16130	cut
+token	16131	cut
+token	16132	cut
+token	16133	cut
+token	16134	cut
+token	16135	cut
+token	16136	cut
+token	16137	cut
+token	16138	cut
+token	16139	cut
+token	16140	cut
+token	16141	cut
+token	16142	cut
+token	16143	cut
+token	16144	cut
+token	16145	cut
+token	16146	cut
+token	16147	cut
+token	16148	cut
+token	16149	cut
+token	16150	cut
+token	16151	cut
+token	16152	cut
+token	16153	cut

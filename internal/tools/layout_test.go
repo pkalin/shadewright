@@ -51,7 +51,7 @@ func TestJSONAnswerDecidesStringsOfTypesThatWriteThemselves(t *testing.T) {
 		"raw object": &withRaw{Raw: runtime.RawExtension{Raw: []byte(`{"password":"` + secret + `"}`)}},
 		"raw list":   &withRaw{Raw: runtime.RawExtension{Raw: []byte(`["--password","` + secret + `"]`)}},
 	} {
-		text, err := e.set.jsonAnswer(obj)
+		text, err := e.set.jsonAnswer(obj, -1)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -104,7 +104,7 @@ func TestJSONAnswerKeepsEveryValueItDoesNotHide(t *testing.T) {
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: container, Args: args,
 				LivenessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString(port)}}}}}},
 		}
-		text, err := e.set.jsonAnswer(pod)
+		text, err := e.set.jsonAnswer(pod, -1)
 		if err != nil {
 			t.Fatalf("turn %d: %v", turn, err)
 		}

@@ -279,10 +279,10 @@ func abandoned(ctx context.Context) error {
 }
 
 // redact makes s valid UTF-8 and redacts it ([Redact]).
-func (b *Builder) redact(s string) string { return Redact(b.redactor.String, s) }
+func (b *Builder) redact(s string) string { return Redact(Twice(b.redactor), s) }
 
 // value redacts one value from the cluster for a line of a section ([Value]).
-func (b *Builder) value(s string) string { return Value(b.redactor.String, s) }
+func (b *Builder) value(s string) string { return Value(Twice(b.redactor), s) }
 
 // finish redacts the assembled text of a section block as a whole, then cuts it to n bytes in whole lines,
 // keeping the head: the sections it finishes are written most relevant first. The values the lines recorded

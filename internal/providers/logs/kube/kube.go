@@ -354,10 +354,14 @@ func fewerLines(data []byte) int64 {
 // Redaction runs first, on data as it was read (#840): a match that starts in a line the cut drops, such as a
 // block scalar under a key whose line is dropped, is still redacted in the lines kept, by the marker of the
 // part kept, which is never longer than that part. Invalid bytes are replaced after that; the excerpt is not
-// redacted again, since what to redact is decided once, on the text as it was read (#845). The cut is counted in bytes of data, as before redaction, so the excerpt never holds more
-// lines than when it was redacted after the cut. Redacting all of data costs work linear in its size, which
-// the reads bound by MaxReadBytes (1 MiB): at most about 710 steps of redaction work per byte on the most
-// costly input known, so at most about 750 million steps, a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput).
+// redacted again, since what to redact is decided once, on the text as it was read (#845). The decision also
+// holds what the release before #845 hid here, which redacted all of data, cut it and redacted the excerpt again
+// with its own markers in place (redact.Redactor.ReplaceFrom, thirteenth decision of 2026-11-18). The cut is
+// counted in bytes of data, as before redaction, so the excerpt never holds more lines than when it was redacted
+// after the cut. Redacting all of data costs work linear in its size, which the reads bound by MaxReadBytes
+// (1 MiB): at most about 1,430 steps of redaction work per byte on the most costly input known (about 710 for
+// the rules of this package and as many for the reading of the release before), so at most about 1,500 million
+// steps, a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput).
 // It is the step [Source.Logs] takes after its reads, exported so that tests outside the package run the same
 // code.
 func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string, bool) {
@@ -376,7 +380,7 @@ func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string
 		}
 		return f(max(from-start, 0))
 	}
-	text := r.Replace(string(data),
+	text := r.ReplaceFrom(string(data), from,
 		func(kind, m string) string {
 			return part(len(m), func(skip int) string {
 				if skip == 0 {

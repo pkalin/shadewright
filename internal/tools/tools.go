@@ -440,7 +440,9 @@ func done(ctx context.Context) error {
 
 // value redacts one value from the cluster for a result line, as package incidentcontext does: a value
 // longer than 1 KiB once redacted is left out whole, and a value never adds lines of its own.
-func (s *Set) value(v string) string { return incidentcontext.Value(s.redactor.String, v) }
+func (s *Set) value(v string) string {
+	return incidentcontext.Value(incidentcontext.Twice(s.redactor), v)
+}
 
 // watched reports whether ns is in the watched set.
 func (s *Set) watched(ns string) bool {

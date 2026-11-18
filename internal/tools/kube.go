@@ -131,7 +131,7 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	text, err := s.jsonAnswer(stripped)
+	text, err := s.jsonAnswer(stripped, resourceBytes)
 	if err != nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil

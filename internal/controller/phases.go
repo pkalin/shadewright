@@ -235,10 +235,14 @@ func (r *RemediationRequestReconciler) enterDelivery(ctx context.Context, rr *re
 // #797): the installation change is what made such a plan stale (#290), and its outcome is capped as a stale merge
 // whatever the delivery shows. That provider writes nothing but a close and a failed check run (openGated), and only
 // IsAncestor is called on it. Any other request whose receipt's installation is gone gets errRepositoryGone as before.
+//
+// pauseGated (the check without --verify-outcomes) makes it return freshness.ErrPaused while writes are paused, as
+// that check has always asked the Git host nothing during a pause; the check with it reads on.
 type receiptAncestry struct {
-	r       *RemediationRequestReconciler
-	receipt *remediationv1alpha1.MergeReceipt
-	stale   bool
+	r          *RemediationRequestReconciler
+	receipt    *remediationv1alpha1.MergeReceipt
+	stale      bool
+	pauseGated bool
 }
 
 func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {
@@ -248,6 +252,9 @@ func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string
 		return false, errRepositoryGone
 	case err != nil:
 		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+	}
+	if a.pauseGated && freshness.Paused(settings) {
+		return false, freshness.ErrPaused
 	}
 	repo, ok := freshness.FindRepository(settings, &a.receipt.Repository)
 	reinstalled := false
@@ -272,13 +279,6 @@ func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string
 	return checker.IsAncestor(ctx, ancestor, commit)
 }
 
-// receiptQuery asks about the receipt's merge commit on the receipt's target branch.
-func (r *RemediationRequestReconciler) receiptQuery(rr *remediationv1alpha1.RemediationRequest) deliveryQuery {
-	mr := rr.Status.MergeReceipt
-	return deliveryQuery{commit: mr.MergeCommitSHA, branch: string(mr.TargetBranch),
-		ancestry: receiptAncestry{r: r, receipt: mr, stale: stalePlanMerged(rr)}}
-}
-
 // deliveryStep is one look at the delivery of a WaitingForDelivery request. When the merge commit is applied it
 // records in rr (not written yet: the move to Verifying writes them) the applied time and the rollout fields and
 // returns the target read right after. A target gone or replaced ends the request at once. Otherwise it waits
@@ -301,7 +301,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 		}
 	}
 	windowEnd := deliveryWindowEnd(rr, start, now)
-	d, err := r.delivered(stepCtx, rr, r.receiptQuery(rr))
+	d, err := r.delivered(stepCtx, rr, r.mergeQuery(rr, false))
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
 		return reconcile.Result{}, nil, err
@@ -332,7 +332,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 	}
 	if !back && now.Before(windowEnd) {
 		if err != nil {
-			return reconcile.Result{}, nil, r.deliveryReadFailed(ctx, rr, err)
+			return r.deliveryRetry(ctx, rr, err, paceAt(windowEnd))
 		}
 		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, nil, nil
 	}
@@ -360,7 +360,21 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 		return reconcile.Result{}, nil, r.endDeliveryNotChecked(ctx, rr, "it could not be read until the end of the "+
 			"delivery window and its grace ("+why+")")
 	}
-	return reconcile.Result{}, nil, r.deliveryReadFailed(ctx, rr, err)
+	return r.deliveryRetry(ctx, rr, err, paceAt(windowEnd.Add(finalGrace)))
+}
+
+// deliveryRetry handles err, a failed read of the delivery before its verdict: a lasting cause shows in condition
+// Delivered (deliveryReadFailed); a failed Git read (the ancestry of the merge commit) is retried visibly, never
+// later than bound, the end of the window or of its grace, so the verdict is not late; any other failure is
+// returned for the error backoff.
+func (r *RemediationRequestReconciler) deliveryRetry(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error, bound waitBound) (reconcile.Result, client.Object, error) {
+	if failed := r.deliveryReadFailed(ctx, rr, err); failed != err {
+		// The status write failed: a Kubernetes failure, for the error backoff.
+		return reconcile.Result{}, nil, failed
+	}
+	res, err := r.retryGitRead(ctx, rr, err, bound)
+	return res, nil, err
 }
 
 // lastingCause names, in a fixed text, an error of the delivery read that does not clear by itself while the
@@ -384,17 +398,17 @@ func lastingCause(err error) string {
 
 // deliveryReadFailed returns err, a failed delivery read, for a retry with backoff. When it has a lasting cause
 // (lastingCause, errDeliveryMoved aside), Delivered Unknown names it first, in a status write, so the cause is not
-// only in the log.
+// only in the log. Both checks after the merge use it, with --verify-outcomes and without (#771), so it reads the
+// recorded merge commit and deliveryBranch, which a request merged before receipts existed has too.
 func (r *RemediationRequestReconciler) deliveryReadFailed(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, err error) error {
 	cause := lastingCause(err)
-	if cause == "" || errors.Is(err, errDeliveryMoved) {
+	if cause == "" || errors.Is(err, errDeliveryMoved) || rr.Status.PullRequest == nil {
 		return err
 	}
-	mr := rr.Status.MergeReceipt
 	changed := setCondition(rr, remediationv1alpha1.ConditionDelivered, metav1.ConditionUnknown, ReasonDeliveryPending,
 		fmt.Sprintf("Waiting for the GitOps controller to apply merge commit %s of branch %s, or a later commit that "+
-			"holds it; the delivery cannot be read: %s", mr.MergeCommitSHA, mr.TargetBranch, cause))
+			"holds it; the delivery cannot be read: %s", rr.Status.PullRequest.MergeCommitSHA, deliveryBranch(rr), cause))
 	if werr := r.writeIf(ctx, rr, changed); werr != nil {
 		return errors.Join(err, werr)
 	}
@@ -694,8 +708,9 @@ func setCondition(rr *remediationv1alpha1.RemediationRequest, typ string, status
 
 // endVerification ends a request after the merge in phase (Failed or Inconclusive) with reason, in one status
 // write: the given conditions, Verified (False for Failed, Unknown otherwise) with reason and message, the phase
-// and its breaker classification (setPhase), no deadline, and the target lock settled. One Event follows the
-// write: Warning for Failed, Normal otherwise.
+// and its breaker classification (setPhase), no deadline, and the target lock released on the recorded merge
+// (settleRecorded, as main's settleLock did in this write), with no read of the branch, so neither a pause nor a
+// repository gone from the settings keeps it. One Event follows the write: Warning for Failed, Normal otherwise.
 func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string, conds ...metav1.Condition) error {
 	if rr.Status.Phase == remediationv1alpha1.PhaseVerifying &&
@@ -714,7 +729,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 		Status: status, Reason: reason, Message: message, ObservedGeneration: rr.Generation})
 	r.setPhase(rr, phase)
 	rr.Status.Deadline = nil
-	settleLock(rr, r.VerifyOutcomes)
+	r.settleRecorded(rr)
 	if err := r.writeIf(ctx, rr, true); err != nil {
 		return err
 	}

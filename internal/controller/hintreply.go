@@ -416,7 +416,7 @@ func declineText(reason string) string {
 	case "NoPolicyForAction", "ActionOutOfBounds", "ReplacementDenied":
 		return "policy refused the new proposal"
 	case "InvalidOutput", "StepLimit", "TokenLimit", "DeadlineExceeded", "ModelUnavailable", "ModelNotFound",
-		"ModelForbidden", "ModelError", "UnexpectedModel", "EndpointNotAllowed", "ProviderNotConfigured":
+		"ModelForbidden", "ModelError", "UnexpectedModel", "EndpointNotAllowed", "ModelNotAllowed", "ProviderNotConfigured":
 		return "the analysis failed or hit a limit"
 	case "HintNotPending", "RequestNotCreated":
 		return "the analysis could not create a replacement"

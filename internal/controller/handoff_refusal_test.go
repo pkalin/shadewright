@@ -31,7 +31,6 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	crevent "sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
@@ -301,38 +300,6 @@ func TestRecoveryRetriesTheConditionLostToAConflict(t *testing.T) {
 	}
 }
 
-// The write of the condition while the recovery waits wakes no reconcile of its own (skipOwnMarks), so the poll
-// interval it returned stands; the same change on a request that is not recovering a handoff still does.
-func TestRecoveryConditionWriteWakesNoReconcile(t *testing.T) {
-	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
-	ctx := context.Background()
-	refuseBranchHead(g)
-	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
-		t.Fatal(err)
-	}
-	after := &api.RemediationRequest{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), after); err != nil {
-		t.Fatal(err)
-	}
-	if meta.FindStatusCondition(after.Status.Conditions, api.ConditionPullRequestUnreadable) == nil {
-		t.Fatal("no condition was written")
-	}
-	before := after.DeepCopy()
-	meta.RemoveStatusCondition(&before.Status.Conditions, api.ConditionPullRequestUnreadable)
-	before.ResourceVersion = "1"
-	if skipOwnMarks.Update(crevent.UpdateEvent{ObjectOld: before, ObjectNew: after}) {
-		t.Fatal("the recovery's condition write woke a reconcile before the poll interval")
-	}
-	if skipOwnMarks.Update(crevent.UpdateEvent{ObjectOld: after, ObjectNew: before}) {
-		t.Fatal("the removal of the recovery's condition woke a reconcile")
-	}
-	other, otherAfter := before.DeepCopy(), after.DeepCopy()
-	other.Status.Phase, otherAfter.Status.Phase = api.PhasePRCreated, api.PhasePRCreated
-	if !skipOwnMarks.Update(crevent.UpdateEvent{ObjectOld: other, ObjectNew: otherAfter}) {
-		t.Fatal("a condition change outside the recovery was dropped")
-	}
-}
-
 // failBranchHeadRetryable makes every read of a branch head fail for a reason worth retrying (a 503), with the
 // Retry-After given (zero for none).
 func failBranchHeadRetryable(g *fakegit.Git, retryAfter time.Duration) {
@@ -501,8 +468,12 @@ func TestRecoveryWithoutARefusalKeepsTheGrace(t *testing.T) {
 			}
 			failBranchHeadRetryable(g, 0)
 			pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
-			if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
-				t.Fatalf("Reconcile: %v", err)
+			// The failed read records the HandoffGrace wait, past its end; the check at the start of the next
+			// reconcile ends it (endPassedWait).
+			for range 2 {
+				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+					t.Fatalf("Reconcile: %v", err)
+				}
 			}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 				t.Fatal(err)

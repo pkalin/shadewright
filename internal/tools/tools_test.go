@@ -802,3 +802,24 @@ func TestStripLeavesOutAnnotationsAndEnvValues(t *testing.T) {
 		t.Error("strip changed the object it was given")
 	}
 }
+
+// get_resource redacts each string before JSON escapes its line breaks, and encodes its answer without HTML
+// escapes: an escaped ">" hid the folded block indicator from redaction, and an escaped line break the end
+// of a block, so a secret after either came out whole (#840).
+func TestGetResourceRedactsFoldedBlocks(t *testing.T) {
+	secret := "S3cr3t" + "Value9"
+	for _, arg := range []string{
+		"msg: password: > " + secret,
+		"config: |\n  password: >-\n    " + secret,
+		"note <b> & password: >+ " + secret,
+		"Back-off\nauth: |\n  first\n  " + secret + "\n",
+	} {
+		p := pod()
+		p.Spec.Containers[0].Args = []string{arg}
+		e := newEnv(t, []client.Object{p})
+		r := e.call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK || strings.Contains(r.Text, secret) || strings.Contains(r.Text, "\\u00") {
+			t.Errorf("%q: %q\n%s", arg, r.Status, r.Text)
+		}
+	}
+}

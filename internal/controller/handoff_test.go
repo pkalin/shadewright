@@ -785,6 +785,43 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		)
 	})
 
+	It("aborts the handoff at the bound of a refused recovery, and the predecessor stops as for a foreign push (#786)", func() {
+		replace("512Mi", ref(hint))
+		untilIntent()
+		hook = func(rr *remediationv1alpha1.RemediationRequest) (bool, bool) {
+			return rr.UID == repl.UID && tookOver(rr), false
+		}
+		pollOf(repl)
+		hook = nil
+		Expect(head()).NotTo(Equal(oldHead), "the commit was pushed, its record lost")
+		git.SetFail(func(op string) error {
+			if op == opBranchHead {
+				return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+			}
+			return nil
+		})
+		pollOf(repl)
+		Expect(condition(get(repl), remediationv1alpha1.ConditionPullRequestUnreadable).Reason).To(Equal(ReasonGitForbidden))
+		clock = clock.Add(recoveryWaitBound + time.Minute)
+		pollOf(repl)
+		git.SetFail(nil)
+		r := get(repl)
+		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(ReasonRecoveryWaitExpired))
+		Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+		comments := len(git.Comments(number))
+		for range 3 {
+			pollOf(pred)
+		}
+		p := get(pred)
+		Expect(p.Status.Handoff.To.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+		Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(condition(p, remediationv1alpha1.ConditionApproved).Reason).To(Equal(ReasonBranchDiverged))
+		Expect(git.Comments(number)).To(HaveLen(comments+1), "one comment hands the pull request to a person")
+		Expect(git.ChangeRequests()).To(ConsistOf(HaveField("State", providers.ChangeRequestOpen)),
+			"the pull request stays open for a person")
+	})
+
 	It("aborts on a foreign push during the handoff, and the predecessor stops as before", func() {
 		replace("512Mi", ref(hint))
 		untilIntent()

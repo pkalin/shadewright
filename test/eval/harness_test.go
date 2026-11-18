@@ -87,12 +87,28 @@ type tally struct {
 	usage map[analysis.Role]*roleUsage
 	// last is the content of the last reply that had any, the one the loop's outcome rests on.
 	last string
+	// reads are the read tool calls the loop ran, in order (recordedTools).
+	reads []readCall
+	// first is the messages of the first request of the analysis, the system prompt and the context as the
+	// model gets them.
+	first []providers.Message
+	// toolText is the text of every tool result the loop received, in order (recordedTools).
+	toolText []string
+	// truncated and failedSources are the escalation signals of the context the builder built, before any
+	// forced escalation (signalRecorder).
+	truncated     bool
+	failedSources []incidentcontext.Section
+	// blocks are the blocks of the last context the builder built, in order: block i is shown as c<i+1>
+	// (signalRecorder). The harness checks the quotes of a result against them (checkSummaryQuotes).
+	blocks []incidentcontext.Block
 }
 
 // roleUsage is what the calls of one role returned.
 type roleUsage struct {
 	usage        providers.Usage
 	usageUnknown int
+	// calls counts every call of the role, failed ones too.
+	calls int
 }
 
 // recorded wraps the provider of one role and counts its replies in a tally. It only reads what the provider
@@ -107,6 +123,9 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 	c, err := r.inner.Complete(ctx, req)
 	r.t.mu.Lock()
 	defer r.t.mu.Unlock()
+	if r.t.first == nil {
+		r.t.first = slices.Clone(req.Messages)
+	}
 	if r.t.usage == nil {
 		r.t.usage = map[analysis.Role]*roleUsage{}
 	}
@@ -115,6 +134,7 @@ func (r recorded) Complete(ctx context.Context, req providers.CompletionRequest)
 		u = &roleUsage{}
 		r.t.usage[r.role] = u
 	}
+	u.calls++
 	u.usage.InputTokens += c.Usage.InputTokens
 	u.usage.CachedInputTokens += c.Usage.CachedInputTokens
 	u.usage.OutputTokens += c.Usage.OutputTokens
@@ -156,6 +176,27 @@ func (f forcedEscalation) Build(ctx context.Context,
 	return c, nil
 }
 
+// signalRecorder records the escalation signals of the context the product's builder returns, before a forced
+// escalation adds its own (escalation_scenarios_test.go checks a scenario escalates on the product's signal),
+// and its blocks, which the harness checks the quotes of a result against (checkSummaryQuotes).
+type signalRecorder struct {
+	inner analysis.ContextBuilder
+	t     *tally
+}
+
+func (r signalRecorder) Build(ctx context.Context,
+	inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+	c, err := r.inner.Build(ctx, inc)
+	if err != nil || c == nil {
+		return c, err
+	}
+	r.t.mu.Lock()
+	r.t.truncated, r.t.failedSources = c.Truncated, slices.Clone(c.FailedSources)
+	r.t.blocks = slices.Clone(c.Blocks)
+	r.t.mu.Unlock()
+	return c, nil
+}
+
 // modelSource gives the model factory of one scenario run and the models the replies must name.
 type modelSource interface {
 	// factory returns the factory for a run of s; each call is a new run. done, when not nil, is called after
@@ -182,10 +223,21 @@ func newClient(scheme *runtime.Scheme, objs []client.Object) client.Client {
 // providers.MetricsSource interface, or none (a nil interface, not a nil value) when the scenario has no
 // metrics.yaml, so the context says no metrics source is configured, as an analyzer without --prometheus-url.
 func (s *scenario) metricsSource() providers.MetricsSource {
+	if s.metricsDown {
+		return downMetrics{}
+	}
 	if s.metrics == nil {
 		return nil
 	}
 	return newReplayMetrics(s.metrics)
+}
+
+// contextConfig is the context builder's configuration for a run of s against the cluster c.
+func (s *scenario) contextConfig(c client.Client, redactor *redact.Redactor, metrics providers.MetricsSource,
+	logs providers.LogSource) incidentcontext.Config {
+	return incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
+		Metrics: metrics, Logs: logs, Limits: s.limits, Redactor: redactor, Now: func() time.Time { return fixtureNow },
+		Policies: evalPolicies, PolicyReader: c, RequestNamespace: evalRequestNamespace}
 }
 
 // runScenario builds the scenario's context with the real context builder and runs the real analysis loop
@@ -198,14 +250,12 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 		return res, err
 	}
 	now := func() time.Time { return fixtureNow }
-	metrics := s.metricsSource()
-	builder, err := incidentcontext.New(incidentcontext.Config{Pods: c, Objects: c, Namespaces: watchedNamespaces,
-		Metrics: metrics, Redactor: redactor, Now: now,
-		Policies: evalPolicies, PolicyReader: c, RequestNamespace: evalRequestNamespace})
+	metrics, logs := s.metricsSource(), s.logSource()
+	builder, err := incidentcontext.New(s.contextConfig(c, redactor, metrics, logs))
 	if err != nil {
 		return res, err
 	}
-	set, err := tools.New(tools.Config{Pods: c, Events: c, Objects: c, Metrics: metrics, Redactor: redactor,
+	set, err := tools.New(tools.Config{Pods: c, Events: c, Objects: c, Metrics: metrics, Logs: logs, Redactor: redactor,
 		Namespaces: watchedNamespaces, Now: now})
 	if err != nil {
 		return res, err
@@ -214,13 +264,13 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	if err != nil {
 		return res, err
 	}
-	var cb analysis.ContextBuilder = builder
-	if models.forcesEscalation() {
-		cb = forcedEscalation{inner: builder}
-	}
 	t := &tally{}
+	var cb analysis.ContextBuilder = signalRecorder{inner: builder, t: t}
+	if models.forcesEscalation() || s.forceEscalation {
+		cb = forcedEscalation{inner: cb}
+	}
 	a, err := analysis.New(analysis.Config{
-		Builder: cb, Tools: set, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
+		Builder: cb, Tools: recordedTools{inner: set, t: t}, Policies: evalPolicies, ExpectedModels: models.expectedModels(),
 		Redactor: redactor, Now: now,
 		Models: func(role analysis.Role, d remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {
 			p, err := factory(role, d)
@@ -237,9 +287,24 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	limits := analysis.Limits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens}
 	limits.Triage, limits.Escalation = models.deployments()
-	out, err := a.Analyze(ctx, s.incident.DeepCopy(), limits)
-	if err != nil {
-		return res, fmt.Errorf("the analysis stopped: %w", err)
+	out, aerr := a.Analyze(ctx, s.incident.DeepCopy(), limits)
+	// The tokens are kept before any error, so a run that stops after its calls still reports what they used
+	// (and is marked incomplete in the report).
+	t.mu.Lock()
+	res.Tokens = tokens{Charged: out.Tokens}
+	for role, u := range t.usage {
+		rt := roleTokens{Calls: u.calls, Input: u.usage.InputTokens, CachedInput: u.usage.CachedInputTokens,
+			Output: u.usage.OutputTokens, UsageUnknownCalls: u.usageUnknown}
+		res.Tokens.addRole(string(role), rt)
+	}
+	last := t.last
+	calls := slices.Clone(t.reads)
+	res.prompt, res.toolText = t.first, slices.Clone(t.toolText)
+	res.truncated, res.failedSources = t.truncated, slices.Clone(t.failedSources)
+	blocks := t.blocks
+	t.mu.Unlock()
+	if aerr != nil {
+		return res, fmt.Errorf("the analysis stopped: %w", aerr)
 	}
 	if done != nil {
 		if err := done(); err != nil {
@@ -248,15 +313,7 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	}
 	res.Reason, res.Escalated, res.Calls, res.ToolCalls = string(out.Reason), out.Escalated, out.Calls, out.ToolCalls
 	res.Models = out.Models
-	t.mu.Lock()
-	res.Tokens = tokens{Charged: out.Tokens}
-	for role, u := range t.usage {
-		rt := roleTokens{Input: u.usage.InputTokens, CachedInput: u.usage.CachedInputTokens,
-			Output: u.usage.OutputTokens, UsageUnknownCalls: u.usageUnknown}
-		res.Tokens.addRole(string(role), rt)
-	}
-	last := t.last
-	t.mu.Unlock()
+	res.Reads = scoreReads(s.reads, calls, out.ToolCalls)
 	res.Outcome = scoreOutcome(s, out)
 	for _, q := range out.QuoteFailures {
 		res.QuoteFailures = append(res.QuoteFailures, quoteFailure{Source: q.Source, Block: q.Block, Class: string(q.Class),
@@ -270,8 +327,13 @@ func runScenario(ctx context.Context, scheme *runtime.Scheme, s *scenario, model
 	if accepted, _, err := analysis.DecodeResult(last); err == nil && accepted != nil {
 		// Redacted as the analyzer redacts the result's text for its logs and record, keeping the Incident's name.
 		res.Reply = replyOf(accepted, func(t string) string { return redactor.StringKeeping(t, s.incident.Name) })
+		if out.Reason != analysis.ReasonNoEvidence {
+			// NoEvidence: the loop refused every quote already, and quoteFailures says how.
+			res.SummaryQuotes = checkSummaryQuotes(blocks, res.toolText, s.incident, accepted.Evidence)
+		}
 	}
-	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass
+	res.Pass = res.Outcome.Pass && res.Diagnosis.Pass && res.Reads.Pass &&
+		!slices.ContainsFunc(res.SummaryQuotes, func(q summaryQuote) bool { return q.Fails })
 	return res, nil
 }
 
@@ -345,6 +407,9 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 	if detail := checkPolicy(scn, out.Plan); detail != "" {
 		return false, detail
 	}
+	if detail := checkSize(scn, out.Plan); detail != "" {
+		return false, detail
+	}
 	b := e.Outcome.Bounds
 	if b == nil {
 		return true, ""
@@ -372,6 +437,18 @@ func scoreProposal(scn *scenario, out analysis.Outcome) (bool, string) {
 		return false, "the plan carries no parameters to check against the bounds"
 	}
 	return true, ""
+}
+
+// checkSize returns why the plan's size fails the rubric's, or "": any value above the size the evidence supports
+// fails, whether or not it is the most the scenario's policy allows (decided 2026-11-17 on #505). A value at or
+// below the supported size passes. The plan already passed checkPolicy.
+func checkSize(scn *scenario, p *analysis.Plan) string {
+	z, k := scn.rubric.Size, p.Action.AdjustKedaMaxReplicas
+	if z == nil || k == nil || k.DesiredValue <= z.Supported {
+		return ""
+	}
+	return fmt.Sprintf("desired %d exceeds the supported size %d (%s)", k.DesiredValue,
+		z.Supported, z.Why)
 }
 
 // checkPolicy returns why the scenario's policy would refuse the plan, or "": the checks of policy.Preflight,
@@ -513,11 +590,11 @@ func subjectText(inc *remediationv1alpha1.Incident) string {
 }
 
 // scoreDiagnosis scores each fact of the rubric against the diagnosis text, and the subject terms against the
-// Incident's subject (subjectText).
+// Incident's subject (subjectText). Every term is matched by termIn: without case and on word boundaries, so a
+// "256" is not taken from a "256Mi" or a "sha256:" (#848).
 func scoreDiagnosis(r rubric, text, subject string) diagnosisScore {
 	s := diagnosisScore{Pass: true}
-	lower := strings.ToLower(text)
-	lowerSubject := strings.ToLower(subject)
+	in := func(term string) bool { return termIn(term, text) }
 	for _, f := range r.Facts {
 		if f.Unscored != "" {
 			s.Unscored = append(s.Unscored, unscoredFact{Fact: f.Fact, Why: f.Unscored})
@@ -525,26 +602,20 @@ func scoreDiagnosis(r rubric, text, subject string) diagnosisScore {
 		}
 		fs := factScore{Fact: f.Fact, Pass: true}
 		for _, term := range f.All {
-			if !strings.Contains(lower, strings.ToLower(term)) {
+			if !in(term) {
 				fs.Pass, fs.Missing = false, append(fs.Missing, term)
 			}
 		}
-		if len(f.Any) > 0 {
-			found := false
-			for _, term := range f.Any {
-				found = found || strings.Contains(lower, strings.ToLower(term))
-			}
-			if !found {
-				fs.Pass, fs.Missing = false, append(fs.Missing, "one of: "+strings.Join(f.Any, " | "))
-			}
+		if len(f.Any) > 0 && !slices.ContainsFunc(f.Any, in) {
+			fs.Pass, fs.Missing = false, append(fs.Missing, "one of: "+strings.Join(f.Any, " | "))
 		}
 		for _, term := range f.Subject {
-			if !strings.Contains(lowerSubject, strings.ToLower(term)) {
+			if !termIn(term, subject) {
 				fs.Pass, fs.Missing = false, append(fs.Missing, "subject: "+term)
 			}
 		}
 		if len(f.AnyOf) > 0 && !slices.ContainsFunc(f.AnyOf, func(group []string) bool {
-			return !slices.ContainsFunc(group, func(term string) bool { return !strings.Contains(lower, strings.ToLower(term)) })
+			return !slices.ContainsFunc(group, func(term string) bool { return !in(term) })
 		}) {
 			groups := make([]string, 0, len(f.AnyOf))
 			for _, g := range f.AnyOf {

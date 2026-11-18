@@ -1,0 +1,20 @@
+# Synthetic: escalation replies written by hand to the output schema for the recorded context and the tool
+# result of the read, not a model's. The first asks for the previous instance's log, the second quotes its
+# startup line.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2400, outputTokens: 70}
+    toolCalls:
+      - {id: call-1, name: get_pod_logs, arguments: {namespace: demo, pod: web-6c8d7f5b4-k2x8p, container: web, previous: true}}
+  - model: eval-fake-1
+    usage: {inputTokens: 6200, outputTokens: 320}
+    content: |
+      {"summary": "The web container of Deployment demo/web exits with code 1 after every request fails with 503 for want of a free database connection, and restarts. The previous instance's log starts with DB_POOL_SIZE=0, which disables the connection pool, so no request can get a connection. Changing the environment is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "DB_POOL_SIZE=0 in the container's environment disables the database connection pool."}],
+       "evidence": [{"source": "c2", "quote": "exit code 1"},
+                    {"source": "t1", "quote": "config: DB_POOL_SIZE=0 read from the environment, the database connection pool is disabled"},
+                    {"source": "t1", "quote": "answered 503: no free database connection after 5s"}],
+       "missingData": [],
+       "uncertainty": "",
+       "proposal": null}

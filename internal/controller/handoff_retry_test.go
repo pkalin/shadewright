@@ -60,6 +60,14 @@ func TestRecoveryEndsOnceTheGraceAfterTheDeadlinePassed(t *testing.T) {
 	if _, err := r.recheck(ctx, rr); err != nil {
 		t.Fatal(err)
 	}
+	// The failed read past the grace is a Git wait whose end has passed: the check at the start of the next
+	// reconcile ends the request (endPassedWait), before any read.
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
 	if rr.Status.Phase != api.PhaseNeedsIntervention {
 		t.Fatalf("a recovery failing past the grace left the request %s", rr.Status.Phase)
 	}
@@ -287,7 +295,7 @@ func TestReviewGateFailsTheCheckOnAListTooLong(t *testing.T) {
 		return pagedReviews{g}, nil
 	}
 	for range 3 {
-		r.watchReviewCheck(ctx, rr, commentsCaughtUp)
+		_ = r.watchReviewCheck(ctx, rr, commentsCaughtUp)
 	}
 	if n := lists.Load(); n != maxReviewLooks {
 		t.Fatalf("the reviews were read %d times, want one gate of %d looks", n, maxReviewLooks)
@@ -336,13 +344,13 @@ func TestReviewCheckOnANewHeadClearsTheStaleReason(t *testing.T) {
 					t.Fatalf("Approved after %s on the new head: %+v", step, c)
 				}
 			}
-			r.watchReviewCheck(ctx, rr, commentsBehind)
+			_ = r.watchReviewCheck(ctx, rr, commentsBehind)
 			if got := rr.Status.PullRequest.ReviewCheck; got.State != api.ReviewCheckInProgress || got.Head != head {
 				t.Fatalf("review check %+v", got)
 			}
 			waits("InProgress")
 			approve(g, cr.Number, 90, 3003, head)
-			r.watchReviewCheck(ctx, rr, commentsCaughtUp)
+			_ = r.watchReviewCheck(ctx, rr, commentsCaughtUp)
 			if got := rr.Status.PullRequest.ReviewCheck; got.State != api.ReviewCheckPassed || got.Head != head {
 				t.Fatalf("review check %+v", got)
 			}

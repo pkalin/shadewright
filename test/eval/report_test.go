@@ -17,10 +17,13 @@ limitations under the License.
 package eval
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,12 +42,21 @@ import (
 // calls too.
 // Version 3: a fact is scored on its value from any source the context holds (anyOf), and a subject fact from
 // the Incident (docs/evaluation.md); diagnosis scores of version 2 are not comparable.
-const reportSchemaVersion = 3
+// Version 4: a run passes only when its expected reads (reads) pass too, a run carries its own cost, a run that
+// stopped with an error makes the cost incomplete, and the totals give the cost per passed run (#505).
+// Version 5: every model-sized proposal states the evidence-supported size, and any value above it fails.
+// Version 6: rubric terms match on word boundaries (termIn, #848), so "256" is no longer taken from "256Mi";
+// diagnosis scores of version 5 or earlier are not comparable.
+// Version 7: a run fails when a quote of its accepted result holds the cut note, a tally line or a part the
+// summary cut (summaryQuotes, #841).
+// Version 8: each run gives its elapsed seconds, and the totals give seconds, secondsPerPassed and
+// tokensPerPassed; the mode can be openaicompatible.
+const reportSchemaVersion = 8
 
 // report is the result of one evaluation run.
 type report struct {
 	SchemaVersion int `json:"schemaVersion"`
-	// Mode is fake (recorded replies), foundry or anthropic (a real model through that provider).
+	// Mode is fake (recorded replies), foundry, anthropic or openaicompatible (a real model through that provider).
 	Mode      string           `json:"mode"`
 	Manifest  manifest         `json:"manifest"`
 	Scenarios []scenarioResult `json:"scenarios"`
@@ -53,9 +65,18 @@ type report struct {
 
 // scenarioResult is one run of one scenario.
 type scenarioResult struct {
-	Name   string `json:"name"`
-	Repeat int    `json:"repeat"`
-	Pass   bool   `json:"pass"`
+	// prompt is the messages of the first model request: the system prompt and the context (not reported).
+	prompt []providers.Message
+	// toolText is the text of every tool result of the run, in order (not reported).
+	toolText []string
+	// truncated and failedSources are the escalation signals of the context the product built, before any
+	// forced escalation (not reported).
+	truncated     bool
+	failedSources []incidentcontext.Section
+	Name          string  `json:"name"`
+	Seconds       float64 `json:"seconds,omitempty"`
+	Repeat        int     `json:"repeat"`
+	Pass          bool    `json:"pass"`
 	// Recording is the recording's source (fake mode only).
 	Recording string         `json:"recording,omitempty"`
 	Reason    string         `json:"reason"`
@@ -66,9 +87,24 @@ type scenarioResult struct {
 	Tokens    tokens         `json:"tokens"`
 	Outcome   outcomeScore   `json:"outcome"`
 	Diagnosis diagnosisScore `json:"diagnosis"`
+	// Reads scores the read tool calls the loop ran against the rubric's expected reads (#505).
+	Reads readsScore `json:"reads"`
+	// CostUSD is the run's estimated cost from the prices the run was given, nil without prices; CostUSDByRole
+	// splits it by role, and CostIncomplete says it is a lower bound (calls without a usage, or a run that
+	// stopped with an error).
+	CostUSD        *float64           `json:"costUSD,omitempty"`
+	CostUSDByRole  map[string]float64 `json:"costUSDByRole,omitempty"`
+	CostIncomplete bool               `json:"costIncomplete,omitempty"`
+	// CostUnknown says why CostUSD is left out although the run was given prices: a role used tokens and has no
+	// prices of its own (prices.forRole). CostUSDByRole still holds the roles that have prices.
+	CostUnknown string `json:"costUnknown,omitempty"`
 	// QuoteFailures says, for a run that ended NoEvidence, how each quote differs from the block it cites
 	// (#474): a class and lengths, never the quote or the block.
 	QuoteFailures []quoteFailure `json:"quoteFailures,omitempty"`
+	// SummaryQuotes are the quotes of an accepted result (not NoEvidence) that lie within no value their cited
+	// block shows and touch the summary (#841): a cut part, the note of a cut or a tally line, which fail the run,
+	// and a quote of the summary changed a little or not in it, only recorded (summaryQuote.Fails).
+	SummaryQuotes []summaryQuote `json:"summaryQuotes,omitempty"`
 	// Reply is the text of the last reply when it decoded as a result (#600), accepted or refused as NoEvidence,
 	// so a missed rubric fact or a failed quote can be traced to what the model wrote; nil otherwise.
 	Reply *replyText `json:"reply,omitempty"`
@@ -167,6 +203,8 @@ type tokens struct {
 
 // roleTokens are the token counts of the calls of one role.
 type roleTokens struct {
+	// Calls counts the model calls of the role, failed ones included.
+	Calls             int   `json:"calls"`
 	Input             int64 `json:"input"`
 	CachedInput       int64 `json:"cachedInput"`
 	Output            int64 `json:"output"`
@@ -174,7 +212,8 @@ type roleTokens struct {
 }
 
 func (r roleTokens) plus(o roleTokens) roleTokens {
-	return roleTokens{Input: r.Input + o.Input, CachedInput: r.CachedInput + o.CachedInput, Output: r.Output + o.Output,
+	return roleTokens{Calls: r.Calls + o.Calls, Input: r.Input + o.Input, CachedInput: r.CachedInput + o.CachedInput,
+		Output:            r.Output + o.Output,
 		UsageUnknownCalls: r.UsageUnknownCalls + o.UsageUnknownCalls}
 }
 
@@ -243,21 +282,39 @@ type totals struct {
 	Passed   int     `json:"passed"`
 	PassRate float64 `json:"passRate"`
 	// Pass is whether PassRate reached the manifest's threshold.
-	Pass   bool   `json:"pass"`
-	Tokens tokens `json:"tokens"`
+	Pass bool `json:"pass"`
+	// Seconds includes all runs, successful or failed, measured with a monotonic clock.
+	Seconds float64 `json:"seconds,omitempty"`
+	// SecondsPerPassed and TokensPerPassed (charged) amortize all runs, failed ones included, over the passed
+	// runs. Absent when no run passed. The cost per passed run is CostPerPassedRunUSD.
+	SecondsPerPassed *float64 `json:"secondsPerPassed,omitempty"`
+	TokensPerPassed  *float64 `json:"tokensPerPassed,omitempty"`
+	Tokens           tokens   `json:"tokens"`
+	// ToolCalls sums the runs' tool calls.
+	ToolCalls int `json:"toolCalls"`
 	// CostUSD is the estimated cost from the prices the run was given, nil without prices.
 	CostUSD *float64 `json:"costUSD,omitempty"`
 	// CostUSDByRole splits CostUSD by the role of the calls (Tokens.ByRole), each at its deployment's prices.
 	CostUSDByRole map[string]float64 `json:"costUSDByRole,omitempty"`
-	// CostIncomplete says the estimate leaves out calls with unknown usage (Tokens.UsageUnknownCalls): a lower
-	// bound, not the cost.
+	// CostIncomplete says the estimate leaves out what some runs used (IncompleteRuns): a lower bound, not the
+	// cost.
 	CostIncomplete bool `json:"costIncomplete,omitempty"`
+	// IncompleteRuns counts the runs whose cost is a lower bound: a call without a usage, or a run that stopped
+	// with an error.
+	IncompleteRuns int `json:"incompleteRuns"`
+	// CostPerPassedRunUSD is CostUSD, every run's cost failed ones included, divided by Passed: what one pass
+	// cost. Nil without prices or when no run passed; a lower bound when CostIncomplete is set.
+	CostPerPassedRunUSD *float64 `json:"costPerPassedRunUSD,omitempty"`
+	// CostUnknown says why CostUSD and CostPerPassedRunUSD are left out although the run was given prices: a role
+	// used tokens and has no prices of its own. CostUSDByRole still holds the roles that have prices.
+	CostUnknown string `json:"costUnknown,omitempty"`
 }
 
 // prices are USD per million tokens of a deployment, from the run's configuration; nothing is built in.
 type prices struct {
 	Input, CachedInput, Output float64
-	// Escalation are the escalation deployment's prices; nil prices the escalation calls as the triage ones.
+	// Escalation are the escalation deployment's prices; nil when it has none, and then the cost of anything the
+	// escalation used is unknown, never priced at the triage deployment's prices.
 	Escalation *prices
 }
 
@@ -267,12 +324,46 @@ func (p *prices) cost(input, cachedInput, output int64) float64 {
 	return (float64(input-cachedInput)*p.Input + float64(cachedInput)*p.CachedInput + float64(output)*p.Output) / 1e6
 }
 
-// forRole returns the prices of a role's deployment.
+// estimate is the estimated cost of t, in all and by role. Every count is first priced at the triage prices,
+// then the counts of each role are moved to that role's prices: tokens not attributed to a role stay at the
+// triage prices. unknown is set when a role that used tokens, or made a call of unknown usage, has no prices:
+// the total is then unknown and left out (ok false), and byRole holds the priced roles only.
+func (p *prices) estimate(t tokens) (cost float64, byRole map[string]float64, unknown string, ok bool) {
+	cost = p.cost(t.Input, t.CachedInput, t.Output)
+	var unpriced []string
+	for _, role := range slices.Sorted(maps.Keys(t.ByRole)) {
+		rt := t.ByRole[role]
+		rp := p.forRole(role)
+		if rp == nil {
+			if rt.Input > 0 || rt.Output > 0 || rt.UsageUnknownCalls > 0 {
+				unpriced = append(unpriced, role)
+			}
+			continue
+		}
+		c := rp.cost(rt.Input, rt.CachedInput, rt.Output)
+		if byRole == nil {
+			byRole = map[string]float64{}
+		}
+		byRole[role] = c
+		cost += c - p.cost(rt.Input, rt.CachedInput, rt.Output)
+	}
+	if len(unpriced) > 0 {
+		return 0, byRole, fmt.Sprintf("no prices for the %s deployment, whose calls used tokens (set %s*)",
+			strings.Join(unpriced, ", "), envEscPrices), false
+	}
+	return cost, byRole, "", true
+}
+
+// forRole returns the prices of a role's deployment, nil when it has none: the escalation deployment without
+// its own prices, or a role this harness does not know. A role is never priced at another role's prices.
 func (p *prices) forRole(role string) *prices {
-	if role == string(analysis.RoleEscalation) && p.Escalation != nil {
+	switch role {
+	case string(analysis.RoleTriage):
+		return p
+	case string(analysis.RoleEscalation):
 		return p.Escalation
 	}
-	return p
+	return nil
 }
 
 // manifest is the evaluation manifest of ADR-0025 decision 3: the inputs that affect behaviour, and its
@@ -283,6 +374,8 @@ type manifest struct {
 	Provider string `json:"provider,omitempty"`
 	// Anthropic holds the settings of the anthropic provider; left out for the others.
 	Anthropic *manifestAnthropic `json:"anthropic,omitempty"`
+	// Compatible identifies the server and endpoint without storing its URL or credential.
+	Compatible *manifestCompatible `json:"openAICompatible,omitempty"`
 	// Models are the deployments by role: deployment name and the model ID and version the replies must name.
 	Models map[string]manifestModel `json:"models"`
 	// PromptVersion is analysis.PromptVersion: the prompt templates and their generated parts.
@@ -295,8 +388,9 @@ type manifest struct {
 	Redaction      manifestRedaction      `json:"redaction"`
 	// RunLimits are the loop limits of the run (the sample settings' maxToolSteps and maxOutputTokens).
 	RunLimits manifestRunLimits `json:"runLimits"`
-	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml, metrics.yaml, replies.yaml and
-	// policy.yaml, and of every file of its variants: what the model is shown (and, in fake mode, answers).
+	// Scenarios is the hash of every scenario's incident.yaml, objects.yaml, metrics.yaml, logs.yaml, replies.yaml
+	// and policy.yaml, and of every file of its variants, and of the same files and the scenario.yaml of every
+	// escalation scenario: what the model is shown (and, in fake mode, answers).
 	Scenarios string         `json:"scenarios"`
 	Rubric    manifestRubric `json:"rubric"`
 	// ForcedEscalation says every run went to the escalation model (EVAL_FORCE_ESCALATION): a benchmark of
@@ -307,6 +401,12 @@ type manifest struct {
 	Repeats     int     `json:"repeats"`
 	// Digest is the SHA-256 of the manifest's JSON without this field (see manifestDigest).
 	Digest string `json:"digest,omitempty"`
+}
+
+// manifestCompatible identifies the qualified server without storing its endpoint URL.
+type manifestCompatible struct {
+	ServerID     string `json:"serverID"`
+	EndpointHash string `json:"endpointHash"`
 }
 
 // manifestAnthropic are the settings of the Anthropic API adapter that change the replies.
@@ -360,18 +460,18 @@ type manifestRedaction struct {
 type manifestRubric struct {
 	FleetRepository string `json:"fleetRepository"`
 	FleetCommit     string `json:"fleetCommit"`
-	// Files is the hash of every scenario's expected.yaml and rubric.yaml.
+	// Files is the hash of every scenario's and escalation scenario's expected.yaml and rubric.yaml.
 	Files string `json:"files"`
 }
 
 // buildManifest fills the manifest of a run and its digest.
 func buildManifest(src source, models modelSource, defs []providers.ToolDefinition, minPassRate float64,
 	repeats int) (manifest, error) {
-	return buildManifestIn(scenariosDir, src, models, defs, minPassRate, repeats)
+	return buildManifestIn(scenariosDir, escalationDir, src, models, defs, minPassRate, repeats)
 }
 
-// buildManifestIn is buildManifest over the scenarios in dir.
-func buildManifestIn(dir string, src source, models modelSource, defs []providers.ToolDefinition,
+// buildManifestIn is buildManifest over the scenarios in dir and the escalation scenarios in escDir.
+func buildManifestIn(dir, escDir string, src source, models modelSource, defs []providers.ToolDefinition,
 	minPassRate float64, repeats int) (manifest, error) {
 	l := incidentcontext.DefaultLimits()
 	m := manifest{
@@ -382,13 +482,17 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 			Limits: manifestLimits{Total: l.Total, Summary: l.Summary, Status: l.Status, Logs: l.Logs,
 				Metrics: l.Metrics, Git: l.Git, Policy: l.Policy},
 			// Recorded metrics: the metrics.yaml of the scenarios that have one, replayed (metrics_test.go).
+			// Recorded logs: the logs.yaml of the escalation scenarios that have one, replayed (logs_test.go).
 			// Policies: each scenario's policy.yaml, for the policy bounds section (#493).
-			Sources: []string{"pods", "objects", "recorded metrics", "policies"},
+			Sources: []string{"pods", "objects", "recorded metrics", "recorded logs", "policies"},
 		},
 		RunLimits: manifestRunLimits{MaxToolSteps: evalMaxToolSteps, MaxOutputTokens: evalMaxOutputTokens},
 		Rubric:    manifestRubric{FleetRepository: src.FleetRepository, FleetCommit: src.FleetCommit},
 	}
 	m.Provider, m.Anthropic = models.manifestProvider()
+	if c, ok := models.(*compatibleSource); ok {
+		m.Compatible = &manifestCompatible{ServerID: c.serverID, EndpointHash: c.endpointHash}
+	}
 	triage, escalation := models.deployments()
 	expectedModels := models.expectedModels()
 	for role, d := range map[analysis.Role]*remediationv1alpha1.ModelDeployment{
@@ -415,13 +519,21 @@ func buildManifestIn(dir string, src source, models modelSource, defs []provider
 	if m.Redaction.BuiltInRules, err = hashFiles("../../internal/redact/*.go"); err != nil {
 		return m, err
 	}
+	// An escalation scenario's expected.yaml (a synthetic one's) and rubric.yaml are the rubric; its other files,
+	// scenario.yaml included, what the model is shown and how the run is made.
 	if m.Rubric.Files, err = hashFiles(filepath.Join(dir, "*", "expected.yaml"),
-		filepath.Join(dir, "*", "rubric.yaml")); err != nil {
+		filepath.Join(dir, "*", "rubric.yaml"), filepath.Join(escDir, "*", "expected.yaml"),
+		filepath.Join(escDir, "*", "rubric.yaml")); err != nil {
 		return m, err
 	}
 	if m.Scenarios, err = hashFiles(filepath.Join(dir, "*", "incident.yaml"), filepath.Join(dir, "*", "objects.yaml"),
-		filepath.Join(dir, "*", metricsFile), filepath.Join(dir, "*", "replies.yaml"), filepath.Join(dir, "*", policyFile),
-		filepath.Join(dir, "*", variantsDir, "*", "*.yaml")); err != nil {
+		filepath.Join(dir, "*", metricsFile), filepath.Join(dir, "*", logsFile), filepath.Join(dir, "*", "replies.yaml"),
+		filepath.Join(dir, "*", policyFile),
+		filepath.Join(dir, "*", variantsDir, "*", "*.yaml"), filepath.Join(escDir, "*", "incident.yaml"),
+		filepath.Join(escDir, "*", "objects.yaml"), filepath.Join(escDir, "*", metricsFile),
+		filepath.Join(escDir, "*", logsFile),
+		filepath.Join(escDir, "*", "replies.yaml"), filepath.Join(escDir, "*", policyFile),
+		filepath.Join(escDir, "*", escalationFile)); err != nil {
 		return m, err
 	}
 	if m.Digest, err = manifestDigest(m); err != nil {
@@ -479,30 +591,49 @@ func hashFiles(patterns ...string) (string, error) {
 // summarise fills the totals.
 func (r *report) summarise(p *prices) {
 	t := totals{Runs: len(r.Scenarios)}
-	for _, s := range r.Scenarios {
+	for i := range r.Scenarios {
+		s := &r.Scenarios[i]
 		if s.Pass {
 			t.Passed++
 		}
 		t.Tokens.add(s.Tokens)
+		t.Seconds += s.Seconds
+		t.ToolCalls += s.ToolCalls
+		// A failed call has no usage to price, and a run that stopped with an error may have used more than it
+		// counted: its cost is a lower bound, never a zero.
+		incomplete := s.Tokens.UsageUnknownCalls > 0 || s.Error != ""
+		if incomplete {
+			t.IncompleteRuns++
+		}
+		s.CostUSD, s.CostUSDByRole, s.CostIncomplete, s.CostUnknown = nil, nil, false, ""
+		if p != nil {
+			c, byRole, unknown, ok := p.estimate(s.Tokens)
+			s.CostUSDByRole, s.CostUnknown = byRole, unknown
+			if ok {
+				s.CostUSD, s.CostIncomplete = &c, incomplete
+			}
+		}
 	}
 	if t.Runs > 0 {
 		t.PassRate = float64(t.Passed) / float64(t.Runs)
 	}
 	t.Pass = t.Runs > 0 && t.PassRate >= r.Manifest.MinPassRate
 	if p != nil {
-		// Every count at the triage prices, then the escalation's counts moved to its own prices: tokens a
-		// result does not attribute to a role stay at the triage prices.
-		cost := p.cost(t.Tokens.Input, t.Tokens.CachedInput, t.Tokens.Output)
-		for role, rt := range t.Tokens.ByRole {
-			c := p.forRole(role).cost(rt.Input, rt.CachedInput, rt.Output)
-			if t.CostUSDByRole == nil {
-				t.CostUSDByRole = map[string]float64{}
-			}
-			t.CostUSDByRole[role] = c
-			cost += c - p.cost(rt.Input, rt.CachedInput, rt.Output)
+		cost, byRole, unknown, ok := p.estimate(t.Tokens)
+		t.CostUSDByRole, t.CostUnknown = byRole, unknown
+		if ok {
+			t.CostUSD = &cost
+			t.CostIncomplete = t.IncompleteRuns > 0
 		}
-		t.CostUSD = &cost
-		t.CostIncomplete = t.Tokens.UsageUnknownCalls > 0
+		if ok && t.Passed > 0 {
+			per := cost / float64(t.Passed)
+			t.CostPerPassedRunUSD = &per
+		}
+	}
+	if t.Passed > 0 {
+		seconds := t.Seconds / float64(t.Passed)
+		tokens := float64(t.Tokens.Charged) / float64(t.Passed)
+		t.SecondsPerPassed, t.TokensPerPassed = &seconds, &tokens
 	}
 	r.Totals = t
 }
@@ -524,34 +655,43 @@ func (r *report) markdown() string {
 		r.Manifest.Rubric.FleetCommit[:min(12, len(r.Manifest.Rubric.FleetCommit))])
 	fmt.Fprintf(&b, "- Passed %d of %d runs (%.0f%%, threshold %.0f%%, %d repeat(s))\n", r.Totals.Passed, r.Totals.Runs,
 		100*r.Totals.PassRate, 100*r.Manifest.MinPassRate, r.Manifest.Repeats)
+	if r.Totals.SecondsPerPassed != nil && r.Totals.Seconds > 0 {
+		fmt.Fprintf(&b, "- Per passed run (all attempts included): %.2f seconds, %.0f charged tokens\n",
+			*r.Totals.SecondsPerPassed, *r.Totals.TokensPerPassed)
+	}
 	tk := r.Totals.Tokens
 	if r.Manifest.ForcedEscalation {
 		b.WriteString("- Escalation forced (EVAL_FORCE_ESCALATION): every run went to the escalation model\n")
 	}
-	fmt.Fprintf(&b, "- Tokens: input %d (cached %d), output %d, charged %d, calls with unknown usage %d\n",
-		tk.Input, tk.CachedInput, tk.Output, tk.Charged, tk.UsageUnknownCalls)
+	fmt.Fprintf(&b, "- Tokens: input %d (cached %d), output %d, charged %d, calls with unknown usage %d; tool calls %d\n",
+		tk.Input, tk.CachedInput, tk.Output, tk.Charged, tk.UsageUnknownCalls, r.Totals.ToolCalls)
 	for _, role := range []analysis.Role{analysis.RoleTriage, analysis.RoleEscalation} {
 		rt, ok := tk.ByRole[string(role)]
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(&b, "  - %s: input %d (cached %d), output %d, calls with unknown usage %d", role, rt.Input,
-			rt.CachedInput, rt.Output, rt.UsageUnknownCalls)
+		model := ""
+		if m, ok := r.Manifest.Models[string(role)]; ok && m.Model != "" {
+			model = " (" + m.Model + ")"
+		}
+		fmt.Fprintf(&b, "  - %s%s: calls %d, input %d (cached %d), output %d, calls with unknown usage %d", role, model,
+			rt.Calls, rt.Input, rt.CachedInput, rt.Output, rt.UsageUnknownCalls)
 		if c, ok := r.Totals.CostUSDByRole[string(role)]; ok {
 			fmt.Fprintf(&b, ", estimated cost USD %.4f", c)
+		} else if r.Totals.CostUnknown != "" {
+			b.WriteString(", no prices, cost unknown")
 		}
 		b.WriteString("\n")
 	}
-	if r.Totals.CostUSD != nil {
-		fmt.Fprintf(&b, "- Estimated cost: USD %.4f", *r.Totals.CostUSD)
-		if r.Totals.CostIncomplete {
-			fmt.Fprintf(&b, " (incomplete, a lower bound: %d call(s) failed or had unknown usage and are not priced; "+
-				"compare the charged tokens)", tk.UsageUnknownCalls)
-		}
-		b.WriteString("\n")
+	r.costMarkdown(&b)
+	priced := r.Totals.CostUSD != nil || r.Totals.CostUnknown != ""
+	b.WriteString("\n| Scenario | Run | Result | Outcome | Diagnosis | Reads | Escalated | Calls | Tokens |")
+	sep := "|---|---|---|---|---|---|---|---|---|"
+	if priced {
+		b.WriteString(" Cost USD |")
+		sep += "---|"
 	}
-	b.WriteString("\n| Scenario | Run | Result | Outcome | Diagnosis | Escalated | Calls | Tokens |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("\n" + sep + "\n")
 	for _, s := range r.Scenarios {
 		res := "fail"
 		if s.Pass {
@@ -587,11 +727,68 @@ func (r *report) markdown() string {
 		if s.Escalated {
 			escalated = "yes"
 		}
-		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s | %s | %d+%d | %d |\n", s.Name, s.Repeat, res, cell(outcome), cell(diag),
-			escalated, s.Calls, s.ToolCalls, s.Tokens.Charged)
+		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s | %s | %s | %d+%d | %d |", s.Name, s.Repeat, res, cell(outcome), cell(diag),
+			cell(readsCell(s.Reads)), escalated, s.Calls, s.ToolCalls, s.Tokens.Charged)
+		if priced {
+			switch {
+			case s.CostUnknown != "":
+				b.WriteString(" unknown |")
+			case s.CostUSD == nil:
+				b.WriteString(" - |")
+			case s.CostIncomplete:
+				fmt.Fprintf(&b, " %.4f (incomplete) |", *s.CostUSD)
+			default:
+				fmt.Fprintf(&b, " %.4f |", *s.CostUSD)
+			}
+		}
+		b.WriteString("\n")
 	}
 	r.quoteFailuresMarkdown(&b)
+	r.summaryQuotesMarkdown(&b)
 	return b.String()
+}
+
+// costMarkdown writes the summary lines of the estimated cost, when the run was given prices.
+func (r *report) costMarkdown(b *strings.Builder) {
+	if r.Totals.CostUSD != nil {
+		fmt.Fprintf(b, "- Estimated cost: USD %.4f", *r.Totals.CostUSD)
+		if r.Totals.CostIncomplete {
+			fmt.Fprintf(b, " (incomplete, a lower bound: %d call(s) failed or had unknown usage and are not priced, "+
+				"%d run(s) incomplete; compare the charged tokens)", r.Totals.Tokens.UsageUnknownCalls, r.Totals.IncompleteRuns)
+		}
+		b.WriteString("\n")
+		if c := r.Totals.CostPerPassedRunUSD; c != nil {
+			fmt.Fprintf(b, "- Cost per passed run: USD %.4f (all runs' cost over %d passed)", *c, r.Totals.Passed)
+			if r.Totals.CostIncomplete {
+				b.WriteString(", incomplete, a lower bound")
+			}
+			b.WriteString("\n")
+		} else {
+			b.WriteString("- Cost per passed run: none, no run passed\n")
+		}
+	}
+	if r.Totals.CostUnknown != "" {
+		fmt.Fprintf(b, "- Estimated cost: unknown, %s\n- Cost per passed run: unknown\n", r.Totals.CostUnknown)
+	}
+}
+
+// readsCell is the reads of a run for the Markdown table: expected reads made, extra and refused calls, and the
+// expected reads missing.
+func readsCell(rs readsScore) string {
+	made := 0
+	var missing []string
+	for _, e := range rs.Expected {
+		if e.Pass {
+			made++
+		} else {
+			missing = append(missing, e.Read)
+		}
+	}
+	out := fmt.Sprintf("%d/%d expected, %d extra, %d refused", made, len(rs.Expected), rs.Extra, rs.Refused)
+	if len(missing) > 0 {
+		out += "; missing " + strings.Join(missing, ", ")
+	}
+	return out
 }
 
 // quoteFailuresMarkdown lists the quotes of the runs that ended NoEvidence, one row each, when there are any.
@@ -611,9 +808,54 @@ func (r *report) quoteFailuresMarkdown(b *strings.Builder) {
 	}
 }
 
+// summaryQuotesMarkdown lists the quotes checkSummaryQuotes reported (#841), one row each, those that failed
+// the run and those only recorded, when there are any.
+func (r *report) summaryQuotesMarkdown(b *strings.Builder) {
+	header := false
+	for _, s := range r.Scenarios {
+		for _, q := range s.SummaryQuotes {
+			if !header {
+				b.WriteString("\n## Quotes not in the summary as shown\n\n")
+				b.WriteString("| Scenario | Run | Source | Kind | Fails | Quote bytes |\n")
+				b.WriteString("|---|---|---|---|---|---|\n")
+				header = true
+			}
+			fmt.Fprintf(b, "| %s | %d | %s | %s | %t | %d |\n", s.Name, s.Repeat, cell(q.Source), cell(q.Kind), q.Fails,
+				q.QuoteBytes)
+		}
+	}
+}
+
 // cell keeps a table cell on one line and its pipes literal.
 func cell(s string) string {
 	return strings.NewReplacer("|", `\|`, "\n", " ").Replace(s)
+}
+
+// readReport decodes a report.json of this harness's schema version. A report of another version is refused with
+// the versions named, never read as this one: a field may mean something else there (docs/evaluation.md lists
+// the changes), and a field this version does not know is refused too.
+func readReport(raw []byte) (*report, error) {
+	var head struct {
+		SchemaVersion *int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil, fmt.Errorf("reading the report: %w", err)
+	}
+	switch {
+	case head.SchemaVersion == nil:
+		return nil, errors.New("reading the report: it has no schemaVersion, so it is not an evaluation report")
+	case *head.SchemaVersion != reportSchemaVersion:
+		return nil, fmt.Errorf("reading the report: its schema version is %d, this harness reads version %d only; "+
+			"the fields changed meaning between versions (docs/evaluation.md, The report), so compare it only with "+
+			"reports of its own version", *head.SchemaVersion, reportSchemaVersion)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var r report
+	if err := dec.Decode(&r); err != nil {
+		return nil, fmt.Errorf("reading the report of schema version %d: %w", reportSchemaVersion, err)
+	}
+	return &r, nil
 }
 
 // write saves report.json and report.md in dir, the directory the person running the evaluation chose

@@ -1,0 +1,25 @@
+# Synthetic: written by hand for the escalation scenario cut-context, not recorded on a cluster. The symptom is
+# the kubelet's BackOff note. UIDs and the fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-cut-context
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-000000000800
+spec:
+  fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000800
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-000000000801
+  reason: BackOff
+  type: Warning
+  reportingController: kubelet
+  symptom: Back-off restarting failed container web in pod web-6c8d7f5b4-k2x8p_demo(00000000-0000-4000-8000-000000000803)
+status:
+  phase: Open
+  count: 6
+  firstSeen: "2026-11-04T11:40:00Z"
+  lastSeen: "2026-11-04T11:58:00Z"

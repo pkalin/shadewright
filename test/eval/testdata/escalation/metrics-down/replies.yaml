@@ -1,0 +1,19 @@
+# Synthetic: escalation replies written by hand to the output schema for the recorded context and the tool
+# result of the read, not a model's. The first asks for the previous ReplicaSet, the second hands off for the
+# missing working set (MissingData) with the lowered limit as the lead.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2300, outputTokens: 60}
+    toolCalls:
+      - {id: call-1, name: get_resource, arguments: {kind: ReplicaSet, namespace: demo, name: web-7b9c5d8f6}}
+  - model: eval-fake-1
+    usage: {inputTokens: 3600, outputTokens: 330}
+    content: |
+      {"summary": "The web container of Deployment demo/web is OOMKilled (exit code 137) and restarts since revision 2 rolled out. Revision 1 (ReplicaSet web-7b9c5d8f6) set its memory limit to 96Mi; revision 2 lowered it to 48Mi. The metrics source could not be read, so the working set is unknown and no memory size can be supported; a person should decide whether to restore 96Mi.",
+       "hypotheses": [{"description": "Revision 2 lowered the memory limit from 96Mi to 48Mi, below what the container uses."}],
+       "evidence": [{"source": "c2", "quote": "OOMKilled"},
+                    {"source": "t1", "quote": "96Mi"}],
+       "missingData": ["The container's memory working set: the metrics source could not be read."],
+       "uncertainty": "Whether 96Mi was enough is not measured: no working set is available.",
+       "proposal": null}

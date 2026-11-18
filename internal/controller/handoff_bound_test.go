@@ -350,7 +350,8 @@ func TestRecoveryBoundReleasesThePredecessor(t *testing.T) {
 		t.Fatalf("the merge gate is not due after the bound: handoff %+v", gate.Status.Handoff.To)
 	}
 
-	// The predecessor's look checks it again: the head the replacement pushed is not its own any more.
+	// The predecessor's look checks it again: the head the replacement pushed is not its own any more (the stop as
+	// for a foreign push, BranchDiverged with its comment, is the envtest spec of #786 in handoff_test.go).
 	reconcilePred()
 	if p.Status.Handoff.To.Phase != api.HandoffAborted || p.Status.Phase == api.PhaseAwaitingApproval {
 		t.Fatalf("after the bound the predecessor is still held: phase %q, handoff %q", p.Status.Phase,
@@ -359,13 +360,17 @@ func TestRecoveryBoundReleasesThePredecessor(t *testing.T) {
 }
 
 // The clock of the bound is the condition's lastTransitionTime from the first refusal: a restart and a change of the
-// reason (here the repository leaving the settings) keep it. Near the bound the request is still looked at after the
-// poll interval, or after the delay the host asked for, never sooner, and nothing ends it before the bound.
+// reason (here the repository leaving the settings) keep it, and the HandoffGrace wait ends there. Before the bound the
+// request is looked at again after the poll interval, or after the delay the host asked for when longer; near the
+// bound never later than its end (retryGitRead), and nothing ends it before the bound.
 func TestRecoveryBoundCountsFromTheFirstRefusal(t *testing.T) {
 	r, g, _, rr, move := boundWorld(t)
 	ctx := context.Background()
 	key := client.ObjectKeyFromObject(rr)
 	start := watchedRecovery(rr).LastTransitionTime
+	if w := gitWait(rr, waitHandoffGrace); w == nil || !w.Ends.Time.Equal(start.Add(recoveryWaitBound)) {
+		t.Fatalf("HandoffGrace wait = %+v, want its end %v after the first refusal", w, recoveryWaitBound)
+	}
 
 	restore := changeSettings(t, r, func(s *api.RemediationSettings) { s.Spec.Repositories[0].URL = otherRepositoryURL })
 	move(time.Hour)
@@ -383,16 +388,22 @@ func TestRecoveryBoundCountsFromTheFirstRefusal(t *testing.T) {
 	}
 	restore()
 
-	// Thirty seconds before the bound: the poll interval, then the delay the host asked for, kept.
-	move(cleanupFailingBound - time.Hour - 30*time.Second)
+	// Two hours before the bound: the poll interval, then the delay the host asked for, kept.
+	move(cleanupFailingBound - 3*time.Hour)
 	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	if err != nil || res.RequeueAfter != DefaultPullRequestPollInterval {
-		t.Fatalf("Reconcile = %+v, %v; want the poll interval near the bound", res, err)
+		t.Fatalf("Reconcile = %+v, %v; want the poll interval before the bound", res, err)
 	}
 	failBranchHeadRetryable(g, 10*time.Minute)
 	res, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	if err != nil || res.RequeueAfter != 10*time.Minute {
 		t.Fatalf("Reconcile = %+v, %v; want the delay the host asked for", res, err)
+	}
+	// Thirty seconds before the bound: looked at again at the bound, not later.
+	move(2*time.Hour - 30*time.Second)
+	res, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	if err != nil || res.RequeueAfter != 30*time.Second {
+		t.Fatalf("Reconcile = %+v, %v; want the end of the wait", res, err)
 	}
 	if err := r.Get(ctx, key, rr); err != nil {
 		t.Fatal(err)
@@ -548,8 +559,10 @@ func TestRecoveryGraceEndNamesTheGitHost(t *testing.T) {
 	ctx := context.Background()
 	failBranchHeadRetryable(g, 0)
 	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Hour)
-	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
-		t.Fatal(err)
+	for range 2 {
+		if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
@@ -595,24 +608,27 @@ func TestHeldRecoveryReturnsAnAPIFailure(t *testing.T) {
 	}
 }
 
-// A failure of the Kubernetes API on the look that finds the bound passed ends nothing: it goes to the error backoff,
-// and the next look that fails on the Git host ends the request.
-func TestRecoveryBoundNotOnAnAPIFailure(t *testing.T) {
-	r, _, p, rr, move := boundWorld(t)
+// A failure of the Kubernetes API before the bound ends nothing: it goes to the error backoff. Past the bound the end
+// is made from recorded state alone at the start of the reconcile (endPassedWait), with no read of the predecessor or
+// of the Git host, so neither a failing API read nor a host that keeps failing delays it.
+func TestRecoveryBoundEndsFromRecordedState(t *testing.T) {
+	r, g, p, rr, move := boundWorld(t)
 	ctx := context.Background()
 	key := client.ObjectKeyFromObject(rr)
-	move(cleanupFailingBound + time.Minute)
 	base := r.Client.(client.WithWatch)
+	predReads := 0
 	c := interceptor.NewClient(base, interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, obj client.Object,
 			opts ...client.GetOption) error {
 			if k.Name == p.Name {
+				predReads++
 				return transportError()
 			}
 			return c.Get(ctx, k, obj, opts...)
 		},
 	})
 	r.Client, r.APIReader = c, c
+	move(cleanupFailingBound - time.Minute)
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err == nil {
 		t.Fatal("a failure of the Kubernetes API was not returned for the error backoff")
 	}
@@ -620,17 +636,27 @@ func TestRecoveryBoundNotOnAnAPIFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rr.Status.Phase != api.PhasePolicyChecked {
-		t.Fatalf("phase = %q: a failure of the Kubernetes API ended the recovery at the bound", rr.Status.Phase)
+		t.Fatalf("phase = %q: a failure of the Kubernetes API ended the recovery", rr.Status.Phase)
 	}
-	r.Client, r.APIReader = base, base
+	move(2 * time.Minute)
+	predReads = 0
+	calls := 0
+	g.SetFail(func(string) error {
+		calls++
+		return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+	})
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
 	}
 	if err := base.Get(ctx, key, rr); err != nil {
 		t.Fatal(err)
 	}
-	if rr.Status.Phase != api.PhaseNeedsIntervention {
-		t.Fatalf("phase = %q, want the end at the bound once the Git host refuses again", rr.Status.Phase)
+	if o := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened); rr.Status.Phase !=
+		api.PhaseNeedsIntervention || o == nil || o.Reason != ReasonRecoveryWaitExpired {
+		t.Fatalf("phase %q, PullRequestOpened %+v: want the end at the bound", rr.Status.Phase, o)
+	}
+	if predReads != 0 || calls != 0 {
+		t.Fatalf("the end read the predecessor %d times and the Git host %d times; want none", predReads, calls)
 	}
 }
 

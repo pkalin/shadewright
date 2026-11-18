@@ -1,0 +1,19 @@
+# Synthetic: escalation replies written by hand to the output schema for the recorded context and the tool
+# result of the read, not a model's. The first asks for the Deployment, the second quotes its CPU request.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2600, outputTokens: 60}
+    toolCalls:
+      - {id: call-1, name: get_resource, arguments: {kind: Deployment, namespace: demo, name: web}}
+  - model: eval-fake-1
+    usage: {inputTokens: 3900, outputTokens: 300}
+    content: |
+      {"summary": "The new pod of Deployment demo/web is Pending with FailedScheduling because its web container requests 256 CPUs, more than any of the 3 nodes has (Insufficient cpu). Lowering the request or adding nodes is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "The pod template's CPU request of 256 is a typo or a unit error; no node can offer it."}],
+       "evidence": [{"source": "c1", "quote": "3 Insufficient cpu"},
+                    {"source": "c2", "quote": "Unschedulable"},
+                    {"source": "t1", "quote": "\"cpu\": \"256\""}],
+       "missingData": [],
+       "uncertainty": "",
+       "proposal": null}

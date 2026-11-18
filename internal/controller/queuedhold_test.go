@@ -40,6 +40,7 @@ import (
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
+	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -70,6 +71,55 @@ func holdWorld(t *testing.T, verify bool) (*RemediationRequestReconciler, client
 	return r, c, rr, stub
 }
 
+// configureHolderGit supplies the branch evidence now required before releasing a merged holder.
+func configureHolderGit(t *testing.T, r *RemediationRequestReconciler, c client.Client) {
+	t.Helper()
+	ctx := context.Background()
+	holder := getHolder(t, c)
+	settings := &remediationv1alpha1.RemediationSettings{}
+	if err := c.Get(ctx, client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Repositories[0].TargetBranch = mainBranch
+	if err := c.Update(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	holder.Status.PlanRepository = freshness.RepositoryOf(settings.Spec.Repositories[0])
+	holder.Status.Source = &remediationv1alpha1.ResolvedSource{TargetBranch: mainBranch, Path: sourcePath}
+	g := fakegit.NewGit(mainBranch, map[string][]byte{sourcePath: []byte("a: 1")})
+	base, err := g.BranchHead(ctx, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.CreateBranch(ctx, freshness.BranchName(holder), base); err != nil {
+		t.Fatal(err)
+	}
+	for range 7 {
+		cr, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(holder), BaseBranch: mainBranch, Body: marker(holder)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.Merge(cr.Number); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.Status().Update(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	r.OpenRepository = func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) { return g, nil }
+}
+
+// settleHolder runs the next lock reconcile after a terminal status write.
+func settleHolder(t *testing.T, r *RemediationRequestReconciler, c client.Client) {
+	t.Helper()
+	previous := r.OpenRepository
+	defer func() { r.OpenRepository = previous }()
+	configureHolderGit(t, r, c)
+	if _, err := r.checkHeld(context.Background(), getHolder(t, c)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // getHolder reads the holder, the request called closedHolder.
 func getHolder(t *testing.T, c client.Client) *remediationv1alpha1.RemediationRequest {
 	t.Helper()
@@ -93,11 +143,12 @@ func mergeHolder(t *testing.T, r *RemediationRequestReconciler, c client.Client,
 		"Pull request #7 was merged"); !errors.Is(err, errStopped) {
 		t.Fatalf("stop: %v", err)
 	}
+	settleHolder(t, r, c)
 	stub.result = sourcemap.Result{Outcome: sourcemap.NeedsIntervention, Reason: sourcemap.ReasonValueMismatch,
 		Message: "the memory limit in the file differs from the live value"}
 }
 
-// moveHolder writes the holder's next phase after the merge, as afterMerge does (no settleLock on the way), and
+// moveHolder writes the holder's next phase after the merge, as afterMerge does (no settleTargetLock on the way), and
 // runs checkHeld on it, as every reconcile of a request that stopped does.
 func moveHolder(t *testing.T, r *RemediationRequestReconciler, c client.Client, phase remediationv1alpha1.RemediationPhase) {
 	t.Helper()
@@ -110,9 +161,7 @@ func moveHolder(t *testing.T, r *RemediationRequestReconciler, c client.Client, 
 	if err := c.Status().Update(context.Background(), holder); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.checkHeld(context.Background(), holder); err != nil {
-		t.Fatalf("checkHeld: %v", err)
-	}
+	settleHolder(t, r, c)
 }
 
 // deliver sets the live memory limit of the target to the holder's desired value: Flux applied the merge.
@@ -182,6 +231,7 @@ func TestQueuedRequestsWaitForTheHolderVerdict(t *testing.T) {
 		"No recurrence in the window"); err != nil {
 		t.Fatalf("succeed: %v", err)
 	}
+	settleHolder(t, r, c)
 	if h := getHolder(t, c); ptr.Deref(h.Status.HoldsTarget, true) {
 		t.Fatal("the holder kept the lock after it ended Succeeded")
 	}
@@ -229,6 +279,7 @@ func TestQueuedRequestAfterHolderFailedIsCheckedAsUsual(t *testing.T) {
 				"The container was OOM killed under the new limit"); err != nil {
 				t.Fatalf("endVerification: %v", err)
 			}
+			settleHolder(t, r, c)
 			_, got, err := reconcileLimits(t, r, rr)
 			if err != nil {
 				t.Fatalf("Reconcile: %v", err)
@@ -263,7 +314,7 @@ func TestQueuedRequestWithoutVerificationUnchanged(t *testing.T) {
 
 // TestHeldForVerification checks which merged holders keep the lock while their outcome is verified (#719): with
 // verification on, Merged with a merge receipt, WaitingForDelivery and Verifying; never with it off, and never
-// Merged without a receipt (ends Inconclusive at once) or a final phase. settleLock keeps such a lock.
+// Merged without a receipt (ends Inconclusive at once) or a final phase. settleTargetLock keeps such a lock.
 func TestHeldForVerification(t *testing.T) {
 	receipt := func(o *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.RemediationRequest {
 		o.Status.MergeReceipt = &remediationv1alpha1.MergeReceipt{TargetBranch: mainBranch, PullRequest: 7}
@@ -292,9 +343,9 @@ func TestHeldForVerification(t *testing.T) {
 			if got := heldForVerification(c.rr, c.verify); got != c.want {
 				t.Fatalf("heldForVerification = %v, want %v", got, c.want)
 			}
-			settleLock(c.rr, c.verify)
-			if got := ptr.Deref(c.rr.Status.HoldsTarget, false); got != c.want {
-				t.Fatalf("after settleLock holdsTarget = %v, want %v", got, c.want)
+			clearReleasedRead(c.rr)
+			if got := ptr.Deref(c.rr.Status.HoldsTarget, false); !got {
+				t.Fatalf("status-only settlement released the lock without reading the branch")
 			}
 		})
 	}
@@ -416,6 +467,7 @@ func TestTwoWaitersBehindOneSucceededHolder(t *testing.T) {
 	if err := r.succeed(context.Background(), getHolder(t, c), time.Minute, "No recurrence in the window"); err != nil {
 		t.Fatalf("succeed: %v", err)
 	}
+	settleHolder(t, r, c)
 	for _, w := range []*remediationv1alpha1.RemediationRequest{rr, second} {
 		_, got, err := reconcileLimits(t, r, w)
 		if err != nil {
@@ -511,6 +563,7 @@ func TestRecordedHolderEndsWaiterWhileAnotherLimitHolds(t *testing.T) {
 				"No recurrence in the window"); err != nil {
 				t.Fatalf("succeed: %v", err)
 			}
+			settleHolder(t, r, c)
 		}, remediationv1alpha1.ReasonAnotherRequestSucceeded},
 		"closed without a merge": {func(t *testing.T, _ *RemediationRequestReconciler, c client.Client, _ *stubResolver) {
 			holder := closeUnmerged(getHolder(t, c), limitsNow)
@@ -546,6 +599,36 @@ func TestRecordedHolderEndsWaiterWhileAnotherLimitHolds(t *testing.T) {
 			}
 			if n := stub.calls.Load(); n != calls {
 				t.Fatal("the superseded request read Git")
+			}
+		})
+	}
+}
+
+// TestVerificationEndReleasesTheLockInItsWrite checks the eighth decision of 2026-11-18 on #771, point 3: a holder
+// merged with its receipt and held through verification releases the lock in the status write that ends the
+// verification (Succeeded, Failed or Inconclusive), as on main, with no read of the branch after it.
+func TestVerificationEndReleasesTheLockInItsWrite(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseSucceeded,
+		remediationv1alpha1.PhaseFailed, remediationv1alpha1.PhaseInconclusive} {
+		t.Run(string(phase), func(t *testing.T) {
+			r, c, _, stub := holdWorld(t, true)
+			mergeHolder(t, r, c, stub)
+			moveHolder(t, r, c, remediationv1alpha1.PhaseWaitingForDelivery)
+			moveHolder(t, r, c, remediationv1alpha1.PhaseVerifying)
+			deliver(t, c)
+			var err error
+			if phase == remediationv1alpha1.PhaseSucceeded {
+				err = r.succeed(context.Background(), getHolder(t, c), time.Minute, "No recurrence in the window")
+			} else {
+				err = r.endVerification(context.Background(), getHolder(t, c), phase, ReasonOOMKilled,
+					"The container was OOM killed under the new limit")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if h := getHolder(t, c); h.Status.Phase != phase || ptr.Deref(h.Status.HoldsTarget, true) {
+				t.Fatalf("phase %s, holds %v; want %s with the lock released in the ending write", h.Status.Phase,
+					ptr.Deref(h.Status.HoldsTarget, true), phase)
 			}
 		})
 	}

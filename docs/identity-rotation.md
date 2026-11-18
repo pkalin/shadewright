@@ -85,3 +85,27 @@ In this order, because the first step is the one that stops the damage:
 2. Delete the compromised private key on the App's page and disable the matching Key Vault version.
 3. Review the `shadewright/*` branches and pull requests, and the `KeySign` entries of the vault's audit log for the period.
 4. Generate a new key, import it (section 1), install the App again (section 2), unpause.
+
+## OpenAI-compatible credential
+
+Each compatible endpoint declaration owns an optional key. Chart
+`analyzer.analysis.openAICompatible.endpoints[].apiKey` names an existing Secret
+(`secretName`, `secretKey`, default `api-key`) or a Secret/CSI `volume` with
+`fileName`. Each source mounts whole and read-only, without `subPath`, only in the
+analyzer, at `/var/run/secrets/shadewright/openai-compatible/<index>/`. The chart
+passes the derived `keyFile` in `--openai-compatible-endpoints`. No Secret RBAC,
+credential environment variable or custom resource field is added.
+
+The key is read on every attempt. Rotate the Secret or CSI source, allow its
+projection to update, and then revoke the old credential at the endpoint. A
+missing or empty file is retryable; malformed files, including nonempty keys
+shorter than 16 bytes, are refused without retry. Keys never reach
+errors, events or records. A declaration without a key sends no Authorization
+header. Separate endpoints, including different tenant paths on one host, can
+have separate keys. Settings cannot move a key away from its exact declared base
+URL. Foundry and Anthropic never receive these keys.
+
+Use credentials dedicated to inference and set server-side spend limits. A
+compromised analyzer can read its mounted keys. Removing the release does not
+revoke them. See [ADR-0042](adr/0042-openai-compatible-model-endpoints.md), which
+remains Proposed, and the [qualification runbook](how-to/qualify-openai-compatible.md).

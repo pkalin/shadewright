@@ -89,6 +89,13 @@ type changeQuery struct {
 	// recordedBranch is the read of the recorded pull request after the target branch of the plan's repository
 	// changed (watchBranchChanged): every failed read sets condition PullRequestUnreadable (noteRead).
 	recordedBranch bool
+	// configuredBranch, when set, is the read of the recorded pull request on the target branch the plan's
+	// repository entry names now, after a change (watchBranchChanged, #771), through a provider opened for that
+	// branch: the answer is bound to the recorded number, the request's branch, that target branch and this
+	// request's marker. Only a merge counts there: it keeps and drops no first look at a missing number
+	// (settleGone), every failed read sets condition PullRequestUnreadable, and any other read that works leaves
+	// the condition to the read on the recorded branch that follows (noteRead).
+	configuredBranch remediationv1alpha1.GitBranch
 	// reinstalled is a read through a new installation of the GitHub App for the plan's repository (#290): every
 	// failed read that is not an answer of the Git host sets condition PullRequestUnreadable (noteRead, #797).
 	reinstalled bool
@@ -212,7 +219,16 @@ func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git provide
 	}
 	defer looks.unlock(key)
 	v, n := r.readChange(ctx, git, rr, q)
-	return r.noteRead(ctx, rr, n, q, v)
+	v = r.noteRead(ctx, rr, n, q, v)
+	// Evidence about the last read of an open wait for a read (endAfterLastRead): the read of the pull request
+	// answered, or its answers disagree, which outweighs any answer of the same reconcile.
+	switch {
+	case v.state != changeUnknown:
+		r.gitRetries().noteAnswered(key)
+	case answeredUnknown(v.err):
+		r.gitRetries().noteDisagreed(key)
+	}
+	return v
 }
 
 // readChange is changeOf without the condition; it also returns the number it read (0 for the listing).
@@ -226,10 +242,48 @@ func (r *RemediationRequestReconciler) readChange(ctx context.Context, git provi
 	if n == 0 && rr.Status.PullRequest != nil {
 		n = rr.Status.PullRequest.Number
 	}
-	if n == 0 {
+	switch {
+	case q.configuredBranch != "" && q.openOnBranch:
+		copy := rr.DeepCopy()
+		copy.Status.Source.TargetBranch = q.configuredBranch
+		if n == 0 {
+			return r.changeOnBranch(ctx, git, copy), 0
+		}
+		v := r.readOnConfigured(ctx, git, rr, n, q.configuredBranch)
+		absent := false
+		return r.checkOpenListing(ctx, git, copy, q, n, v, &absent), n
+	case q.configuredBranch != "" && n == 0:
+		return unknownChange(errors.New("no pull request recorded to read on the configured target branch")), 0
+	case q.configuredBranch != "":
+		return r.readOnConfigured(ctx, git, rr, n, q.configuredBranch), n
+	case n == 0:
 		return r.settleGone(ctx, rr, 0, false, r.changeOnBranch(ctx, git, rr)), 0
 	}
 	return r.readByNumber(ctx, git, rr, q, n), n
+}
+
+// readOnConfigured is readChange for q.configuredBranch: pull request n read by its number on branch, the target
+// branch the repository entry names now, through git, a provider opened for that branch. A pull request without
+// this request's marker is gone, and so is a missing number that the listing of the branch to branch does not
+// show, even when it shows another pull request with the marker (errOwnListed): only the recorded number counts
+// here. It settles no first look: a missing number there only means the pull request was not merged into branch,
+// and the read on the recorded branch that follows decides the rest as before #771.
+func (r *RemediationRequestReconciler) readOnConfigured(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, n int64, branch remediationv1alpha1.GitBranch) changeVerdict {
+	v, _ := r.changeByNumber(ctx, git, rr, n, string(branch))
+	if v.state == changeUnknown && errors.Is(v.err, errOwnListed) {
+		return changeVerdict{state: changeGone, gone: fmt.Sprintf("the Git host has no pull request #%d to %s", n, branch)}
+	}
+	if v.state == changeUnknown || v.state == changeGone {
+		return v
+	}
+	switch ours, err := r.ownsMarker(ctx, v.pr.Body, rr); {
+	case err != nil:
+		return unknownChange(err)
+	case !ours:
+		return changeVerdict{state: changeGone, gone: fmt.Sprintf("pull request #%d lacks this request's marker", n)}
+	}
+	return v
 }
 
 // readByNumber is readChange for a number.
@@ -700,8 +754,11 @@ const (
 //   - a read that worked (any verdict but unknown, or unknown from answers the host gave: a 404 the branch does
 //     not confirm, contradicting reads, a first look that finds the number missing, an answer about another pull
 //     request) removes it;
-//   - on the read after the target branch changed (q.recordedBranch), any other unknown verdict, an answered one
-//     included, sets it with reason TargetBranchChanged (branchChangedRead): the request waits on that read alone;
+//   - on the reads after the target branch changed (q.recordedBranch, q.configuredBranch), any other unknown
+//     verdict, an answered one included, sets it with reason TargetBranchChanged (branchChangedRead): the request
+//     waits on that read alone; on the configured branch, a read that works but finds no merge that counts
+//     (retargetedMergeCounts: another head, or not merged) leaves it to the read on the recorded branch that
+//     follows, so the two reads never set and remove it in turn;
 //   - on a read through a new installation of the GitHub App (q.reinstalled, #797), any other failure that is not an
 //     answer listed below, but the caller's cancellation and a failed read of the Kubernetes API (a *clusterError:
 //     ownsMarker's read of the supersede chain, #812), sets it with reason GitNotFound (a 404) or GitFailed
@@ -717,12 +774,18 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 	var want *metav1.Condition
 	ownListed, isOwnListed := errors.AsType[*ownListedError](v.err)
 	switch reason, _, refused := refusal(v.err); {
+	case isClusterError(v.err):
+		return v
 	case v.state == changeUnknown && refused:
 		want = refusedRead(rr, reason, v.err, n)
 	case v.state == changeUnknown && isOwnListed:
 		want = ownListedRead(rr, ownListed)
-	case v.state == changeUnknown && q.recordedBranch:
+	case v.state == changeUnknown && (q.recordedBranch || q.configuredBranch != ""):
 		want = branchChangedRead(rr)
+	case q.configuredBranch != "" && !retargetedMergeCounts(rr, v):
+		// No merge that counts on the configured branch (another head, not merged): the read on the recorded
+		// branch that follows keeps the condition, so the two reads never set and remove it in turn.
+		return v
 	case v.state != changeUnknown, answeredUnknown(v.err):
 	case q.reinstalled && !errors.Is(v.err, context.Canceled) && !isClusterError(v.err):
 		want = reinstalledRead(rr, v.err, n)
@@ -732,9 +795,11 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 	}
 	if err := r.setUnreadable(ctx, rr, want); err != nil {
 		if v.state == changeUnknown {
-			return unknownChange(errors.Join(v.err, err))
+			// The failed write is a Kubernetes failure (isClusterError), and the error still says what the read
+			// showed (errOwnListed, a refusal), so no caller takes it for another verdict.
+			return unknownChange(errors.Join(&clusterError{err: err}, v.err))
 		}
-		return unknownChange(err)
+		return unknownChange(&clusterError{err: err})
 	}
 	return v
 }
@@ -742,7 +807,11 @@ func (r *RemediationRequestReconciler) noteRead(ctx context.Context, rr *remedia
 // isClusterError reports whether err is a failure on the Kubernetes side (a *clusterError), not of the Git host.
 func isClusterError(err error) bool {
 	_, ok := errors.AsType[*clusterError](err)
-	return ok
+	_, status := errors.AsType[interface {
+		error
+		apierrors.APIStatus
+	}](err)
+	return ok || status
 }
 
 // answeredUnknown reports whether err, the error of an unknown verdict, comes from answers the Git host gave (a 404
@@ -822,6 +891,16 @@ var repositoryReasons = map[string]bool{
 	reasonRepositoryUnavailable: true, reasonTargetBranchChanged: true, string(sourcemap.ReasonRepositoryUnusable): true,
 }
 
+// unstartableReads says, per reason of condition PullRequestUnreadable that says the repository of the plan cannot be
+// opened as the settings stand (repositoryRead), why no read of the Git host could start: the message of the end of a
+// wait for a read whose last read could not start (endAfterLastRead). TargetBranchChanged is not one: a stopped holder
+// still reads both branches then, and its reads answer or fail on their own account.
+var unstartableReads = map[string]string{
+	reasonRepositoryUnavailable: "the repository of the plan is not in RemediationSettings",
+	string(sourcemap.ReasonRepositoryUnusable): "the entry of the repository of the plan in RemediationSettings " +
+		"cannot be used",
+}
+
 // repositoryGoneRead is condition PullRequestUnreadable for a request whose plan's repository is not in
 // RemediationSettings any more, so none of its pull requests can be read.
 func repositoryGoneRead(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
@@ -836,12 +915,18 @@ func repositoryGoneRead(rr *remediationv1alpha1.RemediationRequest) *metav1.Cond
 }
 
 // repositoryRead is condition PullRequestUnreadable for err, the failure to open the repository of the plan, when
-// it says that the request's pull requests cannot be read there as the settings stand now: the repository left
-// the settings (RepositoryUnavailable), its entry names another target branch (TargetBranchChanged), or its entry
-// cannot be used (RepositoryUnusable). Any other failure gives nil.
+// it says that the request's pull requests cannot be read there as the settings stand now: the settings object does
+// not exist (SettingsNotFound), the repository left the settings (RepositoryUnavailable), its entry names another
+// target branch (TargetBranchChanged), or its entry cannot be used (RepositoryUnusable). Any other failure gives nil.
 func repositoryRead(rr *remediationv1alpha1.RemediationRequest, err error) *metav1.Condition {
 	var reason, message string
 	switch {
+	case errors.Is(err, errNoSettings):
+		// Not in unstartableReads: a missing settings object ends no wait for a read (eleventh decision of 2026-11-18
+		// on #771, point 3).
+		reason, message = ReasonSettingsNotFound, "RemediationSettings "+remediationv1alpha1.SettingsName+" does not "+
+			"exist, so the request's pull requests cannot be read; the target stays locked and the look is tried "+
+			"again until the settings exist or the request is deleted"
 	case errors.Is(err, errRepositoryGone):
 		return repositoryGoneRead(rr)
 	case errors.Is(err, errTargetBranchChanged):
@@ -900,6 +985,10 @@ func (r *RemediationRequestReconciler) unreadableEvent(rr *remediationv1alpha1.R
 // condition and the new resourceVersion.
 func (r *RemediationRequestReconciler) setUnreadable(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	want *metav1.Condition) error {
+	if want != nil && unstartableReads[want.Reason] != "" {
+		// Evidence that no read could start in this reconcile, for the end of a wait for a read (endAfterLastRead).
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableReads[want.Reason])
+	}
 	was := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 	if was != nil {
 		was = was.DeepCopy()

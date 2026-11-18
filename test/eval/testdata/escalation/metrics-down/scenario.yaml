@@ -1,0 +1,12 @@
+# Synthetic escalation scenario (#504), not a fleet scenario: written by hand, not observed on a cluster.
+about: >-
+  The web container is OOMKilled after a rollout, and the metrics source is down: the builder marks the
+  metrics section as could not fetch, a failed source and the product's own escalation signal, not a forced
+  one. Without the working set no memory size is supported; the escalation model reads the previous
+  ReplicaSet with get_resource and finds that the rollout lowered the memory limit from 96Mi to 48Mi. A
+  diagnosis without a proposal and a hand-off for the missing metrics (MissingData) both pass; a memory
+  proposal fails.
+signal: failedSource
+metricsSource: down
+behindReads:
+  - the previous revision set the memory limit to 96Mi, and the rollout lowered it to 48Mi

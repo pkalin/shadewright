@@ -119,10 +119,13 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -coverprofile cover.out
-	@# The redact timing tests and the 100,000 seeded keys skip under -race (internal/redact/race_test.go): run the
-	@# whole package again without it, so that no test is selected by name and a renamed one cannot drop out.
-	go test ./internal/redact
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 20m -coverprofile cover.out
+	@# The redact timing tests and the 100,000 seeded keys skip under -race, and the generated corpora check a seeded
+	@# sample there (internal/redact/race_test.go, racesample_test.go): run the whole package again without it, so
+	@# that no test is selected by name and a renamed one cannot drop out. The
+	@# linearity tests count redaction work only in a build with the tag redactwork (internal/redact/work_counted.go,
+	@# no counter in the product build), so this run and the log excerpt's package get it.
+	go test -timeout 20m -tags redactwork ./internal/redact ./internal/providers/logs/kube
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
 	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
 
@@ -137,14 +140,14 @@ eval: ## Replay every lab scenario's recorded context and replies through the an
 EVAL_MODEL ?= foundry
 
 .PHONY: eval-model
-eval-model: ## Evaluate a real model through EVAL_MODEL (foundry or anthropic; the EVAL_* variables, see docs/evaluation.md). Costs money. Times out at 50m, so a report is written first.
-	@case "$(EVAL_MODEL)" in foundry) t=TestEvalFoundry ;; anthropic) t=TestEvalAnthropic ;; \
-		*) echo "EVAL_MODEL must be foundry or anthropic" >&2; exit 1 ;; esac; \
+eval-model: ## Evaluate a real model through EVAL_MODEL (foundry, anthropic or openaicompatible; the EVAL_* variables, see docs/evaluation.md). Costs money. Times out at 50m, so a report is written first.
+	@case "$(EVAL_MODEL)" in foundry) t=TestEvalFoundry ;; anthropic) t=TestEvalAnthropic ;; openaicompatible) t=TestEvalOpenAICompatible ;; \
+		*) echo "EVAL_MODEL must be foundry, anthropic or openaicompatible" >&2; exit 1 ;; esac; \
 	EVAL_MODEL="$(EVAL_MODEL)" EVAL_REPORT_DIR="$(EVAL_REPORT_DIR)" go test ./test/eval -run "^$$t\$$" -count=1 -v -timeout 50m
 
 # Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
 # new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.
-FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/redact:FuzzMonotonicAgainstMain internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponses internal/tools:FuzzArguments
+FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/redact:FuzzMonotonicAgainstMain internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/openaicompatible:FuzzCredentialEcho internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponses internal/tools:FuzzArguments
 FUZZ ?= $(FUZZ_TARGETS)
 FUZZTIME ?= 30s
 

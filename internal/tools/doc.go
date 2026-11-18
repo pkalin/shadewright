@@ -50,7 +50,9 @@ limitations under the License.
 // loses the leading lines that may continue an entry whose first line the source left out, before
 // redaction, its header is budgeted first, and every cut keeps the header and the newest lines. get_resource
 // leaves out annotations, managed fields, literal environment values, the metadata of volume claim templates
-// and the containers' termination messages. The error text of a failed read never reaches the result.
+// and the containers' termination messages; it redacts each string of the object as it was read, before JSON
+// escapes its line breaks, and encodes the object without HTML escapes, so that no escape hides what a rule
+// reads (a block scalar's lines, a folded indicator ">"). The error text of a failed read never reaches the result.
 // [Result.Content] puts the text in a delimited block that says it is data, never instructions, and that the
 // text cannot close: every angle bracket and look-alike in it is escaped.
 //

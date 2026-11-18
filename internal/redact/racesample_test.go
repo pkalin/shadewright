@@ -1,0 +1,45 @@
+/*
+Copyright 2026 The Shadewright Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package redact
+
+import (
+	"hash/fnv"
+	"strconv"
+)
+
+// raceSampleEvery sets the share of a generated corpus that a test checks under -race: about one input in
+// raceSampleEvery. Each input costs the same redaction work with or without the race detector, whose
+// instrumentation makes it 10 to 20 times slower, and the corpora are single goroutine apart from the entry
+// points run in parallel: in full, the corpora of #840 ran the package past the 10 minutes that go test
+// allows it under -race -coverprofile in CI. make test runs this package a second time without -race, where
+// every input is checked.
+const raceSampleEvery = 16
+
+// raceSampleSeed fixes the sample, so that a failure under -race fails again on the same input.
+const raceSampleSeed = "shadewright-redact-race-sample-1"
+
+// raceKeeps says whether input i of the corpus is checked by the test or entry point name in this run: always
+// without -race, and for a fixed, seeded sample of about one input in raceSampleEvery under it. The sample
+// depends on name, so the ten entry points together see about half of the corpus.
+func raceKeeps(name string, i int) bool {
+	if !raceDetector {
+		return true
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(raceSampleSeed + "\x00" + name + "\x00" + strconv.Itoa(i)))
+	return h.Sum64()%raceSampleEvery == 0
+}

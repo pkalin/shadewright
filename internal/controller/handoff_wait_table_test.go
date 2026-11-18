@@ -295,6 +295,20 @@ func (w *logGit) CheckBranch(ctx context.Context, commit, path string) (provider
 	return w.g.CheckBranch(ctx, commit, path)
 }
 
+func (w *logGit) CheckBetween(ctx context.Context, from, to, path string) (providers.BranchState, error) {
+	if err := w.l.call(ctx, false, "CheckBetween"); err != nil {
+		return 0, err
+	}
+	return w.g.CheckBetween(ctx, from, to, path)
+}
+
+func (w *logGit) CountAhead(ctx context.Context, base, head string) (int, error) {
+	if err := w.l.call(ctx, false, "CountAhead"); err != nil {
+		return 0, err
+	}
+	return w.g.CountAhead(ctx, base, head)
+}
+
 func (w *logGit) CheckChain(ctx context.Context, commit, path string, commits int) (providers.BranchState, error) {
 	if err := w.l.call(ctx, false, "CheckChain"); err != nil {
 		return 0, err
@@ -630,11 +644,14 @@ var recoveryPaths = []recoveryPath{
 			callSettings3: {end: takenOverUnchecked},
 			callPolicy:    {end: takenOverUnchecked},
 			// A failed start of the wait is logged with the check's failure; the takeover is recorded all the same.
+			// The start is written on the request as the API server holds it (startMergeWait, patchGitWaits).
+			"k8s get RemediationRequest/" + newName + "#1": {stepWide: true,
+				end: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhasePRCreated }},
 			"k8s patch status RemediationRequest/" + newName + "#1": {stepWide: true,
 				end: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhasePRCreated }},
 		},
-		calls: append(slices.Clone(mergedTakeoverCalls[:13]), "k8s patch status RemediationRequest/"+newName+"#1",
-			mergedTakeoverCalls[13]),
+		calls: append(slices.Clone(mergedTakeoverCalls[:13]), "k8s get RemediationRequest/"+newName+"#1",
+			"k8s patch status RemediationRequest/"+newName+"#1", mergedTakeoverCalls[13]),
 		ended: func(rr *api.RemediationRequest) bool {
 			return rr.Status.Phase == api.PhasePRCreated && rr.Status.MergeCommitAwaitedSince != nil
 		},

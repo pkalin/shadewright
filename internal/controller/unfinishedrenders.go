@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crevent "sigs.k8s.io/controller-runtime/pkg/event"
@@ -193,9 +194,8 @@ func (r *RemediationRequestReconciler) unmarkFresh(ctx context.Context, rr *reme
 }
 
 // skipOwnMarks drops the watch events of an update that changed nothing of a request but status.unfinishedRenders,
-// condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound, or with
-// any reason on a replacement whose handoff recovery waits (recovering, #786), set or
-// removed, PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
+// condition PullRequestNotClosed and condition PullRequestUnreadable with reason GitFailed or GitNotFound, set or
+// removed, condition Delivered Unknown with reason DeliveryPending, set or changed (deliveryReadFailed), PullRequestOpened recorded closed in the write that removes PullRequestNotClosed (closedRecorded), and
 // the metadata every write changes. Those are the executor's own writes: the mark and its removal
 // around a render, the condition that says why a stale plan's pull request is not closed (keepWatchingStale,
 // noteNotReached) and its removal with the close (recordStaleClosed), and the one that says a read through a new installation of the GitHub App failed (noteRead,
@@ -207,11 +207,9 @@ var skipOwnMarks = predicate.Funcs{UpdateFunc: func(e crevent.UpdateEvent) bool 
 	return !onlyOwnMarksChanged(e.ObjectOld, e.ObjectNew)
 }}
 
-// onlyOwnMarksChanged reports whether newObj differs from oldObj, and only in status.unfinishedRenders, condition
-// PullRequestNotClosed, condition PullRequestUnreadable while neither side has another reason than GitFailed or
-// GitNotFound (reinstalledUnreadable) or both sides are a replacement recovering its handoff (recovering), the
-// resource version and the managed fields. Anything that is not a request
-// is never such an update.
+// onlyOwnMarksChanged ignores executor bookkeeping and retry-only updates: render marks, merge-read clocks,
+// PullRequestNotClosed, PullRequestUnreadable and GitReadRetry. They must not shorten a scheduled retry.
+// Phase, lock, plan and external changes still wake the request.
 func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	o, ok1 := oldObj.(*remediationv1alpha1.RemediationRequest)
 	n, ok2 := newObj.(*remediationv1alpha1.RemediationRequest)
@@ -233,11 +231,15 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	}
 	for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 		rr.Status.UnfinishedRenders = nil
+		rr.Status.GitWaits = nil
+		rr.Status.MergeCommitAwaitedSince = nil
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 	}
-	if (reinstalledUnreadable(o) && reinstalledUnreadable(n)) || (recovering(o) && recovering(n)) {
+	if deliveryPending(o) && deliveryPending(n) {
 		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
-			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
 		}
 	}
 	return equality.Semantic.DeepEqual(o, n)
@@ -252,18 +254,10 @@ func closedRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
 		remediationv1alpha1.ConditionPullRequestNotClosed) == nil && c != nil && c.Reason == ReasonPullRequestClosed
 }
 
-// recovering reports whether rr is a replacement whose handoff recovery runs on every look (recoverHandoff): in
-// PolicyChecked, with its incoming handoff Reserved. While it cannot read, only watchRecovery, its replacement of a
-// cause that is gone (nowUnreadable) and the recovery's removal write condition PullRequestUnreadable on it (#786), and the reconcile that wrote it returns its own delay.
-func recovering(rr *remediationv1alpha1.RemediationRequest) bool {
-	return rr.Spec.Replaces != nil && rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked &&
-		rr.Status.Handoff != nil && rr.Status.Handoff.From != nil &&
-		rr.Status.Handoff.From.Phase == remediationv1alpha1.HandoffReserved
-}
-
-// reinstalledUnreadable reports whether rr has no condition PullRequestUnreadable, or one with reason GitFailed or
-// GitNotFound: only a read through a new installation of the GitHub App sets those (reinstalledRead, #797).
-func reinstalledUnreadable(rr *remediationv1alpha1.RemediationRequest) bool {
-	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
-	return c == nil || c.Reason == ReasonGitFailed || c.Reason == ReasonGitNotFound
+// deliveryPending reports whether rr has no condition Delivered, or one Unknown with reason DeliveryPending: the
+// write of deliveryReadFailed, which names a lasting cause of a failed delivery read and returns the failure for the
+// error backoff, changes only that (#771, also without --verify-outcomes).
+func deliveryPending(rr *remediationv1alpha1.RemediationRequest) bool {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
+	return c == nil || (c.Status == metav1.ConditionUnknown && c.Reason == ReasonDeliveryPending)
 }

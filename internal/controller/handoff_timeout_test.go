@@ -211,8 +211,11 @@ func TestRecoveryWithoutARefusalKeepsTheGraceForAStepTimeout(t *testing.T) {
 	ctx := context.Background()
 	h.hang.Store(true)
 	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
-	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
+	// The read that times out records the HandoffGrace wait, past its end; the next reconcile ends it (endPassedWait).
+	for range 2 {
+		if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)

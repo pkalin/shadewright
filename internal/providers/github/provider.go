@@ -42,6 +42,7 @@ const (
 	opCreateBranch = "GitHub create branch"
 	opCommitFile   = "GitHub commit file"
 	opCheckBranch  = "GitHub check branch"
+	opCountAhead   = "GitHub count commits ahead"
 	opCheckCommit  = "GitHub check commit"
 	opOpenCR       = "GitHub open pull request"
 	opFindCR       = "GitHub find pull request"
@@ -577,6 +578,50 @@ func (p *Provider) CheckCommit(ctx context.Context, commit, path string) (provid
 		return state, "", err
 	}
 	return state, parents[0], nil
+}
+
+// CheckBetween reports whether the trees of from and to differ at most in the regular file at path
+// (providers.GitProvider.CheckBetween), compared as CheckBranch compares them: one tree each per directory.
+func (p *Provider) CheckBetween(ctx context.Context, from, to, path string) (providers.BranchState, error) {
+	switch {
+	case !validSHA(from) || !validSHA(to):
+		return 0, errors.New(opCheckCommit + ": commit is not a full SHA")
+	case !validPath(path):
+		return 0, errors.New(opCheckCommit + ": path is invalid")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	return p.changedOnly(ctx, to, from, strings.Split(path, "/"))
+}
+
+// CountAhead returns how many commits head's history holds that base's does not (providers.GitProvider.CountAhead):
+// ahead_by of the comparison base...head, one call. A response too large to read is an error, never a count.
+func (p *Provider) CountAhead(ctx context.Context, base, head string) (int, error) {
+	if !validSHA(base) || !validSHA(head) {
+		return 0, errors.New(opCountAhead + ": commit is not a full SHA")
+	}
+	ctx, cancel := p.withTimeout(ctx)
+	defer cancel()
+	r, err := p.do(ctx, call{
+		op: opCountAhead, method: http.MethodGet, path: "/compare/" + base + "..." + head,
+		query: url.Values{paramPerPage: {"1"}},
+	})
+	if err != nil {
+		return 0, err
+	}
+	if !r.ok() {
+		return 0, statusError(opCountAhead, r.status)
+	}
+	var c struct {
+		AheadBy *int `json:"ahead_by"`
+	}
+	if err := decode(opCountAhead, r, &c); err != nil {
+		return 0, err
+	}
+	if c.AheadBy == nil || *c.AheadBy < 0 {
+		return 0, errors.New(opCountAhead + ": the response holds no count")
+	}
+	return *c.AheadBy, nil
 }
 
 // changedOnly compares the trees of commit and parent along the path segs, from the root trees down.

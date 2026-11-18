@@ -224,7 +224,7 @@ const closedHolder = "first"
 
 // closeUnmerged moves o to the status the pull request step leaves when a person closed its recorded pull request
 // without a merge (rejected): NeedsIntervention at at, PullRequestOpened rewritten by markClosed, Approved False
-// with ChangeRequestClosed, and the lock released by settleLock.
+// with ChangeRequestClosed, and the lock released by settleTargetLock.
 func closeUnmerged(o *remediationv1alpha1.RemediationRequest, at time.Time) *remediationv1alpha1.RemediationRequest {
 	if o.Status.PullRequest == nil {
 		withPullRequest(o, ReasonPullRequestOpened)

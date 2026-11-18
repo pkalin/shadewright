@@ -110,8 +110,7 @@ func notFoundIncident(err error, name string) bool {
 // so the same write takes the request out of the count under maxConcurrentRemediations (active). The target lock
 // is not released in that write (ADR-0039 points 21 and 22, amended 2026-11-16): the request has no recorded pull
 // request, so one may still exist (an earlier open whose answer was lost and that the listing does not show yet,
-// or one a person opens from the branch the cancel leaves), and the status rule keeps the lock (prMayBeOpen,
-// settleLock in stop). The write wakes the request again, and the next reconcile reads the branch (afterStop,
+// or one a person opens from the branch the cancel leaves), and stop keeps the lock for settleTargetLock. The write wakes the request again, and the next reconcile reads the branch (afterStop,
 // checkHeld), as after Expired: it releases the lock when no open pull request of the branch may deliver the
 // change, and otherwise keeps it and looks again after heldRecheckInterval; a pull request of its own that the read
 // finds open is closed then, and one found merged is followed (settleCancelled). The cancel itself writes nothing
@@ -183,14 +182,15 @@ func (r *RemediationRequestReconciler) followCancelledMerge(ctx context.Context,
 	if err == nil {
 		err = r.endMerged(cleanCtx, git, rr, cr)
 	}
-	err = boundErr(ctx, cleanCtx, "check of the merged change request", err)
+	err = keepGitRead(ctx, cleanCtx, "check of the merged change request", err)
 	if errors.Is(err, errStopped) {
-		return reconcile.Result{}, nil
+		// The end is written; the lock is settled by the one decision that releases it, as followHeldMerge does.
+		return r.checkHeld(ctx, rr)
 	}
 	logf.FromContext(ctx).Info("Could not record the merge of the pull request of a cancelled RemediationRequest yet; "+
 		"tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number,
 		"error", err.Error())
-	return r.waitOrFail(ctx, rr, err)
+	return r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 }
 
 // recordCancelledOpen records cr, the request's own pull request found open after the cancel, in one status write:
@@ -277,7 +277,8 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 		"pullRequest", rr.Status.PullRequest.Number)
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := r.closeChangeRequest(cleanCtx, rr)
-	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
+	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead).
+	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err
@@ -327,7 +328,7 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 	if refused {
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 	}
-	return r.waitOrFail(ctx, rr, err)
+	return r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 }
 
 // cancelNotClosedCondition is condition PullRequestNotClosed for the recorded pull request of a request cancelled

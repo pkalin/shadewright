@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -318,14 +319,22 @@ func TestRecoverHandoffRetriesARefusedReadUntilTheGraceEnds(t *testing.T) {
 		}
 		return nil
 	})
-	if _, err := r.recheck(ctx, rr); err == nil {
-		t.Fatal("a refused read was not handed back for a retry")
+	if res, err := r.recheck(ctx, rr); err != nil || res.RequeueAfter < r.pullRequestPollInterval() || meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
+		t.Fatalf("a refused read needs a visible poll: %+v %v", res, err)
 	}
 	if rr.Status.Phase != api.PhasePolicyChecked {
 		t.Fatalf("a refused read before the deadline ended the replacement: %s", rr.Status.Phase)
 	}
 	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
 	if _, err := r.recheck(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	// The failed read past the grace is a Git wait whose end has passed: the check at the start of the next
+	// reconcile ends the request (endPassedWait), before any read.
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
 	if rr.Status.Phase != api.PhaseNeedsIntervention {

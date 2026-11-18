@@ -1644,6 +1644,38 @@ func staleMark(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
 	return c
 }
 
+// staleCleanupStopped reports whether rr ended NeedsIntervention because the Git host refused for good a step of the
+// cleanup of its stale plan (cleanUpStale): PlanFresh False with reason GitForbidden or GitRejected, which only that
+// end writes (endFreshness; a refusal elsewhere is written on PullRequestOpened or Approved by stop, or as PlanFresh
+// Unknown). Its pull request, recorded or found by the request's marker, may still be open, so the request keeps the
+// target lock, and the read after the stop (checkHeld) still reaches the plan's URL under a new installation of the
+// GitHub App (cleanupRepository) and tries the close again (closeAfterStaleStop, #808).
+func staleCleanupStopped(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention {
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+	return c != nil && c.Status == metav1.ConditionFalse && (c.Reason == ReasonGitForbidden || c.Reason == ReasonGitRejected)
+}
+
+// retriedClose marks err, a failed close of the request's own pull request (a *closeFailure) that is neither a
+// refusal for good nor a conflict (a merge, which the next read records), as a step of the Git host that the shared
+// record of Git retries takes (retryGitRead, under the fixed name of the close): a Paced entry of status.gitWaits
+// with condition GitReadRetry, at the poll interval or the host's longer delay, never the controller's rate limiter
+// (#808). Anything else, a failure of the Kubernetes side included, is returned unchanged.
+func retriedClose(err error) error {
+	if _, ok := errors.AsType[*closeFailure](err); !ok || isClusterError(err) || providers.IsConflict(err) {
+		return err
+	}
+	if _, _, refused := refusal(err); refused {
+		return err
+	}
+	return readFailure(opCloseChangeRequest, err)
+}
+
+// opCloseChangeRequest is the fixed name of the close of a pull request in condition GitReadRetry and the log.
+const opCloseChangeRequest = "close the change request"
+
 // cleanUpStale closes the change request of a stale plan whose mark is written and ends the request: Superseded
 // with the stale reason, or NeedsIntervention when the change request cannot be closed for good and no pull
 // request is recorded. A close of the recorded pull request that the Git host refuses for good keeps the request
@@ -1662,6 +1694,11 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 	// closing the change request.
 	cleanCtx, cleanCancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	closeErr := r.closeChangeRequest(cleanCtx, rr)
+	if rr.Status.PullRequest == nil {
+		// With no pull request recorded, a close that failed without a refusal is retried like a failed read, through
+		// the shared record (#808), also when it ran out of the cleanup's time (keepGitRead below).
+		closeErr = retriedClose(closeErr)
+	}
 	// Every result, nil and errRepositoryGone included, is checked against the deadline before a final phase
 	// is written from it. A step of the new installation that ran past it is still that step's failure (#797).
 	timedOut := ctx.Err() == nil && cleanCtx.Err() != nil
@@ -1754,13 +1791,17 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		refused, _, ok := refusal(err)
 		if !ok {
 			// A failed call never clears PullRequestNotClosed, also one that may have closed the pull request (a
-			// timeout, a 5xx): only a close that went through or a read that finds it closed or merged does.
+			// timeout, a 5xx): only a close that went through or a read that finds it closed or merged does. With no
+			// pull request recorded a failed close is a retried Git step by now (retriedClose): refuseOrWait gives it
+			// to retryGitRead with the request's bound.
 			return err
 		}
 		// The Git host refuses the close of a pull request found by the branch (none is recorded, so none is
 		// watched), or a step before it, for good (a permission the App lacks, a rule): the plan is stale and
-		// nothing more may be written for it, so a person has to close the change request. The lock stays
-		// (prMayBeOpen keeps it) until checkHeld finds none open.
+		// nothing more may be written for it, so the request ends at once (decision of 2026-11-17 on #808). The lock
+		// stays (prMayBeOpen keeps it) until the read after the stop settles it with a verdict (checkHeld): through
+		// the installation the cleanup used, the new one included (staleCleanupStopped), it tries the close again
+		// (closeAfterStaleStop), and it records a merge as a stale plan's merge (recordStoppedMerge).
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, refused
 		message = "The plan is stale (" + staleErr.Reason + ") and the Git host refused to close its " +
 			"change request; it was not closed"
@@ -2149,8 +2190,9 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	if freshness.Paused(settings) {
 		return freshness.ErrPaused
 	}
-	// The cleanup of a stale plan also reaches the plan's URL under a new installation (#290); the finalizer does not.
-	repo, reinstalled, ok := cleanupRepository(settings, rr, staleMark(rr) != nil && !deleting)
+	// The cleanup of a stale plan also reaches the plan's URL under a new installation (#290), and so does the close
+	// after a stop of that cleanup (staleCleanupStopped, #808); the finalizer does not.
+	repo, reinstalled, ok := cleanupRepository(settings, rr, (staleMark(rr) != nil || staleCleanupStopped(rr)) && !deleting)
 	if !ok {
 		return errRepositoryGone
 	}

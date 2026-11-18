@@ -142,7 +142,8 @@ type RemediationRequestReconciler struct {
 	RolloutDeadline time.Duration
 	// Now is the clock; nil means time.Now (tests set it).
 	Now func() time.Time
-	// Recorder records the kill switch's Events about a request (WritesPaused, WritesResumed). They are core/v1
+	// Recorder records the Events about a request (the kill switch's WritesPaused and WritesResumed, a status
+	// write an older CustomResourceDefinition pruned: CustomResourceDefinitionOutdated, among others). They are core/v1
 	// Events in the request's namespace, the operator namespace, where the executor's leader election Role
 	// grants create and patch on Events. Nil records none (tests).
 	Recorder record.EventRecorder
@@ -250,6 +251,10 @@ type RemediationRequestReconciler struct {
 	// gitRetries makes it on first use.
 	gitRetryMarks *gitRetryMarks
 	gitRetryOnce  sync.Once
+	// outdatedCRD holds, per request, the error of a status write in the reconcile in progress whose answer lacked a
+	// field the executor sent (crdoutdated.go, #866): later status writes of the request in that reconcile are
+	// refused with it, and Reconcile returns it. Dropped at the start and the end of each reconcile.
+	outdatedCRD sync.Map
 	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
 	// it. Memory only, set once.
 	since reconcilingSince
@@ -448,8 +453,14 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 // (retryGitRead); Kubernetes failures and other retryable errors keep their error path.
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.gitRetries().take(req.NamespacedName)
+	_ = r.takeOutdatedCRD(req.NamespacedName)
 	res, err := r.reconcile(ctx, req)
 	m := r.gitRetries().take(req.NamespacedName)
+	if crdErr := r.takeOutdatedCRD(req.NamespacedName); crdErr != nil {
+		// A status write lost a field the executor decides from (crdoutdated.go): whatever the steps made of it,
+		// the reconcile ends with that error for the error backoff, and nothing after it runs.
+		return ctrl.Result{}, crdErr
+	}
 	kept := false
 	if len(m.lastRead) > 0 && err == nil && ctx.Err() == nil {
 		// The reconcile read once more past the end of a read wait: what its reads left standing ends now on evidence

@@ -40,10 +40,12 @@ import (
 // the Git host, or settings that cannot reach the plan's repository, no longer ends a replacement whose commit may
 // already be on the pull request it was to take over. The recovery waits on the shared path of Git waits
 // (gitwait.go): condition PullRequestUnreadable says why for people (one Warning Event per change of reason), and the
-// wait is the HandoffGrace entry of status.gitWaits, recorded and paced by retryGitRead. Its end is
-// recoveryWaitBound after the first refusal (handoffGraceEnd), read from recorded state alone; the check at the start
-// of every reconcile ends it (endPassedWait, endRecoveryFailed, endRecoveryWait), so no error, timeout or early return
-// of the recovery skips it. The end aborts the handoff and keeps the target lock; the lock is released only by a
+// wait is the HandoffRecovery entry of status.gitWaits, recorded with the HandoffGrace entry of the deadline and paced
+// by retryGitRead (decision of 2026-11-18). The HandoffRecovery entry starts at the first refusal (the condition's
+// lastTransitionTime) and ends recoveryWaitBound later; neither entry's end ever moves. The recovery ends when both
+// have passed, at the later end (handoffWaitEnd), read from recorded state alone; the check at the start of every
+// reconcile ends it (endPassedWait, endRecoveryFailed, endRecoveryWait), so no error, timeout or early return of the
+// recovery skips it. The end aborts the handoff and keeps the target lock; the lock is released only by a
 // verdict of lockverdict, after the read that settles it (checkHeld, heldRecovery first).
 
 // recoveryWaitBound is how long a recovery waits after its first refusal: the bound of a cancel and of a cleanup.
@@ -66,24 +68,6 @@ const ReasonRecoveryReadFailed = "RecoveryReadFailed"
 var recoveryWaitReasons = map[string]bool{
 	ReasonGitForbidden: true, ReasonGitRejected: true, ReasonRecoveryReadFailed: true, ReasonSettingsNotFound: true,
 	reasonRepositoryUnavailable: true, reasonTargetBranchChanged: true, reasonRepositoryUnusable: true,
-}
-
-// handoffGraceEnd is when a HandoffGrace wait of rr ends: handoffRecoveryGrace after its deadline, or, for a recovery
-// that waits (watchedRecovery), recoveryWaitBound after the start of that wait (the condition's lastTransitionTime,
-// set from the executor's clock by setRecoveryWait) when that is later. Both are recorded state written by the
-// executor; ok is false when rr records neither.
-func handoffGraceEnd(rr *remediationv1alpha1.RemediationRequest) (time.Time, bool) {
-	var end time.Time
-	ok := false
-	if rr.Status.Deadline != nil {
-		end, ok = rr.Status.Deadline.Add(handoffRecoveryGrace), true
-	}
-	if c := watchedRecovery(rr); c != nil && !c.LastTransitionTime.IsZero() {
-		if e := c.LastTransitionTime.Add(recoveryWaitBound); !ok || e.After(end) {
-			end, ok = e, true
-		}
-	}
-	return end, ok
 }
 
 // recoveryStepErr is keepGitRead for the step of the recovery: a Git read that ran out of the step's time stays that
@@ -187,8 +171,8 @@ func watchedRecovery(rr *remediationv1alpha1.RemediationRequest) *metav1.Conditi
 }
 
 // waitRecovery starts or continues the wait of a recovery that cannot read (#786): condition PullRequestUnreadable
-// (want) says why (setRecoveryWait), and the wait is the HandoffGrace entry of status.gitWaits, recorded and paced by
-// retryGitRead (the poll interval, or the delay the host asked for when longer, never past the end of the wait). A
+// (want) says why (setRecoveryWait), and the wait is the HandoffRecovery entry of status.gitWaits with the HandoffGrace
+// entry of the deadline, recorded and paced by retryGitRead (the poll interval, or the delay the host asked for when longer, never past the end of the wait). A
 // failure of the Kubernetes API joined to err is returned once the condition is written, for the error backoff; a
 // failed write is returned with err.
 func (r *RemediationRequestReconciler) waitRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
@@ -201,12 +185,12 @@ func (r *RemediationRequestReconciler) waitRecovery(ctx context.Context, rr *rem
 	}
 	logf.FromContext(ctx).Info("Could not recover the handoff of RemediationRequest; it waits for a read that works",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "reason", want.Reason, "error", err.Error())
-	return r.retryGitRead(ctx, rr, recoveryRead(err), boundBy(waitHandoffGrace))
+	return r.retryGitRead(ctx, rr, recoveryRead(err), boundBy(waitHandoffRecovery))
 }
 
 // waitingRecovery is retryRecovery for err, a failure of a recovery that waits on c (watchedRecovery, #786, decision
 // of 2026-11-16: sort by where the error comes from, and let nothing unknown end a waiting recovery). It never ends
-// the request; only the end of the HandoffGrace wait does (endPassedWait):
+// the request; only the end of its waits does (endPassedWait):
 //   - the end of the reconcile's own context is returned as it is;
 //   - a final refusal of the Git host, or settings that cannot reach the repository, continues the wait
 //     (waitRecovery) with the condition that names it;
@@ -238,7 +222,7 @@ func (r *RemediationRequestReconciler) waitingRecovery(ctx context.Context, rr *
 			return reconcile.Result{}, errors.Join(err, werr)
 		}
 	}
-	return r.retryGitRead(ctx, rr, recoveryRead(err), boundBy(waitHandoffGrace))
+	return r.retryGitRead(ctx, rr, recoveryRead(err), boundBy(waitHandoffRecovery))
 }
 
 // cancelRecovery is recoverHandoff's answer to err, a failure of the recovery of a request whose spec.cancel is set:
@@ -275,7 +259,8 @@ func recoveryWaits(ctx context.Context, rr *remediationv1alpha1.RemediationReque
 // setRecoveryWait writes want, condition PullRequestUnreadable of a recovery that waits (setUnreadable, one Warning
 // Event per change of reason). The write that starts the wait (no watchedRecovery before it) sets its
 // lastTransitionTime to the executor's clock, also over a condition that was True for another reason, so the end of
-// the wait (handoffGraceEnd) counts from the first refusal; a later change of reason keeps that time.
+// the wait (the start of the HandoffRecovery entry, newWait) is the first refusal; a later change of reason keeps that
+// time.
 func (r *RemediationRequestReconciler) setRecoveryWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	want *metav1.Condition) error {
 	if watchedRecovery(rr) == nil {
@@ -303,8 +288,9 @@ func dropRecoveryWait(rr *remediationv1alpha1.RemediationRequest) {
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 }
 
-// endRecoveryWait ends a replacement whose recovery waited on c (watchedRecovery) until the end of its HandoffGrace
-// wait, recoveryWaitBound after its first refusal (#786, decision of 2026-11-17). While the handoff's intent stands,
+// endRecoveryWait ends a replacement whose recovery waited on c (watchedRecovery) until the end of its waits, the later
+// of recoveryWaitBound after its first refusal and handoffRecoveryGrace after its deadline (#786, decisions of
+// 2026-11-17 and 2026-11-18). While the handoff's intent stands,
 // the request it replaces runs no freshness check and no merge gate, and its deletion waits; the bound keeps that
 // from lasting. The end is one status write: NeedsIntervention with ReasonRecoveryWaitExpired, the handoff Aborted
 // (declineOnEnd), so the predecessor aborts its intent on its next look (settleHandoff), checks its pull request

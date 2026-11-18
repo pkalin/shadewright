@@ -822,6 +822,260 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 			"the pull request stays open for a person")
 	})
 
+	// The waits of a recovery whose commit was pushed and whose takeover write was lost (decision of 2026-11-18 on
+	// #786): the HandoffGrace entry (the deadline plus the grace) and the HandoffRecovery entry (the first refusal plus
+	// 24 hours) are each recorded once and never move, and the recovery ends when both have passed.
+	Context("when the recovery of a pushed commit cannot read (#786)", func() {
+		const (
+			fail503 = "503"
+			fail403 = "403"
+		)
+		var failing string
+		recoveryEntry := func(rr *remediationv1alpha1.RemediationRequest, k remediationv1alpha1.GitWaitKind) *remediationv1alpha1.GitWait {
+			for i := range rr.Status.GitWaits {
+				if rr.Status.GitWaits[i].Kind == k {
+					return &rr.Status.GitWaits[i]
+				}
+			}
+			return nil
+		}
+		// reconcileRepl runs one reconcile of the replacement and requires it to return no error: a status write the
+		// API server refuses would come back here.
+		reconcileRepl := func() reconcile.Result {
+			res, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(repl)})
+			Expect(err).NotTo(HaveOccurred())
+			return res
+		}
+		// pushed leaves the replacement's commit on the branch with the record of the takeover lost, and the Git host
+		// failing the read of the branch head as failing says.
+		pushed := func() {
+			replace("512Mi", ref(hint))
+			untilIntent()
+			hook = func(rr *remediationv1alpha1.RemediationRequest) (bool, bool) {
+				return rr.UID == repl.UID && tookOver(rr), false
+			}
+			pollOf(repl)
+			hook = nil
+			Expect(head()).NotTo(Equal(oldHead), "the commit was pushed, its record lost")
+			Expect(get(repl).Status.Deadline).NotTo(BeNil())
+			failing = ""
+			git.SetFail(func(op string) error {
+				switch {
+				case op != opBranchHead:
+					return nil
+				case failing == fail503:
+					return &providers.RetryableError{Err: errors.New("GitHub branch head: status 503")}
+				case failing == fail403:
+					return fmt.Errorf("status 403: %w", providers.ErrForbidden)
+				}
+				return nil
+			})
+		}
+		// endsAt checks that the recovery has not ended one minute before end, and has ended one minute after it, with
+		// RecoveryWaitExpired, the handoff aborted and the lock kept.
+		endsAt := func(end time.Time) {
+			clock = end.Add(-time.Minute)
+			reconcileRepl()
+			Expect(get(repl).Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked), "ended before %v", end)
+			clock = end.Add(time.Minute)
+			reconcileRepl()
+			r := get(repl)
+			Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(ReasonRecoveryWaitExpired))
+			Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+			Expect(r.Status.HoldsTarget).To(HaveValue(BeTrue()))
+			Expect(r.Status.GitWaits).To(BeEmpty())
+		}
+
+		It("records the grace of a 503 and then the 24 hours of a 403, and ends at the later one", func() {
+			pushed()
+			deadline := get(repl).Status.Deadline.Time
+			clock = deadline.Add(time.Minute)
+			failing = fail503
+			reconcileRepl()
+			grace := recoveryEntry(get(repl), remediationv1alpha1.GitWaitHandoffGrace)
+			Expect(grace).NotTo(BeNil(), "the 503 past the deadline records the grace")
+			Expect(grace.Ends.Time).To(BeTemporally("==", deadline.Add(handoffRecoveryGrace)))
+			grace = grace.DeepCopy()
+
+			clock = clock.Add(time.Minute)
+			refusedAt := clock
+			failing = fail403
+			reconcileRepl()
+			r := get(repl)
+			Expect(r.Status.GitWaits).To(HaveLen(2))
+			bound := recoveryEntry(r, remediationv1alpha1.GitWaitHandoffRecovery)
+			Expect(bound).NotTo(BeNil(), "the 403 records the 24 hours")
+			Expect(bound.Since.Time).To(BeTemporally("==", refusedAt))
+			Expect(bound.Ends.Time).To(BeTemporally("==", refusedAt.Add(recoveryWaitBound)))
+			bound = bound.DeepCopy()
+
+			for range 10 {
+				clock = clock.Add(2 * time.Hour)
+				reconcileRepl()
+				r := get(repl)
+				Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+				Expect(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffGrace)).To(Equal(grace))
+				Expect(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffRecovery)).To(Equal(bound))
+			}
+			endsAt(bound.Ends.Time)
+		})
+
+		It("records the 24 hours of a 403 before the deadline, keeps them through a 503 past it, and ends at the later end", func() {
+			pushed()
+			deadline := get(repl).Status.Deadline.Time
+			refusedAt := clock
+			failing = fail403
+			reconcileRepl()
+			r := get(repl)
+			bound := recoveryEntry(r, remediationv1alpha1.GitWaitHandoffRecovery)
+			Expect(bound).NotTo(BeNil())
+			Expect(bound.Ends.Time).To(BeTemporally("==", refusedAt.Add(recoveryWaitBound)))
+			bound = bound.DeepCopy()
+			grace := recoveryEntry(r, remediationv1alpha1.GitWaitHandoffGrace)
+			Expect(grace).NotTo(BeNil(), "the grace after the deadline is recorded with the refusal")
+			Expect(grace.Ends.Time).To(BeTemporally("==", deadline.Add(handoffRecoveryGrace)))
+			grace = grace.DeepCopy()
+
+			clock = deadline.Add(time.Minute)
+			failing = fail503
+			for range 10 {
+				reconcileRepl()
+				r := get(repl)
+				Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
+				Expect(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffGrace)).To(Equal(grace))
+				Expect(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffRecovery)).To(Equal(bound))
+				clock = clock.Add(time.Minute)
+			}
+			end := bound.Ends.Time
+			if g := grace.Ends.Time; g.After(end) {
+				end = g
+			}
+			failing = fail403
+			endsAt(end)
+		})
+
+		It("keeps the first refusal's 24 hours while the refusal comes and goes", func() {
+			pushed()
+			refusedAt := clock
+			failing = fail403
+			reconcileRepl()
+			bound := recoveryEntry(get(repl), remediationv1alpha1.GitWaitHandoffRecovery)
+			Expect(bound).NotTo(BeNil())
+			Expect(bound.Since.Time).To(BeTemporally("==", refusedAt))
+			bound = bound.DeepCopy()
+			for i := range 12 {
+				clock = clock.Add(time.Hour)
+				failing = map[bool]string{true: fail503, false: fail403}[i%2 == 0]
+				reconcileRepl()
+				r := get(repl)
+				Expect(condition(r, remediationv1alpha1.ConditionPullRequestUnreadable)).NotTo(BeNil())
+				n := 0
+				for _, w := range r.Status.GitWaits {
+					if w.Kind == remediationv1alpha1.GitWaitHandoffRecovery {
+						n++
+					}
+				}
+				Expect(n).To(Equal(1), "the HandoffRecovery entry is recorded once")
+				Expect(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffRecovery)).To(Equal(bound))
+			}
+			endsAt(bound.Ends.Time)
+		})
+
+		// Decision of 2026-11-18 on #786, point 3: during and after the abort the predecessor and its replacement hold
+		// the target, as the chain of a handoff does, and a third request for it waits Queued with TargetLocked. Once
+		// reads answer, the predecessor stops BranchDiverged with one comment and the lock settles by the usual
+		// verdict: kept by the chain while the pull request is open, released by both within settleRounds rounds once
+		// a person closes it, and the third, which waited behind it, ends Superseded.
+		It("keeps the target from a third request through the abort, and settles once reads answer", func() {
+			const settleRounds = 3
+			pushed()
+			p := get(pred)
+			third := &remediationv1alpha1.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace,
+				Name: fmt.Sprintf("handoff-third-%d", seq)}, Spec: *p.Spec.DeepCopy()}
+			third.Spec.Replaces, third.Spec.ChainRoot = nil, ""
+			Expect(k8sClient.Create(ctx, third)).To(Succeed())
+			DeferCleanup(func() {
+				got := &remediationv1alpha1.RemediationRequest{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(third), got); err == nil &&
+					controllerutil.RemoveFinalizer(got, FinalizerName) {
+					Expect(k8sClient.Update(ctx, got)).To(Succeed())
+				}
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, third))).To(Succeed())
+			})
+			git.SetFail(func(string) error { return fmt.Errorf("status 403: %w", providers.ErrForbidden) })
+			answering := false
+			// round reconciles the replacement, the predecessor and the third request once each, and checks that the
+			// third never holds the target while the chain does.
+			round := func(step string) {
+				pollOf(repl)
+				pollOf(pred)
+				pollOf(third)
+				r, p, o := get(repl), get(pred), get(third)
+				Expect(holdsLock(r) || holdsLock(p)).To(BeTrue(), "%s: the chain released the target", step)
+				Expect(holdsLock(o)).To(BeFalse(), "%s: a third request took the target", step)
+				Expect(o.Status.Phase).To(BeEmpty(), "%s: the third request went on", step)
+				if answering {
+					// While reads are refused it waits on its own read before it asks for the lock.
+					q := condition(o, remediationv1alpha1.ConditionQueued)
+					Expect(q).NotTo(BeNil(), "%s: the third request is not queued", step)
+					Expect(q.Reason).To(Equal(ReasonTargetLocked), step)
+				}
+			}
+			deadline := get(repl).Status.Deadline.Time
+			refusedAt := clock
+			ends := refusedAt.Add(recoveryWaitBound)
+			if g := deadline.Add(handoffRecoveryGrace); g.After(ends) {
+				ends = g
+			}
+			for i := 0; !clock.After(ends.Add(time.Hour)); i++ {
+				round(fmt.Sprintf("refused, step %d", i))
+				clock = clock.Add(2 * time.Hour)
+			}
+			round("past both ends")
+			r := get(repl)
+			Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(ReasonRecoveryWaitExpired))
+			Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+
+			git.SetFail(nil)
+			answering = true
+			comments := len(git.Comments(number))
+			for i := range settleRounds {
+				round(fmt.Sprintf("reads answer, round %d", i))
+			}
+			p = get(pred)
+			Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+			Expect(condition(p, remediationv1alpha1.ConditionApproved).Reason).To(Equal(ReasonBranchDiverged))
+			Expect(p.Status.Handoff.To.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+			Expect(git.Comments(number)).To(HaveLen(comments+1), "one comment hands the pull request to a person")
+			Expect(git.ChangeRequests()).To(ConsistOf(HaveField("State", providers.ChangeRequestOpen)))
+			// Settled: nothing changes while the pull request stays open.
+			for i := range settleRounds {
+				round(fmt.Sprintf("settled, round %d", i))
+			}
+			Expect(git.Comments(number)).To(HaveLen(comments+1), "no second comment")
+
+			// A person closes the pull request: the chain releases the target, and the third, which waited behind it,
+			// ends Superseded.
+			Expect(git.CloseChangeRequest(ctx, number)).To(Succeed())
+			for range settleRounds {
+				pollOf(repl)
+				pollOf(pred)
+			}
+			Expect(holdsLock(get(repl))).To(BeFalse(), "the replacement keeps the target after the close")
+			Expect(holdsLock(get(pred))).To(BeFalse(), "the predecessor keeps the target after the close")
+			for range settleRounds {
+				pollOf(third)
+			}
+			// The usual verdict on a request that waited behind a pull request closed without a merge.
+			o := get(third)
+			Expect(holdsLock(o)).To(BeFalse())
+			Expect(o.Status.Phase).To(Equal(remediationv1alpha1.PhaseSuperseded))
+			Expect(condition(o, remediationv1alpha1.ConditionPlanFresh).Reason).To(Equal(remediationv1alpha1.ReasonAnotherRequestClosed))
+		})
+	})
+
 	It("aborts on a foreign push during the handoff, and the predecessor stops as before", func() {
 		replace("512Mi", ref(hint))
 		untilIntent()

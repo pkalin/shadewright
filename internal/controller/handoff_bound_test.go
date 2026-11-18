@@ -360,7 +360,7 @@ func TestRecoveryBoundReleasesThePredecessor(t *testing.T) {
 }
 
 // The clock of the bound is the condition's lastTransitionTime from the first refusal: a restart and a change of the
-// reason (here the repository leaving the settings) keep it, and the HandoffGrace wait ends there. Before the bound the
+// reason (here the repository leaving the settings) keep it, and the HandoffRecovery wait ends there. Before the bound the
 // request is looked at again after the poll interval, or after the delay the host asked for when longer; near the
 // bound never later than its end (retryGitRead), and nothing ends it before the bound.
 func TestRecoveryBoundCountsFromTheFirstRefusal(t *testing.T) {
@@ -368,8 +368,9 @@ func TestRecoveryBoundCountsFromTheFirstRefusal(t *testing.T) {
 	ctx := context.Background()
 	key := client.ObjectKeyFromObject(rr)
 	start := watchedRecovery(rr).LastTransitionTime
-	if w := gitWait(rr, waitHandoffGrace); w == nil || !w.Ends.Time.Equal(start.Add(recoveryWaitBound)) {
-		t.Fatalf("HandoffGrace wait = %+v, want its end %v after the first refusal", w, recoveryWaitBound)
+	if w := gitWait(rr, waitHandoffRecovery); w == nil || !w.Since.Equal(&start) ||
+		!w.Ends.Time.Equal(start.Add(recoveryWaitBound)) {
+		t.Fatalf("HandoffRecovery wait = %+v, want it from the first refusal to %v after it", w, recoveryWaitBound)
 	}
 
 	restore := changeSettings(t, r, func(s *api.RemediationSettings) { s.Spec.Repositories[0].URL = otherRepositoryURL })
@@ -687,5 +688,93 @@ func TestRecoveryWaitStartsItsOwnClock(t *testing.T) {
 	}
 	if l := watchedRecovery(rr); l == nil || !l.LastTransitionTime.Equal(&c.LastTransitionTime) {
 		t.Fatalf("the caller's copy = %+v, want the stored time", l)
+	}
+}
+
+// The first refusal's status writes may be lost or meet a change of the request (decision of 2026-11-18 on #786): the
+// HandoffRecovery entry still starts at the first refusal the status records (the condition's lastTransitionTime) and
+// ends recoveryWaitBound after it, whichever reconcile records it.
+func TestRecoveryWaitSurvivesALostWriteAtTheFirstRefusal(t *testing.T) {
+	isEntry := func(obj client.Object) bool {
+		rr, ok := obj.(*api.RemediationRequest)
+		return ok && rr.Name == newName && gitWait(rr, waitHandoffRecovery) != nil
+	}
+	isCondition := func(obj client.Object) bool {
+		rr, ok := obj.(*api.RemediationRequest)
+		return ok && rr.Name == newName && watchedRecovery(rr) != nil && gitWait(rr, waitHandoffRecovery) == nil
+	}
+	for name, c := range map[string]struct {
+		// hit picks the status patch the fault is put on; lose fails it unapplied, otherwise the request is changed
+		// (an annotation) between the read and the patch, a conflict.
+		hit  func(client.Object) bool
+		lose bool
+		// fromFirst: the entry counts from the first refusal; otherwise from the reconcile after the lost condition.
+		fromFirst bool
+	}{
+		"condition lost":      {hit: isCondition, lose: true},
+		"condition conflicts": {hit: isCondition},
+		"entry lost":          {hit: isEntry, lose: true, fromFirst: true},
+		"entry conflicts":     {hit: isEntry, fromFirst: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
+			move := movableClock(r)
+			refuseAll(g)
+			ctx := context.Background()
+			key := client.ObjectKeyFromObject(rr)
+			base := r.Client.(client.WithWatch)
+			hit := false
+			fake := interceptor.NewClient(base, interceptor.Funcs{
+				SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object,
+					patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					if !hit && c.hit(obj) {
+						hit = true
+						if c.lose {
+							return errors.New("the status write was lost")
+						}
+						live := &api.RemediationRequest{}
+						if err := base.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+							return err
+						}
+						live.Annotations = map[string]string{"test.shadewright.io/refusal": "changed"}
+						if err := base.Update(ctx, live); err != nil {
+							return err
+						}
+					}
+					return cl.SubResource(sub).Patch(ctx, obj, patch, opts...)
+				},
+			})
+			r.Client, r.APIReader = fake, fake
+			first := r.now().Truncate(time.Second)
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			if !hit {
+				t.Fatal("the fault met no status write")
+			}
+			move(time.Hour)
+			for range 2 {
+				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := base.Get(ctx, key, rr); err != nil {
+				t.Fatal(err)
+			}
+			want := first
+			if !c.fromFirst {
+				// Nothing of the first refusal was recorded (a conflict on the condition's write is returned for a
+				// retry): the wait starts with the refusal the status records.
+				want = first.Add(time.Hour)
+			}
+			w := gitWait(rr, waitHandoffRecovery)
+			if w == nil || !w.Since.Time.Equal(want) || !w.Ends.Time.Equal(want.Add(recoveryWaitBound)) {
+				t.Fatalf("HandoffRecovery wait = %+v, want it from %v to %v after it", w, want, recoveryWaitBound)
+			}
+			if n := len(rr.Status.GitWaits); n != 2 {
+				t.Fatalf("waits = %+v, want the HandoffRecovery and HandoffGrace entries", rr.Status.GitWaits)
+			}
+			if c := watchedRecovery(rr); c == nil || !c.LastTransitionTime.Time.Equal(want) {
+				t.Fatalf("PullRequestUnreadable = %+v, want it from %v", c, want)
+			}
+		})
 	}
 }

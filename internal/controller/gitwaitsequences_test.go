@@ -636,7 +636,7 @@ func TestSequenceMergeWithoutReceiptReleasesUnderAPause(t *testing.T) {
 }
 
 // #786: a replacement recovering a handoff whose repository leaves the settings waits on that refusal past the
-// deadline and its grace; its HandoffGrace wait ends recoveryWaitBound after the first refusal, from recorded state:
+// deadline and its grace; its HandoffRecovery wait ends recoveryWaitBound after the first refusal, from recorded state:
 // NeedsIntervention with RecoveryWaitExpired, the handoff Aborted and the target lock kept, never released without a
 // verdict. The poll interval is an hour, so the bound is reached in few steps; the model's properties hold at each.
 func TestSequenceHandoffRefusalEndsAtItsBound(t *testing.T) {
@@ -658,8 +658,8 @@ func TestSequenceHandoffRefusalEndsAtItsBound(t *testing.T) {
 	case m.clock.at.Before(m.refusedAt.Add(recoveryWaitBound)):
 		m.fatalf("end: ended %v after the first refusal, before the bound %v", m.clock.at.Sub(m.refusedAt),
 			recoveryWaitBound)
-	case gitWait(live, waitHandoffGrace) != nil:
-		m.fatalf("end: the HandoffGrace wait stands after the end")
+	case gitWait(live, waitHandoffGrace) != nil || gitWait(live, waitHandoffRecovery) != nil:
+		m.fatalf("end: a wait of the recovery stands after the end")
 	case live.Status.Handoff == nil || live.Status.Handoff.From == nil ||
 		live.Status.Handoff.From.Phase != api.HandoffAborted:
 		m.fatalf("end: the handoff is not aborted: %+v", live.Status.Handoff)

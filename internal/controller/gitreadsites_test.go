@@ -103,7 +103,10 @@ const (
 	heldLockBound = "unboundedRead(noBoundHeldLock)"
 	// handoffGraceBound is the bound of the retries of a handoff's recovery: the end of its HandoffGrace wait.
 	handoffGraceBound = "boundBy(waitHandoffGrace)"
-	unboundedCalls    = "unboundedRead("
+	// handoffRecoveryBound is the bound of the retries of a recovery that waits on a refusal: its HandoffRecovery
+	// wait, recorded with the HandoffGrace wait of its deadline, the later of the two ending it (#786).
+	handoffRecoveryBound = "boundBy(waitHandoffRecovery)"
+	unboundedCalls       = "unboundedRead("
 )
 
 var gitReadSites = map[string]gitReadSite{
@@ -150,8 +153,8 @@ var gitReadSites = map[string]gitReadSite{
 		}},
 	helperSite:                                 {},
 	"handoff.go:retryRecovery:1":               {bound: handoffGraceBound, check: checkRecoveryBound},
-	"recoverywait.go:waitRecovery:1":           {bound: handoffGraceBound, check: checkRecoveryWaitBound(false)},
-	"recoverywait.go:waitingRecovery:1":        {bound: handoffGraceBound, check: checkRecoveryWaitBound(true)},
+	"recoverywait.go:waitRecovery:1":           {bound: handoffRecoveryBound, check: checkRecoveryWaitBound(false)},
+	"recoverywait.go:waitingRecovery:1":        {bound: handoffRecoveryBound, check: checkRecoveryWaitBound(true)},
 	"recoverywait.go:heldRecovery:1":           {bound: heldLockBound},
 	"incidentcancel.go:followCancelledMerge:1": {bound: heldLockBound},
 	"incidentcancel.go:closeCancelled:1":       {bound: heldLockBound},

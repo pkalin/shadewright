@@ -102,6 +102,37 @@ func TestRecoveryHonoursRetryAfterPastTheDeadline(t *testing.T) {
 	}
 }
 
+// Past the grace, a failure that is no Git read (here a 404 for the branch while its pull request is open, answers
+// that disagree) does not end a recovery whose HandoffRecovery wait from an earlier refusal still stands: the recovery
+// ends when every recorded wait has passed (decision of 2026-11-18 on #786), and this path reads that end as
+// endPassedWait does.
+func TestRecoveryPastTheGraceKeepsARecordedRefusalWait(t *testing.T) {
+	r, g, _, rr, _, _ := gateWorld(t)
+	ctx := context.Background()
+	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
+	since := metav1.NewTime(r.now().Add(-time.Hour).Truncate(time.Second))
+	rr.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitHandoffRecovery, Since: since,
+		Ends: &metav1.Time{Time: since.Add(recoveryWaitBound)}, Operation: opBranchHead}}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	g.SetFail(func(op string) error {
+		if op == opBranchHead {
+			return fmt.Errorf("status 404: %w", providers.ErrNotFound)
+		}
+		return nil
+	})
+	if _, err := r.recheck(ctx, rr); !errors.Is(err, errConflictingReads) {
+		t.Fatalf("recheck = %v, want the answers that disagree for the error backoff", err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != api.PhasePolicyChecked {
+		t.Fatalf("the recovery ended at the grace with a HandoffRecovery wait standing: %s", rr.Status.Phase)
+	}
+}
+
 // failRewriteRecord makes every status write that records the rewrite after the handoff fail.
 func failRewriteRecord(r *RemediationRequestReconciler) client.Client {
 	base := r.Client

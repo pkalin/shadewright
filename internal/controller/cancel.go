@@ -342,8 +342,8 @@ func (r *RemediationRequestReconciler) endCancelClosed(ctx context.Context, rr *
 // cancelRecoveryFailed handles err, a failure of the recovery of a handoff (recoverHandoff) of a request whose
 // spec.cancel is set: the cancel cannot finish while it is not known whether the replacement's own commit is on the
 // pull request, and the cancel never ends the request on it, so a merge of that commit is still recorded once the
-// recovery can read again; only the end of the recovery's own wait does (its HandoffGrace entry, endPassedWait,
-// #786). A pause waits and the caller's cancellation is returned. A final refusal of the Git host, a repository that is not configured or usable any more and a changed target branch are watched
+// recovery can read again; only the end of the recovery's own waits does (its HandoffGrace and HandoffRecovery
+// entries, endPassedWait, #786). A pause waits and the caller's cancellation is returned. A final refusal of the Git host, a repository that is not configured or usable any more and a changed target branch are watched
 // (cancelWatch), as for a refused close; anything else, a failed read of a pull request included, is retried
 // (cancelFailed) within cleanupFailingBound, then watched. The recovery's own deadline grace does not apply.
 func (r *RemediationRequestReconciler) cancelRecoveryFailed(ctx context.Context,

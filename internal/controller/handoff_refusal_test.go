@@ -461,8 +461,15 @@ func TestRecoveryWithoutARefusalKeepsTheGrace(t *testing.T) {
 				if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable) == nil {
 					t.Fatal("no condition was written")
 				}
-				// A read that worked removed it (setUnreadable, as recoverHandoff does with nothing to recover).
+				// A read that worked removed it (setUnreadable, as recoverHandoff does with nothing to recover), and the
+				// reconcile that read, retrying nothing, removed its waits (clearGitReadRetry).
 				if err := r.setUnreadable(ctx, rr, nil); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := r.clearGitReadRetry(ctx, client.ObjectKeyFromObject(rr), true); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -632,10 +632,12 @@ spec:
               gitWaits:
                 description: |-
                   gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of
-                  bound: Paced (no end of its own), RequestDeadline, HandoffGrace, MergeCheck and MergeContent. Starting or ending
-                  one kind never touches another, and an entry holds everything needed to end it. At the start of every
-                  reconcile the executor ends each RequestDeadline and HandoffGrace entry whose bound has passed, before any
-                  read: RequestDeadline expires the request, HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed.
+                  bound: Paced (no end of its own), RequestDeadline, HandoffGrace, HandoffRecovery, MergeCheck and MergeContent.
+                  Starting or ending one kind never touches another, and an entry holds everything needed to end it. At the start
+                  of every reconcile the executor ends each RequestDeadline entry whose bound has passed, and the recovery of a
+                  handoff once every HandoffGrace and HandoffRecovery entry it records has passed, before any read:
+                  RequestDeadline expires the request, the recovery's entries end it NeedsIntervention with HandoffRecoveryFailed,
+                  or RecoveryWaitExpired while condition PullRequestUnreadable says why it waits.
                   A MergeCheck or MergeContent entry whose bound has passed ends only after one more read in that reconcile:
                   an answer goes on as after any read, and a failure ends it, MergeCheck by recording the merge with the plan
                   not shown fresh, MergeContent (five minutes from its start) by ending the request NeedsIntervention with
@@ -651,8 +653,9 @@ spec:
                     ends:
                       description: |-
                         ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
-                        request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
-                        the start (MergeCheck, MergeContent). It does not move while the entry stands.
+                        request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), 24 hours after the
+                        start (HandoffRecovery), five minutes after the start (MergeCheck, MergeContent). It does not move while the
+                        entry stands.
                       format: date-time
                       type: string
                     kind:
@@ -661,6 +664,7 @@ spec:
                       - Paced
                       - RequestDeadline
                       - HandoffGrace
+                      - HandoffRecovery
                       - MergeCheck
                       - MergeContent
                       type: string

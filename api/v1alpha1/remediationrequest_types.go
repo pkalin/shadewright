@@ -380,9 +380,10 @@ const (
 	// branch that settles the lock on its target fails through that installation (#797), and, on a replacement whose
 	// recovery of its handoff cannot read, with the refusal's reason (GitForbidden, GitRejected) or one of the three
 	// reasons about the repository while it waits for a read that can show whether its commit was merged (#786), and
-	// with reason RecoveryReadFailed once that cause is gone and another read of the recovery fails; that wait lasts at
-	// most 24 hours from its first refusal (lastTransitionTime), then the replacement ends NeedsIntervention with
-	// reason RecoveryWaitExpired, keeps this condition and reads on while it keeps the lock. The message names the read;
+	// with reason RecoveryReadFailed once that cause is gone and another read of the recovery fails; that wait lasts
+	// until the later of 24 hours from its first refusal (lastTransitionTime, the start of its HandoffRecovery wait)
+	// and 15 minutes after its deadline, then the replacement ends NeedsIntervention with reason RecoveryWaitExpired,
+	// keeps this condition and reads on while it keeps the lock. The message names the read;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,
@@ -460,8 +461,8 @@ const (
 	ConditionCancelPending = "CancelPending"
 	// ConditionGitReadRetry is True while status.gitWaits holds an entry: the executor retries a read of the Git host
 	// that failed (#771). It summarizes the entries: the reason is that of the entry that ends first
-	// (GitReadFailedBeforeDeadline, GitReadFailedBeforeHandoffGrace, GitReadFailedBeforeMergeWait,
-	// GitReadFailedBeforeContentWait), or GitReadFailed when only a Paced entry stands; the message names the
+	// (GitReadFailedBeforeDeadline, GitReadFailedBeforeHandoffGrace, GitReadFailedBeforeHandoffRecovery,
+	// GitReadFailedBeforeMergeWait, GitReadFailedBeforeContentWait), or GitReadFailed when only a Paced entry stands; the message names the
 	// reads, never the host's answer; lastTransitionTime is the start of that entry. The read is made again after
 	// the pull request poll interval, or the longer delay the host asked for, and never later than the end of an
 	// entry; an entry past its end is ended at the start of the next reconcile. A failure of the Kubernetes API
@@ -473,7 +474,7 @@ const (
 const ReasonGitReadFailed = "GitReadFailed"
 
 // GitWaitKind is the kind of bound of a Git wait (status.gitWaits).
-// +kubebuilder:validation:Enum=Paced;RequestDeadline;HandoffGrace;MergeCheck;MergeContent
+// +kubebuilder:validation:Enum=Paced;RequestDeadline;HandoffGrace;HandoffRecovery;MergeCheck;MergeContent
 type GitWaitKind string
 
 // Kinds of Git wait.
@@ -486,10 +487,14 @@ const (
 	// recorded: the request expires, also when the cleanup of its pull requests cannot read the Git host.
 	GitWaitRequestDeadline GitWaitKind = "RequestDeadline"
 	// GitWaitHandoffGrace ends a grace after status.deadline of a replacement recovering a handoff: the request ends
-	// NeedsIntervention with HandoffRecoveryFailed. A recovery that waits on a refusal or on settings that cannot reach
-	// its repository (condition PullRequestUnreadable) ends 24 hours after its first refusal when that is later, with
-	// RecoveryWaitExpired.
+	// NeedsIntervention with HandoffRecoveryFailed, once every HandoffGrace and HandoffRecovery entry it records has
+	// passed its end.
 	GitWaitHandoffGrace GitWaitKind = "HandoffGrace"
+	// GitWaitHandoffRecovery ends 24 hours after the first refusal (or settings that cannot reach the repository) met
+	// by a replacement recovering a handoff, the start of condition PullRequestUnreadable (#786). The recovery ends once
+	// every HandoffGrace and HandoffRecovery entry it records has passed its end, so at the later of the two: with
+	// RecoveryWaitExpired while PullRequestUnreadable says why it waits, the handoff aborted and the target lock kept.
+	GitWaitHandoffRecovery GitWaitKind = "HandoffRecovery"
 	// GitWaitMergeCheck ends five minutes after its start, a wait for the merge commit of a pull request seen merged
 	// without one or for an answer of the check at the merge: the merge it names is recorded, with the plan not
 	// shown fresh, and without a receipt when no merge commit was seen. It ends only after one more read made once
@@ -516,8 +521,9 @@ type GitWait struct {
 	Since metav1.Time `json:"since"`
 
 	// ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
-	// request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
-	// the start (MergeCheck, MergeContent). It does not move while the entry stands.
+	// request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), 24 hours after the
+	// start (HandoffRecovery), five minutes after the start (MergeCheck, MergeContent). It does not move while the
+	// entry stands.
 	// +optional
 	Ends *metav1.Time `json:"ends,omitempty"`
 
@@ -1059,10 +1065,12 @@ type RemediationRequestStatus struct {
 	MergeCommitAwaitedSince *metav1.Time `json:"mergeCommitAwaitedSince,omitempty"`
 
 	// gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of
-	// bound: Paced (no end of its own), RequestDeadline, HandoffGrace, MergeCheck and MergeContent. Starting or ending
-	// one kind never touches another, and an entry holds everything needed to end it. At the start of every
-	// reconcile the executor ends each RequestDeadline and HandoffGrace entry whose bound has passed, before any
-	// read: RequestDeadline expires the request, HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed.
+	// bound: Paced (no end of its own), RequestDeadline, HandoffGrace, HandoffRecovery, MergeCheck and MergeContent.
+	// Starting or ending one kind never touches another, and an entry holds everything needed to end it. At the start
+	// of every reconcile the executor ends each RequestDeadline entry whose bound has passed, and the recovery of a
+	// handoff once every HandoffGrace and HandoffRecovery entry it records has passed, before any read:
+	// RequestDeadline expires the request, the recovery's entries end it NeedsIntervention with HandoffRecoveryFailed,
+	// or RecoveryWaitExpired while condition PullRequestUnreadable says why it waits.
 	// A MergeCheck or MergeContent entry whose bound has passed ends only after one more read in that reconcile:
 	// an answer goes on as after any read, and a failure ends it, MergeCheck by recording the merge with the plan
 	// not shown fresh, MergeContent (five minutes from its start) by ending the request NeedsIntervention with

@@ -259,6 +259,9 @@ var troubleshootingSections = map[string][]string{
 	"VerificationDisabled":              {secAfterMerge},
 	"WaitingForReview":                  {secPullRequest},
 	"WithinApprovedBounds":              {secRequest},
+
+	// In a block of its own, so the longer key does not realign the table above.
+	"GitReadFailedBeforeHandoffRecovery": {secPullRequest},
 }
 
 // conditionSections is the section a reason on that condition belongs to when the reason is listed in more

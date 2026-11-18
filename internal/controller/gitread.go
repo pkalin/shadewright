@@ -256,7 +256,8 @@ func readOp(err error) string {
 // endAfterLastRead after it). In a reconcile that makes the last read of a read wait past its end (markLastRead) a
 // failed read is no retry: it is noted (failedRead) and nothing is recorded, and the wait ends after the reconcile.
 // Otherwise:
-//   - the caller's kind (bound) gets its entry in status.gitWaits, and so does the wait err belongs to
+//   - the caller's kind (bound) gets its entry in status.gitWaits (a recovery that waits on a refusal also the
+//     HandoffGrace entry of its deadline, waitKind.recorded), and so does the wait err belongs to
 //     (readOfMergeCheck, readOfContent), each its own: an entry that stands keeps its start, and no other entry is
 //     touched. In the path that ends a wait (expiring) only a Paced entry is recorded;
 //   - every entry records its end, from the request's status or the merge it is about (newWait, wholeWait), and an
@@ -302,12 +303,14 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 				adds = append(adds, w)
 			}
 		}
-		if w, ok := newWait(rr, bound.kind, op, now); ok {
-			adds = append(adds, w)
-		} else if bound.kind != waitNone {
-			// The bound cannot be recorded (no deadline): the read is retried at the pace, never without a record.
-			w, _ := newWait(rr, waitNone, op, now)
-			adds = append(adds, w)
+		for i, k := range bound.kind.recorded() {
+			if w, ok := newWait(rr, k, op, now); ok {
+				adds = append(adds, w)
+			} else if i == 0 && k != waitNone {
+				// The bound cannot be recorded (no deadline): the read is retried at the pace, never without a record.
+				w, _ := newWait(rr, waitNone, op, now)
+				adds = append(adds, w)
+			}
 		}
 	}
 	if e := r.putGitWaits(ctx, rr, adds); e != nil {

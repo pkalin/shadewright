@@ -76,9 +76,9 @@ import (
 //   - requeue: a reconcile that leaves a stopped request holding its lock, without an error, asks to run again at a
 //     time (seventh decision, point 3);
 //   - waits (not while paused): every entry of status.gitWaits has not passed the end of its kind by more than one
-//     poll interval: the request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace, or
-//     recoveryWaitBound after the first refusal when later, #786), five minutes after its start (MergeCheck,
-//     MergeContent); an end that fell in a pause or while the executor was down is due when that gap ended
+//     poll interval: the request deadline (RequestDeadline), the later of the deadline plus the handoff grace and
+//     recoveryWaitBound after the first refusal (HandoffGrace and HandoffRecovery, #786), five minutes after its
+//     start (MergeCheck, MergeContent); an end that fell in a pause or while the executor was down is due when that gap ended
 //     (afterGap);
 //   - last read (not while paused): a reconcile that starts with a MergeCheck or MergeContent wait past its end and
 //     returns no error, with no write made to fail, ends it only on evidence about its last read (lastReadProperty):
@@ -106,9 +106,9 @@ import (
 //     not record, checked at the moment of the release (a merge into a branch the plan's change was not for, seen
 //     only after the settings moved, is recorded as released aside), and a lock once released never comes back
 //     while the request does not hold it;
-//   - ending: a reconcile that starts with a RequestDeadline or HandoffGrace wait past its end calls the Git host
-//     nothing before its first status write: the end decides from recorded state alone (fifth decision of 2026-11-18
-//     on #771, point 5 as the sixth kept it);
+//   - ending: a reconcile that starts with a RequestDeadline, HandoffGrace or HandoffRecovery wait past its end
+//     calls the Git host nothing before its first status write: the end decides from recorded state alone (fifth
+//     decision of 2026-11-18 on #771, point 5 as the sixth kept it);
 //   - schema: no status write is one the API server refuses.
 //
 // At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; a pause is
@@ -302,8 +302,8 @@ type modelWorld struct {
 	handoff bool
 	// refusedAt: the first reconcile, not paused, of a replacement recovering a handoff that ran with its repository
 	// gone from the settings or with the settings naming another branch than its plan's (planBranch): the recovery
-	// waits on that refusal from then on (#786), and its HandoffGrace wait ends recoveryWaitBound after it at the
-	// latest.
+	// waits on that refusal from then on (#786), and its HandoffRecovery wait ends recoveryWaitBound after it, or
+	// its HandoffGrace wait later.
 	refusedAt  time.Time
 	planBranch string
 	// lastingUntil keeps the fault as it is until then (an outage that lasts): fault events wait.
@@ -1548,7 +1548,9 @@ func (m *modelWorld) waitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Ti
 			return rr.Status.Deadline.Time, true
 		}
 		return w.Since.Time, true
-	case api.GitWaitHandoffGrace:
+	case api.GitWaitHandoffGrace, api.GitWaitHandoffRecovery:
+		// The recovery ends when both of its waits have passed (decision of 2026-11-18 on #786): each entry ends at
+		// the later of the two.
 		end := w.Since.Add(handoffRecoveryGrace)
 		if rr.Status.Deadline != nil {
 			end = rr.Status.Deadline.Add(handoffRecoveryGrace)

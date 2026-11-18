@@ -1030,3 +1030,63 @@ func TestGetResourceHidesEveryTokenOfAHiddenCollection(t *testing.T) {
 
 // builtInRules names the cases of a test run with the built-in redactor.
 const builtInRules = "built-in rules"
+
+// linesSecret is the secret on the first line of the values below.
+const linesSecret = "Qz7line" + "Secret"
+
+// linesNote is a multi-line value with a secret under a key and diagnosis text on the lines after it: a block
+// whose line is indented with figure spaces (U+2007), which the reading of the value alone does not take as the
+// block's indentation.
+const linesNote = "password: |-\n\u2007\u2007" + linesSecret + "\nhost: db.internal\nport: 5432"
+
+// checkLinesKept fails unless text hides linesSecret and shows the lines after it.
+func checkLinesKept(t *testing.T, what, text string) {
+	t.Helper()
+	if strings.Contains(text, linesSecret) {
+		t.Errorf("%s: the password shows:\n%s", what, text)
+	}
+	for _, shown := range []string{"db.internal", "5432"} {
+		if !strings.Contains(text, shown) {
+			t.Errorf("%s: %s is hidden, main showed it:\n%s", what, shown, text)
+		}
+	}
+}
+
+// The reading of the whole answer keeps the lines of the values (#845, tenth decision of 2026-11-18): a value
+// hidden to the end of its line stops at a line break inside the value, written "\n" in the JSON of get_resource,
+// as it stops in the reading of that value alone. A secret in a map value (get_resource leaves out annotations,
+// so a CSI volume's attribute) or in an argument does not take the host and port on the next lines, which main
+// showed; in the answer as written the value ran on to the end of the JSON string. (An argument that starts with
+// the key is read by main as a quoted key at the start of its JSON line, and main hid the rest of that line; the
+// argument here has text before the key.)
+func TestGetResourceKeepsTheLinesAfterASecretInAValue(t *testing.T) {
+	for name, set := range map[string]func(p *corev1.Pod){
+		"map value": func(p *corev1.Pod) {
+			p.Spec.Volumes = []corev1.Volume{{Name: "config", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+				Driver: "d", VolumeAttributes: map[string]string{"config": linesNote},
+			}}}}
+		},
+		"argument": func(p *corev1.Pod) { p.Spec.Containers[0].Args = []string{"serve", "connect with " + linesNote} },
+	} {
+		p := pod()
+		set(p)
+		r := newEnv(t, []client.Object{p}).call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK {
+			t.Fatalf("%s: %s: %s", name, r.Status, r.Text)
+		}
+		checkLinesKept(t, name, r.Text)
+	}
+}
+
+// An Event's note with real line breaks keeps the lines after the one with the secret (#845, tenth decision of
+// 2026-11-18): list_events writes the note on one line, and the line breaks it had still end the secret's value.
+// The secret is a block under the key, indented with a control character that list_events writes as a space:
+// on that one line the block reading took the host and port too, which main showed.
+func TestListEventsKeepsTheLinesAfterASecretInANote(t *testing.T) {
+	note := "password: | # note\n\x01\x01" + linesSecret + "\nhost: db.internal\nport: 5432"
+	r := newEnv(t, []client.Object{event("e1", podName, note, testNow)}).call(t, NameListEvents, with(NameListEvents, nil))
+	if r.Status != StatusOK {
+		t.Fatalf("%s: %s", r.Status, r.Text)
+	}
+	checkLinesKept(t, "event note", r.Text)
+}

@@ -120,8 +120,11 @@ func SecretCollection(name string) bool {
 //     after a secret flag is its value, whatever it looks like: "--token", "--verbose" hides "--verbose"); for a
 //     map key (MapKey), what String hides of the key as the answer writes it; and all of it when it is marked
 //     Whole or its Key is a secret key (SecretKey).
-//  2. The whole answer as the tool writes it: what String redacts of it, cut at each piece's ends and widened
-//     to whole units (an escape is hidden whole or kept whole).
+//  2. The whole answer as the tool writes it: what String redacts of it, each match ended at a line break inside
+//     a value as the reading of that value alone ends it (endAtValueLines, tenth decision of 2026-11-18), cut at
+//     each piece's ends and widened to whole units (an escape is hidden whole or kept whole). A secret on one line
+//     of a value does not take the lines after it, and a match still reaches across what the encoding puts side by
+//     side (a key and its value, the items of a list, a flag and its argument).
 //  3. The whole answer with the markers of reading 1 in place, the markers main's first pass made (what String
 //     redacts of each value alone as it was read; main redacted no map key alone): what String redacts of it,
 //     carried back to the units the markers stand for, and all of a data piece from its first byte that is no
@@ -187,9 +190,11 @@ func (r *Redactor) Pieces(ps []Piece) []string {
 		marks[i] = w.mark(mergeSpans(alone))
 		k++
 	}
-	// Reading 2: the answer as the tool writes it.
+	// Reading 2: the answer as the tool writes it, each match ended at the line breaks of the values.
 	wsize := func(i int) int { return len(ws[i].text) }
-	r.cutAnswer(ps, own, endAtObjectValues(ps, wsize, r.spans(raw.String())), func(i int, sp span) span { return ws[i].widen(sp) },
+	answer := raw.String()
+	reading2 := endAtValueLines(ps, ws, answer, r.ruleMatches(answer))
+	r.cutAnswer(ps, own, settle(answer, endAtObjectValues(ps, wsize, reading2)), func(i int, sp span) span { return ws[i].widen(sp) },
 		func(i int) string { return ws[i].text })
 	// Reading 3: the answer with the markers of reading 1.
 	var b strings.Builder
@@ -268,6 +273,94 @@ func (r *Redactor) cutAnswer(ps []Piece, own [][]span, spans []span, to func(i i
 		}
 		off = end
 	}
+}
+
+// isLineBreak reports whether c is a line break: a line feed, a carriage return, a vertical tab, a form feed, a
+// next line (U+0085), a line separator (U+2028) or a paragraph separator (U+2029).
+func isLineBreak(c rune) bool {
+	switch c {
+	case '\n', '\r', '\v', '\f', '\u0085', '\u2028', '\u2029':
+		return true
+	}
+	return false
+}
+
+// Kinds of the bytes of the answer for endAtValueLines.
+const (
+	byteSolid     = iota // any other byte
+	byteBlank            // a space or a tab, or a line break the tool writes
+	byteLineBreak        // a byte of the unit a line break of a value is written as
+)
+
+// endAtValueLines ends each match of reading 2 on the answer as written (the pieces ws joined) at the first line
+// break of a value after the match's first byte that is no blank and no line break (#845, tenth decision of
+// 2026-11-18). A line break inside a value, written "\n" in JSON or a space on a line, ends a line for it exactly
+// as it does for the reading of that value alone, so a value hidden to the end of its line stops there and the
+// lines after it stay, as main kept them. A match still reaches across what the encoding puts side by side (a
+// key and its value, the items of a list, a flag and its argument), and a value that begins on the line after
+// its key is still taken: the line breaks before the match's first other byte do not end it. The matches are
+// changed in place and returned. The work and the allocation are linear in the length of the answer and the
+// number of matches.
+func endAtValueLines(ps []Piece, ws []written, answer string, matches []span) []span {
+	n := len(answer)
+	kind := make([]byte, n)
+	off := 0
+	for i, p := range ps {
+		tick(1)
+		w := ws[i]
+		if !p.Data {
+			for j := range len(w.text) {
+				tick(1)
+				if c := w.text[j]; c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+					kind[off+j] = byteBlank
+				}
+			}
+			off += len(w.text)
+			continue
+		}
+		for j := 0; j < len(p.Text); {
+			tick(1)
+			c, size := utf8.DecodeRuneInString(p.Text[j:])
+			s, e := j, j+size
+			if w.start != nil {
+				s, e = w.start[j], w.end[j]
+			}
+			k := byte(byteSolid)
+			switch {
+			case c == utf8.RuneError && size == 1:
+			case isLineBreak(c):
+				k = byteLineBreak
+			case c == ' ' || c == '\t':
+				k = byteBlank
+			}
+			for x := s; x < e; x++ {
+				tick(1)
+				kind[off+x] = k
+			}
+			j += size
+		}
+		off += len(w.text)
+	}
+	// nextSolid[x] and nextBreak[x] are the first byte at or after x of that kind, n for none.
+	nextSolid, nextBreak := make([]int, n+1), make([]int, n+1)
+	nextSolid[n], nextBreak[n] = n, n
+	for x := n - 1; x >= 0; x-- {
+		tick(1)
+		nextSolid[x], nextBreak[x] = nextSolid[x+1], nextBreak[x+1]
+		switch kind[x] {
+		case byteSolid:
+			nextSolid[x] = x
+		case byteLineBreak:
+			nextBreak[x] = x
+		}
+	}
+	for i := range matches {
+		tick(1)
+		if q := nextSolid[min(matches[i].start, n)]; q < matches[i].end {
+			matches[i].end = min(matches[i].end, nextBreak[q])
+		}
+	}
+	return matches
 }
 
 // endAtObjectValues cuts each span of a reading of the whole answer (pieces of length size(i) in that reading's

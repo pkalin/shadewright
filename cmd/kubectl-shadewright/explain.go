@@ -160,6 +160,7 @@ var troubleshootingSections = map[string][]string{
 	"KustomizationSuspended":            {secFlux},
 	"KustomizationTransforms":           {secFlux},
 	"MergedBeforeVerification":          {secReceipt},
+	"MergedForReplacement":              {secPhases},
 	"MergedWithForeignChange":           {secPullRequest},
 	"MergeContentUnreadable":            {secPullRequest},
 	"MergeNotCheckable":                 {secPullRequest},

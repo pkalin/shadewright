@@ -32,7 +32,9 @@ limitations under the License.
 // rotated key is used without a restart. Every key file error matches [providers.ErrCredentialUnavailable]: a
 // file that cannot be read, or is empty, is retryable; a file that is too large, or a key that is too long or
 // holds characters a header cannot carry (an inner newline, a UTF-8 byte order mark), is malformed, not
-// retried, and stays so until a person fixes the file. It is never [providers.ErrForbidden]: nothing was sent.
+// retried, and stays so until a person fixes the file. Before each read the opened file is compared, by path
+// and identity, with Config.OtherKeyFiles (the OpenAI-compatible endpoints' key files, ADR-0042): a match is
+// refused the same way, not retried. It is never [providers.ErrForbidden]: nothing was sent.
 // The error of a call none of whose attempts handed a request to the HTTP client is marked
 // [providers.ErrNotSent], so nothing of it can have been billed. The key never appears in an error, a
 // [CallReport] or a log line, and nothing is logged.

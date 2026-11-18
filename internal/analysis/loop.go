@@ -129,9 +129,12 @@ const (
 	ReasonUnexpectedModel Reason = "UnexpectedModel"
 	// ReasonEndpointNotAllowed: the deployment's endpoint is one the analyzer may not call
 	// (ErrEndpointNotAllowed): for Foundry, outside the operator's allow-list of host suffixes or the Anthropic
-	// API's host; for Anthropic, not the API's fixed endpoint. Nothing was sent to it and no token requested for
+	// API's host; for Anthropic, not the API's fixed endpoint; for OpenAICompatible,
+	// not a declared base and inference API. Nothing was sent to it and no token requested for
 	// it; an earlier triage call may have gone to another endpoint.
 	ReasonEndpointNotAllowed Reason = "EndpointNotAllowed"
+	// ReasonModelNotAllowed: the compatible deployment model is absent from its endpoint's install-time list; no request is sent.
+	ReasonModelNotAllowed Reason = "ModelNotAllowed"
 	// ReasonProviderNotConfigured: the deployment's provider needs something the analyzer was not started
 	// with, such as the API key file of an Anthropic deployment or the endpoint allow-list and workload identity
 	// of a Foundry deployment (ErrProviderNotConfigured), or the provider's
@@ -159,6 +162,9 @@ const (
 // other than the API's fixed one; the analysis hands off with ReasonEndpointNotAllowed.
 var ErrEndpointNotAllowed = errors.New("the model endpoint is not allowed")
 
+// ErrModelNotAllowed is returned before any call when a compatible model is not declared for its endpoint.
+var ErrModelNotAllowed = errors.New("the model is not allowed by the endpoint declaration")
+
 // ErrProviderNotConfigured is what a [ModelFactory] returns, wrapped, for a deployment whose provider the
 // analyzer cannot call as started, such as an Anthropic deployment without the analyzer's key file flag or a
 // Foundry deployment without its --model-endpoint-suffixes; the
@@ -173,6 +179,8 @@ var ErrDeploymentNotExpected = errors.New("the deployment names another model th
 // factoryFailure is the hand-off reason of a ModelFactory error.
 func factoryFailure(err error) Reason {
 	switch {
+	case errors.Is(err, ErrModelNotAllowed):
+		return ReasonModelNotAllowed
 	case errors.Is(err, ErrEndpointNotAllowed):
 		return ReasonEndpointNotAllowed
 	case errors.Is(err, ErrProviderNotConfigured):
@@ -880,6 +888,9 @@ func (r *run) call(model providers.ModelProvider, role Role, d *remediationv1alp
 		ResponseSchema: ResponseSchema(),
 	}
 	upper := estimateInput(req) + outputBound(model, r.limits.MaxOutputTokens)
+	if d.ProviderName() == remediationv1alpha1.ModelProviderOpenAICompatible {
+		upper = providers.CompatibleUsageCeiling(estimateInput(req), outputBound(model, r.limits.MaxOutputTokens))
+	}
 	key := d.Endpoint + "\x00" + d.Deployment
 	for attempt := 0; ; attempt++ {
 		if err := r.parent.Err(); err != nil {
@@ -901,6 +912,9 @@ func (r *run) call(model providers.ModelProvider, role Role, d *remediationv1alp
 			return providers.Completion{}, ReasonModelUnavailable, nil
 		}
 		r.out.Calls++
+		// An adapter that reports its billed attempts retries only while the budget left covers one more
+		// attempt at the ceiling, so that charging each one (attempt) cannot pass either bound.
+		req.MaxBilledAttempts = int(min(r.a.cfg.MaxTokensPerAnalysis-r.out.Tokens, dayCap-r.spent[key]) / upper)
 		a := r.attempt(model, role, d, req, upper, key, attempt)
 		if !a.again {
 			return a.c, a.reason, a.err
@@ -932,6 +946,11 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		attrAttempt.Int(attempt+1), attrMaxOutputTokens.Int(req.MaxOutputTokens)))
 	defer func() { endModelCall(span, res) }()
 	c, err := model.Complete(ctx, req)
+	if d.ProviderName() == remediationv1alpha1.ModelProviderOpenAICompatible && compatibleUsageOutsideBound(c, upper) {
+		// The attempts the adapter reported stay: each one is checked against the bound when it is charged.
+		c = providers.Completion{UsageUnknown: true, AttemptsReported: c.AttemptsReported, BilledAttempts: c.BilledAttempts}
+		err = fmt.Errorf("openai-compatible: reported usage exceeds the request bound: %w", providers.ErrMalformedOutput)
+	}
 	notSent := providers.IsNotSent(err)
 	if !notSent {
 		r.a.sent(r.parent, r.inc, role, d.ProviderName())
@@ -939,19 +958,30 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 	// Fail closed: a call that failed, or whose usage is unknown, is charged its upper bound. Whether and
 	// how much the service billed it cannot be told (a timeout may come after the reply was generated), so
 	// the analysis and deployment bounds count the most it could have cost. A malformed reply was billed
-	// and reports its usage, which is charged as reported. A call the adapter marks as having sent no request
+	// and reports its usage, which is charged as reported (with the compatible input floor and ceiling). A call the adapter marks as having sent no request
 	// on any attempt (providers.ErrNotSent) cannot have been billed and is charged nothing, as is a call the
 	// adapter marks as refused by its host before processing on every attempt (providers.ErrNotProcessed, a
 	// Foundry 429, #725). Which refusals are free is the adapter's fact about its host, not decided here. Such a
 	// call still took the analysis's unit of the daily count, so a throttled host cannot be retried for free
-	// without an end.
+	// without an end. An adapter that reports its billed attempts (providers.Completion.AttemptsReported) has
+	// each of them charged on its own (billedAttemptsCharge): a call it retried after a billed failure costs
+	// every attempt, not one.
 	charge := upper
 	billed := (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown
 	switch {
 	case notSent, providers.RefusedUnbilled(c, err):
 		charge = 0
+	case c.AttemptsReported:
+		charge = billedAttemptsCharge(c.BilledAttempts, upper, estimateInput(req),
+			d.ProviderName() == remediationv1alpha1.ModelProviderOpenAICompatible)
+		if billed {
+			span.SetAttributes(attrInputTokens.Int64(c.Usage.InputTokens), attrOutputTokens.Int64(c.Usage.OutputTokens))
+		}
 	case billed:
 		charge = c.Usage.InputTokens + c.Usage.OutputTokens
+		if d.ProviderName() == remediationv1alpha1.ModelProviderOpenAICompatible {
+			charge = max(charge, estimateInput(req))
+		}
 		span.SetAttributes(attrInputTokens.Int64(c.Usage.InputTokens), attrOutputTokens.Int64(c.Usage.OutputTokens))
 	}
 	span.SetAttributes(attrCharged.Int64(charge), attrUsageUnknown.Bool(c.UsageUnknown))
@@ -1036,19 +1066,7 @@ func outputBound(model providers.ModelProvider, limit int) int64 {
 // estimateInput is a conservative estimate of a request's input tokens: one token per two bytes of
 // everything sent, the provider blocks a message carries back included, which overestimates the tokenisers in
 // use for English text and JSON.
-func estimateInput(req providers.CompletionRequest) int64 {
-	n := len(req.ResponseSchema)
-	for _, m := range req.Messages {
-		n += len(m.Content) + len(m.ToolCallID) + m.ProviderBlocks.Len()
-		for _, c := range m.ToolCalls {
-			n += len(c.ID) + len(c.Name) + len(c.Arguments)
-		}
-	}
-	for _, t := range req.Tools {
-		n += len(t.Name) + len(t.Description) + len(t.Parameters)
-	}
-	return int64(n+1) / 2
-}
+func estimateInput(req providers.CompletionRequest) int64 { return providers.EstimateInputTokens(req) }
 
 // finish turns a valid result into the outcome: a hand-off without a proposal, or a plan once the proposal
 // has evidence found in the blocks the model saw, may target the subject and has a policy configured. action
@@ -1265,4 +1283,30 @@ func (a *Analyzer) accept(inc *remediationv1alpha1.Incident, out Outcome, reason
 	p.PolicyRef = ref
 	out.Reason, out.Plan = reason, &p
 	return out, nil
+}
+
+// billedAttemptsCharge is the charge of a call whose adapter listed the attempts the service may have billed:
+// upper for each attempt whose usage is unknown or outside the bound, its reported usage for the others, with
+// the input floor when floor is set (the compatible provider, ADR-0042). An endpoint that reports less than
+// it billed is charged the larger of the floor and its report, the accepted limit of ADR-0042.
+func billedAttemptsCharge(attempts []providers.BilledAttempt, upper, input int64, floor bool) int64 {
+	var total int64
+	for _, a := range attempts {
+		if a.UsageUnknown || compatibleUsageOutsideBound(providers.Completion{Usage: a.Usage}, upper) {
+			total += upper
+			continue
+		}
+		n := a.Usage.InputTokens + a.Usage.OutputTokens
+		if floor {
+			n = max(n, input)
+		}
+		total += n
+	}
+	return total
+}
+
+// compatibleUsageOutsideBound checks without adding untrusted counts, which could overflow.
+func compatibleUsageOutsideBound(c providers.Completion, upper int64) bool {
+	return !c.UsageUnknown && (c.Usage.InputTokens < 0 || c.Usage.OutputTokens < 0 ||
+		c.Usage.InputTokens > upper || c.Usage.OutputTokens > upper-c.Usage.InputTokens)
 }

@@ -974,6 +974,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonModelError:              "The model call failed; handed off to a person",
 	ReasonRequestNotCreated:       "The RemediationRequest of the proposal could not be created; handed off to a person",
 	ReasonUnexpectedModel:         "A reply came from another model than the one configured for the deployment; handed off to a person",
+	ReasonModelNotAllowed:         "The model is not declared for the compatible endpoint at installation; nothing was sent; handed off to a person",
 	ReasonEndpointNotAllowed:      "The model endpoint is not one the analyzer may call (a Foundry host outside its allow-list of suffixes or on the Anthropic API's host, or an Anthropic endpoint other than the API's fixed one); nothing was sent to that endpoint; handed off to a person",
 	ReasonProviderNotConfigured:   "The model deployment's provider is not configured in the analyzer, or its key file could not be read or is malformed; nothing was sent to that provider; handed off to a person",
 	ReasonPlanUnchanged:           "The analysis with a reviewer hint proposed the plan of the request it would replace; no replacement was created",

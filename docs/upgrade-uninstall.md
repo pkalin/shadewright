@@ -257,3 +257,29 @@ A new `helm install` with `settings.create=true` over a leftover object keeps th
 ## Not covered
 
 - Rolling back after a merged pull request: merging is outside Shadewright's control, and undoing it is a revert pull request. After a request ends `Failed` with `Verified` False the analyzer proposes one revert request for it ([#96](https://github.com/pkalin/shadewright/issues/96)), which a person approves like any other; for anything else, revert in Git by hand. On the first start after an upgrade to a version with the proposer, only a request that ended that way at most 24 hours before (by its `Verified` condition) gets its revert proposed; older ones are left to you.
+
+## OpenAI-compatible provider (#834)
+
+Apply the new CRDs before selecting `provider: OpenAICompatible`. Compatible
+deployments omit `apiVersion`; their base and inference API must match an
+install-time endpoint declaration, and their model must be in its allowed
+`models` list (`ModelNotAllowed` otherwise). Compatible-only installs set
+`analyzer.analysis.disableFoundry=true` and need no inference workload identity.
+Blob records still need Azure identity.
+
+- This release refuses a Foundry deployment at `api.openai.com` through CEL, and a
+  Foundry deployment at any declared compatible host through the analyzer. The
+  previous release permitted them when its Foundry suffix list covered the host.
+  An existing stored settings object is not rewritten by upgrade: CEL refuses a
+  subsequent edit containing that OpenAI Foundry deployment, and the analyzer
+  refuses calls to either destination with `EndpointNotAllowed`. Declare its exact
+  compatible base and API and explicitly change that deployment's provider and
+  remove its `apiVersion`, or restore a permitted Foundry resource before resuming.
+
+Declare compatible endpoints and optional per-endpoint Secret or CSI key sources
+with a nonempty allowed `models` list under
+`analyzer.analysis.openAICompatible.endpoints`, then follow the
+[qualification runbook](how-to/qualify-openai-compatible.md). The Foundry suffix list
+never authorizes a compatible endpoint. Removing the release removes its mounts
+but does not revoke server credentials; revoke each key separately. No Secret API
+permission or additional controller identity is introduced. ADR-0042 is Accepted.

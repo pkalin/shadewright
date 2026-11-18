@@ -174,7 +174,7 @@ leader election, the metrics authentication or the watched namespaces. Keep in s
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
 */}}
 {{- define "shadewright.reservedFlags" -}}
-leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
+leader-elect health-probe-bind-address metrics-bind-address metrics-secure metrics-cert-path metrics-cert-name metrics-cert-key namespace watch-namespaces cluster-id max-incidents pod-logs prometheus-url prometheus-cluster triage-model escalation-model model-endpoint-suffixes action-policies anthropic-api-key-file disable-foundry openai-compatible-endpoints openai-compatible-in-cluster-cidrs analysis-store-account analysis-store-container module-grants reviewer-hints node-grace verify-outcomes
 {{- end }}
 
 {{/*
@@ -215,11 +215,97 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 created once and never changed by an upgrade, so the values cannot tell which deployments the cluster holds. The
 analyzer is the gate for them: without --model-endpoint-suffixes it builds no token source and refuses every
 Foundry deployment (#814). */ -}}
-{{- if and $a.triageModel (not $a.endpointSuffixes) (not (or $key.secretName $key.volume)) -}}
-{{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes (Foundry deployments: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com) or analyzer.analysis.anthropic.apiKey (Anthropic deployments), or both" -}}
+{{- if and $a.triageModel (not $a.endpointSuffixes) (not (($a.openAICompatible | default dict).endpoints)) (not (or $key.secretName $key.volume)) -}}
+{{- fail "analyzer.analysis.triageModel needs analyzer.analysis.endpointSuffixes (Foundry deployments: no model endpoint host is allowed by default, so list your own resource, such as .<resource>.services.ai.azure.com) or analyzer.analysis.openAICompatible.endpoints (OpenAICompatible deployments) or analyzer.analysis.anthropic.apiKey (Anthropic deployments)" -}}
 {{- end -}}
-{{- if and $a.triageModel $a.endpointSuffixes (not $c.identity.azure.clientId) -}}
+{{- if and $a.triageModel $a.endpointSuffixes (not $a.disableFoundry) (not $c.identity.azure.clientId) -}}
 {{- fail "analyzer.analysis.endpointSuffixes needs analyzer.identity.azure.clientId: with a triage model and suffixes the analyzer builds an Azure token source, which needs the analyzer's workload identity" -}}
+{{- end -}}
+{{- $compatible := $a.openAICompatible | default dict -}}
+{{- if and (or $a.disableFoundry $compatible.endpoints) (not $a.triageModel) -}}
+{{- fail "analyzer.analysis.openAICompatible and disableFoundry need triageModel" -}}
+{{- end -}}
+{{- if and $compatible.inClusterCIDRs (not $compatible.endpoints) -}}
+{{- fail "analyzer.analysis.openAICompatible.inClusterCIDRs needs analyzer.analysis.openAICompatible.endpoints" -}}
+{{- end -}}
+{{- if and $compatible.inClusterCIDRs (not (kindIs "slice" $compatible.inClusterCIDRs)) -}}
+{{- fail "analyzer.analysis.openAICompatible.inClusterCIDRs must be a list of CIDRs" -}}
+{{- end -}}
+{{- range $compatible.inClusterCIDRs -}}
+{{- $problem := include "shadewright.inClusterCIDRProblem" . -}}
+{{- if $problem -}}
+{{- fail (printf "analyzer.analysis.openAICompatible.inClusterCIDRs entry %q %s" (toString .) $problem) -}}
+{{- end -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- /* A key belongs to one declaration (ADR-0042): the analyzer compares key files by path and identity, but two
+mounts of one Secret key are two files to it, so the chart refuses what it can see, a Secret key (through a
+secret volume's items too) shared by two endpoints or with the Anthropic key (shadewright.keySourceID). */ -}}
+{{- $anthropicKeyID := include "shadewright.keySourceID" $key -}}
+{{- $keyIDs := dict -}}
+{{- range $i, $_ := $compatible.endpoints -}}
+{{- $keyID := include "shadewright.keySourceID" (.apiKey | default dict) -}}
+{{- if $keyID -}}
+{{- if eq $keyID $anthropicKeyID -}}
+{{- fail (printf "openAICompatible.endpoints[%d] and analyzer.analysis.anthropic.apiKey mount the same key: a key belongs to one declaration" $i) -}}
+{{- end -}}
+{{- if hasKey $keyIDs $keyID -}}
+{{- fail (printf "openAICompatible.endpoints[%s] and endpoints[%d] mount the same key: a key belongs to one declaration" (get $keyIDs $keyID) $i) -}}
+{{- end -}}
+{{- $_ := set $keyIDs $keyID (toString $i) -}}
+{{- end -}}
+{{- $base := include "shadewright.compatibleBase" .url -}}
+{{- if hasKey $seen $base -}}{{- fail "openAICompatible.endpoints contains duplicate base URLs" -}}{{- end -}}
+{{- range $previous, $_ := $seen -}}
+{{- if or (hasPrefix (printf "%s/" $previous) $base) (hasPrefix (printf "%s/" $base) $previous) -}}
+{{- fail "openAICompatible endpoint base is a path prefix of another declaration" -}}
+{{- end -}}
+{{- end -}}
+{{- $_ := set $seen $base true -}}
+{{- if or (not (kindIs "slice" .models)) (not .models) -}}{{- fail "openAICompatible endpoint needs a nonempty models list" -}}{{- end -}}
+{{- range .models -}}
+{{- if not (kindIs "string" .) -}}{{- fail "openAICompatible endpoint model name must be a string" -}}{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" .) -}}{{- fail "openAICompatible endpoint model name is invalid" -}}{{- end -}}
+{{- end -}}
+{{- $host := (urlParse $base).hostname -}}
+{{- if or (eq $host "api.anthropic.com") (regexMatch "(^|\\.)(openai\\.azure\\.com|cognitiveservices\\.azure\\.com|services\\.ai\\.azure\\.com)$" $host) -}}
+{{- fail "openAICompatible endpoint belongs to Azure or Anthropic" -}}{{- end -}}
+{{- range $a.endpointSuffixes -}}
+{{- if or (eq $host (trimPrefix "." .)) (hasSuffix . $host) -}}
+{{- fail "openAICompatible endpoint host matches Foundry endpointSuffixes" -}}{{- end -}}
+{{- end -}}
+{{- if not (has .inferenceAPI (list "ChatCompletions" "Responses")) -}}{{- fail "openAICompatible endpoint needs inferenceAPI" -}}{{- end -}}
+{{- $key := .apiKey | default dict -}}
+{{- if and $key.secretName $key.volume -}}{{- fail "openAICompatible apiKey sets both secretName and volume" -}}{{- end -}}
+{{- if $key.volume -}}
+{{- if or (ne (len $key.volume) 1) (not (or (hasKey $key.volume "secret") (hasKey $key.volume "csi"))) -}}
+{{- fail "openAICompatible apiKey.volume must contain only secret or csi" -}}{{- end -}}
+{{- if hasKey $key.volume "secret" -}}
+{{- if or (not (kindIs "map" $key.volume.secret)) (not $key.volume.secret.secretName) -}}{{- fail "openAICompatible secret source needs secretName" -}}{{- end -}}
+{{- else -}}
+{{- if or (not (kindIs "map" $key.volume.csi)) (not $key.volume.csi.driver) -}}{{- fail "openAICompatible csi source needs driver" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if or $key.secretName $key.volume -}}
+{{- $file := include "shadewright.compatibleKeyFile" . -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$" $file) -}}{{- fail "openAICompatible key filename is invalid" -}}{{- end -}}
+{{- end -}}
+{{- with .service -}}
+{{- if or (not .namespace) (not .podSelector) (lt (int .port) 1) (gt (int .port) 65535) (not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.svc(\\.cluster\\.local)?$" $host)) (ne (index (splitList "." $host) 1) .namespace) -}}
+{{- fail "openAICompatible service needs its DNS namespace, podSelector and target port" -}}{{- end -}}
+{{- /* The analyzer's rules (openaicompatible.ValidateEndpoints): 1 to 32 entries, each key a qualified name and each value a label value. */ -}}
+{{- if or (not (kindIs "map" .podSelector)) (gt (len .podSelector) 32) -}}
+{{- fail "openAICompatible service podSelector must have 1 to 32 labels" -}}{{- end -}}
+{{- range $k, $v := .podSelector -}}
+{{- $parts := splitList "/" $k -}}
+{{- $name := last $parts -}}
+{{- $prefixOK := or (eq (len $parts) 1) (and (eq (len $parts) 2) (le (len (first $parts)) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" (first $parts))) -}}
+{{- $nameOK := and (le (len $name) 63) (regexMatch "^([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$" $name) -}}
+{{- $valueOK := and (kindIs "string" $v) (le (len (toString $v)) 63) (regexMatch "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$" (toString $v)) -}}
+{{- if not (and $prefixOK $nameOK $valueOK) -}}
+{{- fail "openAICompatible service podSelector has an invalid label" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if and $a.escalationModel (not $a.triageModel) -}}
 {{- fail "analyzer.analysis.escalationModel needs analyzer.analysis.triageModel" -}}
@@ -436,3 +522,233 @@ secret:
 {{- $key := ((.Values.analyzer.analysis.anthropic | default dict).apiKey | default dict) -}}
 {{- if $key.secretName -}}{{ $key.secretKey | default "api-key" }}{{- else -}}{{ $key.fileName | default "api-key" }}{{- end -}}
 {{- end }}
+
+{{/*
+shadewright.keySourceID prints what a key source (an apiKey value: secretName and secretKey, or volume and
+fileName) mounts, so that two declarations of one key can be told apart. For a Secret, or a secret volume, it is
+the Secret and the Secret key the file comes from: through the volume's items when it has them (items that do
+not map fileName are refused, the file would not exist; paths are compared cleaned, "./api-key" is "api-key"),
+else the file name. Any other volume source (projected,
+CSI) cannot be resolved at render: its ID is the source as written and the file name, which catches only the
+same declaration written twice, and keeping one key to one declaration there is the operator's to do. Empty
+when no source is set.
+*/}}
+{{- define "shadewright.keySourceID" -}}
+{{- if .secretName -}}
+{{- printf "secret %s/%s" .secretName (.secretKey | default "api-key") -}}
+{{- else if and .volume (kindIs "map" .volume) (hasKey .volume "secret") (kindIs "map" .volume.secret) -}}
+{{- $file := .fileName | default "api-key" -}}
+{{- $secretKey := $file -}}
+{{- with .volume.secret.items -}}
+{{- $secretKey = "" -}}
+{{- range . -}}
+{{- if and (kindIs "map" .) (eq (clean (toString .path)) (clean $file)) -}}{{- $secretKey = toString .key -}}{{- end -}}
+{{- end -}}
+{{- if not $secretKey -}}
+{{- fail (printf "an apiKey secret volume has items but no item with path %q (its fileName): the key file would not exist" $file) -}}
+{{- end -}}
+{{- end -}}
+{{- printf "secret %s/%s" (.volume.secret.secretName | default "") $secretKey -}}
+{{- else if .volume -}}
+{{- printf "volume %s/%s" (toJson .volume) (.fileName | default "api-key") -}}
+{{- end -}}
+{{- end }}
+
+{{/* One endpoint's optional key volume. */}}
+{{- define "shadewright.compatibleKeyVolume" -}}
+{{- $key := .apiKey | default dict -}}
+{{- if $key.secretName -}}
+secret:
+  secretName: {{ $key.secretName | quote }}
+  defaultMode: 0444
+  items:
+  - key: {{ $key.secretKey | default "api-key" | quote }}
+    path: {{ $key.secretKey | default "api-key" | quote }}
+{{- else if $key.volume -}}
+{{- toYaml $key.volume -}}
+{{- end -}}
+{{- end }}
+
+{{- define "shadewright.compatibleKeyFile" -}}
+{{- $key := .apiKey | default dict -}}
+{{- if $key.secretName -}}{{ $key.secretKey | default "api-key" }}{{- else -}}{{ $key.fileName | default "api-key" }}{{- end -}}
+{{- end }}
+
+{{/* Match the binary's parsed base comparison; never clean a dot segment into an allowed base. */}}
+{{- define "shadewright.compatibleBase" -}}
+{{- $u := urlParse . -}}
+{{- $host := lower ($u.hostname | default "") -}}
+{{- $authority := lower ($u.host | default "") -}}
+{{- $path := $u.path | default "" -}}
+{{- $port := trimPrefix $host $authority -}}
+{{- if or (gt (len .) 256) (ne (lower ($u.scheme | default "")) "https") $u.userinfo (contains "@" .) (contains "?" .) (contains "#" .) (contains "%2f" (lower .)) (contains "%5c" (lower .)) (not (regexMatch "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$" $host)) (not (regexMatch "^(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$" $path)) -}}
+{{- fail "openAICompatible endpoint must be an unambiguous HTTPS base without userinfo, query, fragment or dot segments" -}}
+{{- end -}}
+{{- if $port -}}
+{{- if or (not (regexMatch "^:[1-9][0-9]{0,4}$" $port)) (gt (int (trimPrefix ":" $port)) 65535) -}}{{- fail "openAICompatible endpoint port is invalid" -}}{{- end -}}
+{{- end -}}
+{{- if eq $port ":443" -}}{{- $port = "" -}}{{- end -}}
+{{- printf "https://%s%s%s" $host $port (trimSuffix "/" $path) -}}
+{{- end }}
+
+{{/* Only declared data reaches the process, with one mounted key path per endpoint. */}}
+{{- define "shadewright.compatibleEndpoints" -}}
+{{- $out := list -}}
+{{- range $i, $e := . -}}
+{{- $d := dict "url" $e.url "inferenceAPI" $e.inferenceAPI "models" $e.models -}}
+{{- if include "shadewright.compatibleKeyVolume" $e -}}
+{{- $_ := set $d "keyFile" (printf "/var/run/secrets/shadewright/openai-compatible/%d/%s" $i (include "shadewright.compatibleKeyFile" $e)) -}}
+{{- end -}}
+{{- with $e.service -}}{{- $_ := set $d "service" . -}}{{- end -}}
+{{- $out = append $out $d -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end }}
+
+{{/*
+shadewright.pow2 prints 2 to the power of the argument (0 to 32).
+*/}}
+{{- define "shadewright.pow2" -}}
+{{- $p := 1 -}}
+{{- range until (int .) -}}{{- $p = mul $p 2 -}}{{- end -}}
+{{- $p -}}
+{{- end -}}
+
+{{/*
+shadewright.ipv6Text prints eight 16-bit groups in the canonical text form Go's netip prints (RFC 5952):
+lower case, no leading zeros, the longest run of two or more zero groups (the first of equal runs) as ::.
+*/}}
+{{- define "shadewright.ipv6Text" -}}
+{{- $groups := . -}}
+{{- $best := -1 -}}{{- $bestLen := 1 -}}{{- $start := 0 -}}{{- $run := 0 -}}
+{{- range $i, $g := $groups -}}
+{{- if eq (int64 $g) 0 -}}
+{{- if eq $run 0 -}}{{- $start = $i -}}{{- end -}}
+{{- $run = add1 $run -}}
+{{- if gt $run $bestLen -}}{{- $bestLen = $run -}}{{- $best = $start -}}{{- end -}}
+{{- else -}}
+{{- $run = 0 -}}
+{{- end -}}
+{{- end -}}
+{{- $hex := list -}}
+{{- range $groups -}}{{- $hex = append $hex (printf "%x" (int64 .)) -}}{{- end -}}
+{{- if lt $best 0 -}}
+{{- join ":" $hex -}}
+{{- else -}}
+{{- printf "%s::%s" (join ":" (slice $hex 0 $best)) (join ":" (slice $hex (add $best $bestLen) 8)) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+shadewright.prefixesOverlap prints "true" when the IPv6 prefixes a and b (eight groups each) with lengths
+aBits and bBits share an address: their first min(aBits, bBits) bits are equal.
+*/}}
+{{- define "shadewright.prefixesOverlap" -}}
+{{- $m := min .aBits .bBits -}}
+{{- $equal := true -}}
+{{- range $i := until 8 -}}
+{{- $rem := sub $m (mul $i 16) -}}
+{{- $x := int64 (index $.a $i) -}}{{- $y := int64 (index $.b $i) -}}
+{{- if ge $rem 16 -}}
+{{- if ne $x $y -}}{{- $equal = false -}}{{- end -}}
+{{- else if gt $rem 0 -}}
+{{- $unit := int64 (include "shadewright.pow2" (sub 16 $rem)) -}}
+{{- if ne (div $x $unit) (div $y $unit) -}}{{- $equal = false -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $equal -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+shadewright.inClusterCIDRProblem prints why one entry of analyzer.analysis.openAICompatible.inClusterCIDRs is
+refused, or nothing. The rule is the analyzer's (openaicompatible.CheckInClusterRange), and a chart test runs
+the same inputs through both: a CIDR in canonical text form, no host bits, not a /0, and no IPv6 range that
+overlaps a form embedding IPv4 addresses (::ffff:0:0/96, ::/96, 64:ff9b::/96, 2002::/16).
+*/}}
+{{- define "shadewright.inClusterCIDRProblem" -}}
+{{- $notCIDR := "is not a CIDR such as 203.0.113.0/24 or 2001:db8::/64" -}}
+{{- if not (kindIs "string" .) -}}
+{{- $notCIDR -}}
+{{- else if not (regexMatch "^[0-9A-Fa-f:.]+/(0|[1-9][0-9]{0,2})$" .) -}}
+{{- $notCIDR -}}
+{{- else -}}
+{{- $addr := regexReplaceAll "/.*$" . "" -}}
+{{- $bits := int (regexReplaceAll "^.*/" . "") -}}
+{{- if not (contains ":" $addr) -}}
+  {{- if or (not (regexMatch "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$" $addr)) (gt $bits 32) -}}
+  {{- $notCIDR -}}
+  {{- else if eq $bits 0 -}}
+  covers every address: no endpoint outside a declared Service could be reached, and the egress rule cannot except it; list the cluster's pod and Service ranges
+  {{- else -}}
+  {{- $v := int64 0 -}}
+  {{- range splitList "." $addr -}}{{- $v = add (mul $v 256) (int64 .) -}}{{- end -}}
+  {{- $unit := int64 (include "shadewright.pow2" (sub 32 $bits)) -}}
+  {{- $host := mod $v $unit -}}
+  {{- if ne $host 0 -}}
+  {{- $n := sub $v $host -}}
+  {{- printf "has host bits set: write %d.%d.%d.%d/%d" (div $n 16777216) (mod (div $n 65536) 256) (mod (div $n 256) 256) (mod $n 256) $bits -}}
+  {{- end -}}
+  {{- end -}}
+{{- else if or (contains "." $addr) (contains ":::" $addr) (gt (len (regexFindAll "::" $addr -1)) 1) (gt $bits 128) -}}
+  {{- $notCIDR -}}
+{{- else -}}
+  {{- $digits := dict "0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7 "8" 8 "9" 9 "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15 -}}
+  {{- $halves := list $addr -}}
+  {{- if contains "::" $addr -}}{{- $halves = splitList "::" $addr -}}{{- end -}}
+  {{- $parsed := list -}}
+  {{- $bad := false -}}
+  {{- range $halves -}}
+  {{- $groups := list -}}
+  {{- if ne . "" -}}
+  {{- range splitList ":" . -}}
+  {{- if not (regexMatch "^[0-9A-Fa-f]{1,4}$" .) -}}{{- $bad = true -}}{{- else -}}
+  {{- $g := 0 -}}
+  {{- range splitList "" (lower .) -}}{{- $g = add (mul $g 16) (get $digits .) -}}{{- end -}}
+  {{- $groups = append $groups $g -}}
+  {{- end -}}
+  {{- end -}}
+  {{- end -}}
+  {{- $parsed = append $parsed $groups -}}
+  {{- end -}}
+  {{- $groups := list -}}
+  {{- if eq (len $parsed) 1 -}}
+  {{- $groups = index $parsed 0 -}}
+  {{- if ne (len $groups) 8 -}}{{- $bad = true -}}{{- end -}}
+  {{- else -}}
+  {{- $zeros := sub 8 (add (len (index $parsed 0)) (len (index $parsed 1))) -}}
+  {{- if lt $zeros 1 -}}{{- $bad = true -}}{{- else -}}
+  {{- $groups = concat (index $parsed 0) (list) -}}
+  {{- range until (int $zeros) -}}{{- $groups = append $groups 0 -}}{{- end -}}
+  {{- $groups = concat $groups (index $parsed 1) -}}
+  {{- end -}}
+  {{- end -}}
+  {{- if $bad -}}
+  {{- $notCIDR -}}
+  {{- else if eq $bits 0 -}}
+  covers every address: no endpoint outside a declared Service could be reached, and the egress rule cannot except it; list the cluster's pod and Service ranges
+  {{- else -}}
+  {{- $overlap := "" -}}
+  {{- range list (list "::ffff:0:0/96" (list 0 0 0 0 0 65535 0 0) 96) (list "::/96" (list 0 0 0 0 0 0 0 0) 96) (list "64:ff9b::/96" (list 100 65435 0 0 0 0 0 0) 96) (list "2002::/16" (list 8194 0 0 0 0 0 0 0) 16) -}}
+  {{- if and (not $overlap) (include "shadewright.prefixesOverlap" (dict "a" $groups "aBits" $bits "b" (index . 1) "bBits" (index . 2))) -}}{{- $overlap = index . 0 -}}{{- end -}}
+  {{- end -}}
+  {{- if $overlap -}}
+  {{- printf "overlaps %s, a form that embeds IPv4 addresses: write the IPv4 range, which the dial guard also applies to that form" $overlap -}}
+  {{- else -}}
+  {{- $masked := list -}}
+  {{- range $i, $g := $groups -}}
+  {{- $rem := sub $bits (mul $i 16) -}}
+  {{- if le $rem 0 -}}{{- $masked = append $masked 0 -}}
+  {{- else if lt $rem 16 -}}{{- $masked = append $masked (sub $g (mod $g (int64 (include "shadewright.pow2" (sub 16 $rem))))) -}}
+  {{- else -}}{{- $masked = append $masked $g -}}{{- end -}}
+  {{- end -}}
+  {{- $text := printf "%s/%d" (include "shadewright.ipv6Text" $masked) $bits -}}
+  {{- if ne (toJson $masked) (toJson $groups) -}}
+  {{- printf "has host bits set: write %s" $text -}}
+  {{- else if ne $text . -}}
+  {{- printf "is not in canonical form: write %s" $text -}}
+  {{- end -}}
+  {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

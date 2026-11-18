@@ -986,3 +986,53 @@ func TestFailedCallChargeCountsProviderBlocksAndOutputSpend(t *testing.T) {
 		})
 	}
 }
+
+func TestCompatibleUsageFloorAndCeiling(t *testing.T) {
+	for _, n := range []int64{0, 1 << 40} {
+		f := newFixture()
+		limits := testLimits()
+		limits.Triage.Provider = remediationv1alpha1.ModelProviderOpenAICompatible
+		limits.Escalation = nil
+		first := reply(validResult)
+		first.c.Usage = providers.Usage{InputTokens: n}
+		f.triage.steps = []step{first, first}
+		out := f.analyze(t, limits)
+		req := f.triage.reqs()[0]
+		floor := estimateInput(req)
+		if out.Tokens < floor {
+			t.Errorf("usage %d charged %d below input estimate %d", n, out.Tokens, floor)
+		}
+		upper := floor + int64(req.MaxOutputTokens)
+		upper += (upper + 9) / 10
+		totalUpper := int64(0)
+		for _, sent := range f.triage.reqs() {
+			bound := estimateInput(sent) + int64(sent.MaxOutputTokens)
+			totalUpper += bound + (bound+9)/10
+		}
+		if out.Tokens > totalUpper {
+			t.Errorf("usage %d charged %d above bound %d per call", n, out.Tokens, upper)
+		}
+		if n > upper && out.Plan != nil {
+			t.Error("oversized usage produced a proposal")
+		}
+	}
+}
+
+func TestCompatibleUnknownUsageChargesExactMargin(t *testing.T) {
+	f := newFixture()
+	limits := testLimits()
+	limits.Triage.Provider = remediationv1alpha1.ModelProviderOpenAICompatible
+	limits.Escalation = nil
+	first := reply(validResult)
+	first.c.UsageUnknown = true
+	f.triage.steps = []step{first, first}
+	out := f.analyze(t, limits)
+	var want int64
+	for _, req := range f.triage.reqs() {
+		base := estimateInput(req) + int64(req.MaxOutputTokens)
+		want += base + (base+9)/10
+	}
+	if want == 0 || out.Tokens != want {
+		t.Fatalf("charged %d, want exact ceiling %d", out.Tokens, want)
+	}
+}

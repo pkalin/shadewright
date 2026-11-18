@@ -18,13 +18,15 @@ limitations under the License.
 // model endpoint host suffixes, the model names the replies must give, the policy per action type, and the
 // factory that builds the provider of a deployment of RemediationSettings by its provider field: Microsoft
 // Foundry only after its endpoint passed the allow-list, the Anthropic API only at its fixed host and with the
-// analyzer's key file (ADR-0037). It is apart from package analyzer so that the collector's tests, which import
+// analyzer's key file (ADR-0037), and OpenAICompatible at a declared exact base with its own optional
+// endpoint-bound key (ADR-0042). It is apart from package analyzer so that the collector's tests, which import
 // that package, do not import the analysis.
 package models
 
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
@@ -38,6 +40,7 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/model/anthropic"
 	"github.com/pkalin/shadewright/internal/providers/model/foundry"
+	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
 )
 
 // suffixLabel is one DNS label of a host suffix.
@@ -143,8 +146,15 @@ const anthropicHost = "api.anthropic.com"
 
 // ModelsConfig configures [NewModelFactory].
 type ModelsConfig struct {
-	// Suffixes is the allow-list of endpoint host suffixes ([ParseEndpointSuffixes]) of Foundry deployments.
-	// Set together with Tokens or not at all. Empty refuses every Foundry deployment
+	// DisableFoundry prevents constructing or using an Entra token source, for compatible-only installs.
+	DisableFoundry bool
+	// CompatibleEndpoints are exact install-time bases with their own API, allowed models and optional key.
+	CompatibleEndpoints []openaicompatible.Endpoint
+	// CompatibleInClusterRanges are the in-cluster ranges outside the private ones that every compatible
+	// endpoint's dialer refuses (--openai-compatible-in-cluster-cidrs, ADR-0042).
+	CompatibleInClusterRanges []netip.Prefix
+	// Suffixes is the allow-list of endpoint host suffixes for Foundry deployments only.
+	// Set together with Tokens unless DisableFoundry is true. Empty refuses every Foundry deployment
 	// (analysis.ErrProviderNotConfigured): an analyzer that only calls the Anthropic API needs no Azure
 	// settings (#814).
 	Suffixes []string
@@ -177,14 +187,32 @@ type ModelsConfig struct {
 //     deployment is not the model its role expects (analysis.ErrDeploymentNotExpected); the allow-list is not
 //     consulted. It then builds an Anthropic provider for that model that reads the key file at every attempt
 //     and logs every failed call.
+//   - OpenAICompatible: it matches an exact installation endpoint and its allowed models (ErrModelNotAllowed before any call), then builds the shared-wire adapter with no
+//     token source, an optional key bound to that exact base, and the declared Service endpoints allowed private addresses; every other endpoint refuses private addresses and the declared in-cluster ranges at dial time. Azure model hosts and the Anthropic API are refused. No key means
+//     no Authorization header; API versions are refused and the API prefix is part of the endpoint.
 //   - Any other provider is refused (analysis.ErrProviderNotConfigured).
 func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
-	foundryOn := len(cfg.Suffixes) > 0
+	foundryOn := len(cfg.Suffixes) > 0 && !cfg.DisableFoundry
 	if foundryOn != (cfg.Tokens != nil) {
 		return nil, errors.New("the model factory needs an endpoint allow-list and a token source together, or neither")
 	}
-	if !foundryOn && cfg.AnthropicKeyFile == "" {
-		return nil, errors.New("the model factory needs an endpoint allow-list and a token source, or an Anthropic key file")
+	if !foundryOn && len(cfg.CompatibleEndpoints) == 0 && cfg.AnthropicKeyFile == "" {
+		return nil, errors.New("the model factory needs a Foundry allow-list and token source, declared compatible endpoints, or an Anthropic key file")
+	}
+	if err := openaicompatible.ValidateEndpoints(cfg.CompatibleEndpoints, cfg.Suffixes); err != nil {
+		return nil, err
+	}
+	if err := openaicompatible.ValidateKeyFiles(cfg.CompatibleEndpoints, AnthropicKeyFileDeclaration(cfg.AnthropicKeyFile)); err != nil {
+		return nil, err
+	}
+	if err := openaicompatible.ValidateInClusterRanges(cfg.CompatibleInClusterRanges); err != nil {
+		return nil, err
+	}
+	cfg.CompatibleInClusterRanges = slices.Clone(cfg.CompatibleInClusterRanges)
+	// Freeze installation data: settings and caller mutations cannot move a credential.
+	cfg.CompatibleEndpoints = slices.Clone(cfg.CompatibleEndpoints)
+	for i := range cfg.CompatibleEndpoints {
+		cfg.CompatibleEndpoints[i].Models = slices.Clone(cfg.CompatibleEndpoints[i].Models)
 	}
 	refused := func(role analysis.Role, d remediationv1alpha1.ModelDeployment, err error) error {
 		cfg.Log.Info("Refused a model deployment from RemediationSettings", "role", role,
@@ -195,11 +223,11 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 		switch d.ProviderName() {
 		case remediationv1alpha1.ModelProviderFoundry:
 			if !foundryOn {
-				return nil, refused(role, d, fmt.Errorf("the analyzer runs without --model-endpoint-suffixes and its "+
+				return nil, refused(role, d, fmt.Errorf("the analyzer has Foundry disabled or runs without --model-endpoint-suffixes and its "+
 					"Azure workload identity: %w", analysis.ErrProviderNotConfigured))
 			}
-			if u, err := url.Parse(d.Endpoint); err == nil && strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") == anthropicHost {
-				return nil, refused(role, d, fmt.Errorf("model endpoint host is the Anthropic API's, not a Foundry "+
+			if cfg.separateProviderHost(d.Endpoint) {
+				return nil, refused(role, d, fmt.Errorf("model endpoint host belongs to a separate provider, not a Foundry "+
 					"resource: %w", analysis.ErrEndpointNotAllowed))
 			}
 			if err := CheckEndpoint(d.Endpoint, cfg.Suffixes); err != nil {
@@ -207,6 +235,36 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			}
 			p, err := foundry.New(foundry.Config{Endpoint: d.Endpoint, Deployment: d.Deployment,
 				APIVersion: d.APIVersion, API: foundry.API(d.InferenceAPI), Tokens: cfg.Tokens})
+			if err != nil {
+				return nil, refused(role, d, err)
+			}
+			return p, nil
+		case remediationv1alpha1.ModelProviderOpenAICompatible:
+			if len(cfg.CompatibleEndpoints) == 0 {
+				return nil, refused(role, d, fmt.Errorf("the analyzer declares no --openai-compatible-endpoints: %w", analysis.ErrEndpointNotAllowed))
+			}
+			decl, ok := openaicompatible.MatchEndpoint(cfg.CompatibleEndpoints, d.Endpoint, openaicompatible.API(d.InferenceAPI))
+			if !ok {
+				return nil, refused(role, d, fmt.Errorf("model endpoint or API is not declared at installation: %w", analysis.ErrEndpointNotAllowed))
+			}
+			if !slices.Contains(decl.Models, d.Deployment) {
+				return nil, refused(role, d, analysis.ErrModelNotAllowed)
+			}
+			if d.APIVersion != "" {
+				return nil, refused(role, d, fmt.Errorf("OpenAICompatible does not allow apiVersion: %w", providers.ErrInvalidConfig))
+			}
+			log := cfg.Log.WithValues("role", role, "provider", d.ProviderName())
+			p, err := openaicompatible.New(openaicompatible.Config{
+				Endpoint: decl.URL, Deployment: d.Deployment, API: decl.API,
+				KeyFile: decl.KeyFile, OtherKeyFiles: otherKeyFiles(cfg, decl),
+				Service: decl.Service, InClusterRanges: cfg.CompatibleInClusterRanges,
+				OnCall: func(r openaicompatible.CallReport) {
+					if r.Err != nil {
+						log.Info("A call to an OpenAI-compatible endpoint failed", "attempts", r.Attempts,
+							"notSent", providers.IsNotSent(r.Err), "error", r.Err.Error())
+					}
+				},
+			})
 			if err != nil {
 				return nil, refused(role, d, err)
 			}
@@ -226,6 +284,7 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			}
 			log := cfg.Log.WithValues("role", role, "provider", d.ProviderName(), "deployment", d.Deployment)
 			p, err := anthropic.New(anthropic.Config{Model: d.Deployment, KeyFile: cfg.AnthropicKeyFile,
+				OtherKeyFiles: compatibleKeyFiles(cfg),
 				// The adapter's errors are fixed text that never holds the key, the key file's path or the
 				// reply; logging them tells a key file that cannot be used from an outage of the API.
 				OnCall: func(r anthropic.CallReport) {
@@ -242,4 +301,60 @@ func NewModelFactory(cfg ModelsConfig) (analysis.ModelFactory, error) {
 			return nil, refused(role, d, fmt.Errorf("unknown model provider: %w", analysis.ErrProviderNotConfigured))
 		}
 	}, nil
+}
+
+// separateProviderHost keeps the Foundry token away from every other provider's destinations.
+func (cfg ModelsConfig) separateProviderHost(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == anthropicHost || host == "api.openai.com" {
+		return true
+	}
+	for _, e := range cfg.CompatibleEndpoints {
+		base, _ := openaicompatible.CanonicalBase(e.URL)
+		u, _ := url.Parse(base)
+		if u != nil && u.Hostname() == host {
+			return true
+		}
+	}
+	return false
+}
+
+// AnthropicKeyFileDeclaration names the Anthropic key file for openaicompatible.ValidateKeyFiles; empty when
+// no file is set.
+func AnthropicKeyFileDeclaration(path string) []openaicompatible.NamedKeyFile {
+	if path == "" {
+		return nil
+	}
+	return []openaicompatible.NamedKeyFile{{Name: "--anthropic-api-key-file", Path: path}}
+}
+
+// otherKeyFiles lists the key files declared for anything but decl: the other compatible endpoints and the
+// Anthropic key file. The provider refuses its own key file when it is one of them (ADR-0042).
+func otherKeyFiles(cfg ModelsConfig, decl openaicompatible.Endpoint) []string {
+	var out []string
+	for _, e := range cfg.CompatibleEndpoints {
+		if e.KeyFile != "" && e.URL != decl.URL {
+			out = append(out, e.KeyFile)
+		}
+	}
+	if cfg.AnthropicKeyFile != "" {
+		out = append(out, cfg.AnthropicKeyFile)
+	}
+	return out
+}
+
+// compatibleKeyFiles lists the key files of the compatible endpoints, the other declarations of the Anthropic
+// provider's key (ADR-0042).
+func compatibleKeyFiles(cfg ModelsConfig) []string {
+	var out []string
+	for _, e := range cfg.CompatibleEndpoints {
+		if e.KeyFile != "" {
+			out = append(out, e.KeyFile)
+		}
+	}
+	return out
 }

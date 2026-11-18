@@ -36,7 +36,8 @@ import (
 // promptGolden holds, per scenario whose Incident has an empty absorbed tally, the SHA-256 of the first model
 // request's messages (the system prompt and the context, by role): the prompt as the model gets it. The values
 // were computed by the code before the absorbed tally block (#796), so a scenario with an empty tally must
-// still get the same prompt, byte for byte. A change that is meant to change the prompt of every Incident
+// still get the same prompt, byte for byte; unschedulable/over-bound, added after it (#841), pins its shortened
+// summary. A change that is meant to change the prompt of every Incident
 // writes them again: SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/
 var promptGolden = filepath.Join("testdata", "prompt.golden")
 

@@ -70,7 +70,7 @@ const (
 var canonForms = []string{
 	canonFormIndent, canonFormKeys, canonFormBrackets, canonFormSequence, canonFormEnv, canonFormExcerpt,
 	canonFormMixed, canonFormGlyph, canonFormExplicit, canonFormComment, canonFormLabels, canonFormSeparator,
-	canonFormAutolink,
+	canonFormAutolink, canonFormSepBlanks, canonFormKeyValue, canonFormEqualsArrow,
 }
 
 // canonCase is one input of the corpus. in is the text as a caller reads it. args, for a sequence, holds its
@@ -258,6 +258,8 @@ func canonCorpus() []canonCase {
 	g.foldRoundThreeCases()
 	// The forms of the fourth round come after those of the third.
 	g.foldRoundFourCases()
+	// The forms of the fifth round come after those of the fourth.
+	g.foldRoundFiveCases()
 	return g.out
 }
 

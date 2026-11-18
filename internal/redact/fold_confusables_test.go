@@ -18,6 +18,7 @@ package redact
 
 import (
 	"bufio"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -96,6 +97,83 @@ func TestFoldColonsAreTheConfusablesOfColon(t *testing.T) {
 	for _, r := range []rune{':', 0x205D, 0x2254, 0x00B7, 0x003B} {
 		if isFoldColon(r) {
 			t.Errorf("isFoldColon(%U) = true, it is not in the list", r)
+		}
+	}
+}
+
+// confusablesEqualsArrows is the extract of confusables.txt that foldEquals and foldArrows are made from: its
+// header and every line whose target is one or more U+003D EQUALS SIGN, U+2192 or U+21D2.
+const confusablesEqualsArrows = "testdata/confusables-equals-arrows.txt"
+
+// foldEquals is every character the confusables list maps to equals signs, and foldArrows the two arrows and
+// every character the list maps to one of them, from the version the comment names, and nothing else.
+func TestFoldMarksAreTheConfusablesOfEqualsAndArrows(t *testing.T) {
+	f, err := os.Open(confusablesEqualsArrows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	var version string
+	var equals []rune
+	arrows := map[rune]string{0x2192: "->", 0x21D2: "=>"}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if v, ok := strings.CutPrefix(line, "# Version: "); ok {
+			version = strings.TrimSpace(v)
+			continue
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ";")
+		if len(fields) < 3 {
+			t.Fatalf("malformed line %q", line)
+		}
+		r, err := strconv.ParseInt(strings.TrimSpace(fields[0]), 16, 32)
+		if err != nil {
+			t.Fatalf("line %q: %v", line, err)
+		}
+		switch targets := strings.Fields(fields[1]); {
+		case len(targets) == 1 && (targets[0] == "2192" || targets[0] == "21D2"):
+			arrows[rune(r)] = map[string]string{"2192": "->", "21D2": "=>"}[targets[0]]
+		default:
+			for _, tg := range targets {
+				if tg != "003D" {
+					t.Fatalf("line %q maps to more than equals signs", line)
+				}
+			}
+			equals = append(equals, rune(r))
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if version == "" || len(equals) == 0 {
+		t.Fatalf("%s names no version or holds no line", confusablesEqualsArrows)
+	}
+	if !slices.Equal(foldEquals, equals) {
+		t.Errorf("foldEquals = %U, the confusables of '=' in %s are %U", foldEquals, confusablesEqualsArrows, equals)
+	}
+	if !maps.Equal(foldArrows, arrows) {
+		t.Errorf("foldArrows = %v, want %v", foldArrows, arrows)
+	}
+	src, err := os.ReadFile("fold.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`confusables\.txt version (\S+) whose target is\s*(?://\s*)?one or more U\+003D`).FindSubmatch(src)
+	if m == nil || string(m[1]) != version {
+		t.Errorf("the comment of foldEquals names confusables.txt version %q, %s holds version %s", m, confusablesEqualsArrows, version)
+	}
+	for r, want := range arrows {
+		if got, ok := foldMark(r); !ok || got != want {
+			t.Errorf("foldMark(%U) = %q, %v, want %q", r, got, ok, want)
+		}
+	}
+	for _, r := range []rune{'=', '>', 0x2190, 0x21D0, 0x2261, 0x2260, 0x27F6} {
+		if _, ok := foldMark(r); ok {
+			t.Errorf("foldMark(%U) folds, it is not in the list", r)
 		}
 	}
 }

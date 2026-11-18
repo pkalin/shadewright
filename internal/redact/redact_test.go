@@ -564,6 +564,7 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 	const size = 1 << 18
 	// tails close the units that open a quote, once, at the end of the text.
 	tails := map[string]string{"quote closed at the end": "'", "flag quote closed at end": `"`}
+	largest, largestName := 0.0, ""
 	for name, unit := range map[string]string{
 		"yaml empty headers":       "password:\n",
 		"yaml headers over values": "password:\n  password:\n",
@@ -702,6 +703,9 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		small, smallSize := workString(t, name, rep(unit, size/8/len(unit))+tail)
 		large, largeSize := workString(t, name, rep(unit, size/len(unit))+tail)
 		t.Logf("%s: %.1f steps per byte", name, float64(large)/float64(largeSize))
+		if per := float64(large) / float64(largeSize); per > largest {
+			largest, largestName = per, name
+		}
 		if large > maxWorkPerByte*int64(largeSize) {
 			t.Errorf("%s: %d steps for %d bytes, more than %d per byte", name, large, largeSize, maxWorkPerByte)
 		}
@@ -709,6 +713,8 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 			t.Errorf("%s: %d steps for %d bytes, %d for %d: more than linear", name, small, smallSize, large, largeSize)
 		}
 	}
+	// The figure the docs give for the largest unit (comma fields after a quoted value, "blanks commas").
+	t.Logf("largest unit: %s, %.1f steps per byte", largestName, largest)
 }
 
 // workString returns the work of String on in and the size of in, and fails when the output is longer

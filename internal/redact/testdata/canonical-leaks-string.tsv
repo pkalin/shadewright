@@ -197,6 +197,12 @@ f8b71a22a38109a7	bracket inside the secret	k2	kept
 f8b71a22a38109a7	bracket inside the secret	k3	kept
 fcb7d4cebfa27203	bracket inside the secret	k2	kept
 fcb7d4cebfa27203	bracket inside the secret	k3	kept
+168ba7c88f7e1c4e	equals or arrow look-alike	k1	kept
+168ba7c88f7e1c4e	equals or arrow look-alike	k2	kept
+18ec18be693e24ab	equals or arrow look-alike	k1	kept
+18ec18be693e24ab	equals or arrow look-alike	k2	kept
+f77157bb0aa16a5f	equals or arrow look-alike	k1	kept
+f77157bb0aa16a5f	equals or arrow look-alike	k2	kept
 03749a12a3d778c5	explicit key	k1	kept
 03749a12a3d778c5	explicit key	k2	kept
 24056f7701bdcd27	explicit key	k2	kept
@@ -5298,6 +5304,894 @@ ff84a4e36b21e7ca	keys on one line	k2	kept
 ff93b85bf4b65962	keys on one line	k1	kept
 6b1759a9821bfe23	metric labels	k3	kept
 6b1759a9821bfe23	metric labels	k4	kept
+0088ae25f62ce9da	secret key as a value	k1	kept
+012d08bdd637de81	secret key as a value	k1	kept
+01e80df4df0b3724	secret key as a value	k2	kept
+01e80df4df0b3724	secret key as a value	k3	kept
+02b3104261e18c01	secret key as a value	k1	kept
+03691d6fbc89e09b	secret key as a value	k1	kept
+038b74976487fb44	secret key as a value	k1	kept
+038b74976487fb44	secret key as a value	k2	kept
+038b74976487fb44	secret key as a value	k3	kept
+08162406ebc05b70	secret key as a value	k1	kept
+0a6f03e160fa406d	secret key as a value	k1	kept
+0bbf78339163b823	secret key as a value	k1	kept
+0be5389137b5fffd	secret key as a value	k1	kept
+0be5389137b5fffd	secret key as a value	k2	kept
+0be5389137b5fffd	secret key as a value	k3	kept
+0c8ac9175c7cd462	secret key as a value	k1	kept
+12d5a186fe7e97ff	secret key as a value	k1	kept
+155d2cb0b3761d78	secret key as a value	k1	kept
+15921bdd5677f8e8	secret key as a value	k1	kept
+15921bdd5677f8e8	secret key as a value	k2	kept
+15921bdd5677f8e8	secret key as a value	k3	kept
+1b70aad75450124a	secret key as a value	k1	kept
+1b7c9f3be0a5f7b6	secret key as a value	k1	kept
+1b7c9f3be0a5f7b6	secret key as a value	k2	kept
+1b7c9f3be0a5f7b6	secret key as a value	k3	kept
+1cf374e1d4360322	secret key as a value	k1	kept
+1e5117d95bed0409	secret key as a value	k1	kept
+21cd1ce90c2754ef	secret key as a value	k1	kept
+21cd1ce90c2754ef	secret key as a value	k2	kept
+21cd1ce90c2754ef	secret key as a value	k3	kept
+233a7e7c677c055c	secret key as a value	k1	kept
+24201d8880264c75	secret key as a value	k1	kept
+26e3758b315349f1	secret key as a value	k1	kept
+299d38ace83d242d	secret key as a value	k1	kept
+2ba662e8706c6e8f	secret key as a value	k1	kept
+2e0263ae6be320d5	secret key as a value	k1	kept
+2e52a2f28138adc7	secret key as a value	k1	kept
+2e52a2f28138adc7	secret key as a value	k2	kept
+2e52a2f28138adc7	secret key as a value	k3	kept
+2e60be7bfbc2e868	secret key as a value	k1	kept
+2e60be7bfbc2e868	secret key as a value	k2	kept
+2e60be7bfbc2e868	secret key as a value	k3	kept
+369563e9110ad9e0	secret key as a value	k1	kept
+3782dccfc149e439	secret key as a value	k1	kept
+3b137b4f0d267beb	secret key as a value	k1	kept
+3b137b4f0d267beb	secret key as a value	k2	kept
+3b137b4f0d267beb	secret key as a value	k3	kept
+3b4472714c3c2700	secret key as a value	k1	kept
+3cfd043bb95fd569	secret key as a value	k2	kept
+3cfd043bb95fd569	secret key as a value	k3	kept
+3f0b1d0bf82b473a	secret key as a value	k1	kept
+40311723948536d5	secret key as a value	k1	kept
+4152f79ad5992b66	secret key as a value	k1	kept
+42aa8212c5dc180c	secret key as a value	k1	kept
+44dbb795db760165	secret key as a value	k1	kept
+47319f8c55afefc9	secret key as a value	k1	kept
+494e2e38b99ada5e	secret key as a value	k1	kept
+4b94098b4daae969	secret key as a value	k2	kept
+4b94098b4daae969	secret key as a value	k3	kept
+4c47274e102e4c7f	secret key as a value	k1	kept
+4c8aae1225cfa520	secret key as a value	k1	kept
+509e570c0a13264f	secret key as a value	k2	kept
+509e570c0a13264f	secret key as a value	k3	kept
+50d570b46d751db7	secret key as a value	k1	kept
+53fa2e15650cd1e9	secret key as a value	k1	kept
+5760b90324feb1bd	secret key as a value	k2	kept
+5760b90324feb1bd	secret key as a value	k3	kept
+58e745a312ed9ee3	secret key as a value	k1	kept
+58e745a312ed9ee3	secret key as a value	k2	kept
+58e745a312ed9ee3	secret key as a value	k3	kept
+599c06270b68f567	secret key as a value	k1	kept
+5ac8aad37af6f2a9	secret key as a value	k1	kept
+5ac8aad37af6f2a9	secret key as a value	k2	kept
+5ac8aad37af6f2a9	secret key as a value	k3	kept
+5f5eb0367487d345	secret key as a value	k1	kept
+5f74dcd84a45abe9	secret key as a value	k1	kept
+5f74dcd84a45abe9	secret key as a value	k2	kept
+5f74dcd84a45abe9	secret key as a value	k3	kept
+613e2611d7ea2461	secret key as a value	k1	kept
+619310989647ca66	secret key as a value	k1	kept
+647defffc473d46b	secret key as a value	k1	kept
+69bf9771cf832dd7	secret key as a value	k1	kept
+6dc79cb9f4c8c28a	secret key as a value	k1	kept
+6e4cf25728d261b3	secret key as a value	k1	kept
+6e4cf25728d261b3	secret key as a value	k2	kept
+6e4cf25728d261b3	secret key as a value	k3	kept
+6ffda05c613ff8eb	secret key as a value	k1	kept
+6ffda05c613ff8eb	secret key as a value	k2	kept
+6ffda05c613ff8eb	secret key as a value	k3	kept
+715093435186ddd2	secret key as a value	k1	kept
+753c82fa2eb39555	secret key as a value	k1	kept
+753c82fa2eb39555	secret key as a value	k2	kept
+753c82fa2eb39555	secret key as a value	k3	kept
+7579da21da5f5899	secret key as a value	k1	kept
+779ea4657b4cacbd	secret key as a value	k1	kept
+7ffe3ee0d0ebf174	secret key as a value	k1	kept
+7ffe3ee0d0ebf174	secret key as a value	k2	kept
+7ffe3ee0d0ebf174	secret key as a value	k3	kept
+82f9c4efbce23a91	secret key as a value	k1	kept
+82f9c4efbce23a91	secret key as a value	k2	kept
+82f9c4efbce23a91	secret key as a value	k3	kept
+832e98337980ec10	secret key as a value	k1	kept
+84645a8192b5f462	secret key as a value	k1	kept
+84edd590899d3b40	secret key as a value	k1	kept
+84edd590899d3b40	secret key as a value	k2	kept
+84edd590899d3b40	secret key as a value	k3	kept
+858f204c022587b5	secret key as a value	k1	kept
+8704da68040a06e7	secret key as a value	k1	kept
+87093ae127ea5d55	secret key as a value	k1	kept
+88dc09dc6c89d90e	secret key as a value	k1	kept
+88ff6f92ad8a8cba	secret key as a value	k1	kept
+8a936a334d08f7a2	secret key as a value	k2	kept
+8a936a334d08f7a2	secret key as a value	k3	kept
+8ae45547035e32b5	secret key as a value	k2	kept
+8ae45547035e32b5	secret key as a value	k3	kept
+8be6babd557935b2	secret key as a value	k1	kept
+8c0b0208e7af537f	secret key as a value	k1	kept
+8da908b732ad32db	secret key as a value	k1	kept
+8dbcf92976214d50	secret key as a value	k1	kept
+8f197e3a3728d1c7	secret key as a value	k1	kept
+90ac4191b40997f7	secret key as a value	k1	kept
+9296a81b6f85b0b7	secret key as a value	k1	kept
+968757c8973fb953	secret key as a value	k1	kept
+97079e1d68f30f65	secret key as a value	k1	kept
+98a8e0eb3054d6b0	secret key as a value	k2	kept
+98a8e0eb3054d6b0	secret key as a value	k3	kept
+a66758961907959e	secret key as a value	k1	kept
+a75751d41947402f	secret key as a value	k1	kept
+aaa1fc1536fe6a06	secret key as a value	k1	kept
+aaa1fc1536fe6a06	secret key as a value	k2	kept
+aaa1fc1536fe6a06	secret key as a value	k3	kept
+b08b086f36d5392b	secret key as a value	k1	kept
+b2fbf895b1e6ca10	secret key as a value	k1	kept
+b49ea8acdca4dbff	secret key as a value	k2	kept
+b49ea8acdca4dbff	secret key as a value	k3	kept
+b6921e7db0565de0	secret key as a value	k1	kept
+b77c46e7f51e1a11	secret key as a value	k1	kept
+b850e9da865babf2	secret key as a value	k1	kept
+b9794cdf40fc93f2	secret key as a value	k1	kept
+b9794cdf40fc93f2	secret key as a value	k2	kept
+b9794cdf40fc93f2	secret key as a value	k3	kept
+bb96805db2418a29	secret key as a value	k1	kept
+bbda30a720f5a56c	secret key as a value	k1	kept
+bda9e6bd6d2e8ba4	secret key as a value	k2	kept
+bda9e6bd6d2e8ba4	secret key as a value	k3	kept
+bf08bca0f01bb1c7	secret key as a value	k2	kept
+bf08bca0f01bb1c7	secret key as a value	k3	kept
+c14447e97ab587e6	secret key as a value	k1	kept
+c2365b8940991eac	secret key as a value	k2	kept
+c2365b8940991eac	secret key as a value	k3	kept
+c60f16039e8dcb0f	secret key as a value	k2	kept
+c60f16039e8dcb0f	secret key as a value	k3	kept
+c7453cd053842b6b	secret key as a value	k1	kept
+c7453cd053842b6b	secret key as a value	k2	kept
+c7453cd053842b6b	secret key as a value	k3	kept
+c8f61984aeccc174	secret key as a value	k1	kept
+c8f61984aeccc174	secret key as a value	k2	kept
+c8f61984aeccc174	secret key as a value	k3	kept
+cbeaf721607e2ec7	secret key as a value	k1	kept
+cbeaf721607e2ec7	secret key as a value	k2	kept
+cbeaf721607e2ec7	secret key as a value	k3	kept
+cd64f54406a060f1	secret key as a value	k1	kept
+cd78df8908b8acc9	secret key as a value	k1	kept
+cd78df8908b8acc9	secret key as a value	k2	kept
+cd78df8908b8acc9	secret key as a value	k3	kept
+d158ac929d142cc7	secret key as a value	k1	kept
+d19bab85905c0c0c	secret key as a value	k1	kept
+d2fa20ec39bec6c7	secret key as a value	k1	kept
+d4acbeca7168d99d	secret key as a value	k1	kept
+d9be0aeaa4f95fa2	secret key as a value	k1	kept
+d9be0aeaa4f95fa2	secret key as a value	k2	kept
+d9be0aeaa4f95fa2	secret key as a value	k3	kept
+daf00af29678dfdd	secret key as a value	k1	kept
+daf00af29678dfdd	secret key as a value	k2	kept
+daf00af29678dfdd	secret key as a value	k3	kept
+e44c4d90ebff5b9d	secret key as a value	k1	kept
+e51770f21b4a822e	secret key as a value	k1	kept
+e646bece0d1ffd59	secret key as a value	k1	kept
+e744a89bde833d62	secret key as a value	k1	kept
+e9c66ae4229fb8fa	secret key as a value	k1	kept
+ebc86d7476fd0d9e	secret key as a value	k1	kept
+ec446510474f2a44	secret key as a value	k2	kept
+ec446510474f2a44	secret key as a value	k3	kept
+ed6f0809392b5954	secret key as a value	k1	kept
+edeee614a931a264	secret key as a value	k1	kept
+f1ca2cbb36cd0e93	secret key as a value	k1	kept
+f1ca2cbb36cd0e93	secret key as a value	k2	kept
+f1ca2cbb36cd0e93	secret key as a value	k3	kept
+f20efad3df675312	secret key as a value	k1	kept
+f20efad3df675312	secret key as a value	k2	kept
+f20efad3df675312	secret key as a value	k3	kept
+f9fa8109304999d6	secret key as a value	k1	kept
+001b145a6c99bd15	separator between blanks	k1	kept
+001b145a6c99bd15	separator between blanks	k2	kept
+019d44b33078ec6a	separator between blanks	k1	kept
+019d44b33078ec6a	separator between blanks	k2	kept
+0284a36d4782c2c4	separator between blanks	k1	kept
+0284a36d4782c2c4	separator between blanks	k2	kept
+02de8cf59da73fb9	separator between blanks	k1	kept
+02de8cf59da73fb9	separator between blanks	k2	kept
+04a92bb45025a10b	separator between blanks	k1	kept
+04a92bb45025a10b	separator between blanks	k2	kept
+05b4e0cb221bde34	separator between blanks	k1	kept
+05b4e0cb221bde34	separator between blanks	k2	kept
+05ec97a8632ea0c2	separator between blanks	k1	kept
+05ec97a8632ea0c2	separator between blanks	k2	kept
+0602e1c4ffbd714a	separator between blanks	k1	kept
+0602e1c4ffbd714a	separator between blanks	k2	kept
+0673a0e9fe1c4983	separator between blanks	k1	kept
+0673a0e9fe1c4983	separator between blanks	k2	kept
+0688cb13542dd2d3	separator between blanks	k1	kept
+0688cb13542dd2d3	separator between blanks	k2	kept
+075f492e4405dd0c	separator between blanks	k1	kept
+075f492e4405dd0c	separator between blanks	k2	kept
+0a6e5286e69de206	separator between blanks	k1	kept
+0a6e5286e69de206	separator between blanks	k2	kept
+0b8e95ef2adefaa0	separator between blanks	k1	kept
+0b8e95ef2adefaa0	separator between blanks	k2	kept
+0bb035734beaec0d	separator between blanks	k1	kept
+0bb035734beaec0d	separator between blanks	k2	kept
+0c94a762363988a0	separator between blanks	k1	kept
+0c94a762363988a0	separator between blanks	k2	kept
+0ce6415aa97486c2	separator between blanks	k1	kept
+0ce6415aa97486c2	separator between blanks	k2	kept
+0dc9d45659a21644	separator between blanks	k1	kept
+0dc9d45659a21644	separator between blanks	k2	kept
+0e2b367b5d81a575	separator between blanks	k1	kept
+0e2b367b5d81a575	separator between blanks	k2	kept
+0ee7d1d4ffce55d3	separator between blanks	k1	kept
+0ee7d1d4ffce55d3	separator between blanks	k2	kept
+10f425ebdbd48600	separator between blanks	k1	kept
+10f425ebdbd48600	separator between blanks	k2	kept
+1105762921b473d4	separator between blanks	k1	kept
+1105762921b473d4	separator between blanks	k2	kept
+116215e2fd3d28bd	separator between blanks	k1	kept
+116215e2fd3d28bd	separator between blanks	k2	kept
+11b48ac1232e780f	separator between blanks	k1	kept
+11b48ac1232e780f	separator between blanks	k2	kept
+11d0e45f8c971a4d	separator between blanks	k1	kept
+11d0e45f8c971a4d	separator between blanks	k2	kept
+128090a6bc08fdd2	separator between blanks	k1	kept
+128090a6bc08fdd2	separator between blanks	k2	kept
+12a2b0312636ddef	separator between blanks	k1	kept
+12a2b0312636ddef	separator between blanks	k2	kept
+1397bae6686b4fe3	separator between blanks	k1	kept
+1397bae6686b4fe3	separator between blanks	k2	kept
+14de7d41ff655ba2	separator between blanks	k1	kept
+14de7d41ff655ba2	separator between blanks	k2	kept
+167599b829f9a10e	separator between blanks	k1	kept
+167599b829f9a10e	separator between blanks	k2	kept
+16a9fb7696c2c36c	separator between blanks	k1	kept
+16a9fb7696c2c36c	separator between blanks	k2	kept
+1730e576bc1b902e	separator between blanks	k1	kept
+1730e576bc1b902e	separator between blanks	k2	kept
+17757e3d2cf312cd	separator between blanks	k1	kept
+17757e3d2cf312cd	separator between blanks	k2	kept
+1789950784dacc02	separator between blanks	k1	kept
+1789950784dacc02	separator between blanks	k2	kept
+18dca275af404589	separator between blanks	k1	kept
+18dca275af404589	separator between blanks	k2	kept
+1924914e28fcdcf8	separator between blanks	k1	kept
+1924914e28fcdcf8	separator between blanks	k2	kept
+19a91da45188cd84	separator between blanks	k1	kept
+19a91da45188cd84	separator between blanks	k2	kept
+19ab40eba42814b3	separator between blanks	k1	kept
+19ab40eba42814b3	separator between blanks	k2	kept
+1a2dba62dac05a15	separator between blanks	k1	kept
+1a2dba62dac05a15	separator between blanks	k2	kept
+1a7a580dadc0bbdd	separator between blanks	k1	kept
+1a7a580dadc0bbdd	separator between blanks	k2	kept
+1aa8a3c62d11294c	separator between blanks	k1	kept
+1aa8a3c62d11294c	separator between blanks	k2	kept
+1aafaf29997cafa6	separator between blanks	k1	kept
+1aafaf29997cafa6	separator between blanks	k2	kept
+1e2f8243e35cdcbf	separator between blanks	k1	kept
+1e2f8243e35cdcbf	separator between blanks	k2	kept
+1f61488b36e5c0bc	separator between blanks	k1	kept
+1f61488b36e5c0bc	separator between blanks	k2	kept
+1f97221a162af614	separator between blanks	k1	kept
+1f97221a162af614	separator between blanks	k2	kept
+2022816cbbc59270	separator between blanks	k1	kept
+2022816cbbc59270	separator between blanks	k2	kept
+209d01d875947fa6	separator between blanks	k1	kept
+209d01d875947fa6	separator between blanks	k2	kept
+21bf20bfb6b61c7e	separator between blanks	k1	kept
+21bf20bfb6b61c7e	separator between blanks	k2	kept
+2264f0c736402c11	separator between blanks	k1	kept
+2264f0c736402c11	separator between blanks	k2	kept
+24e84a85027a64d4	separator between blanks	k1	kept
+24e84a85027a64d4	separator between blanks	k2	kept
+2511c8a61dfa1357	separator between blanks	k1	kept
+2511c8a61dfa1357	separator between blanks	k2	kept
+251e8da952c8f6fd	separator between blanks	k1	kept
+251e8da952c8f6fd	separator between blanks	k2	kept
+264fc5222ee00ab1	separator between blanks	k1	kept
+264fc5222ee00ab1	separator between blanks	k2	kept
+267e5fc89ef93f7d	separator between blanks	k1	kept
+267e5fc89ef93f7d	separator between blanks	k2	kept
+26d776f7f71a2c4d	separator between blanks	k1	kept
+26d776f7f71a2c4d	separator between blanks	k2	kept
+273dc3a93369c29d	separator between blanks	k1	kept
+273dc3a93369c29d	separator between blanks	k2	kept
+27e342b6b6837168	separator between blanks	k1	kept
+27e342b6b6837168	separator between blanks	k2	kept
+2aafe507fab66d59	separator between blanks	k1	kept
+2aafe507fab66d59	separator between blanks	k2	kept
+2b2c39e180701395	separator between blanks	k1	kept
+2b2c39e180701395	separator between blanks	k2	kept
+2c44e60dc31e3a21	separator between blanks	k1	kept
+2c44e60dc31e3a21	separator between blanks	k2	kept
+2cc238c4396f86f0	separator between blanks	k1	kept
+2cc238c4396f86f0	separator between blanks	k2	kept
+2d1470d974d6d1b0	separator between blanks	k1	kept
+2d1470d974d6d1b0	separator between blanks	k2	kept
+3071bfe5baa032b6	separator between blanks	k1	kept
+3071bfe5baa032b6	separator between blanks	k2	kept
+30b223d92d5a75e7	separator between blanks	k1	kept
+30b223d92d5a75e7	separator between blanks	k2	kept
+31559ef2937c44e2	separator between blanks	k1	kept
+31559ef2937c44e2	separator between blanks	k2	kept
+321876f80709d2ea	separator between blanks	k1	kept
+321876f80709d2ea	separator between blanks	k2	kept
+328420342592294e	separator between blanks	k1	kept
+328420342592294e	separator between blanks	k2	kept
+330583ebf4d0e8e6	separator between blanks	k1	kept
+330583ebf4d0e8e6	separator between blanks	k2	kept
+34240d7dffae3346	separator between blanks	k1	kept
+34240d7dffae3346	separator between blanks	k2	kept
+34738428996ad329	separator between blanks	k1	kept
+34738428996ad329	separator between blanks	k2	kept
+3601417a1798fa9b	separator between blanks	k1	kept
+3601417a1798fa9b	separator between blanks	k2	kept
+3730e1c2428dcb8d	separator between blanks	k1	kept
+3730e1c2428dcb8d	separator between blanks	k2	kept
+376dc8e8436cb28b	separator between blanks	k1	kept
+376dc8e8436cb28b	separator between blanks	k2	kept
+390b0ab1f2be8d60	separator between blanks	k1	kept
+390b0ab1f2be8d60	separator between blanks	k2	kept
+3b66825874804d44	separator between blanks	k1	kept
+3b66825874804d44	separator between blanks	k2	kept
+3bb592a4398cce4d	separator between blanks	k1	kept
+3bb592a4398cce4d	separator between blanks	k2	kept
+3bd89ea343f7f864	separator between blanks	k1	kept
+3bd89ea343f7f864	separator between blanks	k2	kept
+3c66210446199a2f	separator between blanks	k1	kept
+3c66210446199a2f	separator between blanks	k2	kept
+3c707954aba45e89	separator between blanks	k1	kept
+3c707954aba45e89	separator between blanks	k2	kept
+3d9d3f8586f383a5	separator between blanks	k1	kept
+3d9d3f8586f383a5	separator between blanks	k2	kept
+3db699548129be2b	separator between blanks	k1	kept
+3db699548129be2b	separator between blanks	k2	kept
+3e581bb3cf2960ee	separator between blanks	k1	kept
+3e581bb3cf2960ee	separator between blanks	k2	kept
+3e704ed1a0cc36c5	separator between blanks	k1	kept
+3e704ed1a0cc36c5	separator between blanks	k2	kept
+3f7b8a57c080f185	separator between blanks	k1	kept
+3f7b8a57c080f185	separator between blanks	k2	kept
+3f80eccd0a0a8132	separator between blanks	k1	kept
+3f80eccd0a0a8132	separator between blanks	k2	kept
+404c2aaf972fd18c	separator between blanks	k1	kept
+404c2aaf972fd18c	separator between blanks	k2	kept
+4076788ba1845092	separator between blanks	k1	kept
+4076788ba1845092	separator between blanks	k2	kept
+409d26783fcc777a	separator between blanks	k1	kept
+409d26783fcc777a	separator between blanks	k2	kept
+426b8ae16999a6f1	separator between blanks	k1	kept
+426b8ae16999a6f1	separator between blanks	k2	kept
+440b971c9be7c31e	separator between blanks	k1	kept
+440b971c9be7c31e	separator between blanks	k2	kept
+441acf6fa40118c5	separator between blanks	k1	kept
+441acf6fa40118c5	separator between blanks	k2	kept
+4449b8151cfc4e60	separator between blanks	k1	kept
+4449b8151cfc4e60	separator between blanks	k2	kept
+456296562782c6ff	separator between blanks	k1	kept
+456296562782c6ff	separator between blanks	k2	kept
+45cfb2d71f292b48	separator between blanks	k1	kept
+45cfb2d71f292b48	separator between blanks	k2	kept
+46003b00a6bc630a	separator between blanks	k1	kept
+46003b00a6bc630a	separator between blanks	k2	kept
+46a6123bad497b03	separator between blanks	k1	kept
+46a6123bad497b03	separator between blanks	k2	kept
+4755894e99cdc2f4	separator between blanks	k1	kept
+4755894e99cdc2f4	separator between blanks	k2	kept
+484257b3c658231d	separator between blanks	k1	kept
+484257b3c658231d	separator between blanks	k2	kept
+495138df6de0e09f	separator between blanks	k1	kept
+495138df6de0e09f	separator between blanks	k2	kept
+49ef423902171222	separator between blanks	k1	kept
+49ef423902171222	separator between blanks	k2	kept
+4a41614d990e4141	separator between blanks	k1	kept
+4a41614d990e4141	separator between blanks	k2	kept
+4a4b76fbcc452e8c	separator between blanks	k1	kept
+4a4b76fbcc452e8c	separator between blanks	k2	kept
+4a67a0020f5d4291	separator between blanks	k1	kept
+4a67a0020f5d4291	separator between blanks	k2	kept
+4a85c968a9dd6dee	separator between blanks	k1	kept
+4a85c968a9dd6dee	separator between blanks	k2	kept
+4e0326d75ce033a5	separator between blanks	k1	kept
+4e0326d75ce033a5	separator between blanks	k2	kept
+4ee44f6efde76fe1	separator between blanks	k1	kept
+4ee44f6efde76fe1	separator between blanks	k2	kept
+4fe968d32a905a78	separator between blanks	k1	kept
+4fe968d32a905a78	separator between blanks	k2	kept
+50389e7eb50a534f	separator between blanks	k1	kept
+50389e7eb50a534f	separator between blanks	k2	kept
+5077a2889c52444b	separator between blanks	k1	kept
+5077a2889c52444b	separator between blanks	k2	kept
+50b4ae70708a0e53	separator between blanks	k1	kept
+50b4ae70708a0e53	separator between blanks	k2	kept
+50f2d9cc9cf2687a	separator between blanks	k1	kept
+50f2d9cc9cf2687a	separator between blanks	k2	kept
+511368ad16b7ae35	separator between blanks	k1	kept
+511368ad16b7ae35	separator between blanks	k2	kept
+524d0b90c773ac5e	separator between blanks	k1	kept
+524d0b90c773ac5e	separator between blanks	k2	kept
+5333510b2b992d3c	separator between blanks	k1	kept
+5333510b2b992d3c	separator between blanks	k2	kept
+538c2ffb02f6c228	separator between blanks	k1	kept
+538c2ffb02f6c228	separator between blanks	k2	kept
+54d72d03e00064a0	separator between blanks	k1	kept
+54d72d03e00064a0	separator between blanks	k2	kept
+55494b6ba9f20076	separator between blanks	k1	kept
+55494b6ba9f20076	separator between blanks	k2	kept
+57b7d690635073ce	separator between blanks	k1	kept
+57b7d690635073ce	separator between blanks	k2	kept
+582facd0e1b0ca01	separator between blanks	k1	kept
+582facd0e1b0ca01	separator between blanks	k2	kept
+592bb9fc4bdfdf8b	separator between blanks	k1	kept
+592bb9fc4bdfdf8b	separator between blanks	k2	kept
+59ce082c72db05d3	separator between blanks	k1	kept
+59ce082c72db05d3	separator between blanks	k2	kept
+5ade6ab0c8f0face	separator between blanks	k1	kept
+5ade6ab0c8f0face	separator between blanks	k2	kept
+5c0694676d738fce	separator between blanks	k1	kept
+5c0694676d738fce	separator between blanks	k2	kept
+5c6d1249e2e8362d	separator between blanks	k1	kept
+5c6d1249e2e8362d	separator between blanks	k2	kept
+5d0b88627ee26989	separator between blanks	k1	kept
+5d0b88627ee26989	separator between blanks	k2	kept
+5e82d1bafcba5f14	separator between blanks	k1	kept
+5e82d1bafcba5f14	separator between blanks	k2	kept
+5f60c2801ab0c0c7	separator between blanks	k1	kept
+5f60c2801ab0c0c7	separator between blanks	k2	kept
+62226f70d4691414	separator between blanks	k1	kept
+62226f70d4691414	separator between blanks	k2	kept
+62ecaa2f911a97f4	separator between blanks	k1	kept
+62ecaa2f911a97f4	separator between blanks	k2	kept
+63f019aeca4ab302	separator between blanks	k1	kept
+63f019aeca4ab302	separator between blanks	k2	kept
+64aa936d540d2655	separator between blanks	k1	kept
+64aa936d540d2655	separator between blanks	k2	kept
+64d963dd913b9ec9	separator between blanks	k1	kept
+64d963dd913b9ec9	separator between blanks	k2	kept
+64f820480dfd416b	separator between blanks	k1	kept
+64f820480dfd416b	separator between blanks	k2	kept
+657fefea01507d8b	separator between blanks	k1	kept
+657fefea01507d8b	separator between blanks	k2	kept
+66cd1a9c4dbbb3d2	separator between blanks	k1	kept
+66cd1a9c4dbbb3d2	separator between blanks	k2	kept
+6757f17d05630107	separator between blanks	k1	kept
+6757f17d05630107	separator between blanks	k2	kept
+67e091dbc5e75236	separator between blanks	k1	kept
+67e091dbc5e75236	separator between blanks	k2	kept
+67ea5750e4cc1130	separator between blanks	k1	kept
+67ea5750e4cc1130	separator between blanks	k2	kept
+69188440f50ef485	separator between blanks	k1	kept
+69188440f50ef485	separator between blanks	k2	kept
+695b72f8dc8ad105	separator between blanks	k1	kept
+695b72f8dc8ad105	separator between blanks	k2	kept
+6997a5e557b3ae54	separator between blanks	k1	kept
+6997a5e557b3ae54	separator between blanks	k2	kept
+69ec2b6b058b2971	separator between blanks	k1	kept
+69ec2b6b058b2971	separator between blanks	k2	kept
+69f6a6cb5283d8d5	separator between blanks	k1	kept
+69f6a6cb5283d8d5	separator between blanks	k2	kept
+6b7c95fe1ad0f369	separator between blanks	k1	kept
+6b7c95fe1ad0f369	separator between blanks	k2	kept
+6ba46b5800a3bb03	separator between blanks	k1	kept
+6ba46b5800a3bb03	separator between blanks	k2	kept
+6e91eef67b518485	separator between blanks	k1	kept
+6e91eef67b518485	separator between blanks	k2	kept
+6faad850c198ae47	separator between blanks	k1	kept
+6faad850c198ae47	separator between blanks	k2	kept
+7070796702e9d895	separator between blanks	k1	kept
+7070796702e9d895	separator between blanks	k2	kept
+71dabc825f96bc8a	separator between blanks	k1	kept
+71dabc825f96bc8a	separator between blanks	k2	kept
+7612d8d726588a5d	separator between blanks	k1	kept
+7612d8d726588a5d	separator between blanks	k2	kept
+76fa8b9d7412c43b	separator between blanks	k1	kept
+76fa8b9d7412c43b	separator between blanks	k2	kept
+773ad2acafb7cb9d	separator between blanks	k1	kept
+773ad2acafb7cb9d	separator between blanks	k2	kept
+78c0809602440cb6	separator between blanks	k1	kept
+78c0809602440cb6	separator between blanks	k2	kept
+78cb04a4a7ca7021	separator between blanks	k1	kept
+78cb04a4a7ca7021	separator between blanks	k2	kept
+79b3238266617ffb	separator between blanks	k1	kept
+79b3238266617ffb	separator between blanks	k2	kept
+7a9d310e79029da5	separator between blanks	k1	kept
+7a9d310e79029da5	separator between blanks	k2	kept
+7da20730a194c6dc	separator between blanks	k1	kept
+7da20730a194c6dc	separator between blanks	k2	kept
+7e2fa2a0b2667923	separator between blanks	k1	kept
+7e2fa2a0b2667923	separator between blanks	k2	kept
+7e72f85f6ac36fc6	separator between blanks	k1	kept
+7e72f85f6ac36fc6	separator between blanks	k2	kept
+7fd542c6c0a8e4f2	separator between blanks	k1	kept
+7fd542c6c0a8e4f2	separator between blanks	k2	kept
+81d14072ec43f907	separator between blanks	k1	kept
+81d14072ec43f907	separator between blanks	k2	kept
+82a80e725c58d92e	separator between blanks	k1	kept
+82a80e725c58d92e	separator between blanks	k2	kept
+82fd596cb6f03cc0	separator between blanks	k1	kept
+82fd596cb6f03cc0	separator between blanks	k2	kept
+83868e2e30a878b9	separator between blanks	k1	kept
+83868e2e30a878b9	separator between blanks	k2	kept
+8455ce2273e159ba	separator between blanks	k1	kept
+8455ce2273e159ba	separator between blanks	k2	kept
+85640dcca331a3fd	separator between blanks	k1	kept
+85640dcca331a3fd	separator between blanks	k2	kept
+85a251473437978d	separator between blanks	k1	kept
+85a251473437978d	separator between blanks	k2	kept
+8632bd5adae792bc	separator between blanks	k1	kept
+8632bd5adae792bc	separator between blanks	k2	kept
+8644d415e3f974ab	separator between blanks	k1	kept
+8644d415e3f974ab	separator between blanks	k2	kept
+8688e20b5c474af5	separator between blanks	k1	kept
+8688e20b5c474af5	separator between blanks	k2	kept
+86d9d795c9a85be4	separator between blanks	k1	kept
+86d9d795c9a85be4	separator between blanks	k2	kept
+8711d2b10ec5fca7	separator between blanks	k1	kept
+8711d2b10ec5fca7	separator between blanks	k2	kept
+878bf1c51197a35f	separator between blanks	k1	kept
+878bf1c51197a35f	separator between blanks	k2	kept
+87963c9d9af0ad37	separator between blanks	k1	kept
+87963c9d9af0ad37	separator between blanks	k2	kept
+87a4e54bff1a7429	separator between blanks	k1	kept
+87a4e54bff1a7429	separator between blanks	k2	kept
+883104345e20b961	separator between blanks	k1	kept
+883104345e20b961	separator between blanks	k2	kept
+89c2608a5b4af5bc	separator between blanks	k1	kept
+89c2608a5b4af5bc	separator between blanks	k2	kept
+89d5ef07f09333f6	separator between blanks	k1	kept
+89d5ef07f09333f6	separator between blanks	k2	kept
+8aa1fe6062e30cf6	separator between blanks	k1	kept
+8aa1fe6062e30cf6	separator between blanks	k2	kept
+8b14e2c6d3e6a91c	separator between blanks	k1	kept
+8b14e2c6d3e6a91c	separator between blanks	k2	kept
+8b62cc95d3a80ca7	separator between blanks	k1	kept
+8b62cc95d3a80ca7	separator between blanks	k2	kept
+8bce27752a9c34ae	separator between blanks	k1	kept
+8bce27752a9c34ae	separator between blanks	k2	kept
+8bf3ba2af9ebdff2	separator between blanks	k1	kept
+8bf3ba2af9ebdff2	separator between blanks	k2	kept
+8c0a146ee6fda696	separator between blanks	k1	kept
+8c0a146ee6fda696	separator between blanks	k2	kept
+8cedf9c2440b58bf	separator between blanks	k1	kept
+8cedf9c2440b58bf	separator between blanks	k2	kept
+8cfab494b328d99f	separator between blanks	k1	kept
+8cfab494b328d99f	separator between blanks	k2	kept
+8d1c191ea6296775	separator between blanks	k1	kept
+8d1c191ea6296775	separator between blanks	k2	kept
+8d5ddeeb2a830606	separator between blanks	k1	kept
+8d5ddeeb2a830606	separator between blanks	k2	kept
+8f5a46ecc4abf85d	separator between blanks	k1	kept
+8f5a46ecc4abf85d	separator between blanks	k2	kept
+8ff6d8786d1a2c4e	separator between blanks	k1	kept
+8ff6d8786d1a2c4e	separator between blanks	k2	kept
+923fe22ff83439ac	separator between blanks	k1	kept
+923fe22ff83439ac	separator between blanks	k2	kept
+926b3bee878ac82e	separator between blanks	k1	kept
+926b3bee878ac82e	separator between blanks	k2	kept
+9272f0642e3bf352	separator between blanks	k1	kept
+9272f0642e3bf352	separator between blanks	k2	kept
+93a61b506eb4b755	separator between blanks	k1	kept
+93a61b506eb4b755	separator between blanks	k2	kept
+947fd48f5fdc02c1	separator between blanks	k1	kept
+947fd48f5fdc02c1	separator between blanks	k2	kept
+959afe8f92a254f7	separator between blanks	k1	kept
+959afe8f92a254f7	separator between blanks	k2	kept
+965c5f4654305351	separator between blanks	k1	kept
+965c5f4654305351	separator between blanks	k2	kept
+96761f545e696193	separator between blanks	k1	kept
+96761f545e696193	separator between blanks	k2	kept
+979477cbe64bfe9c	separator between blanks	k1	kept
+979477cbe64bfe9c	separator between blanks	k2	kept
+97e8404b1e83fc06	separator between blanks	k1	kept
+97e8404b1e83fc06	separator between blanks	k2	kept
+9816691fede5e135	separator between blanks	k1	kept
+9816691fede5e135	separator between blanks	k2	kept
+9843fe6dc467d447	separator between blanks	k1	kept
+9843fe6dc467d447	separator between blanks	k2	kept
+99c0fe13ac23d904	separator between blanks	k1	kept
+99c0fe13ac23d904	separator between blanks	k2	kept
+9ae0eb3961d2d5df	separator between blanks	k1	kept
+9ae0eb3961d2d5df	separator between blanks	k2	kept
+9b88bebe960bd788	separator between blanks	k1	kept
+9b88bebe960bd788	separator between blanks	k2	kept
+9bfa39b3fbdcf896	separator between blanks	k1	kept
+9bfa39b3fbdcf896	separator between blanks	k2	kept
+9c9d56fd8933c8cd	separator between blanks	k1	kept
+9c9d56fd8933c8cd	separator between blanks	k2	kept
+9d13c7f795040a1f	separator between blanks	k1	kept
+9d13c7f795040a1f	separator between blanks	k2	kept
+9e1a5917625ce386	separator between blanks	k1	kept
+9e1a5917625ce386	separator between blanks	k2	kept
+9e883edab06a3610	separator between blanks	k1	kept
+9e883edab06a3610	separator between blanks	k2	kept
+9e9016b0a8115f34	separator between blanks	k1	kept
+9e9016b0a8115f34	separator between blanks	k2	kept
+9f8a28fc5a57735f	separator between blanks	k1	kept
+9f8a28fc5a57735f	separator between blanks	k2	kept
+9feef580771e8372	separator between blanks	k1	kept
+9feef580771e8372	separator between blanks	k2	kept
+a16343f41b90dcfe	separator between blanks	k1	kept
+a16343f41b90dcfe	separator between blanks	k2	kept
+a1cef7f1a5fe15b5	separator between blanks	k1	kept
+a1cef7f1a5fe15b5	separator between blanks	k2	kept
+a3280c4de8904114	separator between blanks	k1	kept
+a3280c4de8904114	separator between blanks	k2	kept
+a356fa4fe0a3714c	separator between blanks	k1	kept
+a356fa4fe0a3714c	separator between blanks	k2	kept
+a3b009b87f474c40	separator between blanks	k1	kept
+a3b009b87f474c40	separator between blanks	k2	kept
+a49641c64f8d52f4	separator between blanks	k1	kept
+a49641c64f8d52f4	separator between blanks	k2	kept
+a5429f4ff7ec8e7f	separator between blanks	k1	kept
+a5429f4ff7ec8e7f	separator between blanks	k2	kept
+a6211256dc6be787	separator between blanks	k1	kept
+a6211256dc6be787	separator between blanks	k2	kept
+a67e7a28795408df	separator between blanks	k1	kept
+a67e7a28795408df	separator between blanks	k2	kept
+a6b0b3d04f8a891a	separator between blanks	k1	kept
+a6b0b3d04f8a891a	separator between blanks	k2	kept
+a6fc55a0ad93122b	separator between blanks	k1	kept
+a6fc55a0ad93122b	separator between blanks	k2	kept
+a7559094ed4fc0d1	separator between blanks	k1	kept
+a7559094ed4fc0d1	separator between blanks	k2	kept
+a83621da4b502274	separator between blanks	k1	kept
+a83621da4b502274	separator between blanks	k2	kept
+a88e893bd8bcc77e	separator between blanks	k1	kept
+a88e893bd8bcc77e	separator between blanks	k2	kept
+a9171f519928d86c	separator between blanks	k1	kept
+a9171f519928d86c	separator between blanks	k2	kept
+a9c612ecb67c448d	separator between blanks	k1	kept
+a9c612ecb67c448d	separator between blanks	k2	kept
+aa3c20caf43e4d3f	separator between blanks	k1	kept
+aa3c20caf43e4d3f	separator between blanks	k2	kept
+aa820a209fb88df0	separator between blanks	k1	kept
+aa820a209fb88df0	separator between blanks	k2	kept
+abdd535a698b904e	separator between blanks	k1	kept
+abdd535a698b904e	separator between blanks	k2	kept
+ad19d0c13fb1fcfc	separator between blanks	k1	kept
+ad19d0c13fb1fcfc	separator between blanks	k2	kept
+ad7d53f58bce5862	separator between blanks	k1	kept
+ad7d53f58bce5862	separator between blanks	k2	kept
+adcc83ab447c9fde	separator between blanks	k1	kept
+adcc83ab447c9fde	separator between blanks	k2	kept
+ae04097662f4896a	separator between blanks	k1	kept
+ae04097662f4896a	separator between blanks	k2	kept
+af16bba5a4429368	separator between blanks	k1	kept
+af16bba5a4429368	separator between blanks	k2	kept
+af3d277694d134bb	separator between blanks	k1	kept
+af3d277694d134bb	separator between blanks	k2	kept
+b0cde59f0d3ec727	separator between blanks	k1	kept
+b0cde59f0d3ec727	separator between blanks	k2	kept
+b1fffbaca6d850ee	separator between blanks	k1	kept
+b1fffbaca6d850ee	separator between blanks	k2	kept
+b437e075a9e925fd	separator between blanks	k1	kept
+b437e075a9e925fd	separator between blanks	k2	kept
+b464b00d06494151	separator between blanks	k1	kept
+b464b00d06494151	separator between blanks	k2	kept
+b4fb268287a75c3f	separator between blanks	k1	kept
+b4fb268287a75c3f	separator between blanks	k2	kept
+b5ac4f89cc88d665	separator between blanks	k1	kept
+b5ac4f89cc88d665	separator between blanks	k2	kept
+b5dab5de0121df08	separator between blanks	k1	kept
+b5dab5de0121df08	separator between blanks	k2	kept
+b63d3e0bd96cd854	separator between blanks	k1	kept
+b63d3e0bd96cd854	separator between blanks	k2	kept
+b69128162529d0c6	separator between blanks	k1	kept
+b69128162529d0c6	separator between blanks	k2	kept
+b8f7d222d1155989	separator between blanks	k1	kept
+b8f7d222d1155989	separator between blanks	k2	kept
+bb8d268cedcb535c	separator between blanks	k1	kept
+bb8d268cedcb535c	separator between blanks	k2	kept
+bbdcc5776397def4	separator between blanks	k1	kept
+bbdcc5776397def4	separator between blanks	k2	kept
+bc099fcfb4b2f171	separator between blanks	k1	kept
+bc099fcfb4b2f171	separator between blanks	k2	kept
+bd606e4b0ac57178	separator between blanks	k1	kept
+bd606e4b0ac57178	separator between blanks	k2	kept
+bdea5f08d876c94b	separator between blanks	k1	kept
+bdea5f08d876c94b	separator between blanks	k2	kept
+be06fdd7cc814b31	separator between blanks	k1	kept
+be06fdd7cc814b31	separator between blanks	k2	kept
+be660a2bcd4a2aef	separator between blanks	k1	kept
+be660a2bcd4a2aef	separator between blanks	k2	kept
+be823bd404b08004	separator between blanks	k1	kept
+be823bd404b08004	separator between blanks	k2	kept
+be82e9f118466bf5	separator between blanks	k1	kept
+be82e9f118466bf5	separator between blanks	k2	kept
+bec4fce414714ec3	separator between blanks	k1	kept
+bec4fce414714ec3	separator between blanks	k2	kept
+bf18665a56f39e87	separator between blanks	k1	kept
+bf18665a56f39e87	separator between blanks	k2	kept
+bf7e33afda512e7d	separator between blanks	k1	kept
+bf7e33afda512e7d	separator between blanks	k2	kept
+bf8cc7e136887fba	separator between blanks	k1	kept
+bf8cc7e136887fba	separator between blanks	k2	kept
+bfb7160718e0eb90	separator between blanks	k1	kept
+bfb7160718e0eb90	separator between blanks	k2	kept
+c05cba3f86b271c1	separator between blanks	k1	kept
+c05cba3f86b271c1	separator between blanks	k2	kept
+c212270fea7ed8f8	separator between blanks	k1	kept
+c212270fea7ed8f8	separator between blanks	k2	kept
+c4210420c2e73d03	separator between blanks	k1	kept
+c4210420c2e73d03	separator between blanks	k2	kept
+c50039b1eb43130b	separator between blanks	k1	kept
+c50039b1eb43130b	separator between blanks	k2	kept
+c5421a3444d19aba	separator between blanks	k1	kept
+c5421a3444d19aba	separator between blanks	k2	kept
+c95ffd4bff983e26	separator between blanks	k1	kept
+c95ffd4bff983e26	separator between blanks	k2	kept
+c9d0ce03c984d17f	separator between blanks	k1	kept
+c9d0ce03c984d17f	separator between blanks	k2	kept
+ca1edf3162d04f6d	separator between blanks	k1	kept
+ca1edf3162d04f6d	separator between blanks	k2	kept
+ca2ed8c7898a9491	separator between blanks	k1	kept
+ca2ed8c7898a9491	separator between blanks	k2	kept
+caa8e9fae8a034fe	separator between blanks	k1	kept
+caa8e9fae8a034fe	separator between blanks	k2	kept
+cb97a9a59e072185	separator between blanks	k1	kept
+cb97a9a59e072185	separator between blanks	k2	kept
+cbf43fc60c5502d2	separator between blanks	k1	kept
+cbf43fc60c5502d2	separator between blanks	k2	kept
+cc02cfb1145300b2	separator between blanks	k1	kept
+cc02cfb1145300b2	separator between blanks	k2	kept
+cc92a0a83a3de7e2	separator between blanks	k1	kept
+cc92a0a83a3de7e2	separator between blanks	k2	kept
+cc9ee84bf3a5d11f	separator between blanks	k1	kept
+cc9ee84bf3a5d11f	separator between blanks	k2	kept
+ccc7f82e74faa0d4	separator between blanks	k1	kept
+ccc7f82e74faa0d4	separator between blanks	k2	kept
+cd975b41cfbf01f5	separator between blanks	k1	kept
+cd975b41cfbf01f5	separator between blanks	k2	kept
+cf94fca2dfe13280	separator between blanks	k1	kept
+cf94fca2dfe13280	separator between blanks	k2	kept
+d1334394f2d0103b	separator between blanks	k1	kept
+d1334394f2d0103b	separator between blanks	k2	kept
+d140606a92f93250	separator between blanks	k1	kept
+d140606a92f93250	separator between blanks	k2	kept
+d1b78a4472754ab0	separator between blanks	k1	kept
+d1b78a4472754ab0	separator between blanks	k2	kept
+d250575bc393ecb4	separator between blanks	k1	kept
+d250575bc393ecb4	separator between blanks	k2	kept
+d47a779b08f8696d	separator between blanks	k1	kept
+d47a779b08f8696d	separator between blanks	k2	kept
+d48148bf6b0493db	separator between blanks	k1	kept
+d48148bf6b0493db	separator between blanks	k2	kept
+d582934f955a586b	separator between blanks	k1	kept
+d582934f955a586b	separator between blanks	k2	kept
+d6b5bbace293789e	separator between blanks	k1	kept
+d6b5bbace293789e	separator between blanks	k2	kept
+d6c34a103af33e32	separator between blanks	k1	kept
+d6c34a103af33e32	separator between blanks	k2	kept
+d7575fc7026a5928	separator between blanks	k1	kept
+d7575fc7026a5928	separator between blanks	k2	kept
+d7768fb4a64cb24f	separator between blanks	k1	kept
+d7768fb4a64cb24f	separator between blanks	k2	kept
+d816a05e25f5f0cc	separator between blanks	k1	kept
+d816a05e25f5f0cc	separator between blanks	k2	kept
+d817795217a4cced	separator between blanks	k1	kept
+d817795217a4cced	separator between blanks	k2	kept
+d87faed0b4154bda	separator between blanks	k1	kept
+d87faed0b4154bda	separator between blanks	k2	kept
+d8820b7b33c1774b	separator between blanks	k1	kept
+d8820b7b33c1774b	separator between blanks	k2	kept
+d95f094c500bd5f0	separator between blanks	k1	kept
+d95f094c500bd5f0	separator between blanks	k2	kept
+d9f367f890547340	separator between blanks	k1	kept
+d9f367f890547340	separator between blanks	k2	kept
+da978b3f55d8332f	separator between blanks	k1	kept
+da978b3f55d8332f	separator between blanks	k2	kept
+dadb972b019851bd	separator between blanks	k1	kept
+dadb972b019851bd	separator between blanks	k2	kept
+dc38bbf2067f320c	separator between blanks	k1	kept
+dc38bbf2067f320c	separator between blanks	k2	kept
+dc7408c738bc4420	separator between blanks	k1	kept
+dc7408c738bc4420	separator between blanks	k2	kept
+ded3032ab18f3791	separator between blanks	k1	kept
+ded3032ab18f3791	separator between blanks	k2	kept
+dedecbcde1bbaa06	separator between blanks	k1	kept
+dedecbcde1bbaa06	separator between blanks	k2	kept
+df7bb170b1c37e5e	separator between blanks	k1	kept
+df7bb170b1c37e5e	separator between blanks	k2	kept
+e1572b3c3bb21028	separator between blanks	k1	kept
+e1572b3c3bb21028	separator between blanks	k2	kept
+e24c98bc2ad1ebe7	separator between blanks	k1	kept
+e24c98bc2ad1ebe7	separator between blanks	k2	kept
+e2a3e8bcc186781c	separator between blanks	k1	kept
+e2a3e8bcc186781c	separator between blanks	k2	kept
+e3457b2bbc03df51	separator between blanks	k1	kept
+e3457b2bbc03df51	separator between blanks	k2	kept
+e36da2eb20438363	separator between blanks	k1	kept
+e36da2eb20438363	separator between blanks	k2	kept
+e3bcdd53c139492d	separator between blanks	k1	kept
+e3bcdd53c139492d	separator between blanks	k2	kept
+e509567947e4cda2	separator between blanks	k1	kept
+e509567947e4cda2	separator between blanks	k2	kept
+e6836e5eb9b43d74	separator between blanks	k1	kept
+e6836e5eb9b43d74	separator between blanks	k2	kept
+e763ee8bd1c31c65	separator between blanks	k1	kept
+e763ee8bd1c31c65	separator between blanks	k2	kept
+e806f6cd1f4ebaba	separator between blanks	k1	kept
+e806f6cd1f4ebaba	separator between blanks	k2	kept
+e9566a6e7bd228a4	separator between blanks	k1	kept
+e9566a6e7bd228a4	separator between blanks	k2	kept
+e9f275c0682e275b	separator between blanks	k1	kept
+e9f275c0682e275b	separator between blanks	k2	kept
+ea03661764c1ab5d	separator between blanks	k1	kept
+ea03661764c1ab5d	separator between blanks	k2	kept
+ea49925a2d7c851a	separator between blanks	k1	kept
+ea49925a2d7c851a	separator between blanks	k2	kept
+ea694c27c0b0b7d0	separator between blanks	k1	kept
+ea694c27c0b0b7d0	separator between blanks	k2	kept
+eb96abf64c6f0f30	separator between blanks	k1	kept
+eb96abf64c6f0f30	separator between blanks	k2	kept
+ecc85295283bcd29	separator between blanks	k1	kept
+ecc85295283bcd29	separator between blanks	k2	kept
+ecd6e1e5c04c52c4	separator between blanks	k1	kept
+ecd6e1e5c04c52c4	separator between blanks	k2	kept
+ee18cd982686973b	separator between blanks	k1	kept
+ee18cd982686973b	separator between blanks	k2	kept
+ee21511b9df62d71	separator between blanks	k1	kept
+ee21511b9df62d71	separator between blanks	k2	kept
+ee7cd844d9fa9c95	separator between blanks	k1	kept
+ee7cd844d9fa9c95	separator between blanks	k2	kept
+eed6c3eeaa6f1803	separator between blanks	k1	kept
+eed6c3eeaa6f1803	separator between blanks	k2	kept
+f095c6742591f85c	separator between blanks	k1	kept
+f095c6742591f85c	separator between blanks	k2	kept
+f0c7c7b5fc1d7f94	separator between blanks	k1	kept
+f0c7c7b5fc1d7f94	separator between blanks	k2	kept
+f1f4f136ecd81686	separator between blanks	k1	kept
+f1f4f136ecd81686	separator between blanks	k2	kept
+f246797221836479	separator between blanks	k1	kept
+f246797221836479	separator between blanks	k2	kept
+f330680e62c3a286	separator between blanks	k1	kept
+f330680e62c3a286	separator between blanks	k2	kept
+f37b7ba7243d5a00	separator between blanks	k1	kept
+f37b7ba7243d5a00	separator between blanks	k2	kept
+f4f4ec546435cec1	separator between blanks	k1	kept
+f4f4ec546435cec1	separator between blanks	k2	kept
+f66bf41c6b08a128	separator between blanks	k1	kept
+f66bf41c6b08a128	separator between blanks	k2	kept
+f66e92ab01aea95a	separator between blanks	k1	kept
+f66e92ab01aea95a	separator between blanks	k2	kept
+f69cb7d3e492765d	separator between blanks	k1	kept
+f69cb7d3e492765d	separator between blanks	k2	kept
+f6bdd0e93a2d9ac8	separator between blanks	k1	kept
+f6bdd0e93a2d9ac8	separator between blanks	k2	kept
+f7a087913b8a6e97	separator between blanks	k1	kept
+f7a087913b8a6e97	separator between blanks	k2	kept
+f87d66da68bf1fdc	separator between blanks	k1	kept
+f87d66da68bf1fdc	separator between blanks	k2	kept
+f8918023d6973c47	separator between blanks	k1	kept
+f8918023d6973c47	separator between blanks	k2	kept
+f94ca7f2dec49fc9	separator between blanks	k1	kept
+f94ca7f2dec49fc9	separator between blanks	k2	kept
+fafacaaa0dfcdaf0	separator between blanks	k1	kept
+fafacaaa0dfcdaf0	separator between blanks	k2	kept
+fbb3dbdd1894f418	separator between blanks	k1	kept
+fbb3dbdd1894f418	separator between blanks	k2	kept
+fc5bf4029b274b72	separator between blanks	k1	kept
+fc5bf4029b274b72	separator between blanks	k2	kept
+fc5dad934eb5b1fe	separator between blanks	k1	kept
+fc5dad934eb5b1fe	separator between blanks	k2	kept
+fccc7bf0567310e4	separator between blanks	k1	kept
+fccc7bf0567310e4	separator between blanks	k2	kept
+fd8395e5a309c0e9	separator between blanks	k1	kept
+fd8395e5a309c0e9	separator between blanks	k2	kept
+fe66104f3306cd11	separator between blanks	k1	kept
+fe66104f3306cd11	separator between blanks	k2	kept
+ff061478ca6c05b7	separator between blanks	k1	kept
+ff061478ca6c05b7	separator between blanks	k2	kept
 015f3be86aaf6693	separator of other characters	k1	kept
 015f3be86aaf6693	separator of other characters	k2	kept
 04454ab6b3d45071	separator of other characters	k1	kept

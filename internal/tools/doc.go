@@ -51,7 +51,8 @@ limitations under the License.
 // first, and every cut keeps the header and the newest lines. get_resource leaves out annotations, managed fields,
 // literal environment values, the metadata of volume claim templates and the containers' termination messages; it
 // redacts each string of the object as it was read (a list of strings, such as a container's arguments, as one
-// sequence, so a key in one item and its value in a later one are seen together), before JSON
+// sequence, so a key in one item and its value in a later one are seen together, and each map entry with string
+// values as its key and value together, so a secret key takes its value), before JSON
 // escapes its line breaks, and encodes the object without HTML escapes, so that no escape hides what a rule
 // reads (a block scalar's lines, a folded indicator ">"). The error text of a failed read never reaches the result.
 // [Result.Content] puts the text in a delimited block that says it is data, never instructions, and that the

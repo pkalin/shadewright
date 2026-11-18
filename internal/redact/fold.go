@@ -20,10 +20,11 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
-// The folded view of a text (#845, second to fourth rounds): the text a reader sees, where the rules read the
+// The folded view of a text (#845, second to fifth rounds): the text a reader sees, where the rules read the
 // text as written. Four things are folded, and nothing else:
 //
 //   - A run of invisible characters (invisibleRanges: Unicode's default ignorable code points and category Cf,
@@ -32,15 +33,18 @@ import (
 //     equals sign, a quote, a colon look-alike or the end of the line follows it ("pass​word",
 //     "api_key​: V"): a reader does not see it, and it split the key from itself or from its colon for
 //     every rule.
-//   - Each character of foldColons becomes ":".
+//   - Each character of foldColons becomes ":", each of foldEquals "=", and each of foldArrows "->" or "=>".
 //   - An explicit YAML key, "? key" with ":" at the same column on the next line, becomes "key:" on one line;
 //     so does a key on its own line below "?" or below "? |" (a block scalar: one line of key, more indented
 //     than the "?", blank lines around it), with ":" at the column of the "?" after it.
-//   - The separator after a secret key, read on the view the three folds above give (sepRunAt): a run of at
-//     most maxSepRun characters that are blanks, controls, invisible characters, colons, equals signs and the
+//   - The separator after a secret key, read on the view the three folds above give (sepRunAt): a run of
+//     blanks of any length and at most maxSepRun controls, invisible characters, colons, equals signs and the
 //     arrows "->" and "=>", with at least one colon, equals sign or arrow in it, becomes ": ", which every rule
 //     for a key and its value reads. A run the rules have always read (one ":", "=" or ":=" between spaces and
-//     tabs) stays as it is, and a run of blanks alone is no separator ("password reset failed" is prose).
+//     tabs) stays as it is, unless an "=" follows a quoted key, and a run of blanks alone is no separator
+//     ("password reset failed" is prose). A secret key and separator right after the separator of another
+//     secret key starts a line of its own ("auth: password: V"), so the first key does not take it as its
+//     value.
 //
 // The rules read the folded view as well as the text ([Redactor.spans]); each of its matches counts on the
 // bytes of the text it was folded from, so a redacted range still starts and ends on the original bytes and
@@ -56,6 +60,40 @@ var foldColons = []rune{
 	0x0903, 0x0A83, 0x11002, 0x11082, 0x11182, 0x115BE, 0x116AC, 0x11838, 0xFF1A, 0xFE55, 0xFE13, 0x0589, 0x0703,
 	0x0704, 0x0831, 0x1361, 0x16EC, 0xFE30, 0x1803, 0x1809, 0x205A, 0x05C3, 0x10AF5, 0x1123A, 0x02F8, 0x1393,
 	0xA789, 0x2236, 0x1D108, 0x02D0, 0x1015B, 0x11DD9, 0xA4FD, 0x2E2C, 0x2237,
+}
+
+// foldEquals are the characters that Unicode's confusables list maps to an equals sign, or to two or three
+// (U+2A75 and U+2A76), each folded to one "=": every line of confusables.txt version 18.0.0 whose target is
+// one or more U+003D EQUALS SIGN, in the file's order. foldArrows are U+2192 RIGHTWARDS ARROW and U+21D2
+// RIGHTWARDS DOUBLE ARROW, folded to "->" and "=>", and the characters the same list maps to either of them
+// (U+FFEB HALFWIDTH RIGHTWARDS ARROW). testdata/confusables-equals-arrows.txt holds those lines, and
+// TestFoldMarksAreTheConfusablesOfEqualsAndArrows checks both tables against it (#845, decision of 2026-11-18).
+var (
+	foldEquals = []rune{0x1400, 0x2E40, 0x30A0, 0xA4FF, 0xA78A, 0xFF1D, 0xFE66, 0x10190, 0x11053, 0xA60C, 0x2A75, 0x2A76}
+	foldArrows = map[rune]string{0x2192: "->", 0x21D2: "=>", 0xFFEB: "->"}
+)
+
+// foldMark returns what the character r folds to when it is one of foldEquals or foldArrows.
+func foldMark(r rune) (string, bool) {
+	if r < 0x1400 {
+		return "", false
+	}
+	if a, ok := foldArrows[r]; ok {
+		return a, true
+	}
+	if slices.Contains(foldEquals, r) {
+		return "=", true
+	}
+	return "", false
+}
+
+// foldMarkAt returns what the character at s[i] folds to when it is one of foldEquals or foldArrows.
+func foldMarkAt(s string, i int) (string, bool) {
+	if s[i] < utf8.RuneSelf {
+		return "", false
+	}
+	r, _ := utf8.DecodeRuneInString(s[i:])
+	return foldMark(r)
 }
 
 // foldedView is the folded view of a text: its text, and for each of its bytes the first byte of the original
@@ -98,6 +136,7 @@ func foldView(s string) (foldedView, bool) {
 		sepWalk(t, func(text string, a, b int, copied bool) {
 			if copied {
 				for i := a; i < b; i++ {
+					tick(1)
 					emit(t[i:i+1], from(i), to(i), true)
 				}
 				return
@@ -127,6 +166,7 @@ func (fb *foldBuilder) build(walk func(emit func(text string, from, to int, copi
 		tick(1)
 		fb.b.WriteString(text)
 		for i := range len(text) {
+			tick(1)
 			if copied {
 				fb.f.from, fb.f.to = append(fb.f.from, from+i), append(fb.f.to, from+i+1)
 				continue
@@ -278,6 +318,14 @@ func foldChars(s string, from, to int, emit func(text string, from, to int)) boo
 			flush(i)
 			emit(":", i, i+n)
 			plain = i + n
+		case foldMarkOf(r) != "":
+			changed = true
+			if emit == nil {
+				return true
+			}
+			flush(i)
+			emit(foldMarkOf(r), i, i+n)
+			plain = i + n
 		case isInvisible(r) && i > from && isKeyByte(s[i-1]):
 			// A run of invisible characters after a byte of a key name, before another, a separator, a quote or
 			// the end of the line.
@@ -290,7 +338,7 @@ func foldChars(s string, from, to int, emit func(text string, from, to int)) boo
 				}
 				j += n2
 			}
-			if j == to || isKeyByte(s[j]) || strings.IndexByte(`:="'`, s[j]) >= 0 || isFoldColonAt(s, j) {
+			if j == to || isKeyByte(s[j]) || strings.IndexByte(`:="'`, s[j]) >= 0 || isFoldColonAt(s, j) || isFoldMarkAt(s, j) {
 				changed = true
 				if emit == nil {
 					return true
@@ -304,6 +352,18 @@ func foldChars(s string, from, to int, emit func(text string, from, to int)) boo
 	}
 	flush(to)
 	return changed
+}
+
+// foldMarkOf returns what r folds to when it is one of foldEquals or foldArrows, or "".
+func foldMarkOf(r rune) string {
+	m, _ := foldMark(r)
+	return m
+}
+
+// isFoldMarkAt reports whether the character at s[i] is one of foldEquals or foldArrows.
+func isFoldMarkAt(s string, i int) bool {
+	_, ok := foldMarkAt(s, i)
+	return ok
 }
 
 // isFoldColon reports whether r is one of foldColons.
@@ -363,8 +423,11 @@ func invisibleLen(s string, i int) int {
 // separator fold looks for a separator.
 var sepKey = regexp.MustCompile(`(?i)` + bareKeyExpr + `(?:\\*["'])?`)
 
-// maxSepRun bounds the characters of a separator run, so that a long run of punctuation after a key is no
-// separator (a heading underlined with "=" after "Password"). A key followed by a longer run keeps its value.
+// maxSepRun bounds the marks, controls and invisible characters of a separator run, so that a long run of
+// punctuation after a key is no separator (a heading underlined with "=" after "Password"). A key followed by a
+// longer run keeps its value. Blanks do not count (#845, decision of 2026-11-18): a column-aligned key
+// ("password::", fifteen spaces, the value) is read like one with a single space, and each blank is still read
+// once, since the run of one key ends where the next key starts.
 const maxSepRun = 16
 
 // sepRun is a run of separator characters (sepRunAt): where it ends, and what it holds.
@@ -374,13 +437,29 @@ type sepRun struct {
 	plain bool   // nothing but marks, spaces and tabs
 }
 
+// sepBlankLen returns the length of the blank at s[i], or 0: a space, a tab, or another Unicode space that is
+// no line break.
+func sepBlankLen(s string, i int) int {
+	if c := s[i]; c == ' ' || c == '\t' {
+		return 1
+	} else if c < utf8.RuneSelf {
+		return 0
+	}
+	r, n := utf8.DecodeRuneInString(s[i:])
+	if unicode.Is(unicode.Zs, r) {
+		return n
+	}
+	return 0
+}
+
 // sepRunAt reads the run of separator characters at s[i]: blanks and other indentation characters but line
-// breaks (indentLen), invisible characters, ":" and its look-alikes, "=", "->" and "=>", at most maxSepRun of
-// them. ok is false when there is no mark in it, or when the run goes on past maxSepRun characters.
+// breaks (indentLen), invisible characters, ":" and its look-alikes, "=" and its look-alikes, "->" and "=>"
+// and the arrow characters (foldArrows), with at most maxSepRun of them that are no blanks (sepBlankLen). ok is
+// false when there is no mark in it, or when the run goes on past maxSepRun characters that are no blanks.
 func sepRunAt(s string, i int) (r sepRun, ok bool) {
 	r.plain = true
 	j := i
-	for n := 0; j < len(s); n++ {
+	for n := 0; j < len(s); {
 		tick(1)
 		k := 0
 		switch c := s[j]; {
@@ -394,12 +473,24 @@ func sepRunAt(s string, i int) (r sepRun, ok bool) {
 			k, r.plain = 2, false
 			r.marks += "->"
 		case c == ' ' || c == '\t':
-			k = 1
+			j++
+			continue
 		case isFoldColonAt(s, j):
 			// A colon look-alike, read where the glyph folds have not run (a string of a sequence as written).
 			k, r.plain = charLen(s, j), false
 			r.marks += ":"
 		default:
+			if m, ok := foldMarkAt(s, j); ok {
+				// A look-alike of "=" or an arrow character, read where the glyph folds have not run.
+				k, r.plain = charLen(s, j), false
+				r.marks += m
+				break
+			}
+			if b := sepBlankLen(s, j); b > 0 {
+				j += b
+				r.plain = false
+				continue
+			}
 			if k = indentLen(s, j); k == 0 {
 				k = invisibleLen(s, j)
 			}
@@ -412,6 +503,7 @@ func sepRunAt(s string, i int) (r sepRun, ok bool) {
 		if n == maxSepRun {
 			return r, false
 		}
+		n++
 		j += k
 	}
 	r.end = j
@@ -425,10 +517,14 @@ func (r sepRun) foldsAsSeparator() bool {
 }
 
 // sepWalk calls emit for each piece of the separator fold of s: the text between separators, copied, and each
-// separator run after a secret key (sepKey) that folds (foldsAsSeparator), folded. With emit nil it only
-// reports, as soon as it finds one, whether any run folds.
+// separator run after a secret key (sepKey) that folds (foldsAsSeparator), folded. A secret key with a
+// separator right after the separator of another secret key ("auth: password: V", "token = apiKey -> V")
+// starts a line of its own in the view: a line break takes the place of the blanks before it, so the key before
+// takes no value on that line and this key takes its own (#845, decision of 2026-11-18: the key before took
+// "password" as its value, and V was shown). With emit nil it only reports, as soon as it finds one, whether
+// anything folds.
 func sepWalk(s string, emit func(text string, from, to int, copied bool)) bool {
-	changed, pos := false, 0
+	changed, pos, prevRunEnd := false, 0, -1
 	for _, m := range sepKey.FindAllStringIndex(counted(s), -1) {
 		tick(1)
 		at := m[1]
@@ -440,12 +536,40 @@ func sepWalk(s string, emit func(text string, from, to int, copied bool)) bool {
 			continue
 		}
 		r, ok := sepRunAt(s, at)
-		if !ok || !r.foldsAsSeparator() {
+		if !ok {
+			prevRunEnd = -1
+			continue
+		}
+		// A plain run the rules read stays, unless an "=" follows a quoted key ("\"password\" = V"), which no
+		// rule reads.
+		fold := r.foldsAsSeparator() || r.marks != ":" && (s[at-1] == '"' || s[at-1] == '\'')
+		keyAt := m[0]
+		if keyAt > 0 && (s[keyAt-1] == '"' || s[keyAt-1] == '\'') {
+			keyAt--
+		}
+		nested := keyAt == prevRunEnd && keyAt >= pos
+		prevRunEnd = r.end
+		if !fold && !nested {
 			continue
 		}
 		changed = true
 		if emit == nil {
 			return true
+		}
+		if nested {
+			blanksAt := keyAt
+			for blanksAt > pos && (s[blanksAt-1] == ' ' || s[blanksAt-1] == '\t') {
+				tick(1)
+				blanksAt--
+			}
+			if blanksAt > pos {
+				emit(s[pos:blanksAt], pos, blanksAt, true)
+			}
+			emit("\n", blanksAt, keyAt, false)
+			pos = keyAt
+		}
+		if !fold {
+			continue
 		}
 		if at > pos {
 			emit(s[pos:at], pos, at, true)

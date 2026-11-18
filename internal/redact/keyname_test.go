@@ -222,8 +222,8 @@ func TestQuotedValueAfterAKeyName(t *testing.T) {
 	}
 	// A value never starts in the middle of a quoted string it did not open: the quote after the blank closes
 	// the argument that holds the flag, which stays whole. The flag's value is the next string of the sequence,
-	// whole, as the arguments apart give it ([Redactor.Strings], #845: "--password " ends with a blank as
-	// "--password\n" ends with a line break).
+	// whole. The arguments apart ([Redactor.Strings]) keep a string that is itself a flag, as main kept it when
+	// it redacted each argument on its own (#845, decision of 2026-11-18).
 	for _, in := range []string{
 		`args: ["--password ", "--region", "x"]`,
 		`"args":"[\"--password \",\"--region\"]"`,
@@ -235,8 +235,11 @@ func TestQuotedValueAfterAKeyName(t *testing.T) {
 		if !strings.Contains(out, flag) || strings.Contains(out, next) {
 			t.Errorf("flag or its value in the next argument wrong:\n in: %q\nout: %q", in, out)
 		}
-		if got := Strings([]string{flag, next, "x"}); got[0] != flag || got[1] == next || got[2] != "x" {
-			t.Errorf("Strings = %q, want the flag and %q whole and the value between them redacted", got, "x")
+		if got := Strings([]string{flag, next, "x"}); got[0] != flag || got[1] != next || got[2] != "x" {
+			t.Errorf("Strings = %q, want every string whole", got)
+		}
+		if got := Strings([]string{flag, "Qz55555xK9w", next}); got[0] != flag || got[1] == "Qz55555xK9w" || got[2] != next {
+			t.Errorf("Strings = %q, want the flags whole and the value between them redacted", got)
 		}
 	}
 }

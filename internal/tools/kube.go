@@ -175,11 +175,12 @@ func strip(obj client.Object) any {
 	return nil
 }
 
-// redactStrings replaces every exported string reachable from v with f of it, and every slice of strings (a
+// redactStrings replaces every exported string reachable from v with f of it, every slice of strings (a
 // container's command or arguments) with seq of it, which decides on the sequence as a whole: a key in one
-// string and its value in the next (#845). It writes through pointers, slices and maps into new copies, never
-// into what v shares with the object that was read (a cache's). Unexported fields (a time, a quantity) hold no
-// free text and are left as they are.
+// string and its value in the next (#845), and every key of a map with f of it, or, when its values are
+// strings, the key with ":" and its value with seq of the two, so a secret key takes its value. It writes
+// through pointers, slices and maps into new copies, never into what v shares with the object that was read (a
+// cache's). Unexported fields (a time, a quantity) hold no free text and are left as they are.
 func redactStrings(v reflect.Value, f func(string) string, seq func([]string) []string) {
 	switch v.Kind() {
 	case reflect.Pointer:
@@ -227,10 +228,27 @@ func redactStrings(v reflect.Value, f func(string) string, seq func([]string) []
 		}
 		c := reflect.MakeMapWithSize(v.Type(), v.Len())
 		for it := v.MapRange(); it.Next(); {
+			k := reflect.New(v.Type().Key()).Elem()
+			k.Set(it.Key())
 			e := reflect.New(v.Type().Elem()).Elem()
 			e.Set(it.Value())
-			redactStrings(e, f, seq)
-			c.SetMapIndex(it.Key(), e)
+			switch {
+			case k.Kind() == reflect.String && e.Kind() == reflect.String:
+				// A key and its value are decided together (#845, second decision of 2026-11-18): a map value
+				// under a secret key (a CSI volume's volumeAttributes, a nodeSelector, labels) was redacted
+				// without its key and shown, where main's second pass over the whole answer hid it.
+				out := seq([]string{k.String() + ":", e.String()})
+				k.SetString(strings.TrimSuffix(out[0], ":"))
+				e.SetString(out[1])
+			case k.Kind() == reflect.String:
+				k.SetString(f(k.String()))
+				redactStrings(e, f, seq)
+			default:
+				redactStrings(e, f, seq)
+			}
+			// Two keys redacted alike are one entry: the value of the one written last is shown, never a
+			// secret.
+			c.SetMapIndex(k, e)
 		}
 		v.Set(c)
 	case reflect.String:

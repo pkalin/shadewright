@@ -89,7 +89,7 @@ func TestCanonRepeatedKeysWorkIsLinear(t *testing.T) {
 		for _, n := range []int{512, 1024, 2048} {
 			w, size := canonWork(t, canonRepeated(key, n))
 			per = append(per, float64(w)/float64(size))
-			t.Logf("%q at %d keys: %d steps for %d bytes", key, n, w, size)
+			t.Logf("%q at %d keys: %d steps for %d bytes, %.1f per byte", key, n, w, size, float64(w)/float64(size))
 			if w > int64(maxWorkPerByte*size) {
 				t.Errorf("%q: %d steps for %d bytes, more than %d per byte", key, w, size, maxWorkPerByte)
 			}

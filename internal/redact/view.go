@@ -364,12 +364,28 @@ func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), re
 	}
 	var holes [][2]int
 	bStart, bEnd, bNext, accepted := viewLineBlock(s, l, keys, refused, &holes)
+	// nextTaking[i] is the first key after keys[i] in the same string that takes its own value, or -1: found
+	// once for the line, read back to front, so that no key looks through the keys after it (#845, decision of
+	// 2026-11-18: a line of n quoted keys made n*(n-1)/2 comparisons).
+	nextTaking := make([]int, len(keys))
+	lastTaking := map[int]int{}
+	for i := len(keys) - 1; i >= 0; i-- {
+		tick(1)
+		nextTaking[i] = -1
+		if j, ok := lastTaking[keys[i].strEnd]; ok {
+			nextTaking[i] = j
+		}
+		if keys[i].takes {
+			lastTaking[keys[i].strEnd] = i
+		}
+	}
 	covered := -1
 	for i, k := range keys {
+		tick(1)
 		if !k.block && !k.plain && !k.word || k.after > k.valueEnd || k.m[0] < covered {
 			continue
 		}
-		end := viewValueEnd(s, keys, i)
+		end := viewValueEnd(s, keys, i, nextTaking[i])
 		// The keys inside this value are read with it, so a line of keys is read once.
 		covered = max(covered, end)
 		if k.after < end && (s[k.after] != '#' || !k.block || bStart < 0 || k.strEnd >= 0) &&
@@ -460,6 +476,7 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 	bStart, bEnd = -1, -1
 	claim, allBare := -1, true
 	for i, k := range keys {
+		tick(1)
 		if k.block && k.strEnd < 0 {
 			if claim < 0 {
 				claim = i
@@ -483,6 +500,7 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 	// fourth round: each key read it again, quadratic in a line of many "pass: |").
 	looks, read := false, false
 	for _, k := range keys {
+		tick(1)
 		if !k.block || k.strEnd >= 0 {
 			continue
 		}
@@ -500,9 +518,10 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 }
 
 // viewValueEnd returns where the value of keys[i] on its line ends: before the next key in the same string
-// that takes its own value, at a comma for a plain flow value, before a comma and a plain key in a flow
-// collection, at the last bracket that closes the innermost collection, without its trailing separators.
-func viewValueEnd(s string, keys []viewKeyAt, i int) int {
+// that takes its own value (keys[next], or none when next is -1), at a comma for a plain flow value, before a
+// comma and a plain key in a flow collection, at the last bracket that closes the innermost collection, without
+// its trailing separators.
+func viewValueEnd(s string, keys []viewKeyAt, i, next int) int {
 	k := keys[i]
 	end := k.valueEnd
 	if k.word {
@@ -512,11 +531,10 @@ func viewValueEnd(s string, keys []viewKeyAt, i int) int {
 			end += charLen(s, end)
 		}
 	}
-	for _, n := range keys[i+1:] {
-		if n.takes && n.strEnd == k.strEnd && n.m[0] < end {
-			end = max(n.m[0], k.after)
-			break
-		}
+	// The keys of a line are in the order of their matches, so a later key that takes its value starts after
+	// keys[next]: when keys[next] starts past the end, so do they.
+	if next >= 0 && keys[next].m[0] < end {
+		end = max(keys[next].m[0], k.after)
 	}
 	switch {
 	case k.plain:
@@ -858,6 +876,24 @@ var seqKeyEnd = regexp.MustCompile(`(?i)(` + bareKeyExpr + `)(?:\\*["'])?(?:` + 
 // group 1 is the name.
 var seqFlagEnd = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])-{1,2}(` + bareKeyExpr + `)$`)
 
+// seqLoneFlag matches a string that is itself a flag, with its own value after "=" or none ("--verbose", "-v",
+// "--port=8080"). After a secret flag it is no value (seqValues).
+var seqLoneFlag = regexp.MustCompile(`(?s)^-{1,2}[A-Za-z][A-Za-z0-9_.-]*(?:=.*)?$`)
+
+// keepFlagAfterFlag returns seqFlagAfterFlag in place of start, the value seqValues found in the string t
+// after a secret flag, when on and t is itself a flag (seqLoneFlag): the flag keeps its text, and what comes
+// after it is decided as in the strings joined.
+func keepFlagAfterFlag(on bool, start int, t string) int {
+	if on && start >= 0 && seqLoneFlag.MatchString(counted(t)) {
+		return seqFlagAfterFlag
+	}
+	return start
+}
+
+// seqFlagAfterFlag is the place seqValues gives a flag after a secret flag: no value, and a string that keeps
+// what the flag rule of the joined text would take of it.
+const seqFlagAfterFlag = -2
+
 // seqWordEnd matches a secret key at the end of a string with no colon after it, alone or after other words
 // (group 1): its colon or equals sign may come in a string of its own, or at the start of the next.
 var seqWordEnd = regexp.MustCompile(`(?i)(?:^|\s)(` + bareKeyExpr + `)(?:\\*["'])?$`)
@@ -968,8 +1004,12 @@ func seqValueStart(item string) int {
 // of it looks like a secret. Every string is also read as a key of its own, a value included ("--token",
 // "--password", "V"). Each string is read in its folded view (foldView), as String reads a text: an invisible
 // character inside a key or a flag, or before its separator, is dropped, a colon look-alike reads as ":", and a
-// separator of other characters reads as ": ".
-func seqValues(items []string) []int {
+// separator of other characters reads as ": ". With flagAfterFlag (the strings of a sequence apart, Strings), a
+// string that is itself a flag (seqLoneFlag) after a secret flag is no value of it, as main had it when it
+// redacted each string on its own ("--token", "--verbose"): its place holds seqFlagAfterFlag, and Strings does
+// not give it what the joined text's flag rule redacts either. In a sequence written in a text (seqScan), it is
+// the value, as String on main read it there.
+func seqValues(items []string, flagAfterFlag bool) []int {
 	const (
 		none = iota
 		value
@@ -977,7 +1017,7 @@ func seqValues(items []string) []int {
 		env
 	)
 	out := make([]int, len(items))
-	pending, bare, block, inBlock := none, false, false, false
+	pending, bare, block, inBlock, flag := none, false, false, false, false
 	for i, it := range items {
 		tick(1)
 		out[i] = -1
@@ -1010,6 +1050,7 @@ func seqValues(items []string) []int {
 			take(seqValueStart(it), t)
 			inBlock = block && out[i] >= 0
 			pending = none
+			out[i] = keepFlagAfterFlag(flagAfterFlag && flag, out[i], t)
 		case word:
 			pending = none
 			if ok, colon := seqSeparator(t); ok {
@@ -1037,18 +1078,18 @@ func seqValues(items []string) []int {
 		if m := seqKeyEnd.FindStringSubmatchIndex(counted(t)); m != nil {
 			if !isReference(t[m[2]:m[3]]) {
 				// A colon may have a block below it, with an indicator or with nothing after it.
-				pending, bare, block = value, isBareShortKey(t[m[2]:m[3]]), t[len(t)-1] != '='
+				pending, bare, block, flag = value, isBareShortKey(t[m[2]:m[3]]), t[len(t)-1] != '=', false
 			}
 			continue
 		}
 		if m := seqFlagEnd.FindStringSubmatchIndex(counted(t)); m != nil {
 			if !referenceKey(t[m[2]:m[3]], true) {
-				pending, bare, block = value, false, false
+				pending, bare, block, flag = value, false, false, true
 			}
 			continue
 		}
 		if m := seqWordEnd.FindStringSubmatchIndex(counted(t)); m != nil && !isReference(t[m[2]:m[3]]) {
-			pending, bare = word, isBareShortKey(t[m[2]:m[3]])
+			pending, bare, flag = word, isBareShortKey(t[m[2]:m[3]]), false
 		}
 	}
 	return out
@@ -1058,15 +1099,18 @@ func seqValues(items []string) []int {
 // takes on them joined by line breaks: each string loses what String redacts of it in the joined text, what
 // String redacts of it alone, and, after its indentation, the value seqValues finds in it (the rule for a key,
 // a separator or a flag in one string and the value in a later one, which String also applies to a sequence
-// written in a text). So what String hides in the strings joined, Strings hides in them apart. Callers that walk
+// written in a text). So what String hides in the strings joined, Strings hides in them apart, with one
+// exception kept from main, which redacted each string on its own: a string that is itself a flag after a
+// secret flag keeps its text ("--token", "--verbose"; seqLoneFlag, decision of 2026-11-18 on #845). Callers that walk
 // an object (the read tool get_resource) call it for every sequence of strings instead of redacting the strings
 // one by one.
 func (r *Redactor) Strings(items []string) []string {
 	joined := r.spans(strings.Join(items, "\n"))
-	starts := seqValues(items)
+	starts := seqValues(items, true)
 	out := make([]string, len(items))
 	off, next := 0, 0
 	for i, it := range items {
+		tick(1)
 		end := off + len(it)
 		var own []span
 		for next < len(joined) && joined[next].end <= off {
@@ -1076,6 +1120,11 @@ func (r *Redactor) Strings(items []string) []string {
 		for k := next; k < len(joined) && joined[k].start < end; k++ {
 			tick(1)
 			sp := joined[k]
+			if starts[i] == seqFlagAfterFlag {
+				// The flag rule of the joined text reads this flag as the value of the flag before it; what the
+				// string holds on its own is redacted below.
+				continue
+			}
 			sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
 			if sp.end > sp.start {
 				own = append(own, sp)
@@ -1144,9 +1193,11 @@ func seqScan(s string, add func(start, end int)) {
 		}
 		texts := make([]string, len(items))
 		for k, it := range items {
+			tick(1)
 			texts[k] = s[it[0]:it[1]]
 		}
-		for k, start := range seqValues(texts) {
+		for k, start := range seqValues(texts, false) {
+			tick(1)
 			if start >= 0 {
 				add(items[k][0]+start, items[k][1])
 			}
@@ -1245,24 +1296,17 @@ func autolinkClosed(s string, start, end int) bool {
 }
 
 // autolinkPassword reports whether the URL in angle brackets from start to its closing bracket at gt holds a
-// user and a password ("<postgres://alice:mint>"): a colon after its "://" with text after it that is no port
-// number. Such a URL is no link of a list: its match is kept whole, as main kept it (#845, fourth round).
+// user and a password ("<postgres://alice:mint>"): a colon after its "://" with text after it. Such a URL is no
+// link of a list: its match is kept whole, as main kept it (#845, fourth round). The text after the colon may
+// be all digits, a port or a password: "<postgres://alice:12345>" cannot be told from "<https://host:8080>",
+// so both are read as a password (#845, decision of 2026-11-18), and "<https://host:8080>,<mailto:a@b>" is
+// redacted whole, as on main.
 func autolinkPassword(s string, start, gt int) bool {
-	sep := strings.Index(s[start:gt], "://")
+	sep := index(s[start:gt], "://")
 	if sep < 0 {
 		return false
 	}
 	auth := s[start+sep+3 : gt]
-	c := strings.IndexByte(auth, ':')
-	if c < 0 || strings.HasPrefix(auth, "[") {
-		// No password, or an IPv6 address.
-		return false
-	}
-	for i := c + 1; i < len(auth); i++ {
-		tick(1)
-		if auth[i] < '0' || auth[i] > '9' {
-			return true
-		}
-	}
-	return false
+	c := indexByte(auth, ':')
+	return c >= 0 && c+1 < len(auth) && !strings.HasPrefix(auth, "[")
 }

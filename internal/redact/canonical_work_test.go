@@ -17,6 +17,7 @@ limitations under the License.
 package redact
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,7 @@ func TestCanonCorpusWorkIsLinear(t *testing.T) {
 	}
 	t.Logf("String on the %d inputs one by one: %d steps for %d bytes, %.1f per byte", len(cases), total, size,
 		float64(total)/float64(size))
+	logMainWork(t, "corpus", total, size)
 	sizes := map[string]int{}
 	for _, c := range cases {
 		sizes[c.form] += len(c.in) + 1
@@ -73,6 +75,8 @@ func TestCanonCorpusWorkIsLinear(t *testing.T) {
 		wl, large := canonWork(t, canonFormText(cases, form, 8*n))
 		perSmall, perLarge := float64(ws)/float64(small), float64(wl)/float64(large)
 		t.Logf("%s: %.1f steps per byte on %d bytes, %.1f on %d", form, perSmall, small, perLarge, large)
+		logMainWork(t, "form "+form+" once", ws, small)
+		logMainWork(t, "form "+form+" eight times", wl, large)
 		if wl > int64(maxWorkPerByte*large) {
 			t.Errorf("%s: %d steps for a %d-byte input, more than %d per byte", form, wl, large, maxWorkPerByte)
 		}
@@ -106,8 +110,8 @@ func canonStair(line string, n int) string {
 
 // The staircases cost the same per byte at 64 KiB, 256 KiB and 1 MiB (the log read's bound; the first line
 // only, the others at the two smaller sizes, to keep the run short): at most maxWorkPerByte, and the larger
-// sizes at most an eighth and half a step more per byte than the smallest. On main "pass: |" cost 513, 996
-// and 1,961 steps per byte.
+// sizes at most an eighth and half a step more per byte than the smallest. Main's cost on "pass: |" is logged
+// next to it (canonMainWork).
 func TestCanonStairWorkIsLinear(t *testing.T) {
 	for li, line := range canonStairLines {
 		sizes := []int{64 << 10, 256 << 10, 1 << 20}
@@ -118,6 +122,9 @@ func TestCanonStairWorkIsLinear(t *testing.T) {
 		for _, n := range sizes {
 			w, size := canonWork(t, canonStair(line, n))
 			per = append(per, float64(w)/float64(size))
+			if li == 0 {
+				logMainWork(t, fmt.Sprintf("stair %q %d", line, n), w, size)
+			}
 			if w > int64(maxWorkPerByte*size) {
 				t.Errorf("%q: %d steps for %d bytes, more than %d per byte", line, w, size, maxWorkPerByte)
 			}
@@ -127,6 +134,32 @@ func TestCanonStairWorkIsLinear(t *testing.T) {
 			if p > 1.125*per[0]+0.5 {
 				t.Errorf("%q: %.1f steps per byte at %d bytes, %.1f at %d: more than linear", line, per[0], sizes[0], p, sizes[i+1])
 			}
+		}
+	}
+}
+
+// repeatedQuotedKeys is a line of n quoted strings, each a secret key with a block indicator and a word
+// (#845, decision of 2026-11-18): each key looked through every later key of the line for one in its own
+// string that takes a value, n*(n-1)/2 comparisons in a loop that counted none of them.
+func repeatedQuotedKeys(n int) string { return strings.Repeat("\"password: | pear\" ", n) }
+
+// The line of repeated quoted keys costs the same per byte at 512, 1,024 and 2,048 keys: the larger at most an
+// eighth and half a step more per byte than the smallest.
+func TestRepeatedQuotedKeysWorkIsLinear(t *testing.T) {
+	ns := []int{512, 1024, 2048}
+	per := make([]float64, 0, len(ns))
+	for _, n := range ns {
+		w, size := canonWork(t, repeatedQuotedKeys(n))
+		per = append(per, float64(w)/float64(size))
+		logMainWork(t, fmt.Sprintf("repeated quoted keys %d", n), w, size)
+		if w > int64(maxWorkPerByte*size) {
+			t.Errorf("%d keys: %d steps for %d bytes, more than %d per byte", n, w, size, maxWorkPerByte)
+		}
+	}
+	t.Logf("repeated quoted keys: %.1f steps per byte at %v keys", per, ns)
+	for i, p := range per[1:] {
+		if p > 1.125*per[0]+0.5 {
+			t.Errorf("%.1f steps per byte at %d keys, %.1f at %d: more than linear", per[0], ns[0], p, ns[i+1])
 		}
 	}
 }

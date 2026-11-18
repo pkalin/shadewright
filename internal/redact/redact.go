@@ -90,7 +90,12 @@ limitations under the License.
 // the lines below a secret key after other text on its line with nothing after its colon, the lines after the
 // first of a scalar over several lines under a bare short key, a value after a secret key and blanks alone
 // with no colon, "=" or arrow ("userPassword x", read as prose like "password reset failed"), a value after a
-// separator of more than maxSepRun characters, and a secret in a format no rule knows (TestKeyNameKnownLeaks).
+// separator with more than maxSepRun marks, controls or invisible characters (blanks do not count), after a
+// key and a separator of "|", "~", ">", "-" or a dash, or after a key, a line break and then the separator
+// (#859 looks for such values by their shape), and a secret in a format no rule knows (TestKeyNameKnownLeaks).
+// It removes too much in a few known places: the line after a value that a lone CR ends, the text after "->",
+// "=>" or "==" behind a key word, the name of a secret key that stands as another secret key's value, and a
+// URL in angle brackets with a port before a link with an "@".
 //
 // Every rule reads the text as it was given and reports spans of it; the spans of all rules are merged and
 // replaced once ([Redactor.String]), so no rule reads another's output and no pass comes before another. The
@@ -410,6 +415,7 @@ func (r *Redactor) spans(s string) []span {
 	}
 	merged := mergeSpans(spans)
 	for i := range merged {
+		tick(1)
 		// Invisible characters right after a match belong to it (#845, fourth round): the folded view drops
 		// them, and kept apart from the replacement they would be the one visible trace of where it ended. The
 		// merged ranges are disjoint, so each byte is read at most once here.

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"slices"
@@ -49,25 +50,30 @@ import (
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
-// The generated model of a handoff (#786, fifth decision of 2026-11-18): two requests, a predecessor whose pull request
-// is open and a replacement taking it over, driven through Reconcile in seeded random orders of events, from one of
-// three starts (the intent reserved and nothing pushed, the replacement's commit pushed and the takeover not recorded,
-// the takeover recorded). The events: a reconcile of either request (either order, repeated), the clock moving on
-// (minutes, past the replacement's deadline, past the deadline and the handoff grace, past a day), the Git host
-// failing (503), refusing (403), not finding (404) or rejecting (422) the next read of one operation or every read
-// until it answers again, the next status write of one request lost or meeting a conflicting write, a restart (a new
-// reconciler, nothing kept in memory), a crash after the next reconcile made n writes (status or Git, so any two
-// writes can be cut apart), the kill switch pausing writes or lifting the pause, either request deleted, and a person
-// merging the pull request at its head, pushing a commit on top of it, or closing it.
+// The generated model of a handoff (#786, fifth decision of 2026-11-18, extended by the second round of the same day):
+// two requests, a predecessor whose pull request is open and a replacement taking it over, driven through Reconcile in
+// seeded random orders of events, from one of three starts (the intent reserved and nothing pushed, the replacement's
+// commit pushed and the takeover not recorded, the takeover recorded). The events: a reconcile of either request
+// (either order, repeated), the clock moving on (minutes, past the replacement's deadline, past the deadline and the
+// handoff grace, past a day), the Git host failing (503), refusing (403), not finding (404) or rejecting (422) the next
+// read of one operation or every read until it answers again, the next status write of one request lost or meeting a
+// conflicting write, a restart (a new reconciler, nothing kept in memory), a crash after the next reconcile made n
+// writes (status or Git, so any two writes can be cut apart), the kill switch pausing writes or lifting the pause,
+// either request deleted, a settings change (the repository leaves the settings, its entry cannot be used or is fixed
+// again, its target branch changes), and a person merging the pull request at its head, pushing a commit on top of it,
+// force pushing it back to the predecessor's commit (alone, or with a person's commit on it), closing it, reopening it
+// or deleting its branch (which closes it). Nine sequences in ten that draw no merge, close or branch deletion get one
+// in their second half, so most reach the end of the pull request.
 //
-// After every step, and at the end after a settling run (the pause lifted, reads answering, both requests reconciled
-// in both orders while the clock moves on), the properties:
+// After every step, and at the end after a settling run (the pause lifted, reads answering, an unusable entry fixed,
+// both requests reconciled in both orders while the clock moves on), the properties:
 //
 //	P1 a merge of a request's commit is recorded once: on the request whose commit it is, with its merge receipt, or,
 //	   when that request is the replacement and it is deleted before it recorded the merge, on the predecessor as
-//	   MergedWithForeignChange with no receipt (#786, decision 2 of the model result of 2026-11-18); never on both,
-//	   and, once reads answer, never on none (a merged head with further commits on top of the replacement's commit
-//	   is the documented gap #870: excluded and counted apart);
+//	   MergedWithForeignChange with no receipt (#786, decision 2 of the model result of 2026-11-18), a completed
+//	   takeover included; never on both, and, once reads answer, never on none. A merged head with further commits on
+//	   top of the replacement's commit is the documented gap #870, and the predecessor's commit put back by a force
+//	   push after it handed the pull request over is a foreign change to the replacement: both are left out;
 //	P2 the circuit breaker counts that merge once (one success at most), and, once reads answer, no request is a
 //	   failure for the breaker that was not one when a person merged a request's own commit, except the
 //	   predecessor's MergedWithForeignChange of P1, a failure as on main;
@@ -75,16 +81,27 @@ import (
 //	   never releases it while its commit is on the open pull request, and no request releases it on a merge of its
 //	   own commit it does not record;
 //	P4 after the abort is stored, the two requests never both write the branch or the pull request, and the
-//	   predecessor writes nothing to Git while its intent stands;
+//	   predecessor writes nothing to Git while its intent stands; every write to Git is checked as it is made, against
+//	   the abort as stored by then (noted at the status write that stores it);
 //	P5 every status write passes the CRD schema and its CEL rules (transition rules included), and a reconcile that
-//	   could act leaves no entry of status.gitWaits that stood past its own end at its start.
+//	   could act leaves no entry of status.gitWaits that stood past its own end at its start;
+//	P6 after the settling run, once the pull request is merged or closed, or its branch or its repository is gone, no
+//	   request holds the target lock.
 //
-// A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property.
-// The default set is the seeds 1 to 500 (about ten seconds), 1 to 100 under the race detector or -short; the code was
-// checked against the seeds 1 to 5,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed,
-// SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1
-// prints the trace of every seed (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile), and
-// SHADEWRIGHT_HANDOFF_MODEL_SUMMARY=1 logs the count of failures per property.
+// Exclusions, each named and recognised by its shape, never by a seed (hmShapes, and the checks that name them): the
+// #288 cleanup bound (a replacement with its takeover recorded let go of its finalizer while being deleted with the
+// pull request open), the #870 head (P3), a reopen after a release (a request whose lock a verdict released when a
+// person reopened the pull request does not take it back and records nothing of it, design 6.5), and a stopped holder
+// whose repository left the settings (it keeps the lock, design 6 table of stops; only the replacement whose recovery
+// holds it releases). With the repository gone, reads never answer, so P1 and P2 ask nothing of a merge then.
+//
+// A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property; a
+// seed whose only violations an exclusion covers is skipped with the exclusion's name. The default set is the seeds 1
+// to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
+// 9,001 to 13,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
+// (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
+// holds the count of failures per property, of the exclusions, and of what the sequences reached.
 
 const (
 	// hmPred and hmRepl name the two requests in the model; hmPerson is the actor of a person's change.
@@ -105,17 +122,6 @@ const (
 	hmSettleRounds = 10
 )
 
-// handoffModelSkips are the seeds whose first failing property the design does not require, with the sentence that
-// lets it happen. They are outside the default set and skip when a range names them.
-var handoffModelSkips = map[uint64]string{
-	// A replacement that took the pull request over is deleted while every read or the close fails; its finalizer
-	// lets go at the end of the CleanupRefused or CleanupFailing bound with the pull request left open (design 6,
-	// "The Git cleanup cannot hold a deletion for good", #288), so no request holds the lock of that open pull
-	// request. P3 asks more than that sentence.
-	4017: "P3: a deleted replacement's cleanup ran out of its bound (#288), the pull request is left open",
-	4726: "P3: a deleted replacement's cleanup ran out of its bound (#288), the pull request is left open",
-}
-
 type hmKind string
 
 const (
@@ -134,6 +140,25 @@ const (
 	hMerge    hmKind = "person-merges"
 	hPush     hmKind = "person-pushes"
 	hClose    hmKind = "person-closes"
+	hReopen   hmKind = "person-reopens"
+	hBranch   hmKind = "person-deletes-branch"
+	hForce    hmKind = "person-force-pushes"
+	hSettings hmKind = "settings-change"
+)
+
+// The variants of a force push (hForce) and of a settings change (hSettings).
+const (
+	forceDrop   = "drop-to-predecessor"
+	forcePerson = "person-commit-on-predecessor"
+
+	settingsRemoved  = "repository-removed"
+	settingsUnusable = "entry-unusable"
+	settingsBranch   = "target-branch-changed"
+	settingsFixed    = "entry-fixed"
+
+	// hmOtherBranch is the target branch a settings change names; hmOtherURL the repository that replaces the plan's.
+	hmOtherBranch = "release"
+	hmOtherURL    = "https://github.com/example/other-fleet"
 )
 
 const (
@@ -154,12 +179,16 @@ type hmStep struct {
 	Mins   int
 	N      int  // writes before a crash
 	Commit bool // a merge with a merge commit
+	// Variant is the kind of a force push or a settings change.
+	Variant string
 }
 
 func (s hmStep) String() string {
 	switch s.Kind {
-	case hRecPred, hRecRepl, hAnswer, hRestart, hPause, hLift, hPush, hClose:
+	case hRecPred, hRecRepl, hAnswer, hRestart, hPause, hLift, hPush, hClose, hReopen, hBranch:
 		return string(s.Kind)
+	case hForce, hSettings:
+		return string(s.Kind) + " " + s.Variant
 	case hClock:
 		if s.Clock == clockSmall {
 			return fmt.Sprintf("clock+%dm", s.Mins)
@@ -226,9 +255,28 @@ type hmWorld struct {
 	keys   map[string]client.ObjectKey
 	number int64
 	branch string
-	// commits: the predecessor's, the replacement's (empty until pushed), and the ones a person pushed.
+	// commits: the predecessor's, the replacement's (empty until pushed; replCommits holds every commit the
+	// replacement pushed, replCommit the last), and the ones a person pushed.
 	predCommit, replCommit string
+	replCommits            map[string]bool
 	personCommits          map[string]bool
+
+	// settings is the last settings change in effect ("" for none): the repository removed, its entry unusable, or
+	// the target branch changed.
+	settings string
+	// branchGone: a person deleted the branch of the pull request.
+	branchGone bool
+	// releasedAtReopen names the requests that did not hold the target lock (a verdict released it, or they were
+	// gone) when a person reopened the pull request: the named exclusion "a reopen after a release" (design 6.5), a
+	// released request does not take the lock back and records nothing of the reopened pull request.
+	releasedAtReopen map[string]bool
+	// gone288: the replacement, with its takeover recorded, was deleted and let go of its finalizer with the pull
+	// request open: the end of the cleanup bound (#288).
+	gone288  bool
+	lastRepl *api.RemediationRequest
+	// reach is what the sequence reached, for the counts; excused counts the violations a named shape excuses.
+	reach   map[string]bool
+	excused map[string]int
 
 	mu          sync.Mutex
 	actor       string
@@ -265,8 +313,46 @@ func (m *hmWorld) logf(format string, args ...any) {
 	m.trace = append(m.trace, fmt.Sprintf("[%d +%v] ", m.stepNo, m.now.Sub(m.t0))+fmt.Sprintf(format, args...))
 }
 
-// fail notes a violation of property p; one per property.
+// hmShapes are the shapes of a sequence that the design does not require a property of, by name, with the properties
+// each one excuses and the function that recognises it. A violation of an excused property is counted under its
+// shape instead of failing the seed.
+var hmShapes = []struct {
+	name     string
+	excuses  string
+	matching func(m *hmWorld) bool
+}{
+	// A replacement that took the pull request over is deleted while every read or the close fails; its finalizer
+	// lets go at the end of the CleanupRefused or CleanupFailing bound with the pull request left open (design 6,
+	// "The Git cleanup cannot hold a deletion for good", #288), so no request holds the lock of that open pull
+	// request, and a later merge of it is recorded by nobody.
+	{name: "#288 cleanup bound", excuses: "P1 P3 P6", matching: func(m *hmWorld) bool { return m.gone288 }},
+	// A person pushed on top of the replacement's commit (#870): the head of the pull request carries the
+	// replacement's commit with further commits on it. The merge of such a head is excluded from P1 and P2 by its
+	// owner (gap870); P3 asks nothing of the lock of that head.
+	{name: "#870 commits on top of the replacement's", excuses: "P3", matching: func(m *hmWorld) bool {
+		return m.ownerOf(m.pr().HeadSHA) == "gap870"
+	}},
+}
+
+// excusedBy is the name of the shape that excuses a violation of p now, "" for none.
+func (m *hmWorld) excusedBy(p string) string {
+	for _, sh := range hmShapes {
+		if slices.Contains(strings.Fields(sh.excuses), p) && sh.matching(m) {
+			return sh.name
+		}
+	}
+	return ""
+}
+
+// fail notes a violation of property p; one per property. A violation a named shape excuses is counted under it.
 func (m *hmWorld) fail(p, format string, args ...any) {
+	if shape := m.excusedBy(p); shape != "" {
+		if m.excused[shape] == 0 {
+			m.logf("EXCUSED (%s) %s: %s", shape, p, fmt.Sprintf(format, args...))
+		}
+		m.excused[shape]++
+		return
+	}
 	for _, v := range m.violations {
 		if strings.HasPrefix(v, p+":") {
 			return
@@ -284,8 +370,16 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 	m := &hmWorld{t: t, schema: schema, start: start, g: g, base: r.Client.(client.WithWatch),
 		keys:   map[string]client.ObjectKey{hmPred: client.ObjectKeyFromObject(p), hmRepl: client.ObjectKeyFromObject(rr)},
 		number: cr.Number, branch: cr.HeadBranch, predCommit: p.Status.PullRequest.HeadSHA,
-		personCommits: map[string]bool{}, once: map[string]error{}, lose: map[string]bool{},
-		conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{}, held: map[string]bool{}}
+		personCommits: map[string]bool{}, replCommits: map[string]bool{}, once: map[string]error{},
+		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{},
+		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{}}
+	base, err := g.BranchHead(ctx, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.CreateBranch(ctx, hmOtherBranch, base); err != nil {
+		t.Fatal(err)
+	}
 	m.now = reconcilerClock
 	m.t0, m.dl = m.now, m.now.Add(hmDeadline)
 	r.Now = func() time.Time { return m.now }
@@ -299,9 +393,9 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 			t.Fatal(err)
 		}
 	case hmStartPushed:
-		m.replCommit = head
+		m.replCommit, m.replCommits[head] = head, true
 	case hmStartTookOver:
-		m.replCommit = head
+		m.replCommit, m.replCommits[head] = head, true
 		if err := r.recordHandoff(ctx, rr, p, cr, head); err != nil {
 			t.Fatal(err)
 		}
@@ -459,11 +553,15 @@ func (m *hmWorld) restart() {
 	// The API server answers the != field selectors of the limits, which the fake client refuses (apiServerReader).
 	m.r = &RemediationRequestReconciler{Client: m.cl, APIReader: &apiServerReader{Reader: m.cl}, ReviewerHints: true,
 		Scheme: m.base.Scheme(), Now: func() time.Time { return m.now }, Source: &hmResolver{m: m},
-		OpenRepository: func(context.Context, api.GitRepository) (providers.GitProvider, error) {
+		OpenRepository: func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
 			if err := m.gitFail("open"); err != nil {
 				return nil, err
 			}
-			return g, nil
+			if m.settings == settingsUnusable {
+				return nil, fmt.Errorf("open %s: %w", repo.URL, providers.ErrInvalidConfig)
+			}
+			// A provider opened for a target branch answers about the pull requests to that branch.
+			return g.ForTarget(string(repo.TargetBranch)), nil
 		}}
 	g.SetFeedbackClock(func() time.Time { return hostClock })
 }
@@ -476,8 +574,12 @@ func (s *hmResolver) Resolve(ctx context.Context, _ sourcemap.Input) (sourcemap.
 		return sourcemap.Result{}, err
 	}
 	res := resolved()
-	res.Source.TargetBranch = mainBranch
-	head, err := s.m.g.BranchHead(ctx, mainBranch)
+	branch := mainBranch
+	if s.m.settings == settingsBranch {
+		branch = hmOtherBranch
+	}
+	res.Source.TargetBranch = api.GitBranch(branch)
+	head, err := s.m.g.BranchHead(ctx, branch)
 	if err != nil {
 		return sourcemap.Result{}, err
 	}
@@ -584,6 +686,7 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 	m.mu.Unlock()
 	if lose {
 		m.logf("  status write of %s lost", rr.Name)
+		m.reach["lost-write"] = true
 		return apierrors.NewServiceUnavailable("lost")
 	}
 	if conflict {
@@ -618,6 +721,16 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 			return err
 		}
 		return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
+	}
+	// P4 follows the abort from the write that stores it, so a write to Git later in the same reconcile counts.
+	if stored.Name == m.keys[hmPred].Name && stored.Status.Handoff != nil && stored.Status.Handoff.To != nil &&
+		stored.Status.Handoff.To.Phase == api.HandoffAborted {
+		m.mu.Lock()
+		if !m.abortStored {
+			m.abortStored = true
+			m.trace = append(m.trace, fmt.Sprintf("[%d +%v]   the abort is stored", m.stepNo, m.now.Sub(m.t0)))
+		}
+		m.mu.Unlock()
 	}
 	return nil
 }
@@ -692,15 +805,12 @@ func (m *hmWorld) carriesOwn(head, who string) bool {
 	if who == hmPred {
 		return true
 	}
-	return m.replCommit != "" && slices.Contains(above, m.replCommit)
+	return slices.ContainsFunc(above, func(sha string) bool { return m.replCommits[sha] })
 }
 
-// learnReplCommit finds the replacement's commit after it pushed: the commit on top of the predecessor's that no
-// person pushed.
+// learnReplCommit finds a commit the replacement pushed: a commit on top of the predecessor's that no person pushed.
+// After a force push removed its commit, the replacement may push another one.
 func (m *hmWorld) learnReplCommit() {
-	if m.replCommit != "" {
-		return
-	}
 	head, err := m.g.BranchHead(context.Background(), m.branch)
 	if err != nil {
 		return
@@ -710,10 +820,9 @@ func (m *hmWorld) learnReplCommit() {
 		return
 	}
 	for _, sha := range slices.Backward(above) {
-		if !m.personCommits[sha] {
-			m.replCommit = sha
+		if !m.personCommits[sha] && !m.replCommits[sha] {
+			m.replCommit, m.replCommits[sha] = sha, true
 			m.logf("  the replacement's commit is %s", short(sha))
-			return
 		}
 	}
 }
@@ -811,17 +920,37 @@ func (m *hmWorld) observe() {
 		m.abortStored = true
 		m.logf("  the abort is stored")
 	}
+	if m.abortStored {
+		m.reach["abort-stored"] = true
+	}
+	if rr != nil {
+		for _, w := range rr.Status.GitWaits {
+			if w.Kind == api.GitWaitHandoffRecovery {
+				m.reach["refusal-to-HandoffRecovery"] = true
+			}
+		}
+	}
+	// The #288 shape: the replacement, its takeover recorded, let go of its finalizer while being deleted with the
+	// pull request open, at the end of its cleanup bound.
+	if rr == nil && m.lastRepl != nil && !m.lastRepl.DeletionTimestamp.IsZero() && tookOver(m.lastRepl) &&
+		m.pr().State == providers.ChangeRequestOpen && !m.gone288 {
+		m.gone288 = true
+		m.logf("  the #288 shape: the replacement let go at its cleanup bound with the pull request open")
+	}
+	m.lastRepl = rr
 	cr := m.pr()
 	// P1 and P2 after a merge of a request's own commit.
 	m.observeMerge(reqs)
-	// P3.
+	// P3. A repository that left the settings releases the lock (decision of the second round, 2026-11-18): P3 asks
+	// nothing of it.
+	repoGone := m.settings == settingsRemoved
 	free := true
 	for who, x := range reqs {
 		holds := x != nil && ptr.Deref(x.Status.HoldsTarget, false)
 		if holds {
 			free = false
 		}
-		if m.held[who] && !holds && x != nil {
+		if m.held[who] && !holds && x != nil && !repoGone {
 			switch {
 			case cr.State == providers.ChangeRequestOpen && who == hmRepl && m.carriesOwn(cr.HeadSHA, hmRepl):
 				m.fail("P3", "the replacement released the lock while its commit is on the open pull request (%s)",
@@ -833,7 +962,8 @@ func (m *hmWorld) observe() {
 		}
 		m.held[who] = holds
 	}
-	if free && cr.State == providers.ChangeRequestOpen && m.carries(cr.HeadSHA) {
+	if free && cr.State == providers.ChangeRequestOpen && m.carries(cr.HeadSHA) && !repoGone &&
+		!m.reopenExcuses(cr.HeadSHA) {
 		m.fail("P3", "the lock is free while the open pull request carries a commit of a request (pred: %s, repl: %s)",
 			describe(p), describe(rr))
 	}
@@ -944,9 +1074,88 @@ func (m *hmWorld) apply(s hmStep) {
 		if err := m.base.Delete(ctx, rr); err != nil && !apierrors.IsNotFound(err) {
 			m.t.Fatal(err)
 		}
-	case hMerge, hPush, hClose:
+		m.reach["deletion"] = true
+	case hSettings:
+		m.changeSettings(s.Variant)
+	case hMerge, hPush, hClose, hForce:
 		m.personEvent(s)
+	case hReopen:
+		m.reopen()
+	case hBranch:
+		if m.branchGone {
+			return
+		}
+		if err := m.g.DeleteBranch(m.branch); err != nil {
+			m.t.Fatal(err)
+		}
+		m.branchGone = true
+		m.reach["branch-deleted"] = true
 	}
+}
+
+// changeSettings makes a settings change: the plan's repository leaves the settings (an entry for another repository
+// takes its place), its entry cannot open a provider, its target branch changes, or an unusable entry is fixed. A
+// repository that left the settings and a changed branch stay so: the model does not bring them back.
+func (m *hmWorld) changeSettings(variant string) {
+	if m.settings == settingsRemoved || (m.settings == settingsBranch && variant != settingsRemoved) {
+		return
+	}
+	switch variant {
+	case settingsFixed:
+		if m.settings == settingsUnusable {
+			m.settings = ""
+		}
+		return
+	case settingsUnusable:
+		m.settings = variant
+		m.reach["settings-change"] = true
+		return
+	}
+	ctx := context.Background()
+	st := &api.RemediationSettings{}
+	if err := m.base.Get(ctx, client.ObjectKey{Name: api.SettingsName}, st); err != nil {
+		m.t.Fatal(err)
+	}
+	switch variant {
+	case settingsRemoved:
+		st.Spec.Repositories[0].URL = hmOtherURL
+	case settingsBranch:
+		st.Spec.Repositories[0].TargetBranch = hmOtherBranch
+	}
+	if err := m.base.Update(ctx, st); err != nil {
+		m.t.Fatal(err)
+	}
+	m.settings = variant
+	m.reach["settings-change"] = true
+}
+
+// reopen is a person reopening the closed pull request. A reopen while no request holds the lock is the named
+// exclusion of P3: a request whose lock a verdict released does not take it back (design 6.5).
+func (m *hmWorld) reopen() {
+	if m.pr().State != providers.ChangeRequestClosed {
+		return
+	}
+	if err := m.g.Reopen(m.number); err != nil {
+		m.logf("  the reopen is refused: %v", err)
+		return
+	}
+	m.reach["reopen"] = true
+	for _, who := range []string{hmPred, hmRepl} {
+		if x := m.get(who); (x == nil || !ptr.Deref(x.Status.HoldsTarget, false)) && !m.releasedAtReopen[who] {
+			m.releasedAtReopen[who] = true
+			m.logf("  reopened after the %s's lock was released", who)
+		}
+	}
+}
+
+// reopenExcuses reports whether the named exclusion "a reopen after a release" covers a free lock while the open
+// pull request has head: every request whose commit head carries had its lock released when a person reopened it.
+func (m *hmWorld) reopenExcuses(head string) bool {
+	if !m.releasedAtReopen[hmPred] || (m.carriesOwn(head, hmRepl) && !m.releasedAtReopen[hmRepl]) {
+		return false
+	}
+	m.excused["reopen after a release"]++
+	return true
 }
 
 // personEvent is a person merging, pushing to or closing the open pull request.
@@ -978,12 +1187,21 @@ func (m *hmWorld) personEvent(s hmStep) {
 		}
 		m.merge = &hmMerge{head: cr.HeadSHA, owner: m.ownerOf(cr.HeadSHA), failed: map[string]bool{},
 			recorded: map[string]bool{}}
+		if p := m.get(hmPred); m.merge.owner == hmPred && p != nil && handedOff(p) {
+			// The predecessor handed the pull request over (to Done) and ended: a person put its commit back with a
+			// force push. The pull request is the replacement's, and that head is a foreign change to it.
+			m.merge.owner = "foreign"
+		}
 		for _, who := range []string{hmPred, hmRepl} {
 			if x := m.get(who); x != nil && breakerOutcome(x) == outcomeFailure {
 				m.merge.failed[who] = true
 			}
 		}
 		m.logf("  merged head %s, the %s's commit", short(cr.HeadSHA), m.merge.owner)
+		m.reach["merge"] = true
+		if m.merge.owner == hmPred || m.merge.owner == hmRepl {
+			m.reach["own-commit-merge"] = true
+		}
 	case hPush:
 		sha, err := m.g.PushFiles(m.branch, map[string][]byte{"person.yaml": []byte(fmt.Sprintf("step: %d\n", m.stepNo))})
 		if err != nil {
@@ -994,6 +1212,19 @@ func (m *hmWorld) personEvent(s hmStep) {
 		if err := m.g.CloseChangeRequest(ctx, m.number); err != nil {
 			m.t.Fatal(err)
 		}
+	case hForce:
+		// A force push that removes every commit on top of the predecessor's, and, for forcePerson, puts a person's
+		// commit there instead.
+		if err := m.g.ForcePush(m.branch, m.predCommit); err != nil {
+			m.t.Fatal(err)
+		}
+		if s.Variant == forcePerson {
+			sha, err := m.g.PushFiles(m.branch, map[string][]byte{"person.yaml": []byte(fmt.Sprintf("force: %d\n", m.stepNo))})
+			if err != nil {
+				m.t.Fatal(err)
+			}
+			m.personCommits[sha] = true
+		}
 	}
 }
 
@@ -1003,7 +1234,7 @@ func (m *hmWorld) ownerOf(head string) string {
 	switch {
 	case head == m.predCommit:
 		return hmPred
-	case m.replCommit != "" && head == m.replCommit:
+	case m.replCommits[head]:
 		return hmRepl
 	case m.carriesOwn(head, hmRepl):
 		return "gap870"
@@ -1028,6 +1259,8 @@ func (m *hmWorld) settle() {
 	if m.paused {
 		m.apply(hmStep{Kind: hLift})
 	}
+	// An unusable entry is fixed, as reads answer; a repository that left the settings and a changed branch stay.
+	m.changeSettings(settingsFixed)
 	for i := range hmSettleRounds {
 		order := []string{hmPred, hmRepl}
 		if i%2 == 1 {
@@ -1042,8 +1275,14 @@ func (m *hmWorld) settle() {
 			m.now = m.now.Add(recoveryWaitBound)
 		}
 	}
+	m.liveness()
 	mg := m.merge
 	if mg == nil || (mg.owner != hmPred && mg.owner != hmRepl) {
+		return
+	}
+	if m.settings == settingsRemoved {
+		// The repository left the settings: no read of it can start, so reads never answer, and nothing records a
+		// merge made through it.
 		return
 	}
 	// P2 once reads answer: no request is a failure for the breaker that was not one when the merge was made.
@@ -1064,13 +1303,18 @@ func (m *hmWorld) settle() {
 				mg.owner, describe(x))
 		}
 	}
+	if m.releasedAtReopen[mg.owner] {
+		// A reopen after a release: the request whose lock a verdict released records nothing of the reopened pull
+		// request (design 6.5).
+		m.excused["reopen after a release"]++
+		return
+	}
 	owner := m.get(mg.owner)
 	if owner == nil || (mg.owner == hmRepl && !owner.DeletionTimestamp.IsZero() && !mg.recorded[hmRepl]) {
 		// #786, decision 2 of the model result of 2026-11-18: a deleted replacement records nothing; unless it
-		// recorded the merge before it went, the predecessor records it as a foreign change. A predecessor that handed its pull request over (to Done) has
-		// none left to record, as for any request deleted after its merge.
-		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && !handedOff(reqs[hmPred]) &&
-			!m.foreignForGone(reqs) {
+		// recorded the merge before it went, the predecessor records it as a foreign change, a predecessor that handed
+		// its pull request over (to Done) included: takeover, merge, replacement deleted ends with one record.
+		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && !m.foreignForGone(reqs) {
 			m.fail("P1", "the merge of the deleted replacement's commit %s is recorded on neither request (pred: %s)",
 				short(mg.head), describe(reqs[hmPred]))
 		}
@@ -1080,6 +1324,49 @@ func (m *hmWorld) settle() {
 		m.fail("P1", "the merge of the %s's commit %s is not recorded on it with its receipt (pred: %s, repl: %s)",
 			mg.owner, short(mg.head), describe(m.get(hmPred)), describe(m.get(hmRepl)))
 	}
+}
+
+// liveness checks P6 after the settling run: once the pull request is merged or closed, or its branch or repository is
+// gone, no request holds the target lock. A reopen after a release is outside it by name (reopenedAfterRelease): the
+// pull request is then open, and P6 asks nothing of an open one.
+func (m *hmWorld) liveness() {
+	cr := m.pr()
+	if m.merge != nil || cr.State != providers.ChangeRequestOpen {
+		m.reach["merge-or-close"] = true
+	}
+	var why string
+	switch {
+	case m.settings == settingsRemoved:
+		why = "the repository left the settings"
+	case m.branchGone:
+		why = "the branch is deleted"
+	case cr.State == providers.ChangeRequestMerged:
+		why = "the pull request is merged"
+	case cr.State == providers.ChangeRequestClosed:
+		why = "the pull request is closed"
+	default:
+		return
+	}
+	for _, who := range []string{hmPred, hmRepl} {
+		if x := m.get(who); x != nil && ptr.Deref(x.Status.HoldsTarget, false) {
+			if m.settings == settingsRemoved && !m.recovering(x) {
+				// A stopped holder whose repository left the settings keeps the lock, as nothing can read its pull
+				// request any more (design 6, the table of stops, "the repository is unavailable or unusable"; tenth
+				// decision of 2026-11-18 on #771): only the replacement whose recovery holds it releases (second round
+				// of #786).
+				m.excused["stopped holder of a repository that left the settings"]++
+				continue
+			}
+			m.fail("P6", "%s, and the %s still holds the target lock after the settling run (%s)", why, who, describe(x))
+		}
+	}
+}
+
+// recovering reports whether x is the replacement before its takeover: its handoff from Reserved, its lock held for
+// the pull request it was to take over (the watch of its recovery, or a stop after it).
+func (m *hmWorld) recovering(x *api.RemediationRequest) bool {
+	return x.Name == m.keys[hmRepl].Name && x.Status.Handoff != nil && x.Status.Handoff.From != nil &&
+		x.Status.Handoff.From.Phase == api.HandoffReserved
 }
 
 // hmRun runs start and steps and returns the world, with its violations.
@@ -1131,7 +1418,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 	}
 	weights := []weighted{{6, hRecPred}, {6, hRecRepl}, {4, hClock}, {3, hFault}, {2, hAnswer}, {1, hLose},
 		{1, hConflict}, {1, hRestart}, {1, hCrash}, {1, hPause}, {1, hLift}, {1, hDelete}, {2, hMerge}, {1, hPush},
-		{1, hClose}}
+		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}}
 	switch focus {
 	case 1:
 		weights = append(weights, weighted{3, hFault}, weighted{2, hClock}, weighted{2, hMerge})
@@ -1182,8 +1469,22 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 			s.N = rng.IntN(3)
 		case hMerge:
 			s.Commit = rng.IntN(4) > 0
+		case hForce:
+			s.Variant = []string{forceDrop, forcePerson}[rng.IntN(2)]
+		case hSettings:
+			s.Variant = []string{settingsRemoved, settingsUnusable, settingsBranch, settingsFixed}[rng.IntN(4)]
 		}
 		steps = append(steps, s)
+	}
+	// Most sequences reach a merge or a close: one without a step that ends the pull request gets one, nine times in
+	// ten, at a random place in its second half, so that later steps still follow it.
+	ends := slices.ContainsFunc(steps, func(s hmStep) bool { return s.Kind == hMerge || s.Kind == hClose || s.Kind == hBranch })
+	if !ends && rng.IntN(10) > 0 {
+		end := hmStep{Kind: hMerge, Commit: rng.IntN(4) > 0}
+		if rng.IntN(5) == 0 {
+			end = hmStep{Kind: hClose}
+		}
+		steps[hmSteps/2+rng.IntN(hmSteps-hmSteps/2)] = end
 	}
 	return start, steps
 }
@@ -1243,16 +1544,12 @@ func TestHandoffModel(t *testing.T) {
 	var mu sync.Mutex
 	counts := map[string]int{}
 	t.Cleanup(func() {
-		if os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_SUMMARY") != "" {
-			t.Logf("handoff model summary: %v", counts)
-		}
+		// The reach counts (and the failures per property) are in the log of every run, go test -v shows them.
+		t.Logf("handoff model summary: %v", counts)
 	})
 	for _, seed := range hmSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			t.Parallel()
-			if why, ok := handoffModelSkips[seed]; ok {
-				t.Skipf("the design does not require it: %s", why)
-			}
 			start, steps := hmGenerate(seed)
 			m := hmRun(t, schema, start, steps)
 			p := m.property()
@@ -1263,11 +1560,20 @@ func TestHandoffModel(t *testing.T) {
 				k, _, _ := strings.Cut(v, ":")
 				counts[k]++
 			}
+			for k := range m.reach {
+				counts["reach "+k]++
+			}
+			for k := range m.excused {
+				counts["excused "+k]++
+			}
 			mu.Unlock()
 			if os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_TRACE") != "" {
 				t.Logf("trace:\n  %s", strings.Join(m.trace, "\n  "))
 			}
 			if p == "" {
+				if len(m.excused) > 0 {
+					t.Skipf("the design does not require it: shapes %v", slices.Sorted(maps.Keys(m.excused)))
+				}
 				return
 			}
 			minimal := hmShrink(t, schema, start, steps, p)

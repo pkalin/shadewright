@@ -19,10 +19,13 @@ package redact_test
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
+	"regexp/syntax"
 	"slices"
 	"strings"
 	"testing"
@@ -47,7 +50,8 @@ import (
 // of fields) places a secret key and a secret value in every string field, every list of strings and every map
 // with string keys, one place at a time. The answers are compared with what main hid
 // (testdata/fields-main-entry.tsv, written by TestWriteFieldsMainTable in a checkout of main): a value main
-// hid that is shown now fails. The file uses only the read tools' API, so it runs unchanged in that checkout.
+// hid that is shown now fails. The file uses only the read tools' API (and the two key expressions of
+// export_keys_test.go, which main has too), so it runs unchanged in that checkout with that file copied.
 
 // fieldsMainTable holds, for each place and form, whether main hid the value.
 const fieldsMainTable = "testdata/fields-main-entry.tsv"
@@ -143,6 +147,21 @@ type fieldForm struct {
 	name       string
 	text       func(v string) string
 	key, value func(v string) string
+	// word: the secret is a word of letters (fieldWord), not shaped like a credential, so only the key can
+	// hide it.
+	word bool
+}
+
+// fieldWord is the secret of call n as a word of letters only: no digit and no symbol, so the rule for a bare
+// short key in prose ("auth: failed"), which wants a value shaped like a credential, does not take it.
+func fieldWord(n int) string {
+	var b strings.Builder
+	b.WriteString("Vfw")
+	for _, d := range fmt.Sprintf("%06d", n) {
+		b.WriteRune('a' + d - '0')
+	}
+	b.WriteString("xkqw")
+	return b.String()
 }
 
 var (
@@ -166,6 +185,16 @@ var fieldListForms = []fieldListForm{
 	{name: "flag, short flag with value", items: func(v string) []string { return []string{"--" + fieldsKey, "-p=" + v} }},
 	{name: "client-secret flag, flag with value", items: func(v string) []string { return []string{"--client-secret", "--x=" + v} }},
 	{name: "flag, plain value", items: func(v string) []string { return []string{"--" + fieldsKey, v} }},
+}
+
+// listForms returns fieldListForms and, for the value shapes of turn (shapesAt), a secret flag and the value in
+// that shape.
+func listForms(turn int) []fieldListForm {
+	out := slices.Clone(fieldListForms)
+	for _, sh := range shapesAt(turn, fieldListShapes) {
+		out = append(out, fieldListForm{name: "flag, value " + sh.name, items: func(v string) []string { return []string{"--" + fieldsKey, sh.shape(v)} }})
+	}
+	return out
 }
 
 // fieldListForm is one way of placing a secret key and its value in two elements of a list of strings.
@@ -230,15 +259,136 @@ func (p fieldPlace) setText(root reflect.Value, text string) {
 	p.set(root, fieldForm{text: func(string) string { return text }}, "")
 }
 
-// forms returns the forms of a place.
-func (p fieldPlace) forms() []fieldForm {
+// forms returns the forms of the place of number turn: the fixed forms, then value shapes (fieldShapes) with a
+// form of the place, and in a map of strings every secret key (fieldSecretKeys) with a plain value and with a
+// word (fieldWord) (#845, fifth decision of 2026-11-18). A string or a list of strings gets fieldStringShapes of
+// the shapes, the next ones at each place (shapesAt), so every place gets values after a line break, blanks or a
+// marker and each shape reaches every tool's places; a map gets every shape, the keys taken in turn. The shapes
+// take the forms of their place in turn.
+func (p fieldPlace) forms(turn int) []fieldForm {
 	switch {
 	case p.kind != reflect.Map:
-		return fieldStringForms
+		out := slices.Clone(fieldStringForms)
+		for i, sh := range shapesAt(turn, fieldStringShapes) {
+			f := fieldStringForms[i%len(fieldStringForms)]
+			out = append(out, fieldForm{name: f.name + ", " + sh.name, text: func(v string) string { return f.text(sh.shape(v)) }})
+		}
+		return out
 	case p.elem.Kind() == reflect.String:
-		return fieldMapForms
+		out := slices.Clone(fieldMapForms)
+		keys := fieldSecretKeys()
+		for _, k := range keys {
+			out = append(out, fieldForm{name: "every key " + k, key: func(string) string { return k }, value: func(v string) string { return v }})
+			out = append(out, fieldForm{name: "every key " + k + ", a word", key: func(string) string { return k }, value: func(v string) string { return v }, word: true})
+		}
+		for i, sh := range fieldShapes {
+			k := keys[i*7%len(keys)]
+			out = append(out, fieldForm{
+				name: "every key " + k + ", " + sh.name, key: func(string) string { return k }, value: sh.shape,
+			})
+		}
+		return out
 	}
 	return fieldMapForms[len(fieldMapForms)-1:]
+}
+
+// How many value shapes a string place, a list of strings and a pair of places get (shapesAt): all of them at
+// every place would be some 170,000 calls, more than the package's test run allows.
+const (
+	fieldStringShapes = 4
+	fieldListShapes   = 3
+	fieldPairShapes   = 2
+)
+
+// shapesAt returns n of fieldShapes for the place or pair of number turn, the next n after those of turn-1, so
+// consecutive places go through all the shapes.
+func shapesAt(turn, n int) []fieldShape {
+	out := make([]fieldShape, n)
+	for i := range n {
+		out[i] = fieldShapes[(turn*n+i)%len(fieldShapes)]
+	}
+	return out
+}
+
+// fieldShape is a way of writing a secret value v: after a line break, a line of text, blanks or a marker
+// that the laid-out text reads as its own (#845, fifth decision of 2026-11-18). main encoded the answer as
+// JSON before its second pass, so a line break in a value was "\n" there and the value stayed one.
+type fieldShape struct {
+	name  string
+	shape func(v string) string
+}
+
+var fieldShapes = []fieldShape{
+	{name: "after a line break", shape: func(v string) string { return "\n" + v }},
+	{name: "after CRLF", shape: func(v string) string { return "\r\n" + v }},
+	{name: "after two line breaks", shape: func(v string) string { return "\n\n" + v }},
+	{name: "on the second line", shape: func(v string) string { return "line1\n" + v }},
+	{name: "indented on the second line", shape: func(v string) string { return "x\n  " + v }},
+	{name: "after the end of a list", shape: func(v string) string { return "(end of list)\n" + v }},
+	{name: "after a key line", shape: func(v string) string { return "a: b\n" + v }},
+	{name: "after a literal block marker", shape: func(v string) string { return "|\n" + v }},
+	{name: "after a folded block marker", shape: func(v string) string { return ">\n " + v }},
+	{name: "after leading blanks", shape: func(v string) string { return "   " + v }},
+	{name: "after a list dash", shape: func(v string) string { return "- " + v }},
+	{name: "after a comment line", shape: func(v string) string { return "# note\n" + v }},
+	{name: "after a lone CR", shape: func(v string) string { return "x\r" + v }},
+}
+
+// fieldSecretKeys returns every key the secret key list names, by construction from its expressions: each
+// string the secret words match (redact.SecretWordExpr), each short key name (redact.ShortKeyNamesExpr), and
+// the short names as the last part of a longer key. Every one is a key main hid the value of, quoted.
+func fieldSecretKeys() []string {
+	re, err := syntax.Parse(redact.SecretWordExpr, syntax.Perl)
+	if err != nil {
+		panic(err)
+	}
+	var words func(re *syntax.Regexp) []string
+	words = func(re *syntax.Regexp) []string {
+		switch re.Op {
+		case syntax.OpLiteral:
+			return []string{string(re.Rune)}
+		case syntax.OpCharClass:
+			var out []string
+			for i := 0; i < len(re.Rune); i += 2 {
+				for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
+					out = append(out, string(r))
+				}
+			}
+			return out
+		case syntax.OpQuest:
+			return append([]string{""}, words(re.Sub[0])...)
+		case syntax.OpCapture:
+			return words(re.Sub[0])
+		case syntax.OpAlternate:
+			var out []string
+			for _, s := range re.Sub {
+				out = append(out, words(s)...)
+			}
+			return out
+		case syntax.OpConcat:
+			out := []string{""}
+			for _, s := range re.Sub {
+				var next []string
+				for _, a := range out {
+					for _, b := range words(s) {
+						next = append(next, a+b)
+					}
+				}
+				out = next
+			}
+			return out
+		case syntax.OpEmptyMatch:
+			return []string{""}
+		}
+		panic(fmt.Sprintf("secret word expression: unexpected %v", re.Op))
+	}
+	out := words(re)
+	for short := range strings.SplitSeq(redact.ShortKeyNamesExpr, "|") {
+		out = append(out, short, "DB_"+strings.ToUpper(short), "proxy-"+short)
+	}
+	out = append(out, "storageSas")
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // set writes the form with the secret v into the place of root (a pointer to a zero object), creating the
@@ -328,6 +478,7 @@ type fieldEnv struct {
 	logs     *fake.Logs
 	metrics  *fake.Metrics
 	delivery *fake.Delivery
+	last     map[string]any // the arguments of the last call (fieldTool.call)
 }
 
 func newFieldEnv(t *testing.T) *fieldEnv {
@@ -415,8 +566,15 @@ type fieldResult struct {
 	skipped bool
 }
 
-// key is the result's row key in the table.
+// key is the result's row key: its tool, place and form.
 func (r fieldResult) key() string { return r.tool + "\t" + r.place + "\t" + r.form }
+
+// id is the result's row in the table: the first 16 hex digits of the SHA-256 of its key, which keeps the table
+// of some 170,000 rows small. A failure names the key, not the id.
+func (r fieldResult) id() string {
+	sum := sha256.Sum256([]byte(r.key()))
+	return hex.EncodeToString(sum[:8])
+}
 
 // fieldResults calls every tool with a secret in every place of the types it reads, in every form of that
 // place, and returns the results and the number of places per tool.
@@ -429,11 +587,14 @@ func fieldResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) {
 	for _, ft := range fieldTools {
 		e := newFieldEnv(t)
 		for _, typ := range ft.types {
-			for _, p := range fieldPlaces(typ) {
+			for turn, p := range fieldPlaces(typ) {
 				places[ft.name]++
-				for _, f := range p.forms() {
+				for _, f := range p.forms(turn) {
 					n++
 					v := fmt.Sprintf("Vf%06dxK9w", n)
+					if f.word {
+						v = fieldWord(n)
+					}
 					if sample && !redact.RaceKeeps("fields", n) {
 						out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: f.name, skipped: true})
 						continue
@@ -477,7 +638,7 @@ func callFieldTool(t *testing.T, set *tools.Set, name string, args map[string]an
 	return r.Text
 }
 
-// readFieldsMainTable reads fieldsMainTable: whether main hid each row's secret, by row key.
+// readFieldsMainTable reads fieldsMainTable: whether main hid each row's secret, by row id.
 func readFieldsMainTable(t *testing.T) map[string]bool {
 	t.Helper()
 	f, err := os.Open(fieldsMainTable)
@@ -513,11 +674,11 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	lost, hidden, mainHidden := 0, 0, 0
 	seen := map[string]bool{}
 	for _, r := range results {
-		seen[r.key()] = true
+		seen[r.id()] = true
 		if r.skipped {
 			continue
 		}
-		was, ok := main[r.key()]
+		was, ok := main[r.id()]
 		if !ok {
 			t.Errorf("%s: no row in %s (write it again from main)", r.key(), fieldsMainTable)
 			continue
@@ -536,7 +697,7 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	}
 	for k := range main {
 		if !seen[k] {
-			t.Errorf("%s: row of %s that the walk no longer makes", k, fieldsMainTable)
+			t.Errorf("row %s of %s: the walk no longer makes it", k, fieldsMainTable)
 		}
 	}
 	if lost > 0 {
@@ -557,9 +718,9 @@ func TestWriteFieldsMainTable(t *testing.T) {
 	results = append(results, relations...)
 	var b strings.Builder
 	b.WriteString("# Whether each read tool hid a secret placed in each field of the objects it reads, at main " +
-		os.Getenv("FIELDS_MAIN_COMMIT") + " (#845).\n# tool\tplace\tform\thidden or shown\n")
+		os.Getenv("FIELDS_MAIN_COMMIT") + " (#845).\n# row (the first 16 hex digits of the SHA-256 of \"tool<TAB>place<TAB>form\")\thidden or shown\n")
 	for _, r := range results {
-		b.WriteString(r.key() + "\t" + map[bool]string{true: "hidden", false: "shown"}[r.hidden] + "\n")
+		b.WriteString(r.id() + "\t" + map[bool]string{true: "hidden", false: "shown"}[r.hidden] + "\n")
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil { // #nosec G703 -- a path the person running the test names
 		t.Fatal(err)
@@ -581,8 +742,15 @@ func (ft fieldTool) call(t *testing.T, e *fieldEnv, typ reflect.Type, v string, 
 	if ft.name == tools.NameGetResource {
 		args = map[string]any{fieldsArgKind: typ.Name(), fieldsArgNS: fieldsNS, fieldsArgName: fieldsPod}
 	}
+	e.last = args
 	text := callFieldTool(t, e.set, ft.name, args)
 	return strings.Contains(text, v[:8]) || strings.Contains(text, v[len(v)-8:])
+}
+
+// answer calls the tool again with the arguments of its last call and returns the answer.
+func (ft fieldTool) answer(t *testing.T, e *fieldEnv) string {
+	t.Helper()
+	return callFieldTool(t, e.set, ft.name, e.last)
 }
 
 // at returns the value at the place p of root, creating the pointers and the first elements of slices on the
@@ -637,11 +805,11 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "plain value", hidden: !shown})
 				}
 			}
-			for _, p := range places {
+			for turn, p := range places {
 				if p.kind != reflect.Slice {
 					continue
 				}
-				for _, f := range fieldListForms {
+				for _, f := range listForms(turn) {
 					n++
 					v := fmt.Sprintf("Vl%06dxK9w", n)
 					if sample && !redact.RaceKeeps("fields relations", n) {
@@ -661,7 +829,7 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "list " + f.name, hidden: !shown})
 				}
 			}
-			for _, pq := range fieldPairs(places) {
+			for turn, pq := range fieldPairs(places) {
 				p, q := pq[0], pq[1]
 				for _, f := range fieldPairForms {
 					n++
@@ -677,8 +845,78 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 					})
 					out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: "pair " + f.name, hidden: !shown})
 				}
+				// The value in the shapes of this pair (shapesAt), the pair forms taken in turn.
+				for i, sh := range shapesAt(turn, fieldPairShapes) {
+					f := fieldPairForms[(turn+i)%len(fieldPairForms)]
+					form := "pair " + f.name + ", " + sh.name
+					n++
+					v := fmt.Sprintf("Vp%06dxK9w", n)
+					if sample && !redact.RaceKeeps("fields relations", n) {
+						out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: form, skipped: true})
+						continue
+					}
+					calls[ft.name]++
+					shown := ft.call(t, e, typ, v, func(obj reflect.Value) {
+						p.setText(obj, f.key)
+						q.setText(obj, sh.shape(v))
+					})
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: form, hidden: !shown})
+				}
 			}
 		}
 	}
 	return out, calls
+}
+
+// Two map keys that redact alike stay two entries (#845, fifth decision of 2026-11-18): a value only partly
+// hidden never merges entries, so a map keeps as many entries as the object has, as main kept them. Each map of
+// strings that a tool shows gets three keys that redact to the same marker (tokens of one length) with values
+// that are no secret, and each value must show.
+func TestMapsKeepEveryEntry(t *testing.T) {
+	values := []string{"Ent1qzk", "Ent2qzk", "Ent3qzk"}
+	maps := 0
+	for _, ft := range fieldTools {
+		e := newFieldEnv(t)
+		for _, typ := range ft.types {
+			for _, p := range fieldPlaces(typ) {
+				if p.kind != reflect.Map || p.elem.Kind() != reflect.String {
+					continue
+				}
+				// A map the tool does not show is no place to lose an entry.
+				if !ft.call(t, e, typ, "Ent0zzkq", func(obj reflect.Value) {
+					cur := p.at(obj)
+					m := reflect.MakeMap(cur.Type())
+					m.SetMapIndex(reflect.ValueOf("k").Convert(cur.Type().Key()), reflect.ValueOf("Ent0zzkq").Convert(cur.Type().Elem()))
+					cur.Set(m)
+				}) {
+					continue
+				}
+				maps++
+				var lost []string
+				ft.call(t, e, typ, "unused-value", func(obj reflect.Value) {
+					cur := p.at(obj)
+					m := reflect.MakeMap(cur.Type())
+					for i, v := range values {
+						key := "ghp_" + strings.Repeat(string(rune('A'+i)), 36)
+						m.SetMapIndex(reflect.ValueOf(key).Convert(cur.Type().Key()), reflect.ValueOf(v).Convert(cur.Type().Elem()))
+					}
+					cur.Set(m)
+				})
+				// call reports only one value; read the answer again for all three.
+				text := ft.answer(t, e)
+				for _, v := range values {
+					if !strings.Contains(text, v) {
+						lost = append(lost, v)
+					}
+				}
+				if len(lost) > 0 {
+					t.Errorf("%s %s: entries %v are gone; the map had %d", ft.name, p.name(typ), lost, len(values))
+				}
+			}
+		}
+	}
+	if maps == 0 {
+		t.Fatal("no tool shows a map of strings")
+	}
+	t.Logf("%d maps of strings shown", maps)
 }

@@ -47,8 +47,8 @@ limitations under the License.
 // YAML key ("? password" over ": x", also "password" alone below "?" or "? |"), and a key followed by a
 // separator of other characters ("userPassword:: x", "password => x", "token\x00: x"),
 // the value after a secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
-// argument lists and after a flag that took the flag as its value), however it reads or starts with
-// ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
+// argument lists), however it reads or starts with, another flag included ("--use-token --verbose" loses
+// "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
 // name of two or more words, joined by "_", "-" or in camelCase, and a blank ("aws_secret_access_key x",
 // "ClientSecret x"), only when the whole value is an opaque token: 16 or more characters, every one of them
 // from "A-Z a-z 0-9 / + = _ -", and at least one digit or one of "/+=" ("client_secret is missing" keeps "is",
@@ -406,15 +406,13 @@ func (r *Redactor) String(s string) string {
 // separator of other characters), whose matches count on the bytes of s they were folded from. A merged range
 // takes the invisible characters right after it.
 func (r *Redactor) spans(s string) []span {
-	spans := r.ruleSpans(s, nil, false)
-	if f, ok := foldView(s); ok {
-		spans = r.ruleSpans(f.text, spans, true)
-		for i := len(spans) - 1; i >= 0 && spans[i].folded; i-- {
-			tick(1)
-			spans[i].start, spans[i].end, spans[i].folded = f.from[spans[i].start], f.to[spans[i].end-1], false
-		}
-	}
-	merged := mergeSpans(spans)
+	return settle(s, r.ruleMatches(s))
+}
+
+// settle merges matches found on s (mergeSpans) and gives each merged range the invisible characters right
+// after it.
+func settle(s string, matches []span) []span {
+	merged := mergeSpans(matches)
 	for i := range merged {
 		tick(1)
 		// Invisible characters right after a match belong to it (#845, fourth round): the folded view drops
@@ -434,6 +432,20 @@ func (r *Redactor) spans(s string) []span {
 		}
 	}
 	return merged
+}
+
+// ruleMatches returns the matches of every rule in s and in its folded view (mapped to the bytes of s), unsorted
+// and not merged, each with the kind of the rule that found it.
+func (r *Redactor) ruleMatches(s string) []span {
+	spans := r.ruleSpans(s, nil, false)
+	if f, ok := foldView(s); ok {
+		spans = r.ruleSpans(f.text, spans, true)
+		for i := len(spans) - 1; i >= 0 && spans[i].folded; i-- {
+			tick(1)
+			spans[i].start, spans[i].end, spans[i].folded = f.from[spans[i].start], f.to[spans[i].end-1], false
+		}
+	}
+	return spans
 }
 
 // mergeSpans sorts spans and merges the overlapping ones into one named after the span that starts first (the

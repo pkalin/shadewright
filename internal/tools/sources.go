@@ -293,7 +293,7 @@ func (s *Set) queryMetrics(ctx context.Context, t metricTemplate, a queryMetrics
 		r.addLabel(LabelMetricsPartial)
 	}
 	// The series are one text, decided once (layout): each label a "name: value" line, the name and value of a
-	// label decided together.
+	// label decided together, the value under its name (a label named like a secret key hides its whole value).
 	type label struct{ name, value string }
 	labels := make([][]label, len(res.Series))
 	var lay layout
@@ -301,11 +301,7 @@ func (s *Set) queryMetrics(ctx context.Context, t metricTemplate, a queryMetrics
 		keys := slices.Sorted(maps.Keys(se.Labels))
 		labels[i] = make([]label, len(keys))
 		for j, k := range keys {
-			lay.text("- ")
-			lay.value(k, shown(&labels[i][j].name))
-			lay.text(": ")
-			lay.value(se.Labels[k], shown(&labels[i][j].value))
-			lay.text("\n")
+			lay.entry("- ", k, se.Labels[k], shown(&labels[i][j].name), shown(&labels[i][j].value))
 		}
 	}
 	s.decide(&lay)

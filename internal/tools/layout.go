@@ -17,7 +17,7 @@ limitations under the License.
 package tools
 
 import (
-	"cmp"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -31,7 +31,8 @@ import (
 // of a list of objects as "- " items one level deeper, the strings of a list as lines of their own, the entries of a map as "key: value" lines, nothing escaped or
 // encoded. The redactor takes one decision on that text (redact.Redactor.Pieces) and each value gets its
 // result back through the setter recorded with it. No field, list or map is decided by itself, and the
-// answer, once encoded, is not redacted again.
+// answer, once encoded, is not redacted again. Each value carries the key the object gives it (a field name, a map
+// key, a label's name), and a secret key hides the whole value (#845, fifth decision of 2026-11-18).
 
 // pieceRedactor is a [Redactor] that takes one decision on a text laid out from pieces (*redact.Redactor's
 // Pieces).
@@ -53,16 +54,30 @@ func (l *layout) text(t string) {
 	l.set = append(l.set, nil)
 }
 
-// value appends a value from a source; set receives it once decided.
-func (l *layout) value(v string, set func(string)) {
-	l.pieces = append(l.pieces, redact.Piece{Text: v, Data: true, Whole: l.whole > 0})
+// value appends a value from a source under the key the object gives it (a field name, a map key, a label's
+// name; empty for none); set receives it once decided. A key that redact.SecretKey reports hides the whole value
+// (redact.Piece's Key).
+func (l *layout) value(key, v string, set func(string)) {
+	l.pieces = append(l.pieces, redact.Piece{Text: v, Data: true, Whole: l.whole > 0, Key: key})
 	l.set = append(l.set, set)
 }
 
-// field appends a line "name: value" at indentation ind, for a value from a source.
+// field appends a line "name: value" at indentation ind, for a value from a source under the field name.
 func (l *layout) field(ind, name, v string, set func(string)) {
 	l.text(ind + name + ": ")
-	l.value(v, set)
+	l.value(name, v, set)
+	l.text("\n")
+}
+
+// entry appends a line "key: value" at indentation ind for a key and its value from a source (a map entry, a
+// metric label), the value under that key.
+func (l *layout) entry(ind, key, v string, setKey, setValue func(string)) {
+	l.text(ind)
+	l.value("", key, setKey)
+	l.text(": ")
+	if v != "" {
+		l.value(key, v, setValue)
+	}
 	l.text("\n")
 }
 
@@ -207,7 +222,7 @@ const listEnd = "(end of list)\n"
 func (l *layout) strings(v reflect.Value) bool {
 	for i := range v.Len() {
 		e := v.Index(i)
-		l.value(e.String(), e.SetString)
+		l.value("", e.String(), e.SetString)
 		l.text("\n")
 	}
 	l.text(listEnd)
@@ -235,32 +250,38 @@ func (l *layout) under(ind, name string, body func(inner string) bool) bool {
 }
 
 // mapEntries appends the entries of the map v, in the order encoding/json writes them (by key), as "key: value"
-// lines at indentation ind, and rebuilds v from the decided keys and values once they are set. Two keys redacted
-// alike are one entry: the value of the one written last is kept, never a secret.
+// lines at indentation ind, and rebuilds v from the decided keys and values once they are set. Each value is
+// under its key (layout.entry). Two keys redacted alike stay two entries (#845, fifth decision of 2026-11-18):
+// the later one in that order gets " (2)", " (3)" and so on, the first number that makes it a key of its own,
+// so the map keeps as many entries as the object has.
+//
+// The sort is the one step of a tool result that is not linear: n keys take O(n log n) comparisons, each
+// reading at most the bytes two keys share at their start, so the bytes read are bounded by the length of the
+// keys times log2(n). The keys are read once into strings, so a comparison reads bytes and no reflection;
+// encoding/json sorts the same keys again when the answer is encoded, as it did on main.
 func (l *layout) mapEntries(v reflect.Value, ind string) bool {
-	type entry struct{ k, e reflect.Value }
-	var es []entry
+	type entry struct {
+		k, e reflect.Value
+		key  string
+	}
+	es := make([]entry, 0, v.Len())
 	for it := v.MapRange(); it.Next(); {
 		k := reflect.New(v.Type().Key()).Elem()
 		k.Set(it.Key())
 		e := reflect.New(v.Type().Elem()).Elem()
 		e.Set(it.Value())
-		es = append(es, entry{k, e})
+		es = append(es, entry{k, e, k.String()})
 	}
-	slices.SortFunc(es, func(a, b entry) int { return cmp.Compare(a.k.String(), b.k.String()) })
+	slices.SortFunc(es, func(a, b entry) int { return strings.Compare(a.key, b.key) })
 	for _, en := range es {
-		l.text(ind)
-		l.value(en.k.String(), en.k.SetString)
 		if en.e.Kind() == reflect.String {
-			l.text(": ")
-			if en.e.Len() > 0 {
-				l.value(en.e.String(), en.e.SetString)
-			}
-			l.text("\n")
+			l.entry(ind, en.key, en.e.String(), en.k.SetString, en.e.SetString)
 			continue
 		}
+		l.text(ind)
+		l.value("", en.key, en.k.SetString)
 		l.text(":\n")
-		secret := redact.SecretCollection(en.k.String())
+		secret := redact.SecretCollection(en.key)
 		if secret {
 			l.whole++
 		}
@@ -272,7 +293,16 @@ func (l *layout) mapEntries(v reflect.Value, ind string) bool {
 	l.after = append(l.after, func() {
 		c := reflect.MakeMapWithSize(v.Type(), len(es))
 		for _, en := range es {
-			c.SetMapIndex(en.k, en.e)
+			k := en.k
+			if c.MapIndex(k).IsValid() {
+				for n := 2; ; n++ {
+					k = reflect.ValueOf(fmt.Sprintf("%s (%d)", en.k.String(), n)).Convert(v.Type().Key())
+					if !c.MapIndex(k).IsValid() && !v.MapIndex(k).IsValid() {
+						break
+					}
+				}
+			}
+			c.SetMapIndex(k, en.e)
 		}
 		v.Set(c)
 	})

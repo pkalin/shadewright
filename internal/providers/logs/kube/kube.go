@@ -358,10 +358,11 @@ func fewerLines(data []byte) int64 {
 // holds what the release before #845 hid here, which redacted all of data, cut it and redacted the excerpt again
 // with its own markers in place (redact.Redactor.ReplaceFrom, thirteenth decision of 2026-11-18). The cut is
 // counted in bytes of data, as before redaction, so the excerpt never holds more lines than when it was redacted
-// after the cut. Redacting all of data costs work linear in its size, which the reads bound by MaxReadBytes
-// (1 MiB): at most about 1,430 steps of redaction work per byte on the most costly input known (about 710 for
-// the rules of this package and as many for the reading of the release before), so at most about 1,500 million
-// steps, a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput).
+// after the cut. The reads bound data by MaxReadBytes (1 MiB). The rules of this package add work linear in its
+// size, at most about 720 steps per byte on the most costly input known; the reading of the release before costs
+// about 710 more on that input, and grows faster than linear on lines each indented one more than the last
+// under a secret key (about 1,950 steps per byte at 1 MiB, #873), so a read costs at most a few seconds
+// (TestExcerptWorkIsBoundedOnTheLargestInput, TestCanonStairWorkIsLinear in package redact).
 // It is the step [Source.Logs] takes after its reads, exported so that tests outside the package run the same
 // code.
 func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string, bool) {

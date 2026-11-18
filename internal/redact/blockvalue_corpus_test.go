@@ -636,32 +636,24 @@ var anyKeyHostileUnits = map[string]func(i int) string{
 	"many keys before a block":      func(i int) string { return []string{"x token: | pass: | ", "\n  a\n"}[min(i%64, 1)] },
 }
 
-// anyKeyWork returns the work ([Work]) of String on the hostile input of about n
-// bytes built from unit, and the size of that input.
-func anyKeyWork(t *testing.T, unit func(int) string, n int) (work, size int) {
+// anyKeySample returns the work of String and of the reading of the release before (sampleWork) on the hostile
+// input of about n bytes built from unit.
+func anyKeySample(t *testing.T, unit func(int) string, n int) workSample {
 	var b strings.Builder
 	for i := 0; b.Len() < n; i++ {
 		b.WriteString(unit(i))
 	}
-	in := b.String()
-	return int(countWork(t, func() { String(in) })), len(in)
+	return sampleWork(t, b.String())
 }
 
 // The rule for block indicators reads each line a bounded number of times, whatever the input: on
-// every hostile input the work of redaction ([Work]) is at most maxWorkPerByte per byte, and eight times the
-// input costs at most about eight times as much. Work is counted, not timed, so a loaded machine cannot fail
+// every hostile input the work of redaction ([Work]) is bounded as checkWork bounds it: what String adds to
+// the reading of the release before is at most ownWorkPerByte per byte, and eight times the input costs at
+// most about eight times as much. Work is counted, not timed, so a loaded machine cannot fail
 // it (#825).
 func TestAnyKeyWorkIsLinear(t *testing.T) {
-	const perByte = maxWorkPerByte
 	for name, unit := range anyKeyHostileUnits {
-		small, smallSize := anyKeyWork(t, unit, 16<<10)
-		large, largeSize := anyKeyWork(t, unit, 128<<10)
-		if large > perByte*largeSize {
-			t.Errorf("%s: %d steps for a %d-byte input, more than %d per byte", name, large, largeSize, perByte)
-		}
-		if float64(large)/float64(largeSize) > 1.125*float64(max(small, 1))/float64(smallSize)+0.5 {
-			t.Errorf("%s: %d steps for %d bytes, %d for %d: more than linear", name, small, smallSize, large, largeSize)
-		}
+		checkWork(t, name, []workSample{anyKeySample(t, unit, 16<<10), anyKeySample(t, unit, 128<<10)})
 	}
 }
 

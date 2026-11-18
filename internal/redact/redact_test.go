@@ -547,18 +547,20 @@ func skipLarge(t *testing.T) {
 	}
 }
 
-// maxWorkPerByte bounds the work ([Work]) of redaction per byte of input on every hostile input of the tests.
-// The largest, about 710 on runs of commas after a quoted value ("blanks commas"), comes from the extent rule,
-// which reads up to maxValueExtent bytes from each value; the rules that read every byte a fixed number of
-// times account for 30 to 75. Since the thirteenth decision of 2026-11-18 (#845) String also applies one pass
-// of the reading of the release before (package released), whose extent rule costs as much again: about 1,420
-// on "blanks commas".
-const maxWorkPerByte = 1536
+// maxWorkPerByte bounds the work ([Work]) per byte of input on every hostile input of the tests: of String
+// where it has no reading of the release before, and of that reading alone (released.Spans) where it has,
+// except on the shapes of releasedSuperlinear (#873). The largest, about 710 on runs of commas after a quoted
+// value ("blanks commas"), comes from the extent rule, which reads up to maxValueExtent bytes from each value;
+// the rules that read every byte a fixed number of times account for 30 to 75. Since the thirteenth decision
+// of 2026-11-18 (#845) String also applies one pass of the reading of the release before (package released),
+// whose extent rule costs as much again; what String adds to that reading is bounded by ownWorkPerByte.
+const maxWorkPerByte = 1024
 
 // Repeating the shapes the scanning rules look for must cost linear work: each value is scanned once and
 // keys inside a value already redacted are skipped. The work ([Work]) is counted, not timed, so a busy machine
-// cannot fail the test (#825): on 256 KiB it is at most maxWorkPerByte per byte, and its work per byte is at
-// most an eighth more than on an eighth of the input (a quadratic scan does eight times the work per byte).
+// cannot fail the test (#825): on 256 KiB checkWork bounds it, and the work per byte of what String adds to
+// the reading of the release before is at most an eighth more than on an eighth of the input (a quadratic scan
+// does eight times the work per byte).
 // 256 KiB, not 1 MiB, since #845: the ratio shows a quadratic scan at any size, and the larger input took most
 // of the tagged run's time.
 func TestRepeatedPatternsStayLinear(t *testing.T) {
@@ -702,21 +704,25 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"view autolinks":           "<https://a>,<b:c@",
 	} {
 		tail := tails[name]
-		small, smallSize := workString(t, name, rep(unit, size/8/len(unit))+tail)
-		large, largeSize := workString(t, name, rep(unit, size/len(unit))+tail)
-		t.Logf("%s: %.1f steps per byte", name, float64(large)/float64(largeSize))
-		if per := float64(large) / float64(largeSize); per > largest {
+		small := sampleString(t, name, rep(unit, size/8/len(unit))+tail)
+		large := sampleString(t, name, rep(unit, size/len(unit))+tail)
+		if per := perByte(large.own(), large.size); per > largest {
 			largest, largestName = per, name
 		}
-		if large > maxWorkPerByte*int64(largeSize) {
-			t.Errorf("%s: %d steps for %d bytes, more than %d per byte", name, large, largeSize, maxWorkPerByte)
-		}
-		if float64(large)/float64(largeSize) > 1.125*float64(max(small, 1))/float64(smallSize)+0.5 {
-			t.Errorf("%s: %d steps for %d bytes, %d for %d: more than linear", name, small, smallSize, large, largeSize)
-		}
+		checkWork(t, name, []workSample{small, large})
 	}
 	// The figure the docs give for the largest unit (comma fields after a quoted value, "blanks commas").
-	t.Logf("largest unit: %s, %.1f steps per byte", largestName, largest)
+	t.Logf("largest unit: %s, String adds %.1f steps per byte to the release's reading", largestName, largest)
+}
+
+// sampleString is sampleWork on in, and fails when String's output is longer than the input.
+func sampleString(t *testing.T, name, in string) workSample {
+	t.Helper()
+	w := sampleWork(t, in)
+	if out := String(in); len(out) > len(in) {
+		t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+	}
+	return w
 }
 
 // workString returns the work of String on in and the size of in, and fails when the output is longer

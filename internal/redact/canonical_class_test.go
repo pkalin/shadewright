@@ -80,26 +80,15 @@ func canonRepeated(key string, n int) string {
 	return strings.Repeat(key, n) + "\n  " + strings.Repeat("garden ", n) + "\nend: ok"
 }
 
-// The repeated-key inputs cost the same per byte at 512, 1,024 and 2,048 keys: at most maxWorkPerByte, and the
-// larger at most an eighth and half a step more per byte than the smallest. On c5daa6f8 "pass: | " cost 2.4M,
+// The repeated-key inputs cost the same per byte at 512, 1,024 and 2,048 keys, as checkWork bounds it. On c5daa6f8 "pass: | " cost 2.4M,
 // 9.1M and 35.0M steps.
 func TestCanonRepeatedKeysWorkIsLinear(t *testing.T) {
 	for _, key := range canonRepeatedKeys {
-		per := make([]float64, 0, 3)
+		samples := make([]workSample, 0, 3)
 		for _, n := range []int{512, 1024, 2048} {
-			w, size := canonWork(t, canonRepeated(key, n))
-			per = append(per, float64(w)/float64(size))
-			t.Logf("%q at %d keys: %d steps for %d bytes, %.1f per byte", key, n, w, size, float64(w)/float64(size))
-			if w > int64(maxWorkPerByte*size) {
-				t.Errorf("%q: %d steps for %d bytes, more than %d per byte", key, w, size, maxWorkPerByte)
-			}
+			samples = append(samples, sampleWork(t, canonRepeated(key, n)))
 		}
-		for _, p := range per[1:] {
-			if p > 1.125*per[0]+0.5 {
-				t.Errorf("%q: %.1f steps per byte: more than linear", key, per)
-				break
-			}
-		}
+		checkWork(t, fmt.Sprintf("repeated key %q", key), samples)
 	}
 }
 

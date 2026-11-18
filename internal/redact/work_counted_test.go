@@ -22,3 +22,7 @@ import "testing"
 
 // countWork returns the work ([Work]) of f.
 func countWork(_ *testing.T, f func()) int64 { return Work(f) }
+
+// countWorkOfReleased returns the work of f and the part of it the reading of the release before took
+// ([WorkOfReleased]).
+func countWorkOfReleased(_ *testing.T, f func()) (total, release int64) { return WorkOfReleased(f) }

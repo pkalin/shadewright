@@ -31,6 +31,8 @@ var (
 	workMu   sync.Mutex
 	counting atomic.Bool
 	steps    atomic.Int64
+	// releasedSteps are the steps of steps that the reading of the release before (package released) took.
+	releasedSteps atomic.Int64
 )
 
 // tick adds n to the count of work while [Work] counts: one turn of a scanning loop, or the bytes a library
@@ -45,14 +47,31 @@ func tick(n int) {
 // are serialized, so two tests cannot mix their counts; redaction that other goroutines run meanwhile is
 // counted too, so a test that calls it runs nothing else at the same time (no t.Parallel).
 func Work(f func()) int64 {
+	total, _ := WorkOfReleased(f)
+	return total
+}
+
+// WorkOfReleased runs f and returns the steps of redaction it took, as [Work], and the part of them that the
+// reading of the release before took (package released, counted by its own counter), so that the linearity
+// tests can bound what the rules of this package add to that reading (#845, fourteenth decision of 2026-11-18).
+func WorkOfReleased(f func()) (total, release int64) {
 	workMu.Lock()
 	defer workMu.Unlock()
 	steps.Store(0)
+	releasedSteps.Store(0)
 	counting.Store(true)
 	defer counting.Store(false)
 	f()
-	return steps.Load()
+	return steps.Load(), releasedSteps.Load()
 }
 
-// The reading of the release before (package released) counts its work with this package's.
-func init() { released.Counter = tick }
+// tickReleased counts n steps of the reading of the release before: in the total and in its own count.
+func tickReleased(n int) {
+	if counting.Load() {
+		steps.Add(int64(n))
+		releasedSteps.Add(int64(n))
+	}
+}
+
+// The reading of the release before (package released) counts its work with this package's, and on its own.
+func init() { released.Counter = tickReleased }

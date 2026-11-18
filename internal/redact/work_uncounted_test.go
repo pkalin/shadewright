@@ -27,3 +27,10 @@ func countWork(t *testing.T, _ func()) int64 {
 	t.Skip("work is counted only with -tags redactwork (make test runs it)")
 	return 0
 }
+
+// countWorkOfReleased skips the test, as countWork.
+func countWorkOfReleased(t *testing.T, _ func()) (total, release int64) {
+	t.Helper()
+	t.Skip("work is counted only with -tags redactwork (make test runs it)")
+	return 0, 0
+}

@@ -250,8 +250,10 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 //     heldUnsettled), without an end, as every look of a stopped holder;
 //   - a pause of the kill switch holds it (waitWhilePaused); a failure of the Kubernetes side, and the caller's
 //     cancellation, go to the error backoff;
-//   - anything else (a merge the close met, the entry that can no longer be used): nothing is closed, and the look
-//     that follows decides from what it reads.
+//   - a merge the close met, a pull request that is not this request's or is being handed over, or an entry that is
+//     gone or can no longer be used (nothingToClose): nothing is closed, and the look that follows decides from what
+//     it reads;
+//   - any other error is returned to the work queue.
 func (r *RemediationRequestReconciler) closeAfterStaleStop(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (reconcile.Result, error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
@@ -272,10 +274,23 @@ func (r *RemediationRequestReconciler) closeAfterStaleStop(ctx context.Context,
 	case refused:
 		log.Info("The Git host still refuses to close the pull request of a stopped stale RemediationRequest",
 			"reason", reason)
-	default:
+	case nothingToClose(err):
 		log.Info("Did not close the pull request of a stopped stale RemediationRequest", "error", err.Error())
+	default:
+		// Not a failure this function knows: returned, so the work queue retries it and the retry is not silent.
+		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, nil
+}
+
+// nothingToClose reports whether err, from the close after a stale stop, means there is nothing for that close to
+// do: the pull request merged while it was being closed (a conflict), it is not this request's or its handoff is in
+// flight, or the plan's repository entry is gone, changed its target branch or can no longer be used. The look that
+// follows decides from what it reads. Any other error is a failure and is not one of these.
+func nothingToClose(err error) bool {
+	return providers.IsConflict(err) || errors.Is(err, errChangeRequestNotOurs) || errors.Is(err, errHandoffInFlight) ||
+		errors.Is(err, errRepositoryGone) || errors.Is(err, errTargetBranchChanged) ||
+		errors.Is(err, freshness.ErrRepositoryUnusable)
 }
 
 // recordMergeOnConfigured records cr, the request's pull request found merged into the target branch the settings

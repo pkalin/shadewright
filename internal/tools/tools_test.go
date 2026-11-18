@@ -967,6 +967,29 @@ func TestGetResourceHidesAMapKeyAsMainDid(t *testing.T) {
 	}
 }
 
+// A map key that is itself hidden keeps the signal it carries for its value (#845, ninth decision of 2026-11-18):
+// main redacted each value alone and then read the whole answer, where the word "authorization" at the end of the
+// key hides the value after it. Hiding the key first as a piece took the word away before the answer was read,
+// and the value showed.
+func TestGetResourceHidesTheValueOfAHiddenKeyWithASignal(t *testing.T) {
+	value := "Qz9Secret" + "Value"
+	key := "postgres" + "://u:p@h/db" + "\n-authorization"
+	p := pod()
+	p.Spec.Volumes = []corev1.Volume{{Name: "csi", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+		Driver: "d", VolumeAttributes: map[string]string{key: value},
+	}}}}
+	r := newEnv(t, []client.Object{p}).call(t, NameGetResource, with(NameGetResource, nil))
+	if r.Status != StatusOK {
+		t.Fatalf("%s: %s", r.Status, r.Text)
+	}
+	if strings.Contains(r.Text, value) {
+		t.Errorf("the value of the key shows, main hid it:\n%s", r.Text)
+	}
+	if !json.Valid([]byte(r.Text)) || !strings.Contains(r.Text, `"driver": "d"`) {
+		t.Errorf("the answer is no JSON or the text around the key is gone:\n%s", r.Text)
+	}
+}
+
 // Numbers, booleans and null are tokens of the walk too (#845, eighth decision of 2026-11-18, point 2): where main
 // hid a whole object or list, every token inside is hidden, and the answer stays valid JSON. main answered the
 // volume below with

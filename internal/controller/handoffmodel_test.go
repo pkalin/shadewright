@@ -91,13 +91,15 @@ import (
 //	   request holds the target lock.
 //
 // Exclusions, each named and recognised by its shape, never by a seed (hmShapes, and the checks that name them): the
-// #288 cleanup bound (a replacement with its takeover recorded let go of its finalizer while being deleted with the
-// pull request open), the #870 head (P3), a reopen after a release (a request whose lock a verdict released when a
-// person reopened the pull request does not take it back and records nothing of it, design 6.5), and a stopped holder
-// whose repository left the settings (it keeps the lock, design 6 table of stops; only the replacement whose recovery
-// holds it releases), and a replacement deleted before it recorded the merge of its pull request after its
-// predecessor ended HandedOff (the pull request was the replacement's alone, and a request deleted before it records
-// the merge of its own pull request records nothing, as any request; the predecessor has ended). With the repository gone, reads never answer, so P1 and P2 ask nothing of a merge then.
+// #288 cleanup bound (a request whose cleanup was failing let go of its finalizer at the end of a bound of that
+// cleanup, elapsed on the model's clock, with the pull request open), the #870 head (P3), a reopen after a release (a
+// request whose lock a verdict released when a person reopened the pull request does not take it back and records
+// nothing of it, design 6.5), a stopped holder whose repository left the settings before any verdict of its pull
+// request was readable (it keeps the lock, design 6 table of stops; only the replacement whose recovery holds it
+// releases), and #875: a replacement deleted before it recorded the merge of its pull request after its predecessor
+// ended HandedOff (the pull request was the replacement's alone, and a request deleted before it records the merge of
+// its own pull request records nothing, as any request; the predecessor has ended). With the repository gone, reads
+// never answer, so P1 and P2 ask nothing of a merge then.
 //
 // A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property; a
 // seed whose only violations an exclusion covers is skipped with the exclusion's name. The default set is the seeds 1
@@ -274,9 +276,16 @@ type hmWorld struct {
 	// gone) when a person reopened the pull request: the named exclusion "a reopen after a release" (design 6.5), a
 	// released request does not take the lock back and records nothing of the reopened pull request.
 	releasedAtReopen map[string]bool
-	// gone288: a request was deleted and let go of its finalizer with the pull request open: the replacement with its
-	// takeover recorded, or either one whose cleanup failed until its bound (CleanupFailing True on its last copy):
-	// the end of the cleanup bound (#288).
+	// verdictSeen names the requests a read of the pull request answered for while it was merged or closed or its
+	// branch gone (prEnded, as of the last step), with the repository in the settings: a verdict was readable to them.
+	verdictSeen map[string]bool
+	prEnded     bool
+	// lastRes and lastErr are what the last reconcile of each request returned.
+	lastRes map[string]reconcile.Result
+	lastErr map[string]error
+	// gone288: a request was deleted and let go of its finalizer with the pull request open after its cleanup failed
+	// until a bound of it elapsed on the model's clock (CleanupFailing True on its last copy): the end of the cleanup
+	// bound (#288).
 	gone288  bool
 	lastRepl *api.RemediationRequest
 	lastPred *api.RemediationRequest
@@ -345,8 +354,8 @@ var hmShapes = []struct {
 	excuses  string
 	matching func(m *hmWorld) bool
 }{
-	// A replacement that took the pull request over is deleted while every read or the close fails; its finalizer
-	// lets go at the end of the CleanupRefused or CleanupFailing bound with the pull request left open (design 6,
+	// A request is deleted while every read or the close fails; its finalizer lets go at the end of the
+	// CleanupRefused or CleanupFailing bound, elapsed on the model's clock, with the pull request left open (design 6,
 	// "The Git cleanup cannot hold a deletion for good", #288), so no request holds the lock of that open pull
 	// request, and a later merge of it is recorded by nobody.
 	{name: "#288 cleanup bound", excuses: "P1 P3 P6", matching: func(m *hmWorld) bool { return m.gone288 }},
@@ -396,7 +405,8 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		number: cr.Number, branch: cr.HeadBranch, predCommit: p.Status.PullRequest.HeadSHA,
 		personCommits: map[string]bool{}, replCommits: map[string]bool{}, once: map[string]error{},
 		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{},
-		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{}}
+		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
+		verdictSeen: map[string]bool{}, lastErr: map[string]error{}, lastRes: map[string]reconcile.Result{}}
 	base, err := g.BranchHead(ctx, mainBranch)
 	if err != nil {
 		t.Fatal(err)
@@ -651,8 +661,16 @@ func (m *hmWorld) gitFail(op string) error {
 	if m.sticky != nil {
 		return m.sticky
 	}
+	if hmPRReads[op] && m.prEnded && m.settings != settingsRemoved {
+		// A read of the pull request that answers while it is merged or closed, or its branch is gone: a verdict
+		// was readable to the actor.
+		m.verdictSeen[m.actor] = true
+	}
 	return nil
 }
+
+// hmPRReads are the reads that find the pull request and its state.
+var hmPRReads = map[string]bool{opGet: true, "FindChangeRequest": true, opList: true}
 
 func (m *hmWorld) gitAfter(op string) error {
 	m.mu.Lock()
@@ -940,6 +958,10 @@ func (m *hmWorld) observeMerge(reqs map[string]*api.RemediationRequest) {
 func (m *hmWorld) observe() {
 	p, rr := m.get(hmPred), m.get(hmRepl)
 	reqs := map[string]*api.RemediationRequest{hmPred: p, hmRepl: rr}
+	cr := m.pr()
+	m.mu.Lock()
+	m.prEnded = cr.State != providers.ChangeRequestOpen || m.branchGone
+	m.mu.Unlock()
 	m.note(p, rr)
 	// P1 and P2 after a merge of a request's own commit.
 	m.observeMerge(reqs)
@@ -964,13 +986,22 @@ func (m *hmWorld) note(p, rr *api.RemediationRequest) {
 		}
 	}
 	// The #288 shape: a request let go of its finalizer while being deleted with the pull request open, at the end of
-	// its cleanup bound: the replacement with its takeover recorded, or either request whose cleanup was failing.
-	letGo := func(now, last *api.RemediationRequest, tookOverCounts bool) bool {
-		return now == nil && last != nil && !last.DeletionTimestamp.IsZero() &&
-			((tookOverCounts && tookOver(last)) || meta.IsStatusConditionTrue(last.Status.Conditions,
-				api.ConditionCleanupFailing))
+	// its cleanup bound: its cleanup was failing (CleanupFailing True on its last copy), and a bound of it had elapsed
+	// on the model's clock when it let go (closeRefusedGrace after CleanupRefused, or cleanupFailingBound after
+	// CleanupFailing). A request that let go with the pull request open in any other way is not this shape.
+	letGo := func(now, last *api.RemediationRequest) bool {
+		if now != nil || last == nil || last.DeletionTimestamp.IsZero() {
+			return false
+		}
+		failing := meta.FindStatusCondition(last.Status.Conditions, api.ConditionCleanupFailing)
+		if failing == nil || failing.Status != metav1.ConditionTrue {
+			return false
+		}
+		refused := meta.FindStatusCondition(last.Status.Conditions, api.ConditionCleanupRefused)
+		return boundLeft(failing, cleanupFailingBound, m.now) <= 0 ||
+			(refused != nil && refused.Status == metav1.ConditionTrue && boundLeft(refused, closeRefusedGrace, m.now) <= 0)
 	}
-	if (letGo(rr, m.lastRepl, true) || letGo(p, m.lastPred, false)) && m.pr().State == providers.ChangeRequestOpen &&
+	if (letGo(rr, m.lastRepl) || letGo(p, m.lastPred)) && m.pr().State == providers.ChangeRequestOpen &&
 		!m.gone288 {
 		m.gone288 = true
 		m.logf("  the #288 shape: a request let go at its cleanup bound with the pull request open")
@@ -1027,6 +1058,7 @@ func (m *hmWorld) reconcile(who string) {
 	crashed, faulted := m.crashed, m.faulted
 	m.crashed, m.crashAt = false, -1
 	m.mu.Unlock()
+	m.lastRes[who], m.lastErr[who] = res, err
 	after := m.get(who)
 	m.logf("  -> %s: %s (requeue %v, err %v)", who, describe(after), res.RequeueAfter, err)
 	if os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS") != "" && after != nil {
@@ -1388,7 +1420,7 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 			// and at its deletion only once it recorded its merge): the pull request was the replacement's alone, and
 			// a request deleted before it records the merge of its own pull request records nothing, as any request
 			// (finalize reads it merged and lets go). The predecessor has ended and records nothing either.
-			m.excused["replacement deleted before it recorded, predecessor handed off"]++
+			m.excused["#875 replacement deleted before it recorded, predecessor handed off"]++
 			return
 		}
 		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && m.releasedAtReopen[hmPred] {
@@ -1408,7 +1440,7 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 		!reqs[hmRepl].DeletionTimestamp.IsZero()) {
 		// The same shape for the predecessor's commit put back after the takeover: the pull request was the
 		// replacement's alone, and it was deleted before it recorded the merge.
-		m.excused["replacement deleted before it recorded, predecessor handed off"]++
+		m.excused["#875 replacement deleted before it recorded, predecessor handed off"]++
 		return
 	}
 	if (owner.Status.MergeReceipt == nil || owner.Status.MergeReceipt.HeadSHA != mg.head) && !m.foreignOnReplacement(reqs) {
@@ -1440,17 +1472,24 @@ func (m *hmWorld) liveness() {
 	}
 	for _, who := range []string{hmPred, hmRepl} {
 		if x := m.get(who); x != nil && ptr.Deref(x.Status.HoldsTarget, false) {
-			if m.settings == settingsRemoved && !m.recovering(x) {
+			if m.settings == settingsRemoved && m.stopped(x) && !m.verdictSeen[who] {
 				// A stopped holder whose repository left the settings keeps the lock, as nothing can read its pull
 				// request any more (design 6, the table of stops, "the repository is unavailable or unusable"; tenth
 				// decision of 2026-11-18 on #771): only the replacement whose recovery holds it releases (second round
-				// of #786).
+				// of #786). Only a holder that had stopped, and that saw its pull request open at every read that
+				// answered before the settings changed (no verdict was readable); a request still at work, or one that
+				// could have read a verdict, is not excused (fourth round of #786).
 				m.excused["stopped holder of a repository that left the settings"]++
 				continue
 			}
 			m.fail("P6", "%s, and the %s still holds the target lock after the settling run (%s)", why, who, describe(x))
 		}
 	}
+}
+
+// stopped reports whether x had stopped: ended, or NeedsIntervention, and not the replacement whose recovery watches.
+func (m *hmWorld) stopped(x *api.RemediationRequest) bool {
+	return (ended(x.Status.Phase) || x.Status.Phase == api.PhaseNeedsIntervention) && !m.recovering(x)
 }
 
 // recovering reports whether x is the replacement before its takeover: its handoff from Reserved, its lock held for
@@ -1777,4 +1816,29 @@ func TestHandoffModelDeletionAfterABranchChange(t *testing.T) {
 func TestHandoffModelPredecessorMergeWhileItIsDeleted(t *testing.T) {
 	hmDirected(t, hmStartIntent, []hmStep{stRecRepl, {Kind: hForce, Variant: forceDrop}, stMerge, stRecPred,
 		{Kind: hDelete, Obj: hmPred}, stRecRepl})
+}
+
+// Fourth round of #786, seed 90404: after the recorded takeover a person puts the predecessor's commit back and closes
+// the pull request, the predecessor aborts its intent and releases the lock, then a person reopens the pull request and
+// merges it. The predecessor cannot record that merge any more (a verdict released it), so the replacement, which
+// still watches, must not wait for it: after the settling run no request holds the lock, and no request is left
+// retrying with an error or still at work on the merged pull request.
+func TestHandoffModelReopenAfterThePredecessorReleased(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{stRecRepl, stRecPred, {Kind: hForce, Variant: forceDrop},
+		{Kind: hClose}, stRecPred, {Kind: hReopen}, stMerge})
+	for _, who := range []string{hmPred, hmRepl} {
+		x := m.get(who)
+		if x == nil {
+			continue
+		}
+		if ptr.Deref(x.Status.HoldsTarget, false) {
+			t.Errorf("the %s holds the target lock after the settling run: %s", who, describe(x))
+		}
+		if err := m.lastErr[who]; err != nil {
+			t.Errorf("the last reconcile of the %s failed (a retry no condition shows): %v", who, err)
+		}
+		if progresses(x) {
+			t.Errorf("the %s still waits on the merged pull request: %s", who, describe(x))
+		}
+	}
 }

@@ -349,13 +349,16 @@ func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alph
 
 // mergeNotRecorded is recheck's answer to a look that found the pull request merged without recording the merge:
 // merged is true, and nothing else runs, for prMergeCommitPending (looked at again until the host reports the
-// merge commit or the wait ends) and prMergeUnchecked (the plan could not be checked at the merge: Git reads use the common visible poll, while Kubernetes errors are returned). The full freshness check never runs on a merged change, which makes the plan
+// merge commit or the wait ends), prMergeRecordPending (looked at again at the poll interval until the other request
+// of the handoff records the merge or releases its lock) and prMergeUnchecked (the plan could not be checked at the merge: Git reads use the common visible poll, while Kubernetes errors are returned). The full freshness check never runs on a merged change, which makes the plan
 // look stale.
 func (r *RemediationRequestReconciler) mergeNotRecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, outcome prOutcome,
 	lookErr error, bound waitBound) (res ctrl.Result, merged bool, err error) {
 	switch outcome {
 	case prMergeCommitPending:
 		return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, true, nil
+	case prMergeRecordPending:
+		return ctrl.Result{RequeueAfter: r.pullRequestPollInterval()}, true, nil
 	case prMergeUnchecked:
 		res, err := r.waitOrFail(ctx, rr, lookErr, bound)
 		return res, true, err

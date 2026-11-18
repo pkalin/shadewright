@@ -660,17 +660,33 @@ func (r *RemediationRequestReconciler) predecessorMergeOwner(ctx context.Context
 	}
 	owner, err := r.mergedHeadOwner(ctx, git, pred, repl, to, head)
 	if err == nil && owner == ownerReplacement && !replacementHoldsReceipt(pred, repl, head) {
+		if !mayStillRecord(repl) {
+			// The replacement released its lock without recording the merge: it records nothing of this pull request
+			// any more, so the merge is a foreign change for the predecessor (fourth round of #786).
+			return ownerForeign, nil
+		}
 		return ownerReplacementPending, nil
 	}
 	return owner, err
 }
 
+// mayStillRecord reports whether other, the other request of a handoff, read from the API server, can still record a
+// merge of the pull request the handoff names: it is not being deleted, and it holds the target lock or a standing
+// intent. A request that released its lock on a verdict records nothing of that pull request any more (design 6.5),
+// also when a person reopens and merges it, so the request that still watches does not wait for it: the merge is a
+// foreign change for the watcher (fourth round of #786, the mirror of handoffSettled). The one rule for both sides
+// of a handoff (predecessorMergeOwner, replacementMergeOwner).
+func mayStillRecord(other *remediationv1alpha1.RemediationRequest) bool {
+	return other != nil && other.DeletionTimestamp.IsZero() &&
+		(ptr.Deref(other.Status.HoldsTarget, false) || intent(other) != nil)
+}
+
 // replacementMergeOwner is the rule for who records a merge with head of the pull request rr, a replacement, took over
 // (tookOver), seen from rr: a head that is the one its predecessor recorded is the predecessor's once it holds the
 // receipt of that merge (ownerPredecessorRecords), also while it is being deleted, and before that while it is alive
-// (its UID, not being deleted) and not handed off (ownerPredecessorPending: it records its own merge, mergedHeadOwner);
-// anything else, a predecessor gone, or being deleted or handed off without that receipt, is ownerForeign, rr's to
-// record as before. A failed read of the predecessor is the Kubernetes API's (a *clusterError).
+// (its UID, not being deleted), not handed off and still able to record it (mayStillRecord: it holds the lock or its
+// intent; ownerPredecessorPending: it records its own merge, mergedHeadOwner); anything else, a predecessor gone, being
+// deleted, handed off or released by a verdict without that receipt, is ownerForeign, rr's to record as before. A failed read of the predecessor is the Kubernetes API's (a *clusterError).
 func (r *RemediationRequestReconciler) replacementMergeOwner(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	head string) (mergeOwner, error) {
 	if !tookOver(rr) {
@@ -692,7 +708,7 @@ func (r *RemediationRequestReconciler) replacementMergeOwner(ctx context.Context
 		// on it (supersedeReplacementAfterMerge) before it goes (third round of #786).
 		return ownerPredecessorRecords, nil
 	}
-	if !pred.DeletionTimestamp.IsZero() || handedOff(pred) {
+	if !pred.DeletionTimestamp.IsZero() || handedOff(pred) || !mayStillRecord(pred) {
 		return ownerForeign, nil
 	}
 	return ownerPredecessorPending, nil
@@ -826,6 +842,43 @@ func (r *RemediationRequestReconciler) leaveReplacementMerge(ctx context.Context
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseSuperseded, ReasonMergedForReplacement,
 		fmt.Sprintf("Pull request #%d was merged with the commit of RemediationRequest %s, which records the merge; "+
 			"this request's plan was not merged", v.pr.Number, name))
+}
+
+// ReasonMergeRecordPending is the reason of condition Approved False on a request of a handoff whose pull request was
+// merged with the commit of the other request, which still holds the target lock or a standing intent and records
+// that merge (ownerReplacementPending, ownerPredecessorPending): this request waits for that record and writes nothing
+// to the merged pull request (fourth round of #786).
+const ReasonMergeRecordPending = "MergeRecordPending"
+
+// errMergeRecordPending is lookMovedHead's answer while it waits for the other request of the handoff to record the
+// merge of its commit: nothing else is done on the merged pull request (no check run, no close, no reply).
+var errMergeRecordPending = errors.New("waiting for the other request of the handoff to record the merge")
+
+// awaitOtherRecord shows that rr waits for other, the request of its handoff that records the merge v found
+// (condition Approved False, ReasonMergeRecordPending, written only when it changes), and returns
+// errMergeRecordPending. The wait lasts while other may still record it (mayStillRecord); once other records it or
+// releases its lock, the next look decides again (predecessorMergeOwner, replacementMergeOwner). A failed status write
+// is returned for a retry.
+func (r *RemediationRequestReconciler) awaitOtherRecord(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict, other string) error {
+	changed := meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type:   remediationv1alpha1.ConditionApproved,
+		Status: metav1.ConditionFalse,
+		Reason: ReasonMergeRecordPending,
+		Message: fmt.Sprintf("Pull request #%d was merged with the commit of RemediationRequest %s, which records the "+
+			"merge; this request waits for that record while RemediationRequest %s holds the target or its handoff, "+
+			"and writes nothing to the pull request", v.pr.Number, other, other),
+		ObservedGeneration: rr.Generation,
+	})
+	if changed {
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		}
+		logf.FromContext(ctx).Info("The pull request of RemediationRequest was merged with the commit of the other "+
+			"request of its handoff; waiting for that request to record the merge",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number, "recordedBy", other)
+	}
+	return errMergeRecordPending
 }
 
 // afterUpdate reads the pull request after the branch update (ADR-0028 section 4 item 5), by the number the

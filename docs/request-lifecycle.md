@@ -47,7 +47,7 @@ stateDiagram-v2
     NeedsIntervention --> Merged: a stopped holder whose own pull request is found merged later (#771, #808)
     NeedsIntervention --> Merged: a replacement whose watch after a refused recovery ended sees its commit merged later (#786)
     NeedsIntervention --> PRCreated: the same, while the merge commit or the check at the merge is awaited (#786)
-    NeedsIntervention --> Cancelled: that pull request merged without its commit (HandoffAborted, #786)
+    NeedsIntervention --> Cancelled: that pull request merged with a head that is not its commit (HandoffAborted, #786)
     Cancelled --> Merged: a replacement that ended before its takeover sees its commit merged later (#786)
     Cancelled --> PRCreated: the same, while the merge commit or the check at the merge is awaited (#786)
     Expired --> Merged: its own pull request of a lost open found merged by the cleanup after the deadline (#771), a stopped holder's found merged later (#808), or a replacement that ended before its takeover sees its commit merged later (#786)

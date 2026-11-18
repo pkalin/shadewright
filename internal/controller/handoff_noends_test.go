@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,13 @@ func TestRecoveryForeignMergeWithThePredecessorGone(t *testing.T) {
 	}
 	if ptr.Deref(got.Status.HoldsTarget, false) {
 		t.Fatal("the merged pull request did not settle the lock")
+	}
+	// The merged head may carry the replacement's commit under a person's (#870): the message says the head is not
+	// this request's commit, never that the commit is absent (fourth round of #786).
+	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPROpened)
+	if c == nil || !strings.Contains(c.Message, "which is not this request's commit") ||
+		strings.Contains(c.Message, "without this request's commit") {
+		t.Fatalf("PullRequestOpened = %+v: want a message saying the merged head is not this request's commit", c)
 	}
 }
 

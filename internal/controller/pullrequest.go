@@ -1260,6 +1260,10 @@ const (
 	// could not be opened (watchBranchChanged). Nothing else is done: the error is retried, since the full
 	// freshness check would end the request without knowing whether it was merged.
 	prBranchUnread
+	// prMergeRecordPending: merged with the commit of the other request of a handoff, which records the merge
+	// (awaitOtherRecord). Nothing else is done on the merged pull request: it is looked at again at the poll
+	// interval until that request records the merge or releases its lock.
+	prMergeRecordPending
 )
 
 // watchPullRequest looks at the recorded pull request: a merge ends the request (Merged), a pull request
@@ -1302,6 +1306,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prConflicted, nil
 	case errors.Is(err, errMergeCommitPending):
 		return prMergeCommitPending, nil
+	case errors.Is(err, errMergeRecordPending):
+		return prMergeRecordPending, nil
 	}
 	comments := commentsNone
 	if ctx.Err() == nil {
@@ -1527,6 +1533,16 @@ func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git pr
 		switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
 		case err != nil:
 			return err
+		case ok && cr.State == providers.ChangeRequestMerged:
+			// Merged with the replacement's expected commit: while the replacement may still record the merge, this
+			// request waits for that record without acting on the merged pull request as on an open one.
+			switch owner, err := r.predecessorMergeOwner(ctx, git, rr, cr.HeadSHA); {
+			case err != nil:
+				return err
+			case owner == ownerReplacementPending:
+				return r.awaitOtherRecord(ctx, rr, v, string(intent(rr).Name))
+			}
+			return nil
 		case ok:
 			return nil
 		}
@@ -1552,8 +1568,9 @@ func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git pr
 		case owner == ownerReplacement:
 			return r.leaveReplacementMerge(ctx, rr, v, owner)
 		case owner == ownerReplacementPending:
-			// The replacement records the merge of its commit; this request ends once it holds the receipt.
-			return nil
+			// The replacement records the merge of its commit; this request ends once it holds the receipt, and
+			// writes nothing to the merged pull request meanwhile.
+			return r.awaitOtherRecord(ctx, rr, v, string(rr.Status.Handoff.To.Name))
 		}
 	}
 	if cr.State == providers.ChangeRequestMerged && tookOver(rr) {
@@ -1564,7 +1581,7 @@ func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git pr
 		case owner == ownerPredecessorRecords:
 			return r.leavePredecessorMerge(ctx, rr, v)
 		case owner == ownerPredecessorPending:
-			return nil
+			return r.awaitOtherRecord(ctx, rr, v, string(rr.Status.Handoff.From.Name))
 		}
 	}
 	return r.headMoved(ctx, git, rr, cr)

@@ -763,7 +763,8 @@ func (r *RemediationRequestReconciler) endOnOtherMerge(ctx context.Context, rr *
 	}
 	clearReleasedRead(rr)
 	logf.FromContext(ctx).Info("Released the target lock of RemediationRequest: the pull request it was to take over "+
-		"was merged without its commit", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number)
+		"was merged with a head that is not its commit", "remediationRequest", client.ObjectKeyFromObject(rr),
+		"pullRequest", cr.Number, "head", cr.HeadSHA)
 	if breakerOutcome(rr) != outcomeFailure {
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
@@ -773,8 +774,8 @@ func (r *RemediationRequestReconciler) endOnOtherMerge(ctx context.Context, rr *
 	// It leaves its final phase, so the breaker's counts of that end go with it (classifyBreaker counts the new end).
 	rr.Status.BreakerCounts = nil
 	return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.ReasonHandoffAborted,
-		fmt.Sprintf("Pull request #%d, which this request was to take over, was merged without this request's commit; "+
-			"nothing was taken over", cr.Number)))
+		fmt.Sprintf("Pull request #%d, which this request was to take over, was merged with head %s, which is not "+
+			"this request's commit; nothing was taken over", cr.Number, cr.HeadSHA)))
 }
 
 // endWithoutCommit settles rr, a replacement that ended before it took the pull request over (endedBeforeTakeover),

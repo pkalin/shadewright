@@ -1412,28 +1412,7 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 		return
 	}
 	if owner == nil || (mg.owner == hmRepl && !owner.DeletionTimestamp.IsZero() && !mg.recorded[hmRepl]) {
-		// #786, decision 2 of the model result of 2026-11-18: a deleted replacement records nothing; unless it
-		// recorded the merge before it went, the predecessor records it as a foreign change, a predecessor that handed
-		// its pull request over (to Done) included: takeover, merge, replacement deleted ends with one record.
-		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && handedOff(reqs[hmPred]) {
-			// The predecessor ended HandedOff while the replacement lived (step 5 is written by the replacement alone,
-			// and at its deletion only once it recorded its merge): the pull request was the replacement's alone, and
-			// a request deleted before it records the merge of its own pull request records nothing, as any request
-			// (finalize reads it merged and lets go). The predecessor has ended and records nothing either.
-			m.excused["#875 replacement deleted before it recorded, predecessor handed off"]++
-			return
-		}
-		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && m.releasedAtReopen[hmPred] {
-			// The fallback is the predecessor, and a verdict released its lock before the reopen: it records nothing
-			// of the reopened pull request either (design 6.5), so the merge of the deleted replacement's commit
-			// stays unrecorded.
-			m.excused["reopen after a release"]++
-			return
-		}
-		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && !m.foreignForGone(reqs) {
-			m.fail("P1", "the merge of the deleted replacement's commit %s is recorded on neither request (pred: %s)",
-				short(mg.head), describe(reqs[hmPred]))
-		}
+		m.settledGoneOwner(mg, reqs)
 		return
 	}
 	if mg.afterTakeover && handedOff(owner) && !mg.recorded[hmRepl] && (reqs[hmRepl] == nil ||
@@ -1446,6 +1425,33 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 	if (owner.Status.MergeReceipt == nil || owner.Status.MergeReceipt.HeadSHA != mg.head) && !m.foreignOnReplacement(reqs) {
 		m.fail("P1", "the merge of the %s's commit %s is not recorded on it with its receipt (pred: %s, repl: %s)",
 			mg.owner, short(mg.head), describe(m.get(hmPred)), describe(m.get(hmRepl)))
+	}
+}
+
+// settledGoneOwner is settledRecord for a merge whose owner is gone, or is the replacement being deleted before it
+// recorded the merge.
+func (m *hmWorld) settledGoneOwner(mg *hmMerge, reqs map[string]*api.RemediationRequest) {
+	// #786, decision 2 of the model result of 2026-11-18: a deleted replacement records nothing; unless it
+	// recorded the merge before it went, the predecessor records it as a foreign change, a predecessor that handed
+	// its pull request over (to Done) included: takeover, merge, replacement deleted ends with one record.
+	if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && handedOff(reqs[hmPred]) {
+		// The predecessor ended HandedOff while the replacement lived (step 5 is written by the replacement alone,
+		// and at its deletion only once it recorded its merge): the pull request was the replacement's alone, and
+		// a request deleted before it records the merge of its own pull request records nothing, as any request
+		// (finalize reads it merged and lets go). The predecessor has ended and records nothing either.
+		m.excused["#875 replacement deleted before it recorded, predecessor handed off"]++
+		return
+	}
+	if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && m.releasedAtReopen[hmPred] {
+		// The fallback is the predecessor, and a verdict released its lock before the reopen: it records nothing
+		// of the reopened pull request either (design 6.5), so the merge of the deleted replacement's commit
+		// stays unrecorded.
+		m.excused["reopen after a release"]++
+		return
+	}
+	if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && !m.foreignForGone(reqs) {
+		m.fail("P1", "the merge of the deleted replacement's commit %s is recorded on neither request (pred: %s)",
+			short(mg.head), describe(reqs[hmPred]))
 	}
 }
 
@@ -1841,4 +1847,30 @@ func TestHandoffModelReopenAfterThePredecessorReleased(t *testing.T) {
 			t.Errorf("the %s still waits on the merged pull request: %s", who, describe(x))
 		}
 	}
+}
+
+// Fourth round of #786: a person merges the replacement's commit before the replacement recorded its takeover, and
+// the predecessor, whose intent stands, looks first. The replacement records that merge, so the predecessor waits for
+// it: it shows Approved False with MergeRecordPending, naming the replacement, and writes nothing to the merged pull
+// request; the replacement then records the merge and the predecessor ends.
+func TestHandoffModelWaitForTheReplacementsRecordIsShown(t *testing.T) {
+	steps := make([]hmStep, 0, 4)
+	steps = append(steps, stMerge, stRecPred)
+	m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
+	for i, s := range steps {
+		m.stepNo = i + 1
+		m.apply(s)
+		m.observe()
+	}
+	for _, l := range m.trace {
+		if strings.Contains(l, "git write") {
+			t.Fatalf("a write to the merged pull request while the replacement's record is awaited: %s", l)
+		}
+	}
+	p := m.get(hmPred)
+	if c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved); c == nil ||
+		c.Reason != ReasonMergeRecordPending || !strings.Contains(c.Message, string(p.Status.Handoff.To.Name)) {
+		t.Fatalf("Approved = %+v, want reason %s naming the replacement (%s)", c, ReasonMergeRecordPending, describe(p))
+	}
+	hmDirected(t, hmStartPushed, append(steps, stRecRepl, stRecPred))
 }

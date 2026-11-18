@@ -651,6 +651,9 @@ func (r *report) markdown() string {
 		fmt.Fprintf(&b, "- Effort %s; thinking allowance %d tokens above the output limit\n", a.Effort,
 			a.ThinkingAllowance)
 	}
+	if c := r.Manifest.Compatible; c != nil {
+		fmt.Fprintf(&b, "- Server `%s`; endpoint `%s`\n", c.ServerID, c.EndpointHash)
+	}
 	fmt.Fprintf(&b, "- Prompt `%s`; rubric %s@%s\n", r.Manifest.PromptVersion, r.Manifest.Rubric.FleetRepository,
 		r.Manifest.Rubric.FleetCommit[:min(12, len(r.Manifest.Rubric.FleetCommit))])
 	fmt.Fprintf(&b, "- Passed %d of %d runs (%.0f%%, threshold %.0f%%, %d repeat(s))\n", r.Totals.Passed, r.Totals.Runs,

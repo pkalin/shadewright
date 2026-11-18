@@ -80,9 +80,10 @@ import (
 //     minutes after its start (MergeCheck, MergeContent); an end that fell in a pause or while the executor was down
 //     is due when that gap ended (afterGap);
 //   - last read (not while paused): a reconcile that starts with a MergeCheck or MergeContent wait past its end and
-//     returns no error, with no write made to fail, leaves no such wait standing (a failed last read ends it, never
-//     a retry), and when it ended one it called the Git host, unless the repository is not in the settings (the wait
-//     never ends without a read; ninth decision of 2026-11-18 on #771, point 1);
+//     returns no error, with no write made to fail, ends it only on evidence about its last read (lastReadProperty):
+//     a failed read ends it (never a retry), a repository gone from the settings ends it, a pause met inside the
+//     reconcile or answers that disagree keep it, and a kept wait comes back between a second and the poll interval
+//     (ninth decision of 2026-11-18 on #771, point 1, and the tenth, point 1);
 //   - clocks (not while paused): every time field of the status that bounds a wait has not passed its end by more than one poll
 //     interval (gitWaitClocks): a request in PolicyChecked past its deadline, a merge seen without its commit
 //     (mergeCommitAwaitedSince, due as a read wait) whose merge is not recorded;
@@ -94,9 +95,10 @@ import (
 //     and is not ended runs hot, and the clock that bounds it never moves);
 //   - record: a merge the status records names its pull request;
 //   - lock recorded: a request whose status records its merge (Merged, Succeeded, Inconclusive, Failed with its
-//     receipt, or its pull request marked merged, MergedWithForeignChange and MergeContentUnreadable among them) and
-//     that no verification holds holds no lock after a reconcile with no write made to fail, paused or not (ninth
-//     decision of 2026-11-18 on #771, point 5);
+//     receipt, or its pull request marked merged) and that no verification holds holds no lock after a reconcile
+//     with no write made to fail, paused or not (ninth decision of 2026-11-18 on #771, point 5), except a merge that
+//     did not deliver the plan as shown (MergedWithForeignChange, MergeContentUnreadable) or whose wait for a read
+//     is open: that lock waits for a read of the branch (tenth decision, point 3);
 //   - lock: the lock is never released while a pull request of the request is open, nor on a merge the status does
 //     not record, checked at the moment of the release (a merge into a branch the plan's change was not for, seen
 //     only after the settings moved, is recorded as released aside), and a lock once released never comes back
@@ -139,6 +141,9 @@ const (
 	faultTimeout = "+timeout"
 	// faultBoth joins two faults of one pass.
 	faultBoth = "&"
+	// opGet404 answers the read of the pull request by its number with a 404 that the listing of its branch does not
+	// confirm: answers that disagree, not a failed read (tenth decision of 2026-11-18 on #771).
+	opGet404 = "get404"
 
 	// startRunning: the request waits for review, not stopped.
 	startRunning = "running"
@@ -163,6 +168,11 @@ const (
 	// focusPause: the kill switch pauses writes early and the pause mostly lasts, while the pull request is closed,
 	// deleted or merged and a deadline passes.
 	focusPause = "pause"
+	// focusLastRead: a request stopped for a change of its target branch whose pull request a person moves to the
+	// branch the settings name now and merges there, with or without its commit, while the reads of what it brought
+	// fail; past the end of its wait for a read, the answers disagree, a pause comes and goes inside one reconcile, or
+	// the host reports the commit (tenth decision of 2026-11-18 on #771).
+	focusLastRead = "lastread"
 )
 
 var (
@@ -174,7 +184,7 @@ var (
 	longBranch = strings.Repeat("r", 255)
 	// modelFocuses are the focuses of the seeds, in the order of seed modulo their number.
 	modelFocuses = []string{focusNone, focusDeadline, focusCommit, focusReceipt, focusStale, focusLong, focusCancel,
-		focusPause}
+		focusPause, focusLastRead}
 )
 
 // modelSeeds is the fixed seed set: 1 to n.
@@ -294,21 +304,35 @@ type modelWorld struct {
 	violations []string
 	// focus weights the events (modelFocuses).
 	focus string
+	// flicker: the next reconcile that makes a last read meets a pause at its first read of the settings after the
+	// check at its start, lifted at the next read (flickerReader).
+	flicker bool
+	// flickered: the flicker was consumed by the reconcile just checked.
+	flickered bool
 	// paused: the kill switch pauses writes now. flap: under focusPause, the pause comes and goes at every event,
 	// faster than a wait, while a merge waits for its commit or its content.
 	paused, flap bool
 	// calls counts the calls to the Git host (opening the repository included) in the reconcile running; passed is
 	// the kind of a Git wait of the request that had passed its end when that reconcile began, and ended whether the
 	// first status write of that reconcile was made (property "ending").
-	calls  int
-	passed string
-	ended  bool
+	calls int
+	// failedCalls counts the calls to the Git host the model made fail in the reconcile running (property "last
+	// read": the evidence that a last read failed).
+	failedCalls int
+	// lastFailedCalls is failedCalls of the last reconcile checked (readsSettle).
+	lastFailedCalls int
+	// lastErred: the last reconcile checked returned an error or had a write made to fail (readsSettle).
+	lastErred bool
+	passed    string
+	ended     bool
 	// lifted: the pause was lifted since the last reconcile (property "lift"); liftedAt is when the last pause was
 	// lifted: an end that passed during it is due by then (afterGap).
 	lifted             bool
 	pausedAt, liftedAt time.Time
-	// pauses are the pauses lifted so far, in order; downs the times the executor was down (down), in order.
-	pauses, downs []pauseSpan
+	// pauses are the pauses lifted so far, in order; downs the times the executor was down (down), in order;
+	// disagree the times the answers about the pull request disagreed (opGet404), from disagreeFrom while they do.
+	pauses, downs, disagree []pauseSpan
+	disagreeFrom            time.Time
 	// afterLift counts the reconciles since the last lift with reads working and no write made to fail; -1 when
 	// none is counted (no lift yet, or a fault since).
 	afterLift int
@@ -359,6 +383,8 @@ func drawStart(rng *rand.Rand, focus string) modelStart {
 		st := modelStart{start: starts[rng.IntN(len(starts))], verify: rng.IntN(2) == 0, focus: focus}
 		st.fresh = st.start == startRunning && rng.IntN(3) > 0
 		return st
+	case focusLastRead:
+		return modelStart{start: stopPlanFresh, verify: rng.IntN(2) == 0, focus: focus}
 	case focusPause:
 		if rng.IntN(2) == 0 {
 			// The pause comes and goes faster than a wait, while a merge of a running request waits (flap).
@@ -472,7 +498,7 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 			return c.Get(ctx, key, obj, opts...)
 		},
 	})
-	r.Client, r.APIReader = cache, direct
+	r.Client, r.APIReader = cache, &flickerReader{WithWatch: direct, m: m}
 	r.Source = &modelResolver{m: m}
 	r.OpenRepository = func(ctx context.Context, repo api.GitRepository) (providers.GitProvider, error) {
 		if err := (&modelGit{m: m}).fail(ctx, faultOpen); err != nil {
@@ -1028,9 +1054,13 @@ func (m *modelWorld) flapEvent(cr providers.ChangeRequest, open bool) bool {
 	return true
 }
 
-// focusEvent is the event of the run's focus, when it draws one; false leaves the event to the common draw.
+// focusEvent is the event of the run's focus, when it draws one; false leaves the event to the common draw. Under any
+// focus, a stopped request with an open wait for a read may meet answers that disagree for a while (disagreeEvent).
 func (m *modelWorld) focusEvent(cr providers.ChangeRequest) bool {
 	open := cr.State == providers.ChangeRequestOpen && !m.deleted
+	if m.disagreeEvent() {
+		return true
+	}
 	switch m.focus {
 	case focusDeadline:
 		// Mostly quiet until the deadline and a poll interval after it have passed, while the outage lasts.
@@ -1064,6 +1094,8 @@ func (m *modelWorld) focusEvent(cr providers.ChangeRequest) bool {
 		return m.cancelEvent(cr, open)
 	case focusPause:
 		return m.pauseEvent(cr, open)
+	case focusLastRead:
+		return m.lastReadEvent(cr, open)
 	case focusStale:
 		if !m.released {
 			// First the lock is released: the pull request is merged and verified (WaitingForDelivery holds the
@@ -1101,6 +1133,109 @@ func (m *modelWorld) focusEvent(cr providers.ChangeRequest) bool {
 	}
 	return false
 }
+
+// lastReadEvent is the event of focusLastRead: the open pull request moved to the configured branch and merged there
+// (half of the time without its commit, else with the reads of what it brought failing for a while); then, once a
+// wait for a read stands, a pause that comes and goes inside the next reconcile (flicker), the host reporting the
+// commit, or reads that work again; mostly quiet otherwise, so the waits pass their end.
+func (m *modelWorld) lastReadEvent(cr providers.ChangeRequest, open bool) bool {
+	live := m.live()
+	reading := gitWait(live, waitMergeCheck) != nil || gitWait(live, waitMergeContent) != nil
+	switch {
+	case open && cr.BaseBranch != m.configured && m.rng.IntN(2) == 0:
+		if err := m.g.SetBase(m.number, m.configured); err != nil {
+			return false
+		}
+		sha, err := m.g.Merge(m.number)
+		if err != nil {
+			return false
+		}
+		m.mu.Lock()
+		m.merge, m.noCommit = sha, m.rng.IntN(2) == 0
+		if !m.noCommit {
+			m.fault = faultBetween
+			m.lastingUntil = m.clock.at.Add(time.Duration(3+m.rng.IntN(10)) * time.Minute)
+		}
+		noCommit := m.noCommit
+		m.mu.Unlock()
+		m.logf("move the pull request to the configured branch and merge it there (merge commit withheld: %t)",
+			noCommit)
+		return true
+	case reading && m.rng.IntN(3) == 0:
+		m.flicker = true
+		m.logf("a pause comes and goes inside the next reconcile")
+		return true
+	case reading && m.rng.IntN(4) == 0:
+		m.mu.Lock()
+		m.noCommit = false
+		m.mu.Unlock()
+		m.logf("the host reports the merge commit")
+		return true
+	}
+	return m.rng.IntN(3) > 0
+}
+
+// flickerReader serves the settings paused at the first read made after the reconcile marked its last reads
+// (markLastRead) while the model's flicker is set, and as they are at every other read: a pause set after the check at
+// the start of the reconcile and lifted before the end of the wait reads the settings again.
+type flickerReader struct {
+	client.WithWatch
+	m *modelWorld
+}
+
+func (f *flickerReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := f.WithWatch.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	s, ok := obj.(*api.RemediationSettings)
+	if !ok || len(f.m.r.gitRetries().lastReads(f.m.key)) == 0 {
+		return nil
+	}
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	if f.m.flicker {
+		f.m.flicker = false
+		s.Spec.Paused = new(true)
+	}
+	return nil
+}
+
+// disagreeEvent: the read of the pull request by its number answers 404 while its branch still lists it (opGet404),
+// for a while, when the request is stopped with an open wait for a read: answers that disagree are no evidence about
+// the last read, so the wait stands until they agree (tenth decision of 2026-11-18 on #771, point 1). The answer the
+// running path gets is left out: it returns an error there, before this branch as on main.
+func (m *modelWorld) disagreeEvent() bool {
+	live := m.live()
+	reading := gitWait(live, waitMergeCheck) != nil || gitWait(live, waitMergeContent) != nil
+	if !reading || progresses(live) || m.clock.at.Before(m.lastingUntil) || m.rng.IntN(5) > 0 {
+		return false
+	}
+	m.mu.Lock()
+	m.fault = opGet404
+	m.lastingUntil = m.clock.at.Add(time.Duration(6+m.rng.IntN(20)) * time.Minute)
+	m.mu.Unlock()
+	m.logf("reads: the pull request answers 404 by its number while its branch lists it, until +%v",
+		m.lastingUntil.Sub(m.start()))
+	return true
+}
+
+// noteDisagreement keeps the spans of answers that disagree (opGet404) up to date at the start of a reconcile: a wait
+// for a read past its end is due when they end (readGap).
+func (m *modelWorld) noteDisagreement() {
+	m.mu.Lock()
+	on := slices.Contains(strings.Split(m.fault, faultBoth), opGet404)
+	m.mu.Unlock()
+	switch {
+	case on && m.disagreeFrom.IsZero():
+		m.disagreeFrom = m.clock.at
+	case !on && !m.disagreeFrom.IsZero():
+		m.disagree = append(m.disagree, pauseSpan{from: m.disagreeFrom, to: m.clock.at})
+		m.disagreeFrom = time.Time{}
+	}
+}
+
+// disagreeing reports whether answers disagree now (opGet404).
+func (m *modelWorld) disagreeing() bool { return !m.disagreeFrom.IsZero() }
 
 // cancel is a person's cancel of the request (spec.cancel).
 func (m *modelWorld) cancel() {
@@ -1251,6 +1386,7 @@ func (m *modelWorld) restart() {
 // step runs one reconcile, checks the properties, and moves the clock on by its wait.
 func (m *modelWorld) step() {
 	ctx := context.Background()
+	m.noteDisagreement()
 	passed := ""
 	before := m.live()
 	m.mu.Lock()
@@ -1272,14 +1408,22 @@ func (m *modelWorld) step() {
 		}
 	}
 	m.mu.Lock()
-	m.writeFaulted, m.calls, m.passed, m.ended = false, 0, passed, false
+	m.writeFaulted, m.calls, m.failedCalls, m.passed, m.ended = false, 0, 0, passed, false
 	m.mu.Unlock()
 	paused, lifted, startedAt := m.paused, m.lifted, m.clock.at
 	m.lifted = false
+	m.mu.Lock()
+	flick := m.flicker
+	m.mu.Unlock()
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.key})
 	m.mu.Lock()
+	m.flickered = flick && !m.flicker
+	m.mu.Unlock()
+	m.mu.Lock()
 	m.passed = ""
-	calls := m.calls
+	failedCalls := m.failedCalls
+	m.lastFailedCalls = failedCalls
+	m.lastErred = err != nil || m.writeFaulted
 	m.mu.Unlock()
 	live := &api.RemediationRequest{}
 	if gerr := m.base.Get(ctx, m.key, live); gerr != nil {
@@ -1306,7 +1450,7 @@ func (m *modelWorld) step() {
 		holdsLock(live), res.RequeueAfter, err, reasonOf(retry), kinds, reasonOf(approved), conditionsOf(live))
 	m.pauseProperties(before, live, paused, lifted && !staleRead, startedAt, faulted || err != nil)
 	if !paused && !staleRead {
-		m.lastReadProperty(readPassed, live, err, faulted, calls)
+		m.lastReadProperty(readPassed, live, res, err, faulted, failedCalls)
 	}
 	m.properties(live, res, err, faulted, paused)
 	switch {
@@ -1406,6 +1550,13 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	for _, w := range live.Status.GitWaits {
 		end, ok := m.waitEnd(live, w)
 		due := m.afterGap(end)
+		if w.Kind == api.GitWaitMergeCheck || w.Kind == api.GitWaitMergeContent {
+			if !m.readsSettle(live, m.lastFailedCalls) {
+				// No evidence about the last read: the wait stands (property "last read").
+				continue
+			}
+			due = m.readGap(end)
+		}
 		if ok && now.After(due.Add(poll)) {
 			m.fatalf("waits: the %s wait passed its end %v ago and stands (phase %s)", w.Kind, now.Sub(end),
 				live.Status.Phase)
@@ -1419,6 +1570,7 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 		m.fatalf("clocks: the request is in PolicyChecked %v after its deadline", now.Sub(d.Time))
 	}
 	if since := live.Status.MergeCommitAwaitedSince; since != nil && progresses(live) && !mergeRecorded(live) &&
+		m.readsSettle(live, m.lastFailedCalls) &&
 		now.After(m.readWaitDue(since.Time).Add(poll)) {
 		m.fatalf("clocks: the merge seen at +%v is not recorded %v later (phase %s)", since.Sub(m.start()),
 			now.Sub(since.Time), live.Status.Phase)
@@ -1426,7 +1578,8 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	m.mu.Lock()
 	since := m.contentFailing
 	m.mu.Unlock()
-	if !since.IsZero() && now.After(m.readWaitDue(since).Add(poll)) && !mergeRecorded(live) {
+	if !since.IsZero() && now.After(m.readWaitDue(since).Add(poll)) && !mergeRecorded(live) &&
+		m.readsSettle(live, m.lastFailedCalls) {
 		m.fatalf("content: the reads of what the merge brought have failed since +%v and the request has not ended",
 			since.Sub(m.start()))
 	}
@@ -1435,18 +1588,26 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	m.recordedProperty(live, faulted)
 }
 
-// recordedProperty: a request whose status records its merge, in Merged, Succeeded, Inconclusive or Failed with its
-// receipt, or with its recorded pull request marked merged (PullRequestOpened ChangeRequestMerged, outside Superseded),
-// and that no verification holds, holds no lock after a reconcile with no write made to fail, under a pause too: the
-// write that records the merge or ends the verification releases it, as on main (ninth decision of 2026-11-18 on
-// #771, point 5).
+// recordedProperty: a request whose status records a merge that delivered the plan, in Merged, Succeeded,
+// Inconclusive or Failed with its receipt, or with its recorded pull request marked merged (PullRequestOpened
+// ChangeRequestMerged, outside Superseded), and that no verification holds, holds no lock after a reconcile with no
+// write made to fail, under a pause too: the write that records the merge or ends the verification releases it, as on
+// main. A merge that did not deliver the plan as shown (MergedWithForeignChange, MergeContentUnreadable), or whose wait
+// for a read is still open, is left to the read of the branch (tenth decision of 2026-11-18 on #771, point 3), which
+// the end of the run checks (settled).
 func (m *modelWorld) recordedProperty(live *api.RemediationRequest, faulted bool) {
 	opened := meta.FindStatusCondition(live.Status.Conditions, api.ConditionPROpened)
+	approved := meta.FindStatusCondition(live.Status.Conditions, api.ConditionApproved)
+	undelivered := live.Status.Phase == api.PhaseNeedsIntervention && approved != nil &&
+		(approved.Reason == ReasonMergedWithForeignChange || approved.Reason == ReasonMergeContentUnreadable)
+	reading := slices.ContainsFunc(live.Status.GitWaits, func(w api.GitWait) bool {
+		return w.Kind == api.GitWaitMergeCheck || w.Kind == api.GitWaitMergeContent
+	})
 	merged := live.Status.Phase == api.PhaseMerged || live.Status.Phase == api.PhaseSucceeded ||
 		live.Status.Phase == api.PhaseInconclusive ||
 		(live.Status.Phase == api.PhaseFailed && live.Status.MergeReceipt != nil) ||
 		(live.Status.PullRequest != nil && opened != nil && opened.Reason == ReasonChangeRequestMerged &&
-			live.Status.Phase != api.PhaseSuperseded && !progresses(live))
+			live.Status.Phase != api.PhaseSuperseded && !progresses(live) && !undelivered && !reading)
 	if !faulted && !m.handoff && merged && holdsLock(live) && !heldForVerification(live, m.r.VerifyOutcomes) {
 		m.fatalf("lock recorded: the merge is recorded (phase %s, receipt %t) and the lock is held", live.Status.Phase,
 			live.Status.MergeReceipt != nil)
@@ -1469,15 +1630,55 @@ func (m *modelWorld) requeueProperty(live *api.RemediationRequest, res reconcile
 // 2026-11-18 on #771, point 1).
 func (m *modelWorld) readWaitDue(start time.Time) time.Time {
 	// The merge check and the content wait have the same bound (mergeContentWait is mergeCommitWait).
-	return m.afterGap(start.Add(mergeCommitWait))
+	return m.readGap(start.Add(mergeCommitWait))
+}
+
+// readGap is afterGap for the end of a wait for a read: the times the answers about the pull request disagreed
+// (opGet404) are gaps too, as no last read is made then (tenth decision of 2026-11-18 on #771, point 1).
+//
+// A pull request missing by its number is confirmed gone only by a second look confirmWait after the first (settleGone):
+// until then the answers disagree too, so a wait for a read may stand that long past its end.
+func (m *modelWorld) readGap(end time.Time) time.Time {
+	gaps := slices.Concat(m.pauses, m.downs, m.disagree)
+	if m.disagreeing() {
+		gaps = append(gaps, pauseSpan{from: m.disagreeFrom, to: m.clock.at})
+	}
+	return m.gapEnd(m.gapEnd(end, gaps).Add(confirmWait), gaps)
+}
+
+// readsSettle reports whether the reconcile just checked could settle a wait for a read past its end: a read failed
+// (failedCalls) or the repository is gone (evidence that ends it), or the reads work and their answers agree (fault
+// none, no answers that disagree). Otherwise the wait may stand (tenth decision of 2026-11-18 on #771, point 1), and the
+// time bounds of the read waits are not checked for it.
+//
+// A pull request deleted, or on a branch neither the plan nor the settings name, is missing by its number on both
+// branches: the code confirms it gone only by a second look confirmWait after the first (settleGone), and a restart or
+// a lost write starts that over, so its answers may disagree for as long as faults come.
+func (m *modelWorld) readsSettle(live *api.RemediationRequest, failedCalls int) bool {
+	if m.lastErred || m.flickered {
+		// A reconcile that returned an error, or had a write made to fail, ends nothing (property "errors"); one that
+		// met a pause inside it keeps its waits for a read.
+		return false
+	}
+	if cr, found := m.pr(); m.repo == nil && failedCalls == 0 && (m.deleted || found && !m.delivers(live, cr)) {
+		return false
+	}
+	m.mu.Lock()
+	fault := m.fault
+	m.mu.Unlock()
+	return failedCalls > 0 || m.repo != nil || fault == faultNone && !m.disagreeing()
 }
 
 // afterGap is end, or the end of a pause or of a time the executor was down that end fell in (from a poll interval
 // before its start, before a reconcile could end it): a pause holds every end, and no reconcile runs while the
 // executor is down, so such an end is due when the gap ends. Gaps that follow each other are followed.
 func (m *modelWorld) afterGap(end time.Time) time.Time {
+	return m.gapEnd(end, slices.Concat(m.pauses, m.downs))
+}
+
+// gapEnd is end, or the end of the gap of gaps that end fell in, following gaps that follow each other.
+func (m *modelWorld) gapEnd(end time.Time, gaps []pauseSpan) time.Time {
 	poll := m.r.pullRequestPollInterval()
-	gaps := slices.Concat(m.pauses, m.downs)
 	slices.SortFunc(gaps, func(a, b pauseSpan) int { return a.from.Compare(b.from) })
 	for _, g := range gaps {
 		if end.Before(g.to) && !end.Add(poll).Before(g.from) {
@@ -1488,26 +1689,89 @@ func (m *modelWorld) afterGap(end time.Time) time.Time {
 }
 
 // lastReadProperty: a reconcile that is not paused and starts with read waits past their end (passed) makes their
-// reads once more; with no error and no write made to fail none of them stands after it (a failed last read ends the
-// wait, never a retry), and when it ended one the Git host was called, unless the repository is not in the settings
-// (a read that cannot start ends it too). Ninth decision of 2026-11-18 on #771, point 1.
-func (m *modelWorld) lastReadProperty(passed []api.GitWaitKind, live *api.RemediationRequest, err error, faulted bool,
-	calls int) {
-	if len(passed) == 0 || err != nil || faulted {
+// reads once more, and ends a wait only on evidence about that read (tenth decision of 2026-11-18 on #771, point 1).
+// With no error and no write made to fail:
+//   - a wait ended as a failure of its last read ("the read after the wait failed") had a read of the Git host fail
+//     in that reconcile (failedCalls), and one ended because no read could start had the repository gone from the
+//     settings: the model checks the read the wait waits for, not that some call was made;
+//   - a read failed, or the repository is gone: none of the waits stands after it (a failed last read ends the wait,
+//     never a retry). A wait whose reads all answered may stand (answers that disagree), and comes back between a
+//     second and the poll interval.
+func (m *modelWorld) lastReadProperty(passed []api.GitWaitKind, live *api.RemediationRequest, res reconcile.Result,
+	err error, faulted bool, failedCalls int) {
+	if len(passed) == 0 || err != nil || faulted || m.handoff {
 		return
+	}
+	// A pause inside the reconcile (flicker) outweighs any evidence: the wait is kept.
+	evidence := (failedCalls > 0 || m.repo != nil) && !m.flickered
+	if !evidence {
+		m.noEvidenceProperty(passed, live)
+	}
+	how := "could not start"
+	if failedCalls > 0 {
+		how = "was a failed read"
 	}
 	for _, k := range passed {
 		for _, w := range live.Status.GitWaits {
-			if w.Kind == k {
-				m.fatalf("last read: the %s wait had passed its end, the reconcile was not paused, and the wait stands "+
-					"after it (phase %s)", k, live.Status.Phase)
+			if w.Kind != k {
+				continue
+			}
+			if evidence {
+				m.fatalf("last read: the %s wait had passed its end, its last read %s, and the wait stands after it "+
+					"(phase %s)", k, how, live.Status.Phase)
+			}
+			if res.RequeueAfter < time.Second || res.RequeueAfter > m.r.pullRequestPollInterval() {
+				m.fatalf("last read pace: the %s wait stands past its end and the request comes back after %v; want "+
+					"between a second and the poll interval", k, res.RequeueAfter)
 			}
 		}
 	}
-	if calls == 0 && m.repo == nil && !m.handoff {
-		m.fatalf("last read call: the %v wait passed its end and ended with no read of the Git host (phase %s)", passed,
-			live.Status.Phase)
+	m.endMessageProperty(passed, live, failedCalls)
+}
+
+// noEvidenceProperty is the part of lastReadProperty for a reconcile with no evidence about the last read of the
+// passed waits: when its answers disagreed or it met a pause inside it, it recorded no merge without a receipt (the
+// end of a MergeCheck wait).
+func (m *modelWorld) noEvidenceProperty(passed []api.GitWaitKind, live *api.RemediationRequest) {
+	if len(m.history) < 2 {
+		return
 	}
+	before := m.history[len(m.history)-2]
+	cr, found := m.pr()
+	// The 404 by number disagrees with the listing only for a pull request read by its recorded number, still on a
+	// branch the code reads.
+	disagree := m.disagreeing() && found && !m.deleted && m.delivers(live, cr) && before.Status.PullRequest != nil
+	if (disagree || m.flickered) && !mergeRecorded(before) && mergeRecorded(live) && live.Status.MergeReceipt == nil {
+		m.fatalf("last read evidence: the %v wait ended with no evidence about its last read (%s)", passed,
+			map[bool]string{true: "answers that disagree", false: "a pause inside the reconcile"}[disagree])
+	}
+}
+
+// endMessageProperty is the part of lastReadProperty for the message of an end: it names the evidence the reconcile
+// had.
+func (m *modelWorld) endMessageProperty(passed []api.GitWaitKind, live *api.RemediationRequest, failedCalls int) {
+	for _, t := range []string{api.ConditionApproved, api.ConditionPlanFresh} {
+		c := meta.FindStatusCondition(live.Status.Conditions, t)
+		switch {
+		case c == nil || m.endedBefore(c):
+		case strings.Contains(c.Message, "the read after the wait failed") && failedCalls == 0:
+			m.fatalf("last read failed: the %v wait ended on a failed last read and no read of the Git host failed "+
+				"(%s %s)", passed, t, c.Reason)
+		case strings.Contains(c.Message, "no read of the Git host could") && m.repo == nil:
+			m.fatalf("last read start: the %v wait ended as a read that could not start with the repository in the "+
+				"settings (%s %s)", passed, t, c.Reason)
+		}
+	}
+}
+
+// endedBefore reports whether condition c of the request stood as it is before the reconcile being checked: an end
+// of an earlier reconcile, not this one's.
+func (m *modelWorld) endedBefore(c *metav1.Condition) bool {
+	if len(m.history) < 2 {
+		return false
+	}
+	prev := meta.FindStatusCondition(m.history[len(m.history)-2].Status.Conditions, c.Type)
+	return prev != nil && prev.Message == c.Message
 }
 
 // pauseProperties checks the properties of the pause (see the top of this file): while paused, no call to the Git
@@ -1558,6 +1822,11 @@ func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, pause
 		return
 	}
 	for _, w := range live.Status.GitWaits {
+		if w.Kind == api.GitWaitMergeCheck || w.Kind == api.GitWaitMergeContent {
+			// A wait for a read ends at the lift only on evidence about its last read (property "last read"); answers
+			// that disagree keep it (property "waits" bounds them).
+			continue
+		}
 		if end, ok := m.waitEnd(live, w); ok && !startedAt.Before(end) {
 			m.fatalf("lift wait: the %s wait passed its end during the pause and stands after the first reconcile "+
 				"after the lift (phase %s)", w.Kind, live.Status.Phase)
@@ -1692,6 +1961,9 @@ func (g *modelGit) fail(ctx context.Context, op string) error {
 		if name != op {
 			continue
 		}
+		g.m.mu.Lock()
+		g.m.failedCalls++
+		g.m.mu.Unlock()
 		if deadline, bounded := ctx.Deadline(); timeout && bounded && time.Until(deadline) < 2*time.Second {
 			// The step's time (CleanupTimeout) runs out while the host does not answer.
 			<-ctx.Done()
@@ -1701,6 +1973,13 @@ func (g *modelGit) fail(ctx context.Context, op string) error {
 		return errModelOutage
 	}
 	return nil
+}
+
+// answers404 reports whether the model answers the read of a pull request by its number with a 404 now (opGet404).
+func (g *modelGit) answers404() bool {
+	g.m.mu.Lock()
+	defer g.m.mu.Unlock()
+	return slices.Contains(strings.Split(g.m.fault, faultBoth), opGet404)
 }
 
 func (g *modelGit) hidden(n int64) bool {
@@ -1723,7 +2002,7 @@ func (g *modelGit) GetChangeRequest(ctx context.Context, n int64) (providers.Cha
 	if err := g.fail(ctx, opGet); err != nil {
 		return providers.ChangeRequest{}, err
 	}
-	if g.hidden(n) {
+	if g.hidden(n) || g.answers404() {
 		return providers.ChangeRequest{}, fmt.Errorf("pull request %d: %w", n, providers.ErrNotFound)
 	}
 	cr, err := g.GitProvider.GetChangeRequest(ctx, n)

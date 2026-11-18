@@ -442,14 +442,19 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 	r.gitRetries().take(req.NamespacedName)
 	res, err := r.reconcile(ctx, req)
 	m := r.gitRetries().take(req.NamespacedName)
+	kept := false
 	if len(m.lastRead) > 0 && err == nil && ctx.Err() == nil {
-		// The reconcile read once more past the end of a read wait: what its reads left standing ends now (gitwait.go).
-		endRes, ended, endErr := r.endAfterLastRead(ctx, req.NamespacedName, m.lastRead, m.failed)
+		// The reconcile read once more past the end of a read wait: what its reads left standing ends now on evidence
+		// about its last read, or is kept and looked at again at the poll pace (gitwait.go).
+		endRes, outcome, endErr := r.endAfterLastRead(ctx, req.NamespacedName, m)
 		if endErr != nil {
 			return ctrl.Result{}, endErr
 		}
-		if ended {
+		switch outcome {
+		case lastReadEnded:
 			res = endRes
+		case lastReadKept:
+			kept = true
 		}
 	}
 	if err == nil && ctx.Err() == nil && (m.shown || m.retried) {
@@ -460,9 +465,13 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if clearErr != nil {
 			return ctrl.Result{}, clearErr
 		}
-		if left > 0 && (res.RequeueAfter <= 0 || left < res.RequeueAfter) {
+		if left > 0 && !kept && (res.RequeueAfter <= 0 || left < res.RequeueAfter) {
 			res.RequeueAfter = left
 		}
+	}
+	if kept {
+		// The end of the kept wait has passed: it is looked at again at the poll pace, never hot.
+		res.RequeueAfter = r.keptPace(res.RequeueAfter)
 	}
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 		// The manager cancelled the reconcile (it is shutting down): not a failure to log and retry with

@@ -232,6 +232,7 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableReads[reasonRepositoryUnavailable])
 		return remediationv1alpha1.GitRepository{}, false, errRepositoryGone
 	case err != nil:
 		return remediationv1alpha1.GitRepository{}, false, fmt.Errorf("get RemediationSettings %s: %w",
@@ -244,6 +245,8 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 	}
 	repo, reinstalled, ok := cleanupRepository(settings, rr, staleMark(rr) != nil)
 	if !ok {
+		// Evidence that no read of the Git host can start for the request (endAfterLastRead).
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableReads[reasonRepositoryUnavailable])
 		return remediationv1alpha1.GitRepository{}, false, errRepositoryGone
 	}
 	if src := rr.Status.Source; src == nil || repo.TargetBranch != src.TargetBranch {

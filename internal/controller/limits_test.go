@@ -475,8 +475,9 @@ func TestBackfillLock(t *testing.T) {
 
 // TestCheckHeldRequiresBranchEvidence checks that a closed status does not release a stopped holder without a read
 // of its branch: the reconciler has no provider, so it keeps the lock. A pull request recorded merged
-// (ChangeRequestMerged, as MergedWithForeignChange and MergeContentUnreadable record it) releases it from status
-// alone, as settleLock did on main (ninth decision of 2026-11-18 on #771, point 5).
+// (ChangeRequestMerged) releases it from status alone, as settleLock did on main (ninth decision of 2026-11-18 on
+// #771, point 5), unless the merge did not deliver the plan as shown (tenth decision, point 3;
+// TestRecordedMergeIsMainsRule).
 func TestCheckHeldRequiresBranchEvidence(t *testing.T) {
 	closed := holding(withPullRequest(otherRequest("c", limitsTarget, remediationv1alpha1.PhaseNeedsIntervention,
 		time.Minute), ReasonChangeRequestClosed), true)

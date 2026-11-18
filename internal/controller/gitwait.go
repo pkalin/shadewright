@@ -48,8 +48,9 @@ import (
 // start of every reconcile (endPassedWait) ends each RequestDeadline and HandoffGrace entry past its end before any
 // read or step runs, reading nothing from the Git host (endWait). A wait for a read (readWaits: MergeCheck,
 // MergeContent) past its end ends only after one more read (ninth decision of 2026-11-18 on #771): that reconcile
-// makes its reads as any other, and when they leave the entry standing (a read failed, or none could be made) it
-// ends there (endAfterLastRead). A call site only starts or continues a wait (retryGitRead); it never looks at
+// makes its reads as any other, and when they leave the entry standing it ends there only on evidence about that read
+// (endAfterLastRead, tenth decision): it failed, it could not start, or it answered and settled nothing; otherwise it
+// is kept and looked at again at the poll pace. A call site only starts or continues a wait (retryGitRead); it never looks at
 // whether the end has passed, so an error, a timeout or an early return in a step cannot skip the end. An entry past
 // its end always ends: by its kind's end, or, when the kind no longer applies to the request, by its removal; never
 // by an error that repeats. Condition GitReadRetry summarizes the entries for people (gitWaitSummary).
@@ -296,8 +297,10 @@ func dropWait(rr *api.RemediationRequest, k waitKind, now time.Time) {
 // readWaits are the kinds of wait for reads of the Git host (ninth decision of 2026-11-18 on #771, which replaced
 // the stretch by recorded paused time of the eighth). One past its end ends only after one more read made once the
 // end has passed: endPassedWait lets the reconcile make its reads (markLastRead), and endAfterLastRead ends what they
-// left standing. Whatever kept the executor from reading (a pause, a restart, a leader change, an executor scaled to
-// zero), the wait never ends without that read. Under a pause no read is made, so nothing ends. The request deadline
+// left standing on evidence about that read (tenth decision). Whatever kept the executor from reading (a pause, a
+// restart, a leader change, an executor scaled to zero), the wait never ends without that read. Under a pause no read
+// is made, so nothing ends. Every stopped request with an open one makes that read, holding its lock or not
+// (checkHeld, openReadWait). The request deadline
 // and the handoff grace bound waiting for a person or another executor, not a read: they end with no read and count
 // paused time, as on main.
 var readWaits = []waitKind{waitMergeCheck, waitMergeContent}
@@ -400,8 +403,8 @@ func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *ap
 //     spent paused counts against them, as on main, so the first reconcile after a pause ends those that passed
 //     meanwhile;
 //   - a MergeCheck or MergeContent entry past its end (readWaits) is not ended here: the reconcile goes on and makes
-//     its reads once more (markLastRead), and endAfterLastRead ends what they leave standing (ninth decision of
-//     2026-11-18 on #771).
+//     its reads once more (markLastRead), and endAfterLastRead ends what they leave standing on evidence about that
+//     read (ninth and tenth decisions of 2026-11-18 on #771).
 //
 // done is true when the reconcile stops here; a merge wait ended by its mark lets the reconcile go on, which then
 // records the merge. A failed status write, or a failed read of the settings, is returned for the error backoff.
@@ -484,45 +487,95 @@ func passedReadWaits(rr *api.RemediationRequest, now time.Time) []waitKind {
 	return kinds
 }
 
-// endAfterLastRead runs after a reconcile of the request key that started with read waits past their end (kinds,
-// markLastRead) and returned without an error: those reads were made once more. A read that answered went on as
-// after any read, and a merge it recorded removed the entries. Each entry of kinds that still stands ends here, as a
-// failure, with no retry: its last read failed (failed names it, from retryGitRead) or could not be made (the
-// repository left the settings or cannot be opened). Under a pause nothing ends: no read was made. ended is false
-// when nothing was left to end. A failed Kubernetes read or write is returned for the error backoff.
+// lastReadOutcome is what endAfterLastRead did with the read waits a reconcile read once more.
+type lastReadOutcome int
+
+const (
+	// lastReadSettled: nothing was left to end (an answer settled the waits, or they no longer apply).
+	lastReadSettled lastReadOutcome = iota
+	// lastReadEnded: a wait ended as a failure, on evidence that its last read failed or could not start.
+	lastReadEnded
+	// lastReadKept: a wait stands with no evidence about its last read; the request comes back at the poll pace.
+	lastReadKept
+)
+
+// endAfterLastRead runs after a reconcile of the request key that started with read waits past their end (m.lastRead,
+// markLastRead) and returned without an error. A read that answered went on as after any read, and a merge it recorded
+// or a read of what it brought removed the entries. An entry that still stands ends only on evidence about its last
+// read, gathered by the reconcile in m (tenth decision of 2026-11-18 on #771, point 1):
+//   - the read failed (m.failed, from retryGitRead): it ends there, as a failure, with no retry, saying which read;
+//   - the read provably could not start (m.unstartable, from setUnreadable: the repository of the plan left the
+//     settings or its entry cannot be used): it ends there, saying why;
+//   - the read answered (m.answered: the pull request read by changeOf, the merge commit, what the merge brought) and
+//     settled nothing: it ends there, saying so.
+//
+// Without such evidence the entry is kept (lastReadKept) and the caller requeues the request at the poll pace: a pause
+// the reconcile met at any point (m.paused, waitWhilePaused, or one found here), answers that disagree (m.disagreed,
+// which outweighs an answer of the same reconcile), or a path that read nothing. A failed Kubernetes read or write is returned for the error backoff.
 func (r *RemediationRequestReconciler) endAfterLastRead(ctx context.Context, key types.NamespacedName,
-	kinds []waitKind, failed string) (ctrl.Result, bool, error) {
+	m gitRetryMark) (ctrl.Result, lastReadOutcome, error) {
 	rr := &api.RemediationRequest{}
 	if err := r.reader().Get(ctx, key, rr); err != nil {
-		return ctrl.Result{}, false, client.IgnoreNotFound(err)
+		return ctrl.Result{}, lastReadSettled, client.IgnoreNotFound(err)
 	}
 	if !rr.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, false, nil
+		return ctrl.Result{}, lastReadSettled, nil
 	}
 	now := r.now()
 	var left []waitKind
-	for _, k := range kinds {
+	for _, k := range m.lastRead {
 		if end, ok := k.end(rr, now); ok && !now.Before(end) {
 			left = append(left, k)
 		}
 	}
 	if len(left) == 0 {
-		return ctrl.Result{}, false, nil
+		return ctrl.Result{}, lastReadSettled, nil
 	}
-	switch paused, err := r.writesPaused(ctx); {
-	case err != nil:
-		return ctrl.Result{}, false, err
+	log := logf.FromContext(ctx).WithValues("remediationRequest", key, "wait", gitWaitKinds[left[0]])
+	paused := m.paused
+	if !paused {
+		p, err := r.writesPaused(ctx)
+		if err != nil {
+			return ctrl.Result{}, lastReadSettled, err
+		}
+		paused = p
+	}
+	var why string
+	switch {
 	case paused:
-		// A pause set while the reconcile ran: its reads stopped at the pause, so nothing ends.
-		return ctrl.Result{}, false, nil
-	}
-	why := "no read of the Git host could be made after the wait (it could not start, for example because the " +
-		"repository of the plan cannot be opened or is not in the settings)"
-	if failed != "" {
-		why = "the read after the wait failed: " + failed
+		log.Info("Kept the Git wait of RemediationRequest past its end: the reconcile met a pause of Git writes, so " +
+			"its last read may not have been made")
+		return ctrl.Result{}, lastReadKept, nil
+	case m.failed != "":
+		why = "the read after the wait failed: " + m.failed
+	case m.unstartable != "":
+		why = "no read of the Git host could start after the wait: " + m.unstartable
+	case m.disagreed:
+		log.Info("Kept the Git wait of RemediationRequest past its end: the answers about its pull request disagree")
+		return ctrl.Result{}, lastReadKept, nil
+	case m.answered:
+		// The read answered and its answers agree, yet the wait stands: nothing the answer shows records the merge the
+		// wait is about (it is not on a branch the plan or the settings name, or it is gone).
+		why = "the read after the wait answered without settling it"
+	default:
+		log.Info("Kept the Git wait of RemediationRequest past its end: the reconcile made no read that answered, " +
+			"failed or could not start (answers that disagree, or a path that read nothing)")
+		return ctrl.Result{}, lastReadKept, nil
 	}
 	res, _, err := r.endWait(ctx, rr, left[0], now, why)
-	return r.lookAgainWhileHeld(rr, res, err), true, err
+	return r.lookAgainWhileHeld(rr, res, err), lastReadEnded, err
+}
+
+// keptPace is the time to run again of a reconcile whose wait for a read stands past its end with no evidence about
+// its last read (lastReadKept): the reconcile's own time when it lies between a second and the poll interval (the
+// recheck of a pause, a pace of its own), else the poll interval. A wait past its end is never looked at hot, nor left
+// for longer than a poll.
+func (r *RemediationRequestReconciler) keptPace(d time.Duration) time.Duration {
+	poll := r.pullRequestPollInterval()
+	if d < time.Second || d > poll {
+		return poll
+	}
+	return d
 }
 
 // endWait ends rr's entry of kind, past its end: a RequestDeadline or HandoffGrace entry from endPassedWait, a read

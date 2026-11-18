@@ -3329,10 +3329,13 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(got.Status.MergeReceipt).To(BeNil())
 		Expect(breakerOutcome(got)).To(Equal(outcomeNone))
 		Expect(revert.Revertible(got)).To(BeFalse())
-		// The pull request is recorded merged (ChangeRequestMerged), which frees the target in the write that ends
-		// the request, as settleLock did on main (ninth decision of 2026-11-18 on #771, point 5), and it stays free.
-		Expect(holdsLock(got)).To(BeFalse())
+		// The merge did not deliver the plan as shown: the lock is kept in the write that ends the request, and the
+		// next look, whose read of the branch finds no other open pull request, frees it (the rule of 2026-11-17,
+		// kept by the tenth decision of 2026-11-18 on #771, point 3); it stays free.
+		Expect(holdsLock(got)).To(BeTrue())
 		at(mergeContentWait + 2*time.Second)
+		Expect(holdsLock(fetch())).To(BeFalse())
+		at(mergeContentWait + 3*time.Second)
 		Expect(holdsLock(fetch())).To(BeFalse())
 		Expect(closes.Load()).To(BeZero())
 	})

@@ -357,9 +357,18 @@ type gitRetryMark struct {
 	// shown: the request read at the start of this reconcile carried condition GitReadRetry.
 	shown bool
 	// lastRead: the read waits past their end at the start of this reconcile (endPassedWait), whose reads this
-	// reconcile makes once more; failed names the first Git read of this reconcile that failed (retryGitRead).
-	lastRead []waitKind
-	failed   string
+	// reconcile makes once more. The rest is the evidence about those reads that endAfterLastRead decides on (tenth
+	// decision of 2026-11-18 on #771): failed names the first Git read of this reconcile that failed (retryGitRead);
+	// unstartable says why no read could start (the repository of the plan left the settings or cannot be used,
+	// noteUnstartable from setUnreadable); answered, that a read a wait waits for answered (noteAnswered); paused, that
+	// the reconcile met a pause of the kill switch (waitWhilePaused), so it may have read nothing; disagreed, that
+	// answers about the pull request disagreed (changeOf), which outweighs any answer.
+	lastRead    []waitKind
+	failed      string
+	unstartable string
+	answered    bool
+	disagreed   bool
+	paused      bool
 }
 
 func (m *gitRetryMarks) update(key types.NamespacedName, f func(*gitRetryMark)) {
@@ -397,6 +406,31 @@ func (m *gitRetryMarks) failedRead(key types.NamespacedName, op string) {
 			e.failed = op
 		}
 	})
+}
+
+// noteUnstartable records why no read of the Git host could start for key's reconcile, when it is the first such note.
+func (m *gitRetryMarks) noteUnstartable(key types.NamespacedName, why string) {
+	m.update(key, func(e *gitRetryMark) {
+		if e.unstartable == "" {
+			e.unstartable = why
+		}
+	})
+}
+
+// noteAnswered records that a read a wait for a read waits for (the pull request's merge, the check at the merge, what
+// the merge brought) answered in key's reconcile.
+func (m *gitRetryMarks) noteAnswered(key types.NamespacedName) {
+	m.update(key, func(e *gitRetryMark) { e.answered = true })
+}
+
+// noteDisagreed records that answers about the pull request disagreed in key's reconcile (answeredUnknown).
+func (m *gitRetryMarks) noteDisagreed(key types.NamespacedName) {
+	m.update(key, func(e *gitRetryMark) { e.disagreed = true })
+}
+
+// notePaused records that key's reconcile met a pause of the kill switch.
+func (m *gitRetryMarks) notePaused(key types.NamespacedName) {
+	m.update(key, func(e *gitRetryMark) { e.paused = true })
 }
 
 // shown records that the request key's reconcile read carries condition GitReadRetry.

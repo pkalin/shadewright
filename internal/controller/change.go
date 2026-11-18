@@ -219,7 +219,16 @@ func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git provide
 	}
 	defer looks.unlock(key)
 	v, n := r.readChange(ctx, git, rr, q)
-	return r.noteRead(ctx, rr, n, q, v)
+	v = r.noteRead(ctx, rr, n, q, v)
+	// Evidence about the last read of an open wait for a read (endAfterLastRead): the read of the pull request
+	// answered, or its answers disagree, which outweighs any answer of the same reconcile.
+	switch {
+	case v.state != changeUnknown:
+		r.gitRetries().noteAnswered(key)
+	case answeredUnknown(v.err):
+		r.gitRetries().noteDisagreed(key)
+	}
+	return v
 }
 
 // readChange is changeOf without the condition; it also returns the number it read (0 for the listing).
@@ -882,6 +891,16 @@ var repositoryReasons = map[string]bool{
 	reasonRepositoryUnavailable: true, reasonTargetBranchChanged: true, string(sourcemap.ReasonRepositoryUnusable): true,
 }
 
+// unstartableReads says, per reason of condition PullRequestUnreadable that says the repository of the plan cannot be
+// opened as the settings stand (repositoryRead), why no read of the Git host could start: the message of the end of a
+// wait for a read whose last read could not start (endAfterLastRead). TargetBranchChanged is not one: a stopped holder
+// still reads both branches then, and its reads answer or fail on their own account.
+var unstartableReads = map[string]string{
+	reasonRepositoryUnavailable: "the repository of the plan is not in RemediationSettings",
+	string(sourcemap.ReasonRepositoryUnusable): "the entry of the repository of the plan in RemediationSettings " +
+		"cannot be used",
+}
+
 // repositoryGoneRead is condition PullRequestUnreadable for a request whose plan's repository is not in
 // RemediationSettings any more, so none of its pull requests can be read.
 func repositoryGoneRead(rr *remediationv1alpha1.RemediationRequest) *metav1.Condition {
@@ -954,6 +973,10 @@ func (r *RemediationRequestReconciler) unreadableEvent(rr *remediationv1alpha1.R
 // condition and the new resourceVersion.
 func (r *RemediationRequestReconciler) setUnreadable(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	want *metav1.Condition) error {
+	if want != nil && unstartableReads[want.Reason] != "" {
+		// Evidence that no read could start in this reconcile, for the end of a wait for a read (endAfterLastRead).
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableReads[want.Reason])
+	}
 	was := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 	if was != nil {
 		was = was.DeepCopy()

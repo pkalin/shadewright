@@ -342,6 +342,8 @@ func (g *gatedGit) ReviewCheckRun(ctx context.Context, head string) (providers.C
 // of the status are kept, so the request goes on from where it stopped once the pause ends.
 func (r *RemediationRequestReconciler) waitWhilePaused(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
+	// No wait for a read ends on this reconcile: it met the pause, so it may have read nothing (endAfterLastRead).
+	r.gitRetries().notePaused(client.ObjectKeyFromObject(rr))
 	if meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionWritesPaused,
 		Status:             metav1.ConditionTrue,

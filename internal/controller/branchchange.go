@@ -309,6 +309,7 @@ func (r *RemediationRequestReconciler) checkRetargeted(ctx context.Context, git 
 			"tried again", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
 		return nil, readOfContent(cr, err)
 	}
+	r.gitRetries().noteAnswered(client.ObjectKeyFromObject(rr))
 	return ref, r.clearContentWait(ctx, rr)
 }
 
@@ -590,9 +591,10 @@ func markStaleForBranchChange(rr *remediationv1alpha1.RemediationRequest) {
 // is looked at again when what is left of its wait is over; failed Git reads use retryGitRead; a failed Kubernetes read or write remains an error. No failed read
 // records the merge. The lock is kept meanwhile. The waits for the merge commit and for the check at the merge are
 // bounded by mergeCommitWait from the start of their MergeCheck entry in status.gitWaits, the reads of what a
-// retargeted merge brought by mergeContentWait from the start of their MergeContent entry, each stretched by the
-// paused time a reconcile of the request saw (waitKind.end); a read of the pull request itself that keeps failing
-// shows in condition PullRequestUnreadable.
+// retargeted merge brought by mergeContentWait from the start of their MergeContent entry (waitKind.end). Past that
+// end, one more read is made at the first reconcile not under a pause, and the wait ends only on evidence about it
+// (endAfterLastRead): it failed, it could not start, or it answered and settled nothing; otherwise it is kept. A read
+// of the pull request itself that keeps failing shows in condition PullRequestUnreadable.
 func (r *RemediationRequestReconciler) followHeldMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	record func(context.Context) error) (reconcile.Result, error) {
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)

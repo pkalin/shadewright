@@ -271,6 +271,10 @@ var errMergeCommitPending = errors.New("waiting for the Git host to report the m
 // longer than mergeCommitWait plus mergeCommitClockSlack (mergeWaitRemaining).
 func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) (time.Duration, error) {
+	if cr.State == providers.ChangeRequestMerged && gitWait(rr, waitMergeCheck) != nil {
+		// The read of the merge the wait is about answered (endAfterLastRead).
+		r.gitRetries().noteAnswered(client.ObjectKeyFromObject(rr))
+	}
 	if cr.State != providers.ChangeRequestMerged || shaPattern.MatchString(cr.MergeCommit) {
 		return 0, nil
 	}

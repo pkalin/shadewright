@@ -67,12 +67,16 @@ const (
 	// reaches, Failed with its receipt, or the pull request marked merged), with or without a receipt, and no
 	// verification holds the lock: the merge settles the lock without a read of the branch, as on main.
 	recordedMerge
+	// undeliveredGone: a merge that did not deliver the plan as shown, whose repository is gone from the settings: no
+	// read of its branch can start any more.
+	undeliveredGone
 )
 
 var proofNames = map[proof]string{
 	none: "none", mergeRecorded: "merge recorded", closedOrGone: "closed or gone", noPullRequest: "no pull request",
 	neverHeld: "never held", handedOver: "handed over", handoffAborted: "handoff aborted",
 	releasedBeforeField: "released before the field", recordedMerge: "recorded merge",
+	undeliveredGone: "undelivered merge, repository gone",
 }
 
 // String names what v proves, for logs.
@@ -156,36 +160,53 @@ func ReleasedBeforeField(status *api.RemediationRequestStatus, derivedHold bool)
 	return &Verdict{proof: releasedBeforeField}, true
 }
 
-// RecordedMerge is the verdict of a merge the status records (ninth decision of 2026-11-18 on #771, point 5), as
-// main's status rule told it (settleLock): the request is in a phase only a recorded merge reaches (Merged,
-// WaitingForDelivery, Verifying, Succeeded, Inconclusive: a merge recorded without a receipt ends there too), or
-// Failed with its receipt and pull request (Failed before a merge has none), or, in any phase but Superseded (which
-// main left to the read of the branch), its recorded pull request is marked merged
-// (markedMerged: PullRequestOpened with reason ChangeRequestMerged, which a merge with foreign change or one whose
-// content could not be read carries in NeedsIntervention); and no verification holds the lock
-// (heldForVerification false). A merge that was recorded was seen, and its pull request cannot merge again. It needs
-// no read of the branch, so neither a pause nor a repository that cannot be opened any more keeps the lock. The
-// caller checks that the request no longer moves on.
-func RecordedMerge(status *api.RemediationRequestStatus, markedMerged, heldForVerification bool) (*Verdict, bool) {
+// RecordedMerge is the verdict of a merge the status records as delivering the plan, as main's status rule told it
+// (settleLock), less the merges that did not deliver it as shown (tenth decision of 2026-11-18 on #771, point 3): the
+// request is in a phase only a recorded merge reaches (Merged, WaitingForDelivery, Verifying, Succeeded, Inconclusive:
+// a merge recorded without a receipt ends there too), or Failed with its receipt and pull request (Failed before a
+// merge has none), or, in any phase but Superseded, its recorded pull request is marked merged (markedMerged:
+// PullRequestOpened with reason ChangeRequestMerged), or Superseded with its handoff done and the pull request marked
+// merged (handedOff, as main's closedOnly let it through); and no verification holds the lock (heldForVerification
+// false). undelivered is a merge that did not deliver the plan as shown (MergedWithForeignChange,
+// MergeContentUnreadable) or whose read is still to be made (an open wait for a read): only a read that shows no other
+// open pull request of the branch releases it (ByRead, or UndeliveredRepositoryGone). A merge that was recorded was
+// seen, and its pull request cannot merge again. It needs no read of the branch, so neither a pause nor a repository
+// that cannot be opened any more keeps the lock. The caller checks that the request no longer moves on.
+func RecordedMerge(status *api.RemediationRequestStatus, markedMerged, undelivered, handedOff,
+	heldForVerification bool) (*Verdict, bool) {
 	if heldForVerification {
 		return nil, false
 	}
 	switch status.Phase {
 	case api.PhaseMerged, api.PhaseWaitingForDelivery, api.PhaseVerifying, api.PhaseSucceeded, api.PhaseInconclusive:
+		return &Verdict{proof: recordedMerge}, true
 	case api.PhaseFailed:
-		if (status.MergeReceipt == nil || status.PullRequest == nil) && !markedMerged {
-			return nil, false
+		if status.MergeReceipt != nil && status.PullRequest != nil {
+			return &Verdict{proof: recordedMerge}, true
 		}
 	case api.PhaseSuperseded:
 		// Written after Shadewright's close: another pull request of the branch may carry the change, so main's rule
-		// left it to the read of the branch (closedOnly), whatever PullRequestOpened says.
-		return nil, false
-	default:
-		if !markedMerged {
+		// left it to the read of the branch (closedOnly), unless the replacement took the pull request over (handoff
+		// done) and it is marked merged.
+		if !handedOff {
 			return nil, false
 		}
 	}
+	if !markedMerged || undelivered {
+		return nil, false
+	}
 	return &Verdict{proof: recordedMerge}, true
+}
+
+// UndeliveredRepositoryGone is the verdict of a merge that did not deliver the plan as shown (undelivered:
+// MergedWithForeignChange, MergeContentUnreadable) whose repository is gone from the settings (repositoryGone): the
+// read that would show no other open pull request of the branch cannot start, and nobody can see such a pull request
+// any more (tenth decision of 2026-11-18 on #771, point 3).
+func UndeliveredRepositoryGone(undelivered, repositoryGone bool) (*Verdict, bool) {
+	if !undelivered || !repositoryGone {
+		return nil, false
+	}
+	return &Verdict{proof: undeliveredGone}, true
 }
 
 // Release clears the lock in status, about to be written, for the verdict v, with the condition TargetHeld that

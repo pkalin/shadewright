@@ -451,10 +451,11 @@ func TestSequenceContentWaitLastReadFailsAfterAPause(t *testing.T) {
 	m.report()
 }
 
-// The ninth decision of 2026-11-18 on #771, points 1 and 5: the content wait ends with MergeContentUnreadable, the pull
-// request marked merged (ChangeRequestMerged), and writes are then paused. The merge is a recorded fact, as main's
-// status rule told it: the lock is released in the write that ends the request, before the pause.
-func TestSequenceContentUnreadableFreesTheTargetUnderAPause(t *testing.T) {
+// The tenth decision of 2026-11-18 on #771, point 3: the content wait ends with MergeContentUnreadable, the pull request
+// marked merged (ChangeRequestMerged), and writes are then paused. The merge did not deliver the plan as shown, so the
+// rule of 2026-11-17 holds: only a read that shows no other open pull request of the branch releases the lock. Under the
+// pause that read waits and the lock is held; within three reconciles after the lift it is settled.
+func TestSequenceContentUnreadableHeldUnderAPauseSettledAfterTheLift(t *testing.T) {
 	m := contentWaitWithFailingReads(t)
 	m.clock.at = gitWait(m.live(), waitMergeContent).Ends.Add(time.Second)
 	_, live, err := m.once()
@@ -466,16 +467,20 @@ func TestSequenceContentUnreadableFreesTheTargetUnderAPause(t *testing.T) {
 	}
 	m.pause(true)
 	m.steps(2)
-	if live := m.live(); holdsLock(live) {
-		m.fatalf("lock: the merge with unreadable content is recorded (%s) and the lock is held under the pause",
-			conditionsOf(live))
+	if live := m.live(); !holdsLock(live) {
+		m.fatalf("lock: the merge did not deliver the plan as shown (%s) and the lock was released under the pause, "+
+			"with no read of the branch", conditionsOf(live))
 	}
+	m.fault, m.lastingUntil = faultNone, time.Time{}
+	m.pause(false)
+	settledIn(m, 3)
 	m.report()
 }
 
-// The ninth decision of 2026-11-18 on #771, point 5: a pull request that Shadewright did not push the head of is
+// The tenth decision of 2026-11-18 on #771, point 3: a pull request that Shadewright did not push the head of is
 // merged (MergedWithForeignChange, PullRequestOpened ChangeRequestMerged), then the repository leaves the settings.
-// The merge is recorded, so it frees the target without a read of the branch, as main's settleLock did.
+// The read that would show no other open pull request of the branch cannot start, and nobody can see such a pull
+// request any more: the target is freed.
 func TestSequenceForeignMergeFreesTheTargetWithTheRepositoryGone(t *testing.T) {
 	r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 	ctx := context.Background()

@@ -27,8 +27,9 @@ import (
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
-// The ninth decision of 2026-11-18 on #771, point 5: the release of the target lock from recorded status is main's
-// rule (settleLock: prMayBeOpen and closedOnly), case by case. mainReleasesFromStatus is that rule as origin/main
+// The ninth decision of 2026-11-18 on #771, point 5, as the tenth narrowed it: the release of the target lock from
+// recorded status is main's rule (settleLock: prMayBeOpen and closedOnly), case by case, less the two stops whose
+// merge did not deliver the plan as shown (MergedWithForeignChange, MergeContentUnreadable). mainReleasesFromStatus is that rule as origin/main
 // holds it, kept here to compare the branch's verdict (settleRecordedMerge) with.
 func mainReleasesFromStatus(rr *api.RemediationRequest, verify bool) bool {
 	return holdsLock(rr) && !progresses(rr) && !mainPRMayBeOpen(rr) && !mainClosedOnly(rr) &&
@@ -69,9 +70,12 @@ func mainMergedAndEnded(rr *api.RemediationRequest) bool {
 }
 
 // TestRecordedMergeIsMainsRule builds every combination of phase, recorded pull request, reason of PullRequestOpened,
-// receipt, plan digest and verification, and checks that the branch releases the lock from recorded status exactly
-// where main's settleLock did: no more (a closed pull request needs the read of its branch) and no less (a merge with
-// foreign change, or one whose content could not be read, is recorded by ChangeRequestMerged and frees its target).
+// reason of Approved, receipt, plan digest, handoff and verification, and checks that the branch releases the lock from
+// recorded status exactly where main's settleLock did, less the two stops whose merge did not deliver the plan as shown
+// (tenth decision of 2026-11-18 on #771, point 3): NeedsIntervention with MergedWithForeignChange or
+// MergeContentUnreadable, which only a read of the branch releases. No more (a closed pull request needs the read of its
+// branch) and no less (a Superseded request whose handoff is done and whose pull request is marked merged is released,
+// point 4).
 func TestRecordedMergeIsMainsRule(t *testing.T) {
 	phases := []api.RemediationPhase{api.PhasePending, api.PhasePolicyChecked, api.PhasePRCreated,
 		api.PhaseAwaitingApproval, api.PhaseAutoMergeQueued, api.PhaseMerged, api.PhaseWaitingForDelivery,
@@ -79,37 +83,54 @@ func TestRecordedMergeIsMainsRule(t *testing.T) {
 		api.PhaseSuperseded, api.PhaseNeedsIntervention, api.PhaseInconclusive}
 	reasons := []string{"", ReasonPullRequestOpened, ReasonPullRequestClosed, ReasonChangeRequestClosed,
 		ReasonChangeRequestMerged, ReasonHeadMoved}
+	approvals := []string{"", ReasonMergedWithForeignChange, ReasonMergeContentUnreadable, ReasonMergeNotCheckable,
+		ReasonGitForbidden}
+	handoffs := []*api.OutgoingHandoff{nil, {Phase: api.HandoffDone, UID: "u"}, {Phase: api.HandoffIntent, UID: "u"}}
 	r := &RemediationRequestReconciler{}
 	n := 0
 	for _, phase := range phases {
 		for _, pr := range []bool{false, true} {
 			for _, reason := range reasons {
-				for _, receipt := range []bool{false, true} {
-					for _, digest := range []bool{false, true} {
-						for _, verify := range []bool{false, true} {
-							rr := &api.RemediationRequest{}
-							rr.Status.Phase, rr.Status.HoldsTarget = phase, new(true)
-							if pr {
-								rr.Status.PullRequest = &api.PullRequestStatus{Number: 7}
+				for _, approval := range approvals {
+					for _, receipt := range []bool{false, true} {
+						for _, digest := range []bool{false, true} {
+							for _, handoff := range handoffs {
+								for _, verify := range []bool{false, true} {
+									rr := &api.RemediationRequest{}
+									rr.Status.Phase, rr.Status.HoldsTarget = phase, new(true)
+									if pr {
+										rr.Status.PullRequest = &api.PullRequestStatus{Number: 7}
+									}
+									if reason != "" {
+										meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+											Type: api.ConditionPROpened, Status: metav1.ConditionTrue, Reason: reason})
+									}
+									if approval != "" {
+										meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+											Type: api.ConditionApproved, Status: metav1.ConditionFalse, Reason: approval})
+									}
+									if receipt {
+										rr.Status.MergeReceipt = &api.MergeReceipt{}
+									}
+									if digest {
+										rr.Status.PlanDigest = "sha256:" + fmt.Sprint(n)
+									}
+									if handoff != nil {
+										rr.Status.Handoff = &api.Handoff{To: handoff.DeepCopy()}
+									}
+									r.VerifyOutcomes = verify
+									_, got := r.settleRecordedMerge(rr)
+									got = got && !progresses(rr)
+									undelivered := phase == api.PhaseNeedsIntervention &&
+										(approval == ReasonMergedWithForeignChange || approval == ReasonMergeContentUnreadable)
+									if want := mainReleasesFromStatus(rr, verify) && !undelivered; got != want {
+										t.Errorf("phase %s, pull request %t, PullRequestOpened %q, Approved %q, receipt %t, "+
+											"digest %t, handoff %v, verify %t: the branch releases %t, main less the two "+
+											"stops %t", phase, pr, reason, approval, receipt, digest, handoff, verify, got, want)
+									}
+									n++
+								}
 							}
-							if reason != "" {
-								meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
-									Type: api.ConditionPROpened, Status: metav1.ConditionTrue, Reason: reason})
-							}
-							if receipt {
-								rr.Status.MergeReceipt = &api.MergeReceipt{}
-							}
-							if digest {
-								rr.Status.PlanDigest = "sha256:" + fmt.Sprint(n)
-							}
-							r.VerifyOutcomes = verify
-							_, got := r.settleRecordedMerge(rr)
-							got = got && !progresses(rr)
-							if want := mainReleasesFromStatus(rr, verify); got != want {
-								t.Errorf("phase %s, pull request %t, PullRequestOpened %q, receipt %t, digest %t, verify %t: "+
-									"the branch releases %t, main %t", phase, pr, reason, receipt, digest, verify, got, want)
-							}
-							n++
 						}
 					}
 				}

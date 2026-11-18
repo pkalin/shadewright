@@ -21,8 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -559,6 +561,29 @@ func (r *RemediationRequestReconciler) openRecovery(ctx context.Context, rr *rem
 	return git, err
 }
 
+// openStoppedRead opens the plan's repository for a read of a stopped holder's look that is not lookHeld's: the read of
+// the pull request a replacement that ended before its takeover was to take over (heldRecovery), and the read of who
+// records a merge a stopped predecessor found (stoppedMergeOwner). When the settings name another target branch, the
+// pull request is read on the branch the plan recorded, as lookHeld reads it, through a provider that writes nothing
+// (openRecordedBranch), so a merge or a close there settles the lock (second round of #786). Anything else is
+// openRecovery's: a repository gone from the settings is errRepositoryGone (heldRecovery releases on it), and a failed
+// read of the settings is the Kubernetes API's.
+func (r *RemediationRequestReconciler) openStoppedRead(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	providers.GitProvider, error) {
+	repo, _, err := r.planEntry(ctx, rr)
+	if !errors.Is(err, errTargetBranchChanged) || rr.Status.Source == nil {
+		return r.openRecovery(ctx, rr)
+	}
+	git, err := r.openRecordedBranch(ctx, repo, rr.Status.Source.TargetBranch)
+	switch {
+	case providers.IsInvalidConfig(err):
+		return nil, freshness.ErrRepositoryUnusable
+	case err != nil:
+		return nil, freshness.WrapProvider("open the repository", err)
+	}
+	return git, nil
+}
+
 // heldRecovery is checkHeld's first read for a request that ended before it took the pull request over
 // (endedBeforeTakeover, #786, decision 3 of the model result of 2026-11-18): the pull request the predecessor recorded,
 // by its number (changeOf, as the recovery reads it), which may carry this request's commit although no pull request
@@ -626,6 +651,14 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 	case isClusterError(err):
 		return reconcile.Result{}, true, err
 	}
+	if s, ok := settleRecoveryGone(rr, err); ok {
+		// The repository left the settings: no read of the pull request it was to take over can start, and nobody can
+		// see that pull request through Shadewright any more, so the lock goes as for an undelivered merge
+		// (settleUndeliveredGone). A missing settings object is no such evidence: the lock is kept.
+		rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
+		return reconcile.Result{}, true, r.releaseUnread(ctx, rr, s, "it ended before it took the pull request over "+
+			"and its repository is not in the settings any more")
+	}
 	if want := recoveryUnreadable(rr, err); want != nil {
 		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
 			return reconcile.Result{}, true, werr
@@ -644,6 +677,15 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 	return res, true, nil
 }
 
+// settleRecoveryGone is the verdict of rr, a replacement that ended before it took the pull request over
+// (endedBeforeTakeover), whose look found the repository of the plan gone from the settings (err): no read of that
+// pull request can start any more, so the lock is released, as settleUndeliveredGone releases an undelivered merge
+// (second round of #786). A settings object that is missing (errNoSettings) is not that: the lock is kept.
+func settleRecoveryGone(rr *remediationv1alpha1.RemediationRequest, err error) (*lockverdict.Verdict, bool) {
+	return lockverdict.RecoveryRepositoryGone(endedBeforeTakeover(rr),
+		errors.Is(err, errRepositoryGone) && !errors.Is(err, errNoSettings))
+}
+
 // heldRecoveryAlone is heldRecovery's read once the predecessor is gone (NotFound), so neither its recorded pull
 // request nor its intent can be read: the pull requests of the chain's branch are read through changeOf, as rr would
 // read them had it taken the pull request over (the predecessor's marker counts as its own, inheritsMarker, in memory
@@ -653,7 +695,7 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 // a failure of the Kubernetes API is marked so (a *clusterError).
 func (r *RemediationRequestReconciler) heldRecoveryAlone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, bool, error) {
-	git, err := r.openRecovery(ctx, rr)
+	git, err := r.openStoppedRead(ctx, rr)
 	if err != nil {
 		return reconcile.Result{}, true, err
 	}
@@ -688,6 +730,13 @@ func (r *RemediationRequestReconciler) heldRecoveryAlone(ctx context.Context, rr
 		return reconcile.Result{}, false, nil
 	}
 	if err := r.setUnreadable(ctx, rr, nil); err != nil {
+		return reconcile.Result{}, true, err
+	}
+	ours, err := r.isOwnCommitAlone(ctx, git, rr, v.pr.HeadSHA)
+	if err != nil {
+		return reconcile.Result{}, true, err
+	}
+	if err := r.noteHeldOpen(ctx, rr, v.pr.Number, ours); err != nil {
 		return reconcile.Result{}, true, err
 	}
 	logf.FromContext(ctx).Info("Kept the target lock of RemediationRequest: a pull request of its branch that may carry "+
@@ -795,7 +844,7 @@ func (r *RemediationRequestReconciler) isOwnCommitAlone(ctx context.Context, git
 // Kubernetes API is marked so (a *clusterError).
 func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr, pred *remediationv1alpha1.RemediationRequest,
 	to *remediationv1alpha1.OutgoingHandoff) (reconcile.Result, bool, error) {
-	git, err := r.openRecovery(ctx, rr)
+	git, err := r.openStoppedRead(ctx, rr)
 	if err != nil {
 		return reconcile.Result{}, true, err
 	}
@@ -820,9 +869,76 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 		if err := r.setUnreadable(ctx, rr, nil); err != nil {
 			return reconcile.Result{}, true, err
 		}
+		ours, err := r.isHandoffCommit(ctx, git, rr, pred, to, v.pr.HeadSHA)
+		if err != nil {
+			return reconcile.Result{}, true, err
+		}
+		if err := r.noteHeldOpen(ctx, rr, v.pr.Number, ours); err != nil {
+			return reconcile.Result{}, true, err
+		}
 		logf.FromContext(ctx).Info("Kept the target lock of RemediationRequest: the pull request that may carry its "+
 			"commit is open", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number)
 		return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, true, nil
 	}
 	return reconcile.Result{}, false, nil
+}
+
+// ReasonPersonCommitOnPullRequest is the reason of condition TargetHeld on a replacement that ended before it took the
+// pull request over (endedBeforeTakeover) and keeps the lock while that pull request is open with a head that is not
+// its handoff commit alone: a person's commit is on it (on top of the replacement's commit, or in its place), and the
+// pull request may still deliver the replacement's commit until it is merged or closed (second round of #786).
+const ReasonPersonCommitOnPullRequest = "PersonCommitOnPullRequest"
+
+// noteHeldOpen records why rr, a replacement that ended before its takeover, keeps the lock for the open pull request
+// number: with a person's commit on it (ours false), condition TargetHeld with ReasonPersonCommitOnPullRequest; with
+// its handoff commit alone as the head (ours true), no TargetHeld of that reason. The write is made only when the
+// condition changes, on a fresh read, and is retried on a conflict; a failure is the Kubernetes API's (a
+// *clusterError).
+func (r *RemediationRequestReconciler) noteHeldOpen(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	number int64, ours bool) error {
+	change := func(conds *[]metav1.Condition) {
+		if ours {
+			if c := meta.FindStatusCondition(*conds, remediationv1alpha1.ConditionTargetHeld); c != nil &&
+				c.Reason == ReasonPersonCommitOnPullRequest {
+				meta.RemoveStatusCondition(conds, remediationv1alpha1.ConditionTargetHeld)
+			}
+			return
+		}
+		meta.SetStatusCondition(conds, metav1.Condition{
+			Type: remediationv1alpha1.ConditionTargetHeld, Status: metav1.ConditionTrue,
+			Reason: ReasonPersonCommitOnPullRequest, ObservedGeneration: rr.Generation,
+			Message: fmt.Sprintf("Pull request #%d, which this request was to take over, is open with a commit "+
+				"Shadewright did not push on its branch, and may still deliver this request's commit; the target stays "+
+				"locked until it is merged or closed", number),
+		})
+	}
+	probe := slices.Clone(rr.Status.Conditions)
+	if change(&probe); equality.Semantic.DeepEqual(probe, rr.Status.Conditions) {
+		return nil
+	}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live := &remediationv1alpha1.RemediationRequest{}
+		if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+			return err
+		}
+		if live.UID != rr.UID {
+			return errors.New("RemediationRequest was replaced")
+		}
+		base := live.DeepCopy()
+		change(&live.Status.Conditions)
+		if equality.Semantic.DeepEqual(base.Status, live.Status) {
+			rr.ResourceVersion, rr.Status.Conditions = live.ResourceVersion, live.Status.Conditions
+			return nil
+		}
+		if err := r.Status().Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		rr.ResourceVersion, rr.Status.Conditions = live.ResourceVersion, live.Status.Conditions
+		return nil
+	})
+	if err != nil {
+		return &clusterError{err: fmt.Errorf("record why RemediationRequest %s/%s keeps its target lock: %w",
+			rr.Namespace, rr.Name, err)}
+	}
+	return nil
 }

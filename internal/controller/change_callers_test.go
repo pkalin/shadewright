@@ -155,7 +155,7 @@ var (
 	releasers   = map[string]bool{
 		"settleTargetLock": true, "releaseUnread": true, "settleRecorded": true, "releaseRefused": true, "supersedeDuplicate": true,
 		"endHandoff": true, "supersedePredecessor": true, "cancelUndecided": true, "backfill": true,
-		"leaveReplacementMerge": true, "endOnOtherMerge": true, "endWithoutCommit": true,
+		"leaveReplacementMerge": true, "endOnOtherMerge": true, "endWithoutCommit": true, "leavePredecessorMerge": true,
 	}
 	// statusReplacers may replace a request's whole status: restoreStatus puts back the status the same caller saved
 	// earlier in the same reconcile, which holds the lock as it was then (a release since then is undone, so the lock
@@ -334,7 +334,7 @@ func restoreStatus(rr *R, before *S) { rr.Status = *before }
 var settlementBuilders = map[string]bool{
 	"settleByRead": true, "settleNeverHeld": true, "settleHandedOver": true, "settleHandoffAborted": true,
 	"settleReleasedBeforeField": true, "settleRecordedMerge": true, "settleUndeliveredGone": true,
-	"settleReplacementMerge": true,
+	"settleReplacementMerge": true, "settlePredecessorMerge": true, "settleRecoveryGone": true,
 }
 
 // isPackage reports whether e is the package name pkg.

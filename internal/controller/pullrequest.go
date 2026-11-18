@@ -1478,30 +1478,7 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	// changeOf read the recorded number and answers about it only, so cr is that pull request.
 	cr := v.pr
 	if cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
-		if intent(rr) != nil {
-			// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
-			// what happens to the pull request from here, and this request waits for it.
-			switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
-			case err != nil:
-				return hintLook{}, err
-			case ok:
-				return hintLook{}, nil
-			}
-			// Any other head ends the handoff: the abort is stored before this request writes anything to the pull
-			// request (its comment, headMoved), as nothing is written to Git while the intent stands (#786).
-			if err := r.abortStandingIntent(ctx, rr); err != nil {
-				return hintLook{}, err
-			}
-		}
-		if cr.State == providers.ChangeRequestMerged && rr.Status.Handoff != nil && rr.Status.Handoff.To != nil {
-			switch owner, err := r.predecessorMergeOwner(ctx, git, rr, cr.HeadSHA); {
-			case err != nil:
-				return hintLook{}, err
-			case owner == ownerReplacement:
-				return hintLook{}, r.leaveReplacementMerge(ctx, rr, v, owner)
-			}
-		}
-		return hintLook{}, r.headMoved(ctx, git, rr, cr)
+		return hintLook{}, r.lookMovedHead(ctx, git, rr, v)
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
@@ -1535,6 +1512,62 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	return hintLook{}, nil
+}
+
+// lookMovedHead is watchStep's look at rr's recorded pull request, v.pr, found with a head that is not the one rr
+// recorded: the replacement's expected commit while the intent stands, a takeover the replacement recorded, the merge
+// of a head another request of the handoff records (mergedHeadOwner), or a head that moved (headMoved). A failed read
+// or write is returned for a retry.
+func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) error {
+	cr := v.pr
+	if intent(rr) != nil {
+		// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
+		// what happens to the pull request from here, and this request waits for it.
+		switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
+		case err != nil:
+			return err
+		case ok:
+			return nil
+		}
+		// A takeover the replacement recorded (its from Done) is never aborted, also when its write here was
+		// lost: the pull request is the replacement's, which handles the head from here and ends this request
+		// HandedOff (step 5, supersedePredecessor). The replacement is read first (second round of #786).
+		switch took, err := r.replacementTookOver(ctx, rr); {
+		case err != nil:
+			return err
+		case took:
+			return nil
+		}
+		// Any other head ends the handoff: the abort is stored before this request writes anything to the pull
+		// request (its comment, headMoved), as nothing is written to Git while the intent stands (#786).
+		if err := r.abortStandingIntent(ctx, rr, "its pull request moved to a head that is not its replacement's commit"); err != nil {
+			return err
+		}
+	}
+	if cr.State == providers.ChangeRequestMerged && rr.Status.Handoff != nil && rr.Status.Handoff.To != nil {
+		switch owner, err := r.predecessorMergeOwner(ctx, git, rr, cr.HeadSHA); {
+		case err != nil:
+			return err
+		case owner == ownerReplacement:
+			return r.leaveReplacementMerge(ctx, rr, v, owner)
+		case owner == ownerReplacementPending:
+			// The replacement records the merge of its commit; this request ends once it holds the receipt.
+			return nil
+		}
+	}
+	if cr.State == providers.ChangeRequestMerged && tookOver(rr) {
+		// A person put the predecessor's recorded head back and merged it: the predecessor records that merge.
+		switch owner, err := r.replacementMergeOwner(ctx, rr, cr.HeadSHA); {
+		case err != nil:
+			return err
+		case owner == ownerPredecessorRecords:
+			return r.leavePredecessorMerge(ctx, rr, v)
+		case owner == ownerPredecessorPending:
+			return nil
+		}
+	}
+	return r.headMoved(ctx, git, rr, cr)
 }
 
 // recordMergeSeen records the merge of the recorded pull request, cr, seen merged with the head Shadewright
@@ -2118,8 +2151,13 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // beginFinalize is the first step of finalize: it marks the deletion and ends the Git waits of a handoff's recovery
 // (#786: nothing recovers the handoff any more) in one status write, before the close, since the limits read this
 // request, and count it against the cap, until the finalizer is gone (breakercounts.go). Then a replacement that
-// recorded the takeover (and maybe the merge of its commit) ends its predecessor HandedOff (step 5 of a handoff), so
-// the predecessor never takes this request's merge for a foreign one once this request is gone (#786). done is true
+// recorded the takeover and the merge of its pull request ends its predecessor HandedOff (step 5 of a handoff), so the
+// predecessor never records that merge a second time once this request is gone (#786). One that recorded no merge
+// leaves its predecessor as it is: a merge of its commit it did not record is the predecessor's to record as a
+// foreign change once this request is gone (decision 2 of the model result of 2026-11-18, second round). The other way
+// round, a predecessor that recorded the merge of its own head after its replacement took the pull request over ends
+// that replacement MergedForPredecessor first (supersedeReplacementAfterMerge), so the replacement never records that
+// merge a second time once this request is gone. done is true
 // when finalize returns res and err as they are: a failed write, a pause, or a failure of that step.
 func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, bool, error) {
@@ -2134,7 +2172,14 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 				rr.Name, err)
 		}
 	}
-	if !tookOver(rr) || !r.ReviewerHints {
+	if err := r.supersedeReplacementAfterMerge(ctx, rr); err != nil {
+		if errors.Is(err, freshness.ErrPaused) {
+			res, err := r.waitWhilePaused(ctx, rr)
+			return res, true, err
+		}
+		return reconcile.Result{}, true, err
+	}
+	if !tookOver(rr) || !r.ReviewerHints || !mergeRecorded(rr) {
 		return reconcile.Result{}, false, nil
 	}
 	switch err := r.supersedePredecessor(ctx, rr); {

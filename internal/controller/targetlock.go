@@ -160,7 +160,14 @@ func handingOverMerge(rr *remediationv1alpha1.RemediationRequest, v changeVerdic
 	if rr.Status.Handoff.To.Phase != remediationv1alpha1.HandoffAborted {
 		return true
 	}
-	return v.state == changeMerged && owner == ownerReplacement
+	return v.state == changeMerged && (owner == ownerReplacement || owner == ownerReplacementPending)
+}
+
+// leavesToPredecessor reports whether rr, a stopped replacement that took the pull request over, leaves the merge v
+// found to its predecessor (owner from replacementMergeOwner): the merged head is the predecessor's own, and the
+// predecessor records it or is about to.
+func leavesToPredecessor(v changeVerdict, owner mergeOwner) bool {
+	return v.state == changeMerged && (owner == ownerPredecessorRecords || owner == ownerPredecessorPending)
 }
 
 // stoppedMergeOwner is mergedHeadOwner for a stopped holder rr whose aborted handoff names a replacement and whose
@@ -169,11 +176,15 @@ func handingOverMerge(rr *remediationv1alpha1.RemediationRequest, v changeVerdic
 func (r *RemediationRequestReconciler) stoppedMergeOwner(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict) (mergeOwner, error) {
 	ho := rr.Status.Handoff
+	if v.state == changeMerged && tookOver(rr) && rr.Status.PullRequest != nil &&
+		v.pr.HeadSHA != rr.Status.PullRequest.HeadSHA && !mergeRecorded(rr) {
+		return r.replacementMergeOwner(ctx, rr, v.pr.HeadSHA)
+	}
 	if v.state != changeMerged || ho == nil || ho.To == nil || ho.To.Phase != remediationv1alpha1.HandoffAborted ||
 		rr.Status.PullRequest == nil || v.pr.HeadSHA == rr.Status.PullRequest.HeadSHA || mergeRecorded(rr) {
 		return ownerPredecessor, nil
 	}
-	git, err := r.openPlanRepository(ctx, rr)
+	git, err := r.openStoppedRead(ctx, rr)
 	if err != nil {
 		return ownerForeign, err
 	}
@@ -211,7 +222,7 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 	if done {
 		return res, true, err
 	}
-	handingOver := handingOverMerge(rr, v, owner)
+	handingOver := handingOverMerge(rr, v, owner) || leavesToPredecessor(v, owner)
 	if expiredUncleaned(rr) && !handingOver && rr.Status.Source != nil {
 		switch {
 		case v.state == changeMerged && !mergeRecorded(rr) && v.pr.BaseBranch == string(rr.Status.Source.TargetBranch):
@@ -531,6 +542,17 @@ func settleReplacementMerge(v changeVerdict, owner mergeOwner) (*lockverdict.Ver
 	return lockverdict.ReplacementMerge(found, owner == ownerReplacement)
 }
 
+// settlePredecessorMerge is the verdict of a replacement whose taken-over pull request v found merged, when owner says
+// its predecessor records that merge (ownerPredecessorRecords, replacementMergeOwner): nothing can be merged through it
+// any more, and the merge is not this request's to record (second round of #786).
+func settlePredecessorMerge(v changeVerdict, owner mergeOwner) (*lockverdict.Verdict, bool) {
+	found := lockverdict.FoundOther
+	if v.state == changeMerged {
+		found = lockverdict.FoundMerged
+	}
+	return lockverdict.OtherRequestMerge(found, owner == ownerPredecessorRecords)
+}
+
 // settleRecordedMerge is the verdict of a request that no longer moves on and whose status records a merge that
 // delivered the plan, as main's status rule told it less the merges that did not deliver it as shown
 // (lockverdict.RecordedMerge): a phase after the merge (Merged, WaitingForDelivery, Verifying, Succeeded,
@@ -774,6 +796,14 @@ func (r *RemediationRequestReconciler) settleReplacementOwned(ctx context.Contex
 	case owner == ownerReplacement && ptr.Deref(rr.Status.HoldsTarget, false):
 		res, err := r.releaseReplacementMerge(ctx, rr, v, owner)
 		return owner, res, true, err
+	case owner == ownerPredecessorRecords:
+		// As a stopped predecessor ends MergedForReplacement (supersedeAfterAbort): the merge is not this request's,
+		// and no failure for the circuit breaker; the lock goes in the same write.
+		return owner, reconcile.Result{}, true, r.ignoreStopped(r.leavePredecessorMerge(ctx, rr, v))
+	case owner == ownerReplacementPending, owner == ownerPredecessorPending:
+		// The replacement does not hold the receipt of its merge yet: the lock is kept, and read again, until it
+		// does, or until it is deleted and the merge is this request's to record as a foreign change.
+		return owner, reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, true, nil
 	}
 	return owner, reconcile.Result{}, false, nil
 }

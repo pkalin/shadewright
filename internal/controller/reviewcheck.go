@@ -189,12 +189,15 @@ type stuckLooks struct {
 //
 // The counts are in memory only and no status write comes between a count and its Event: after a restart they
 // start again, so each Event may come once more per process.
+//
+// A failed Git read of the look (the check run, the reviews) is also returned, for the caller to retry visibly
+// (recheck, retryGitRead); any other failure is not.
 func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	comments commentLook) {
+	comments commentLook) error {
 	behind := comments == commentsBehind && r.gateDue(rr)
 	written, err := r.reviewCheckLook(ctx, rr, comments == commentsCaughtUp)
 	if ctx.Err() != nil {
-		return
+		return nil
 	}
 	key := client.ObjectKeyFromObject(rr)
 	pr := rr.Status.PullRequest
@@ -226,7 +229,7 @@ func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr 
 		if err == nil {
 			r.reviewCheckFailures.Delete(key)
 		}
-		return
+		return nil
 	}
 	logf.FromContext(ctx).Info("Could not update the review check of RemediationRequest",
 		"remediationRequest", key, "error", err.Error())
@@ -236,6 +239,10 @@ func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr 
 			"looks in a row; it keeps what the Git host shows, which may be a pass that no longer rests on an "+
 			"approval. The executor's log says why", reviewCheckStuckLooks))
 	}
+	if gitReadFailure(err) {
+		return err
+	}
+	return nil
 }
 
 // warn records a Warning Event about rr with reason and a fixed message, when the reconciler has a recorder.

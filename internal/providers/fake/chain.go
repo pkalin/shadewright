@@ -33,6 +33,16 @@ import (
 // CheckChain reports what a commit carries over the target branch when the branch may carry up to commits
 // commits of its own (providers.GitProvider.CheckChain).
 func (g *Git) CheckChain(ctx context.Context, sha, path string, commits int) (providers.BranchState, error) {
+	return g.checkChain(sha, path, commits, g.target)
+}
+
+// CheckChain is Git.CheckChain over the view's target branch.
+func (v *TargetView) CheckChain(ctx context.Context, sha, path string, commits int) (providers.BranchState, error) {
+	return v.checkChain(sha, path, commits, v.target)
+}
+
+// checkChain is CheckChain over the branch target.
+func (g *Git) checkChain(sha, path string, commits int, target string) (providers.BranchState, error) {
 	if commits < 1 || commits > providers.MaxChainCommits {
 		return 0, fmt.Errorf("a chain of %d commits is out of range", commits)
 	}
@@ -44,7 +54,8 @@ func (g *Git) CheckChain(ctx context.Context, sha, path string, commits int) (pr
 	if _, ok := g.commits[sha]; !ok {
 		return 0, fmt.Errorf("commit %q: %w", sha, providers.ErrNotFound)
 	}
-	if g.onTarget(sha) {
+	onTarget := func(c string) bool { return g.ancestor(g.branches[target], c) }
+	if onTarget(sha) {
 		return providers.BranchAtTarget, nil
 	}
 	at := sha
@@ -53,7 +64,7 @@ func (g *Git) CheckChain(ctx context.Context, sha, path string, commits int) (pr
 		if c.parent == "" || c.merged != "" || !g.onlyFile(c, c.parent, path) {
 			return providers.BranchForeign, nil
 		}
-		if g.onTarget(c.parent) {
+		if onTarget(c.parent) {
 			return providers.BranchOneChange, nil
 		}
 		at = c.parent

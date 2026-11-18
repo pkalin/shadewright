@@ -1186,6 +1186,88 @@ func TestCheckCommit(t *testing.T) {
 	}
 }
 
+// #771: CheckBetween compares the trees of two commits, whatever their relation: the whole difference a merge
+// brought shows there.
+func TestCheckBetween(t *testing.T) {
+	root, apps := mustRead(t, "tree_root.json"), mustRead(t, "tree_apps.json")
+	newRoot := strings.ReplaceAll(root, shaApps, shaNewTree)
+	newApps := strings.ReplaceAll(apps, shaDeploy, shaNewBlob)
+	trees := func(appsA string) []step {
+		return []step{raw("/git/trees/"+shaCommit, newRoot), raw("/git/trees/"+shaOld, root),
+			raw("/git/trees/"+shaNewTree, appsA), raw("/git/trees/"+shaApps, apps)}
+	}
+	const elsewhere = "8888888888888888888888888888888888888888"
+	for name, c := range map[string]struct {
+		steps []step
+		want  providers.BranchState
+	}{
+		"one change":            {trees(newApps), providers.BranchOneChange},
+		"a second file differs": {trees(strings.ReplaceAll(newApps, shaRun, elsewhere)), providers.BranchForeign},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, c.steps...)
+			got, err := h.p.CheckBetween(ctx, shaOld, shaCommit, deployPath)
+			if err != nil || got != c.want {
+				t.Fatalf("CheckBetween() = %v, %v, want %v", got, err, c.want)
+			}
+		})
+	}
+	for name, steps := range map[string][]step{
+		"refused": {status(http.MethodGet, "/git/trees/"+shaCommit, http.StatusForbidden, fxForbidden)},
+		"truncated tree": {raw("/git/trees/"+shaCommit, strings.ReplaceAll(newRoot, `"truncated":false`,
+			`"truncated":true`)), raw("/git/trees/"+shaOld, root)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, steps...)
+			got, err := h.p.CheckBetween(ctx, shaOld, shaCommit, deployPath)
+			if err == nil || got != 0 {
+				t.Fatalf("CheckBetween() = %v, %v, want an error and no answer", got, err)
+			}
+			assertSafe(t, err)
+		})
+	}
+	h := newHarness(t)
+	for name, c := range map[string]struct{ from, to, path string }{
+		"abbreviated from":  {"1111", shaCommit, deployPath},
+		"abbreviated to":    {shaOld, "1111", deployPath},
+		"path with dot dot": {shaOld, shaCommit, "x/../y"},
+	} {
+		if _, err := h.p.CheckBetween(ctx, c.from, c.to, c.path); err == nil {
+			t.Errorf("%s: allowed", name)
+		}
+	}
+}
+
+// #771: CountAhead reads ahead_by of one comparison; anything else is an error, never a count.
+func TestCountAhead(t *testing.T) {
+	h := newHarness(t, compareStep(`{"status":"diverged","ahead_by":3,"behind_by":9,"commits":[],"files":[]}`))
+	if got, err := h.p.CountAhead(ctx, shaBase, shaOld); err != nil || got != 3 {
+		t.Errorf("CountAhead() = %v, %v, want 3", got, err)
+	}
+	notFound := compareStep("")
+	notFound.status = http.StatusNotFound
+	for name, s := range map[string]step{
+		"absent commit":  notFound,
+		"no count":       compareStep(`{"status":"diverged","commits":[],"files":[]}`),
+		"negative count": compareStep(`{"ahead_by":-1}`),
+		"invalid JSON":   compareStep("not json"),
+		"too large":      compareStep(`{"ahead_by":1,"files":["` + strings.Repeat("x", maxJSONBody) + `"]}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, s)
+			got, err := h.p.CountAhead(ctx, shaBase, shaOld)
+			if err == nil || got != 0 {
+				t.Fatalf("CountAhead() = %v, %v, want an error and no count", got, err)
+			}
+			assertSafe(t, err)
+		})
+	}
+	h = newHarness(t)
+	if _, err := h.p.CountAhead(ctx, "1111", shaOld); err == nil {
+		t.Error("an abbreviated commit was allowed")
+	}
+}
+
 func TestCheckMergedFailsClosed(t *testing.T) {
 	for name, steps := range map[string][]step{
 		"forbidden": {status(http.MethodGet, mainRef, http.StatusForbidden, fxForbidden)},

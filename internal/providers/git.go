@@ -290,6 +290,15 @@ type GitProvider interface {
 	// failures to find out, never an answer.
 	CheckCommit(ctx context.Context, commit, path string) (BranchState, string, error)
 
+	// CheckBetween reports whether the trees of commits from and to differ at most in the content of the regular
+	// file at path (same mode, held by both): BranchOneChange when they do, BranchForeign otherwise. It says nothing
+	// about how the two commits are related. It only reads. Errors are failures to find out, never an answer.
+	CheckBetween(ctx context.Context, from, to, path string) (BranchState, error)
+
+	// CountAhead returns how many commits the history of head holds that the history of base does not (git
+	// rev-list --count base..head). It only reads. Errors are failures to find out, never an answer.
+	CountAhead(ctx context.Context, base, head string) (int, error)
+
 	// CheckMerged reports what head, the head of a change request that mergeCommit merged into the target
 	// branch, carried over the target branch as it was before the merge: BranchOneChange with head's parent
 	// when head has exactly one parent, that parent is the first parent of mergeCommit or an ancestor of it,

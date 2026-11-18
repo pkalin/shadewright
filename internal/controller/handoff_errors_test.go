@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -72,8 +73,10 @@ func TestRecoveryRetriesWhenTheRepositoryCannotBeOpened(t *testing.T) {
 		}
 		return g, nil
 	}
-	if _, err := r.recheck(ctx, rr); err == nil {
-		t.Fatal("a recovery that could not open the repository was not retried")
+	// A failed Git read past the deadline is a visible retry within the grace, not an error for the backoff.
+	if res, err := r.recheck(ctx, rr); err != nil || res.RequeueAfter <= 0 ||
+		meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
+		t.Fatalf("a recovery that could not open the repository was not retried: %+v %v", res, err)
 	}
 	if rr.Status.Phase != api.PhasePolicyChecked {
 		t.Fatalf("the replacement ended %s with its commit on the pull request", rr.Status.Phase)

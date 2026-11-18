@@ -716,7 +716,7 @@ func TestReviewCheckStuckWarnsOnce(t *testing.T) {
 		return nil
 	})
 	for i := range 2 * reviewCheckStuckLooks {
-		r.watchReviewCheck(ctx, p, commentsCaughtUp)
+		_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
 			t.Fatalf("after %d failed looks: %d Events, want %d", i+1, len(events.Events), want)
 		}
@@ -725,7 +725,7 @@ func TestReviewCheckStuckWarnsOnce(t *testing.T) {
 		t.Fatalf("event %q", ev)
 	}
 	g.SetFail(nil)
-	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 	if _, ok := r.reviewCheckFailures.Load(client.ObjectKeyFromObject(p)); ok {
 		t.Fatal("a look that went through kept the count")
 	}
@@ -742,12 +742,12 @@ func TestReviewCommentsUnreadWarnsOnce(t *testing.T) {
 	r.Recorder = events
 	key := client.ObjectKeyFromObject(p)
 	for i := range 2 * reviewCheckStuckLooks {
-		r.watchReviewCheck(ctx, p, commentsBehind)
+		_ = r.watchReviewCheck(ctx, p, commentsBehind)
 		switch i {
 		case 0:
-			r.watchReviewCheck(ctx, p, commentsPaused)
+			_ = r.watchReviewCheck(ctx, p, commentsPaused)
 		case 1:
-			r.watchReviewCheck(ctx, p, commentsNone)
+			_ = r.watchReviewCheck(ctx, p, commentsNone)
 		}
 		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
 			t.Fatalf("after %d looks behind: %d Events, want %d", i+1, len(events.Events), want)
@@ -762,7 +762,7 @@ func TestReviewCommentsUnreadWarnsOnce(t *testing.T) {
 	if _, ok := r.reviewCheckFailures.Load(key); ok {
 		t.Fatal("looks behind counted as failed looks")
 	}
-	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 	if _, ok := r.reviewCommentsBehind.Load(key); ok {
 		t.Fatal("a look that caught up kept the count")
 	}
@@ -777,7 +777,7 @@ func TestReviewCommentsUnreadOnlyWhileTheGateIsDue(t *testing.T) {
 	r.Recorder = events
 	p.Status.PullRequest.ReviewCheck.State = api.ReviewCheckFailed
 	for range 2 * reviewCheckStuckLooks {
-		r.watchReviewCheck(ctx, p, commentsBehind)
+		_ = r.watchReviewCheck(ctx, p, commentsBehind)
 	}
 	if len(events.Events) != 0 {
 		t.Fatalf("%d Events for a gate that was not due", len(events.Events))
@@ -801,7 +801,7 @@ func TestReviewCheckConflictWarnsOnce(t *testing.T) {
 		return nil
 	})
 	for i := range 2 * reviewCheckStuckLooks {
-		r.watchReviewCheck(ctx, p, commentsCaughtUp)
+		_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 		if want := min((i+1)/reviewCheckStuckLooks, 1); len(events.Events) != want {
 			t.Fatalf("after %d conflicts: %d Events, want %d", i+1, len(events.Events), want)
 		}
@@ -816,7 +816,7 @@ func TestReviewCheckConflictWarnsOnce(t *testing.T) {
 		t.Fatal("conflicts counted as failed looks")
 	}
 	g.SetFail(nil)
-	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 	if _, ok := r.reviewCheckConflicts.Load(key); ok {
 		t.Fatal("a look that went through kept the count")
 	}
@@ -862,8 +862,8 @@ func TestReviewCheckSignalsDoNotResetEachOther(t *testing.T) {
 	g.SetReviewState(number, 90, "DISMISSED")
 	g.SetFail(conflictOnWrite)
 	for i := range 5 * reviewCheckStuckLooks {
-		r.watchReviewCheck(ctx, p, commentsBehind)
-		r.watchReviewCheck(ctx, p, commentsCaughtUp)
+		_ = r.watchReviewCheck(ctx, p, commentsBehind)
+		_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 		got := eventsOf(events)
 		if i+1 == reviewCheckStuckLooks {
 			if got[ReasonReviewCheckConflict] != 1 || len(got) != 1 {
@@ -891,7 +891,7 @@ func TestReviewCheckConflictCountsAcrossFailedReads(t *testing.T) {
 		t.Helper()
 		g.SetFail(conflictOnWrite)
 		for range n {
-			r.watchReviewCheck(ctx, p, commentsCaughtUp)
+			_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 		}
 	}
 	conflicts(5)
@@ -901,9 +901,9 @@ func TestReviewCheckConflictCountsAcrossFailedReads(t *testing.T) {
 		}
 		return nil
 	})
-	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 	g.SetFail(nil)
-	r.watchReviewCheck(ctx, p, commentsNone) // the gate does not run on this look, so nothing is written
+	_ = r.watchReviewCheck(ctx, p, commentsNone) // the gate does not run on this look, so nothing is written
 	conflicts(4)
 	if got := eventsOf(events); len(got) != 0 {
 		t.Fatalf("after nine conflicts and a failed read: Events %v", got)
@@ -920,7 +920,7 @@ func TestReviewCheckConflictCountsAcrossFailedReads(t *testing.T) {
 	g.SetReviewState(number, 90, "DISMISSED")
 	conflicts(5)
 	g.SetFail(nil)
-	r.watchReviewCheck(ctx, p, commentsCaughtUp)
+	_ = r.watchReviewCheck(ctx, p, commentsCaughtUp)
 	if rc := p.Status.PullRequest.ReviewCheck; rc.State != api.ReviewCheckInProgress {
 		t.Fatalf("the write between the conflicts did not go through: %+v", rc)
 	}

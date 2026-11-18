@@ -100,7 +100,9 @@ import (
 // #288 cleanup bound (a request whose cleanup was failing let go of its finalizer at the end of a bound of that
 // cleanup, elapsed on the model's clock, with the pull request open), the #870 head (P3), a reopen after a release (a
 // request whose lock a verdict released when a person reopened the pull request does not take it back and records
-// nothing of it, design 6.5), and #875: a replacement deleted before it recorded the merge of its pull request after its predecessor
+// nothing of it, design 6.5), a request deleted while the repository was not in the settings (its finalizer does not
+// wait for the repository, design 6, so its pull request stays open with no holder after the repository is back:
+// P3), and #875: a replacement deleted before it recorded the merge of its pull request after its predecessor
 // ended HandedOff (the pull request was the replacement's alone, and a request deleted before it records the merge of
 // its own pull request records nothing, as any request; the predecessor has ended). With the repository gone, reads
 // never answer, so P1 and P2 ask nothing of a merge then.
@@ -108,7 +110,7 @@ import (
 // A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property; a
 // seed whose only violations an exclusion covers is skipped with the exclusion's name. The default set is the seeds 1
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
-// 9,001 to 13,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// 9,001 to 13,000, and in the fifth round of #786 against 1 to 24,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.
@@ -298,9 +300,12 @@ type hmWorld struct {
 	// gone288: a request was deleted and let go of its finalizer with the pull request open after its cleanup failed
 	// until a bound of it elapsed on the model's clock (CleanupFailing True on its last copy): the end of the cleanup
 	// bound (#288).
-	gone288  bool
-	lastRepl *api.RemediationRequest
-	lastPred *api.RemediationRequest
+	gone288 bool
+	// goneMissing: a request being deleted let go of its finalizer while the repository was not in the settings, with
+	// the pull request open (design 6: a repository that left the settings does not block the deletion).
+	goneMissing bool
+	lastRepl    *api.RemediationRequest
+	lastPred    *api.RemediationRequest
 	// reach is what the sequence reached, for the counts; excused counts the violations a named shape excuses;
 	// expected counts the named expectations that held (a state the design requires, checked, not excused).
 	reach    map[string]bool
@@ -373,6 +378,12 @@ var hmShapes = []struct {
 	// "The Git cleanup cannot hold a deletion for good", #288), so no request holds the lock of that open pull
 	// request, and a later merge of it is recorded by nobody.
 	{name: "#288 cleanup bound", excuses: "P1 P3 P6", matching: func(m *hmWorld) bool { return m.gone288 }},
+	// A request is deleted while the repository is not in the settings: nothing can close its pull request, and the
+	// deletion does not wait for the repository (design 6, the deletion), so the pull request stays open with no
+	// holder after the repository comes back.
+	{name: "deleted while the repository was missing", excuses: "P3", matching: func(m *hmWorld) bool {
+		return m.goneMissing
+	}},
 	// A person pushed on top of the replacement's commit (#870): the head of the pull request carries the
 	// replacement's commit with further commits on it. The merge of such a head is excluded from P1 and P2 by its
 	// owner (gap870); P3 asks nothing of the lock of that head.
@@ -1008,6 +1019,16 @@ func (m *hmWorld) note(p, rr *api.RemediationRequest) {
 		return boundLeft(failing, cleanupFailingBound, m.now) <= 0 ||
 			(refused != nil && refused.Status == metav1.ConditionTrue && boundLeft(refused, closeRefusedGrace, m.now) <= 0)
 	}
+	// A request deleted while the repository is not in the settings: its finalizer lets go, the pull request left open
+	// (design 6, "A repository that left the settings ... does not block the deletion").
+	goneMissing := func(now, last *api.RemediationRequest) bool {
+		return now == nil && last != nil && !last.DeletionTimestamp.IsZero() && m.settings == settingsRemoved
+	}
+	if (goneMissing(rr, m.lastRepl) || goneMissing(p, m.lastPred)) && m.pr().State == providers.ChangeRequestOpen &&
+		!m.goneMissing {
+		m.goneMissing = true
+		m.logf("  a request deleted while the repository is not in the settings let go with the pull request open")
+	}
 	if (letGo(rr, m.lastRepl) || letGo(p, m.lastPred)) && m.pr().State == providers.ChangeRequestOpen &&
 		!m.gone288 {
 		m.gone288 = true
@@ -1311,7 +1332,7 @@ func (m *hmWorld) personEvent(s hmStep) {
 		}
 		m.merge = &hmMerge{head: cr.HeadSHA, owner: m.ownerOf(cr.HeadSHA), failed: map[string]bool{},
 			recorded: map[string]bool{}}
-		if m.merge.owner == hmPred && m.replTookOver() {
+		if pred := m.get(hmPred); m.merge.owner == hmPred && (m.replTookOver() || (pred != nil && handedOff(pred))) {
 			// The replacement took the pull request over, and a person put the predecessor's commit back with a force
 			// push: the predecessor records that merge as its own while it can (alive, not handed off), or the
 			// replacement records it as a foreign change (foreignOnReplacement). One record either way.

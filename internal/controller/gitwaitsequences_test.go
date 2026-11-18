@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // The sequences the fourth decision of 2026-11-18 on #771 names, scripted through the model of gitwaitmodel_test.go
@@ -629,5 +632,95 @@ func TestSequenceMergeWithoutReceiptReleasesUnderAPause(t *testing.T) {
 			}
 			m.report()
 		})
+	}
+}
+
+// What becomes of the pull request of a stale plan's cleanup that the Git host refused (#808): the close is allowed
+// again, or a person merges it (foundClosed: a person closes it).
+const (
+	thenCloseAllowed = "close allowed"
+	thenMergedByHand = "merged by a person"
+)
+
+// #808, decision of 2026-11-17: a stale plan's cleanup with no pull request recorded (the open's status write was
+// lost), through the plan's installation or a new one, meets a close the Git host refuses for good. The request ends
+// NeedsIntervention at once and keeps the lock; the read after the stop goes on through the installation the cleanup
+// used, retries a failed read through the shared record, tries the close again, and settles the lock with a verdict
+// once the pull request is closed (by Shadewright or a person) or merged (a stale plan's merge). The model's
+// properties hold at every step: each wait ends within its bound, the lock is released only on a verdict and never
+// while the pull request can still merge, and the second request never holds the target while the first does.
+func TestSequenceStaleCleanupRefusedWithoutARecordedPullRequest(t *testing.T) {
+	for _, reinstalled := range []bool{false, true} {
+		for _, then := range []string{thenCloseAllowed, foundClosed, thenMergedByHand} {
+			t.Run(fmt.Sprintf("reinstalled=%t/%s", reinstalled, then), func(t *testing.T) {
+				m := scripted(t, modelStart{start: startPolicyChecked})
+				ctx := context.Background()
+				var refuse atomic.Bool
+				refuse.Store(true)
+				m.g.SetFail(func(op string) error {
+					if op == opClose && refuse.Load() {
+						return fmt.Errorf("close: %w", providers.ErrForbidden)
+					}
+					return nil
+				})
+				if reinstalled {
+					m.updateSettings(func(s *api.RemediationSettings) { s.Spec.Repositories[0].GitHub.InstallationID++ })
+					m.logf("a new installation of the GitHub App")
+				}
+				rr := m.live()
+				meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionPlanFresh,
+					Status: metav1.ConditionFalse, Reason: freshness.ReasonTargetFileChanged, Message: "The plan's target file changed"})
+				if err := m.base.Status().Update(ctx, rr); err != nil {
+					t.Fatal(err)
+				}
+				m.addSecond()
+				m.steps(1)
+				if live := m.live(); live.Status.Phase != api.PhaseNeedsIntervention || !holdsLock(live) {
+					t.Fatalf("setup: want NeedsIntervention with the lock held after the refused close, got %s, holds %t",
+						live.Status.Phase, holdsLock(live))
+				}
+				m.fault = opList
+				m.steps(3)
+				m.fault = faultNone
+				m.steps(2)
+				live := m.live()
+				switch {
+				case !holdsLock(live):
+					m.fatalf("lock: released while the close is refused and the pull request is open")
+				case meta.FindStatusCondition(live.Status.Conditions, api.ConditionPullRequestUnreadable) != nil:
+					m.fatalf("unreadable: the read after the stop does not reach the installation the cleanup used: %s",
+						conditionsOf(live))
+				}
+				switch then {
+				case thenCloseAllowed:
+					refuse.Store(false)
+				case foundClosed:
+					refuse.Store(false)
+					if err := m.g.CloseChangeRequest(ctx, m.number); err != nil {
+						t.Fatal(err)
+					}
+					refuse.Store(true)
+				case thenMergedByHand:
+					sha, err := m.g.Merge(m.number)
+					if err != nil {
+						t.Fatal(err)
+					}
+					m.merge = sha
+				}
+				m.logf("the pull request: %s", then)
+				m.steps(6)
+				live = m.live()
+				switch {
+				case holdsLock(live):
+					m.fatalf("settled: the lock is held after the pull request was %s (phase %s)", then, live.Status.Phase)
+				case then == thenCloseAllowed && func() bool { cr, _ := m.pr(); return cr.State != providers.ChangeRequestClosed }():
+					m.fatalf("close: the read after the stop did not close the pull request once allowed")
+				case then == thenMergedByHand && (!mergeRecorded(live) || !markedStale(live)):
+					m.fatalf("merge: not recorded as a stale plan's merge (phase %s)", live.Status.Phase)
+				}
+				m.settled()
+				m.report()
+			})
+		}
 	}
 }

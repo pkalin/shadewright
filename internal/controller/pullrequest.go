@@ -227,7 +227,9 @@ func (r *RemediationRequestReconciler) openPlanRepositoryFor(ctx context.Context
 // too. With errTargetBranchChanged it also returns the entry, which then
 // names another target branch than the recorded one (status.source), for the look at a merge (watchBranchChanged).
 // reinstalled says that the entry is the plan's URL under a new installation of the GitHub App (#290): only while rr
-// carries the stale mark, so only for the cleanup of a stale plan (cleanupRepository).
+// carries the stale mark, so only for the cleanup of a stale plan, or once that cleanup stopped on a refusal of the
+// Git host (staleCleanupStopped, #808), so the read after the stop settles the lock where the cleanup worked
+// (cleanupRepository).
 func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (remediationv1alpha1.GitRepository, bool, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
@@ -245,7 +247,7 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 	if freshness.Paused(settings) {
 		return remediationv1alpha1.GitRepository{}, false, freshness.ErrPaused
 	}
-	repo, reinstalled, ok := cleanupRepository(settings, rr, staleMark(rr) != nil)
+	repo, reinstalled, ok := cleanupRepository(settings, rr, staleMark(rr) != nil || staleCleanupStopped(rr))
 	if !ok {
 		// Evidence that no read of the Git host can start for the request (endAfterLastRead).
 		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableReads[reasonRepositoryUnavailable])
@@ -258,8 +260,9 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 }
 
 // cleanupRepository returns the settings entry of the repository rr's plan was made for (freshness.FindRepository).
-// When there is none and stale is true (the cleanup of a stale plan), it also accepts the entry with the same URL
-// under a new installation of the GitHub App (freshness.FindReinstalled, #290), and reports reinstalled. A changed
+// When there is none and stale is true (the cleanup of a stale plan, or its stop on a refusal), it also accepts the
+// entry with the same URL under a new installation of the GitHub App (freshness.FindReinstalled, #290), and reports
+// reinstalled. A changed
 // installation makes the plan stale (the digest covers it), and the same URL is the same repository, so its pull
 // request can still be closed there; but every caller reads the pull request through that entry with this request's
 // marker (request UID and plan digest, invariant 5) before it fails the review check or closes it, and the provider

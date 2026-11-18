@@ -76,18 +76,26 @@ import (
 //     and is not ended runs hot, and the clock that bounds it never moves);
 //   - record: a merge the status records names its pull request;
 //   - lock: the lock is never released while a pull request of the request is open, nor on a merge the status does
-//     not record, and a lock once released never comes back;
+//     not record, checked at the moment of the release (a merge into a branch the plan's change was not for, seen
+//     only after the settings moved, is recorded as released aside), and a lock once released never comes back
+//     while the request does not hold it;
+//   - ending: a reconcile that starts with a wait past its end (status.gitWaits) calls the Git host nothing before
+//     its first status write: the end decides from recorded state alone (fifth decision of 2026-11-18 on #771);
 //   - schema: no status write is one the API server refuses.
 //
-// At the end the world heals (reads work, no write fails, writes are not paused; the repository comes back in half
-// of the runs) and, after a few reconciles, the lock is free, or held by a request whose pull request is open and
-// can still merge; a merge recorded with its receipt never holds it, whether the repository came back or not.
+// At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; writes stay
+// paused in half of the runs and always under the pause focus, since a pause stops writes only) and, after a few
+// reconciles, the lock is free, or held by a request whose pull request is open and can still merge; a merge
+// recorded with its receipt never holds it, whether the repository came back or not; a merge is recorded; and a
+// cancelled request whose pull request is closed or gone holds no lock (settled cancel).
 //
 // Each seed has a focus (seed modulo the number of focuses, modelFocuses): none, or one that makes an order of the
-// fourth decision of 2026-11-18 on #771 likely (a deadline that passes while the repository cannot be opened, a
-// merge reported without its commit while the reads fail, a merge recorded with its receipt and the repository gone,
-// the cache serving a copy that held the lock after it was released, a retargeted merge into the longest branch name
-// whose reads fail). A focus only weights the start and the events; every event can still happen.
+// fourth or fifth decision of 2026-11-18 on #771 likely (a deadline that passes while the repository cannot be
+// opened, a merge reported without its commit while the reads fail, a merge recorded with its receipt and the
+// repository gone, the cache serving a copy that held the lock after it was released, a retargeted merge into the
+// longest branch name whose reads fail, a cancel with a branch change and a pull request closed, deleted or merged by
+// hand, writes paused while the request is stopped or waits for its deadline and a person closes or merges its pull
+// request). A focus only weights the start and the events; every event can still happen.
 //
 // Seeds: modelSeeds in CI (a fixed set, fewer under the race detector or -short); SHADEWRIGHT_MODEL_SEEDS=n runs n
 // more seeds from the time, SHADEWRIGHT_MODEL_SEED=s one seed and SHADEWRIGHT_MODEL_SEED_RANGE=a-b the seeds a to b
@@ -123,6 +131,12 @@ const (
 	focusReceipt  = "receipt"
 	focusStale    = "stale"
 	focusLong     = "long"
+	// focusCancel: a person cancels a request whose target branch then changes (or changed), and its pull request is
+	// closed, deleted, or moved to the configured branch and merged there.
+	focusCancel = "cancel"
+	// focusPause: the kill switch pauses writes early and the pause mostly lasts, while the pull request is closed,
+	// deleted or merged and a deadline passes.
+	focusPause = "pause"
 )
 
 var (
@@ -133,7 +147,8 @@ var (
 	// longBranch is the longest target branch name the schema allows (api.GitBranch).
 	longBranch = strings.Repeat("r", 255)
 	// modelFocuses are the focuses of the seeds, in the order of seed modulo their number.
-	modelFocuses = []string{focusNone, focusDeadline, focusCommit, focusReceipt, focusStale, focusLong}
+	modelFocuses = []string{focusNone, focusDeadline, focusCommit, focusReceipt, focusStale, focusLong, focusCancel,
+		focusPause}
 )
 
 // modelSeeds is the fixed seed set: 1 to n.
@@ -238,6 +253,8 @@ type modelWorld struct {
 	startAt                      time.Time
 	// released: the request's lock was seen released; recorded: the request's merge was seen recorded.
 	released, recorded bool
+	// releasedAside: at the release the pull request was merged into a branch that delivered nothing.
+	releasedAside bool
 	// handoff: the request is a replacement recovering a handoff; the pull request is its predecessor's, which
 	// holds the lock on it, so the lock properties about the request's own pull request do not apply.
 	handoff bool
@@ -248,6 +265,14 @@ type modelWorld struct {
 	violations []string
 	// focus weights the events (modelFocuses).
 	focus string
+	// paused: the kill switch pauses writes now.
+	paused bool
+	// calls counts the calls to the Git host (opening the repository included) in the reconcile running; passed is
+	// the kind of a Git wait of the request that had passed its end when that reconcile began, and ended whether the
+	// first status write of that reconcile was made (property "ending").
+	calls  int
+	passed string
+	ended  bool
 }
 
 // modelStart is how a run of the model begins: drawn from the seed (drawStart), or given by a scripted test.
@@ -279,6 +304,16 @@ func drawStart(rng *rand.Rand, focus string) modelStart {
 	case focusLong:
 		starts := []string{startRunning, stopPlanFresh, stopApproved, stopUnrecord}
 		return modelStart{start: starts[rng.IntN(len(starts))], long: true, verify: rng.IntN(2) == 0, focus: focus}
+	case focusCancel:
+		// Waiting for review with its pull request recorded (on a fresh plan, so the branch changes later), or in
+		// PolicyChecked with the record of its pull request lost.
+		starts := []string{startRunning, startPolicyChecked}
+		st := modelStart{start: starts[rng.IntN(len(starts))], verify: rng.IntN(2) == 0, focus: focus}
+		st.fresh = st.start == startRunning && rng.IntN(3) > 0
+		return st
+	case focusPause:
+		starts := []string{stopPlanFresh, stopApproved, stopUnrecord, startPolicyChecked, startRunning, stopOther}
+		return modelStart{start: starts[rng.IntN(len(starts))], verify: rng.IntN(2) == 0, focus: focus}
 	}
 	st := modelStart{start: modelStarts[rng.IntN(len(modelStarts))], focus: focusNone}
 	st.long = st.start != startPolicyChecked && rng.IntN(3) == 0
@@ -507,6 +542,16 @@ func (m *modelWorld) write(ctx context.Context, obj client.Object, do func() err
 		}
 	}
 	m.mu.Lock()
+	if rr, ok := obj.(*api.RemediationRequest); ok && rr.Name == m.key.Name && m.passed != "" && !m.ended {
+		m.ended = true
+		if m.calls > 0 {
+			passed, calls := m.passed, m.calls
+			m.mu.Unlock()
+			m.fatalf("ending: the %s wait had passed its end and the reconcile called the Git host %d times before "+
+				"its first status write", passed, calls)
+			m.mu.Lock()
+		}
+	}
 	lose, conflict, apply := m.loseNext, m.conflictNext, m.applyNext
 	m.loseNext, m.conflictNext, m.applyNext = false, false, false
 	if lose || conflict || apply {
@@ -579,7 +624,14 @@ func (m *modelWorld) report() {
 }
 
 func (m *modelWorld) run() {
-	if !m.deleted && (m.focus == focusLong || m.rng.IntN(3) == 0) {
+	if m.focus == focusCancel && m.rng.IntN(4) > 0 {
+		// The cancel and the branch change come before the executor first looks: a pull request whose record was
+		// lost is not found before them.
+		m.cancel()
+		m.setConfigured(freshOtherBranch)
+		m.logf("the settings name target branch %s", freshOtherBranch)
+	}
+	if !m.deleted && m.focus != focusCancel && (m.focus == focusLong || m.rng.IntN(3) == 0) {
 		// A person moves the pull request and merges it before the executor looks (decision of 2026-11-16: every
 		// order of the settings change, the move and the merge).
 		m.prelude()
@@ -594,11 +646,17 @@ func (m *modelWorld) run() {
 	m.fault, m.loseNext, m.conflictNext, m.applyNext, m.staleNext, m.noCommit = faultNone, false, false, false, false, false
 	m.lastingUntil = time.Time{}
 	m.mu.Unlock()
-	m.updateSettings(func(s *api.RemediationSettings) { s.Spec.Paused = nil })
+	if m.paused && (m.focus == focusPause || m.rng.IntN(2) == 0) {
+		// A pause stops writes to the Git host only (fifth decision of 2026-11-18 on #771): reads go on, so every
+		// settlement below that needs no write is reached while it lasts.
+		m.logf("the pause stays")
+	} else if m.paused {
+		m.pause(false)
+	}
 	if m.repo != nil && m.rng.IntN(2) == 0 {
 		m.restoreRepository()
 	}
-	m.logf("heal (repository in the settings: %t)", m.repo == nil)
+	m.logf("heal (repository in the settings: %t, writes paused: %t)", m.repo == nil, m.paused)
 	for range 8 {
 		m.step(true)
 	}
@@ -644,7 +702,7 @@ func (m *modelWorld) event() {
 	if m.focusEvent(cr) {
 		return
 	}
-	switch m.rng.IntN(17) {
+	switch m.rng.IntN(18) {
 	case 0, 1, 8:
 		if cr.State != providers.ChangeRequestOpen || m.deleted {
 			return
@@ -737,7 +795,82 @@ func (m *modelWorld) event() {
 		m.fault, m.loseNext = modelFaults[1+m.rng.IntN(len(modelFaults)-1)], true
 		m.mu.Unlock()
 		m.logf("reads: %s, and lose the next status write", m.fault)
+	case 17:
+		m.pause(!m.paused)
 	}
+}
+
+// pause sets or lifts the kill switch's pause of writes.
+func (m *modelWorld) pause(on bool) {
+	m.updateSettings(func(s *api.RemediationSettings) { s.Spec.Paused = new(on) })
+	m.paused = on
+	m.logf("the kill switch: writes paused %t", on)
+}
+
+// commitEvent is the event of focusCommit: a merge without its commit, then reads that fail for a while once the
+// executor saw it; mostly quiet while that lasts. ok is false when it draws none.
+func (m *modelWorld) commitEvent(open bool) (done, ok bool) {
+	live := m.live()
+	switch {
+	case open && m.rng.IntN(2) == 0:
+		// Merged without its commit.
+		sha, err := m.g.Merge(m.number)
+		if err != nil {
+			return false, true
+		}
+		m.mu.Lock()
+		m.merge, m.noCommit = sha, true
+		m.mu.Unlock()
+		m.logf("merge the pull request without its commit")
+		return true, true
+	case live.Status.MergeCommitAwaitedSince != nil && !mergeRecorded(live) && m.lastingUntil.IsZero():
+		// The executor saw the merge without its commit; from now on the reads fail, for a while.
+		m.mu.Lock()
+		m.fault = []string{opGet, opGet + faultTimeout, faultOpen}[m.rng.IntN(3)]
+		m.lastingUntil = m.clock.at.Add(time.Duration(6+m.rng.IntN(20)) * time.Minute)
+		m.mu.Unlock()
+		m.logf("reads: %s until +%v", m.fault, m.lastingUntil.Sub(m.start()))
+		return true, true
+	case m.clock.at.Before(m.lastingUntil):
+		// Mostly quiet while the outage lasts.
+		return m.rng.IntN(4) > 0, true
+	}
+	return false, false
+}
+
+// cancelEvent is the event of focusCancel: the cancel first, then the change of the target branch, then a close,
+// a deletion or a merge by hand while the pull request is open; mostly quiet otherwise.
+func (m *modelWorld) cancelEvent(cr providers.ChangeRequest, open bool) bool {
+	switch {
+	case !m.live().Spec.Cancel:
+		m.cancel()
+		return true
+	case m.configured == mainBranch:
+		// The plan's branch is main (the start's).
+		m.setConfigured(freshOtherBranch)
+		m.logf("the settings name target branch %s", freshOtherBranch)
+		return true
+	case open && m.rng.IntN(2) == 0:
+		m.byHand(cr, m.rng.IntN(4))
+		return true
+	}
+	return m.rng.IntN(3) > 0
+}
+
+// pauseEvent is the event of focusPause: the pause, then a close, a deletion or a merge by hand while it lasts and
+// the pull request is open; the pause mostly lasts.
+func (m *modelWorld) pauseEvent(cr providers.ChangeRequest, open bool) bool {
+	switch {
+	case !m.paused && m.rng.IntN(2) == 0:
+		m.pause(true)
+		return true
+	case m.paused && open && m.rng.IntN(3) == 0:
+		m.byHand(cr, m.rng.IntN(4))
+		return true
+	case m.paused:
+		return m.rng.IntN(3) > 0
+	}
+	return false
 }
 
 // focusEvent is the event of the run's focus, when it draws one; false leaves the event to the common draw.
@@ -749,30 +882,8 @@ func (m *modelWorld) focusEvent(cr providers.ChangeRequest) bool {
 		quiet := m.clock.at.Before(m.start().Add(modelPolicyDeadline + 2*DefaultPullRequestPollInterval))
 		return quiet && m.rng.IntN(4) > 0
 	case focusCommit:
-		live := m.live()
-		switch {
-		case open && m.rng.IntN(2) == 0:
-			// Merged without its commit.
-			sha, err := m.g.Merge(m.number)
-			if err != nil {
-				return false
-			}
-			m.mu.Lock()
-			m.merge, m.noCommit = sha, true
-			m.mu.Unlock()
-			m.logf("merge the pull request without its commit")
-			return true
-		case live.Status.MergeCommitAwaitedSince != nil && !mergeRecorded(live) && m.lastingUntil.IsZero():
-			// The executor saw the merge without its commit; from now on the reads fail, for a while.
-			m.mu.Lock()
-			m.fault = []string{opGet, opGet + faultTimeout, faultOpen}[m.rng.IntN(3)]
-			m.lastingUntil = m.clock.at.Add(time.Duration(6+m.rng.IntN(20)) * time.Minute)
-			m.mu.Unlock()
-			m.logf("reads: %s until +%v", m.fault, m.lastingUntil.Sub(m.start()))
-			return true
-		case m.clock.at.Before(m.lastingUntil):
-			// Mostly quiet while the outage lasts.
-			return m.rng.IntN(4) > 0
+		if done, ok := m.commitEvent(open); ok {
+			return done
 		}
 	case focusReceipt:
 		switch {
@@ -794,6 +905,10 @@ func (m *modelWorld) focusEvent(cr providers.ChangeRequest) bool {
 			}
 			return true
 		}
+	case focusCancel:
+		return m.cancelEvent(cr, open)
+	case focusPause:
+		return m.pauseEvent(cr, open)
 	case focusStale:
 		if !m.released {
 			// First the lock is released: the pull request is merged and verified (WaitingForDelivery holds the
@@ -832,6 +947,47 @@ func (m *modelWorld) focusEvent(cr providers.ChangeRequest) bool {
 	return false
 }
 
+// cancel is a person's cancel of the request (spec.cancel).
+func (m *modelWorld) cancel() {
+	live := &api.RemediationRequest{}
+	if err := m.base.Get(context.Background(), m.key, live); err != nil {
+		m.t.Fatal(err)
+	}
+	live.Spec.Cancel = true
+	if err := m.base.Update(context.Background(), live); err != nil {
+		m.t.Fatal(err)
+	}
+	m.logf("a person cancels the request")
+}
+
+// byHand is what a person does to the open pull request cr: close it (0), delete it (1), or move it to the configured
+// branch and merge it there (2), or merge it where it is (3).
+func (m *modelWorld) byHand(cr providers.ChangeRequest, what int) {
+	ctx := context.Background()
+	switch what {
+	case 0:
+		_ = m.g.CloseChangeRequest(ctx, m.number)
+		m.logf("close the pull request by hand")
+	case 1:
+		m.mu.Lock()
+		m.deleted = true
+		m.mu.Unlock()
+		m.logf("delete the pull request")
+	default:
+		if what == 2 && cr.BaseBranch != m.configured {
+			_ = m.g.SetBase(m.number, m.configured)
+		}
+		sha, err := m.g.Merge(m.number)
+		if err != nil {
+			return
+		}
+		m.mu.Lock()
+		m.merge = sha
+		m.mu.Unlock()
+		m.logf("merge the pull request into %.12s", m.configured)
+	}
+}
+
 // serveStale makes the cache serve an older copy of the request at the next read: one that held the lock when the
 // lock was seen released, else one that recorded a Git wait when there is one (what the helpers that write waits
 // read again), any older one otherwise.
@@ -867,22 +1023,9 @@ func (m *modelWorld) serveStale() {
 func (m *modelWorld) stop() {
 	switch m.rng.IntN(3) {
 	case 0:
-		paused := false
-		m.updateSettings(func(s *api.RemediationSettings) {
-			paused = s.Spec.Paused == nil || !*s.Spec.Paused
-			s.Spec.Paused = new(paused)
-		})
-		m.logf("the kill switch: writes paused %t", paused)
+		m.pause(!m.paused)
 	case 1:
-		live := &api.RemediationRequest{}
-		if err := m.base.Get(context.Background(), m.key, live); err != nil {
-			m.t.Fatal(err)
-		}
-		live.Spec.Cancel = true
-		if err := m.base.Update(context.Background(), live); err != nil {
-			m.t.Fatal(err)
-		}
-		m.logf("a person cancels the request")
+		m.cancel()
 	default:
 		branch := freshOtherBranch
 		if m.configured == freshOtherBranch {
@@ -953,10 +1096,27 @@ func (m *modelWorld) restart() {
 // step runs one reconcile, checks the properties, and moves the clock on by its wait.
 func (m *modelWorld) step(check bool) {
 	ctx := context.Background()
+	passed := ""
+	before := m.live()
 	m.mu.Lock()
-	m.writeFaulted = false
+	staleRead := m.staleNext
+	m.mu.Unlock()
+	if staleRead {
+		// The reconcile reads an older copy: it cannot end a wait it does not see.
+		before.Status.GitWaits = nil
+	}
+	for _, w := range before.Status.GitWaits {
+		if end, ok := modelWaitEnd(before, w); ok && !m.clock.at.Before(end) {
+			passed = string(w.Kind)
+		}
+	}
+	m.mu.Lock()
+	m.writeFaulted, m.calls, m.passed, m.ended = false, 0, passed, false
 	m.mu.Unlock()
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.key})
+	m.mu.Lock()
+	m.passed = ""
+	m.mu.Unlock()
 	live := &api.RemediationRequest{}
 	if gerr := m.base.Get(ctx, m.key, live); gerr != nil {
 		m.t.Fatal(gerr)
@@ -1043,11 +1203,6 @@ func reasonOf(c *metav1.Condition) string {
 	return c.Reason
 }
 
-// paused reports whether rr shows the kill switch holding it (WritesPaused True): nothing is ended while it does.
-func paused(rr *api.RemediationRequest) bool {
-	return meta.IsStatusConditionTrue(rr.Status.Conditions, api.ConditionWritesPaused)
-}
-
 // modelWaitEnd is when the model expects an entry of kind k of rr to end, from what the model knows of the kind
 // (not from the code under test); ok is false for a Paced entry, which has no end.
 func modelWaitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Time, bool) {
@@ -1087,7 +1242,7 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	// A request a person cancelled is bounded by the cancel's own bound and then watched with CancelPending
 	// (cancelFailed, TestEveryGitReadRetrySiteKeepsItsBound), not by its deadline.
 	if d := live.Status.Deadline; d != nil && live.Status.Phase == api.PhasePolicyChecked && staleMark(live) == nil &&
-		intent(live) == nil && !recoveringHandoff(live) && !paused(live) && !live.Spec.Cancel && now.After(d.Add(poll)) {
+		intent(live) == nil && !recoveringHandoff(live) && !live.Spec.Cancel && !faulted && now.After(d.Add(poll)) {
 		m.fatalf("clocks: the request is in PolicyChecked %v after its deadline", now.Sub(d.Time))
 	}
 	if since := live.Status.MergeCommitAwaitedSince; since != nil && progresses(live) && !mergeRecorded(live) &&
@@ -1138,7 +1293,9 @@ func (m *modelWorld) lockProperties(live *api.RemediationRequest) {
 	} else if m.recorded {
 		m.fatalf("record lost: the merge was recorded and the status no longer records it (phase %s)", live.Status.Phase)
 	}
-	if !holdsLock(live) && !m.handoff {
+	if !holdsLock(live) && !m.handoff && !m.released {
+		// Checked at the release: a merge into a branch that delivered nothing then (a third base) stays one when the
+		// settings name that branch later.
 		cr, found := m.pr()
 		switch {
 		case found && cr.State == providers.ChangeRequestOpen && m.delivers(live, cr) && !m.deleted:
@@ -1148,8 +1305,11 @@ func (m *modelWorld) lockProperties(live *api.RemediationRequest) {
 		}
 		if !progresses(live) {
 			m.released = true
+			// A pull request merged into a branch that delivered nothing at the release (a third base) is not the
+			// request's merge, whatever the settings name later.
+			m.releasedAside = found && cr.State == providers.ChangeRequestMerged && !m.delivers(live, cr)
 		}
-	} else if m.released {
+	} else if m.released && holdsLock(live) {
 		m.fatalf("lock back: the lock was released and is held again (phase %s)", live.Status.Phase)
 	}
 }
@@ -1178,12 +1338,16 @@ func (m *modelWorld) settled() {
 	case m.repo != nil, m.handoff:
 		// The repository left the settings: no read can settle anything else. Or the pull request is the
 		// predecessor's, which holds it.
-	case live.Spec.Cancel && meta.IsStatusConditionTrue(live.Status.Conditions, api.ConditionCancelPending):
-		// A cancel that cannot finish is watched, and CancelPending asks a person to act (cancelWatch).
+	case live.Spec.Cancel && holdsLock(live) && (m.deleted || found && cr.State == providers.ChangeRequestClosed):
+		// A cancel whose pull request is closed or gone settles like any other stop, also after a change of the
+		// target branch (fifth decision of 2026-11-18 on #771).
+		m.fatalf("settled cancel: the request is cancelled, its pull request is %s, and the lock is held: phase %s",
+			map[bool]string{true: "deleted", false: foundClosed}[m.deleted], live.Status.Phase)
 	case holdsLock(live) && !open && !progresses(live) && !heldForVerification(live, m.r.VerifyOutcomes):
 		m.fatalf("settled lock: the lock is held after the world healed, and the pull request cannot merge (%s): phase %s",
 			cr.State, live.Status.Phase)
-	case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live) && !m.deleted:
+	case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live) && !m.deleted &&
+		!m.releasedAside:
 		m.fatalf("settled merge: the merge is not recorded after the world healed: phase %s", live.Status.Phase)
 	}
 }
@@ -1216,6 +1380,7 @@ var errModelOutage = &providers.RetryableError{Err: errors.New("outage")}
 // fail is the failure of op for the model now: nil, an outage, or the step's time run out.
 func (g *modelGit) fail(ctx context.Context, op string) error {
 	g.m.mu.Lock()
+	g.m.calls++
 	fault := g.m.fault
 	g.m.mu.Unlock()
 	for f := range strings.SplitSeq(fault, faultBoth) {
@@ -1312,6 +1477,9 @@ func (g *modelGit) contentFail(ctx context.Context) error {
 	merged := g.m.merge != ""
 	g.m.mu.Unlock()
 	if !merged {
+		g.m.mu.Lock()
+		g.m.calls++
+		g.m.mu.Unlock()
 		return nil
 	}
 	err := g.fail(ctx, faultBetween)
@@ -1330,6 +1498,9 @@ func (g *modelGit) Parents(ctx context.Context, sha string) ([]string, error) {
 	content := sha == g.m.merge && g.m.merge != ""
 	g.m.mu.Unlock()
 	if !content {
+		g.m.mu.Lock()
+		g.m.calls++
+		g.m.mu.Unlock()
 		return g.GitProvider.Parents(ctx, sha)
 	}
 	if err := g.fail(ctx, faultContent); err != nil {

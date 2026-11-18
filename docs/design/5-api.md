@@ -340,11 +340,11 @@ Policies and requests refer to repositories by name only.
 - It keeps its phase and the rest of its status: the deadline, a recorded pull request, the mark of a stale plan's cleanup.
 - It gets the condition `WritesPaused` (`True`, reason `WritesPaused`) and a Normal Event `WritesPaused`.
 - It checks again every minute.
-- Time spent paused still counts against a started deadline. A request whose deadline passes while paused expires once writes are allowed again (`expire` closes what it opened first, which is a write too).
+- Time spent paused still counts against a started deadline. A request whose deadline passes while paused expires at the deadline: the end reads and writes nothing on the Git host, and the close of what it may have opened, a separate step after it, waits for the pause to end (fifth decision of 2026-11-18 on #771).
 - The first recheck that finds writes allowed again removes the condition, with an Event `WritesResumed`, whatever the rest of that check finds (a failure or a refusal of the host included). The request goes on from where it stopped. A request that ends instead loses the condition without one.
 - The Events are core Events about the request in the operator namespace. They are written with the grant on Events that the executor's leader election Role already holds.
 
-**Other paths.** The freshness check, the look at a recorded pull request and the close also read the switch first, so a paused executor does not read Git for a write it may not make. The gate is what holds whatever the path.
+**Other paths.** A pause stops Git writes and nothing else (fifth decision of 2026-11-18 on #771): the look at a recorded pull request, the settlement of a stopped holder's lock, the cancel watch and the checks after a merge read on, and status writes go on, so a pull request closed, gone or merged by hand during a pause is recorded and its target released. The freshness check still stops at a pause, since its stale verdict leads to a close. The gate is the one check that holds whatever the path.
 
 **Planned.** Issues and comments (ADR-0014) are not built. They are writes and must go through the same gate.
 

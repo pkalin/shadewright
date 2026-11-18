@@ -116,6 +116,12 @@ const (
 	// the plan's branch changed (#771), and what the merge brought could not be read within mergeContentWait. It
 	// says nothing about that content: it is not known to be the planned change alone.
 	ReasonMergeContentUnreadable = "MergeContentUnreadable"
+	// ReasonMergeNotCheckable: a merge of the request's own pull request was found, but the target file it was
+	// compared against (before the merge, or at the parent of an adopted head) is one the typed patcher refuses (it
+	// does not parse, the object is not in it), so the merge cannot be checked against the plan. It says nothing
+	// about the content: it is neither shown foreign nor the planned change alone, and is treated as
+	// MergedWithForeignChange is (no merge receipt, no verification, no circuit breaker outcome).
+	ReasonMergeNotCheckable = "MergeNotCheckable"
 	// ReasonPatchRefused: the typed patcher refused the file on the branch, or the target file at the head of
 	// the target branch while the pull request waits.
 	ReasonPatchRefused = "PatchRefused"
@@ -227,9 +233,10 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 		return remediationv1alpha1.GitRepository{}, false, fmt.Errorf("get RemediationSettings %s: %w",
 			remediationv1alpha1.SettingsName, err)
 	}
-	if freshness.Paused(settings) {
-		return remediationv1alpha1.GitRepository{}, false, freshness.ErrPaused
-	}
+	// A pause of the kill switch is not looked at here: it stops writes to the Git host and nothing else (fifth
+	// decision of 2026-11-18 on #771). Every provider opened from this entry is gated (openPlanEntry,
+	// openRecordedBranch), so a write refuses with freshness.ErrPaused at the gate right before it, and the reads,
+	// the settlement of the target lock among them, go on while writes are paused.
 	repo, reinstalled, ok := cleanupRepository(settings, rr, staleMark(rr) != nil)
 	if !ok {
 		return remediationv1alpha1.GitRepository{}, false, errRepositoryGone
@@ -1647,6 +1654,8 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		ObservedGeneration: rr.Generation,
 	})
 	clearReleasedRead(rr)
+	// A wait the stop ends (the deadline's, a merge wait once the merge is recorded) goes in the same write.
+	dropEnded(rr, r.now())
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
@@ -1655,104 +1664,97 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 	return errStopped
 }
 
-// expire ends a request whose pull request was not opened before its deadline. A pull request opened in the
-// meantime, whose status write failed, is closed first, within CleanupTimeout.
+// expire ends a request whose pull request was not opened before its deadline: Expired with reason
+// PullRequestDeadline, in one status write and with no read of the Git host (fifth decision of 2026-11-18 on #771):
+// the deadline has passed, so neither a Git host that fails nor a pause of the kill switch holds the end back.
 //
-// The deadline has passed, so the end needs no read of the Git host (fourth decision of 2026-11-18 on #771): a
-// cleanup that cannot read or write the Git host (the repository cannot be opened, a read fails or runs out of
-// time) ends the request Expired as well, and the message names the step that failed and says that a pull request
-// of its own may be left open. The target lock stays until the read of the branch after the stop (checkHeld) finds
-// none open that may deliver the change, and records a merge it finds (#808). Only a failure of the Kubernetes API
-// (and a pause of the kill switch) is retried.
+// The cleanup is a step of its own after the stop (cleanUpExpired, through checkHeld): a pull request of its own
+// opened while the write that would record it was lost is closed (a write, which waits for a pause), and one found
+// merged is recorded as the request's merge (endMerged). The target lock stays until the read of the branch after
+// the stop finds none open that may deliver the change (#808). Only a failure of the Kubernetes API is returned,
+// for the error backoff; the result asks for that step a second later.
 func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
-	// The deadline has passed: a read of the expiry that fails starts no bounded wait (expiringCtx).
-	ctx = expiringCtx(ctx)
+	err := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired, ReasonPullRequestDeadline,
+		messageDeadlinePassed))
+	if err != nil || !ptr.Deref(rr.Status.HoldsTarget, false) {
+		return reconcile.Result{}, err
+	}
+	return reconcile.Result{RequeueAfter: stepDelay}, nil
+}
+
+// messageDeadlinePassed is the message of an expired request whose cleanup has not finished (expiredUncleaned).
+const messageDeadlinePassed = "The pull request was not opened before the deadline; a pull request Shadewright may " +
+	"have opened on the branch is closed after the stop, and the target stays locked until none is found open"
+
+// expiredUncleaned reports whether rr ended Expired at its deadline (reason PullRequestDeadline, on the condition stop
+// writes: PullRequestOpened, or Approved once a pull request is recorded), so a pull request of its own may be left
+// open or merged (cleanUpExpired). A refused cleanup changes the reason (PullRequestDeadlineCleanupRefused) and is
+// not tried again.
+func expiredUncleaned(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.Phase != remediationv1alpha1.PhaseExpired {
+		return false
+	}
+	conditionType := remediationv1alpha1.ConditionPROpened
+	if rr.Status.PullRequest != nil {
+		conditionType = remediationv1alpha1.ConditionApproved
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, conditionType)
+	return c != nil && c.Reason == ReasonPullRequestDeadline
+}
+
+// cleanUpExpired is the cleanup of an expired request (expiredUncleaned) whose own pull request the read of the
+// branch after the stop found open (v): it is closed, within CleanupTimeout. A close the kill switch holds waits for
+// the pause (waitWhilePaused), the lock and the pull request kept; a Git host that fails is retried visibly at the
+// pace of a stopped holder's looks (heldUnsettled); a pull request found merged meanwhile is recorded (endMerged); a
+// close the Git host refuses, or one that cannot be made on this entry (the target branch changed, the repository
+// is unusable), ends the cleanup with reason PullRequestDeadlineCleanupRefused and a message that asks a person to
+// close it. The next look settles the lock.
+func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	reconcile.Result, error) {
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := r.closeChangeRequest(cleanCtx, rr)
-	// A Git call that ran out of the cleanup's time is still a failure of the Git host (keepGitRead); any other step
-	// that did is a timeout, retried.
 	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
 	if done, derr := r.endUnrecordedMerge(ctx, rr, err); done {
-		// Its own pull request was merged before any status recorded it: it ends Merged (or
-		// MergedWithForeignChange), never Expired, as for a stale plan's cleanup (cleanUpStale). A Git failure while
-		// it is recorded ends it Expired below; the read of the branch after the stop records the merge (#808).
-		switch {
-		case derr == nil || errors.Is(derr, errStopped):
-			return reconcile.Result{}, nil
-		case !hostFailure(ctx, derr):
-			return r.retry(ctx, rr, derr)
+		if derr == nil || errors.Is(derr, errStopped) {
+			return reconcile.Result{RequeueAfter: stepDelay}, nil
 		}
 		err = derr
 	}
-	if reason, _, ok := refusal(err); ok {
-		// The deadline has passed either way; waiting for a permission or a rule to change would only keep
-		// the request open longer. The message says that a pull request of its own may be left open, and
-		// whether the host refused the read of the pull requests (an unknown verdict, isUnknownChange) or the
-		// close. The lock on the target stays: the status rule keeps it (prMayBeOpen), until checkHeld's read of
-		// the branch finds none open that may deliver the change.
-		what := "to close a pull request Shadewright may have opened on the branch"
-		if isUnknownChange(err) {
-			what = "to read the pull requests of the branch, so none was closed"
-		}
-		// The refused read is decided on for good: the request ends Expired, nothing is retried.
-		err := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
-			ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and the "+
-				"Git host refused ("+reason+") "+what+"; if one is open, close it by hand. The target stays "+
-				"locked until none is found open"))
+	what := ""
+	switch reason, _, refused := refusal(err); {
+	case err == nil:
+		logf.FromContext(ctx).Info("Closed the pull request of an expired RemediationRequest",
+			"remediationRequest", client.ObjectKeyFromObject(rr))
+		return reconcile.Result{RequeueAfter: stepDelay}, nil
+	case ctx.Err() != nil || isClusterError(err):
 		return reconcile.Result{}, err
+	case errors.Is(err, freshness.ErrPaused):
+		return r.waitWhilePaused(ctx, rr)
+	case refused && isUnknownChange(err):
+		what = "the Git host refused (" + reason + ") to read the pull requests of the branch, so none was closed"
+	case refused:
+		what = "the Git host refused (" + reason + ") to close a pull request Shadewright may have opened on the branch"
+	case errors.Is(err, errTargetBranchChanged):
+		what = "the repository of the plan now targets another branch, so the pull request on the recorded branch " +
+			"was not closed"
+	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errRepositoryGone),
+		errors.Is(err, errChangeRequestNotOurs):
+		what = "the repository of the plan cannot be used to close it"
+	case gitReadFailure(err):
+		// A failed read of the cleanup: a visible retry at the pace of a stopped holder's looks.
+		return r.heldUnsettled(ctx, rr, changeVerdict{state: changeUnknown}, err, false)
+	default:
+		// A close the Git host failed to answer: its delay, or the error backoff.
+		logf.FromContext(ctx).Info("Could not close the pull request of an expired RemediationRequest; tried again",
+			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 	}
-	if err != nil && !errors.Is(err, errRepositoryGone) && !errors.Is(err, errTargetBranchChanged) &&
-		!errors.Is(err, freshness.ErrRepositoryUnusable) && !errors.Is(err, errChangeRequestNotOurs) {
-		if !hostFailure(ctx, err) {
-			return r.retry(ctx, rr, err)
-		}
-		logf.FromContext(ctx).Info("Could not clean up the pull requests of RemediationRequest after its deadline; "+
-			"ended it Expired", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		err := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired, ReasonPullRequestDeadline,
-			"The pull request was not opened before the deadline, and the cleanup could not reach the Git host ("+
-				readOp(err)+"), so a pull request Shadewright may have opened on the branch was not closed; if one "+
-				"is open, close it by hand. The target stays locked until none is found open"))
-		return reconcile.Result{}, err
-	}
-	// The lock is not released here, even when the cleanup closed every pull request of the branch with this
-	// request's marker: one without the marker may be open on the branch and still deliver the change. The read
-	// of the branch after the stop (checkHeld, through openHolding) releases it. A repository that left the
-	// settings allows no such read: condition PullRequestUnreadable says so in the same status write, and the
-	// lock is kept until it is configured again or the request is deleted.
-	var gone, was *metav1.Condition
-	if errors.Is(err, errRepositoryGone) {
-		gone = repositoryGoneRead(rr)
-		if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
-			was = c.DeepCopy()
-		}
-		putUnreadable(&rr.Status.Conditions, gone)
-	}
-	err = r.stop(ctx, rr, remediationv1alpha1.PhaseExpired, ReasonPullRequestDeadline,
-		"The pull request was not opened before the deadline")
-	if gone != nil && errors.Is(err, errStopped) {
-		r.unreadableEvent(rr, was, gone)
-	}
-	return reconcile.Result{}, r.ignoreStopped(err)
-}
-
-// hostFailure reports whether err, a failure of a step after the request's deadline, is one of the Git host: a read
-// that failed or ran out of the step's time (keepGitRead), a repository that could not be opened, or a close the
-// host failed to answer (a retryable provider error). An answer of the host (a conflict, a refusal, a pull request
-// seen missing), a failure of the Kubernetes API, a timeout of any other step, a pause of the kill switch and the
-// cancellation of the reconcile are not.
-func hostFailure(ctx context.Context, err error) bool {
-	if err == nil || ctx.Err() != nil || isClusterError(err) || errors.Is(err, freshness.ErrPaused) {
-		return false
-	}
-	if gitReadFailure(err) {
-		return true
-	}
-	// A close that the Git host failed to answer (a server error, a rate limit, a timeout). Its answers that say
-	// something (a conflict for a merged pull request, a refusal, a pull request found missing) are not failures.
-	_, ok := errors.AsType[*freshness.ProviderError](err)
-	return ok && errors.Is(err, providers.ErrRetryable)
+	// Decided on for good: nothing is closed by the executor; the lock stays until none is found open.
+	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
+		ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and "+what+
+			"; if one is open, close it by hand. The target stays locked until none is found open"))
 }
 
 // retry maps a step error to a requeue: paused writes wait, a host that asked for a delay gets it, the rest
@@ -2070,6 +2072,25 @@ func planned(data []byte, rr *remediationv1alpha1.RemediationRequest) ([]byte, f
 		return nil, fileHoldsDesired, nil
 	}
 	return nil, fileHoldsOther, nil
+}
+
+// notCheckable is the refusal of a merge whose file before it the typed patcher refuses (patchErr, the error of
+// planned): reason MergeNotCheckable, never MergedWithForeignChange, since nothing shows the content foreign. what
+// names the file; the message names the patcher's reason (a stable value, never file content).
+func notCheckable(what string, patchErr error) *renderRefusal {
+	reason := "the file could not be patched"
+	if pe, ok := errors.AsType[*patch.Error](patchErr); ok {
+		reason = "the patcher refused it (" + string(pe.Reason) + ")"
+	}
+	return &renderRefusal{reason: ReasonMergeNotCheckable, message: what + " cannot be checked against the plan: " +
+		reason}
+}
+
+// uncountedMergeReasons are the reasons of a merge that was seen but not shown to bring the planned change alone:
+// it ends NeedsIntervention with no merge receipt, is recorded as the request's merge (mergeRecorded) and, on a
+// stale plan, counts for nothing (mergedForeignStale).
+var uncountedMergeReasons = map[string]bool{
+	ReasonMergedWithForeignChange: true, ReasonMergeContentUnreadable: true, ReasonMergeNotCheckable: true,
 }
 
 // applyAction runs the typed patcher of the action. With onto true it expects the desired value instead of the

@@ -149,6 +149,13 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead).
 	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
+	if errors.Is(err, freshness.ErrPaused) || errors.Is(err, errTargetBranchChanged) {
+		// The close cannot be made now: the pull request is read, read-only, so a merge or a close is settled while
+		// writes are paused or after the target branch changed (fifth decision of 2026-11-18 on #771).
+		if res, done, lookErr := r.cancelLook(ctx, rr, checkErr); done {
+			return res, lookErr
+		}
+	}
 	if done, endErr := r.endUnrecordedMerge(ctx, rr, err); done {
 		// Its own pull request was merged before any status recorded it: the change landed, so the request ends
 		// Merged (or MergedWithForeignChange), never Cancelled. A failed check of that merge is retried.
@@ -189,6 +196,56 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	return r.cancelFailed(ctx, rr, err, stepText(rr, stepOf(err))+" failed")
 }
 
+// cancelLook is the read-only look of a cancel whose close cannot be made now (writes are paused, or the target
+// branch of the plan's repository changed): the request's pull requests are read on the recorded and, after a change,
+// on the configured branch (lookHeld, the read that settles the target lock; one whose record was lost is found by
+// its marker). checkErr is the result of the write of the failed review check (failCancelCheck).
+//   - Merged and not recorded: recorded as the request's merge, into the recorded branch (recordOwnMerge) or, moved
+//     to the configured branch, as #771 decided on 2026-11-16 (recordMergeOnConfigured).
+//   - Closed or gone: the request ends Cancelled (endCancelClosed); the read of the branch after the end settles the
+//     lock. A review check that waits for a pause keeps the request in its phase until the pause ends.
+//
+// done is false when the look settles nothing (the pull request is open, or the read failed): the caller's handling
+// of the close stands (a wait while writes are paused, the cancel watch after a branch change).
+func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	checkErr error) (reconcile.Result, bool, error) {
+	if rr.Status.Source == nil || intent(rr) != nil {
+		return reconcile.Result{}, false, nil
+	}
+	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
+	v, _, err := r.lookHeld(lookCtx, rr)
+	cancel()
+	if err != nil || v.state == changeUnknown || ctx.Err() != nil {
+		if err == nil {
+			err = v.err
+		}
+		if err != nil {
+			logf.FromContext(ctx).Info("Could not read the pull request of a cancelled RemediationRequest",
+				"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		}
+		return reconcile.Result{}, false, nil
+	}
+	switch v.state {
+	case changeMerged:
+		if mergeRecorded(rr) {
+			return reconcile.Result{}, false, nil
+		}
+		res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error {
+			if v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
+				return r.recordMergeOnConfigured(ctx, rr, v.pr, "", false)
+			}
+			return r.recordOwnMerge(ctx, rr, v.pr)
+		})
+		return res, true, err
+	case changeClosed, changeGone:
+		res, err := r.endCancelClosed(ctx, rr, checkErr, func() {
+			markClosed(rr, ReasonPullRequestClosed, "is closed; the request was cancelled (spec.cancel)")
+		}, messageCancelledFoundClosed)
+		return res, true, err
+	}
+	return reconcile.Result{}, false, nil
+}
+
 // endCancelClosed ends rr, whose pull request is known closed (found closed, or just closed by the cancel),
 // Cancelled with message; mark records how it was closed. checkErr is the result of the write of the failed review
 // check (failCancelCheck):
@@ -214,7 +271,9 @@ func (r *RemediationRequestReconciler) endCancelClosed(ctx context.Context, rr *
 		case ctx.Err() != nil:
 			return reconcile.Result{}, checkErr
 		}
-		if _, _, final := refusal(checkErr); !final {
+		// After a change of the target branch the check of the recorded head cannot be written through the plan's
+		// entry any more: as final as a refusal.
+		if _, _, final := refusal(checkErr); !final && !errors.Is(checkErr, errTargetBranchChanged) {
 			if _, past := r.cancelBound(rr); !past {
 				return r.cancelFailed(ctx, rr, checkErr, "the failed review check "+providers.CheckRunName+
 					" could not be written")

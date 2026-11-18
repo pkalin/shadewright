@@ -269,6 +269,28 @@ func TestContentWaitStartsBesideTheCallersWait(t *testing.T) {
 	}
 }
 
+// A read that fails in the path that ends a wait (expiring), whose bound and recorded end have passed, is retried at
+// the poll interval: never pulled to the passed end, which would bring the request back at once to read again.
+func TestExpiringReadRetryWaitsThePace(t *testing.T) {
+	r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
+	ctx := context.Background()
+	clock := clockOf(r)
+	rr.Status.Deadline = &metav1.Time{Time: clock.at.Add(-time.Minute)}
+	w, _ := newWait(rr, waitRequestDeadline, "list the change requests of the branch", clock.at.Add(-time.Hour))
+	rr.Status.GitWaits = append(rr.Status.GitWaits, w)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.retryGitRead(expiringCtx(ctx), rr, readFailure(opList, errors.New("outage")), requestBound(rr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RequeueAfter < r.pullRequestPollInterval() {
+		t.Fatalf("the retry waits %v; want the poll interval (%v) in the path that ends a wait", res.RequeueAfter,
+			r.pullRequestPollInterval())
+	}
+}
+
 // The backfill of a request decided before status.holdsTarget existed records the lock holdsLock reads for it, over
 // every phase and recorded pull request state: it never clears a held lock, and records false only with the verdict
 // that the status shows it free.
@@ -316,6 +338,8 @@ var unboundedReads = map[string]noBoundReason{
 	// A request cancelled for its Incident keeps the lock until a read settles its pull request.
 	"followCancelledMerge": noBoundHeldLock,
 	"closeCancelled":       noBoundHeldLock,
+	// An expired request keeps the lock until its own pull request is closed or found closed (cleanUpExpired).
+	"cleanUpExpired": noBoundHeldLock,
 }
 
 func TestUnboundedReadsAreListed(t *testing.T) {

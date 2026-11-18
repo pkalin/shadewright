@@ -17,12 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -333,22 +336,147 @@ func isPackage(e ast.Expr, pkg string) bool {
 	return ok && id.Name == pkg
 }
 
-// TestLockSettlementBuiltByItsProofs fails when a function outside settlementBuilders calls a constructor of
-// package lockverdict: a release of the target lock takes a verdict only the proving reads build (decisions of
-// 2026-11-17 and 2026-11-18 on #771). The type itself is sealed in its package, so no other code can build one.
-func TestLockSettlementBuiltByItsProofs(t *testing.T) {
-	forEachSource(t, func(fset *token.FileSet, owner string, n ast.Node) {
-		call, ok := n.(*ast.CallExpr)
+// lockverdictPath is the import path of package lockverdict.
+const lockverdictPath = "github.com/pkalin/shadewright/internal/controller/lockverdict"
+
+// importedAs returns the names under which f imports path: its own name or the one the import gives ("." for a
+// dot import). A package of another path that happens to have the same name is not in it.
+func importedAs(f *ast.File, path string) map[string]bool {
+	names := map[string]bool{}
+	for _, imp := range f.Imports {
+		if p, err := strconv.Unquote(imp.Path.Value); err != nil || p != path {
+			continue
+		}
+		if imp.Name != nil {
+			names[imp.Name.Name] = true
+		} else {
+			names[pathpkg.Base(path)] = true
+		}
+	}
+	return names
+}
+
+// lockverdictFuncs lists the package-level functions of package lockverdict, read from its source, so a type or a
+// constant of the package (Verdict, Found) is not taken for a constructor.
+func lockverdictFuncs(t *testing.T) map[string]bool {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("lockverdict", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	funcs := map[string]bool{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.IsExported() {
+				funcs[fn.Name.Name] = true
+			}
+		}
+	}
+	if len(funcs) == 0 || !funcs[releaseFunc] {
+		t.Fatalf("no functions read from package lockverdict: %v", funcs)
+	}
+	return funcs
+}
+
+// verdictBuilds lists the references in f to a function of package lockverdict other than Release, called or taken
+// as a value, outside settlementBuilders. The package is resolved by its import path, whatever name the file gives
+// it, and an identifier that a local declaration binds (a shadowing variable) is not the package. A dot import is
+// refused whole: its functions could not be told from this package's.
+func verdictBuilds(fset *token.FileSet, f *ast.File, funcs map[string]bool) []string {
+	names := importedAs(f, lockverdictPath)
+	var found []string
+	if names["."] {
+		found = append(found, fset.Position(f.Pos()).String()+": imports package lockverdict with a dot")
+	}
+	forEachDecl(f, func(owner string, n ast.Node) {
+		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
 			return
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || !isPackage(sel.X, "lockverdict") || sel.Sel.Name == releaseFunc || settlementBuilders[owner] {
+		id, ok := sel.X.(*ast.Ident)
+		if !ok || !names[id.Name] || id.Obj != nil || !funcs[sel.Sel.Name] || sel.Sel.Name == releaseFunc ||
+			settlementBuilders[owner] {
 			return
 		}
-		t.Errorf("%s: %q builds a lock verdict (lockverdict.%s); only its proving reads do", fset.Position(n.Pos()),
-			owner, sel.Sel.Name)
+		found = append(found, fmt.Sprintf("%s: %q refers to lockverdict.%s", fset.Position(n.Pos()), owner,
+			sel.Sel.Name))
 	})
+	return found
+}
+
+// TestLockSettlementBuiltByItsProofs fails when a function outside settlementBuilders calls a constructor of
+// package lockverdict, or takes one as a value: a release of the target lock takes a verdict only the proving
+// reads build (decisions of 2026-11-17 and 2026-11-18 on #771). The type itself is sealed in its package, so no
+// other code can build one.
+func TestLockSettlementBuiltByItsProofs(t *testing.T) {
+	funcs := lockverdictFuncs(t)
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, what := range verdictBuilds(fset, f, funcs) {
+			t.Errorf("%s; only its proving reads build a lock verdict", what)
+		}
+	}
+}
+
+// TestVerdictGuardResolvesThePackage checks the guard above on code it must refuse (a call and a function value
+// outside the builders, under the package's own name and under another, and a dot import) and on code it must
+// pass (a builder, a type and a constant of the package, another package of the same name, and a local variable
+// that shadows the name).
+func TestVerdictGuardResolvesThePackage(t *testing.T) {
+	funcs := map[string]bool{"ByRead": true, releaseFunc: true}
+	cases := []struct {
+		name, src string
+		refused   bool
+	}{
+		{"call", `import "` + lockverdictPath + `"
+func early() { _, _ = lockverdict.ByRead(f, true, true, false) }`, true},
+		{"function value", `import "` + lockverdictPath + `"
+var build = lockverdict.ByRead`, true},
+		{"value in a function", `import "` + lockverdictPath + `"
+func later() { f := lockverdict.ByRead; _ = f }`, true},
+		{"renamed import", `import lv "` + lockverdictPath + `"
+func early() { _, _ = lv.ByRead(f, true, true, false) }`, true},
+		{"dot import", `import . "` + lockverdictPath + `"
+func early() {}`, true},
+		{"builder", `import "` + lockverdictPath + `"
+func settleByRead() { _, _ = lockverdict.ByRead(f, true, true, false) }`, false},
+		{"type and constant", `import "` + lockverdictPath + `"
+func uses(v *lockverdict.Verdict) { _ = lockverdict.FoundOpen }`, false},
+		{"the release itself", `import "` + lockverdictPath + `"
+func release() { _ = lockverdict.Release(s, v) }`, false},
+		{"another package of the same name", `import "example.com/other/lockverdict"
+func early() { _, _ = lockverdict.ByRead(f, true, true, false) }`, false},
+		{"shadowing variable", `import "` + lockverdictPath + `"
+func early(lockverdict builder) { _, _ = lockverdict.ByRead(f, true, true, false) }`, false},
+	}
+	for _, c := range cases {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "x.go", "package controller\n"+c.src+"\n", 0)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := len(verdictBuilds(fset, f, funcs)) > 0; got != c.refused {
+			t.Errorf("%s: refused = %v, want %v", c.name, got, c.refused)
+		}
+	}
 }
 
 // funcName is the name of fn, with the receiver's type for a method of gatedGit.

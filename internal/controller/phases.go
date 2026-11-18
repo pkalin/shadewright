@@ -236,13 +236,12 @@ func (r *RemediationRequestReconciler) enterDelivery(ctx context.Context, rr *re
 // whatever the delivery shows. That provider writes nothing but a close and a failed check run (openGated), and only
 // IsAncestor is called on it. Any other request whose receipt's installation is gone gets errRepositoryGone as before.
 //
-// pauseGated (the check without --verify-outcomes) makes it return freshness.ErrPaused while writes are paused, as
-// that check has always asked the Git host nothing during a pause; the check with it reads on.
+// It reads on while writes are paused, in both modes: a pause stops writes to the Git host and nothing else (fifth
+// decision of 2026-11-18 on #771).
 type receiptAncestry struct {
-	r          *RemediationRequestReconciler
-	receipt    *remediationv1alpha1.MergeReceipt
-	stale      bool
-	pauseGated bool
+	r       *RemediationRequestReconciler
+	receipt *remediationv1alpha1.MergeReceipt
+	stale   bool
 }
 
 func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {
@@ -252,9 +251,6 @@ func (a receiptAncestry) IsAncestor(ctx context.Context, ancestor, commit string
 		return false, errRepositoryGone
 	case err != nil:
 		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
-	}
-	if a.pauseGated && freshness.Paused(settings) {
-		return false, freshness.ErrPaused
 	}
 	repo, ok := freshness.FindRepository(settings, &a.receipt.Repository)
 	reinstalled := false
@@ -301,7 +297,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 		}
 	}
 	windowEnd := deliveryWindowEnd(rr, start, now)
-	d, err := r.delivered(stepCtx, rr, r.mergeQuery(rr, false))
+	d, err := r.delivered(stepCtx, rr, r.mergeQuery(rr))
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
 		return reconcile.Result{}, nil, err

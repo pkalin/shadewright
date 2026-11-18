@@ -103,6 +103,10 @@ func (r *RemediationRequestReconciler) watchBranchChanged(ctx context.Context,
 		return fmt.Errorf("%w: %w", errBranchChangedUnread, v.err)
 	case v.state == changeMerged && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA:
 		return r.recordMergeSeen(ctx, rr, v.pr)
+	case cancelRequested(rr) && (v.state == changeClosed || v.state == changeGone):
+		// A cancel settles like any other stop (fifth decision of 2026-11-18 on #771): the pull request, closed or
+		// confirmed gone, cannot merge, so the cancel ends the request Cancelled (cancelOpen with prClosed).
+		return fmt.Errorf("%w: %w", errClosed, errTargetBranchChanged)
 	}
 	return errTargetBranchChanged
 }
@@ -116,7 +120,11 @@ func (r *RemediationRequestReconciler) mergedRetargeted(ctx context.Context, rr 
 	git, err := r.openRecordedBranch(ctx, repo, repo.TargetBranch)
 	switch {
 	case providers.IsInvalidConfig(err):
-		// The open for the recorded branch fails the same way and says so (watchBranchChanged).
+		// Settings that can never open the provider for the configured branch: the look is left to the recorded
+		// branch (watchBranchChanged, which says so when its open fails too), and a merge there is not looked up.
+		logf.FromContext(ctx).Info("Could not open the repository of RemediationRequest for the target branch the "+
+			"settings name now, so a merge of its pull request there was not looked up", "remediationRequest",
+			client.ObjectKeyFromObject(rr), "targetBranch", repo.TargetBranch, "error", err.Error())
 		return false, nil
 	case err != nil:
 		return true, r.branchChangedOpenFailed(ctx, rr, err)
@@ -204,8 +212,17 @@ func (r *RemediationRequestReconciler) recordRetargetedMerge(ctx context.Context
 func markStaleForBranch(rr *remediationv1alpha1.RemediationRequest, branch remediationv1alpha1.GitBranch) {
 	if !markedStale(rr) {
 		markStaleAtMerge(rr, freshness.ReasonSettingsChanged, "The plan was stale when the merge was seen: the "+
-			"pull request was merged into "+string(branch)+", not into the target branch the plan was made for")
+			"pull request was merged into "+branchName(branch)+", not into the target branch the plan was made for")
 	}
+}
+
+// branchName is branch for a message, or words that say it is not known when it is empty (a wait recorded before
+// its entry named the branch, with the repository gone from the settings): never a placeholder read as a name.
+func branchName(branch remediationv1alpha1.GitBranch) string {
+	if branch == "" {
+		return "a branch the status does not name"
+	}
+	return string(branch)
 }
 
 // markedStale reports whether PlanFresh is False with a stale reason (staleReasons), whatever the phase.
@@ -216,20 +233,29 @@ func markedStale(rr *remediationv1alpha1.RemediationRequest) bool {
 
 // mergedForeignInto ends a request whose pull request was merged into branch, the target branch the settings name
 // now, without being shown to bring the planned change alone (ref, checkRetargeted): NeedsIntervention with
-// ref.reason, MergedWithForeignChange or MergeContentUnreadable, the pull request marked merged, and no merge
+// ref.reason (uncountedMergeReasons), the pull request marked merged, and no merge
 // receipt. The common branch read settles the target lock. The caller has set the stale mark; the breaker's watermark is set again
 // from it, as a request already in NeedsIntervention keeps its phase (setPhase does not run it then).
 func (r *RemediationRequestReconciler) mergedForeignInto(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	branch remediationv1alpha1.GitBranch, ref *renderRefusal) error {
-	message := fmt.Sprintf("Pull request #%d was merged into %s, the target branch the settings name now, and the "+
-		"merge did not bring the planned change alone: %s. Nothing after the merge is checked; review what the merge "+
-		"brought", recordedNumber(rr), branch, ref.message)
-	if ref.reason == ReasonMergeContentUnreadable {
-		message = fmt.Sprintf("Pull request #%d was merged into %s, the target branch the settings name now, and what "+
-			"the merge brought could not be read: %s. Nothing after the merge is checked; review what the merge brought",
-			recordedNumber(rr), branch, ref.message)
+	where := branchName(branch)
+	if branch != "" {
+		where += ", the target branch the settings name now"
 	}
-	markClosed(rr, ReasonChangeRequestMerged, "was merged into "+string(branch)+
+	message := fmt.Sprintf("Pull request #%d was merged into %s, and the "+
+		"merge did not bring the planned change alone: %s. Nothing after the merge is checked; review what the merge "+
+		"brought", recordedNumber(rr), where, ref.message)
+	switch ref.reason {
+	case ReasonMergeContentUnreadable:
+		message = fmt.Sprintf("Pull request #%d was merged into %s, and what "+
+			"the merge brought could not be read: %s. Nothing after the merge is checked; review what the merge brought",
+			recordedNumber(rr), where, ref.message)
+	case ReasonMergeNotCheckable:
+		message = fmt.Sprintf("Pull request #%d was merged into %s, and %s, so it is not known whether the merge "+
+			"brought the planned change alone. Nothing after the merge is checked; review what the merge brought",
+			recordedNumber(rr), where, ref.message)
+	}
+	markClosed(rr, ReasonChangeRequestMerged, "was merged into "+branchName(branch)+
 		" without being shown to bring the planned change alone")
 	// stop sets the same condition; set first, so the breaker's watermark below and in setPhase reads it.
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
@@ -246,14 +272,14 @@ func (r *RemediationRequestReconciler) mergedForeignInto(ctx context.Context, rr
 	return err
 }
 
-// mergedForeignStale reports whether rr ended NeedsIntervention with MergedWithForeignChange or
-// MergeContentUnreadable while its plan carried the stale mark: a pull request merged into the target branch the
+// mergedForeignStale reports whether rr ended NeedsIntervention with MergedWithForeignChange,
+// MergeContentUnreadable or MergeNotCheckable (uncountedMergeReasons) while its plan carried the stale mark: a pull request merged into the target branch the
 // settings name now that was not shown to bring the planned change alone (#771). Neither the change nor its failure
 // is Shadewright's to count, as for any merged stale plan.
 func mergedForeignStale(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
 	return rr.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention && markedStale(rr) && c != nil &&
-		(c.Reason == ReasonMergedWithForeignChange || c.Reason == ReasonMergeContentUnreadable)
+		uncountedMergeReasons[c.Reason]
 }
 
 // mergeContentWait is how long the reads of what a merge into the target branch the settings name now brought are
@@ -401,7 +427,11 @@ func retargetedContent(ctx context.Context, git providers.GitProvider, rr *remed
 	if err != nil {
 		return nil, freshness.WrapProvider("read the target file before the merge", err)
 	}
-	if want, state, err := planned(from.Data, rr); err != nil || state != fileHoldsPrevious || !bytes.Equal(want, to.Data) {
+	want, held, err := planned(from.Data, rr)
+	switch {
+	case err != nil:
+		return notCheckable("the target file "+string(branch)+" held before the merge", err), nil
+	case held != fileHoldsPrevious || !bytes.Equal(want, to.Data):
 		return foreign("the target file the merge left on " + string(branch) + " is not exactly the planned change " +
 			"of the file it held before")
 	}

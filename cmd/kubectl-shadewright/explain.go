@@ -158,6 +158,7 @@ var troubleshootingSections = map[string][]string{
 	"MergedBeforeVerification":          {secReceipt},
 	"MergedWithForeignChange":           {secPullRequest},
 	"MergeContentUnreadable":            {secPullRequest},
+	"MergeNotCheckable":                 {secPullRequest},
 	"ModeNotSupported":                  {secPolicy},
 	"ModuleNotEnabled":                  {secPolicy, secFreshness},
 	"NoChange":                          {secNotRequest},

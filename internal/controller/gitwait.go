@@ -302,12 +302,36 @@ func dropWait(rr *api.RemediationRequest, k waitKind, now time.Time) {
 	gitWaitSummary(rr, now)
 }
 
+// dropEnded removes, in memory, the entries of rr whose kind no longer applies to it (waitKind.applies: a merge
+// recorded ends the merge waits, a final phase the deadline's), so the status write of a stop never leaves an entry
+// that only the next reconcile would remove.
+func dropEnded(rr *api.RemediationRequest, now time.Time) {
+	n := len(rr.Status.GitWaits)
+	rr.Status.GitWaits = slices.DeleteFunc(rr.Status.GitWaits, func(w api.GitWait) bool {
+		k := kindOfEntry(w)
+		return k != waitNone && !k.applies(rr)
+	})
+	if len(rr.Status.GitWaits) == n {
+		return
+	}
+	if len(rr.Status.GitWaits) == 0 {
+		rr.Status.GitWaits = nil
+	}
+	gitWaitSummary(rr, now)
+}
+
 // putGitWaits records adds in status.gitWaits: an entry of a kind that stands keeps its start and its pull request
-// and takes the read that failed now; any other is added whole. Only the entries and their summary are written, in
+// and takes the read that failed now; any other is added whole, as Paced when its kind no longer applies to the live
+// request (waitKind.applies). Only the entries and their summary are written, in
 // a patch with the resourceVersion read, retried on a conflict from a fresh read.
 func (r *RemediationRequestReconciler) putGitWaits(ctx context.Context, rr *api.RemediationRequest, adds []api.GitWait) error {
 	return r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) {
 		for _, a := range adds {
+			if k := kindOfEntry(a); k != waitNone && !k.applies(live) {
+				// The live request has left the state this kind bounds (a step after the read ended it, or the cache
+				// served an older copy): the retry is recorded as Paced, so it stays visible and has no end to pass.
+				a = api.GitWait{Kind: gitWaitKinds[waitNone], Since: a.Since, Operation: a.Operation}
+			}
 			if w := gitWait(live, kindOfEntry(a)); w != nil {
 				w.Operation = a.Operation
 				continue
@@ -523,13 +547,20 @@ func (r *RemediationRequestReconciler) endContentUnreadable(ctx context.Context,
 		recordFound(rr, providers.ChangeRequest{Number: w.PullRequest.Number, URL: w.PullRequest.URL,
 			HeadSHA: w.PullRequest.HeadSHA, State: providers.ChangeRequestMerged})
 	}
-	branch := api.GitBranch("the target branch the settings name now")
-	switch repo, _, err := r.planEntry(ctx, rr); {
-	case err == nil || errors.Is(err, errTargetBranchChanged):
-		branch = repo.TargetBranch
-	case !errors.Is(err, errRepositoryGone) && !errors.Is(err, freshness.ErrPaused):
-		// The read of the settings failed (a Kubernetes read): retried with the error backoff.
-		return err
+	// The branch the merge went into, as the read that started the wait saw it; an entry written without it (before
+	// the upgrade) takes the target branch the settings name now. With neither, the messages name no branch.
+	var branch api.GitBranch
+	if w.PullRequest != nil {
+		branch = w.PullRequest.BaseBranch
+	}
+	if branch == "" {
+		switch repo, _, err := r.planEntry(ctx, rr); {
+		case err == nil || errors.Is(err, errTargetBranchChanged):
+			branch = repo.TargetBranch
+		case !errors.Is(err, errRepositoryGone) && !errors.Is(err, freshness.ErrPaused):
+			// The read of the settings failed (a Kubernetes read): retried with the error backoff.
+			return err
+		}
 	}
 	markStaleForBranch(rr, branch)
 	return r.mergedForeignInto(ctx, rr, branch, &renderRefusal{reason: ReasonMergeContentUnreadable,

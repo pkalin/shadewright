@@ -21,7 +21,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -352,5 +356,38 @@ func TestRetargetedContentComparesWithTheRealParent(t *testing.T) {
 				t.Fatalf("retargetedContent() = %v, %v; want MergedWithForeignChange", ref, err)
 			}
 		})
+	}
+}
+
+// A merge that ends MergeNotCheckable is recorded as the request's merge, as MergedWithForeignChange is: the lock is
+// settled on it (mergeRecorded), and on a stale plan it counts for nothing (mergedForeignStale).
+func TestMergeNotCheckableIsARecordedMerge(t *testing.T) {
+	for _, reason := range []string{ReasonMergedWithForeignChange, ReasonMergeContentUnreadable, ReasonMergeNotCheckable} {
+		rr := &remediationv1alpha1.RemediationRequest{}
+		rr.Status.Phase = remediationv1alpha1.PhaseNeedsIntervention
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionApproved,
+			Status: metav1.ConditionFalse, Reason: reason, Message: "m"})
+		markStaleForBranch(rr, freshOtherBranch)
+		if !mergeRecorded(rr) || !mergedForeignStale(rr) {
+			t.Errorf("%s: mergeRecorded %v, mergedForeignStale %v; want both", reason, mergeRecorded(rr),
+				mergedForeignStale(rr))
+		}
+	}
+}
+
+// #771, fifth decision of 2026-11-18: the file the configured branch held before the merge is one the patcher
+// refuses (the target object is not in it). The merge ends MergeNotCheckable naming that cause, never
+// MergedWithForeignChange.
+func TestRetargetedContentNotCheckable(t *testing.T) {
+	w := newRetargetedWorld(t)
+	broken := w.push(freshOtherBranch, sourcePath, []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: other\n"))
+	n := w.branchOff(broken)
+	w.push("shadewright/rr", sourcePath, w.planned(w.previous))
+	ref, err := w.content(w.mergeInto(n, viaSquash))
+	if err != nil || ref == nil || ref.reason != ReasonMergeNotCheckable {
+		t.Fatalf("retargetedContent() = %v, %v; want MergeNotCheckable", ref, err)
+	}
+	if !strings.Contains(ref.message, "the patcher refused it (TargetNotFound)") {
+		t.Fatalf("message %q does not name the patcher's refusal", ref.message)
 	}
 }

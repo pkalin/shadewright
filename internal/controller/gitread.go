@@ -259,7 +259,8 @@ func readOp(err error) string {
 //   - condition GitReadRetry summarizes the entries (gitWaitSummary);
 //   - the retry comes after the poll interval or the delay the host asked for, whichever is longer, and never later
 //     than the end of any entry nor the time to look again; an end that passed while the reads ran leaves
-//     boundPassedWait, so the next reconcile ends the wait first.
+//     boundPassedWait, so the next reconcile ends the wait first. In the path that ends a wait (expiring) only an
+//     end still ahead shortens it: the bound being ended and ends already past are not waited for again.
 //
 // A failed status write is returned for a retry with the error backoff: a wait is never left unrecorded. Any error
 // that is not a failed Git read (a Kubernetes read or write, the cancellation of the reconcile) is returned
@@ -299,9 +300,17 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	if hostDelay, ok := providers.RetryAfter(err); ok {
 		d = max(d, hostDelay)
 	}
-	by, ok := bound.lookBy(rr, now)
+	// In the path that ends a wait (expiring) the caller's bound has passed and is being ended: the retry is not
+	// pulled to it, nor to another end already past, which would only come back at once (boundPassedWait) to read
+	// again. Only an end still ahead shortens it there.
+	var by time.Time
+	ok := false
+	if !expiring(ctx) {
+		by, ok = bound.lookBy(rr, now)
+	}
 	for _, w := range rr.Status.GitWaits {
-		if end, has := kindOfEntry(w).end(rr, now); has && (!ok || end.Before(by)) {
+		end, has := kindOfEntry(w).end(rr, now)
+		if has && (!expiring(ctx) || end.After(now)) && (!ok || end.Before(by)) {
 			by, ok = end, true
 		}
 	}

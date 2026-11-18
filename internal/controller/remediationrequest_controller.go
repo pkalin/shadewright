@@ -1271,6 +1271,13 @@ func (r *RemediationRequestReconciler) recheck(ctx context.Context, rr *remediat
 		// look is what is retried.
 		return res, err
 	}
+	if err != nil {
+		// The Git host failed a step after the look too (a close answered with a conflict): the look's retry stands
+		// for both, and the step's failure goes to the log so it is not lost.
+		logf.FromContext(ctx).Info("A step after a failed look at the pull request of RemediationRequest failed at "+
+			"the Git host; the look is retried first", "remediationRequest", client.ObjectKeyFromObject(rr),
+			"error", err.Error())
+	}
 	// The look failed and the steps after it went on without it: the look is retried visibly. The steps' own wait
 	// may be longer (a poll); neither passes the look's bound.
 	waited, err := r.retryGitRead(ctx, rr, lookErr, lookBound)

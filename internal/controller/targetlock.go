@@ -171,6 +171,20 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 	// A request handing its pull request over (an outgoing handoff) leaves the merge to the handoff, which gives it
 	// to the replacement when the merged head is the replacement's commit (followHandoff).
 	handingOver := rr.Status.Handoff != nil && rr.Status.Handoff.To != nil
+	if expiredUncleaned(rr) && !handingOver && rr.Status.Source != nil {
+		switch {
+		case v.state == changeMerged && !mergeRecorded(rr) && v.pr.BaseBranch == string(rr.Status.Source.TargetBranch):
+			// Its own pull request, opened while the write that would record it was lost, was merged: recorded as the
+			// request's merge (endMerged checks its head and what it brought), never as a merge after a stop.
+			res, err := r.followHeldMerge(ctx, rr, func(ctx context.Context) error {
+				return r.recordOwnMerge(ctx, rr, v.pr)
+			})
+			return res, true, err
+		case v.state == changeOpen:
+			res, err := r.cleanUpExpired(ctx, rr)
+			return res, true, err
+		}
+	}
 	if v.state == changeMerged && !mergeRecorded(rr) && rr.Status.Source != nil && !handingOver {
 		if v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
 			// Moved to the target branch the settings name now and merged there: recorded as #771 decided, whatever
@@ -295,7 +309,12 @@ func (r *RemediationRequestReconciler) checkAdoptedHead(ctx context.Context, rep
 	if err != nil {
 		return nil, freshness.WrapProvider("read the target file the pull request was made on", err)
 	}
-	if want, state, err := planned(from.Data, rr); err != nil || state != fileHoldsPrevious || !bytes.Equal(want, to.Data) {
+	want, state, err := planned(from.Data, rr)
+	switch {
+	case err != nil:
+		return notCheckable("the target file at the parent of the head of the pull request found by the request's "+
+			"marker", err), nil
+	case state != fileHoldsPrevious || !bytes.Equal(want, to.Data):
 		return foreign, nil
 	}
 	return nil, nil
@@ -324,6 +343,22 @@ func (r *RemediationRequestReconciler) recordStoppedMerge(ctx context.Context,
 	if pr := rr.Status.PullRequest; pr != nil && cr.HeadSHA != pr.HeadSHA {
 		return r.mergedForeign(ctx, rr, &renderRefusal{reason: ReasonHeadMoved,
 			message: "The merged head is not the head Shadewright pushed"})
+	}
+	return r.endMerged(ctx, git, rr, cr)
+}
+
+// recordOwnMerge records the merge of cr, the request's own pull request found merged into the recorded branch by a
+// read that needs no write (an expired request's cleanup, expiredUncleaned; a cancel whose close waits, cancelLook):
+// endMerged on that branch, which checks the head and what the merge brought. It returns what endMerged returns.
+func (r *RemediationRequestReconciler) recordOwnMerge(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
+	repo, _, err := r.planEntry(ctx, rr)
+	if err != nil && !errors.Is(err, errTargetBranchChanged) {
+		return err
+	}
+	git, err := r.openRecordedBranch(ctx, repo, rr.Status.Source.TargetBranch)
+	if err != nil {
+		return freshness.WrapProvider("open the repository", err)
 	}
 	return r.endMerged(ctx, git, rr, cr)
 }
@@ -405,7 +440,7 @@ func mergeRecorded(rr *remediationv1alpha1.RemediationRequest) bool {
 	}
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
 	return rr.Status.Phase == remediationv1alpha1.PhaseNeedsIntervention && c != nil && c.Status == metav1.ConditionFalse &&
-		(c.Reason == ReasonMergedWithForeignChange || c.Reason == ReasonMergeContentUnreadable)
+		uncountedMergeReasons[c.Reason]
 }
 
 // settleReleasedBeforeField is the verdict of a request decided before status.holdsTarget existed whose status

@@ -733,8 +733,10 @@ func TestRolloutDeliveryReadAfterTheWindowCounts(t *testing.T) {
 	}
 }
 
-// Point 3: while writes are paused the Git host is not asked, so the window does not end in DeliveryNotObserved.
-func TestRolloutPausedDoesNotEndTheWindow(t *testing.T) {
+// Point 3, as the fifth decision of 2026-11-18 on #771 has it: a pause stops writes to the Git host and nothing
+// else, so the delivery check reads on while writes are paused and records the delivery it finds; a window that
+// ended while paused without one is held open until the pause ends (TestRolloutPausedHoldsAnEndedWindow).
+func TestRolloutPausedReadsOn(t *testing.T) {
 	w := newRolloutWorld(t, completeStatefulSet())
 	later, err := w.git.Push(mainBranch, "apps/other.yaml", []byte("x"))
 	if err != nil {
@@ -749,23 +751,33 @@ func TestRolloutPausedDoesNotEndTheWindow(t *testing.T) {
 	if err := w.c.Update(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := w.reconcile(t, t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("RolledOut = %+v while paused, want True: the delivery check only reads", c)
+	}
+}
+
+// A window that ended while writes are paused, with no delivery seen, is held open until the pause ends: never
+// DeliveryNotObserved during a pause.
+func TestRolloutPausedHoldsAnEndedWindow(t *testing.T) {
+	w := newRolloutWorld(t, completeStatefulSet())
+	settings := &remediationv1alpha1.RemediationSettings{}
+	if err := w.c.Get(t.Context(), client.ObjectKey{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Paused = new(true)
+	if err := w.c.Update(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
 	w.now = w.merged.Add(deliveryWindow + time.Hour)
 	res, err := w.reconcile(t, t.Context())
 	if err != nil || res.RequeueAfter <= 0 {
 		t.Fatalf("Reconcile = %+v, %v; want a wait", res, err)
 	}
 	if c := rolledOut(t, w); c != nil {
-		t.Fatalf("RolledOut = %+v while paused, want none", c)
-	}
-	settings.Spec.Paused = new(false)
-	if err := w.c.Update(t.Context(), settings); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.reconcile(t, t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if c := rolledOut(t, w); c == nil || c.Status != metav1.ConditionTrue {
-		t.Fatalf("RolledOut = %+v after the pause, want True", c)
+		t.Fatalf("RolledOut = %+v while paused with no delivery seen, want none", c)
 	}
 }
 
@@ -1375,9 +1387,9 @@ func TestRolloutReceiptRepositoryGoneShowsTheCause(t *testing.T) {
 	}
 }
 
-// Without --verify-outcomes the check asks the Git host nothing while writes are paused, with a merge receipt as
-// without one: a later commit is not counted until the pause ends.
-func TestRolloutReceiptAncestryWaitsForThePause(t *testing.T) {
+// A pause stops Git writes only (fifth decision of 2026-11-18 on #771): the ancestry read of a merge receipt goes
+// on while writes are paused, so a later commit is counted during the pause.
+func TestRolloutReceiptAncestryReadsOnWhilePaused(t *testing.T) {
 	w := newRolloutWorld(t, completeStatefulSet())
 	w.withReceipt(t, mainBranch)
 	later := w.laterOn(t, mainBranch)
@@ -1386,9 +1398,7 @@ func TestRolloutReceiptAncestryWaitsForThePause(t *testing.T) {
 	if _, err := w.reconcile(t, t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if rr := w.request(t); rr.Status.PullRequest.AppliedObservedAt != nil {
-		t.Fatal("the Git host was asked while writes are paused")
+	if rr := w.request(t); rr.Status.PullRequest.AppliedObservedAt == nil {
+		t.Fatal("the later commit was not counted while writes are paused: the read waited for the pause")
 	}
-	w.setPaused(t, false)
-	w.untilApplied(t)
 }

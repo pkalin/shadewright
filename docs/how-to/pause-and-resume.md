@@ -12,7 +12,7 @@ The kill switch is `spec.paused` on the one `RemediationSettings` object, `defau
 kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":true}}'
 ```
 
-Requests keep their state and wait, each showing the condition `WritesPaused`:
+Reads and status writes go on: a merge or a close made by hand is recorded, and a request whose pull request can no longer merge releases its target. A request whose next step is a write keeps its state and waits, showing the condition `WritesPaused`:
 
 ```bash
 kubectl get events -n shadewright-system --field-selector reason=WritesPaused

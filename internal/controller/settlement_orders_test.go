@@ -25,11 +25,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
@@ -178,6 +180,80 @@ func TestRetargetedContentTimeoutsReachUnreadable(t *testing.T) {
 	}
 	if rr.Status.MergeReceipt != nil {
 		t.Fatal("an unread retargeted merge got a receipt")
+	}
+}
+
+// The content wait ends after the repository left the settings: the end names the branch the merge went into, as
+// the wait's entry recorded it, never a placeholder in its place.
+func TestContentUnreadableNamesTheRecordedBranch(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	ctx := context.Background()
+	if err := g.SetBase(rr.Status.PullRequest.Number, freshOtherBranch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Merge(rr.Status.PullRequest.Number); err != nil {
+		t.Fatal(err)
+	}
+	r.OpenRepository = func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+		return slowGit{GitProvider: g.ForTarget(string(repo.TargetBranch)), slow: func(op string) bool { return op == opParents }}, nil
+	}
+	r.CleanupTimeout = 50 * time.Millisecond
+	clock := clockOf(r)
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+	if res, err := r.Reconcile(ctx, request); err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile = %+v, %v; want a paced wait", res, err)
+	}
+	settings := &api.RemediationSettings{}
+	if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Repositories = nil
+	if err := r.Update(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(mergeContentWait + time.Minute)
+	if _, err := r.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
+		t.Fatal(err)
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved)
+	if c == nil || c.Reason != ReasonMergeContentUnreadable {
+		t.Fatalf("Approved = %+v; want MergeContentUnreadable after the wait", c)
+	}
+	if !strings.Contains(c.Message, "merged into "+freshOtherBranch+",") {
+		t.Fatalf("Approved message %q does not name the branch the merge went into", c.Message)
+	}
+	if fresh := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPlanFresh); fresh == nil ||
+		!strings.Contains(fresh.Message, "merged into "+freshOtherBranch+",") {
+		t.Fatalf("PlanFresh = %+v; want the branch the merge went into", fresh)
+	}
+}
+
+// Settings that can never open the provider for the configured branch leave the look to the recorded branch, and
+// say so in the log: the merge on the configured branch is not looked up.
+func TestRetargetedLookLogsAnInvalidConfig(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	r.OpenRepository = func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+		if repo.TargetBranch == freshOtherBranch {
+			return nil, fmt.Errorf("client ID: %w", providers.ErrInvalidConfig)
+		}
+		return g.ForTarget(string(repo.TargetBranch)), nil
+	}
+	var lines []string
+	ctx := logf.IntoContext(context.Background(), funcr.New(func(_, args string) { lines = append(lines, args) },
+		funcr.Options{}))
+	repo, _, err := r.planEntry(ctx, rr)
+	if err != nil && !errors.Is(err, errTargetBranchChanged) {
+		t.Fatal(err)
+	}
+	if done, err := r.mergedRetargeted(ctx, rr, repo); done || err != nil {
+		t.Fatalf("mergedRetargeted() = %v, %v; want the look left to the recorded branch", done, err)
+	}
+	if log := strings.Join(lines, "\n"); !strings.Contains(log, "was not looked up") ||
+		!strings.Contains(log, freshOtherBranch) {
+		t.Fatalf("log %q does not say the merge on %s was not looked up", log, freshOtherBranch)
 	}
 }
 

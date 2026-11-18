@@ -46,9 +46,10 @@ import (
 // reconcile pick up from there. writeAllowed
 // reads the settings from the API server, never from the cache, so a pause set at any moment, also after the
 // freshness check passed and between the reads of one step, stops the next write. It fails closed: settings that cannot be read, or that are gone,
-// block the write as well. The freshness check, the watch of a recorded pull request and the close of a change
-// request also look at the switch first, so a paused executor does not even read Git for a write it may not
-// make; the gate is the check that holds whatever the path.
+// block the write as well. The gate is the one check: a pause stops Git writes and nothing else (fifth decision of
+// 2026-11-18 on #771). Reads go on during a pause, so a merge or a close made by hand is recorded, a stopped holder's
+// lock is settled by its read, a wait whose end passed ends, and a rollout is checked; only the step that would write
+// waits for the pause.
 //
 // A request held back by the switch keeps its phase and the rest of its status (a stale mark, a recorded pull
 // request, the deadline), says so with the condition WritesPaused and an Event, and checks again after

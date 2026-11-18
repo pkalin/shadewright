@@ -149,6 +149,19 @@ func heldForVerification(rr *remediationv1alpha1.RemediationRequest, verify bool
 		(rr.Status.Phase == remediationv1alpha1.PhaseMerged && rr.Status.MergeReceipt != nil)
 }
 
+// handingOverMerge reports whether rr, a stopped holder, leaves what v found to its outgoing handoff: always while the
+// handoff stands or is Done, and, once it is Aborted, unless v is a merge of the head rr recorded as its own.
+func handingOverMerge(rr *remediationv1alpha1.RemediationRequest, v changeVerdict) bool {
+	if rr.Status.Handoff == nil || rr.Status.Handoff.To == nil {
+		return false
+	}
+	if rr.Status.Handoff.To.Phase != remediationv1alpha1.HandoffAborted {
+		return true
+	}
+	own := v.state == changeMerged && rr.Status.PullRequest != nil && v.pr.HeadSHA == rr.Status.PullRequest.HeadSHA
+	return !own
+}
+
 // settleStopException handles, once a read worked, what checkHeld must record before the lock may be settled:
 //   - a merge of the request's own pull request that the status does not record (mergeRecorded): it is recorded
 //     first, through followHeldMerge, so no verdict releases the lock on it (settleByRead needs the record). A
@@ -172,9 +185,11 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 	branchStop := stoppedForBranchChange(rr)
 	cancelReason, cancelled := cancelledForIncident(rr)
 	// A request handing its pull request over (an outgoing handoff) leaves the merge to the handoff, which gives it
-	// to the replacement when the merged head is the replacement's commit (followHandoff). An aborted one too: a merge
-	// of the replacement's commit is recorded on the replacement (recordWatchedMerge, #786), never on this request.
-	handingOver := rr.Status.Handoff != nil && rr.Status.Handoff.To != nil
+	// to the replacement when the merged head is the replacement's commit (followHandoff). An aborted one leaves only a
+	// merge of another head than its own recorded one: that may be the replacement's commit, recorded on the
+	// replacement (recordWatchedMerge, #786) when the head is exactly that commit, never on this request. A merge of its
+	// own head is its own. A head with further commits on top of the replacement's is recorded by no request (#870).
+	handingOver := handingOverMerge(rr, v)
 	if expiredUncleaned(rr) && !handingOver && rr.Status.Source != nil {
 		switch {
 		case v.state == changeMerged && !mergeRecorded(rr) && v.pr.BaseBranch == string(rr.Status.Source.TargetBranch):

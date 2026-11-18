@@ -830,16 +830,6 @@ spec:
                   to:
                     description: to is the outgoing side, set on a predecessor.
                     properties:
-                      ends:
-                        description: |-
-                          ends is when this request ends a standing intent on its own, from its own status, if the replacement has not
-                          taken the pull request over by then: the replacement's status.deadline plus the handoff grace (15 minutes),
-                          recorded with the intent on the executor's clock (#786, decision of 2026-11-18). The look at this request's pull
-                          request aborts the intent once it has passed, whatever the replacement could store, so its freshness check and
-                          merge gate work again. An intent recorded before the field existed, or for a replacement with no deadline, has
-                          none: the replacement's deadline is read instead. It never changes once recorded.
-                        format: date-time
-                        type: string
                       expectedHead:
                         description: |-
                           expectedHead is the head of the branch when the intent was recorded: the replacement's commit must have
@@ -899,11 +889,6 @@ spec:
                     x-kubernetes-validations:
                     - message: an outgoing handoff is Intent, Done or Aborted
                       rule: self.phase in ['Intent', 'Done', 'Aborted']
-                    - message: the end of an outgoing handoff is recorded with its
-                        intent and never changes
-                      rule: (oldSelf.phase == 'Aborted' && self.phase == 'Intent')
-                        || (has(self.ends) == has(oldSelf.ends) && (!has(self.ends)
-                        || self.ends == oldSelf.ends))
                     - message: 'an outgoing handoff is pinned: only its phase changes,
                         or an Aborted one is replaced'
                       rule: (oldSelf.phase == 'Aborted' && self.phase == 'Intent')

@@ -317,7 +317,6 @@ func (r *RemediationRequestReconciler) reserve(ctx context.Context, rr, pred *re
 	upd.Status.Handoff.To = &remediationv1alpha1.OutgoingHandoff{
 		Name: remediationv1alpha1.Name(rr.Name), UID: remediationv1alpha1.UID(rr.UID), Hint: from.Hint,
 		ExpectedHead: pred.Status.PullRequest.HeadSHA, Phase: remediationv1alpha1.HandoffIntent,
-		Ends: intentEnds(rr),
 	}
 	hintByRef(upd, from.Hint).State = remediationv1alpha1.HintReserved
 	if err := r.Status().Update(ctx, upd); err != nil {
@@ -1200,51 +1199,6 @@ var recoverRule = map[changeState]recoverOutcome{
 	changeGone: recoverNothing, changeUnknown: recoverRetry,
 }
 
-// intentEnds is the end of an intent to hand a pull request over to rr, recorded on the predecessor with the intent
-// (status.handoff.to.ends): rr's deadline plus handoffRecoveryGrace, the end of rr's own recovery (HandoffGrace). nil
-// when rr records no deadline.
-func intentEnds(rr *remediationv1alpha1.RemediationRequest) *metav1.Time {
-	if rr.Status.Deadline == nil {
-		return nil
-	}
-	return &metav1.Time{Time: rr.Status.Deadline.Add(handoffRecoveryGrace)}
-}
-
-// intentOverdue reports whether rr, a predecessor whose intent to hand its pull request over to repl stands, ends that
-// intent on its own (third decision of 2026-11-18 on #786, point 3): repl has not taken the pull request over, and the
-// end of the intent has passed on the executor's clock. The end is rr's own record (status.handoff.to.ends); an intent
-// recorded without one ends at repl's deadline plus handoffRecoveryGrace, the bound of repl's recovery, and one with
-// neither does not end here. Nothing repl writes after the intent moves it, so a replacement whose status writes keep
-// being refused (it cannot store its refusal, abortOnRefusal) holds the predecessor's freshness check and merge gate no
-// longer than on main. repl may come from the cache: an intent past its end is confirmed on repl as the API server
-// holds it, so a takeover the cache does not show yet is not aborted; a failed read decides nothing.
-func (r *RemediationRequestReconciler) intentOverdue(ctx context.Context, rr, repl *remediationv1alpha1.RemediationRequest) bool {
-	overdue := func(repl *remediationv1alpha1.RemediationRequest) bool {
-		to := intent(rr)
-		if to == nil || tookOver(repl) {
-			return false
-		}
-		end := to.Ends
-		if end == nil {
-			end = intentEnds(repl)
-		}
-		return end != nil && !r.now().Before(end.Time)
-	}
-	if !overdue(repl) {
-		return false
-	}
-	live := &remediationv1alpha1.RemediationRequest{}
-	if err := r.getLive(ctx, client.ObjectKeyFromObject(repl), live); err != nil || live.UID != repl.UID {
-		return false
-	}
-	if !overdue(live) {
-		return false
-	}
-	logf.FromContext(ctx).Info("Found the handoff intent of RemediationRequest past its end: the replacement did not "+
-		"take the pull request over", "remediationRequest", client.ObjectKeyFromObject(rr), "replacement", repl.Name)
-	return true
-}
-
 // handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep
 // is true when its pull request is its replacement's (handed over, or the replacement took it over and has not
 // ended this request yet), so it must not be closed; wait is true while the replacement may still take it over.
@@ -1267,7 +1221,7 @@ func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *rem
 	case repl.UID != types.UID(to.UID):
 	case tookOver(repl):
 		return true, false, nil
-	case !ended(repl.Status.Phase) && !abortedOnRefusal(repl) && !r.intentOverdue(ctx, rr, repl):
+	case !ended(repl.Status.Phase) && !abortedOnRefusal(repl):
 		return false, true, nil
 	}
 	abortIntent(rr, ReasonHintHandoffAborted)
@@ -1285,10 +1239,7 @@ func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *r
 	}
 	// A replacement whose handoff was aborted at a refused read (abortedOnRefusal, #786) never takes over: its intent
 	// is aborted, though it still runs.
-	// One whose intent passed its end (intentOverdue) is not waited for any longer, whatever it could store.
-	abandoned := func(repl *remediationv1alpha1.RemediationRequest) bool {
-		return gaveUp(repl) || abortedOnRefusal(repl) || r.intentOverdue(ctx, upd, repl)
-	}
+	abandoned := func(repl *remediationv1alpha1.RemediationRequest) bool { return gaveUp(repl) || abortedOnRefusal(repl) }
 	reasonOf := func(repl *remediationv1alpha1.RemediationRequest) string {
 		if repl != nil && repl.Status.Phase == remediationv1alpha1.PhaseDenied {
 			return ReasonHintReplacementDenied

@@ -59,9 +59,6 @@ var statusClocks = map[string]statusClock{
 		why: "a paused rollout, which moves the delivery window by the pause"},
 	"status.pullRequest.appliedObservedAt": {test: "TestEveryGitReadRetrySiteKeepsItsBound",
 		why: "the start of the delivery window (paceAt(windowEnd) of deliveryStep and waitForDelivery)"},
-	"status.handoff.to.ends": {test: "TestPredecessorEndsAStandingIntentAtItsOwnEnd",
-		why: "the end of a handoff intent on the predecessor's side, a wait for the replacement, not for a read of " +
-			"the Git host; the look at the predecessor's pull request aborts the intent once it passed (intentOverdue)"},
 	"status.verification.windowStart": {test: "TestCountedStartsNoWindowBeforeReconciling",
 		why: "the stable window of the verification, ended by its verdict"},
 

@@ -539,7 +539,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `from` | [IncomingHandoff](#incominghandoff) | No | from is the incoming side, set on a replacement.<br>Rule: an incoming handoff is Reserved, Done or Aborted<br>Rule: an incoming handoff is pinned: only its phase changes<br>Rule: the rewrite after a handoff is recorded only once it is Done<br>Rule: the record of the pull request's rewrite never changes once set<br>Rule: an incoming handoff moves only from Reserved to Done or Aborted |
-| `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: the end of an outgoing handoff is recorded with its intent and never changes<br>Rule: an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement for another hint |
+| `to` | [OutgoingHandoff](#outgoinghandoff) | No | to is the outgoing side, set on a predecessor.<br>Rule: an outgoing handoff is Intent, Done or Aborted<br>Rule: an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced<br>Rule: an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement for another hint |
 
 ### HandoffPhase
 
@@ -1105,14 +1105,12 @@ OutgoingHandoff is the predecessor's side of a handoff: the replacement that tak
 request it answers (which must be in status.hints, in the state its phase implies: Reserved while Intent,
 Consumed once Done, Declined once Aborted) and the branch head the replacement's commit must have as its
 parent. Only its phase changes once written, except that an Aborted one is replaced by the Intent of a later
-replacement, for another hint of this request. Its end (ends), recorded with the intent, is the bound of the
-intent on this request's side: the replacement's deadline plus the handoff grace (#786).
+replacement, for another hint of this request.
 
 
 Validation rules:
 
 - an outgoing handoff is Intent, Done or Aborted: `self.phase in ['Intent', 'Done', 'Aborted']`
-- the end of an outgoing handoff is recorded with its intent and never changes: `(oldSelf.phase == 'Aborted' && self.phase == 'Intent') || (has(self.ends) == has(oldSelf.ends) && (!has(self.ends) || self.ends == oldSelf.ends))`
 - an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced: `(oldSelf.phase == 'Aborted' && self.phase == 'Intent') || (self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)`
 - an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement for another hint: `oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted']) || (oldSelf.phase == 'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid && (self.hint.source != oldSelf.hint.source || self.hint.commentID != oldSelf.hint.commentID))`
 
@@ -1125,7 +1123,6 @@ Used by: [Handoff](#handoff).
 | `hint` | [HintRef](#hintref) | Yes | hint is this request's hint the replacement answers. |
 | `expectedHead` | string | Yes | expectedHead is the head of the branch when the intent was recorded: the replacement's commit must have it as its parent.<br>Pattern: `^[0-9a-f]{40}$` |
 | `phase` | [HandoffPhase](#handoffphase) | Yes | phase is how far this side has come.<br>One of `Reserved`, `Intent`, `Done`, `Aborted` |
-| `ends` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | ends is when this request ends a standing intent on its own, from its own status, if the replacement has not taken the pull request over by then: the replacement's status.deadline plus the handoff grace (15 minutes), recorded with the intent on the executor's clock (#786, decision of 2026-11-18). The look at this request's pull request aborts the intent once it has passed, whatever the replacement could store, so its freshness check and merge gate work again. An intent recorded before the field existed, or for a replacement with no deadline, has none: the replacement's deadline is read instead. It never changes once recorded. |
 
 ### PlanRepository
 

@@ -421,13 +421,29 @@ func settleHandoffAborted(rr *remediationv1alpha1.RemediationRequest) (*lockverd
 	return lockverdict.HandoffAborted(&rr.Status)
 }
 
-// settleRecordedMerge is the verdict of a request whose status records its merge, in Merged, Succeeded,
-// Inconclusive, or Failed with its receipt, and that no verification holds (eighth decision of 2026-11-18 on #771,
-// point 3): the recorded merge settles the lock by itself, without a read of the branch, so neither a pause nor a
-// repository removed from the settings keeps it.
+// settleRecordedMerge is the verdict of a request that no longer moves on and whose status records its merge as
+// main's status rule told it (lockverdict.RecordedMerge): a phase after the merge (Merged, WaitingForDelivery,
+// Verifying, Succeeded, Inconclusive), Failed with its receipt, or its recorded pull request marked merged
+// (PullRequestOpened with reason ChangeRequestMerged: MergedWithForeignChange and MergeContentUnreadable among
+// them), and that no verification holds (ninth decision of 2026-11-18 on #771, point 5). The recorded merge settles
+// the lock by itself, without a read of the branch, so neither a pause nor a repository removed from the settings
+// keeps it.
 func (r *RemediationRequestReconciler) settleRecordedMerge(rr *remediationv1alpha1.RemediationRequest) (
 	*lockverdict.Verdict, bool) {
-	return lockverdict.RecordedMerge(&rr.Status, heldForVerification(rr, r.VerifyOutcomes))
+	if progresses(rr) {
+		return nil, false
+	}
+	return lockverdict.RecordedMerge(&rr.Status, markedMerged(rr), heldForVerification(rr, r.VerifyOutcomes))
+}
+
+// markedMerged reports whether rr's recorded pull request is marked merged in PullRequestOpened (markClosed with
+// reason ChangeRequestMerged), as main's status rule read it (prMayBeOpen).
+func markedMerged(rr *remediationv1alpha1.RemediationRequest) bool {
+	if rr.Status.PullRequest == nil {
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened)
+	return c != nil && c.Reason == ReasonChangeRequestMerged
 }
 
 // settleRecorded is what main's settleLock did in every write that ends a phase: in the status about to be written,
@@ -483,17 +499,18 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
 	if expiredCleanupOver(rr, r.now()) {
-		// The cutoff of an expired request's cleanup is decided from recorded state, before any read. Nothing new
-		// ends during a pause (eighth decision of 2026-11-18 on #771, point 2): the cutoff waits for it like the close
-		// it bounds, and the paused time a reconcile saw stretches it (expiredCleanupLeft).
+		// The cutoff of an expired request's cleanup is decided from recorded state, before any read. Nothing ends
+		// during a pause: the cutoff waits for it like the close it bounds. Past it one more close is tried (ninth
+		// decision of 2026-11-18 on #771, point 2): if it fails, by a write or by a read, the cleanup ends with
+		// PullRequestDeadlineCleanupFailed (expiredCloseFailed); if it works, the next look settles the lock.
 		switch paused, err := r.writesPaused(ctx); {
 		case err != nil:
 			return reconcile.Result{}, err
 		case paused:
 			return r.waitWhilePaused(ctx, rr)
 		}
-		log.Info("Ended the cleanup of an expired RemediationRequest: its close kept failing")
-		return r.endExpiredCleanupFailed(ctx, rr)
+		log.Info("Trying the close of an expired RemediationRequest once more: its cleanup passed its cutoff")
+		return r.cleanUpExpired(ctx, rr)
 	}
 	if s, ok := r.settleRecordedMerge(rr); ok {
 		// The recorded merge settles the lock: no read of the branch, so neither a repository that cannot be opened

@@ -157,9 +157,9 @@ func (r *RemediationRequestReconciler) mergeCheckContext(ctx context.Context) (c
 // mergeCheckFailed handles a check at the merge of cr that did not answer (checkAtMerge). It records the wait for
 // the merge (its entry in status.gitWaits, startMergeWait) when there is none and the context still allows a
 // write, as the check of any kind of failure is bounded by that wait:
-//   - a failed Git read is one of the wait (readOfMergeCheck), returned wrapped in errMergeCheck for a retry: the
-//     check at the start of a reconcile past its end records the merge with the plan not shown fresh, from the
-//     entry alone (endPassedWait, endMergeWait). Nothing here looks at the end of that wait;
+//   - a failed Git read is one of the wait (readOfMergeCheck), returned wrapped in errMergeCheck for a retry: once
+//     the wait is past its end, a reconcile whose last read fails records the merge with the plan not shown fresh,
+//     from the entry alone (endAfterLastRead, endMergeWait). Nothing here looks at the end of that wait;
 //   - any other failure (a Kubernetes read, a timeout of one) is no Git wait and goes to the error backoff: it is
 //     returned wrapped in errMergeCheck while the wait lasts, and once it is over the plan is marked not shown fresh
 //     here (markNotShownFresh) and nil is returned, so the merge is recorded.
@@ -264,8 +264,9 @@ var errMergeCommitPending = errors.New("waiting for the Git host to report the m
 // commit ID, before its merge is recorded anyway; zero when cr is not merged, has one, or the wait is over.
 // The wait starts when the executor first sees that state: it records the wait as an entry of status.gitWaits
 // (startMergeWait), with its start on its own clock and its end, so the start is kept over a restart and never
-// moved (a validation rule), and the check at the start of a reconcile past its end records the merge without a
-// receipt from the entry alone, also while the reads fail (endMergeWait). It never reads a time of the Git host. A
+// moved (a validation rule). Past its end the merge is recorded without a receipt: by this look when its read
+// answers (zero is returned), or from the entry alone when that last read fails (endAfterLastRead, endMergeWait).
+// It never reads a time of the Git host. A
 // failed write is returned for a retry and decides nothing. A clock that went back never makes the whole wait
 // longer than mergeCommitWait plus mergeCommitClockSlack (mergeWaitRemaining).
 func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
@@ -289,8 +290,7 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 // pull request and its end, and status.mergeCommitAwaitedSince when unset (kept as before the entry existed, as the
 // time the merge was first seen; the entry's end counts from the entry's own start, wholeWait). Both go in one patch
 // with the resourceVersion of rr, so a copy read earlier than the server's is refused as a conflict, and rr takes
-// only these fields and the new resourceVersion: a caller's unwritten changes to rr stay for its own write. The entry
-// records the paused time rr had seen (wholeWait), which the patch's resourceVersion makes the live one. A failed
+// only these fields and the new resourceVersion: a caller's unwritten changes to rr stay for its own write. A failed
 // write leaves rr as it was and is returned for a retry.
 func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, op string) error {
@@ -300,7 +300,7 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 	if upd.Status.MergeCommitAwaitedSince == nil {
 		upd.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Truncate(time.Second)}
 	}
-	w, ok := wholeWait(upd, remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
+	w, ok := wholeWait(remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
 		PullRequest: waitPullRequest(cr)}, op, now)
 	if ok && gitWait(upd, waitMergeCheck) == nil {
 		upd.Status.GitWaits = append(upd.Status.GitWaits, w)

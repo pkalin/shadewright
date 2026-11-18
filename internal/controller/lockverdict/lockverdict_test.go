@@ -49,7 +49,7 @@ func TestReleaseRefusesNoVerdict(t *testing.T) {
 func TestEachVerdictOnlyFromItsProof(t *testing.T) {
 	receipt := func(phase api.RemediationPhase) *api.RemediationRequestStatus {
 		s := held()
-		s.Phase, s.MergeReceipt = phase, &api.MergeReceipt{}
+		s.Phase, s.MergeReceipt, s.PullRequest = phase, &api.MergeReceipt{}, &api.PullRequestStatus{Number: 1}
 		return s
 	}
 	type c struct {
@@ -61,30 +61,32 @@ func TestEachVerdictOnlyFromItsProof(t *testing.T) {
 		got  c
 		want bool
 	}{
-		"read merged and recorded":    {of(ByRead(FoundMerged, true, true, false)), true},
-		"read merged, not recorded":   {of(ByRead(FoundMerged, false, true, false)), false},
-		"read closed":                 {of(ByRead(FoundClosed, false, true, false)), true},
-		"read gone":                   {of(ByRead(FoundGone, false, false, false)), true},
-		"read closed, another open":   {of(ByRead(FoundClosed, false, true, true)), false},
-		"read open or unknown":        {of(ByRead(FoundOther, true, true, false)), false},
-		"never held":                  {of(NeverHeld(&api.RemediationRequestStatus{})), true},
-		"held is not never held":      {of(NeverHeld(held())), false},
-		"handoff aborted":             {of(HandoffAborted(&api.RemediationRequestStatus{Handoff: &api.Handoff{From: &api.IncomingHandoff{}}})), true},
-		"handoff with a pull request": {of(HandoffAborted(&api.RemediationRequestStatus{Handoff: &api.Handoff{From: &api.IncomingHandoff{}}, PullRequest: &api.PullRequestStatus{}})), false},
-		"handed over":                 {of(HandedOver(&api.OutgoingHandoff{Phase: api.HandoffDone, UID: "u"}, "u", true)), true},
-		"handed over to another":      {of(HandedOver(&api.OutgoingHandoff{Phase: api.HandoffDone, UID: "u"}, "v", true)), false},
-		"released before the field":   {of(ReleasedBeforeField(&api.RemediationRequestStatus{}, false)), true},
-		"derived hold":                {of(ReleasedBeforeField(&api.RemediationRequestStatus{}, true)), false},
-		"receipt, Merged":             {of(RecordedMerge(receipt(api.PhaseMerged), false)), true},
-		"receipt, Inconclusive":       {of(RecordedMerge(receipt(api.PhaseInconclusive), false)), true},
-		"receipt, Succeeded":          {of(RecordedMerge(receipt(api.PhaseSucceeded), false)), true},
-		"receipt, Failed":             {of(RecordedMerge(receipt(api.PhaseFailed), false)), true},
-		"receipt, held for verifying": {of(RecordedMerge(receipt(api.PhaseMerged), true)), false},
-		"no receipt, Merged":          {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseMerged}, false)), true},
-		"no receipt, Inconclusive":    {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseInconclusive}, false)), true},
-		"no receipt, Failed":          {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseFailed}, false)), false},
-		"receipt, WaitingForDelivery": {of(RecordedMerge(receipt(api.PhaseWaitingForDelivery), false)), false},
-		"receipt, NeedsIntervention":  {of(RecordedMerge(receipt(api.PhaseNeedsIntervention), false)), false},
+		"read merged and recorded":         {of(ByRead(FoundMerged, true, true, false)), true},
+		"read merged, not recorded":        {of(ByRead(FoundMerged, false, true, false)), false},
+		"read closed":                      {of(ByRead(FoundClosed, false, true, false)), true},
+		"read gone":                        {of(ByRead(FoundGone, false, false, false)), true},
+		"read closed, another open":        {of(ByRead(FoundClosed, false, true, true)), false},
+		"read open or unknown":             {of(ByRead(FoundOther, true, true, false)), false},
+		"never held":                       {of(NeverHeld(&api.RemediationRequestStatus{})), true},
+		"held is not never held":           {of(NeverHeld(held())), false},
+		"handoff aborted":                  {of(HandoffAborted(&api.RemediationRequestStatus{Handoff: &api.Handoff{From: &api.IncomingHandoff{}}})), true},
+		"handoff with a pull request":      {of(HandoffAborted(&api.RemediationRequestStatus{Handoff: &api.Handoff{From: &api.IncomingHandoff{}}, PullRequest: &api.PullRequestStatus{}})), false},
+		"handed over":                      {of(HandedOver(&api.OutgoingHandoff{Phase: api.HandoffDone, UID: "u"}, "u", true)), true},
+		"handed over to another":           {of(HandedOver(&api.OutgoingHandoff{Phase: api.HandoffDone, UID: "u"}, "v", true)), false},
+		"released before the field":        {of(ReleasedBeforeField(&api.RemediationRequestStatus{}, false)), true},
+		"derived hold":                     {of(ReleasedBeforeField(&api.RemediationRequestStatus{}, true)), false},
+		"receipt, Merged":                  {of(RecordedMerge(receipt(api.PhaseMerged), false, false)), true},
+		"receipt, Inconclusive":            {of(RecordedMerge(receipt(api.PhaseInconclusive), false, false)), true},
+		"receipt, Succeeded":               {of(RecordedMerge(receipt(api.PhaseSucceeded), false, false)), true},
+		"receipt, Failed":                  {of(RecordedMerge(receipt(api.PhaseFailed), false, false)), true},
+		"receipt, held for verifying":      {of(RecordedMerge(receipt(api.PhaseMerged), false, true)), false},
+		"no receipt, Merged":               {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseMerged}, false, false)), true},
+		"no receipt, Inconclusive":         {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseInconclusive}, false, false)), true},
+		"no receipt, Failed":               {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseFailed}, false, false)), false},
+		"receipt, WaitingForDelivery":      {of(RecordedMerge(receipt(api.PhaseWaitingForDelivery), false, false)), true},
+		"receipt, NeedsIntervention":       {of(RecordedMerge(receipt(api.PhaseNeedsIntervention), false, false)), false},
+		"marked merged, NeedsIntervention": {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseNeedsIntervention}, true, false)), true},
+		"marked merged, held":              {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseNeedsIntervention}, true, true)), false},
 	} {
 		if tc.got.ok != tc.want || (tc.got.v != nil) != tc.want {
 			t.Errorf("%s: verdict %v, ok %t; want ok %t", name, tc.got.v, tc.got.ok, tc.want)

@@ -252,7 +252,10 @@ func readOp(err error) string {
 }
 
 // retryGitRead is the common result of a failed Git read, called by the path that made the read. It starts or
-// continues waits and never decides whether one is over (endPassedWait does, at the start of the next reconcile):
+// continues waits and never decides whether one is over (endPassedWait does, at the start of the next reconcile, and
+// endAfterLastRead after it). In a reconcile that makes the last read of a read wait past its end (markLastRead) a
+// failed read is no retry: it is noted (failedRead) and nothing is recorded, and the wait ends after the reconcile.
+// Otherwise:
 //   - the caller's kind (bound) gets its entry in status.gitWaits, and so does the wait err belongs to
 //     (readOfMergeCheck, readOfContent), each its own: an entry that stands keeps its start, and no other entry is
 //     touched. In the path that ends a wait (expiring) only a Paced entry is recorded;
@@ -275,6 +278,18 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	}
 	now := r.now()
 	op := readOp(err)
+	key := client.ObjectKeyFromObject(rr)
+	if kinds := r.gitRetries().lastReads(key); slices.ContainsFunc(kinds, func(k waitKind) bool {
+		end, ok := k.end(rr, now)
+		return ok && !now.Before(end)
+	}) {
+		// The last read past the end of a read wait failed: nothing is retried, the wait ends after this reconcile
+		// (endAfterLastRead), which names this read.
+		r.gitRetries().failedRead(key, op)
+		logf.FromContext(ctx).Info("A last Git read of RemediationRequest failed after its wait passed its end",
+			"remediationRequest", key, "operation", op)
+		return reconcile.Result{}, nil
+	}
 	var adds []api.GitWait
 	if expiring(ctx) {
 		// The path that ends a wait: nothing it reads starts a bounded wait, and its caller's bound has passed.
@@ -283,7 +298,7 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 		bound.kind = waitNone
 	} else {
 		if e, ok := errors.AsType[*kindedReadError](err); ok {
-			if w, ok := wholeWait(rr, e.wait, op, now); ok {
+			if w, ok := wholeWait(e.wait, op, now); ok {
 				adds = append(adds, w)
 			}
 		}
@@ -298,7 +313,7 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	if e := r.putGitWaits(ctx, rr, adds); e != nil {
 		return reconcile.Result{}, e
 	}
-	r.gitRetries().mark(client.ObjectKeyFromObject(rr))
+	r.gitRetries().mark(key)
 	d := max(r.pullRequestPollInterval(), retryAfterOf(err))
 	if hostDelay, ok := providers.RetryAfter(err); ok {
 		d = max(d, hostDelay)
@@ -341,6 +356,10 @@ type gitRetryMark struct {
 	retried bool
 	// shown: the request read at the start of this reconcile carried condition GitReadRetry.
 	shown bool
+	// lastRead: the read waits past their end at the start of this reconcile (endPassedWait), whose reads this
+	// reconcile makes once more; failed names the first Git read of this reconcile that failed (retryGitRead).
+	lastRead []waitKind
+	failed   string
 }
 
 func (m *gitRetryMarks) update(key types.NamespacedName, f func(*gitRetryMark)) {
@@ -357,6 +376,27 @@ func (m *gitRetryMarks) update(key types.NamespacedName, f func(*gitRetryMark)) 
 // mark records that key's reconcile scheduled a Git read retry.
 func (m *gitRetryMarks) mark(key types.NamespacedName) {
 	m.update(key, func(e *gitRetryMark) { e.retried = true })
+}
+
+// markLastRead records that key's reconcile makes the reads of the read waits kinds once more, past their end.
+func (m *gitRetryMarks) markLastRead(key types.NamespacedName, kinds []waitKind) {
+	m.update(key, func(e *gitRetryMark) { e.lastRead = kinds })
+}
+
+// lastReads are the read waits past their end whose reads key's reconcile makes once more (markLastRead).
+func (m *gitRetryMarks) lastReads(key types.NamespacedName) []waitKind {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.keys[key].lastRead
+}
+
+// failedRead records op, a Git read of key's reconcile that failed, when it is the first.
+func (m *gitRetryMarks) failedRead(key types.NamespacedName, op string) {
+	m.update(key, func(e *gitRetryMark) {
+		if e.failed == "" {
+			e.failed = op
+		}
+	})
 }
 
 // shown records that the request key's reconcile read carries condition GitReadRetry.

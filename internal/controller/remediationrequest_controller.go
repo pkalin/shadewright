@@ -441,7 +441,18 @@ func (r *RemediationRequestReconciler) getLive(ctx context.Context, key types.Na
 func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.gitRetries().take(req.NamespacedName)
 	res, err := r.reconcile(ctx, req)
-	if m := r.gitRetries().take(req.NamespacedName); err == nil && ctx.Err() == nil && (m.shown || m.retried) {
+	m := r.gitRetries().take(req.NamespacedName)
+	if len(m.lastRead) > 0 && err == nil && ctx.Err() == nil {
+		// The reconcile read once more past the end of a read wait: what its reads left standing ends now (gitwait.go).
+		endRes, ended, endErr := r.endAfterLastRead(ctx, req.NamespacedName, m.lastRead, m.failed)
+		if endErr != nil {
+			return ctrl.Result{}, endErr
+		}
+		if ended {
+			res = endRes
+		}
+	}
+	if err == nil && ctx.Err() == nil && (m.shown || m.retried) {
 		// The reads of this reconcile worked, or were decided on for good: the retry the request showed is over,
 		// but for the waits a read of their own ends (clearGitReadRetry). Whatever stands is looked at again by its
 		// end, whatever pace the reconcile chose (gitwait.go).

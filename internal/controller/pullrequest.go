@@ -1072,8 +1072,9 @@ func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr 
 
 // mergedForeign ends a request whose recorded pull request a person merged although its head failed a check
 // before Shadewright could close it (#524): NeedsIntervention with MergedWithForeignChange and a message that
-// names the pull request, which is recorded as merged, so the lock on the target is released and the merged
-// change is reviewed by a person. Shadewright cannot stop a human merge; it reports it.
+// names the pull request, which is recorded as merged (PullRequestOpened ChangeRequestMerged), so the lock on the
+// target is released in the write that ends the request (stop, settleRecorded) and the merged change is reviewed by a
+// person. Shadewright cannot stop a human merge; it reports it.
 func (r *RemediationRequestReconciler) mergedForeign(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	ref *renderRefusal) error {
 	markClosed(rr, ReasonChangeRequestMerged, "was merged although it failed a check")
@@ -1737,7 +1738,8 @@ func expiredUncleaned(rr *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // cleanUpExpired is the cleanup of an expired request (expiredUncleaned) whose own pull request the read of the
-// branch after the stop found open (v): it is closed, within CleanupTimeout. A close the kill switch holds waits for
+// branch after the stop found open (v), or of one whose failing close passed its cutoff (checkHeld, one more close):
+// it is closed, within CleanupTimeout, and a close that works removes condition CleanupFailing. A close the kill switch holds waits for
 // the pause (waitWhilePaused), the lock and the pull request kept; a failed read is retried visibly at the pace of a
 // stopped holder's looks (heldUnsettled); a close that fails for a reason worth a retry is shown and bounded
 // (expiredCloseFailed); a pull request found merged meanwhile is recorded (endMerged); a
@@ -1759,6 +1761,14 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 	what := ""
 	switch reason, _, refused := refusal(err); {
 	case err == nil:
+		if cleanupFailing(rr) {
+			// The close works again: the cleanup no longer fails, and the next look settles the lock.
+			closeNoLongerFailing(rr)
+			if uerr := r.Status().Update(ctx, rr); uerr != nil {
+				return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
+					rr.Name, uerr)
+			}
+		}
 		logf.FromContext(ctx).Info("Closed the pull request of an expired RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr))
 		return reconcile.Result{RequeueAfter: stepDelay}, nil
@@ -1776,8 +1786,9 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errRepositoryGone),
 		errors.Is(err, errChangeRequestNotOurs):
 		what = "the repository of the plan cannot be used to close it"
-	case gitReadFailure(err):
-		// A failed read of the cleanup: a visible retry at the pace of a stopped holder's looks.
+	case gitReadFailure(err) && !expiredCleanupOver(rr, r.now()):
+		// A failed read of the cleanup: a visible retry at the pace of a stopped holder's looks. Past the cutoff it is
+		// the one more close that failed, which ends the cleanup (expiredCloseFailed).
 		return r.heldUnsettled(ctx, rr, changeVerdict{state: changeUnknown}, err, false)
 	default:
 		// A close the Git host failed to answer (a 5xx, a rate limit, a conflict, a token it does not give): retried
@@ -1821,11 +1832,6 @@ func (r *RemediationRequestReconciler) expiredCloseFailed(ctx context.Context, r
 				"and asks a person to close it", ObservedGeneration: rr.Generation}
 		r.setRefused(rr, failing)
 		setDeadlineMessage(rr, messageDeadlineCloseFailing)
-		// The paused time seen so far, so only what is seen from now on stretches the bound (expiredCleanupLeft).
-		if rr.Status.PauseSeen == nil {
-			rr.Status.PauseSeen = &remediationv1alpha1.PauseSeenStatus{}
-		}
-		rr.Status.PauseSeen.CleanupPausedSecondsAtStart = new(pausedSeenSeconds(rr, now))
 		if uerr := r.Status().Update(ctx, rr); uerr != nil {
 			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
 				rr.Name, uerr)
@@ -1834,7 +1840,7 @@ func (r *RemediationRequestReconciler) expiredCloseFailed(ctx context.Context, r
 		log.Info("Could not close the pull request of an expired RemediationRequest; tried again", "error", err.Error())
 		c = meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
 	}
-	left := expiredCleanupLeft(rr, c, now)
+	left := expiredCleanupLeft(c, now)
 	if left <= 0 {
 		log.Info("Ended the cleanup of an expired RemediationRequest: its close kept failing", "error", err.Error())
 		return r.endExpiredCleanupFailed(ctx, rr)
@@ -1843,16 +1849,16 @@ func (r *RemediationRequestReconciler) expiredCloseFailed(ctx context.Context, r
 }
 
 // expiredCleanupOver reports whether the cleanup of an expired request (expiredUncleaned) has a close that failed
-// (condition CleanupFailing True) for cleanupFailingBound of time not paused, on the executor's clock
-// (expiredCleanupLeft): decided from recorded state alone, so checkHeld checks it before any read of the Git host, and
-// failing reads cannot keep the cleanup from ending (seventh decision of 2026-11-18 on #771, point 4). checkHeld waits
-// for a pause before it ends the cleanup (eighth decision, point 2).
+// (condition CleanupFailing True) for cleanupFailingBound, on the executor's clock (expiredCleanupLeft): decided from
+// recorded state alone, so checkHeld checks it before any read of the Git host, and failing reads cannot keep the
+// cleanup from ending (seventh decision of 2026-11-18 on #771, point 4). Past it checkHeld tries one more close, not
+// during a pause, and the cleanup ends when that fails (ninth decision of 2026-11-18 on #771, point 2).
 func expiredCleanupOver(rr *remediationv1alpha1.RemediationRequest, now time.Time) bool {
 	if !cleanupFailing(rr) {
 		return false
 	}
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
-	return expiredCleanupLeft(rr, c, now) <= 0
+	return expiredCleanupLeft(c, now) <= 0
 }
 
 // cleanupFailing reports whether rr is an expired request whose cleanup has a close that failed (expiredUncleaned,
@@ -1866,16 +1872,9 @@ func cleanupFailing(rr *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // expiredCleanupLeft is what is left at now of the bound of an expired request's failing close, c its condition
-// CleanupFailing: cleanupFailingBound from c's lastTransitionTime (boundLeft), stretched by the paused time a reconcile
-// of the request saw since (status.pauseSeen, from cleanupPausedSecondsAtStart, recorded with the condition; zero
-// when it is missing, so every pause seen stretches the bound and it never ends early). Nothing new ends during a
-// pause: a pause still running keeps stretching it (eighth decision of 2026-11-18 on #771, point 2).
-func expiredCleanupLeft(rr *remediationv1alpha1.RemediationRequest, c *metav1.Condition, now time.Time) time.Duration {
-	var at int64
-	if ps := rr.Status.PauseSeen; ps != nil && ps.CleanupPausedSecondsAtStart != nil {
-		at = *ps.CleanupPausedSecondsAtStart
-	}
-	return boundLeft(c, cleanupFailingBound, now) + pausedAfter(rr, at, now)
+// CleanupFailing: cleanupFailingBound from c's lastTransitionTime (boundLeft).
+func expiredCleanupLeft(c *metav1.Condition, now time.Time) time.Duration {
+	return boundLeft(c, cleanupFailingBound, now)
 }
 
 // endExpiredCleanupFailed ends the cleanup of an expired request whose close kept failing for cleanupFailingBound:

@@ -63,8 +63,8 @@ const (
 	// releasedBeforeField: a request decided before status.holdsTarget existed, whose status alone shows the lock
 	// released.
 	releasedBeforeField
-	// recordedMerge: the status records the merge of the request's pull request in a phase only a recorded merge
-	// reaches (Merged, Succeeded, Inconclusive, Failed with its receipt), with or without a receipt, and no
+	// recordedMerge: the status records the merge of the request's pull request (a phase only a recorded merge
+	// reaches, Failed with its receipt, or the pull request marked merged), with or without a receipt, and no
 	// verification holds the lock: the merge settles the lock without a read of the branch, as on main.
 	recordedMerge
 )
@@ -156,23 +156,34 @@ func ReleasedBeforeField(status *api.RemediationRequestStatus, derivedHold bool)
 	return &Verdict{proof: releasedBeforeField}, true
 }
 
-// RecordedMerge is the verdict of a merge the status records (eighth decision of 2026-11-18 on #771, point 3): the
-// request is in a phase only a recorded merge reaches, Merged, Succeeded or Inconclusive (a merge recorded without a
-// receipt ends there too), or Failed with its receipt (Failed before a merge has none), and no verification holds the
-// lock (heldForVerification false). A merge that was recorded was seen, and its pull request cannot merge again. It
-// needs no read of the branch, so neither a pause nor a repository that cannot be opened any more keeps the lock.
-func RecordedMerge(status *api.RemediationRequestStatus, heldForVerification bool) (*Verdict, bool) {
+// RecordedMerge is the verdict of a merge the status records (ninth decision of 2026-11-18 on #771, point 5), as
+// main's status rule told it (settleLock): the request is in a phase only a recorded merge reaches (Merged,
+// WaitingForDelivery, Verifying, Succeeded, Inconclusive: a merge recorded without a receipt ends there too), or
+// Failed with its receipt and pull request (Failed before a merge has none), or, in any phase but Superseded (which
+// main left to the read of the branch), its recorded pull request is marked merged
+// (markedMerged: PullRequestOpened with reason ChangeRequestMerged, which a merge with foreign change or one whose
+// content could not be read carries in NeedsIntervention); and no verification holds the lock
+// (heldForVerification false). A merge that was recorded was seen, and its pull request cannot merge again. It needs
+// no read of the branch, so neither a pause nor a repository that cannot be opened any more keeps the lock. The
+// caller checks that the request no longer moves on.
+func RecordedMerge(status *api.RemediationRequestStatus, markedMerged, heldForVerification bool) (*Verdict, bool) {
 	if heldForVerification {
 		return nil, false
 	}
 	switch status.Phase {
-	case api.PhaseMerged, api.PhaseSucceeded, api.PhaseInconclusive:
+	case api.PhaseMerged, api.PhaseWaitingForDelivery, api.PhaseVerifying, api.PhaseSucceeded, api.PhaseInconclusive:
 	case api.PhaseFailed:
-		if status.MergeReceipt == nil {
+		if (status.MergeReceipt == nil || status.PullRequest == nil) && !markedMerged {
 			return nil, false
 		}
-	default:
+	case api.PhaseSuperseded:
+		// Written after Shadewright's close: another pull request of the branch may carry the change, so main's rule
+		// left it to the read of the branch (closedOnly), whatever PullRequestOpened says.
 		return nil, false
+	default:
+		if !markedMerged {
+			return nil, false
+		}
 	}
 	return &Verdict{proof: recordedMerge}, true
 }

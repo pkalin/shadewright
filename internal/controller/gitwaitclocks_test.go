@@ -51,10 +51,6 @@ var statusClocks = map[string]statusClock{
 	"status.gitWaits.since": {entry: api.GitWaitPaced, why: "the start of an entry"},
 	"status.gitWaits.ends":  {entry: api.GitWaitPaced, why: "the end of an entry"},
 
-	"status.pauseSeen.pausedSince": {test: "TestSequenceMergeCheckEndsUnderAPauseThatComesAndGoes",
-		why: "a pause a reconcile of the request saw; it bounds no wait, it stretches the MergeCheck and MergeContent " +
-			"entries and the expired cleanup's bound, and the first reconcile that sees the lift clears it"},
-
 	"status.pullRequest.conflictSeen.at": {test: "TestConflictWaitIsBoundedWhenTheClockGoesBack",
 		why: "the wait to confirm a merge conflict, bounded by its own check"},
 	"status.rollout.waitStartedAt": {test: "TestRolloutLateReconcileEndsWithAVerdict",

@@ -221,7 +221,7 @@ func setMergeWait(rr *api.RemediationRequest, since time.Time) {
 	}
 	t := metav1.NewTime(since)
 	rr.Status.MergeCommitAwaitedSince = &t
-	w, _ := wholeWait(rr, api.GitWait{Kind: api.GitWaitMergeCheck, PullRequest: waitPullRequest(cr)},
+	w, _ := wholeWait(api.GitWait{Kind: api.GitWaitMergeCheck, PullRequest: waitPullRequest(cr)},
 		"wait for the merge commit", since)
 	rr.Status.GitWaits = append(rr.Status.GitWaits, w)
 }

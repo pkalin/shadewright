@@ -333,10 +333,10 @@ func TestAdoptedRetargetedHeadNotPushedGetsNoReceipt(t *testing.T) {
 	}
 }
 
-// A Git wait past its end ends at the start of the next reconcile, before any read of the Git host, and needs none:
-// the content wait, the merge wait and the handoff grace make no Git call, and the request's deadline (its expiry
-// tries to close a pull request of its own) ends the request Expired with every Git call failing, with no error
-// and no retry (fourth decision of 2026-11-18 on #771).
+// A Git wait past its end ends in the next reconcile with every Git call failing, with no error and no retry: the
+// handoff grace makes no Git call and the request's deadline (its expiry tries to close a pull request of its own)
+// ends the request Expired (fourth decision of 2026-11-18 on #771); the content wait and the merge wait make their
+// last read, which fails, and end in that same reconcile (ninth decision).
 func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 	type wait struct {
 		kind  waitKind
@@ -347,7 +347,7 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 	waits := map[string]wait{
 		"content": {kind: waitMergeContent, setup: func(rr *api.RemediationRequest, now time.Time) {
 			setContentWait(rr, &metav1.Time{Time: now.Add(-mergeContentWait)})
-		}, check: func(t *testing.T, rr *api.RemediationRequest) {
+		}, reads: true, check: func(t *testing.T, rr *api.RemediationRequest) {
 			if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved); c == nil ||
 				c.Reason != ReasonMergeContentUnreadable || contentWaitSince(rr) != nil || rr.Status.PullRequest == nil {
 				t.Fatalf("Approved = %+v, wait %v; want MergeContentUnreadable, the pull request recorded and the wait removed", c,
@@ -356,7 +356,7 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 		}},
 		"merge check": {kind: waitMergeCheck, setup: func(rr *api.RemediationRequest, now time.Time) {
 			setMergeWait(rr, now.Add(-mergeCommitWait))
-		}, check: func(t *testing.T, rr *api.RemediationRequest) {
+		}, reads: true, check: func(t *testing.T, rr *api.RemediationRequest) {
 			if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPlanFresh); c == nil ||
 				c.Reason != freshness.ReasonPlanChanged || !mergeRecorded(rr) || rr.Status.MergeReceipt != nil {
 				t.Fatalf("PlanFresh = %+v, merge recorded %t; want the plan not shown fresh and the merge recorded "+

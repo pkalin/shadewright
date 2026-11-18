@@ -118,6 +118,10 @@ func (r *RemediationRequestReconciler) markRender(ctx context.Context, rr *remed
 	rr.Status.UnfinishedRenders = &mark
 	if err := r.Status().Update(ctx, rr); err != nil {
 		rr.Status.UnfinishedRenders = before
+		if IsCRDOutdated(err) {
+			// The status writer found the mark pruned (crdoutdated.go): the same case as the check below.
+			err = errors.Join(errMarkNotStored, err)
+		}
 		return fmt.Errorf("record the start of the render check of RemediationRequest %s/%s: %w",
 			rr.Namespace, rr.Name, err)
 	}

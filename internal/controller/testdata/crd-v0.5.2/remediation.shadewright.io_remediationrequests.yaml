@@ -1,0 +1,1800 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: remediationrequests.remediation.shadewright.io
+spec:
+  group: remediation.shadewright.io
+  names:
+    categories:
+    - shadewright
+    kind: RemediationRequest
+    listKind: RemediationRequestList
+    plural: remediationrequests
+    shortNames:
+    - rr
+    singular: remediationrequest
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: 'Reason of the PolicyAllowed condition: the policy decision'
+      jsonPath: .status.conditions[?(@.type=="PolicyAllowed")].reason
+      name: Policy
+      type: string
+    - jsonPath: .spec.action.type
+      name: Action
+      type: string
+    - jsonPath: .spec.targetRef.name
+      name: Target
+      type: string
+    - jsonPath: .status.pullRequest.number
+      name: PR
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RemediationRequest is one proposed fix: a typed action on one object, carried out as a GitOps pull request
+          after deterministic policy allows it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec is the plan.
+            properties:
+              action:
+                description: action is the typed change.
+                properties:
+                  adjustKedaMaxReplicas:
+                    description: adjustKedaMaxReplicas holds the parameters for AdjustKedaMaxReplicas.
+                    properties:
+                      desiredValue:
+                        description: desiredValue is the new maxReplicaCount.
+                        format: int32
+                        maximum: 1000
+                        minimum: 1
+                        type: integer
+                      previousValue:
+                        description: previousValue is the value the plan was made
+                          against.
+                        format: int32
+                        maximum: 1000
+                        minimum: 1
+                        type: integer
+                    required:
+                    - desiredValue
+                    - previousValue
+                    type: object
+                    x-kubernetes-validations:
+                    - message: desiredValue must differ from previousValue
+                      rule: self.desiredValue != self.previousValue
+                  setContainerMemoryLimit:
+                    description: setContainerMemoryLimit holds the parameters for
+                      SetContainerMemoryLimit.
+                    properties:
+                      container:
+                        description: container is the container name in the pod template.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      desired:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: desired is the new limit.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      previous:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: previous is the limit the plan was made against.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - container
+                    - desired
+                    - previous
+                    type: object
+                    x-kubernetes-validations:
+                    - message: desired must differ from previous
+                      rule: '!(quantity(string(self.previous)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12) || quantity(string(self.desired)).compareTo(quantity(string(self.previous)))
+                        != 0'
+                    - message: previous and desired must be whole bytes
+                      rule: '!(quantity(string(self.previous)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        >= -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12) || (quantity(string(self.previous)).isInteger() &&
+                        quantity(string(self.desired)).isInteger())'
+                    - message: previous must be between 1Mi and 1Ti
+                      rule: quantity(string(self.previous)).asApproximateFloat() >=
+                        -2e12 && quantity(string(self.previous)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.previous)).compareTo(quantity('1Mi'))
+                        >= 0 && quantity(string(self.previous)).compareTo(quantity('1Ti'))
+                        <= 0
+                    - message: desired must be between 1Mi and 1Ti
+                      rule: quantity(string(self.desired)).asApproximateFloat() >=
+                        -2e12 && quantity(string(self.desired)).asApproximateFloat()
+                        <= 2e12 && quantity(string(self.desired)).compareTo(quantity('1Mi'))
+                        >= 0 && quantity(string(self.desired)).compareTo(quantity('1Ti'))
+                        <= 0
+                  type:
+                    description: type selects the action.
+                    enum:
+                    - AdjustKedaMaxReplicas
+                    - SetContainerMemoryLimit
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: adjustKedaMaxReplicas must be set if and only if type is
+                    AdjustKedaMaxReplicas
+                  rule: 'self.type == ''AdjustKedaMaxReplicas'' ? has(self.adjustKedaMaxReplicas)
+                    : !has(self.adjustKedaMaxReplicas)'
+                - message: setContainerMemoryLimit must be set if and only if type
+                    is SetContainerMemoryLimit
+                  rule: 'self.type == ''SetContainerMemoryLimit'' ? has(self.setContainerMemoryLimit)
+                    : !has(self.setContainerMemoryLimit)'
+              approvalRequired:
+                default: true
+                description: |-
+                  approvalRequired asks for human review. false is a request for automation that policy may refuse;
+                  it never lowers policy or repository rules.
+                type: boolean
+              chainRoot:
+                description: |-
+                  chainRoot is the UID of the first request of the supersede chain: the replaced request's chainRoot, or
+                  its own UID when it has none. Set together with replaces. The branch of the pull request derives from it
+                  (shadewright/<chainRoot>), so every request of a chain works on the same branch and pull request.
+                maxLength: 36
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
+              incidentRef:
+                description: incidentRef is the incident this plan answers.
+                properties:
+                  name:
+                    description: name of the Incident.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  uid:
+                    description: uid of the Incident.
+                    maxLength: 36
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              mode:
+                default: GitOps
+                description: mode is how the plan is carried out.
+                enum:
+                - GitOps
+                type: string
+              policyRef:
+                description: policyRef names the RemediationPolicy that must allow
+                  this plan.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              replaces:
+                description: |-
+                  replaces names the request this one replaces and the reviewer hint of that request it answers
+                  (ADR-0028 section 4). Set only by the analyzer on a replacement, together with chainRoot. It is part of
+                  the plan, so it is part of the request's name: the same plan answering another hint is another request.
+                  The executor checks the link once, at the policy check, and then takes the pull request over (the handoff).
+                properties:
+                  hint:
+                    description: hint is the pinned hint of the replaced request that
+                      this plan answers.
+                    properties:
+                      commentID:
+                        description: commentID is the comment's ID in the source.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      digest:
+                        description: digest is the SHA-256 of the stored, redacted
+                          hint text.
+                        pattern: ^sha256:[0-9a-f]{64}$
+                        type: string
+                      source:
+                        description: source is the system the comment is in.
+                        enum:
+                        - GitHub
+                        type: string
+                    required:
+                    - commentID
+                    - digest
+                    - source
+                    type: object
+                  name:
+                    description: name of the replaced request, in the same namespace.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  uid:
+                    description: uid of the replaced request, so a request recreated
+                      under the same name is never taken for it.
+                    maxLength: 36
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - hint
+                - name
+                - uid
+                type: object
+              reverts:
+                description: |-
+                  reverts names the request whose change this one undoes, by name and UID (ADR-0030 section 8). Set only on a
+                  revert, which the analyzer's deterministic revert proposer creates, with no model call, for a request that
+                  ended Failed with Verified False. A model proposal has no such field. A revert requires approvalRequired: true, never replaces another
+                  request, and is never changed after create (the spec is immutable). The executor checks
+                  the link before the policy check: the named request exists with this UID, ended Failed with Verified
+                  False, is not a revert itself, has the same Incident, target and action type (and container), and this
+                  request's previous and desired values are its desired and previous values; this request's name is
+                  RevertName of that UID, so a failed request has at most one revert at a time (the proposer also records it in the Incident's status.revertsProposed and never makes a second one). Otherwise the request ends Denied
+                  with reason InvalidRevert before any Git write. A revert is never checked for clearing: the verifier
+                  writes no report for it, and once rolled out, configured and available for stableFor it ends
+                  Inconclusive with reason RevertApplied, never Succeeded.
+                properties:
+                  name:
+                    description: name of the request.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  uid:
+                    description: uid of the request, so a request recreated under
+                      the same name is never taken for it.
+                    maxLength: 36
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              targetRef:
+                description: targetRef is the live object the change is about.
+                properties:
+                  apiVersion:
+                    description: apiVersion of the object, for example apps/v1 or
+                      keda.sh/v1alpha1.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?v[0-9]+((alpha|beta)[0-9]+)?$
+                    type: string
+                  kind:
+                    description: kind of the object.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Z][A-Za-z0-9]*$
+                    type: string
+                  name:
+                    description: name of the object.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  namespace:
+                    description: namespace of the object; empty for cluster-scoped
+                      objects.
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  uid:
+                    description: uid of the object.
+                    maxLength: 36
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: targetRef.uid is required
+                  rule: has(self.uid) && size(self.uid) > 0
+                - message: targetRef.namespace is required
+                  rule: has(self.namespace) && size(self.namespace) > 0
+              verification:
+                default: {}
+                description: verification says when the change counts as a success.
+                properties:
+                  checks:
+                    description: checks to run in addition to the ones the action
+                      type always needs.
+                    items:
+                      description: |-
+                        VerificationCheck is a named, deterministic check run after delivery. DeliveryRevisionApplied: the GitOps
+                        controller has applied the revision that contains the merged change. WorkloadHealthy: the target workload
+                        is available and its rollout is complete. KedaReady: the KEDA ScaledObject reports Ready=True, is not
+                        paused (Paused=True, which a scale-in or scale-out pause also sets), is not on fallback (Fallback=True) and
+                        its HPA can read its metrics (HPAActive is not False). QueueBacklogDecreasing: the backlog that drives the
+                        ScaledObject is going down. NoNewOOMKills: no container of the target is OOMKilled after the change.
+                      enum:
+                      - DeliveryRevisionApplied
+                      - WorkloadHealthy
+                      - KedaReady
+                      - QueueBacklogDecreasing
+                      - NoNewOOMKills
+                      type: string
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: set
+                  stableFor:
+                    default: 3m
+                    description: stableFor is how long all checks must hold.
+                    type: string
+                  timeout:
+                    default: 10m
+                    description: timeout is how long to wait for delivery and stability
+                      before giving up.
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: stableFor must be at least 1m
+                  rule: '!has(self.stableFor) || duration(self.stableFor) >= duration(''1m'')'
+                - message: timeout must be at most 24h
+                  rule: '!has(self.timeout) || duration(self.timeout) <= duration(''24h'')'
+                - message: timeout must be longer than stableFor
+                  rule: '!has(self.timeout) || !has(self.stableFor) || duration(self.timeout)
+                    > duration(self.stableFor)'
+            required:
+            - action
+            - incidentRef
+            - policyRef
+            - targetRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; a changed plan is a new RemediationRequest
+              rule: self == oldSelf
+            - message: AdjustKedaMaxReplicas can only target a keda.sh ScaledObject
+              rule: self.action.type != 'AdjustKedaMaxReplicas' || (self.targetRef.apiVersion.startsWith('keda.sh/')
+                && self.targetRef.kind == 'ScaledObject')
+            - message: SetContainerMemoryLimit can only target an apps/v1 Deployment
+                or StatefulSet
+              rule: self.action.type != 'SetContainerMemoryLimit' || (self.targetRef.apiVersion
+                == 'apps/v1' && self.targetRef.kind in ['Deployment', 'StatefulSet'])
+            - message: replaces and chainRoot are set together or not at all
+              rule: has(self.replaces) == has(self.chainRoot)
+            - message: 'a revert (spec.reverts) requires approvalRequired: true'
+              rule: '!has(self.reverts) || (has(self.approvalRequired) && self.approvalRequired)'
+            - message: a revert (spec.reverts) never replaces another request
+              rule: '!has(self.reverts) || !has(self.replaces)'
+          status:
+            description: status is the progress, written by the controller.
+            properties:
+              breakerClearedBy:
+                description: |-
+                  breakerClearedBy is the name of the request in Succeeded whose success made the executor set breakerCounts
+                  to false on this one, written in the same status write. When that request is deleted, its finalizer sets
+                  breakerCounts back to true on every request that names it, before the finalizer is removed. It is a
+                  selectable field (field selector status.breakerClearedBy).
+                maxLength: 253
+                type: string
+              breakerCounts:
+                description: |-
+                  breakerCounts says whether the executor's limits still read the request for the circuit breaker. It is
+                  set in the status write that ends the request: true for a success (Merged or a later phase), a failure
+                  (Failed, NeedsIntervention) or a probe (breakerProbe) that ended in any other way, false for any other
+                  end. The executor sets it to false only when a newer request in Succeeded is recorded (breakerClearedBy
+                  names it), and back to true when that request is deleted, or when a request whose deletion may still close
+                  a pull request (NeedsIntervention, Expired) is being deleted. It is unset while the request has not ended
+                  and on one that ended before the field existed; an unset request is read (fail closed), and the executor
+                  sets the field once on an ended one from its status. It is a selectable field (field selector
+                  status.breakerCounts), so the breaker reads only the outcomes that still count.
+                type: boolean
+              breakerProbe:
+                description: |-
+                  breakerProbe is true on a request the policy check let through while the circuit breaker was tripped
+                  (half-open): it is the breaker's probe. It is written with the allowed decision and never cleared. The
+                  breaker finds a running probe, or one that ended without a success, by this field only; a request
+                  without it is not a probe. It is a selectable field (field selector status.breakerProbe).
+                type: boolean
+              commentCursor:
+                description: |-
+                  commentCursor is where the executor's next look at the comments of the pull request starts (ADR-0028
+                  section 3). Only the executor writes it.
+                properties:
+                  afterID:
+                    description: 'afterID: the comments of the current sweep with
+                      an ID up to this one were returned already.'
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  etag:
+                    description: |-
+                      etag is the entity tag of the last answer to the first page of a sweep that held no comment, sent as
+                      If-None-Match, so an unchanged answer is "not modified" and costs no read.
+                    maxLength: 256
+                    pattern: ^(W/)?"[!#-~]*"$
+                    type: string
+                  evictedAt:
+                    description: |-
+                      evictedAt is the newest update time of the commands pushed out of seen by its bound; with evictedID it is
+                      the watermark of those commands. A command with an ID up to evictedID and an update time up to evictedAt
+                      counts as judged, so an evicted one returned again unchanged is not judged again, while one edited after
+                      its judgement has a later update time and is. The watermark only grows, and is dropped once since passes
+                      evictedAt. A command edited during a sweep and passed by it may count as judged too when more than
+                      MaxSeenComments newer ones were judged first: it is then not judged, never accepted twice. Those newer
+                      ones include commands from authors without write access, so anyone who can comment can cause this on
+                      purpose; it fails closed (the edited command is missed, its author posts a new comment).
+                    format: date-time
+                    type: string
+                  evictedID:
+                    description: evictedID is the highest ID of the commands pushed
+                      out of seen; set together with evictedAt.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  page:
+                    description: page is the page the next look starts on; 0 starts
+                      a new sweep.
+                    format: int32
+                    maximum: 100000
+                    minimum: 0
+                    type: integer
+                  seen:
+                    description: |-
+                      seen are the commands the executor judged whose update time is at or after since, so a look that returns
+                      them again unchanged (the overlap of two sweeps) does not judge them again: at most MaxSeenComments, the
+                      newest. A comment returned with another update time was edited and is judged again.
+                    items:
+                      description: SeenComment is a comment the executor judged, with
+                        the update time it had then.
+                      properties:
+                        commentID:
+                          description: commentID is the comment's ID in the code host.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        updatedAt:
+                          description: updatedAt is the comment's update time when
+                            it was judged.
+                          format: date-time
+                          type: string
+                      required:
+                      - commentID
+                      - updatedAt
+                      type: object
+                    maxItems: 50
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - commentID
+                    x-kubernetes-list-type: map
+                  since:
+                    description: |-
+                      since is the oldest update time the current sweep of the comments asks for. Every comment created at or
+                      before it was returned by an earlier look, so a command in one counts as an edit (EditedAfterSeen). That
+                      is an assumption about the code host: the GitHub adapter sets since a minute before the host's time when
+                      the previous sweep began, assuming a new comment shows up in the list within a minute. One that shows up
+                      later is refused as EditedAfterSeen and has to be posted again: it fails closed.
+                    format: date-time
+                    type: string
+                  sweepStart:
+                    description: sweepStart is the code host's time when the current
+                      sweep began.
+                    format: date-time
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: etag is kept only on the first page of a new sweep
+                  rule: '!has(self.etag) || ((!has(self.page) || self.page == 0) &&
+                    (!has(self.afterID) || self.afterID == 0))'
+                - message: evictedAt and evictedID are set together
+                  rule: has(self.evictedAt) == (has(self.evictedID) && self.evictedID
+                    > 0)
+              conditions:
+                description: |-
+                  conditions explain the phase. Types: PolicyAllowed, PullRequestOpened, Approved, Delivered,
+                  Verified, Configured, Cleared, PlanFresh, WritesPaused, Queued and RolledOut (after the merge: whether the target's
+                  pods run the applied template; True with reason RolloutComplete, or RolloutPartitioned when a partitioned
+                  StatefulSet keeps pods on the old revision on purpose; False with reason RolloutStuck or
+                  DeliveryNotObserved, Unknown while in progress and with reason KindNotChecked, RolloutSuperseded or
+                  RolloutNotDetermined when the check ends without a verdict).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              deadline:
+                description: |-
+                  deadline is when the current step gives up, on the executor's clock. In WaitingForDelivery it is the end
+                  of the delivery window: one hour after mergeReceipt.mergedAt, extended by the time writes were paused. In
+                  Verifying it is the timeout, written on entering the phase: status.pullRequest.appliedObservedAt plus the
+                  larger of spec.verification.timeout and the rollout deadline plus the effective stableFor plus the
+                  executor's --node-grace. Past the merge a deadline never ends a request Expired: the evidence decides
+                  between Failed and Inconclusive (ADR-0030 sections 2, 4 and 6).
+                format: date-time
+                type: string
+              effectiveApprovalRequired:
+                description: effectiveApprovalRequired is what policy decided, which
+                  may be stricter than spec.approvalRequired.
+                type: boolean
+              handoff:
+                description: |-
+                  handoff records the supersede handoff (ADR-0028 section 4): on a replacement, the request it takes over
+                  (from); on a predecessor, its replacement (to); a request in the middle of a chain has both. Each side is
+                  never removed; Handoff says what may change. Only the executor writes it.
+                properties:
+                  from:
+                    description: from is the incoming side, set on a replacement.
+                    properties:
+                      hint:
+                        description: hint is the predecessor's hint the replacement
+                          answers.
+                        properties:
+                          commentID:
+                            description: commentID is the comment's ID in the source.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          digest:
+                            description: digest is the SHA-256 of the stored, redacted
+                              hint text.
+                            pattern: ^sha256:[0-9a-f]{64}$
+                            type: string
+                          source:
+                            description: source is the system the comment is in.
+                            enum:
+                            - GitHub
+                            type: string
+                        required:
+                        - commentID
+                        - digest
+                        - source
+                        type: object
+                      name:
+                        description: name of the predecessor.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      phase:
+                        description: phase is how far this side has come.
+                        enum:
+                        - Reserved
+                        - Intent
+                        - Done
+                        - Aborted
+                        type: string
+                      pullRequestUpdate:
+                        description: |-
+                          pullRequestUpdate records the rewrite of the pull request's title and body for this request's plan, with
+                          its marker (ADR-0028 section 4, step 6): Done once the Git host did it, Refused when it refused it for
+                          good. Until it is Done the body carries the predecessor's marker, or after refused rewrites further up the
+                          chain an earlier request's, which this request accepts as its own while its chain reaches that request.
+                        enum:
+                        - Done
+                        - Refused
+                        type: string
+                      uid:
+                        description: uid of the predecessor.
+                        maxLength: 36
+                        pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                        type: string
+                    required:
+                    - hint
+                    - name
+                    - phase
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: an incoming handoff is Reserved, Done or Aborted
+                      rule: self.phase in ['Reserved', 'Done', 'Aborted']
+                    - message: 'an incoming handoff is pinned: only its phase changes'
+                      rule: self.name == oldSelf.name && self.uid == oldSelf.uid &&
+                        self.hint == oldSelf.hint
+                    - message: the rewrite after a handoff is recorded only once it
+                        is Done
+                      rule: '!has(self.pullRequestUpdate) || self.phase == ''Done'''
+                    - message: the record of the pull request's rewrite never changes
+                        once set
+                      rule: '!has(oldSelf.pullRequestUpdate) || (has(self.pullRequestUpdate)
+                        && self.pullRequestUpdate == oldSelf.pullRequestUpdate)'
+                    - message: an incoming handoff moves only from Reserved to Done
+                        or Aborted
+                      rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Reserved'
+                        && self.phase in ['Done', 'Aborted'])
+                  to:
+                    description: to is the outgoing side, set on a predecessor.
+                    properties:
+                      expectedHead:
+                        description: |-
+                          expectedHead is the head of the branch when the intent was recorded: the replacement's commit must have
+                          it as its parent.
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                      hint:
+                        description: hint is this request's hint the replacement answers.
+                        properties:
+                          commentID:
+                            description: commentID is the comment's ID in the source.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          digest:
+                            description: digest is the SHA-256 of the stored, redacted
+                              hint text.
+                            pattern: ^sha256:[0-9a-f]{64}$
+                            type: string
+                          source:
+                            description: source is the system the comment is in.
+                            enum:
+                            - GitHub
+                            type: string
+                        required:
+                        - commentID
+                        - digest
+                        - source
+                        type: object
+                      name:
+                        description: name of the replacement.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      phase:
+                        description: phase is how far this side has come.
+                        enum:
+                        - Reserved
+                        - Intent
+                        - Done
+                        - Aborted
+                        type: string
+                      uid:
+                        description: uid of the replacement, so a request recreated
+                          under the same name is never taken for it.
+                        maxLength: 36
+                        pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                        type: string
+                    required:
+                    - expectedHead
+                    - hint
+                    - name
+                    - phase
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: an outgoing handoff is Intent, Done or Aborted
+                      rule: self.phase in ['Intent', 'Done', 'Aborted']
+                    - message: 'an outgoing handoff is pinned: only its phase changes,
+                        or an Aborted one is replaced'
+                      rule: (oldSelf.phase == 'Aborted' && self.phase == 'Intent')
+                        || (self.name == oldSelf.name && self.uid == oldSelf.uid &&
+                        self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)
+                    - message: an outgoing handoff moves only from Intent to Done
+                        or Aborted, or from Aborted to the Intent of another replacement
+                        for another hint
+                      rule: oldSelf.phase == self.phase || (oldSelf.phase == 'Intent'
+                        && self.phase in ['Done', 'Aborted']) || (oldSelf.phase ==
+                        'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid
+                        && (self.hint.source != oldSelf.hint.source || self.hint.commentID
+                        != oldSelf.hint.commentID))
+                type: object
+                x-kubernetes-validations:
+                - message: a handoff has from, to or both
+                  rule: has(self.from) || has(self.to)
+              hints:
+                description: |-
+                  hints are the reviewer hints the executor accepted from comments on the pull request, and the hints a
+                  replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
+                  and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
+                  executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
+                  so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.
+                items:
+                  description: |-
+                    Hint is one reviewer hint the executor accepted from a comment on the request's pull request (ADR-0028
+                    section 2): its author had write access when it was accepted, its text is redacted and bounded, and it is
+                    pinned by comment ID, digest and the comment's updatedAt. Only the executor writes it; the analyzer reads
+                    the stored text, never the comment.
+                  properties:
+                    acceptedAt:
+                      description: acceptedAt is when the executor accepted the hint.
+                      format: date-time
+                      type: string
+                    author:
+                      description: author wrote the comment.
+                      properties:
+                        id:
+                          description: id is the author's numeric user ID in the source.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        login:
+                          description: login is the author's login when the hint was
+                            accepted, for the reader only.
+                          maxLength: 100
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                          type: string
+                      required:
+                      - id
+                      - login
+                      type: object
+                    commentID:
+                      description: commentID is the comment's ID in the source.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    digest:
+                      description: digest is the SHA-256 of text.
+                      pattern: ^sha256:[0-9a-f]{64}$
+                      type: string
+                    editedAfterAccept:
+                      description: |-
+                        editedAfterAccept is true once the executor saw the comment edited after it accepted the hint. The
+                        stored text stays as it was; the edit is recorded once, here, whatever the number of edits.
+                      type: boolean
+                    outcome:
+                      description: |-
+                        outcome is the analysis's outcome that answered the hint with a replacement (Proposed or RunbookMatched),
+                        recorded when the executor first read it in the Incident. The hint is answered from then on, whatever
+                        the Incident handles later: it waits for the handoff, and the answer timeout no longer applies. Once set
+                        it never changes.
+                      enum:
+                      - Proposed
+                      - RunbookMatched
+                      type: string
+                    reason:
+                      description: |-
+                        reason says why a Declined hint was declined: the analysis's outcome (for example BudgetSpent or
+                        NoProposal), NoAnswer when none came within the executor's bound, or the end of the request
+                        (PullRequestMerged, PullRequestClosed, RequestEnded), or the end of its replacement without the handoff:
+                        ReplacementDenied when the replacement was Denied, HandoffAborted when it ended otherwise, or
+                        HintsTurnedOff when the executor runs with reviewer hints off, which declines every Pending or Reserved
+                        hint. HintDeclineReasons lists them.
+                      enum:
+                      - NoModelConfigured
+                      - BudgetSpent
+                      - BudgetUnavailable
+                      - NoProposal
+                      - MissingData
+                      - NoEvidence
+                      - TargetNotSupported
+                      - PreviousValueUnknown
+                      - NoChange
+                      - DirectionReversed
+                      - ScalerNotReady
+                      - NoPolicyForAction
+                      - ActionOutOfBounds
+                      - InvalidOutput
+                      - EscalationNotConfigured
+                      - StepLimit
+                      - TokenLimit
+                      - DeadlineExceeded
+                      - ModelUnavailable
+                      - ModelNotFound
+                      - ModelForbidden
+                      - ModelError
+                      - UnexpectedModel
+                      - EndpointNotAllowed
+                      - ProviderNotConfigured
+                      - PlanUnchanged
+                      - HintNotPending
+                      - RequestNotCreated
+                      - CoolingDown
+                      - NoAnswer
+                      - PullRequestMerged
+                      - PullRequestClosed
+                      - RequestEnded
+                      - ReplacementDenied
+                      - HandoffAborted
+                      - HintsTurnedOff
+                      type: string
+                    reply:
+                      description: |-
+                        reply records the executor's reply to this hint in the pull request, once the hint is Declined or
+                        Consumed (ADR-0028 section 7). Once set it never changes.
+                      enum:
+                      - Posted
+                      - NotRedactable
+                      - TooManyComments
+                      - Refused
+                      - GaveUp
+                      type: string
+                    source:
+                      description: source is the system the comment is in.
+                      enum:
+                      - GitHub
+                      type: string
+                    state:
+                      description: state says what became of the hint.
+                      enum:
+                      - Pending
+                      - Reserved
+                      - Consumed
+                      - Declined
+                      type: string
+                    text:
+                      description: |-
+                        text is the hint after redaction, at most 2048 bytes. It is untrusted input: the analysis fences it as
+                        a reviewer's opinion, never as instructions or evidence.
+                      maxLength: 2048
+                      minLength: 1
+                      type: string
+                    updatedAt:
+                      description: |-
+                        updatedAt is the comment's updated time when the hint was accepted. A comment whose updated time
+                        differs later was edited after acceptance, and the edit is ignored.
+                      format: date-time
+                      type: string
+                  required:
+                  - acceptedAt
+                  - author
+                  - commentID
+                  - digest
+                  - source
+                  - state
+                  - text
+                  - updatedAt
+                  type: object
+                  x-kubernetes-validations:
+                  - message: text must be at most 2048 bytes
+                    rule: size(bytes(self.text)) <= 2048
+                  - message: a Declined hint needs a reason
+                    rule: self.state != 'Declined' || has(self.reason)
+                  - message: 'a stored hint is pinned: only its state and reason change'
+                    rule: self.source == oldSelf.source && self.commentID == oldSelf.commentID
+                      && self.digest == oldSelf.digest && self.text == oldSelf.text
+                      && self.author == oldSelf.author && self.updatedAt == oldSelf.updatedAt
+                      && self.acceptedAt == oldSelf.acceptedAt
+                  - message: the reason of a Consumed or Declined hint never changes
+                    rule: '!(oldSelf.state in [''Consumed'', ''Declined'']) || (has(self.reason)
+                      == has(oldSelf.reason) && (!has(self.reason) || self.reason
+                      == oldSelf.reason))'
+                  - message: editedAfterAccept is never unset
+                    rule: '!has(oldSelf.editedAfterAccept) || !oldSelf.editedAfterAccept
+                      || (has(self.editedAfterAccept) && self.editedAfterAccept)'
+                  - message: the outcome of a hint never changes once set
+                    rule: '!has(oldSelf.outcome) || (has(self.outcome) && self.outcome
+                      == oldSelf.outcome)'
+                  - message: a hint moves only from Pending to Reserved or Declined,
+                      and from Reserved to Consumed or Declined
+                    rule: oldSelf.state == self.state || (oldSelf.state == 'Pending'
+                      && self.state in ['Reserved', 'Declined']) || (oldSelf.state
+                      == 'Reserved' && self.state in ['Consumed', 'Declined'])
+                  - message: only a Consumed or Declined hint has a reply
+                    rule: '!has(self.reply) || self.state in [''Consumed'', ''Declined'']'
+                  - message: the reply of a hint never changes once set
+                    rule: '!has(oldSelf.reply) || (has(self.reply) && self.reply ==
+                      oldSelf.reply)'
+                maxItems: 10
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                - commentID
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: 'status.hints: at most 3 hints are Consumed or Reserved'
+                  rule: self.filter(h, h.state in ['Consumed', 'Reserved']).size()
+                    <= 3
+              holdsTarget:
+                description: |-
+                  holdsTarget is true while the request holds the executor's lock on its target: it is set in the status
+                  write of the allowed decision and cleared only once the request's pull request is known merged or closed and
+                  no other pull request that may deliver its change is open on its branch (condition TargetHeld says when one
+                  is), or a look-up by its branch and marker found none of its own open. With the executor's --verify-outcomes
+                  on, a merged request keeps it until it ends (Succeeded, Failed, Inconclusive), not only until its merge, so a
+                  request queued for the same target does not meet the merged change on its way to the cluster (#719).
+                  While it is true no other request on the
+                  same target goes through the policy check. Unset on a request not yet decided, and on one written before the
+                  field existed; the executor then derives it once from the request's phase and pull request, keeping the
+                  lock when in doubt.
+                  A refused request gets false with its refusal.
+                  It is a selectable field (field selector status.holdsTarget), so the executor's lock reads only holders.
+                type: boolean
+              lastPhaseTransitionTime:
+                description: |-
+                  lastPhaseTransitionTime is when phase last changed, to the microsecond. The circuit breaker orders the
+                  outcomes of requests by it.
+                format: date-time
+                type: string
+              mergeCommitAwaitedSince:
+                description: |-
+                  mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
+                  merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
+                  from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a
+                  receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
+                  change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot
+                  read what it needs, the executor records the start here if it is unset, retries until the wait is over, and
+                  then records the merge with a plan not shown fresh (PlanFresh False, reason PlanChanged). Set once and never
+                  changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset
+                  when the commit was reported at once and the check at the merge answered.
+                format: date-time
+                type: string
+              mergeReceipt:
+                description: |-
+                  mergeReceipt binds the merge to its repository, target branch, pull request, head and merge commit
+                  (ADR-0030 section 1). It is written in the status write that sets Merged and is never changed or removed
+                  after (validation rules on the object). A request merged without a full merge commit ID gets none and ends
+                  Inconclusive with reason NoMergeReceipt; a merge with a foreign change (MergedWithForeignChange) gets none
+                  either. Unset on a request merged before the field existed (condition Verified Unknown, reason
+                  MergedBeforeVerification).
+                properties:
+                  headSHA:
+                    description: |-
+                      headSHA is the head that was merged: the commit Shadewright pushed, or the replacement's commit after a
+                      handoff. It equals status.pullRequest.headSHA when the receipt is written.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  mergeCommitSHA:
+                    description: |-
+                      mergeCommitSHA is the commit the Git host reports for the merge. It equals
+                      status.pullRequest.mergeCommitSHA (a validation rule on the object).
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  mergedAt:
+                    description: 'mergedAt is when the executor recorded the merge:
+                      status.pullRequest.mergedAt of the same status write.'
+                    format: date-time
+                    type: string
+                  pullRequest:
+                    description: pullRequest is the number of the merged pull request.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  repository:
+                    description: repository is the repository the plan was made for,
+                      copied from status.planRepository.
+                    properties:
+                      installationID:
+                        description: installationID is the provider installation that
+                          covers the repository; 0 when the provider has none.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      url:
+                        description: url is the repository URL from RemediationSettings.
+                        maxLength: 512
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  targetBranch:
+                    description: targetBranch is the branch the pull request merged
+                      into, copied from status.source.targetBranch.
+                    maxLength: 255
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must be a plain branch name, not HEAD, refs/..., shadewright/...
+                        or one containing '..' or '.lock'
+                      rule: '!self.contains(''..'') && !self.endsWith(''.lock'') &&
+                        !self.contains(''.lock/'') && self != ''HEAD'' && !self.startsWith(''refs/'')
+                        && !self.startsWith(''shadewright/'')'
+                required:
+                - headSHA
+                - mergeCommitSHA
+                - mergedAt
+                - pullRequest
+                - repository
+                - targetBranch
+                type: object
+              observedGeneration:
+                description: observedGeneration is the generation the status describes.
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  phase summarizes progress. It is a selectable field (field selector status.phase), so the executor's
+                  limits list only the phases they need from the API server.
+                enum:
+                - Pending
+                - PolicyChecked
+                - PRCreated
+                - AwaitingApproval
+                - AutoMergeQueued
+                - Merged
+                - WaitingForDelivery
+                - Verifying
+                - Succeeded
+                - Denied
+                - Failed
+                - Expired
+                - Cancelled
+                - Superseded
+                - NeedsIntervention
+                - Inconclusive
+                type: string
+              planDigest:
+                description: |-
+                  planDigest covers the semantic change, the target UID, the resolved source with the repository URL and
+                  provider installation from RemediationSettings, and the policy UID and generation. It is fixed when the
+                  branch is created; if any input changes later, the request becomes Superseded and its PR is closed.
+                pattern: ^sha256:[0-9a-f]{64}$
+                type: string
+              planRepository:
+                description: planRepository is the repository and installation the
+                  plan digest covers, set together with planDigest.
+                properties:
+                  installationID:
+                    description: installationID is the provider installation that
+                      covers the repository; 0 when the provider has none.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  url:
+                    description: url is the repository URL from RemediationSettings.
+                    maxLength: 512
+                    type: string
+                required:
+                - url
+                type: object
+              policyRevision:
+                description: |-
+                  policyRevision is the policy name and generation the decision used, as name/generation. The policy UID
+                  is recorded next to it, because a deleted and recreated policy can reach the same generation again.
+                maxLength: 128
+                type: string
+              policyUID:
+                description: policyUID is the UID of the policy the decision used.
+                  It is part of the plan digest.
+                maxLength: 36
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                type: string
+              pullRequest:
+                description: pullRequest is set once the pull request exists.
+                properties:
+                  appliedObservedAt:
+                    description: |-
+                      appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later
+                      commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a
+                      deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for
+                      a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge.
+                    format: date-time
+                    type: string
+                  conflictSeen:
+                    description: |-
+                      conflictSeen records the first read in which the Git host reported this pull request open with a merge
+                      conflict while the plan was fresh. GitHub computes mergeability lazily and may report a stale conflict, so
+                      one read does not end the request: it ends NeedsIntervention with reason ChangeRequestConflict only on a
+                      later conflicted read, with the plan still fresh, at least two minutes after at, on the same head and target
+                      branch head. Any read that finds no conflict (an unknown answer included) removes it, and a new target
+                      branch head starts the wait again. Only the executor writes it.
+                    properties:
+                      at:
+                        description: at is when the executor saw the conflict, on
+                          its own clock.
+                        format: date-time
+                        type: string
+                      headSHA:
+                        description: headSHA is the pull request's head at that read,
+                          always the recorded head.
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                      targetHead:
+                        description: |-
+                          targetHead is the head of the target branch the freshness check read with it. It is a record of what the
+                          first report was about; a later move of the target branch does not start the wait again.
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                    required:
+                    - at
+                    - headSHA
+                    - targetHead
+                    type: object
+                  headSHA:
+                    description: headSHA is the commit Shadewright pushed. Any other
+                      head stops automation.
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  mergeCommitSHA:
+                    description: |-
+                      mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when
+                      Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps
+                      controller must report this commit, or a later commit of the target branch containing it, as applied.
+                      Empty until then, and when the host reported none. Once set it never changes.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  mergedAt:
+                    description: |-
+                      mergedAt is when the executor first recorded the request Merged, set in the status write that sets the
+                      phase and never moved, unlike lastPhaseTransitionTime, which every later phase moves. A duplicate of the same
+                      Incident and target created before it ends Superseded (reason AnotherRequestMerged, #556). Empty on a
+                      request merged before the field existed.
+                    format: date-time
+                    type: string
+                  number:
+                    description: number of the pull request.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  renderedTargetHead:
+                    description: |-
+                      renderedTargetHead is the head of the target branch at which the change in the pull request was last
+                      rendered and found to be exactly the planned one. While the pull request waits, the change is rendered
+                      again only when the target branch head is another commit; empty means not rendered since it was recorded.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  reviewCheck:
+                    description: |-
+                      reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge
+                      gate), written only with reviewer hints on. On each caught-up look while the request waits for approval the
+                      executor reads the reviews and the App's own check run on headSHA, writes the Git host when it shows
+                      another state than the reviews call for, then records that state here (#748): InProgress while no approval
+                      of that head by someone who wrote no hint in the chain stands, Passed while one does, Failed when the
+                      executor could not read every review of the pull request and completed it with failure (it fails closed;
+                      condition Approved False with reason ReviewListTooLong; final on that head), Refused when the Git host
+                      refused for good to write it (condition Approved then says so and what the host shows; asked again after a
+                      backoff). It always names headSHA: a new head starts without it, so a state never outlives its head. Once a
+                      merge receipt exists it never changes.
+                    properties:
+                      head:
+                        description: head is the commit the check run is on, always
+                          the pull request's recorded head (headSHA).
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                      refusals:
+                        description: |-
+                          refusals counts the final refusals in a row of the Git host to write the check run on head, while the state
+                          is Refused, up to 1000. The executor asks again after a backoff that doubles with each one, up to a bound.
+                        format: int32
+                        maximum: 1000
+                        minimum: 1
+                        type: integer
+                      refusedAt:
+                        description: |-
+                          refusedAt is when the executor recorded the latest of those refusals, on its own clock; the backoff runs
+                          from it. A time after the executor's now is not trusted and the write is asked again.
+                        format: date-time
+                        type: string
+                      state:
+                        description: state is the state of the check run on head.
+                        enum:
+                        - InProgress
+                        - Passed
+                        - Failed
+                        - Refused
+                        type: string
+                    required:
+                    - head
+                    - state
+                    type: object
+                    x-kubernetes-validations:
+                    - message: on one head a Failed check run never changes
+                      rule: self.head != oldSelf.head || self.state == oldSelf.state
+                        || oldSelf.state != 'Failed'
+                    - message: refusals and refusedAt are recorded only on a Refused
+                        check run
+                      rule: self.state == 'Refused' || (!has(self.refusals) && !has(self.refusedAt))
+                  url:
+                    description: url of the pull request.
+                    maxLength: 2048
+                    pattern: ^https://
+                    type: string
+                required:
+                - headSHA
+                - number
+                - url
+                type: object
+                x-kubernetes-validations:
+                - message: appliedObservedAt needs mergeCommitSHA
+                  rule: '!has(self.appliedObservedAt) || has(self.mergeCommitSHA)'
+                - message: reviewCheck names the recorded head
+                  rule: '!has(self.reviewCheck) || self.reviewCheck.head == self.headSHA'
+                - message: conflictSeen names the recorded head
+                  rule: '!has(self.conflictSeen) || self.conflictSeen.headSHA == self.headSHA'
+              queuedBehind:
+                description: |-
+                  queuedBehind names the requests that held the lock on the target when the executor last held this one back
+                  (Queued, with any reason) while the target was locked, written in that status write (#643). When a later check finds other
+                  holders, the executor first reads the recorded ones from the API server and only then replaces them. Until
+                  the request is decided, it ends Superseded (PlanFresh False, reason AnotherRequestClosed) when a recorded
+                  request ended NeedsIntervention because its pull request for the same target and field was closed without a
+                  merge, or (reason AnotherRequestSucceeded, #719) a recorded request ended Succeeded with a change of the same
+                  field from the same previous value to another one. A request that never waited behind that one has no
+                  record of it and is decided as usual. Only the
+                  executor writes it; once set it is never removed or emptied (a validation rule refuses that). At most four
+                  holders are recorded, those for the same field first: a request behind more holders than that may have no
+                  record of one, and is then decided as usual when that one's pull request is closed.
+                items:
+                  description: RequestRef names another RemediationRequest in the
+                    same namespace.
+                  properties:
+                    name:
+                      description: name of the request.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    uid:
+                      description: uid of the request, so a request recreated under
+                        the same name is never taken for it.
+                      maxLength: 36
+                      pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                      type: string
+                  required:
+                  - name
+                  - uid
+                  type: object
+                maxItems: 4
+                type: array
+                x-kubernetes-list-map-keys:
+                - uid
+                x-kubernetes-list-type: map
+              refusedHints:
+                description: |-
+                  refusedHints are the newest comments with the command that the executor refused, at most
+                  MaxRefusedHints, oldest first; the oldest one whose reply is recorded is dropped for a new one, and while
+                  every one still waits for its reply a new refusal is not recorded. Only the executor writes them.
+                items:
+                  description: |-
+                    RefusedHint records a comment that carried the command and was refused, so the refusal is made once and a
+                    reader sees why no hint was stored. It holds no text of the comment.
+                  properties:
+                    author:
+                      description: author wrote the comment, as the source's API reported
+                        it.
+                      properties:
+                        id:
+                          description: id is the author's numeric user ID in the source.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        login:
+                          description: login is the author's login when the hint was
+                            accepted, for the reader only.
+                          maxLength: 100
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                          type: string
+                      required:
+                      - id
+                      - login
+                      type: object
+                    commentID:
+                      description: commentID is the comment's ID in the source.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    reason:
+                      description: reason says why no hint was stored.
+                      enum:
+                      - CapReached
+                      - TooLong
+                      - NotRedactable
+                      - Empty
+                      - EditedAfterSeen
+                      type: string
+                    refusedAt:
+                      description: refusedAt is when the executor refused it.
+                      format: date-time
+                      type: string
+                    reply:
+                      description: |-
+                        reply records the executor's reply to the refused command in the pull request (ADR-0028 section 7).
+                        Once set it never changes.
+                      enum:
+                      - Posted
+                      - NotRedactable
+                      - TooManyComments
+                      - Refused
+                      - GaveUp
+                      type: string
+                    source:
+                      description: source is the system the comment is in.
+                      enum:
+                      - GitHub
+                      type: string
+                  required:
+                  - author
+                  - commentID
+                  - reason
+                  - refusedAt
+                  - source
+                  type: object
+                  x-kubernetes-validations:
+                  - message: the reply to a refused hint never changes once set
+                    rule: '!has(oldSelf.reply) || (has(self.reply) && self.reply ==
+                      oldSelf.reply)'
+                maxItems: 10
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                - commentID
+                x-kubernetes-list-type: map
+              rollout:
+                description: rollout is what the check after the merge keeps between
+                  reconciles (the RolledOut condition).
+                properties:
+                  appliedRevision:
+                    description: |-
+                      appliedRevision is the commit the GitOps controller reported applied when the executor first saw the merge
+                      commit delivered: the merge commit, or a later commit of the target branch that holds it.
+                    maxLength: 40
+                    minLength: 40
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  ended:
+                    description: ended is true once the check gave its final verdict
+                      in RolledOut; nothing is read for it after that.
+                    type: boolean
+                  pausedSeconds:
+                    description: |-
+                      pausedSeconds is how long, in seconds, writes were paused while the executor waited for the delivery; the
+                      delivery window is extended by it (and by the pause still running), so a pause never uses up the window.
+                      It never decreases.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  pausedSince:
+                    description: |-
+                      pausedSince is when the executor first saw writes paused (RemediationSettings spec.paused) while it waited
+                      for the delivery; cleared when it sees them resumed, the paused time then added to pausedSeconds. It is
+                      never moved while set.
+                    format: date-time
+                    type: string
+                  targetGeneration:
+                    description: |-
+                      targetGeneration is the target's metadata.generation read right after appliedRevision was seen applied:
+                      the generation the applied commit produced.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  templateHash:
+                    description: |-
+                      templateHash is the SHA-256 of the target's pod template at targetGeneration. When the target's controller
+                      first reports a generation past targetGeneration, the revision it names is recorded only if the template
+                      is still this one; otherwise the check ends with RolledOut Unknown, reason RolloutSuperseded.
+                    maxLength: 64
+                    minLength: 64
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                  templateRevision:
+                    description: |-
+                      templateRevision is the template revision the check judges: a StatefulSet's status.updateRevision or a
+                      Deployment's deployment.kubernetes.io/revision annotation, read once the controller observed
+                      targetGeneration and the target's current generation (a revision annotation can name a later generation
+                      before the status does), and, past targetGeneration, only while the template still matches templateHash. A newer revision
+                      ends the check with RolledOut Unknown, reason RolloutSuperseded.
+                    maxLength: 253
+                    type: string
+                  waitStartedAt:
+                    description: |-
+                      waitStartedAt is when the executor started waiting for the delivery of a merged request that has no
+                      lastPhaseTransitionTime; the delivery window is then measured from it instead of from the merge.
+                    format: date-time
+                    type: string
+                type: object
+              source:
+                description: source is where the change is made, resolved by the controller
+                  before the policy check.
+                properties:
+                  baseCommit:
+                    description: |-
+                      baseCommit is the full SHA of the target branch the change was made against. It is fixed when the branch
+                      is created; later merges to the target branch do not change it.
+                    pattern: ^[0-9a-f]{40}$
+                    type: string
+                  buildPath:
+                    description: |-
+                      buildPath is the directory the Flux Kustomization builds (its spec.path, "." for the repository root).
+                      Before every commit the pull request step renders it with and without the change and refuses anything
+                      but the planned difference (design 8.2, steps 4 and 5). The policy check always sets it, and the plan
+                      digest covers it; a request without it is never committed.
+                    maxLength: 512
+                    minLength: 1
+                    pattern: ^(\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$
+                    type: string
+                  path:
+                    description: path is the file that declares the target.
+                    maxLength: 512
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.ya?ml$
+                    type: string
+                  repositoryRef:
+                    description: repositoryRef is the RemediationSettings entry whose
+                      URL matches the Flux source.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  targetBranch:
+                    description: |-
+                      targetBranch is the branch the pull request targets: the branch Flux tracks, which must equal the
+                      repository's targetBranch in RemediationSettings.
+                    maxLength: 255
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must be a plain branch name, not HEAD, refs/..., shadewright/...
+                        or one containing '..' or '.lock'
+                      rule: '!self.contains(''..'') && !self.endsWith(''.lock'') &&
+                        !self.contains(''.lock/'') && self != ''HEAD'' && !self.startsWith(''refs/'')
+                        && !self.startsWith(''shadewright/'')'
+                required:
+                - baseCommit
+                - path
+                - repositoryRef
+                - targetBranch
+                type: object
+              verification:
+                description: |-
+                  verification is the executor's own stable window while the request is Verifying (ADR-0030 section 4), and
+                  the readings of the Incident's count taken from the merge on (incidentCount). Only the executor writes it;
+                  once set it is kept, windowStart and the time of lastReset only move forward, resets never decreases and
+                  a reading is never changed, only removed (validation rules on the object).
+                properties:
+                  incidentCount:
+                    description: |-
+                      incidentCount holds two readings of the Incident's status.count, taken by the executor with the merge
+                      receipt and with appliedObservedAt (ADR-0030 section 4, "Resolved before the rollout"). They decide only
+                      the reason of Cleared True: ResolvedBeforeRollout instead of NoRecurrence. A reading once set is never
+                      changed, but it may be removed (an older executor drops it), and a removed reading is not taken again.
+                    properties:
+                      atApplied:
+                        description: |-
+                          atApplied is the reading taken in the status write that sets status.pullRequest.appliedObservedAt, only by
+                          the process that took atMerge. Never filled in after that write, never changed once set; it may be removed.
+                        properties:
+                          count:
+                            description: |-
+                              count is the Incident's status.count as read. MaxIncidentCount is the saturation value; a saturated
+                              reading never counts.
+                            format: int64
+                            maximum: 1000000
+                            minimum: 0
+                            type: integer
+                          readAt:
+                            description: |-
+                              readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for
+                              atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is
+                              compared only with the other reading's readAt.
+                            format: date-time
+                            type: string
+                          uid:
+                            description: uid is the UID of the Incident read. The
+                              reading counts only when it equals spec.incidentRef.uid.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - readAt
+                        - uid
+                        type: object
+                      atMerge:
+                        description: |-
+                          atMerge is the reading taken with the merge receipt, only in the status write that sets Merged; when
+                          that read fails it stays absent. Never changed once set; it may be removed.
+                        properties:
+                          count:
+                            description: |-
+                              count is the Incident's status.count as read. MaxIncidentCount is the saturation value; a saturated
+                              reading never counts.
+                            format: int64
+                            maximum: 1000000
+                            minimum: 0
+                            type: integer
+                          readAt:
+                            description: |-
+                              readAt is when the read was taken, on the executor's clock: for atMerge a time after the read, for
+                              atApplied a time before it, so the span between the two never exceeds the span the counts cover. It is
+                              compared only with the other reading's readAt.
+                            format: date-time
+                            type: string
+                          uid:
+                            description: uid is the UID of the Incident read. The
+                              reading counts only when it equals spec.incidentRef.uid.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - readAt
+                        - uid
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: atApplied requires atMerge
+                      rule: '!has(self.atApplied) || has(self.atMerge)'
+                  lastReset:
+                    description: lastReset is the last reset of the window. Kept once
+                      set; its time never moves back.
+                    properties:
+                      reason:
+                        description: |-
+                          reason says why the window was reset: NotAvailable (the target reports other available replicas than
+                          desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the
+                          KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter
+                          stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
+                          or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked
+                          before RolledOut is True). Every one is a reset of the no-evidence class.
+                        enum:
+                        - NotAvailable
+                        - StaleReport
+                        - ReportMismatch
+                        - PartialRollout
+                        type: string
+                      time:
+                        description: |-
+                          time is when the reset was recorded, on the executor's clock. It is never earlier than windowStart at that
+                          moment or the previous reset, so the window is open only while windowStart is later than it.
+                        format: date-time
+                        type: string
+                    required:
+                    - reason
+                    - time
+                    type: object
+                  resets:
+                    description: |-
+                      resets counts the resets of the window: a bad check that closes an open window or names another reason
+                      than lastReset. The same reason again on a closed window is not counted and writes nothing. It never
+                      decreases, and it is at least 1 while lastReset is set.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  windowStart:
+                    description: |-
+                      windowStart is when the current window opened: the first good check after the last reset. It only moves
+                      forward.
+                    format: date-time
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: lastReset requires resets of at least 1
+                  rule: '!has(self.lastReset) || (has(self.resets) && self.resets
+                    >= 1)'
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: status.pullRequest.mergeCommitSHA is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.mergeCommitSHA)
+            || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.mergeCommitSHA)
+            && self.status.pullRequest.mergeCommitSHA == oldSelf.status.pullRequest.mergeCommitSHA)'
+        - message: status.pullRequest.appliedObservedAt is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pullRequest) || !has(oldSelf.status.pullRequest.appliedObservedAt)
+            || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt)
+            && self.status.pullRequest.appliedObservedAt == oldSelf.status.pullRequest.appliedObservedAt)'
+        - message: status.mergeReceipt is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || (has(self.status)
+            && has(self.status.mergeReceipt) && self.status.mergeReceipt == oldSelf.status.mergeReceipt)'
+        - message: status.mergeReceipt.mergeCommitSHA must equal status.pullRequest.mergeCommitSHA
+          rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest)
+            && has(self.status.pullRequest.mergeCommitSHA) && self.status.mergeReceipt.mergeCommitSHA
+            == self.status.pullRequest.mergeCommitSHA)'
+        - message: status.mergeReceipt.pullRequest, headSHA and mergedAt must equal
+            status.pullRequest.number, headSHA and mergedAt
+          rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.pullRequest)
+            && self.status.mergeReceipt.pullRequest == self.status.pullRequest.number
+            && self.status.mergeReceipt.headSHA == self.status.pullRequest.headSHA
+            && has(self.status.pullRequest.mergedAt) && self.status.mergeReceipt.mergedAt
+            == self.status.pullRequest.mergedAt)'
+        - message: status.pullRequest.reviewCheck does not change once status.mergeReceipt
+            exists
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest)
+            || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck)
+            == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck)
+            || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))'
+        - message: status.mergeCommitAwaitedSince is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince)
+            || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince
+            == oldSelf.status.mergeCommitAwaitedSince)'
+        - message: status.mergeReceipt is set only in Merged or a phase after it
+          rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
+            && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',
+            ''AwaitingApproval'', ''AutoMergeQueued'']))'
+        - message: status.phase WaitingForDelivery and Verifying require status.mergeReceipt
+          rule: '!has(self.status) || !has(self.status.phase) || !(self.status.phase
+            in [''WaitingForDelivery'', ''Verifying'']) || has(self.status.mergeReceipt)'
+        - message: status.phase Verifying requires status.pullRequest.appliedObservedAt
+          rule: '!has(self.status) || !has(self.status.phase) || self.status.phase
+            != ''Verifying'' || (has(self.status.pullRequest) && has(self.status.pullRequest.appliedObservedAt))'
+        - message: 'status.hints: a stored hint is never removed'
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.hints) || (has(self.status)
+            && has(self.status.hints) && oldSelf.status.hints.all(o, self.status.hints.exists(h,
+            h.source == o.source && h.commentID == o.commentID)))'
+        - message: status.handoff.from is never removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.from)
+            || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.from))'
+        - message: status.handoff.to is never removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.handoff) || !has(oldSelf.status.handoff.to)
+            || (has(self.status) && has(self.status.handoff) && has(self.status.handoff.to))'
+        - message: status.handoff.from starts in Reserved
+          rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from)
+            || self.status.handoff.from.phase == ''Reserved'' || (has(oldSelf.status)
+            && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.from))'
+        - message: status.handoff.to starts in Intent
+          rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to)
+            || self.status.handoff.to.phase == ''Intent'' || (has(oldSelf.status)
+            && has(oldSelf.status.handoff) && has(oldSelf.status.handoff.to))'
+        - message: status.handoff.from must match spec.replaces
+          rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.from)
+            || (has(self.spec.replaces) && self.status.handoff.from.name == self.spec.replaces.name
+            && self.status.handoff.from.uid == self.spec.replaces.uid && self.status.handoff.from.hint.source
+            == self.spec.replaces.hint.source && self.status.handoff.from.hint.commentID
+            == self.spec.replaces.hint.commentID && self.status.handoff.from.hint.digest
+            == self.spec.replaces.hint.digest)'
+        - message: status.handoff.to must name a hint in status.hints that is Reserved
+            while it is Intent, Consumed once Done and Declined once Aborted
+          rule: '!has(self.status) || !has(self.status.handoff) || !has(self.status.handoff.to)
+            || (has(self.status.hints) && self.status.hints.exists(h, h.source ==
+            self.status.handoff.to.hint.source && h.commentID == self.status.handoff.to.hint.commentID
+            && h.digest == self.status.handoff.to.hint.digest && h.state == (self.status.handoff.to.phase
+            == ''Intent'' ? ''Reserved'' : self.status.handoff.to.phase == ''Done''
+            ? ''Consumed'' : ''Declined'')))'
+        - message: status.commentCursor is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || (has(self.status)
+            && has(self.status.commentCursor))'
+        - message: status.commentCursor.since never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.commentCursor) || !has(oldSelf.status.commentCursor.since)
+            || (has(self.status) && has(self.status.commentCursor) && has(self.status.commentCursor.since)
+            && self.status.commentCursor.since >= oldSelf.status.commentCursor.since)'
+        - message: status.rollout is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || (has(self.status)
+            && has(self.status.rollout))'
+        - message: status.rollout.waitStartedAt is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.waitStartedAt)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.waitStartedAt)
+            && self.status.rollout.waitStartedAt == oldSelf.status.rollout.waitStartedAt)'
+        - message: status.rollout.appliedRevision is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.appliedRevision)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.appliedRevision)
+            && self.status.rollout.appliedRevision == oldSelf.status.rollout.appliedRevision)'
+        - message: status.rollout.targetGeneration is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.targetGeneration)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.targetGeneration)
+            && self.status.rollout.targetGeneration == oldSelf.status.rollout.targetGeneration)'
+        - message: status.rollout.templateHash is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateHash)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateHash)
+            && self.status.rollout.templateHash == oldSelf.status.rollout.templateHash)'
+        - message: status.rollout.templateRevision is set once and never changed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.templateRevision)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.templateRevision)
+            && self.status.rollout.templateRevision == oldSelf.status.rollout.templateRevision)'
+        - message: status.rollout.pausedSince is never moved while set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSince)
+            || !has(self.status) || !has(self.status.rollout) || !has(self.status.rollout.pausedSince)
+            || self.status.rollout.pausedSince == oldSelf.status.rollout.pausedSince'
+        - message: status.rollout.pausedSeconds never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.pausedSeconds)
+            || (has(self.status) && has(self.status.rollout) && has(self.status.rollout.pausedSeconds)
+            && self.status.rollout.pausedSeconds >= oldSelf.status.rollout.pausedSeconds)'
+        - message: status.rollout.ended never goes back to false
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.rollout) || !has(oldSelf.status.rollout.ended)
+            || !oldSelf.status.rollout.ended || (has(self.status) && has(self.status.rollout)
+            && has(self.status.rollout.ended) && self.status.rollout.ended)'
+        - message: status.verification is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || (has(self.status)
+            && has(self.status.verification))'
+        - message: status.verification.windowStart only moves forward
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.windowStart)
+            || (has(self.status) && has(self.status.verification) && has(self.status.verification.windowStart)
+            && timestamp(self.status.verification.windowStart) >= timestamp(oldSelf.status.verification.windowStart))'
+        - message: status.verification.lastReset is kept once set and its time never
+            moves back
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.lastReset)
+            || (has(self.status) && has(self.status.verification) && has(self.status.verification.lastReset)
+            && timestamp(self.status.verification.lastReset.time) >= timestamp(oldSelf.status.verification.lastReset.time))'
+        - message: status.verification.resets never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.resets)
+            || (has(self.status) && has(self.status.verification) && has(self.status.verification.resets)
+            && self.status.verification.resets >= oldSelf.status.verification.resets)'
+        - message: status.verification.incidentCount.atMerge is never changed once
+            set; it may only be removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount)
+            || !has(oldSelf.status.verification.incidentCount.atMerge) || !has(self.status)
+            || !has(self.status.verification) || !has(self.status.verification.incidentCount)
+            || !has(self.status.verification.incidentCount.atMerge) || self.status.verification.incidentCount.atMerge
+            == oldSelf.status.verification.incidentCount.atMerge'
+        - message: status.verification.incidentCount.atApplied is never changed once
+            set; it may only be removed
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.verification) || !has(oldSelf.status.verification.incidentCount)
+            || !has(oldSelf.status.verification.incidentCount.atApplied) || !has(self.status)
+            || !has(self.status.verification) || !has(self.status.verification.incidentCount)
+            || !has(self.status.verification.incidentCount.atApplied) || self.status.verification.incidentCount.atApplied
+            == oldSelf.status.verification.incidentCount.atApplied'
+        - message: status.queuedBehind is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.queuedBehind) || size(oldSelf.status.queuedBehind)
+            == 0 || (has(self.status) && has(self.status.queuedBehind) && size(self.status.queuedBehind)
+            > 0)'
+    selectableFields:
+    - jsonPath: .status.phase
+    - jsonPath: .status.breakerProbe
+    - jsonPath: .status.holdsTarget
+    - jsonPath: .status.breakerCounts
+    - jsonPath: .status.breakerClearedBy
+    served: true
+    storage: true
+    subresources:
+      status: {}

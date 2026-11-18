@@ -44,7 +44,9 @@ import (
 // Environment of a run. EVAL_REPORT_DIR applies to both modes; the others to the real model only.
 const (
 	envReportDir = "EVAL_REPORT_DIR"
-	envModel     = "EVAL_MODEL" // "foundry" runs TestEvalFoundry, "anthropic" TestEvalAnthropic
+	// EVAL_MODEL: "foundry" runs TestEvalFoundry, "anthropic" TestEvalAnthropic, "openaicompatible"
+	// TestEvalOpenAICompatible.
+	envModel     = "EVAL_MODEL"
 	envKeyFile   = "EVAL_ANTHROPIC_KEY_FILE"
 	envEffort    = "EVAL_ANTHROPIC_EFFORT"
 	envAllowance = "EVAL_ANTHROPIC_THINKING_ALLOWANCE"

@@ -189,7 +189,8 @@ func (r *Redactor) Pieces(ps []Piece) []string {
 	}
 	// Reading 2: the answer as the tool writes it.
 	wsize := func(i int) int { return len(ws[i].text) }
-	r.cutAnswer(ps, own, endAtObjectValues(ps, wsize, r.spans(raw.String())), func(i int, sp span) span { return ws[i].widen(sp) }, wsize)
+	r.cutAnswer(ps, own, endAtObjectValues(ps, wsize, r.spans(raw.String())), func(i int, sp span) span { return ws[i].widen(sp) },
+		func(i int) string { return ws[i].text })
 	// Reading 3: the answer with the markers of reading 1.
 	var b strings.Builder
 	for _, m := range marks {
@@ -206,7 +207,7 @@ func (r *Redactor) Pieces(ps []Piece) []string {
 			return ws[i].widen(sp)
 		}
 		return marks[i].back(sp)
-	}, msize)
+	}, func(i int) string { return marks[i].text })
 	out := make([]string, len(ps))
 	off := 0
 	for i, p := range ps {
@@ -228,23 +229,38 @@ func (r *Redactor) Pieces(ps []Piece) []string {
 }
 
 // cutAnswer adds to own, by data piece, the spans of a reading of the whole answer (sorted, disjoint, on the
-// text of that reading), cut at each piece's ends (of length size(i) in that text) and carried to the piece's
-// written text by to. A piece the object hides whole takes nothing more: it is hidden whole already. The work is
-// linear in the number of pieces and spans.
-func (r *Redactor) cutAnswer(ps []Piece, own [][]span, spans []span, to func(i int, sp span) span, size func(i int) int) {
+// text of that reading, where piece i is written text(i)), cut at each piece's ends and carried to the piece's
+// written text by to. A span that begins before a piece takes it from its first byte that is no blank: the blanks
+// before that stay as the indentation they are, as for a value a key outside it takes (valueOfKey). A piece the
+// object hides whole takes nothing more: it is hidden whole already. The work is linear in the length of the
+// text and the number of pieces and spans.
+func (r *Redactor) cutAnswer(ps []Piece, own [][]span, spans []span, to func(i int, sp span) span, text func(i int) string) {
 	off, next := 0, 0
 	for i, p := range ps {
 		tick(1)
-		end := off + size(i)
+		t := text(i)
+		end := off + len(t)
 		if p.Data && !hiddenByObject(p) {
 			for next < len(spans) && spans[next].end <= off {
 				tick(1)
 				next++
 			}
+			lead := -1 // the piece's blanks before its first other byte, counted when a span needs them
 			for j := next; j < len(spans) && spans[j].start < end; j++ {
 				tick(1)
 				sp := spans[j]
-				sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
+				from := max(sp.start, off) - off
+				if sp.start < off {
+					if lead < 0 {
+						lead = 0
+						for lead < len(t) && strings.IndexByte(" \t\r\n", t[lead]) >= 0 {
+							tick(1)
+							lead++
+						}
+					}
+					from = lead
+				}
+				sp.start, sp.end = from, min(sp.end, end)-off
 				if sp.end > sp.start {
 					own[i] = append(own[i], to(i, sp))
 				}

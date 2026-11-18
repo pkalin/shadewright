@@ -104,7 +104,7 @@ const (
 	// handoffGraceBound is the bound of the retries of a handoff's recovery: the end of its HandoffGrace wait.
 	handoffGraceBound = "boundBy(waitHandoffGrace)"
 	// handoffRecoveryBound is the bound of the retries of a recovery that waits on a refusal: its HandoffRecovery
-	// wait, recorded with the HandoffGrace wait of its deadline, the later of the two ending it (#786).
+	// wait, which ends at its own end; the write that records it removes the HandoffGrace wait (#786).
 	handoffRecoveryBound = "boundBy(waitHandoffRecovery)"
 	unboundedCalls       = "unboundedRead("
 )

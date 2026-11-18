@@ -76,10 +76,13 @@ import (
 //   - requeue: a reconcile that leaves a stopped request holding its lock, without an error, asks to run again at a
 //     time (seventh decision, point 3);
 //   - waits (not while paused): every entry of status.gitWaits has not passed the end of its kind by more than one
-//     poll interval: the request deadline (RequestDeadline), the later of the deadline plus the handoff grace and
-//     recoveryWaitBound after the first refusal (HandoffGrace and HandoffRecovery, #786), five minutes after its
-//     start (MergeCheck, MergeContent); an end that fell in a pause or while the executor was down is due when that gap ended
+//     poll interval: the request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace),
+//     recoveryWaitBound after the first refusal (HandoffRecovery, #786), five minutes after its start (MergeCheck,
+//     MergeContent); an end that fell in a pause or while the executor was down is due when that gap ended
 //     (afterGap);
+//   - own end (not while paused): a reconcile that could act (no write made to fail, no error, no stale read) leaves
+//     no RequestDeadline, HandoffGrace or HandoffRecovery entry that stood at its start past the end that entry
+//     records: no entry ends at another entry's end (third decision of 2026-11-18 on #786, point 1);
 //   - last read (not while paused): a reconcile that starts with a MergeCheck or MergeContent wait past its end and
 //     returns no error, with no write made to fail, ends it only on evidence about its last read (lastReadProperty):
 //     a failed read ends it (never a retry), a repository gone from the settings ends it, a pause met inside the
@@ -302,8 +305,7 @@ type modelWorld struct {
 	handoff bool
 	// refusedAt: the first reconcile, not paused, of a replacement recovering a handoff that ran with its repository
 	// gone from the settings or with the settings naming another branch than its plan's (planBranch): the recovery
-	// waits on that refusal from then on (#786), and its HandoffRecovery wait ends recoveryWaitBound after it, or
-	// its HandoffGrace wait later.
+	// waits on that refusal from then on (#786), and its HandoffRecovery wait ends recoveryWaitBound after it.
 	refusedAt  time.Time
 	planBranch string
 	// lastingUntil keeps the fault as it is until then (an outage that lasts): fault events wait.
@@ -1498,6 +1500,7 @@ func (m *modelWorld) step() {
 	m.pauseProperties(before, live, paused, lifted && !staleRead, startedAt, faulted || err != nil)
 	if !paused && !staleRead {
 		m.lastReadProperty(readPassed, live, res, err, faulted, failedCalls)
+		m.ownEndProperty(before, live, startedAt, err, faulted)
 	}
 	m.properties(live, res, err, faulted, paused)
 	switch {
@@ -1560,14 +1563,6 @@ func reasonOf(c *metav1.Condition) string {
 	return c.Reason
 }
 
-// latest is the later of a and b.
-func latest(a, b time.Time) time.Time {
-	if b.After(a) {
-		return b
-	}
-	return a
-}
-
 // waitEnd is when the model expects an entry of kind k of rr to end at the latest, from what the model knows of the
 // kind and of the pauses (not from the code under test); ok is false for a Paced entry, which has no end.
 func (m *modelWorld) waitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Time, bool) {
@@ -1577,23 +1572,49 @@ func (m *modelWorld) waitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Ti
 			return rr.Status.Deadline.Time, true
 		}
 		return w.Since.Time, true
-	case api.GitWaitHandoffGrace, api.GitWaitHandoffRecovery:
-		// The recovery ends when both of its waits have passed (decision of 2026-11-18 on #786): each entry ends at
-		// the later of the two.
-		end := w.Since.Add(handoffRecoveryGrace)
+	case api.GitWaitHandoffGrace:
+		// Each wait of the recovery ends at its own end (third decision of 2026-11-18 on #786).
 		if rr.Status.Deadline != nil {
-			end = rr.Status.Deadline.Add(handoffRecoveryGrace)
+			return rr.Status.Deadline.Add(handoffRecoveryGrace), true
 		}
+		return w.Since.Add(handoffRecoveryGrace), true
+	case api.GitWaitHandoffRecovery:
+		// recoveryWaitBound after the first refusal (#786).
 		if !m.refusedAt.IsZero() {
-			// A recovery that waits on a refusal: recoveryWaitBound after the first one (#786).
-			end = latest(end, m.refusedAt.Add(recoveryWaitBound))
+			return m.refusedAt.Add(recoveryWaitBound), true
 		}
-		return end, true
+		return w.Since.Add(recoveryWaitBound), true
 	case api.GitWaitMergeCheck, api.GitWaitMergeContent:
 		// From its own start (never from status.mergeCommitAwaitedSince).
 		return w.Since.Add(mergeCommitWait), true
 	}
 	return time.Time{}, false
+}
+
+// ownEndProperty: a reconcile not paused that started with a RequestDeadline, HandoffGrace or HandoffRecovery entry
+// past the end that entry records (before, at startedAt) and that could act (no error, no write made to fail) leaves
+// no such entry standing (live): every entry ends at its own end, never at one computed from another entry (third
+// decision of 2026-11-18 on #786, point 1).
+func (m *modelWorld) ownEndProperty(before, live *api.RemediationRequest, startedAt time.Time, err error, faulted bool) {
+	if err != nil || faulted {
+		return
+	}
+	for _, w := range before.Status.GitWaits {
+		switch w.Kind {
+		case api.GitWaitRequestDeadline, api.GitWaitHandoffGrace, api.GitWaitHandoffRecovery:
+		default:
+			continue
+		}
+		if w.Ends == nil || startedAt.Before(w.Ends.Time) {
+			continue
+		}
+		for _, l := range live.Status.GitWaits {
+			if l.Kind == w.Kind && l.Since.Equal(&w.Since) {
+				m.fatalf("own end: the %s entry stands %v past the end it records (%v)", w.Kind,
+					startedAt.Sub(w.Ends.Time), w.Ends.Time)
+			}
+		}
+	}
 }
 
 // properties checks the model's properties after a reconcile (see the top of this file).

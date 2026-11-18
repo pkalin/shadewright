@@ -629,10 +629,9 @@ spec:
                   gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of
                   bound: Paced (no end of its own), RequestDeadline, HandoffGrace, HandoffRecovery, MergeCheck and MergeContent.
                   Starting or ending one kind never touches another, and an entry holds everything needed to end it. At the start
-                  of every reconcile the executor ends each RequestDeadline entry whose bound has passed, and the recovery of a
-                  handoff once every HandoffGrace and HandoffRecovery entry it records has passed, before any read:
-                  RequestDeadline expires the request, the recovery's entries end it NeedsIntervention with HandoffRecoveryFailed,
-                  or RecoveryWaitExpired when a HandoffRecovery entry says its handoff was aborted at a refusal.
+                  of every reconcile the executor ends each RequestDeadline, HandoffGrace and HandoffRecovery entry whose own end
+                  has passed, before any read; no end is computed from another entry: RequestDeadline expires the request,
+                  HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed, HandoffRecovery with RecoveryWaitExpired.
                   A MergeCheck or MergeContent entry whose bound has passed ends only after one more read in that reconcile:
                   an answer goes on as after any read, and a failure ends it, MergeCheck by recording the merge with the plan
                   not shown fresh, MergeContent (five minutes from its start) by ending the request NeedsIntervention with
@@ -642,7 +641,9 @@ spec:
                   failed Git read removes the others but MergeCheck and HandoffRecovery. Condition GitReadRetry summarizes the
                   entries for people. At most five entries stand at once though there are six kinds: RequestDeadline applies only
                   to a request that recovers no handoff, and HandoffGrace and HandoffRecovery only to one that does, so the first
-                  never stands with either of the others (a kind that no longer applies is removed before any entry is added).
+                  never stands with either of the others, and HandoffGrace no longer applies once HandoffRecovery stands (a kind
+                  that no longer applies is removed in every write that adds an entry). A status stored before that holds both
+                  HandoffGrace and HandoffRecovery stays valid; the next reconcile removes the grace.
                 items:
                   description: |-
                     GitWait is one wait on a read of the Git host that failed (status.gitWaits). It holds everything needed to end it,
@@ -829,6 +830,16 @@ spec:
                   to:
                     description: to is the outgoing side, set on a predecessor.
                     properties:
+                      ends:
+                        description: |-
+                          ends is when this request ends a standing intent on its own, from its own status, if the replacement has not
+                          taken the pull request over by then: the replacement's status.deadline plus the handoff grace (15 minutes),
+                          recorded with the intent on the executor's clock (#786, decision of 2026-11-18). The look at this request's pull
+                          request aborts the intent once it has passed, whatever the replacement could store, so its freshness check and
+                          merge gate work again. An intent recorded before the field existed, or for a replacement with no deadline, has
+                          none: the replacement's deadline is read instead. It never changes once recorded.
+                        format: date-time
+                        type: string
                       expectedHead:
                         description: |-
                           expectedHead is the head of the branch when the intent was recorded: the replacement's commit must have
@@ -888,6 +899,11 @@ spec:
                     x-kubernetes-validations:
                     - message: an outgoing handoff is Intent, Done or Aborted
                       rule: self.phase in ['Intent', 'Done', 'Aborted']
+                    - message: the end of an outgoing handoff is recorded with its
+                        intent and never changes
+                      rule: (oldSelf.phase == 'Aborted' && self.phase == 'Intent')
+                        || (has(self.ends) == has(oldSelf.ends) && (!has(self.ends)
+                        || self.ends == oldSelf.ends))
                     - message: 'an outgoing handoff is pinned: only its phase changes,
                         or an Aborted one is replaced'
                       rule: (oldSelf.phase == 'Aborted' && self.phase == 'Intent')

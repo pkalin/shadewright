@@ -393,8 +393,10 @@ type IncomingHandoff struct {
 // request it answers (which must be in status.hints, in the state its phase implies: Reserved while Intent,
 // Consumed once Done, Declined once Aborted) and the branch head the replacement's commit must have as its
 // parent. Only its phase changes once written, except that an Aborted one is replaced by the Intent of a later
-// replacement, for another hint of this request.
+// replacement, for another hint of this request. Its end (ends), recorded with the intent, is the bound of the
+// intent on this request's side: the replacement's deadline plus the handoff grace (#786).
 // +kubebuilder:validation:XValidation:rule="self.phase in ['Intent', 'Done', 'Aborted']",message="an outgoing handoff is Intent, Done or Aborted"
+// +kubebuilder:validation:XValidation:rule="(oldSelf.phase == 'Aborted' && self.phase == 'Intent') || (has(self.ends) == has(oldSelf.ends) && (!has(self.ends) || self.ends == oldSelf.ends))",message="the end of an outgoing handoff is recorded with its intent and never changes"
 // +kubebuilder:validation:XValidation:rule="(oldSelf.phase == 'Aborted' && self.phase == 'Intent') || (self.name == oldSelf.name && self.uid == oldSelf.uid && self.hint == oldSelf.hint && self.expectedHead == oldSelf.expectedHead)",message="an outgoing handoff is pinned: only its phase changes, or an Aborted one is replaced"
 // +kubebuilder:validation:XValidation:rule="oldSelf.phase == self.phase || (oldSelf.phase == 'Intent' && self.phase in ['Done', 'Aborted']) || (oldSelf.phase == 'Aborted' && self.phase == 'Intent' && self.uid != oldSelf.uid && (self.hint.source != oldSelf.hint.source || self.hint.commentID != oldSelf.hint.commentID))",message="an outgoing handoff moves only from Intent to Done or Aborted, or from Aborted to the Intent of another replacement for another hint"
 type OutgoingHandoff struct {
@@ -419,6 +421,15 @@ type OutgoingHandoff struct {
 	// phase is how far this side has come.
 	// +required
 	Phase HandoffPhase `json:"phase"`
+
+	// ends is when this request ends a standing intent on its own, from its own status, if the replacement has not
+	// taken the pull request over by then: the replacement's status.deadline plus the handoff grace (15 minutes),
+	// recorded with the intent on the executor's clock (#786, decision of 2026-11-18). The look at this request's pull
+	// request aborts the intent once it has passed, whatever the replacement could store, so its freshness check and
+	// merge gate work again. An intent recorded before the field existed, or for a replacement with no deadline, has
+	// none: the replacement's deadline is read instead. It never changes once recorded.
+	// +optional
+	Ends *metav1.Time `json:"ends,omitempty"`
 }
 
 // Handoff records the supersede handoff (ADR-0028 section 4), written in this order: the replacement's

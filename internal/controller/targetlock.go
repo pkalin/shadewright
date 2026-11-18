@@ -172,7 +172,8 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 	branchStop := stoppedForBranchChange(rr)
 	cancelReason, cancelled := cancelledForIncident(rr)
 	// A request handing its pull request over (an outgoing handoff) leaves the merge to the handoff, which gives it
-	// to the replacement when the merged head is the replacement's commit (followHandoff).
+	// to the replacement when the merged head is the replacement's commit (followHandoff). An aborted one too: a merge
+	// of the replacement's commit is recorded on the replacement (recordWatchedMerge, #786), never on this request.
 	handingOver := rr.Status.Handoff != nil && rr.Status.Handoff.To != nil
 	if expiredUncleaned(rr) && !handingOver && rr.Status.Source != nil {
 		switch {
@@ -592,9 +593,11 @@ func acquire(rr *remediationv1alpha1.RemediationRequest) {
 // checkHeld persists the common target-lock decision for a stopped holder. Branch-change and Incident-cancel
 // merges pass through settleStopException before any release is stored. A successful look is repeated every
 // heldRecheckInterval while the lock stays held; Git failures use retryGitRead, Kubernetes errors remain errors. A
-// replacement whose recovery waited out its bound (endedAtRecoveryBound, #786) first reads the pull request it was to
-// take over (heldRecovery): a merge of its commit is recorded, and an open one keeps the lock; only when that read
-// settles nothing does the verdict of the look decide.
+// replacement whose watch after a refused recovery reached its end (endedAtRecoveryBound, #786) first reads the pull
+// request it was to take over (heldRecovery): a merge of its commit is recorded on it with its receipt, whenever it
+// comes, and that record settles the lock; an open pull request keeps the lock; a failed read keeps it and is retried
+// visibly. Only when that read settles nothing (closed, gone, merged with another head) does the verdict of the look
+// decide, which releases the lock. The end of the watch itself never releases it.
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	reading := openReadWait(rr)
@@ -617,9 +620,10 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		// is open: a merge whose read is still to be made gets no verdict (settleRecordedMerge).
 		return reconcile.Result{}, r.releaseUnread(ctx, rr, s, "its merge is recorded")
 	}
-	// A replacement that ended at the bound of its recovery: its commit may be on the pull request it was to take over,
-	// which may still be merged (#786). That pull request is read first (heldRecovery), which keeps the lock or records
-	// the merge, and never releases it.
+	// A replacement whose watch after a refused recovery ended: its commit may be on the pull request it was to take
+	// over, which may still be merged (#786). That pull request is read first (heldRecovery): a merge of its commit is
+	// recorded on it (the write of the merge settles the lock), an open one or a failed read keeps the lock; it never
+	// releases the lock itself.
 	if res, done, err := r.heldRecovery(ctx, rr); done {
 		return res, err
 	}

@@ -562,8 +562,11 @@ func declineOnEnd(rr *remediationv1alpha1.RemediationRequest, phase remediationv
 	// (handoff.go). A handoff that happened set its intent Done before the end it caused.
 	abortIntent(rr, reason)
 	// Likewise on the replacement's side: one that ends with its handoff still Reserved did not take the pull
-	// request over, whatever ended it (endHandoff, a retry that stopped, the grace of the recovery).
-	if ho := rr.Status.Handoff; ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffReserved {
+	// request over, whatever ended it (endHandoff, a retry that stopped, the grace of the recovery). The end of the
+	// watch after a refusal (RecoveryWaitExpired, #786) is not such an end: the look at stopped holders still records
+	// a merge of its commit (heldRecovery), so its handoff stays Reserved.
+	if ho := rr.Status.Handoff; ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffReserved &&
+		!recoveryWaitExpired(rr) {
 		ho.From.Phase = remediationv1alpha1.HandoffAborted
 	}
 }

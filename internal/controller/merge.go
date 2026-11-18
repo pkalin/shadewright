@@ -308,6 +308,8 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 			live.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Truncate(time.Second)}
 		}
 		since = live.Status.MergeCommitAwaitedSince.DeepCopy()
+		// As every write that adds an entry (removeInapplicable): one whose kind no longer applies goes first.
+		removeInapplicable(live)
 		if ok && gitWait(live, waitMergeCheck) == nil {
 			live.Status.GitWaits = append(live.Status.GitWaits, w)
 		}

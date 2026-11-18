@@ -45,9 +45,9 @@ import (
 // is built whole (newWait, wholeWait): it records its end (status.gitWaits[].ends) for every kind but Paced, and the
 // merge waits record the pull request they are about. The end of an entry is read from the entry alone
 // (waitKind.end), and its operation is cut to the schema's bound where it is built (cutOperation). The check at the
-// start of every reconcile (endPassedWait) ends each RequestDeadline entry past its end, and the recovery of a handoff
-// once every HandoffGrace and HandoffRecovery entry it records is past its end (handoffWaitEnd), before any read or
-// step runs, reading nothing from the Git host (endWait). A wait for a read (readWaits: MergeCheck,
+// start of every reconcile (endPassedWait) ends each RequestDeadline, HandoffGrace and HandoffRecovery entry past its
+// own end before any read or step runs, reading nothing from the Git host (endWait). No end is computed from another
+// entry (third decision of 2026-11-18 on #786). A wait for a read (readWaits: MergeCheck,
 // MergeContent) past its end ends only after one more read (ninth decision of 2026-11-18 on #771): that reconcile
 // makes its reads as any other, and when they leave the entry standing it ends there only on evidence about that read
 // (endAfterLastRead, tenth decision): it failed, it could not start, or it answered and settled nothing; otherwise it
@@ -65,14 +65,15 @@ const (
 	// waitRequestDeadline ends at status.deadline of a request in PolicyChecked whose stale plan's cleanup has not
 	// started: the request expires (expireEnded).
 	waitRequestDeadline
-	// waitHandoffGrace ends handoffRecoveryGrace after status.deadline of a request recovering a handoff: it ends
-	// NeedsIntervention with HandoffRecoveryFailed, once a HandoffRecovery entry it stands with has passed too
-	// (handoffWaitEnd, endRecoveryFailed).
+	// waitHandoffGrace ends handoffRecoveryGrace after status.deadline of a request recovering a handoff whose intent
+	// stands: it ends NeedsIntervention with HandoffRecoveryFailed (endRecoveryFailed). It belongs to the intent, so it
+	// no longer applies once a refusal aborted the intent (a HandoffRecovery entry stands): the write that records
+	// that entry removes it (removeInapplicable).
 	waitHandoffGrace
 	// waitHandoffRecovery ends recoveryWaitBound after the first refusal (or settings that cannot reach the
 	// repository) of a recovery (#786, decision of 2026-11-18), which aborted the handoff: the entry is the record of
-	// that abort (abortedOnRefusal) and bounds the watch after it. It ends the watch once a HandoffGrace entry it stands
-	// with has passed too (handoffWaitEnd), with RecoveryWaitExpired (endRecoveryFailed, endRecoveryWait). It is written
+	// that abort (abortedOnRefusal) and bounds the watch after it. It ends the watch at its own end, with
+	// RecoveryWaitExpired (endRecoveryFailed, endRecoveryWait). It is written
 	// with the condition (abortOnRefusal), whose lastTransitionTime is its start, so a condition found without it gets
 	// the same entry again (recordRefusalEntry); a reconcile that reads and a pause keep it (clearGitReadRetry).
 	waitHandoffRecovery
@@ -207,7 +208,10 @@ func (k waitKind) applies(rr *api.RemediationRequest) bool {
 	case waitRequestDeadline:
 		return rr.Status.Phase == api.PhasePolicyChecked && staleMark(rr) == nil && intent(rr) == nil &&
 			!recoveringHandoff(rr)
-	case waitHandoffGrace, waitHandoffRecovery:
+	case waitHandoffGrace:
+		// The grace bounds a standing intent; a refusal aborted it (third decision of 2026-11-18 on #786).
+		return recoveringHandoff(rr) && gitWait(rr, waitHandoffRecovery) == nil
+	case waitHandoffRecovery:
 		return recoveringHandoff(rr)
 	case waitMergeCheck, waitMergeContent:
 		return !mergeRecorded(rr)
@@ -216,56 +220,23 @@ func (k waitKind) applies(rr *api.RemediationRequest) bool {
 }
 
 // boundEnd is when a wait of kind k bounds rr: its entry's end (end), or, before an entry is recorded, the end the
-// entry would record from rr's status (newWait for the deadline kinds), for a handoff kind no earlier than the end of
-// the recovery's entries that stand (handoffWaitEnd). ok is false when nothing bounds it: the read waits have no end
-// before their entry, which counts from its own start, and a HandoffRecovery wait none before its refusal.
+// entry would record from rr's status (newWait for the deadline kinds). ok is false when nothing bounds it: the read
+// waits have no end before their entry, which counts from its own start, and a HandoffRecovery wait none before its
+// refusal.
 func (k waitKind) boundEnd(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
 	if gitWait(rr, k) != nil || !k.applies(rr) {
 		return k.end(rr, now)
 	}
 	if k == waitRequestDeadline || k == waitHandoffGrace {
 		if w, ok := newWait(rr, k, "bound", now); ok {
-			end := w.Ends.Time
-			if k == waitHandoffGrace {
-				if e, ok := handoffWaitEnd(rr, now); ok && e.After(end) {
-					end = e
-				}
-			}
-			return end, true
+			return w.Ends.Time, true
 		}
 	}
 	return time.Time{}, false
 }
 
-// handoffKinds are the kinds of wait of the recovery of a handoff. The recovery ends when every one of them that rr
-// records has passed its end (decision of 2026-11-18 on #786, point 2), so each reads as the latest of their ends.
-var handoffKinds = []waitKind{waitHandoffGrace, waitHandoffRecovery}
-
-// handoffWaitEnd is the latest end of rr's HandoffGrace and HandoffRecovery entries, each read as it is recorded (an
-// entry whose start lies more than mergeCommitClockSlack after now ends at now); ok is false when rr records neither
-// or the recovery is over.
-func handoffWaitEnd(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
-	var end time.Time
-	found := false
-	for _, k := range handoffKinds {
-		w := gitWait(rr, k)
-		if w == nil || w.Ends == nil || !k.applies(rr) {
-			continue
-		}
-		e := w.Ends.Time
-		if w.Since.After(now.Add(mergeCommitClockSlack)) {
-			e = now
-		}
-		if !found || e.After(end) {
-			end, found = e, true
-		}
-	}
-	return end, found
-}
-
-// end is when rr's entry of kind k ends, read from recorded state alone: the entry's end (status.gitWaits[].ends), for
-// a HandoffGrace or HandoffRecovery entry the latest end of the two that stand (handoffWaitEnd); ok is false when
-// nothing bounds it (no entry, a Paced one, or a kind that no longer applies to rr). An entry whose start lies more
+// end is when rr's entry of kind k ends, read from recorded state alone: the entry's own end
+// (status.gitWaits[].ends), never one computed from another entry; ok is false when nothing bounds it (no entry, a Paced one, or a kind that no longer applies to rr). An entry whose start lies more
 // than mergeCommitClockSlack after now (the clock went back) ends at now.
 func (k waitKind) end(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
 	w := gitWait(rr, k)
@@ -274,9 +245,6 @@ func (k waitKind) end(rr *api.RemediationRequest, now time.Time) (time.Time, boo
 	}
 	if w.Since.After(now.Add(mergeCommitClockSlack)) {
 		return now, true
-	}
-	if slices.Contains(handoffKinds, k) {
-		return handoffWaitEnd(rr, now)
 	}
 	return w.Ends.Time, true
 }
@@ -382,9 +350,10 @@ func dropEnded(rr *api.RemediationRequest, now time.Time) {
 }
 
 // removeInapplicable removes, in memory, the entries of rr whose kind no longer applies to it, and reports whether it
-// removed one. Every write that adds an entry calls it first: so RequestDeadline, which applies only to a request
-// that recovers no handoff, never stands with HandoffGrace or HandoffRecovery, which apply only to one that does, and
-// at most five of the six kinds stand at once (the maxItems of status.gitWaits).
+// removed one. Every write that adds an entry calls it before and after the add: so RequestDeadline, which applies
+// only to a request that recovers no handoff, never stands with HandoffGrace or HandoffRecovery, which apply only to
+// one that does, HandoffGrace, which bounds a standing intent, never stands with HandoffRecovery, the record of an
+// intent aborted at a refusal, and at most five of the six kinds stand at once (the maxItems of status.gitWaits).
 func removeInapplicable(rr *api.RemediationRequest) bool {
 	n := len(rr.Status.GitWaits)
 	rr.Status.GitWaits = slices.DeleteFunc(rr.Status.GitWaits, func(w api.GitWait) bool {
@@ -400,8 +369,10 @@ func removeInapplicable(rr *api.RemediationRequest) bool {
 	return true
 }
 
-// putGitWaits records adds in status.gitWaits, after removing the entries whose kind no longer applies to the live
-// request: an entry of a kind that stands keeps its start and its pull request and takes the read that failed now; any other is added whole, as Paced when its kind no longer applies to the live request (waitKind.applies).
+// putGitWaits records adds in status.gitWaits, removing the entries whose kind no longer applies to the live request
+// before and after (a HandoffRecovery entry added removes the HandoffGrace entry): an entry of a kind that stands
+// keeps its start and its pull request and takes the read that failed now; any other is added whole, as Paced when
+// its kind no longer applies to the live request (waitKind.applies).
 // Only the entries and their summary are written, in a patch with the resourceVersion read, retried on a conflict
 // from a fresh read.
 func (r *RemediationRequestReconciler) putGitWaits(ctx context.Context, rr *api.RemediationRequest, adds []api.GitWait) error {
@@ -419,6 +390,7 @@ func (r *RemediationRequestReconciler) putGitWaits(ctx context.Context, rr *api.
 			}
 			live.Status.GitWaits = append(live.Status.GitWaits, a)
 		}
+		removeInapplicable(live)
 	})
 }
 
@@ -475,8 +447,8 @@ func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *ap
 // kind no longer applies to the request (waitKind.end has no end) is removed. While writes are paused (the kill
 // switch, read live) and an entry has passed its end, nothing ends: the request keeps its phase and waits for the
 // pause (waitWhilePaused), as every other step does (sixth decision of 2026-11-18 on #771). Otherwise:
-//   - every RequestDeadline entry past its end, and the HandoffGrace and HandoffRecovery entries once all of them are
-//     past their end (handoffWaitEnd), are ended before any read or step runs, by the kind's own end, earliest first, from recorded state alone (the entries, the deadline, the executor's clock). Time
+//   - every RequestDeadline, HandoffGrace and HandoffRecovery entry past its own end is ended before any read or step
+//     runs, earliest first, from recorded state alone (the entries, the deadline, the executor's clock). Time
 //     spent paused counts against them, as on main, so the first reconcile after a pause ends those that passed
 //     meanwhile;
 //   - a MergeCheck or MergeContent entry past its end (readWaits) is not ended here: the reconcile goes on and makes
@@ -664,7 +636,7 @@ func (r *RemediationRequestReconciler) keptPace(d time.Duration) time.Duration {
 }
 
 // endWait ends rr's entry of kind, past its end: a RequestDeadline, HandoffGrace or HandoffRecovery entry from
-// endPassedWait (the end of the recovery removes the other of the two in its write, dropEnded), a read
+// endPassedWait, a read
 // wait from endAfterLastRead, with why saying how its last read failed.
 func (r *RemediationRequestReconciler) endWait(ctx context.Context, rr *api.RemediationRequest, kind waitKind,
 	now time.Time, why string) (ctrl.Result, bool, error) {
@@ -676,12 +648,11 @@ func (r *RemediationRequestReconciler) endWait(ctx context.Context, rr *api.Reme
 		log.Info("Ended the Git wait of RemediationRequest: its bound passed")
 	}
 	ctx = expiringCtx(ctx)
-	// The entry and the end of a recovery's waits, read before the end removes the entry.
+	// The HandoffRecovery entry, read before the end removes it.
 	var refused *api.GitWait
 	if w := gitWait(rr, waitHandoffRecovery); w != nil {
 		refused = w.DeepCopy()
 	}
-	recoveryEnd, _ := handoffWaitEnd(rr, now)
 	// The wait ends in the write of its end below; it is not left to end again.
 	dropWait(rr, kind, now)
 	// Each end reads nothing from the Git host and returns no retry of one: only a failed write or read of the
@@ -691,7 +662,7 @@ func (r *RemediationRequestReconciler) endWait(ctx context.Context, rr *api.Reme
 		res, err := r.expire(ctx, rr)
 		return res, true, err
 	case waitHandoffGrace, waitHandoffRecovery:
-		return ctrl.Result{}, true, r.endRecoveryFailed(ctx, rr, refused, recoveryEnd)
+		return ctrl.Result{}, true, r.endRecoveryFailed(ctx, rr, refused)
 	case waitMergeCheck:
 		return ctrl.Result{}, true, r.ignoreStopped(r.endMergeWait(ctx, rr, entry, why))
 	case waitMergeContent:

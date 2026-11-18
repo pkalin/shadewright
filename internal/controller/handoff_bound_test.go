@@ -40,8 +40,9 @@ import (
 
 // The abort of a handoff at a refused read of its recovery (#786, decision of 2026-11-18): the intent is aborted at
 // the first refusal, the replacement watches for a merge of its commit until 24 hours after it and never takes the
-// pull request over again, then ends NeedsIntervention with the lock kept; the look that settles the lock keeps it
-// while the pull request is open.
+// pull request over again, then ends NeedsIntervention with the lock kept and its handoff Reserved; the look that
+// settles the lock keeps it while the pull request is open, records a merge of its commit whenever it comes, and
+// releases the lock on a close (third decision of 2026-11-18).
 
 // refuseAll makes the Git host refuse (403) every call of the provider.
 func refuseAll(g *fakegit.Git) {
@@ -120,8 +121,8 @@ func (m *boundModel) apply(e boundEvent) {
 // step is one reconcile: a recovery that meets its first refusal aborts the handoff and watches; one that reads before
 // any refusal ends as the pull request says. A watching request ends at the bound from recorded state, and before it
 // records a merge of its commit once a read shows one, nothing else. A request ended at the bound keeps the lock while
-// a read shows the pull request open, and leaves it once a read shows it merged or closed: a merge after the end is not
-// recorded on it.
+// a read shows the pull request open, records a merge of its commit once a read shows one, however long after the end,
+// and leaves the lock once a read shows the pull request closed.
 func (m *boundModel) step() {
 	switch m.phase {
 	case stWaiting:
@@ -143,7 +144,10 @@ func (m *boundModel) step() {
 		if m.refusing || !m.held {
 			return
 		}
-		if m.pr != prIsOpen {
+		switch m.pr {
+		case prIsMerged:
+			m.phase = stMerged
+		case prIsClosed:
 			m.held = false
 		}
 	}
@@ -255,9 +259,9 @@ func checkBoundEnd(t *testing.T, m *boundModel, got *api.RemediationRequest) {
 		}
 	case stBound:
 		if got.Status.Phase != api.PhaseNeedsIntervention || opened == nil || opened.Reason != ReasonRecoveryWaitExpired ||
-			got.Status.Handoff.From.Phase != api.HandoffAborted {
-			t.Fatalf("phase %q, PullRequestOpened %+v, handoff %q: want the end at the bound", got.Status.Phase, opened,
-				got.Status.Handoff.From.Phase)
+			got.Status.Handoff.From.Phase != api.HandoffReserved {
+			t.Fatalf("phase %q, PullRequestOpened %+v, handoff %q: want the end at the bound, the handoff Reserved",
+				got.Status.Phase, opened, got.Status.Handoff.From.Phase)
 		}
 		if ptr.Deref(got.Status.HoldsTarget, false) != m.held {
 			t.Fatalf("holdsTarget = %v, want %v", ptr.Deref(got.Status.HoldsTarget, false), m.held)
@@ -460,7 +464,7 @@ func TestRecoveryBoundEndRetriedAfterAConflict(t *testing.T) {
 	if err := r.Get(ctx, key, rr); err != nil {
 		t.Fatal(err)
 	}
-	if rr.Status.Phase != api.PhaseNeedsIntervention || rr.Status.Handoff.From.Phase != api.HandoffAborted ||
+	if rr.Status.Phase != api.PhaseNeedsIntervention || rr.Status.Handoff.From.Phase != api.HandoffReserved ||
 		!ptr.Deref(rr.Status.HoldsTarget, false) {
 		t.Fatalf("phase %q, handoff %q, holdsTarget %v: want the end at the bound after the retry", rr.Status.Phase,
 			rr.Status.Handoff.From.Phase, rr.Status.HoldsTarget)

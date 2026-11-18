@@ -765,6 +765,44 @@ var _ = Describe("RemediationRequest status.handoff", func() {
 		expectStatusRefused(got, "or from Aborted to the Intent of another replacement for another hint")
 	})
 
+	// #786 (third decision of 2026-11-18): the end of an intent is recorded with it and never moves, is never added
+	// to an intent stored without one (an intent stored before the field stays valid), and goes with the intent an
+	// Aborted one is replaced by.
+	It("keeps the end of an outgoing handoff as recorded with its intent", func() {
+		const fixed = "the end of an outgoing handoff is recorded with its intent and never changes"
+		ends := metav1.NewTime(time.Date(2026, 11, 18, 10, 15, 0, 0, time.UTC))
+		later := metav1.NewTime(ends.Add(time.Hour))
+		a := predecessor(v1alpha1.HintReserved)
+		a.Status.Handoff = &v1alpha1.Handoff{To: outgoing(v1alpha1.HandoffIntent, 1)}
+		a.Status.Handoff.To.Ends = &ends
+		Expect(k8sClient.Status().Update(ctx, a)).To(Succeed(), "an intent with its end")
+		for name, change := range map[string]func(*v1alpha1.RemediationRequest){
+			"end moved":   func(r *v1alpha1.RemediationRequest) { r.Status.Handoff.To.Ends = &later },
+			"end removed": func(r *v1alpha1.RemediationRequest) { r.Status.Handoff.To.Ends = nil },
+			"end moved with the abort": func(r *v1alpha1.RemediationRequest) {
+				r.Status.Handoff.To.Phase = v1alpha1.HandoffAborted
+				r.Status.Hints[0].State, r.Status.Hints[0].Reason = v1alpha1.HintDeclined, "HandoffAborted"
+				r.Status.Handoff.To.Ends = &later
+			},
+		} {
+			By(name)
+			got := reread(a)
+			change(got)
+			expectStatusRefused(got, fixed)
+		}
+		got := reread(a)
+		got.Status.Handoff.To.Phase = v1alpha1.HandoffAborted
+		got.Status.Hints[0].State, got.Status.Hints[0].Reason = v1alpha1.HintDeclined, "HandoffAborted"
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "the abort keeps the end")
+
+		b := predecessor(v1alpha1.HintReserved)
+		b.Status.Handoff = &v1alpha1.Handoff{To: outgoing(v1alpha1.HandoffIntent, 1)}
+		Expect(k8sClient.Status().Update(ctx, b)).To(Succeed(), "an intent stored before the field, without an end")
+		got = reread(b)
+		got.Status.Handoff.To.Ends = &ends
+		expectStatusRefused(got, fixed)
+	})
+
 	It("keeps each side once written", func() {
 		const toKept, toPinned = "status.handoff.to is never removed", "an outgoing handoff is pinned"
 		a := predecessor(v1alpha1.HintReserved)

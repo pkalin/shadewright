@@ -326,8 +326,9 @@ var _ = Describe("RemediationRequest", func() {
 	})
 
 	// #786 (decision of 2026-11-18): the 24 hours of a handoff recovery's refusal are their own kind, HandoffRecovery,
-	// next to HandoffGrace, so neither end moves. It takes the rules of the other kinds that end with no read: it
-	// records its end, names no pull request, keeps its start and end while it stands, and stands once.
+	// so neither end moves. It takes the rules of the other kinds that end with no read: it records its end, names no
+	// pull request, keeps its start and end while it stands, and stands once. The executor removes the grace in the
+	// write that adds it (third decision of 2026-11-18); a status stored before that holds both, and stays valid.
 	It("keeps a HandoffRecovery wait next to the HandoffGrace wait, each from moving", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
@@ -343,7 +344,7 @@ var _ = Describe("RemediationRequest", func() {
 		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the grace alone")
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), rr)).To(Succeed())
 		rr.Status.GitWaits = append(rr.Status.GitWaits, recovery)
-		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "a refusal adds its own wait, the grace kept")
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "a status stored before the third decision of 2026-11-18, with both")
 
 		refused := func(name, message string, change func(got *v1alpha1.RemediationRequest)) {
 			got := &v1alpha1.RemediationRequest{}

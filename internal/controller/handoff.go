@@ -317,6 +317,7 @@ func (r *RemediationRequestReconciler) reserve(ctx context.Context, rr, pred *re
 	upd.Status.Handoff.To = &remediationv1alpha1.OutgoingHandoff{
 		Name: remediationv1alpha1.Name(rr.Name), UID: remediationv1alpha1.UID(rr.UID), Hint: from.Hint,
 		ExpectedHead: pred.Status.PullRequest.HeadSHA, Phase: remediationv1alpha1.HandoffIntent,
+		Ends: intentEnds(rr),
 	}
 	hintByRef(upd, from.Hint).State = remediationv1alpha1.HintReserved
 	if err := r.Status().Update(ctx, upd); err != nil {
@@ -1077,7 +1078,7 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 		// Any other failure is no Git wait: it ends the request here, on its own retry.
 		logf.FromContext(ctx).Info("Could not recover the handoff of RemediationRequest before the grace ended",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return reconcile.Result{}, r.endRecoveryFailed(ctx, rr, nil, time.Time{})
+		return reconcile.Result{}, r.endRecoveryFailed(ctx, rr, nil)
 	}
 	d := retryAfterOf(err)
 	if d <= 0 {
@@ -1089,19 +1090,15 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 	return reconcile.Result{RequeueAfter: d}, nil
 }
 
-// endRecoveryFailed ends a request whose HandoffGrace and HandoffRecovery waits passed their end; refused is its
-// HandoffRecovery entry as it stood before the end removed it, nil without one, and end the latest end of its waits
-// then (zero when unknown). A replacement whose handoff was aborted
-// at a refusal ends with ReasonRecoveryWaitExpired and keeps the target lock (endRecoveryWait); any other could not be
-// recovered before handoffRecoveryGrace after its deadline: NeedsIntervention with ReasonHandoffRecoveryFailed. Its
-// handoff is aborted with the end (declineOnEnd).
+// endRecoveryFailed ends a request whose HandoffGrace or HandoffRecovery wait passed its own end; refused is its
+// HandoffRecovery entry as it stood before the end removed it, nil without one. A replacement whose handoff was
+// aborted at a refusal ends with ReasonRecoveryWaitExpired, keeps the target lock and its handoff Reserved
+// (endRecoveryWait); any other could not be recovered before handoffRecoveryGrace after its deadline:
+// NeedsIntervention with ReasonHandoffRecoveryFailed, its handoff aborted with the end (declineOnEnd).
 func (r *RemediationRequestReconciler) endRecoveryFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	refused *remediationv1alpha1.GitWait, end time.Time) error {
+	refused *remediationv1alpha1.GitWait) error {
 	if refused != nil {
-		if end.Before(refused.Ends.Time) {
-			end = refused.Ends.Time
-		}
-		return r.ignoreStopped(r.endRecoveryWait(ctx, rr, *refused, end))
+		return r.ignoreStopped(r.endRecoveryWait(ctx, rr, *refused))
 	}
 	return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 		ReasonHandoffRecoveryFailed, "The deadline passed and the Git host could not be read to learn whether "+
@@ -1203,6 +1200,51 @@ var recoverRule = map[changeState]recoverOutcome{
 	changeGone: recoverNothing, changeUnknown: recoverRetry,
 }
 
+// intentEnds is the end of an intent to hand a pull request over to rr, recorded on the predecessor with the intent
+// (status.handoff.to.ends): rr's deadline plus handoffRecoveryGrace, the end of rr's own recovery (HandoffGrace). nil
+// when rr records no deadline.
+func intentEnds(rr *remediationv1alpha1.RemediationRequest) *metav1.Time {
+	if rr.Status.Deadline == nil {
+		return nil
+	}
+	return &metav1.Time{Time: rr.Status.Deadline.Add(handoffRecoveryGrace)}
+}
+
+// intentOverdue reports whether rr, a predecessor whose intent to hand its pull request over to repl stands, ends that
+// intent on its own (third decision of 2026-11-18 on #786, point 3): repl has not taken the pull request over, and the
+// end of the intent has passed on the executor's clock. The end is rr's own record (status.handoff.to.ends); an intent
+// recorded without one ends at repl's deadline plus handoffRecoveryGrace, the bound of repl's recovery, and one with
+// neither does not end here. Nothing repl writes after the intent moves it, so a replacement whose status writes keep
+// being refused (it cannot store its refusal, abortOnRefusal) holds the predecessor's freshness check and merge gate no
+// longer than on main. repl may come from the cache: an intent past its end is confirmed on repl as the API server
+// holds it, so a takeover the cache does not show yet is not aborted; a failed read decides nothing.
+func (r *RemediationRequestReconciler) intentOverdue(ctx context.Context, rr, repl *remediationv1alpha1.RemediationRequest) bool {
+	overdue := func(repl *remediationv1alpha1.RemediationRequest) bool {
+		to := intent(rr)
+		if to == nil || tookOver(repl) {
+			return false
+		}
+		end := to.Ends
+		if end == nil {
+			end = intentEnds(repl)
+		}
+		return end != nil && !r.now().Before(end.Time)
+	}
+	if !overdue(repl) {
+		return false
+	}
+	live := &remediationv1alpha1.RemediationRequest{}
+	if err := r.getLive(ctx, client.ObjectKeyFromObject(repl), live); err != nil || live.UID != repl.UID {
+		return false
+	}
+	if !overdue(live) {
+		return false
+	}
+	logf.FromContext(ctx).Info("Found the handoff intent of RemediationRequest past its end: the replacement did not "+
+		"take the pull request over", "remediationRequest", client.ObjectKeyFromObject(rr), "replacement", repl.Name)
+	return true
+}
+
 // handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep
 // is true when its pull request is its replacement's (handed over, or the replacement took it over and has not
 // ended this request yet), so it must not be closed; wait is true while the replacement may still take it over.
@@ -1225,7 +1267,7 @@ func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *rem
 	case repl.UID != types.UID(to.UID):
 	case tookOver(repl):
 		return true, false, nil
-	case !ended(repl.Status.Phase) && !abortedOnRefusal(repl):
+	case !ended(repl.Status.Phase) && !abortedOnRefusal(repl) && !r.intentOverdue(ctx, rr, repl):
 		return false, true, nil
 	}
 	abortIntent(rr, ReasonHintHandoffAborted)
@@ -1243,7 +1285,10 @@ func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *r
 	}
 	// A replacement whose handoff was aborted at a refused read (abortedOnRefusal, #786) never takes over: its intent
 	// is aborted, though it still runs.
-	abandoned := func(repl *remediationv1alpha1.RemediationRequest) bool { return gaveUp(repl) || abortedOnRefusal(repl) }
+	// One whose intent passed its end (intentOverdue) is not waited for any longer, whatever it could store.
+	abandoned := func(repl *remediationv1alpha1.RemediationRequest) bool {
+		return gaveUp(repl) || abortedOnRefusal(repl) || r.intentOverdue(ctx, upd, repl)
+	}
 	reasonOf := func(repl *remediationv1alpha1.RemediationRequest) string {
 		if repl != nil && repl.Status.Phase == remediationv1alpha1.PhaseDenied {
 			return ReasonHintReplacementDenied

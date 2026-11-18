@@ -53,13 +53,19 @@ import (
 //   - keeps the target lock, writes nothing to Git, and reads the predecessor's pull request every poll interval
 //     until the end of its HandoffRecovery wait (observeStep): a merge of its commit seen in that time is recorded;
 //     a read that fails is retried visibly (observeFailed). The end (endPassedWait, endRecoveryWait) is no verdict on
-//     the lock: the replacement ends NeedsIntervention with RecoveryWaitExpired and keeps the lock until the look
-//     that settles it (checkHeld, heldRecovery first).
+//     the lock and does not end the observation: the replacement ends NeedsIntervention with RecoveryWaitExpired, so
+//     a person sees it, keeps status.handoff.from Reserved and the lock, and the look at stopped holders (checkHeld,
+//     heldRecovery first) goes on reading that pull request: a merge of its commit is recorded with its receipt
+//     whenever it comes (recordWatchedMerge, the same record as during the watch), and the lock is released only on a
+//     verdict (merged, closed, the branch or the repository gone).
 //
 // A read that fails without a refusal (a 5xx, a timeout) is as before #786: the intent stands until the deadline plus
-// handoffRecoveryGrace (the HandoffGrace entry, retryRecovery). A refusal condition that stands without its entry (an
-// executor that wrote the two apart) gets the entry from the condition's lastTransitionTime before any read
-// (recordRefusalEntry), so every bound is read from recorded state.
+// handoffRecoveryGrace (the HandoffGrace entry, retryRecovery). The write that records the HandoffRecovery entry
+// removes the HandoffGrace entry, which bounded the intent the refusal aborts, so each entry ends at its own end. A
+// refusal condition that stands without its entry (an executor that wrote the two apart) gets the entry from the
+// condition's lastTransitionTime before any read (recordRefusalEntry), so every bound is read from recorded state.
+// The predecessor does not depend on these writes: it ends a standing intent at its own recorded end
+// (status.handoff.to.ends, intentOverdue).
 
 // recoveryWaitBound is how long a replacement whose handoff was aborted at a refusal watches for a merge of its
 // commit: the bound of a cancel and of a cleanup.
@@ -229,6 +235,9 @@ func (r *RemediationRequestReconciler) abortOnRefusal(ctx context.Context, rr *r
 			entry := refusalEntry(r.now(), op)
 			live.Status.GitWaits = append(live.Status.GitWaits, entry)
 			c.LastTransitionTime = entry.Since
+			// The refusal aborts the intent, and the grace that bounded it goes in the same write (third decision of
+			// 2026-11-18 on #786): no entry ends at another's end.
+			removeInapplicable(live)
 		}
 		putUnreadable(&live.Status.Conditions, c)
 		gitWaitSummary(live, r.now())
@@ -361,24 +370,49 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 	if v.state == changeUnknown {
 		return reconcile.Result{}, true, v.err
 	}
-	if v.state == changeMerged && v.pr.HeadSHA != to.ExpectedHead {
-		switch ours, err := r.isHandoffCommit(ctx, git, rr, pred, to, v.pr.HeadSHA); {
-		case err != nil:
-			return reconcile.Result{}, true, err
-		case ours:
-			if err := r.recordHandoff(ctx, rr, pred, v.pr, v.pr.HeadSHA); err != nil {
-				return reconcile.Result{}, true, err
-			}
-			logf.FromContext(ctx).Info("Recorded the merge of the commit of RemediationRequest after its handoff "+
-				"was aborted", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number,
-				"phase", rr.Status.Phase)
-			return reconcile.Result{RequeueAfter: stepDelay}, true, nil
-		}
+	switch recorded, err := r.recordWatchedMerge(ctx, git, rr, pred, to, v); {
+	case err != nil:
+		return reconcile.Result{}, true, err
+	case recorded:
+		return reconcile.Result{RequeueAfter: stepDelay}, true, nil
 	}
 	if err := r.setUnreadable(ctx, rr, nil); err != nil {
 		return reconcile.Result{}, true, err
 	}
 	return wait, !cancelRequested(rr), nil
+}
+
+// recordWatchedMerge records, on rr, a merge of the pull request of pred, v as read through git, whose merged head is
+// rr's handoff commit (isHandoffCommit against pred's outgoing handoff to): recordHandoff, which moves rr's handoff
+// from Reserved to Done and records the merge with its receipt (Merged), or the pull request while its merge commit or
+// the check at the merge is awaited (PRCreated). It is the one record of such a merge, during the watch after the abort
+// (observeStep) and after its end (heldRecovery), so verification and the circuit breaker see it. recorded is false,
+// with nothing written, for any other verdict or head; a merged head that is the predecessor's own is its merge, not
+// this request's. A request that ended at the bound of its watch leaves its final phase here, so the breaker's counts
+// of that end go with it (classifyBreaker counts again at the next end).
+func (r *RemediationRequestReconciler) recordWatchedMerge(ctx context.Context, git providers.GitProvider,
+	rr, pred *remediationv1alpha1.RemediationRequest, to *remediationv1alpha1.OutgoingHandoff, v changeVerdict) (
+	bool, error) {
+	if v.state != changeMerged || v.pr.HeadSHA == to.ExpectedHead {
+		return false, nil
+	}
+	switch ours, err := r.isHandoffCommit(ctx, git, rr, pred, to, v.pr.HeadSHA); {
+	case err != nil:
+		return false, err
+	case !ours:
+		return false, nil
+	}
+	ended := endedAtRecoveryBound(rr)
+	if ended {
+		rr.Status.BreakerCounts = nil
+	}
+	if err := r.recordHandoff(ctx, rr, pred, v.pr, v.pr.HeadSHA); err != nil {
+		return false, err
+	}
+	logf.FromContext(ctx).Info("Recorded the merge of the commit of RemediationRequest after its handoff was aborted",
+		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number, "phase", rr.Status.Phase,
+		"afterTheEndOfTheWatch", ended)
+	return true, nil
 }
 
 // observeFailed is the answer to err, a failure of observeStep. It never ends the request; only the end of its waits
@@ -445,16 +479,17 @@ func dropRecoveryWait(rr *remediationv1alpha1.RemediationRequest) {
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 }
 
-// endRecoveryWait ends a replacement whose handoff was aborted at a refusal at the end of its waits: entry is its
-// HandoffRecovery entry, and end the latest end of its waits (handoffWaitEnd), so the message states the span the
-// entries recorded. The end is one status write: NeedsIntervention with ReasonRecoveryWaitExpired and its handoff
-// Aborted (declineOnEnd). The target lock is kept: the end is no verdict, and the look that settles it (checkHeld,
-// heldRecovery) keeps it while the pull request that may carry the request's commit is open. A merge after the end is
-// not recorded on this request: its handoff is Aborted, which never becomes Done. PullRequestOpened is set before stop,
-// so that the end keeps condition PullRequestUnreadable (dropRecoveryWait reads it).
+// endRecoveryWait ends a replacement whose handoff was aborted at a refusal at the end of its HandoffRecovery wait,
+// entry, so the message states the span that entry recorded. The end is one status write: NeedsIntervention with
+// ReasonRecoveryWaitExpired, so a person sees it. It is no verdict and does not end the observation: the target lock
+// is kept, and status.handoff.from stays Reserved (declineOnEnd leaves it, recoveryWaitExpired), so the look at
+// stopped holders (checkHeld, heldRecovery) goes on reading the pull request that may carry the request's commit and
+// records a merge of it, whenever it comes (recordWatchedMerge). PullRequestOpened is set before stop, so that the end
+// keeps condition PullRequestUnreadable (dropRecoveryWait reads it) and its handoff Reserved.
 func (r *RemediationRequestReconciler) endRecoveryWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	entry remediationv1alpha1.GitWait, end time.Time) error {
-	logf.FromContext(ctx).Info("Ended the watch of RemediationRequest after the abort of its handoff: its waits passed",
+	entry remediationv1alpha1.GitWait) error {
+	end := entry.Ends.Time
+	logf.FromContext(ctx).Info("Ended the watch of RemediationRequest after the abort of its handoff: its wait passed",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "since", entry.Since.Time, "end", end)
 	why := ""
 	if c := watchedRecovery(rr); c != nil {
@@ -462,7 +497,7 @@ func (r *RemediationRequestReconciler) endRecoveryWait(ctx context.Context, rr *
 	}
 	msg := fmt.Sprintf("The handoff was aborted at a refused read of its recovery on %s%s; this request watched the "+
 		"pull request it was to take over for %s, until %s, and saw no merge of its commit. It keeps the target lock "+
-		"while that pull request may still be merged; a later merge is not recorded on this request",
+		"while that pull request may still be merged, and a later merge of its commit is recorded on this request",
 		entry.Since.UTC().Format(time.RFC3339), why, end.Sub(entry.Since.Time), end.UTC().Format(time.RFC3339))
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type: remediationv1alpha1.ConditionPROpened, Status: metav1.ConditionFalse, Reason: ReasonRecoveryWaitExpired,
@@ -472,11 +507,11 @@ func (r *RemediationRequestReconciler) endRecoveryWait(ctx context.Context, rr *
 }
 
 // endedAtRecoveryBound reports whether rr ended NeedsIntervention at the end of the watch after its handoff was
-// aborted at a refusal (endRecoveryWait), with no pull request recorded and its handoff Aborted. It reads the status
-// only.
+// aborted at a refusal (endRecoveryWait), with no pull request recorded and its handoff still Reserved. It reads the
+// status only.
 func endedAtRecoveryBound(rr *remediationv1alpha1.RemediationRequest) bool {
 	ho := rr.Status.Handoff
-	if rr.Spec.Replaces == nil || ho == nil || ho.From == nil || ho.From.Phase != remediationv1alpha1.HandoffAborted ||
+	if rr.Spec.Replaces == nil || ho == nil || ho.From == nil || ho.From.Phase != remediationv1alpha1.HandoffReserved ||
 		rr.Status.PullRequest != nil || rr.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention ||
 		rr.Status.Source == nil || rr.Status.PlanRepository == nil {
 		return false
@@ -485,7 +520,7 @@ func endedAtRecoveryBound(rr *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // recoveryWaitExpired reports whether condition PullRequestOpened of rr has ReasonRecoveryWaitExpired, which only
-// endRecoveryWait sets, before the phase it writes: dropRecoveryWait reads it in that same write.
+// endRecoveryWait sets, before the phase it writes: dropRecoveryWait and declineOnEnd read it in that same write.
 func recoveryWaitExpired(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened)
 	return c != nil && c.Reason == ReasonRecoveryWaitExpired
@@ -512,6 +547,8 @@ func (r *RemediationRequestReconciler) openRecovery(ctx context.Context, rr *rem
 // recorded, by its number (changeOf, as the recovery reads it), which may carry this request's commit although no pull
 // request of this request is recorded or marked. It never releases the lock; only a verdict of the look after it
 // does. done is true when this read settles the look:
+//   - merged with this request's commit (recordWatchedMerge): the merge is recorded on this request with its receipt,
+//     however long after the end, and the write that records it settles the lock as for any recorded merge;
 //   - open: the pull request may still deliver this request's commit, whatever head it has now, so the lock is kept,
 //     PullRequestUnreadable goes (it was read), and it is read again after heldRecheckInterval;
 //   - a failed Git read: the lock is kept and the read is retried visibly (retryGitRead, a stopped holder's paced
@@ -521,9 +558,9 @@ func (r *RemediationRequestReconciler) openRecovery(ctx context.Context, rr *rem
 //
 // done is false, and the look decides as for any stopped request, when rr does not hold the lock or did not end at the
 // bound of its watch (endedAtRecoveryBound), or when the predecessor is gone or made again, no longer names this
-// request in its handoff, or its pull request is closed, gone or merged. A merge is not recorded here: the handoff of
-// a request that ended is Aborted, and an incoming handoff never moves from Aborted to Done (a rule of the CRD), so the
-// predecessor's own look records what became of its pull request.
+// request in its handoff, or its pull request is closed, gone, or merged with a head that is not this request's commit:
+// the verdict of the look then releases the lock (merged, closed, the branch or the repository gone). The predecessor,
+// whose intent is Aborted, leaves a merge of this request's commit to this request (settleStopException).
 func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, bool, error) {
 	if !ptr.Deref(rr.Status.HoldsTarget, false) || !endedAtRecoveryBound(rr) {
@@ -547,17 +584,19 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 	}
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	defer cancel()
-	res, done, err := r.heldRecoveryRead(lookCtx, rr, pred)
+	res, done, err := r.heldRecoveryRead(lookCtx, rr, pred, to)
 	err = recoveryStepErr(ctx, lookCtx, err)
 	switch {
 	case err == nil:
 		return res, done, nil
-	case ctx.Err() != nil, isClusterError(err):
+	case ctx.Err() != nil:
 		return reconcile.Result{}, true, err
 	case errors.Is(err, freshness.ErrPaused):
-		// The look waits for writes to resume; the lock is kept meanwhile.
+		// The look, or the record of a merge it found, waits for writes to resume; the lock is kept meanwhile.
 		res, err := r.waitWhilePaused(ctx, rr)
 		return res, true, err
+	case isClusterError(err):
+		return reconcile.Result{}, true, err
 	}
 	if want := recoveryUnreadable(rr, err); want != nil {
 		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
@@ -579,8 +618,8 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 
 // heldRecoveryRead is heldRecovery's read through the plan's repository. A failure is returned; a failure of the
 // Kubernetes API is marked so (a *clusterError).
-func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr, pred *remediationv1alpha1.RemediationRequest) (
-	reconcile.Result, bool, error) {
+func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr, pred *remediationv1alpha1.RemediationRequest,
+	to *remediationv1alpha1.OutgoingHandoff) (reconcile.Result, bool, error) {
 	git, err := r.openRecovery(ctx, rr)
 	if err != nil {
 		return reconcile.Result{}, true, err
@@ -589,6 +628,11 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 	switch v.state {
 	case changeUnknown:
 		return reconcile.Result{}, true, v.err
+	case changeMerged:
+		recorded, err := r.recordWatchedMerge(ctx, git, rr, pred, to, v)
+		if err != nil || recorded {
+			return reconcile.Result{RequeueAfter: stepDelay}, true, err
+		}
 	case changeOpen:
 		if err := r.setUnreadable(ctx, rr, nil); err != nil {
 			return reconcile.Result{}, true, err

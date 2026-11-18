@@ -220,9 +220,11 @@ func TestRecoveryEntryLostAfterTheGraceKeepsTheBound(t *testing.T) {
 	if err := base.Get(ctx, key, got); err != nil {
 		t.Fatal(err)
 	}
-	if watchedRecovery(got) == nil {
+	c := watchedRecovery(got)
+	if c == nil {
 		t.Fatalf("the refusal set no condition: %+v", got.Status.Conditions)
 	}
+	refusedAt := c.LastTransitionTime
 	r.Client, r.APIReader = base, base
 	move(10 * time.Minute)
 	got, _ = reconcileOnce(t, r, rr)
@@ -231,17 +233,25 @@ func TestRecoveryEntryLostAfterTheGraceKeepsTheBound(t *testing.T) {
 		t.Fatalf("the recovery ended at the grace (%s, %+v) although its first refusal was 10 minutes ago",
 			got.Status.Phase, c)
 	}
-	if gitWait(got, waitHandoffRecovery) == nil {
-		t.Fatalf("no HandoffRecovery entry recorded from the standing refusal: %+v", got.Status.GitWaits)
+	// The entry starts at the refusal the condition records, not at the reconcile that found it missing, and the
+	// write that records it removes the grace of the aborted intent.
+	w := gitWait(got, waitHandoffRecovery)
+	if w == nil || !w.Since.Equal(&refusedAt) || !w.Ends.Time.Equal(refusedAt.Add(recoveryWaitBound)) {
+		t.Fatalf("HandoffRecovery entry %+v, want it from the refusal at %v", w, refusedAt)
 	}
-	move(recoveryWaitBound)
+	if gitWait(got, waitHandoffGrace) != nil {
+		t.Fatalf("the grace of the aborted intent stands with the refusal's entry: %+v", got.Status.GitWaits)
+	}
+	move(recoveryWaitBound - 10*time.Minute)
 	got, _ = reconcileOnce(t, r, rr)
 	endedAtTheBound(t, got)
 }
 
-// The message of RecoveryWaitExpired states the span the entries recorded, here a HandoffGrace entry that ends 30
-// hours after the first refusal (the later of the two), not a fixed 24 hours.
-func TestRecoveryWaitExpiredStatesTheRecordedSpan(t *testing.T) {
+// A status stored before the third decision of 2026-11-18 holds a HandoffGrace entry that ends 30 hours after the
+// first refusal next to the HandoffRecovery entry. Each ends at its own end: the grace no longer applies once the
+// refusal's entry stands and is removed, and the request ends at the end of its HandoffRecovery entry, with the span
+// that entry recorded, not 30 hours.
+func TestRecoveryWaitEndsAtItsOwnEnd(t *testing.T) {
 	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
 	move := movableClock(r)
 	ctx := context.Background()
@@ -263,12 +273,17 @@ func TestRecoveryWaitExpiredStatesTheRecordedSpan(t *testing.T) {
 	if err := r.Status().Update(ctx, rr); err != nil {
 		t.Fatal(err)
 	}
-	move(31 * time.Hour)
+	move(time.Hour)
 	got, _ := reconcileOnce(t, r, rr)
+	if gitWait(got, waitHandoffGrace) != nil || gitWait(got, waitHandoffRecovery) == nil {
+		t.Fatalf("waits = %+v, want the HandoffRecovery entry alone", got.Status.GitWaits)
+	}
+	move(recoveryWaitBound - time.Hour)
+	got, _ = reconcileOnce(t, r, rr)
 	endedAtTheBound(t, got)
 	msg := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPROpened).Message
-	if !strings.Contains(msg, (30*time.Hour).String()) || strings.Contains(msg, recoveryWaitBound.String()) {
-		t.Fatalf("message %q does not state the recorded span of 30h", msg)
+	if !strings.Contains(msg, recoveryWaitBound.String()) || strings.Contains(msg, (30*time.Hour).String()) {
+		t.Fatalf("message %q does not state the span of the HandoffRecovery entry, %v", msg, recoveryWaitBound)
 	}
 }
 
@@ -306,7 +321,7 @@ func TestGitWaitsNeverHoldTheDeadlineWithTheHandoffKinds(t *testing.T) {
 						}
 						n++
 						deadline := waitRequestDeadline.applies(rr)
-						for _, k := range handoffKinds {
+						for _, k := range []waitKind{waitHandoffGrace, waitHandoffRecovery} {
 							if deadline && k.applies(rr) {
 								t.Fatalf("RequestDeadline and %s both apply to %+v", gitWaitKinds[k], rr.Status)
 							}
@@ -364,6 +379,29 @@ func TestGitWaitsAddRemovesAnEntryThatNoLongerApplies(t *testing.T) {
 			t.Fatal(err)
 		}
 		got.DeepCopyInto(rr)
+	}
+}
+
+// The write that starts a wait for the merge commit adds an entry too, so it removes an entry whose kind no longer
+// applies first, as every write that adds one does.
+func TestStartMergeWaitRemovesAnEntryThatNoLongerApplies(t *testing.T) {
+	r, _, _, rr, cr, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	since := metav1.NewTime(r.now().Truncate(time.Second))
+	rr.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitRequestDeadline, Since: since,
+		Ends: &metav1.Time{Time: since.Add(time.Hour)}, Operation: branchHeadRead}}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.startMergeWait(ctx, rr, cr, "read the merge commit"); err != nil {
+		t.Fatal(err)
+	}
+	got := &api.RemediationRequest{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), got); err != nil {
+		t.Fatal(err)
+	}
+	if gitWait(got, waitRequestDeadline) != nil || gitWait(got, waitMergeCheck) == nil {
+		t.Fatalf("waits = %+v, want the MergeCheck entry without the RequestDeadline one", got.Status.GitWaits)
 	}
 }
 

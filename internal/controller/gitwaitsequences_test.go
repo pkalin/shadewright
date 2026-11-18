@@ -637,8 +637,9 @@ func TestSequenceMergeWithoutReceiptReleasesUnderAPause(t *testing.T) {
 
 // #786: a replacement recovering a handoff whose repository leaves the settings waits on that refusal past the
 // deadline and its grace; its HandoffRecovery wait ends recoveryWaitBound after the first refusal, from recorded state:
-// NeedsIntervention with RecoveryWaitExpired, the handoff Aborted and the target lock kept, never released without a
-// verdict. The poll interval is an hour, so the bound is reached in few steps; the model's properties hold at each.
+// NeedsIntervention with RecoveryWaitExpired, its handoff still Reserved (the predecessor's Aborted) and the target
+// lock kept, never released without a verdict. The poll interval is an hour, so the bound is reached in few steps;
+// the model's properties hold at each.
 func TestSequenceHandoffRefusalEndsAtItsBound(t *testing.T) {
 	m := scripted(t, modelStart{start: startPolicyChecked, open: true, lasting: time.Minute, handoff: true})
 	m.r.PullRequestPollInterval = time.Hour
@@ -661,10 +662,66 @@ func TestSequenceHandoffRefusalEndsAtItsBound(t *testing.T) {
 	case gitWait(live, waitHandoffGrace) != nil || gitWait(live, waitHandoffRecovery) != nil:
 		m.fatalf("end: a wait of the recovery stands after the end")
 	case live.Status.Handoff == nil || live.Status.Handoff.From == nil ||
-		live.Status.Handoff.From.Phase != api.HandoffAborted:
-		m.fatalf("end: the handoff is not aborted: %+v", live.Status.Handoff)
+		live.Status.Handoff.From.Phase != api.HandoffReserved:
+		m.fatalf("end: the end moved the handoff on: %+v", live.Status.Handoff)
 	case !holdsLock(live):
 		m.fatalf("end: the target lock was released at the end, with no verdict")
+	}
+	if to := m.predecessor().Status.Handoff.To; to.Phase != api.HandoffAborted {
+		m.fatalf("end: the predecessor's intent is %s, want Aborted", to.Phase)
+	}
+	m.report()
+}
+
+// predecessor is the request a replacement of the model recovers the handoff of (recovering).
+func (m *modelWorld) predecessor() *api.RemediationRequest {
+	p := &api.RemediationRequest{}
+	if err := m.base.Get(context.Background(), client.ObjectKey{Namespace: m.key.Namespace, Name: m.key.Name + "-old"},
+		p); err != nil {
+		m.t.Fatal(err)
+	}
+	return p
+}
+
+// #786, third decision of 2026-11-18, point 1: a failed read ten minutes after the deadline records the grace of the
+// intent; a refusal then aborts the intent (its HandoffRecovery entry), while the write of the abort on the
+// predecessor is lost; an hour later the abort is written again and the Git host answers 503. The grace went with the
+// refusal's entry, so no entry stands past its own end (property "own end"), and the replacement watches on.
+func TestSequenceHandoffGraceGoesWithTheRefusal(t *testing.T) {
+	m := scripted(t, modelStart{start: startPolicyChecked, open: true, lasting: time.Hour, handoff: true})
+	deadline := m.live().Status.Deadline.Time
+	for i := 0; i < 40 && m.clock.at.Before(deadline.Add(10*time.Minute)); i++ {
+		m.step()
+	}
+	if live := m.live(); gitWait(live, waitHandoffGrace) == nil ||
+		!m.clock.at.Before(deadline.Add(handoffRecoveryGrace)) {
+		m.fatalf("setup: at +%v after the deadline, waits %v; want the grace standing before its end",
+			m.clock.at.Sub(deadline), live.Status.GitWaits)
+	}
+	m.removeRepository()
+	m.mu.Lock()
+	m.loseNext, m.passWrites = true, 1
+	m.mu.Unlock()
+	m.step()
+	live := m.live()
+	if gitWait(live, waitHandoffRecovery) == nil || gitWait(live, waitHandoffGrace) != nil {
+		m.fatalf("abort: waits %v; want the HandoffRecovery entry without the grace", live.Status.GitWaits)
+	}
+	if intent(m.predecessor()) == nil {
+		m.fatalf("abort: the write of the abort on the predecessor was not lost")
+	}
+	m.clock.advance(time.Hour)
+	m.restoreRepository()
+	m.mu.Lock()
+	m.fault, m.lastingUntil = opGet, time.Time{}
+	m.mu.Unlock()
+	m.step()
+	live = m.live()
+	if live.Status.Phase != api.PhasePolicyChecked || gitWait(live, waitHandoffRecovery) == nil {
+		m.fatalf("watch: phase %s, waits %v; want the replacement watching", live.Status.Phase, live.Status.GitWaits)
+	}
+	if to := m.predecessor().Status.Handoff.To; to.Phase != api.HandoffAborted {
+		m.fatalf("watch: the predecessor's intent is %s an hour later, want Aborted", to.Phase)
 	}
 	m.report()
 }

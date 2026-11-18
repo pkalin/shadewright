@@ -773,6 +773,35 @@ func describe(rr *api.RemediationRequest) string {
 	return s
 }
 
+// observeMerge checks P1 and P2 after a merge of a request's own commit, on reqs as they are now.
+func (m *hmWorld) observeMerge(reqs map[string]*api.RemediationRequest) {
+	mg := m.merge
+	if mg == nil || (mg.owner != hmPred && mg.owner != hmRepl) {
+		return
+	}
+	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[mg.owner]
+	if recordsMerge(reqs[other]) && !m.foreignForGone(reqs) {
+		m.fail("P1", "the merge of the %s's commit is recorded on the %s (%s)", mg.owner, other, describe(reqs[other]))
+	}
+	for who, x := range reqs {
+		if recordsMerge(x) {
+			mg.recorded[who] = true
+		}
+	}
+	if len(mg.recorded) > 1 {
+		m.fail("P1", "the merge of the %s's commit is recorded on both requests", mg.owner)
+	}
+	successes := 0
+	for _, x := range reqs {
+		if x != nil && breakerOutcome(x) == outcomeSuccess {
+			successes++
+		}
+	}
+	if successes > 1 {
+		m.fail("P2", "the breaker counts the merge as %d successes", successes)
+	}
+}
+
 // observe checks the properties that hold after every step, and notes what later checks need.
 func (m *hmWorld) observe() {
 	p, rr := m.get(hmPred), m.get(hmRepl)
@@ -784,29 +813,7 @@ func (m *hmWorld) observe() {
 	}
 	cr := m.pr()
 	// P1 and P2 after a merge of a request's own commit.
-	if mg := m.merge; mg != nil && (mg.owner == hmPred || mg.owner == hmRepl) {
-		other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[mg.owner]
-		if recordsMerge(reqs[other]) && !m.foreignForGone(reqs) {
-			m.fail("P1", "the merge of the %s's commit is recorded on the %s (%s)", mg.owner, other, describe(reqs[other]))
-		}
-		for who, x := range reqs {
-			if recordsMerge(x) {
-				mg.recorded[who] = true
-			}
-		}
-		if len(mg.recorded) > 1 {
-			m.fail("P1", "the merge of the %s's commit is recorded on both requests", mg.owner)
-		}
-		successes := 0
-		for _, x := range reqs {
-			if x != nil && breakerOutcome(x) == outcomeSuccess {
-				successes++
-			}
-		}
-		if successes > 1 {
-			m.fail("P2", "the breaker counts the merge as %d successes", successes)
-		}
-	}
+	m.observeMerge(reqs)
 	// P3.
 	free := true
 	for who, x := range reqs {

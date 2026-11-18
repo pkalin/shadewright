@@ -2115,6 +2115,38 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 	return err
 }
 
+// beginFinalize is the first step of finalize: it marks the deletion and ends the Git waits of a handoff's recovery
+// (#786: nothing recovers the handoff any more) in one status write, before the close, since the limits read this
+// request, and count it against the cap, until the finalizer is gone (breakercounts.go). Then a replacement that
+// recorded the takeover (and maybe the merge of its commit) ends its predecessor HandedOff (step 5 of a handoff), so
+// the predecessor never takes this request's merge for a foreign one once this request is gone (#786). done is true
+// when finalize returns res and err as they are: a failed write, a pause, or a failure of that step.
+func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	reconcile.Result, bool, error) {
+	marked := markDeleting(rr)
+	if removeInapplicable(rr) {
+		gitWaitSummary(rr, r.now())
+		marked = true
+	}
+	if marked {
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, true, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
+				rr.Name, err)
+		}
+	}
+	if !tookOver(rr) || !r.ReviewerHints {
+		return reconcile.Result{}, false, nil
+	}
+	switch err := r.supersedePredecessor(ctx, rr); {
+	case errors.Is(err, freshness.ErrPaused):
+		res, err := r.waitWhilePaused(ctx, rr)
+		return res, true, err
+	case err != nil:
+		return reconcile.Result{}, true, err
+	}
+	return reconcile.Result{}, false, nil
+}
+
 // finalize closes the request's pull request when the request is deleted, then removes the finalizer. It
 // never touches the cluster. Settings that cannot reach the plan's repository any more do not block the
 // deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
@@ -2136,29 +2168,8 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
-	marked := markDeleting(rr)
-	if removeInapplicable(rr) {
-		// The waits of a handoff's recovery end with the deletion (#786): nothing recovers the handoff any more.
-		gitWaitSummary(rr, r.now())
-		marked = true
-	}
-	if marked {
-		// Before the close below: the limits read this request, and count it against the cap, until the
-		// finalizer is gone (breakercounts.go).
-		if err := r.Status().Update(ctx, rr); err != nil {
-			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
-		}
-	}
-	if tookOver(rr) && r.ReviewerHints {
-		// Step 5 of a handoff before the finalizer goes: a replacement that recorded the takeover (and maybe the merge
-		// of its commit) ends its predecessor HandedOff first, so the predecessor never takes this request's merge for
-		// a foreign one once this request is gone (#786).
-		switch err := r.supersedePredecessor(ctx, rr); {
-		case errors.Is(err, freshness.ErrPaused):
-			return r.waitWhilePaused(ctx, rr)
-		case err != nil:
-			return reconcile.Result{}, err
-		}
+	if res, done, err := r.beginFinalize(ctx, rr); done {
+		return res, err
 	}
 	closes := r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
 		(closeOnDelete(rr.Status.Phase) ||

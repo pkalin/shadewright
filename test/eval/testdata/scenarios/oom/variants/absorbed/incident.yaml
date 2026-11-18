@@ -1,0 +1,35 @@
+# Synthetic: the oom scenario's Incident (../../incident.yaml) as a cause Incident with an absorbed tally, not
+# recorded in the lab. The tally is what the grouping case (grouping_test.go) counts from grouping.yaml: the
+# BackOff event's series of 5 (last 11:56:10) and the Unhealthy event's series of 4 (last 11:56:00). The
+# context builder shows it in the summary (ADR-0039 point 18, #796).
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-oom
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000003c0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000003c0
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-0000000003c1
+  reason: OOMKilled
+  type: Warning
+  reportingController: kubelet
+  symptom: Container web terminated with exit code 137
+status:
+  phase: Open
+  count: 3
+  firstSeen: "2026-11-04T11:40:00Z"
+  lastSeen: "2026-11-04T11:56:00Z"
+  cause: true
+  absorbed:
+    - reason: BackOff
+      count: 5
+      lastSeen: "2026-11-04T11:56:10Z"
+    - reason: Unhealthy
+      count: 4
+      lastSeen: "2026-11-04T11:56:00Z"

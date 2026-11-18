@@ -17,8 +17,12 @@ limitations under the License.
 package eval
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/pkalin/shadewright/internal/analysis"
 )
@@ -110,5 +114,121 @@ func TestKedaAtCeilingTakesThePreviousValueFromTheScaledObject(t *testing.T) {
 	same = strings.Replace(same, `"previousValue": 2`, `"previousValue": 1`, 1)
 	if res, _, _ := runKeda(t, scnKedaCeiling, same); res.Reason != string(analysis.ReasonNoChange) {
 		t.Errorf("the current value as desired: reason %s", res.Reason)
+	}
+}
+
+// mustVariant loads the variant name (<scenario>/<variant>) of the recorded scenarios.
+func mustVariant(t *testing.T, name string) (*runtime.Scheme, *scenario) {
+	t.Helper()
+	base, v, _ := strings.Cut(name, "/")
+	scheme, s := mustScenario(t, base)
+	variants, err := loadVariants(scheme, filepath.Join(scenariosDir, base), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range variants {
+		if x.name == base+"/"+v {
+			return scheme, x
+		}
+	}
+	t.Fatalf("no variant %s", name)
+	return nil, nil
+}
+
+// keda-at-ceiling/wide-policy: the policy allows up to 6 replicas from 2, the evidence supports 3 (the rubric's
+// size). A value at or below the supported size passes (3 of 3, 3 and 4 of 5); 4 and 5 fail against a supported
+// size of 3 even though the policy allows them; 6 passes when the rubric supports it or more (#505, decided
+// 2026-11-17). The recorded object stands at 2, so a proposal of 2 is no change and cannot be scored here.
+func TestKedaProposalAtThePolicyMaximumFails(t *testing.T) {
+	const name = scnKedaCeiling + "/wide-policy"
+	scheme, s := mustVariant(t, name)
+	if res := run(t, scheme, s); !res.Pass || res.Reason != string(analysis.ReasonProposed) {
+		t.Fatalf("the recorded reply at the supported size: pass %t, reason %s, outcome %+v", res.Pass, res.Reason,
+			res.Outcome)
+	}
+	at := func(desired string, supported int32) scenarioResult {
+		t.Helper()
+		scheme, s := mustVariant(t, name)
+		s.expected.Outcome.Bounds = nil
+		s.rubric.Size = &rubricSize{Supported: supported, Why: "the load needs it"}
+		content := strings.Replace(s.recording.Replies[0].Content, `"desiredValue": 3`, `"desiredValue": `+desired, 1)
+		if content == s.recording.Replies[0].Content && desired != "3" {
+			t.Fatal("the recorded reply does not say desiredValue 3: the test proves nothing")
+		}
+		s.recording.Replies[0].Content = content
+		return run(t, scheme, s)
+	}
+	res := at("6", 3)
+	if res.Pass || res.Outcome.Pass || res.Reason != string(analysis.ReasonProposed) ||
+		!strings.Contains(res.Outcome.Detail, "desired 6 exceeds the supported size 3") {
+		t.Errorf("a proposal at the policy maximum: pass %t, reason %s, outcome %+v", res.Pass, res.Reason, res.Outcome)
+	}
+	if !res.Diagnosis.Pass || !res.Reads.Pass {
+		t.Errorf("only the size fails: diagnosis %+v, reads %+v", res.Diagnosis, res.Reads)
+	}
+	for _, c := range []struct {
+		desired   string
+		supported int32
+	}{{"3", 3}, {"3", 5}, {"4", 5}, {"4", 3}, {"5", 3}, {"6", 6}, {"6", 8}} {
+		res := at(c.desired, c.supported)
+		if c.supported == 3 && (c.desired == "4" || c.desired == "5") {
+			if res.Outcome.Pass {
+				t.Errorf("desired %s above supported 3 passed: %+v", c.desired, res.Outcome)
+			}
+		} else if !res.Outcome.Pass {
+			t.Errorf("desired %s, supported %d: outcome %+v", c.desired, c.supported, res.Outcome)
+		}
+	}
+}
+
+// A rubric size applies only to a proposal of an action whose number the model chooses, and needs a value in
+// the action's range and a reason.
+func TestRubricSizeIsChecked(t *testing.T) {
+	_, oom := mustScenario(t, scnOOM) // a SetContainerMemoryLimit proposal: code sizes it (ADR-0040)
+	oom.rubric.Size = &rubricSize{Supported: 3, Why: "x"}
+	if err := oom.checkRubric(); err == nil {
+		t.Error("a size on a memory proposal was accepted")
+	}
+	scheme, k := mustScenario(t, scnKedaCeiling)
+	if k.rubric.Size == nil || k.rubric.Size.Supported != 3 {
+		t.Fatalf("keda-at-ceiling states the size %+v, want 3", k.rubric.Size)
+	}
+	for _, z := range []rubricSize{{Supported: 0, Why: "x"}, {Supported: 1001, Why: "x"}, {Supported: 3, Why: " "}} {
+		k.rubric.Size = &z
+		if err := k.checkRubric(); err == nil {
+			t.Errorf("size %+v was accepted", z)
+		}
+	}
+	k.rubric.Size = &rubricSize{Supported: 3, Why: "x"}
+	if err := k.checkRubric(); err != nil {
+		t.Error(err)
+	}
+	k.rubric.Size = nil
+	if err := k.checkRubric(); err == nil || !strings.Contains(err.Error(), "requires size") {
+		t.Errorf("a model-sized proposal without rubric size was accepted: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS(filepath.Join(scenariosDir, scnKedaCeiling))); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	raw, err := root.ReadFile("rubric.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutSize, cut := strings.CutSuffix(strings.Split(string(raw), "\n# The size the evidence supports")[0]+"\n", "")
+	if !cut || withoutSize == string(raw) {
+		t.Fatal("the rubric has no size block to remove: the test proves nothing")
+	}
+	if err := root.WriteFile("rubric.yaml", []byte(withoutSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadScenarioDir(scheme, dir, scnKedaCeiling); err == nil ||
+		!strings.Contains(err.Error(), "requires size") {
+		t.Errorf("loading a model-sized proposal without rubric size: %v", err)
 	}
 }

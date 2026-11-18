@@ -65,12 +65,16 @@ const (
 	secFreshness   = "freshness"
 	secRender      = "render-check"
 	secNotRequest  = "not-request-reasons"
+	secCompatible  = "openai-compatible-model-refusals"
 )
 
 // troubleshootingSections maps each reason listed in a table of docs/troubleshooting.md to the anchors of the
 // sections whose tables list it, in page order. Table rows have no anchors of their own on the docs site, so a
 // link goes to the section that holds the row. TestTroubleshootingSections keeps this map equal to the page.
 var troubleshootingSections = map[string][]string{
+	"EndpointNotAllowed":                {secCompatible},
+	"ModelNotAllowed":                   {secCompatible},
+	"ProviderNotConfigured":             {secCompatible},
 	"AboveMaximum":                      {secPolicy},
 	"ActionNotAllowed":                  {secPolicy},
 	"ActionUnknown":                     {secPolicy},
@@ -120,6 +124,11 @@ var troubleshootingSections = map[string][]string{
 	"GitFailed":                         {secPullRequest},
 	"GitForbidden":                      {secPullRequest},
 	"GitNotFound":                       {secPullRequest},
+	"GitReadFailed":                     {secPullRequest},
+	"GitReadFailedBeforeContentWait":    {secPullRequest},
+	"GitReadFailedBeforeDeadline":       {secPullRequest},
+	"GitReadFailedBeforeHandoffGrace":   {secPullRequest},
+	"GitReadFailedBeforeMergeWait":      {secPullRequest},
 	"GitRejected":                       {secPullRequest},
 	"HandedOff":                         {secPhases},
 	"HandoffAborted":                    {secPhases},
@@ -130,6 +139,8 @@ var troubleshootingSections = map[string][]string{
 	"HelmManaged":                       {secFlux},
 	"HintsTurnedOff":                    {secPhases},
 	"IncidentCountUnchanged":            {secPullRequest},
+	"IncidentFolded":                    {secPhases},
+	"IncidentGone":                      {secPhases},
 	"IncompleteInput":                   {secPolicy},
 	"IncreaseTooLarge":                  {secPolicy},
 	"InputTooLarge":                     {secFiles},
@@ -150,6 +161,8 @@ var troubleshootingSections = map[string][]string{
 	"KustomizationTransforms":           {secFlux},
 	"MergedBeforeVerification":          {secReceipt},
 	"MergedWithForeignChange":           {secPullRequest},
+	"MergeContentUnreadable":            {secPullRequest},
+	"MergeNotCheckable":                 {secPullRequest},
 	"ModeNotSupported":                  {secPolicy},
 	"ModuleNotEnabled":                  {secPolicy, secFreshness},
 	"NoChange":                          {secNotRequest},
@@ -179,6 +192,7 @@ var troubleshootingSections = map[string][]string{
 	"PreviousValueUnknown":              {secNotRequest},
 	"PullRequestClosed":                 {secPullRequest},
 	"PullRequestDeadline":               {secPullRequest},
+	"PullRequestDeadlineCleanupFailed":  {secPullRequest},
 	"PullRequestDeadlineCleanupRefused": {secPullRequest},
 	"PullRequestOpened":                 {secPullRequest},
 	"PullRequestRewriteRefused":         {secPullRequest},

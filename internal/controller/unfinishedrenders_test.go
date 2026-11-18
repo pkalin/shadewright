@@ -470,10 +470,29 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 	closedRecord := opened(notClosed, ReasonPullRequestClosed)
 	closedAndPhase := closedRecord.DeepCopy()
 	closedAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
+	delivered := func(from *remediationv1alpha1.RemediationRequest, status metav1.ConditionStatus,
+		reason, message string) *remediationv1alpha1.RemediationRequest {
+		rr := from.DeepCopy()
+		rr.ResourceVersion = "6"
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+			Type: remediationv1alpha1.ConditionDelivered, Status: status, Reason: reason, Message: message})
+		return rr
+	}
+	pending := delivered(base, metav1.ConditionUnknown, ReasonDeliveryPending, "waiting")
+	pendingCause := delivered(base, metav1.ConditionUnknown, ReasonDeliveryPending, "waiting; cannot be read: x")
+	applied := delivered(base, metav1.ConditionTrue, ReasonMergeCommitApplied, "applied")
+	pendingAndPhase := pendingCause.DeepCopy()
+	pendingAndPhase.Status.Phase = remediationv1alpha1.PhaseInconclusive
 	for name, tc := range map[string]struct {
 		old, new *remediationv1alpha1.RemediationRequest
 		want     bool
 	}{
+		// #771: deliveryReadFailed names a lasting cause in Delivered Unknown and returns the failure for the error
+		// backoff, in both modes; its write must not wake the request before that delay.
+		"Delivered pending set":          {base, pendingCause, true},
+		"Delivered pending with a cause": {pending, pendingCause, true},
+		"Delivered applied":              {pendingCause, applied, false},
+		"Delivered pending and a phase":  {pending, pendingAndPhase, false},
 		// #797: recordStaleClosed removes PullRequestNotClosed and records the close in one write while the end waits.
 		"the close recorded with the removal": {notClosed, closedRecord, true},
 		"the close recorded and a phase":      {notClosed, closedAndPhase, false},
@@ -487,7 +506,7 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 		"PullRequestNotClosed set":            {base, notClosed, true},
 		"its reason":                          {notClosed, notFound, true},
 		"it and a phase":                      {notClosed, notClosedAndPhase, false},
-		"it and another condition":            {base, notClosedAndOther, false},
+		"it and the unreadable condition":     {base, notClosedAndOther, true},
 		"it and the render mark":              {marked, notClosed, true},
 		// #797: a read through a new installation that fails sets PullRequestUnreadable with these reasons on
 		// every poll; its write, a change of reason and its removal must not wake the request before its delay.
@@ -496,8 +515,8 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 		"the unreadable removal":               {unreadableNotFound, base, true},
 		"it and the not-closed condition":      {notClosed, unreadable(notClosed, ReasonGitFailed), true},
 		"unreadable and a phase":               {unreadableFailed, unreadableAndPhase, false},
-		"PullRequestUnreadable with a refusal": {base, unreadableRefused, false},
-		"from a refusal to GitFailed":          {unreadableRefused, unreadableFailed, false},
+		"PullRequestUnreadable with a refusal": {base, unreadableRefused, true},
+		"from a refusal to GitFailed":          {unreadableRefused, unreadableFailed, true},
 	} {
 		if got := onlyOwnMarksChanged(tc.old, tc.new); got != tc.want {
 			t.Errorf("%s: got %v, want %v", name, got, tc.want)

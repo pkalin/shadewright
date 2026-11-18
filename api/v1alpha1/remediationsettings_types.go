@@ -261,8 +261,9 @@ type AnalysisSettings struct {
 
 // AnalysisModels names the two model deployments of ADR-0023: a small model for the one structured triage
 // call, and a stronger one used only on escalation. There is no field for a key: the analyzer authenticates
-// to Foundry with its workload identity (Entra ID, design 11.1) and reads an Anthropic API key from a mounted
-// file (ADR-0037), so no credential is ever stored in this object. The two
+// to Foundry with its workload identity (Entra ID, design 11.1), reads an Anthropic API key from a mounted
+// file (ADR-0037), and optionally reads a separate endpoint-bound OpenAI-compatible key (ADR-0042). No
+// credential is ever stored in this object. The two
 // must be different deployments, so the escalation cap cannot be a second budget for the triage model.
 // +kubebuilder:validation:XValidation:rule="!has(self.escalation) || has(self.triage)",message="an escalation model needs a triage model"
 // +kubebuilder:validation:XValidation:rule="!has(self.triage) || !has(self.escalation) || (self.triage.endpoint.endsWith('/') ? self.triage.endpoint.substring(0, self.triage.endpoint.size() - 1) : self.triage.endpoint) != (self.escalation.endpoint.endsWith('/') ? self.escalation.endpoint.substring(0, self.escalation.endpoint.size() - 1) : self.escalation.endpoint) || self.triage.deployment.lowerAscii() != self.escalation.deployment.lowerAscii()",message="triage and escalation must not name the same endpoint and deployment"
@@ -281,7 +282,7 @@ type AnalysisModels struct {
 
 // ModelProvider names the API a model deployment's adapter speaks (ADR-0037), not the model family: a Claude
 // model served by Microsoft Foundry is still Foundry.
-// +kubebuilder:validation:Enum=Foundry;Anthropic
+// +kubebuilder:validation:Enum=Foundry;Anthropic;OpenAICompatible
 type ModelProvider string
 
 // The model providers.
@@ -291,17 +292,19 @@ const (
 	// ModelProviderAnthropic is the Anthropic API at its fixed host, reached with an API key the analyzer reads
 	// from a mounted file.
 	ModelProviderAnthropic ModelProvider = "Anthropic"
+	// ModelProviderOpenAICompatible is an operator-allowed OpenAI-format HTTPS endpoint (ADR-0042).
+	ModelProviderOpenAICompatible ModelProvider = "OpenAICompatible"
 )
 
-// InferenceAPI names the inference API a Foundry deployment is called through (#501).
+// InferenceAPI names the inference API a Foundry or OpenAICompatible deployment is called through.
 // +kubebuilder:validation:Enum=ChatCompletions;Responses
 type InferenceAPI string
 
-// The inference APIs of a Foundry deployment.
+// The OpenAI-format inference APIs.
 const (
 	// InferenceAPIChatCompletions is the chat completions API, used when inferenceAPI is left out.
 	InferenceAPIChatCompletions InferenceAPI = "ChatCompletions"
-	// InferenceAPIResponses is the Responses API, with apiVersion v1 only.
+	// InferenceAPIResponses is the Responses API (Foundry needs apiVersion v1).
 	InferenceAPIResponses InferenceAPI = "Responses"
 )
 
@@ -313,19 +316,21 @@ const AnthropicEndpoint = "https://api.anthropic.com"
 // another provider can be sent to that host. TestAnthropicEndpointInRules checks that the rules name
 // AnthropicEndpoint and its host.
 //
-// The first rule is written the same way: apiVersion may be left out only for provider Anthropic, so a provider
-// added later needs it until its own rule says otherwise.
+// apiVersion is required for Foundry, optional for Anthropic and forbidden for OpenAICompatible.
 
 // ModelDeployment is one model deployment behind an inference endpoint, for example in Microsoft Foundry
 // (ADR-0016), or a model of the Anthropic API (ADR-0037). It holds no key, token or other credential.
-// +kubebuilder:validation:XValidation:rule="has(self.apiVersion) || (has(self.provider) && self.provider == 'Anthropic')",message="a deployment with a provider other than Anthropic needs apiVersion",fieldPath=".apiVersion"
+// +kubebuilder:validation:XValidation:rule="has(self.apiVersion) || (has(self.provider) && self.provider in ['Anthropic', 'OpenAICompatible'])",message="a Foundry deployment needs apiVersion",fieldPath=".apiVersion"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'Anthropic' || self.endpoint == 'https://api.anthropic.com'",message="a deployment with provider Anthropic must have the endpoint https://api.anthropic.com"
 // +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider == 'Anthropic') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.anthropic.com'",message="the host api.anthropic.com is only for a deployment with provider Anthropic"
-// +kubebuilder:validation:XValidation:rule="!has(self.inferenceAPI) || !has(self.provider) || self.provider == 'Foundry'",message="inferenceAPI is only for a deployment with provider Foundry"
-// +kubebuilder:validation:XValidation:rule="!has(self.inferenceAPI) || self.inferenceAPI != 'Responses' || (has(self.apiVersion) && self.apiVersion == 'v1')",message="inferenceAPI Responses needs apiVersion v1"
+// +kubebuilder:validation:XValidation:rule="!has(self.inferenceAPI) || !has(self.provider) || self.provider in ['Foundry', 'OpenAICompatible']",message="inferenceAPI is only for a deployment with provider Foundry or OpenAICompatible"
+// +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider == 'OpenAICompatible') || !has(self.inferenceAPI) || self.inferenceAPI != 'Responses' || (has(self.apiVersion) && self.apiVersion == 'v1')",message="inferenceAPI Responses needs apiVersion v1"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'OpenAICompatible' || !has(self.apiVersion)",message="OpenAICompatible does not allow apiVersion"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'OpenAICompatible' || !isURL(self.endpoint) || !['openai.azure.com', 'cognitiveservices.azure.com', 'services.ai.azure.com'].exists(s, url(self.endpoint).getHostname() == s || url(self.endpoint).getHostname().endsWith('.' + s))",message="OpenAICompatible does not allow Azure model hosts"
+// +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider != 'Foundry') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.openai.com'",message="the host api.openai.com needs provider OpenAICompatible"
 type ModelDeployment struct {
-	// provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default) or
-	// Anthropic. It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
+	// provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default),
+	// Anthropic or OpenAICompatible (ADR-0042). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
 	// Anthropic the endpoint must be https://api.anthropic.com, the analyzer reads its API key from the file
 	// of its --anthropic-api-key-file flag (not in this object) and refuses the deployment without it,
 	// deployment must equal the role's --triage-model or --escalation-model value, apiVersion may be left out
@@ -333,6 +338,9 @@ type ModelDeployment struct {
 	// deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
 	// started without them refuses it (ProviderNotConfigured). A Foundry deployment may
 	// not name the host api.anthropic.com. There is no fallback between providers.
+	// OpenAICompatible matches --openai-compatible-endpoints declarations and their allowed models lists (ModelNotAllowed for an undeclared model), with no Azure identity and an optional API key
+	// read from its endpoint's own mounted file. The key is bound to its full install-time base URL, never an Azure model host
+	// or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.
 	// +kubebuilder:default=Foundry
 	// +optional
 	Provider ModelProvider `json:"provider,omitempty"`
@@ -347,7 +355,11 @@ type ModelDeployment struct {
 	// --model-endpoint-suffixes flag (not in this object) or a port other than 443, refuses private, loopback
 	// and link-local addresses when it dials, and requests a token for the Cognitive Services audience only.
 	// For provider Anthropic it must be https://api.anthropic.com, the adapter's fixed host, and the allow-list
-	// does not apply; for Foundry that host is refused whatever the allow-list says.
+	// does not apply; for Foundry that host is refused whatever the allow-list says. OpenAICompatible also
+	// requires HTTPS and an exact parsed base and API from --openai-compatible-endpoints. The request uses only
+	// declared destination data, never a settings path. Foundry refuses declared compatible hosts. Private
+	// addresses require a declared Service with egress fields, never loopback or link-local. Each optional
+	// key belongs to its declared base. No redirects or environment proxy are used.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern=`^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?(:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[A-Za-z0-9_~-][A-Za-z0-9._~-]*)*/?$`
@@ -356,7 +368,8 @@ type ModelDeployment struct {
 
 	// deployment is the name of the model deployment: 1 to 64 letters, digits, '.', '_' or '-', starting
 	// with a letter or digit. For provider Anthropic it is the model ID exactly as the replies name it, such as
-	// claude-haiku-5-5.
+	// claude-haiku-5-5. For OpenAICompatible it is the server's model name and must equal a name in the
+	// endpoint declaration's models list byte for byte (ModelNotAllowed otherwise).
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*$`
@@ -370,6 +383,7 @@ type ModelDeployment struct {
 	// +kubebuilder:validation:MinLength=2
 	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:Pattern=`^(v1|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(-preview)?)$`
+	// OpenAICompatible forbids this field: the endpoint includes its API prefix, such as /v1.
 	// +optional
 	APIVersion string `json:"apiVersion,omitempty"`
 
@@ -380,7 +394,8 @@ type ModelDeployment struct {
 	// out) or Responses, which needs apiVersion v1 and posts to <endpoint>/openai/v1/responses. Both carry the
 	// same redacted context, tool definitions, response schema and output limit; the Responses request asks the
 	// service to store nothing. Set Responses for a model that refuses function tools on chat completions,
-	// such as the gpt-6.1 models, whose escalation calls need the read tools (#501). Only for provider Foundry.
+	// such as the gpt-6.1 models, whose escalation calls need the read tools (#501). OpenAICompatible also
+	// accepts this field and appends /responses or /chat/completions to its endpoint without an Azure prefix.
 	// +optional
 	InferenceAPI InferenceAPI `json:"inferenceAPI,omitempty"`
 

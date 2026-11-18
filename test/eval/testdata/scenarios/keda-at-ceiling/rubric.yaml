@@ -8,9 +8,9 @@ facts:
     subject: ["ScaledObject", "worker"]
   - fact: the backlog, the current external metric value (about 13 requests per second) against its target (5 per replica)
     # metrics.yaml records the HPA's metric through hpa_metric_current and hpa_metric_target (#480): 6.5 per
-    # replica against an average target of 5. The harness matches substrings only (case ignored), so every
-    # number carries a delimiter that "16.5", "130" and "50" lack: a leading space or "last " before the
-    # number, a trailing space, newline or punctuation after it. The current value counts per replica (6.5) or
+    # replica against an average target of 5. These terms were written when the harness matched substrings
+    # (before #848), so every number carries a delimiter that "16.5", "130" and "50" lack: a leading space or
+    # "last " before the number, a trailing space, newline or punctuation after it. The current value counts per replica (6.5) or
     # in all (13); the target must be cited with its value, in words or as the end of its metric line
     # ("} 5"), never by the metric name alone. A value at the very end of the text has no delimiter after it
     # and does not match; the reply's evidence quotes come last, so quote the line with its window or in words.
@@ -34,3 +34,7 @@ facts:
     unscored: checked by the policy gate for AdjustKedaMaxReplicas at the policy step, not diagnosis input
   - fact: request rate and replica history over time
     unscored: no approved metric template reads the trigger's request rate or the replica history; hpa_metric_current shows only the HPA's metric per replica over the window
+# The size the evidence supports (#505, decided 2026-11-17): any proposal above it fails.
+size:
+  supported: 3
+  why: metrics.yaml shows the HPA's metric at 6.5 per replica on 2 replicas, about 13 requests per second, against a target of 5 per replica, so the load needs 13 / 5 = 2.6, that is 3 replicas

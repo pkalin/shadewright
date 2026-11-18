@@ -1,0 +1,9 @@
+about: >-
+  The unschedulable Incident in a shared cluster of 48 nodes, reported by a controller whose name is 245 characters
+  of four-byte text: the scheduler's note lists thirteen distinct reasons before its preemption sentence, a 953-byte
+  symptom, and with the 980-byte controller name the summary is longer than its default bound of 2048 bytes with no
+  absorbed tally. The summary keeps every line and shortens the symptom, with a note of the bytes cut (#796); the
+  cause, 12 Insufficient cpu, stays in the part shown. For #841.
+# The schema's lengths count characters and the summary's bound counts bytes: an Incident in ASCII is at most
+# 1907 bytes of summary without a tally, under the default bound, so only text outside ASCII goes over it
+# (TestOverBoundSummaryVariant measures it with the product's default bound).

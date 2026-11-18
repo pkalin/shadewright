@@ -83,7 +83,8 @@ const (
 const fakeModelName = "eval-fake-1"
 
 // replaySource replays each scenario's recorded replies, in order, for both roles. force sends every run to
-// the escalation model (tests only: the recordings are triage replies).
+// the escalation model (tests only: the fleet scenarios' recordings are triage replies; an escalation scenario
+// goes there anyway).
 type replaySource struct {
 	force bool
 }
@@ -266,7 +267,7 @@ func newAnthropicSource() (*anthropicSource, error) {
 	}
 	src.force = force
 	src.settings.Effort = cmp.Or(os.Getenv(envEffort), anthropic.DefaultEffort)
-	if src.settings.ThinkingAllowance, err = envInt(envAllowance, anthropic.DefaultThinkingAllowance, 1,
+	if src.settings.ThinkingAllowance, err = envInt(envAllowance, anthropic.DefaultThinkingAllowance,
 		anthropic.MaxThinkingAllowance); err != nil {
 		return nil, err
 	}
@@ -320,8 +321,9 @@ func (a *anthropicSource) deployments() (*remediationv1alpha1.ModelDeployment, *
 
 // toolDefinitions are the definitions the loop offers on escalation in an evaluation run, for the manifest:
 // the same list as the loop's own (analysis offers every tool but get_delivery_status), with query_metrics,
-// which a scenario with a metrics.yaml is offered. A scenario without one is offered the list without
-// query_metrics; which scenarios have one is covered by the manifest's scenarios hash.
+// which a scenario with a metrics.yaml (or a metrics source that is down) is offered, and get_pod_logs, which a
+// scenario with a logs.yaml is offered. A scenario without them is offered the list without those tools;
+// which scenarios have them is covered by the manifest's scenarios hash.
 func toolDefinitions(scheme *runtime.Scheme) ([]providers.ToolDefinition, error) {
 	r, err := redact.New()
 	if err != nil {
@@ -329,7 +331,7 @@ func toolDefinitions(scheme *runtime.Scheme) ([]providers.ToolDefinition, error)
 	}
 	c := newClient(scheme, nil)
 	set, err := tools.New(tools.Config{Pods: c, Events: c, Objects: c, Redactor: r, Namespaces: watchedNamespaces,
-		Metrics: newReplayMetrics(&metricsRecording{})})
+		Metrics: newReplayMetrics(&metricsRecording{}), Logs: replayLogs{rec: &logsRecording{}}})
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +372,9 @@ func evaluate(t *testing.T, mode string, src modelSource, repeats int, minPassRa
 	for _, s := range scenarios {
 		for i := 1; i <= repeats; i++ {
 			ctx, cancel := context.WithTimeout(t.Context(), scenarioTimeout)
+			start := time.Now()
 			res, err := runScenario(ctx, scheme, s, src)
+			res.Seconds = time.Since(start).Seconds()
 			cancel()
 			res.Repeat = i
 			if err != nil {
@@ -393,11 +397,13 @@ func evaluate(t *testing.T, mode string, src modelSource, repeats int, minPassRa
 }
 
 // replayEnvError refuses the settings of a real-model run that would change a replay's meaning: the
-// recordings are triage replies, so a forced escalation is not replayed, and it is refused rather than
-// ignored.
+// recordings of the fleet scenarios are triage replies, so forcing every run to the escalation model is not
+// replayed, and it is refused rather than ignored. Only the escalation scenarios, recorded as escalation
+// replies, are replayed on the escalation model.
 func replayEnvError() error {
 	if v := os.Getenv(envForceEsc); v != "" {
-		return fmt.Errorf("%s applies to make eval-model only; the replay does not force escalation", envForceEsc)
+		return fmt.Errorf("%s applies to make eval-model only; the replay does not force escalation for every "+
+			"scenario", envForceEsc)
 	}
 	return nil
 }
@@ -424,7 +430,7 @@ func TestEvalFoundry(t *testing.T) {
 	if os.Getenv(envModel) != providerFoundry {
 		t.Skip("set EVAL_MODEL=foundry to evaluate the real model")
 	}
-	repeats, err := envInt(envRepeats, 1, 1, maxRepeats)
+	repeats, err := envInt(envRepeats, 1, maxRepeats)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +459,7 @@ func TestEvalAnthropic(t *testing.T) {
 	if os.Getenv(envModel) != providerAnthropic {
 		t.Skip("set EVAL_MODEL=anthropic to evaluate a Claude model")
 	}
-	repeats, err := envInt(envRepeats, 1, 1, maxRepeats)
+	repeats, err := envInt(envRepeats, 1, maxRepeats)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,14 +481,14 @@ func TestEvalAnthropic(t *testing.T) {
 	}
 }
 
-func envInt(name string, def, lo, hi int) (int, error) {
+func envInt(name string, def, hi int) (int, error) {
 	v := os.Getenv(name)
 	if v == "" {
 		return def, nil
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n < lo || n > hi {
-		return 0, fmt.Errorf("%s must be an integer from %d to %d", name, lo, hi)
+	if err != nil || n < 1 || n > hi {
+		return 0, fmt.Errorf("%s must be an integer from %d to %d", name, 1, hi)
 	}
 	return n, nil
 }

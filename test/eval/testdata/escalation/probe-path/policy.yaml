@@ -1,0 +1,46 @@
+# The scenario's RemediationPolicies (#493): the context builder shows their bounds and the harness scores a
+# proposal they refuse as a failure. demo-memory is the lab's policy, its spec copied unchanged from
+# infrastructure/shadewright-lab-config/remediationpolicy-demo-memory.yaml at fleet commit
+# 74e907a2dd30efe1e624cd2ac1d7f70026d1729a. demo-keda is synthetic: the lab has no KEDA policy yet; it allows
+# maxReplicaCount 1 to 3 in demo, in steps of at most 50%.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationPolicy
+metadata:
+  name: demo-memory
+spec:
+  requestNamespaces: [shadewright-system]
+  targets:
+    namespaces: [demo]
+  actions:
+    - type: SetContainerMemoryLimit
+      setContainerMemoryLimit:
+        min: 64Mi
+        max: 128Mi
+        maxIncreasePercent: 50
+        maxDecreasePercent: 0
+  gitOps:
+    repositoryRef: fleet
+    allowedPaths:
+      - apps/demo/*-deployment.yaml
+  approval: Required
+---
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: RemediationPolicy
+metadata:
+  name: demo-keda
+spec:
+  requestNamespaces: [shadewright-system]
+  targets:
+    namespaces: [demo]
+  actions:
+    - type: AdjustKedaMaxReplicas
+      adjustKedaMaxReplicas:
+        min: 1
+        max: 3
+        maxIncreasePercent: 50
+        maxDecreasePercent: 0
+  gitOps:
+    repositoryRef: fleet
+    allowedPaths:
+      - apps/demo/*-scaledobject.yaml
+  approval: Required

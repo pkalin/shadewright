@@ -227,8 +227,11 @@ type RemediationRequestSpec struct {
 	Cancel bool `json:"cancel,omitempty"`
 }
 
-// Reasons of a request that ends Cancelled because of its Incident (ADR-0039 points 21 and 22). They are
-// declared for the executor's live read of the Incident before the pull request; nothing sets them yet.
+// Reasons of a request that ends Cancelled because of its Incident (ADR-0039 points 21 and 22), on condition
+// PullRequestOpened. The executor sets them after its live read of the Incident, the last step before it opens
+// the pull request (#794). When the read of the branch after the cancel finds a pull request of the request's own
+// open (an earlier open whose answer was lost), the reason moves to condition Approved, and the pull request is
+// recorded and closed; one found merged is recorded as a merged stale plan, with the reason on PlanFresh.
 const (
 	// ReasonIncidentFolded: the request ended Cancelled before its pull request because its Incident has
 	// status.foldedInto: it was folded into the Incident of its cause.
@@ -362,22 +365,19 @@ const (
 	// It is written when the executor finds that, not on every look, and removed when the lock is released.
 	ConditionTargetHeld = "TargetHeld"
 	// ConditionPullRequestUnreadable is True while the executor cannot read the request's pull requests (#688):
-	// with reason GitForbidden or GitRejected while the Git host refuses the read (403 or 422), in the cleanup of a
-	// stale plan with no pull request recorded also the access token or the listing of its branch (#808: the
-	// message names the step and the class of the answer, the request keeps the lock and reads again every poll
-	// interval, and the request's end removes it), and, on a request
+	// with reason GitForbidden or GitRejected while the Git host refuses the read (403 or 422), and, on a request
 	// that keeps the lock on its target, with reason RepositoryUnavailable while the repository of the plan is not
-	// in RemediationSettings any more, TargetBranchChanged while its entry names another target branch, or
+	// in RemediationSettings any more, SettingsNotFound while the RemediationSettings object does not exist (the
+	// lock and any wait for a read are kept), TargetBranchChanged while its entry names another target branch, or
 	// RepositoryUnusable while its entry cannot be used, with reason TargetBranchChanged also while a pull request
-	// that waits cannot be read on the recorded target branch after the entry named another one (#754), and with
+	// that waits cannot be read on the recorded target branch, or on the one the entry names, after the entry named
+	// another one (#754, #771), and with
 	// reason RecordedMissingOtherListed while the Git
 	// host has no pull request of this request with the recorded number but the request's branch lists another one
 	// with its marker (the message names both numbers and what ends it), and, on a stale plan whose repository the
 	// settings reach only through a new installation of the GitHub App, with reason GitNotFound (a 404) or GitFailed
 	// (any other failure that is not an answer, the token and the cleanup's deadline included) while the read of its
-	// branch that settles the lock on its target fails through that installation (#797), or while the token or the
-	// listing of its branch fails that way in the cleanup of such a plan with no pull request recorded (#808); the
-	// request's end removes these two reasons. The message names the read or the step;
+	// branch that settles the lock on its target fails through that installation (#797). The message names the read;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,
@@ -403,16 +403,10 @@ const (
 	// refusal's reason, with GitNotFound for a 404, or with GitFailed for any other failure, a step still running at
 	// the cleanup's deadline included (#797). A close through that installation that fails without a refusal sets it
 	// too, with GitNotFound or GitFailed. The message names the latest failed step, and a step that failed without a
-	// refusal is retried with the error backoff or the delay the host asked for. With no pull request recorded (#808),
-	// a close through that installation of the pull request found on the request's branch that fails without a
-	// refusal sets it with GitNotFound or GitFailed, with one Warning Event per change of reason; a failed token or
-	// listing there sets PullRequestUnreadable instead (never both: setting one removes the other), and so does a
-	// refused token or listing. A close of that pull request that the Git host refuses for good, through the plan's
-	// installation or a new one, sets it with the refusal's reason and the class of the host's answer in the message,
-	// and does not end the request (decided 2026-11-16): it keeps its phase, the mark and the lock, and the cleanup is
-	// tried again after the poll interval (or the longer delay the host asked for), never through the controller's
-	// rate limiter, until a look of the branch finds the pull request closed (Superseded) or merged (Merged, with
-	// the stale mark).
+	// refusal is retried with the error backoff or the delay the host asked for. A request Cancelled with
+	// IncidentFolded or IncidentGone (#794) sets it too, with the same reasons, when the close of its own pull
+	// request, found open by the read of its branch after the cancel, fails; it keeps its target lock meanwhile, and
+	// the close that goes through, or a read that finds the pull request closed, merged or not its own, removes it.
 	ConditionPullRequestNotClosed = "PullRequestNotClosed"
 	// ConditionCleanupRefused is True, with reason GitForbidden or GitRejected, once the Git host refused for good
 	// (403 or 422) a step of the cleanup of a deleted request: the access token for the plan's repository, the
@@ -432,12 +426,17 @@ const (
 	// the failure (a refusal, a failure worth a retry, a token the Git App cannot get, a signer that cannot sign, a
 	// 404). The reason is GitForbidden or GitRejected for a refusal, RecordedMissingOtherListed for that read and
 	// CleanupFailed for anything else; the message names the step and the recorded pull request, if any, never the
-	// Git host's answer. It is set only while the request is being deleted, so its lastTransitionTime is the first
-	// failure after the deletion began, on the executor's clock, and it is kept while failures go on. It is removed
+	// Git host's answer. It is set while the request is being deleted, so its lastTransitionTime is the first
+	// failure after the deletion began, on the executor's clock, and it is kept while failures go on; it is removed
 	// only when the cleanup finishes. 24 hours after lastTransitionTime the finalizer lets the request go with a
 	// Warning Event PullRequestLeftOpen saying that the cleanup could not be finished, that the state of the pull
-	// request is not known and that it may be open. Paused writes (RemediationSettings spec.paused) hold the
-	// deletion and never set it. One Warning Event, CleanupFailing, is recorded when it is set.
+	// request is not known and that it may be open. An Expired request sets it too (reason CleanupFailed) when the
+	// close of a pull request it opened while the write that would record it was lost fails for a reason worth a
+	// retry: 24 hours after lastTransitionTime the cleanup ends with reason PullRequestDeadlineCleanupFailed, decided
+	// before any read of the Git host, and the condition goes then, when the close works, or when the look-up finds
+	// none of its pull requests open; a deletion that follows counts its own bound from the same condition. Paused
+	// writes (RemediationSettings spec.paused) hold the deletion and the close and never set it. One Warning Event,
+	// CleanupFailing, is recorded when it is set.
 	ConditionCleanupFailing = "CleanupFailing"
 	// ConditionCancelPending is True while spec.cancel is set and the cancel cannot finish (#289): the request keeps
 	// its phase, before the merge, and its pull request is still watched, so a merge ends it Merged and a close ends
@@ -454,7 +453,109 @@ const (
 	// is set or its reason changes. A pull request known closed never keeps it: the request ends Cancelled, also when
 	// the failed review check cannot be written. The write that ends the request removes it.
 	ConditionCancelPending = "CancelPending"
+	// ConditionGitReadRetry is True while status.gitWaits holds an entry: the executor retries a read of the Git host
+	// that failed (#771). It summarizes the entries: the reason is that of the entry that ends first
+	// (GitReadFailedBeforeDeadline, GitReadFailedBeforeHandoffGrace, GitReadFailedBeforeMergeWait,
+	// GitReadFailedBeforeContentWait), or GitReadFailed when only a Paced entry stands; the message names the
+	// reads, never the host's answer; lastTransitionTime is the start of that entry. The read is made again after
+	// the pull request poll interval, or the longer delay the host asked for, and never later than the end of an
+	// entry; an entry past its end is ended at the start of the next reconcile. A failure of the Kubernetes API
+	// never sets it. It is removed with the last entry.
+	ConditionGitReadRetry = "GitReadRetry"
 )
+
+// ReasonGitReadFailed is the reason of condition GitReadRetry True: a read of the Git host failed and is retried.
+const ReasonGitReadFailed = "GitReadFailed"
+
+// GitWaitKind is the kind of bound of a Git wait (status.gitWaits).
+// +kubebuilder:validation:Enum=Paced;RequestDeadline;HandoffGrace;MergeCheck;MergeContent
+type GitWaitKind string
+
+// Kinds of Git wait.
+const (
+	// GitWaitPaced has no end of its own: the read is retried at the poll interval until it works, for a reason the
+	// executor names in code (a request that has no deadline at that step, or a target lock kept until a read
+	// settles it).
+	GitWaitPaced GitWaitKind = "Paced"
+	// GitWaitRequestDeadline ends at status.deadline of a request in PolicyChecked, as it stood when the entry was
+	// recorded: the request expires, also when the cleanup of its pull requests cannot read the Git host.
+	GitWaitRequestDeadline GitWaitKind = "RequestDeadline"
+	// GitWaitHandoffGrace ends a grace after status.deadline of a replacement recovering a handoff: the request ends
+	// NeedsIntervention with HandoffRecoveryFailed.
+	GitWaitHandoffGrace GitWaitKind = "HandoffGrace"
+	// GitWaitMergeCheck ends five minutes after its start, a wait for the merge commit of a pull request seen merged
+	// without one or for an answer of the check at the merge: the merge it names is recorded, with the plan not
+	// shown fresh, and without a receipt when no merge commit was seen. It ends only after one more read made once
+	// its end has passed: an answer goes on as after any read, a failure ends the wait. Under a pause of writes no
+	// read is made and it does not end.
+	GitWaitMergeCheck GitWaitKind = "MergeCheck"
+	// GitWaitMergeContent ends five minutes after its start: the request ends NeedsIntervention with
+	// MergeContentUnreadable. It names the pull request whose merge it reads. Like MergeCheck it ends only after one
+	// more read made once its end has passed, and not under a pause of writes.
+	GitWaitMergeContent GitWaitKind = "MergeContent"
+)
+
+// GitWait is one wait on a read of the Git host that failed (status.gitWaits). It holds everything needed to end it,
+// so its end is decided from the entry alone.
+// +kubebuilder:validation:XValidation:rule="(self.kind == 'MergeContent' || self.kind == 'MergeCheck') == has(self.pullRequest)",message="a MergeContent or MergeCheck wait names its pull request, and no other kind names one"
+// +kubebuilder:validation:XValidation:rule="(self.kind == 'Paced') != has(self.ends)",message="a wait of a bounded kind records its end, and a Paced wait has none"
+type GitWait struct {
+	// kind is the kind of bound of the wait.
+	// +required
+	Kind GitWaitKind `json:"kind"`
+
+	// since is when the wait began, on the executor's clock. It does not move while the entry stands.
+	// +required
+	Since metav1.Time `json:"since"`
+
+	// ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
+	// request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
+	// the start (MergeCheck, MergeContent). It does not move while the entry stands.
+	// +optional
+	Ends *metav1.Time `json:"ends,omitempty"`
+
+	// operation is the fixed name of the read that failed last, never the Git host's answer. A name that would be
+	// longer than the bound (one that names a branch or a path) is cut where the entry is built.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +required
+	Operation string `json:"operation"`
+
+	// pullRequest is, for a MergeContent or a MergeCheck wait only, the pull request whose merge the wait is about:
+	// the recorded one, or one found by the request's marker, so the end of the wait can record it without a read.
+	// +optional
+	PullRequest *GitWaitPullRequest `json:"pullRequest,omitempty"`
+}
+
+// GitWaitPullRequest is the pull request a MergeContent wait is about.
+type GitWaitPullRequest struct {
+	// number of the pull request.
+	// +kubebuilder:validation:Minimum=1
+	// +required
+	Number int64 `json:"number"`
+
+	// url of the pull request.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https://`
+	// +required
+	URL string `json:"url"`
+
+	// headSHA is the head of the pull request, one Shadewright pushed.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +required
+	HeadSHA string `json:"headSHA"`
+
+	// baseBranch is the branch the pull request was merged into, as the read that started the wait saw it.
+	// +optional
+	BaseBranch GitBranch `json:"baseBranch,omitempty"`
+
+	// mergeCommitSHA is the merge commit the Git host reported for the pull request, when it reported one (a
+	// MergeCheck wait for the check at the merge); the end of a MergeCheck wait records the merge with a receipt
+	// only with it.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +optional
+	MergeCommitSHA string `json:"mergeCommitSHA,omitempty"`
+}
 
 // ReasonIncidentCountUnchanged is the reason of condition IncidentStopped True: the Incident's count did not
 // change for at least the quiet time of its closure rules while the pull request waited for review (#715).
@@ -746,7 +847,9 @@ type MergeReceipt struct {
 	// +required
 	Repository PlanRepository `json:"repository"`
 
-	// targetBranch is the branch the pull request merged into, copied from status.source.targetBranch.
+	// targetBranch is the branch the pull request merged into: status.source.targetBranch, or, for a pull request a
+	// person moved to the target branch RemediationSettings names after a change and merged there, that branch
+	// (#771).
 	// +required
 	TargetBranch GitBranch `json:"targetBranch"`
 
@@ -937,15 +1040,34 @@ type RemediationRequestStatus struct {
 
 	// mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
 	// merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
-	// from it (GitHub computes it after the merge), keeping the phase, and then records the merge without a
-	// receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
-	// change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot
+	// (GitHub computes it after the merge), bounded by the MergeCheck entry of gitWaits recorded with it, which
+	// counts from its own start (not from this field) and ends after one more read once it has passed, keeping the
+	// phase, and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull
+	// request it never recorded, as merged with a change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot
 	// read what it needs, the executor records the start here if it is unset, retries until the wait is over, and
 	// then records the merge with a plan not shown fresh (PlanFresh False, reason PlanChanged). Set once and never
 	// changed or removed (a validation rule on the object), so a restart does not start the wait again. Unset
 	// when the commit was reported at once and the check at the merge answered.
 	// +optional
 	MergeCommitAwaitedSince *metav1.Time `json:"mergeCommitAwaitedSince,omitempty"`
+
+	// gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of
+	// bound: Paced (no end of its own), RequestDeadline, HandoffGrace, MergeCheck and MergeContent. Starting or ending
+	// one kind never touches another, and an entry holds everything needed to end it. At the start of every
+	// reconcile the executor ends each RequestDeadline and HandoffGrace entry whose bound has passed, before any
+	// read: RequestDeadline expires the request, HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed.
+	// A MergeCheck or MergeContent entry whose bound has passed ends only after one more read in that reconcile:
+	// an answer goes on as after any read, and a failure ends it, MergeCheck by recording the merge with the plan
+	// not shown fresh, MergeContent (five minutes from its start) by ending the request NeedsIntervention with
+	// MergeContentUnreadable, recording the pull request the entry names when the status holds none. While writes
+	// are paused nothing is read and no entry ends. An entry whose kind no longer applies to the request is
+	// removed. A successful read of what a merge brought removes the MergeContent entry, and a reconcile with no
+	// failed Git read removes the others but MergeCheck. Condition GitReadRetry summarizes the entries for people.
+	// +listType=map
+	// +listMapKey=kind
+	// +kubebuilder:validation:MaxItems=5
+	// +optional
+	GitWaits []GitWait `json:"gitWaits,omitempty"`
 
 	// rollout is what the check after the merge keeps between reconciles (the RolledOut condition).
 	// +optional
@@ -1042,6 +1164,7 @@ type RemediationRequestStatus struct {
 // is neither added, removed nor changed (#748).
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck) == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck) || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))",message="status.pullRequest.reviewCheck does not change once status.mergeReceipt exists"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)",message="status.mergeCommitAwaitedSince is set once and never changed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status) || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o, o.kind != w.kind || (o.since == w.since && has(o.ends) == has(w.ends) && (!has(o.ends) || o.ends == w.ends) && has(o.pullRequest) == has(w.pullRequest) && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))",message="a Git wait keeps its start, its end and its pull request while it stands; remove it to start another"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))",message="status.mergeReceipt is set only in Merged or a phase after it"
 // WaitingForDelivery and Verifying are measured from the receipt (ADR-0030 section 2), and Verifying from the
 // applied time, which the executor writes in the same status write that sets Verifying.

@@ -93,6 +93,7 @@ func TestProviderRefusalsHandOff(t *testing.T) {
 	}{
 		{ErrProviderNotConfigured, ReasonProviderNotConfigured},
 		{ErrDeploymentNotExpected, ReasonUnexpectedModel},
+		{ErrModelNotAllowed, ReasonModelNotAllowed},
 	} {
 		f := newFixture()
 		f.cfg.Models = func(Role, remediationv1alpha1.ModelDeployment) (providers.ModelProvider, error) {

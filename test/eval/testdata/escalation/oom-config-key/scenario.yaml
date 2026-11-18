@@ -1,0 +1,10 @@
+# Synthetic escalation scenario (#504), not a fleet scenario: written by hand, not observed on a cluster.
+about: >-
+  A plausible wrong first guess. The web container is OOMKilled (exit code 137) and restarts, which reads as a
+  memory limit too low, but its cache has no size bound because the ConfigMap web-config lacks the key
+  cache.yaml; a higher limit only delays the next kill, and a memory proposal fails the case. The context's
+  log excerpt, the newest lines of the previous instance, shows the cache growing but not the startup line
+  that names the missing key; the escalation model reads the current instance's log with get_pod_logs and
+  finds it.
+behindReads:
+  - the ConfigMap web-config has no key cache.yaml, so the item cache has no size bound

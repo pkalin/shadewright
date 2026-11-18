@@ -1,0 +1,18 @@
+# Synthetic: the reply of unschedulable/over-bound (its replies.yaml) with one more quote cited from the summary
+# (c1): the end of the symptom, which the summary cut and only the pod's status (c2) shows. The loop accepts the
+# result; the harness fails the run (#841).
+scenario: unschedulable/over-bound
+kind: cut-part
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2700, outputTokens: 300}
+    content: |
+      {"summary": "The new pod of Deployment demo/web is Pending with FailedScheduling: the 12 nodes it could run on all have Insufficient cpu, and the other 36 carry taints it does not tolerate or are cordoned. Lowering requests or adding nodes is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "The new template requests more CPU than any untainted node can offer."}],
+       "evidence": [{"source": "c1", "quote": "12 Insufficient cpu"},
+                    {"source": "c1", "quote": "36 Preemption is not helpful for scheduling"},
+                    {"source": "c2", "quote": "Unschedulable"}],
+       "missingData": ["The container's CPU request in the pod template."],
+       "uncertainty": "The request itself is not in the context; the scheduler's message implies it is large.",
+       "proposal": null}

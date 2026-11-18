@@ -216,27 +216,113 @@ var _ = Describe("RemediationRequest", func() {
 	})
 
 	// #678: the start of the wait for a merge commit is set once, so a restart or a write cannot move it.
-	It("keeps mergeCommitAwaitedSince once set", func() {
+	for field, at := range map[string]func(*v1alpha1.RemediationRequestStatus) **metav1.Time{
+		"mergeCommitAwaitedSince": func(s *v1alpha1.RemediationRequestStatus) **metav1.Time {
+			return &s.MergeCommitAwaitedSince
+		},
+	} {
+		It("keeps "+field+" once set", func() {
+			rr := fx.RemediationRequest("default", unique("rr"))
+			Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+			deleteAfterSpec(rr)
+			since := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+			*at(&rr.Status) = &since
+			Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write is allowed")
+			later := metav1.NewTime(since.Add(time.Minute))
+			for name, change := range map[string]func(*v1alpha1.RemediationRequest){
+				"moved":       func(r *v1alpha1.RemediationRequest) { *at(&r.Status) = &later },
+				"cleared":     func(r *v1alpha1.RemediationRequest) { *at(&r.Status) = nil },
+				statusEmptied: func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} },
+			} {
+				got := &v1alpha1.RemediationRequest{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+				change(got)
+				err := k8sClient.Status().Update(ctx, got)
+				Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+				Expect(err.Error()).To(ContainSubstring("status."+field+" is set once and never changed"), name)
+			}
+		})
+	}
+
+	// #771 (third decision of 2026-11-17): Git waits are a set, one entry per kind. A standing wait keeps its start
+	// and its pull request, so neither a restart nor another wait moves it; a removed one starts again; a content
+	// wait names its pull request and no other kind names one.
+	It("keeps a standing Git wait from moving and a content wait whole", func() {
 		rr := fx.RemediationRequest("default", unique("rr"))
 		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
 		deleteAfterSpec(rr)
 		since := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
-		rr.Status.MergeCommitAwaitedSince = &since
+		pr := &v1alpha1.GitWaitPullRequest{Number: 7, URL: "https://github.com/example/fleet/pull/7",
+			HeadSHA: "0123456789abcdef0123456789abcdef01234567"}
+		ends := metav1.NewTime(since.Add(5 * time.Minute))
+		content := v1alpha1.GitWait{Kind: v1alpha1.GitWaitMergeContent, Since: since, Ends: &ends,
+			Operation: "read the parents of the merge commit", PullRequest: pr}
+		paced := v1alpha1.GitWait{Kind: v1alpha1.GitWaitPaced, Since: since, Operation: "read the pull request"}
+		rr.Status.GitWaits = []v1alpha1.GitWait{content, paced}
 		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the first write is allowed")
-		later := metav1.NewTime(since.Add(time.Minute))
-		for name, change := range map[string]func(*v1alpha1.RemediationRequest){
-			"moved":       func(r *v1alpha1.RemediationRequest) { r.Status.MergeCommitAwaitedSince = &later },
-			"cleared":     func(r *v1alpha1.RemediationRequest) { r.Status.MergeCommitAwaitedSince = nil },
-			statusEmptied: func(r *v1alpha1.RemediationRequest) { r.Status = v1alpha1.RemediationRequestStatus{} },
-		} {
+
+		refused := func(name, message string, change func(got *v1alpha1.RemediationRequest)) {
 			got := &v1alpha1.RemediationRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
 			change(got)
 			err := k8sClient.Status().Update(ctx, got)
 			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
-			Expect(err.Error()).To(ContainSubstring("status.mergeCommitAwaitedSince is set once and never changed"), name)
+			if message != "" {
+				Expect(err.Error()).To(ContainSubstring(message), name)
+			}
 		}
+		later := metav1.NewTime(since.Add(time.Minute))
+		const op = "read the parents"
+		refused("a moved start", "a Git wait keeps its start", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[0].Since = later
+		})
+		refused("another pull request", "a Git wait keeps its start", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[0].PullRequest.Number = 8
+		})
+		refused("a moved end", "a Git wait keeps its start, its end", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[0].Ends = &later
+		})
+		refused("a content wait without its pull request", "a MergeContent or MergeCheck wait names its pull request",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits = []v1alpha1.GitWait{{Kind: v1alpha1.GitWaitMergeContent, Since: since,
+					Ends: &ends, Operation: op}}
+			})
+		refused("a merge wait without its pull request", "a MergeContent or MergeCheck wait names its pull request",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits = []v1alpha1.GitWait{{Kind: v1alpha1.GitWaitMergeCheck, Since: since,
+					Ends: &ends, Operation: op}}
+			})
+		refused("a paced wait with a pull request", "a MergeContent or MergeCheck wait names its pull request",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits[1].PullRequest = pr
+			})
+		refused("a bounded wait without its end", "a wait of a bounded kind records its end",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits = []v1alpha1.GitWait{{Kind: v1alpha1.GitWaitRequestDeadline, Since: since,
+					Operation: op}}
+			})
+		refused("a paced wait with an end", "a wait of a bounded kind records its end",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits[1].Ends = &ends
+			})
+		refused("an operation past its bound", "", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[1].Operation = strings.Repeat("o", 257)
+		})
+		refused("two entries of one kind", "", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits = append(got.Status.GitWaits, paced)
+		})
+
+		got := &v1alpha1.RemediationRequest{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+		got.Status.GitWaits = got.Status.GitWaits[1:]
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a successful read removes its wait alone")
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+		content.Since = later
+		got.Status.GitWaits = append(got.Status.GitWaits, content)
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a later failure starts its own wait")
 	})
 
 	// ADR-0030 section 1 (#678): the merge receipt is written once and never changed, also by dropping it or the
@@ -2012,7 +2098,7 @@ var _ = Describe("RemediationSettings", func() {
 						expectAccepted(s)
 						return
 					}
-					expectRefused(s, "a deployment with a provider other than Anthropic needs apiVersion")
+					expectRefused(s, "a Foundry deployment needs apiVersion")
 				},
 				Entry("Foundry with apiVersion", v1alpha1.ModelProviderFoundry, "2024-10-21", true),
 				Entry("Foundry without apiVersion", v1alpha1.ModelProviderFoundry, "", false),
@@ -2049,13 +2135,46 @@ var _ = Describe("RemediationSettings", func() {
 					"https://example.services.ai.azure.com/", "small-model"
 				err := k8sClient.Update(ctx, got)
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("a deployment with a provider other than Anthropic needs apiVersion"))
+				Expect(err.Error()).To(ContainSubstring("a Foundry deployment needs apiVersion"))
 			})
 
 			It("refuses an unknown provider", func() {
 				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.Provider = "OpenAI" }),
 					"spec.analysis.models.triage.provider")
 			})
+		})
+
+		Describe("OpenAICompatible (#834)", func() {
+			It("refuses a Foundry deployment at the OpenAI API", func() {
+				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+					m.Endpoint = compatibleEndpoint
+				}), "the host api.openai.com needs provider OpenAICompatible")
+			})
+			DescribeTable("checks provider, API version and inference API combinations",
+				func(version string, inference v1alpha1.InferenceAPI, endpoint string, accepted bool) {
+					s := withModel(func(m *v1alpha1.ModelDeployment) {
+						m.Provider = v1alpha1.ModelProviderOpenAICompatible
+						m.Endpoint, m.APIVersion, m.InferenceAPI = endpoint, version, inference
+					})
+					if accepted {
+						expectAccepted(s)
+					} else {
+						err := k8sClient.Create(ctx, s)
+						Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected result: %v", err)
+					}
+				},
+				Entry("default chat", "", v1alpha1.InferenceAPI(""), "https://api.openai.com/v1", true),
+				Entry("chat", "", v1alpha1.InferenceAPIChatCompletions, "https://gateway.example.com/v1", true),
+				Entry("Responses", "", v1alpha1.InferenceAPIResponses, "https://api.openai.com/v1", true),
+				Entry("Service HTTPS", "", v1alpha1.InferenceAPIResponses, "https://model.demo.svc.cluster.local/v1", true),
+				Entry("Azure version", "v1", v1alpha1.InferenceAPIResponses, "https://api.openai.com/v1", false),
+				Entry("dated version", "2024-10-21", v1alpha1.InferenceAPIChatCompletions, "https://api.openai.com/v1", false),
+				Entry("unknown API", "", v1alpha1.InferenceAPI("Other"), "https://api.openai.com/v1", false),
+				Entry("Anthropic host", "", v1alpha1.InferenceAPIResponses, "https://api.anthropic.com", false),
+				Entry("Azure model host", "", v1alpha1.InferenceAPIResponses, "https://r.openai.azure.com", false),
+				Entry("plain Service HTTP", "", v1alpha1.InferenceAPIResponses, "http://model.demo.svc/v1", false),
+				Entry("IP literal", "", v1alpha1.InferenceAPIResponses, "https://10.0.0.2/v1", false),
+			)
 		})
 
 		Describe("inferenceAPI (#501)", func() {
@@ -2095,7 +2214,7 @@ var _ = Describe("RemediationSettings", func() {
 						m.Provider, m.Endpoint, m.Deployment = v1alpha1.ModelProviderAnthropic,
 							"https://api.anthropic.com", "claude-haiku-5-5"
 						m.InferenceAPI = api
-					}), "inferenceAPI is only for a deployment with provider Foundry")
+					}), "inferenceAPI is only for a deployment with provider Foundry or OpenAICompatible")
 				},
 				Entry(nil, v1alpha1.InferenceAPIResponses), Entry(nil, v1alpha1.InferenceAPIChatCompletions),
 			)

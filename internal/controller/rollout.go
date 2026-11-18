@@ -44,7 +44,7 @@ import (
 
 // The check after the merge (#532, design 6 and 7.3): once a request is Merged, the executor asks the delivery
 // verifier whether the Flux Kustomization that applies the target reports the merge commit (or a later commit of
-// the target branch that holds it) applied, records the time it first sees that (status.pullRequest
+// the branch it was merged into that holds it, deliveryBranch) applied, records the time it first sees that (status.pullRequest
 // .appliedObservedAt, set once), and then reads the target's rollout status and sets the RolledOut condition:
 // True when every pod runs the applied template, False with reason RolloutStuck when the rollout did not
 // complete within the deadline measured from that time, with one core Event.
@@ -52,9 +52,9 @@ import (
 // It only reports (invariant 2): it never deletes, restarts or otherwise acts on a pod. It reads the target and
 // the Kustomization with the get the executor already holds on them and asks the Git host, a read, whether a
 // later applied commit holds the merge commit; it writes only the request's status and one Event (invariant 6).
-// No Git write is made, so the kill switch has nothing to gate; the Git provider is opened through
-// openPlanRepository, which refuses while writes are paused, so a paused executor also asks the Git host nothing
-// and the check waits.
+// No Git write is made, so the kill switch has nothing to gate; the Git provider is chosen by mergeQuery (the merge
+// receipt's repository, or the plan's for a request merged before receipts existed), and this check asks it
+// nothing while writes are paused: it waits.
 //
 // A read that fails, a delivery not yet seen applied and a cancelled reconcile are never a verdict: the request
 // keeps its status and is looked at again. The check is bounded in time and always ends with a verdict in
@@ -111,7 +111,9 @@ const maxPaused = 365 * 24 * time.Hour
 var errNoAncestry = errors.New("the Git provider cannot check commit ancestry")
 
 // planAncestry is the AncestryChecker of the plan's repository, opened only when the delivery check needs it:
-// when the unit applied a later commit than the merge commit.
+// when the unit applied a later commit than the merge commit. It is for a request merged before merge receipts
+// existed only (mergeQuery): after a retarget the plan's entry names another branch than the recorded one, and
+// planEntry refuses it.
 type planAncestry struct {
 	r  *RemediationRequestReconciler
 	rr *remediationv1alpha1.RemediationRequest
@@ -235,7 +237,7 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 		}
 	}
 	windowEnd := deliveryWindowEnd(rr, start, now)
-	d, err := r.delivered(stepCtx, rr, r.legacyQuery(rr))
+	d, err := r.delivered(stepCtx, rr, r.mergeQuery(rr, true))
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
 		return reconcile.Result{}, nil, err
@@ -247,6 +249,11 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 		st.TemplateHash = rollout.TemplateHash(d.target)
 		if isCommitID(d.commit) {
 			st.AppliedRevision = d.commit
+		}
+		if meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionDelivered) != nil {
+			// Set only while a read failed for a lasting cause (deliveryReadFailed): the delivery is seen now.
+			setCondition(rr, remediationv1alpha1.ConditionDelivered, metav1.ConditionTrue, ReasonMergeCommitApplied,
+				"The merge commit "+rr.Status.PullRequest.MergeCommitSHA+" is applied")
 		}
 		logf.FromContext(ctx).Info("Observed the merge commit of RemediationRequest applied",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "appliedObservedAt", now.Truncate(time.Second),
@@ -262,7 +269,8 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 	}
 	if now.Before(windowEnd) {
 		if err != nil {
-			return reconcile.Result{}, nil, err
+			// A cause that lasts shows in condition Delivered, as with --verify-outcomes (#771).
+			return r.deliveryRetry(ctx, rr, err, paceAt(windowEnd))
 		}
 		return reconcile.Result{RequeueAfter: pollAfter(windowEnd.Sub(now))}, nil, nil
 	}
@@ -282,12 +290,16 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 	case now.After(windowEnd.Add(finalGrace)):
 		logf.FromContext(ctx).Info("The delivery of RemediationRequest could not be checked",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		why := "the executor log has the error"
+		if cause := lastingCause(err); cause != "" {
+			why = cause
+		}
 		return reconcile.Result{}, nil, r.endRollout(ctx, rr, now, metav1.ConditionUnknown,
 			rollout.ReasonRolloutNotDetermined, "The rollout was not checked: the delivery of merge commit "+
-				rr.Status.PullRequest.MergeCommitSHA+" could not be checked until the end of the check (the "+
-				"executor log has the error)", corev1.EventTypeWarning)
+				rr.Status.PullRequest.MergeCommitSHA+" could not be checked until the end of the check ("+why+")",
+			corev1.EventTypeWarning)
 	}
-	return reconcile.Result{}, nil, err
+	return r.deliveryRetry(ctx, rr, err, paceAt(windowEnd.Add(finalGrace)))
 }
 
 // trackPause records in rr when writes were first seen paused, and on the resume adds the paused time to
@@ -498,7 +510,7 @@ func (r *RemediationRequestReconciler) deliveryNotObserved(ctx context.Context,
 	return r.endRollout(ctx, rr, now, metav1.ConditionFalse, rollout.ReasonDeliveryNotObserved, fmt.Sprintf(
 		"The rollout was not checked: %s was not seen applying merge commit %s, or a later commit of branch %s "+
 			"that holds it, within %s of the merge. Check the GitOps controller", unit,
-		rr.Status.PullRequest.MergeCommitSHA, rr.Status.Source.TargetBranch, deliveryWindow), corev1.EventTypeWarning)
+		rr.Status.PullRequest.MergeCommitSHA, deliveryBranch(rr), deliveryWindow), corev1.EventTypeWarning)
 }
 
 // kustomizationOf returns the Kustomization the target's Flux labels name, when both are valid object names.
@@ -572,18 +584,37 @@ type delivery struct {
 }
 
 // deliveryQuery is what delivered asks about: the merge commit, the branch it was merged into and the Git host
-// that answers whether a later commit holds it. A request with a merge receipt asks about the receipt's
-// (receiptQuery); one merged before receipts existed about its recorded pull request and source (legacyQuery).
+// that answers whether a later commit holds it. Only mergeQuery builds one.
 type deliveryQuery struct {
 	commit, branch string
 	ancestry       providers.AncestryChecker
 }
 
-// legacyQuery is the question of a request merged before receipts existed: its recorded merge commit and target
-// branch, and the plan's repository opened through the live settings.
-func (r *RemediationRequestReconciler) legacyQuery(rr *remediationv1alpha1.RemediationRequest) deliveryQuery {
-	return deliveryQuery{commit: rr.Status.PullRequest.MergeCommitSHA, branch: string(rr.Status.Source.TargetBranch),
+// mergeQuery is the one place a check after the merge picks what it asks about, in both modes (#771). A request
+// with a merge receipt asks about the receipt: its merge commit, its target branch (after a retarget, the one the
+// settings name now; after a merge seen on the recorded branch, that one) and its repository, opened by the
+// receipt's URL and installation whatever target branch the settings name (receiptAncestry). Only a request
+// merged before receipts existed asks about its recorded pull request and source, through the plan's repository
+// (planAncestry). pauseGated is true for the check without --verify-outcomes, which asks the Git host nothing
+// while writes are paused (freshness.ErrPaused) and waits.
+func (r *RemediationRequestReconciler) mergeQuery(rr *remediationv1alpha1.RemediationRequest,
+	pauseGated bool) deliveryQuery {
+	if mr := rr.Status.MergeReceipt; mr != nil {
+		return deliveryQuery{commit: mr.MergeCommitSHA, branch: string(deliveryBranch(rr)),
+			ancestry: receiptAncestry{r: r, receipt: mr, stale: stalePlanMerged(rr), pauseGated: pauseGated}}
+	}
+	return deliveryQuery{commit: rr.Status.PullRequest.MergeCommitSHA, branch: string(deliveryBranch(rr)),
 		ancestry: planAncestry{r: r, rr: rr}}
+}
+
+// deliveryBranch is the branch the request's pull request was merged into: the merge receipt's when there is one
+// (after a retarget it names the target branch the settings name now, #771), and otherwise the plan's target
+// branch, as for a request merged before receipts existed.
+func deliveryBranch(rr *remediationv1alpha1.RemediationRequest) remediationv1alpha1.GitBranch {
+	if mr := rr.Status.MergeReceipt; mr != nil && mr.TargetBranch != "" {
+		return mr.TargetBranch
+	}
+	return rr.Status.Source.TargetBranch
 }
 
 // delivered reports whether the Flux Kustomization named by the target's labels applied the merge commit, or a

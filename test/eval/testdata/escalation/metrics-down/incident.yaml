@@ -1,0 +1,25 @@
+# Synthetic: written by hand for the escalation scenario metrics-down, not recorded on a cluster. The collector's
+# pod watch writes OOMKilled from the container's last termination. UIDs and the fingerprint are placeholders.
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-metrics-down
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-000000000900
+spec:
+  fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000900
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-000000000901
+  reason: OOMKilled
+  type: Warning
+  reportingController: kubelet
+  symptom: Container web terminated with exit code 137
+status:
+  phase: Open
+  count: 3
+  firstSeen: "2026-11-04T11:40:00Z"
+  lastSeen: "2026-11-04T11:56:00Z"

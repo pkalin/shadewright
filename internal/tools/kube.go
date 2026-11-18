@@ -20,8 +20,10 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -122,13 +124,20 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	view := strip(obj)
-	b, err := json.MarshalIndent(view, "", " ")
-	if err != nil {
+	// Every string of the object is redacted as it was read, before JSON escapes its line breaks and quotes
+	// (a block under a secret key is found by its lines), and the encoding leaves out HTML escapes (an
+	// escaped ">" hid a folded block indicator from the second pass over the whole answer, #840).
+	view := reflect.ValueOf(strip(obj))
+	redactStrings(view, s.redact)
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", " ")
+	if err := enc.Encode(view.Interface()); err != nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	r.Text, r.raw = string(b)+"\n", true
+	r.Text, r.raw = b.String(), true
 	return nil
 }
 
@@ -164,6 +173,59 @@ func strip(obj client.Object) any {
 		return c
 	}
 	return nil
+}
+
+// redactStrings replaces every exported string reachable from v with f of it. It writes through pointers,
+// slices and maps into new copies, never into what v shares with the object that was read (a cache's).
+// Unexported fields (a time, a quantity) hold no free text and are left as they are.
+func redactStrings(v reflect.Value, f func(string) string) {
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return
+		}
+		c := reflect.New(v.Elem().Type())
+		c.Elem().Set(v.Elem())
+		redactStrings(c.Elem(), f)
+		if v.CanSet() {
+			v.Set(c)
+		} else {
+			v.Elem().Set(c.Elem())
+		}
+	case reflect.Struct:
+		for _, field := range v.Fields() {
+			if field.CanSet() {
+				redactStrings(field, f)
+			}
+		}
+	case reflect.Slice:
+		if v.IsNil() || !v.CanSet() {
+			return
+		}
+		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		reflect.Copy(c, v)
+		for i := range c.Len() {
+			redactStrings(c.Index(i), f)
+		}
+		v.Set(c)
+	case reflect.Map:
+		if v.IsNil() || !v.CanSet() {
+			return
+		}
+		c := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for it := v.MapRange(); it.Next(); {
+			e := reflect.New(v.Type().Elem()).Elem()
+			e.Set(it.Value())
+			redactStrings(e, f)
+			c.SetMapIndex(it.Key(), e)
+		}
+		v.Set(c)
+	case reflect.String:
+		if v.CanSet() {
+			v.SetString(f(v.String()))
+		}
+	default:
+	}
 }
 
 func tm(apiVersion, kind string) metav1.TypeMeta {

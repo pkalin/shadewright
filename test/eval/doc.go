@@ -20,6 +20,11 @@ limitations under the License.
 // Prometheus holds (metrics.yaml, replayed through the MetricsSource interface), the scenario's
 // expected.yaml as vendored from a named fleet commit, a rubric that says how each expected fact is scored,
 // the RemediationPolicies of its cluster (policy.yaml, #493) and the model replies recorded for it.
+// The escalation scenarios under testdata/escalation (#504) hold a fact only a read tool shows; each runs on the
+// escalation model with the read tools from its first call, forced by the harness or through the product's own
+// signal (a context cut to its total bound, a metrics source that is down), and some have the logs of their pods
+// (logs.yaml, replayed through the LogSource interface for the harness only; escalation_scenarios_test.go,
+// logs_test.go).
 //
 // A run builds each scenario's context with the real context builder (package incidentcontext) over a fake
 // client that holds the recorded objects, and runs the real analysis loop (package analysis) with the real
@@ -28,7 +33,8 @@ limitations under the License.
 // (a refusal is no plan and a reason that the result itself gave, NoProposal or MissingData; a pull request
 // is a plan of the expected action type with a desired value inside the expected bounds, which the scenario's
 // policy does not refuse by the checks of policy.Preflight) and the diagnosis
-// (each scored fact's terms in the result's summary, hypotheses and evidence quotes).
+// (each scored fact's terms in the result's summary, hypotheses and evidence quotes), and the read tool calls the
+// loop ran against the reads the rubric expects (reads_test.go).
 //
 // The harness only reads the outcome the loop returned and the reply the loop accepted: nothing it computes
 // authorizes anything (invariant 1), and it runs no executor and no Git write. It runs the policy's

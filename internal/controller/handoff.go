@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -678,7 +679,7 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 	// start of the wait checkAtMerge recorded), and the look at the recorded pull request checks the plan again
 	// before it records the merge, until the wait is over; a failed read never records the merge as fresh.
 	if cr.State == providers.ChangeRequestMerged && shaPattern.MatchString(cr.MergeCommit) {
-		err := r.checkAtMerge(ctx, rr)
+		err := r.checkAtMerge(ctx, rr, cr)
 		if err == nil {
 			recordMerge(ctx, rr, cr)
 			return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
@@ -708,7 +709,12 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 	if from := rr.Status.Handoff.From; from.Phase == remediationv1alpha1.HandoffReserved {
 		from.Phase = remediationv1alpha1.HandoffAborted
 	}
-	release(rr)
+	// Without the proof (a pull request of its own recorded), the lock stays for the read that settles it (checkHeld).
+	if s, ok := settleHandoffAborted(rr); ok {
+		if err := lockverdict.Release(&rr.Status, s); err != nil {
+			return err
+		}
+	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, reason, message)
 }
 
@@ -936,7 +942,11 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 	if h := hintByRef(pred, to.Hint); h != nil {
 		h.State = remediationv1alpha1.HintConsumed
 	}
-	release(pred)
+	if s, ok := settleHandedOver(to, rr); ok {
+		if err := lockverdict.Release(&pred.Status, s); err != nil {
+			return err
+		}
+	}
 	err := r.stop(ctx, pred, remediationv1alpha1.PhaseSuperseded, remediationv1alpha1.ReasonHandedOff,
 		fmt.Sprintf("RemediationRequest %s took over the pull request and its branch with a new plan", rr.Name))
 	if !errors.Is(err, errStopped) {
@@ -990,8 +1000,9 @@ const ReasonHandoffRecoveryFailed = "HandoffRecoveryFailed"
 
 // retryRecovery is retry for an error of recoverStep. Before the deadline, and for an error retry ends or
 // waits on (a pause, a final refusal, settings that cannot reach the repository), it is retry. Past the
-// deadline a failure worth retrying is retried, after the delay the host asked for (Retry-After, which the
-// deadline does not cut short) or with the error backoff, until handoffRecoveryGrace after the deadline; then
+// deadline a failed Git read is retried visibly (retryGitRead), never later than the end of the grace, and any other
+// failure worth retrying after the delay the host asked for (Retry-After, which the deadline does not cut short)
+// or with the error backoff, until handoffRecoveryGrace after the deadline; then
 // the request ends NeedsIntervention with ReasonHandoffRecoveryFailed, and its handoff Aborted (declineOnEnd).
 func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
@@ -1003,13 +1014,17 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 		errors.Is(err, errTargetBranchChanged) || errors.Is(err, errRepositoryGone) {
 		return r.retry(ctx, rr, err)
 	}
+	if gitReadFailure(err) {
+		// Retried visibly within the grace (waitHandoffGrace): the check at the start of a reconcile past its end
+		// ends the request (endPassedWait, endRecoveryFailed), so no failed read, timeout or early return skips it.
+		return r.retryGitRead(ctx, rr, err, boundBy(waitHandoffGrace))
+	}
 	left := rr.Status.Deadline.Add(handoffRecoveryGrace).Sub(r.now())
 	if left <= 0 {
+		// Any other failure is no Git wait: it ends the request here, on its own retry.
 		logf.FromContext(ctx).Info("Could not recover the handoff of RemediationRequest before the grace ended",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
-			ReasonHandoffRecoveryFailed, "The deadline passed and the branch could not be read to learn whether "+
-				"this request's commit is on the pull request it replaces; check the branch and the pull request"))
+		return reconcile.Result{}, r.endRecoveryFailed(ctx, rr)
 	}
 	d := retryAfterOf(err)
 	if d <= 0 {
@@ -1019,6 +1034,22 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 	logf.FromContext(ctx).Info("Waiting before retrying the recovery of the handoff of RemediationRequest",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error(), "retryAfter", d)
 	return reconcile.Result{RequeueAfter: d}, nil
+}
+
+// endRecoveryFailed ends a request whose handoff could not be recovered before handoffRecoveryGrace after its
+// deadline: NeedsIntervention with ReasonHandoffRecoveryFailed (its handoff is aborted with the end, declineOnEnd).
+func (r *RemediationRequestReconciler) endRecoveryFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
+		ReasonHandoffRecoveryFailed, "The deadline passed and the branch could not be read to learn whether "+
+			"this request's commit is on the pull request it replaces; check the branch and the pull request"))
+}
+
+// recoveringHandoff reports whether rr is a replacement whose handoff recoverHandoff still recovers: the
+// predecessor reserved, the request in PolicyChecked, no stale plan's cleanup started.
+func recoveringHandoff(rr *remediationv1alpha1.RemediationRequest) bool {
+	ho := rr.Status.Handoff
+	return rr.Spec.Replaces != nil && ho != nil && ho.From != nil && ho.From.Phase == remediationv1alpha1.HandoffReserved &&
+		rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && staleMark(rr) == nil
 }
 
 // recoverStep is the look of recoverHandoff.

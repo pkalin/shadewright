@@ -30,6 +30,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 )
 
@@ -43,9 +44,9 @@ import (
 // The executor checks this for every undecided request before the policy check (Reconcile, so neither a wait
 // for the target's state nor a refusal comes first), each time the limits let a Queued request through
 // (holdBack, so a duplicate waiting behind the lock reads nothing from Git), and under the admission lock right
-// before an allowed decision takes the target lock. The holder releases the lock in the same status write that
-// sets Merged (stop, settleLock), and every candidate the cache does not show ended is read again from the API
-// server, so a check of the limits that saw the lock released is followed by a read that sees Merged.
+// before an allowed decision takes the target lock. The holder records Merged before settleTargetLock releases
+// its lock, and every candidate the cache does not show ended is read again from the API server, so a check of
+// the limits that saw the lock released is followed by a read that sees Merged.
 //
 // Only a request that cannot have a pull request of its own is ended this way: no phase or Pending, no recorded
 // pull request, no target lock, no supersede chain (spec.replaces, status.handoff: ADR-0028's checks decide
@@ -389,7 +390,11 @@ func (r *RemediationRequestReconciler) supersedeDuplicate(ctx context.Context, r
 	r.setPhase(rr, remediationv1alpha1.PhaseSuperseded)
 	rr.Status.ObservedGeneration = rr.Generation
 	// It waited in the queue and never took the lock: false keeps it out of the limits' lock list.
-	release(rr)
+	if s, ok := settleNeverHeld(rr); ok {
+		if err := lockverdict.Release(&rr.Status, s); err != nil {
+			return err
+		}
+	}
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPlanFresh,

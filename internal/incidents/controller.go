@@ -259,6 +259,9 @@ type Controller struct {
 	hintsListed bool
 	// analysisRequest selects, of hintRequests, those whose hints count for an Incident (SetAnalysisRequests).
 	analysisRequest func(*remediationv1alpha1.Incident, *remediationv1alpha1.RemediationRequest) bool
+	// onCauseSeen, when set (OnCauseSeen), is told each cause fingerprint that an observation of it, once
+	// consumed, makes seen for its subject (causeOpenedFor).
+	onCauseSeen func(fp string)
 	// lastEvent is when the last Warning event at the cap was written.
 	lastEvent time.Time
 	// capNear is whether the last trigger pass found the Incidents at or over capNearThreshold and reported
@@ -425,6 +428,17 @@ func (c *Controller) SetAnalysisRequests(f func(*remediationv1alpha1.Incident, *
 	c.analysisRequest = f
 }
 
+// OnCauseSeen sets the function the controller calls with the fingerprint of a cause each time it has consumed an
+// observation of it that makes it seen for a consequence of the same subject ([Controller.causeOpenedFor]): the
+// collector's collector.Collector.ReleaseCause, which wakes the consequences held for that cause, each of which
+// then asks [Controller.CauseSeen] with its own observation (ADR-0039 point 7, decided 2026-11-17 three times).
+// A cause held by the gate as a first sighting is not told; the observation that opens its Incident is. It is
+// called from the goroutine that consumes observations, after the observation is consumed and with no lock of the
+// controller held, so it may call CauseSeen; it must not block. Call it before the manager starts.
+func (c *Controller) OnCauseSeen(f func(fp string)) {
+	c.onCauseSeen = f
+}
+
 // hintRequestsOf returns the requests of the current trigger pass that may hold a reviewer hint for inc
 // (SetAnalysisRequests).
 func (c *Controller) hintRequestsOf(inc *remediationv1alpha1.Incident) []remediationv1alpha1.RemediationRequest {
@@ -478,15 +492,31 @@ func (c *Controller) Start(ctx context.Context) error {
 	for {
 		select {
 		case o := <-c.obs:
-			if c.consume(ctx, o) {
-				c.wake()
-			}
+			c.handle(ctx, o)
 		case <-ctx.Done():
 			<-written
 			<-marked
 			c.stop(ctx)
 			return nil
 		}
+	}
+}
+
+// handle consumes o, wakes the writer when a batch is due, and then, for a cause that is now seen for its subject
+// ([Controller.causeOpenedFor]), tells the collector (OnCauseSeen). The cause is recorded under mu before the
+// call, and mu is not held across it.
+func (c *Controller) handle(ctx context.Context, o collector.Observation) {
+	if c.consume(ctx, o) {
+		c.wake()
+	}
+	if c.onCauseSeen == nil || !isCause(o) {
+		return
+	}
+	c.mu.Lock()
+	seen := c.causeOpenedFor(o)
+	c.mu.Unlock()
+	if seen {
+		c.onCauseSeen(o.Fingerprint)
 	}
 }
 
@@ -709,8 +739,12 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 	n := c.increase(o)
 	// A consequence whose cause has an Incident is counted there as evidence and opens none of its own
 	// (ADR-0039 point 6), with what is held for it as a first sighting from before the cause's Incident was
-	// opened. One whose cause has no Incident yet goes through the gate below, as any observation, until the
-	// collector holds it (point 7).
+	// opened. One whose cause has no Incident yet goes through the gate below, as any observation: the collector
+	// holds it until the cause's Incident links it (point 7, CauseSeen and OnCauseSeen), so it comes here with
+	// no Incident for its cause only when it left that hold first: over its bound, or at its end
+	// (cause_unseen). A first sighting is then counted on the cause once the cause's Incident opens
+	// (absorbHeldFor); one that recurs opens its own Incident, which the late-cause fold closes in favour of the
+	// cause (fold.go).
 	name, spec, reason, linked := c.causeFor(o)
 	heldDue := false
 	if linked {

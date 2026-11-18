@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -253,17 +255,29 @@ func plannedWorld(t *testing.T) (client.Client, *remediationv1alpha1.Remediation
 	return c, rr
 }
 
-// The re-check honours the delay the source mapping's host asked for, as it does for the Git provider.
+// The re-check honours the host delay, with the poll interval as the minimum for failed Git reads.
 func TestRecheckHonoursTheResolverRetryAfter(t *testing.T) {
-	c, rr := plannedWorld(t)
-	r := &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(),
-		Source: &stubResolver{err: &sourcemap.TransientError{Op: "read head", RetryAfter: 7 * time.Second}},
-		OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
-			return nil, errors.New("not reached")
-		}}
-	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
-	if err != nil || res.RequeueAfter != 7*time.Second {
-		t.Fatalf("want a requeue after 7s, got %v, %v", res, err)
+	for _, delay := range []time.Duration{7 * time.Second, 2 * time.Minute} {
+		t.Run(delay.String(), func(t *testing.T) {
+			c, rr := plannedWorld(t)
+			r := &RemediationRequestReconciler{Client: c, Scheme: c.Scheme(),
+				Source: &stubResolver{err: &sourcemap.TransientError{Op: "read head", RetryAfter: delay}},
+				OpenRepository: func(context.Context, remediationv1alpha1.GitRepository) (providers.GitProvider, error) {
+					return nil, errors.New("not reached")
+				}}
+			key := client.ObjectKeyFromObject(rr)
+			res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+			if err != nil || res.RequeueAfter != max(delay, r.pullRequestPollInterval()) {
+				t.Fatalf("want the host delay or poll minimum, got %v, %v", res, err)
+			}
+			if err := c.Get(context.Background(), key, rr); err != nil {
+				t.Fatal(err)
+			}
+			retry := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
+			if retry == nil || !strings.Contains(retry.Message, "read head") {
+				t.Fatalf("missing retry operation: %+v", retry)
+			}
+		})
 	}
 }
 

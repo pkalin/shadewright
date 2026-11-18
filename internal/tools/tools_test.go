@@ -897,3 +897,49 @@ func TestGetResourceDecidesTheObjectAsOneText(t *testing.T) {
 		}
 	}
 }
+
+// The values in a collection under a secret-named field (a Secret volume, imagePullSecrets, a projected
+// service account token) are hidden whole, as main hid that JSON collection (#845, fourth decision of
+// 2026-11-18; showing them is #860), with the built-in redactor and with one that has no Pieces. A reference
+// field whose own name is a reference (envFrom's secretRef) keeps its name, as on main.
+func TestGetResourceHidesCollectionsUnderSecretNamedFields(t *testing.T) {
+	const (
+		volSecret = "vol-secret-name"
+		itemPath  = "item-path-name"
+		pullName  = "pull-secret-name"
+		tokenPath = "token-path-name"
+		refName   = "envfrom-ref-name"
+	)
+	p := pod()
+	p.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: pullName}}
+	p.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
+		LocalObjectReference: corev1.LocalObjectReference{Name: refName},
+	}}}
+	p.Spec.Volumes = []corev1.Volume{
+		{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: volSecret, Items: []corev1.KeyToPath{{Key: "k", Path: itemPath}},
+		}}},
+		{Name: "token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: tokenPath}}},
+		}}},
+	}
+	for name, red := range map[string]Redactor{"built-in rules": nil, "no Pieces": canary{}} {
+		e := newEnv(t, []client.Object{p}, func(c *Config) {
+			if red != nil {
+				c.Redactor = red
+			}
+		})
+		r := e.call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK {
+			t.Fatalf("%s: %s", name, r.Status)
+		}
+		for _, hidden := range []string{volSecret, itemPath, pullName, tokenPath} {
+			if strings.Contains(r.Text, hidden) {
+				t.Errorf("%s: %q shows:\n%s", name, hidden, r.Text)
+			}
+		}
+		if !strings.Contains(r.Text, refName) || !strings.Contains(r.Text, `"name": "creds"`) {
+			t.Errorf("%s: a reference outside a secret-named collection is missing:\n%s", name, r.Text)
+		}
+	}
+}

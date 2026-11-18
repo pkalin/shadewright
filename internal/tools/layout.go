@@ -44,6 +44,7 @@ type layout struct {
 	pieces []redact.Piece
 	set    []func(string) // by piece; nil for the layout code writes
 	after  []func()       // run once every value is set, in order (a map rebuilt from its redacted entries)
+	whole  int            // how many collections under a secret-named field (redact.SecretCollection) enclose the values appended now
 }
 
 // text appends layout code writes.
@@ -54,7 +55,7 @@ func (l *layout) text(t string) {
 
 // value appends a value from a source; set receives it once decided.
 func (l *layout) value(v string, set func(string)) {
-	l.pieces = append(l.pieces, redact.Piece{Text: v, Data: true})
+	l.pieces = append(l.pieces, redact.Piece{Text: v, Data: true, Whole: l.whole > 0})
 	l.set = append(l.set, set)
 }
 
@@ -66,7 +67,7 @@ func (l *layout) field(ind, name, v string, set func(string)) {
 }
 
 // decide takes the one decision on the laid out text with the redactor and gives each value its result, made
-// valid UTF-8. A redactor without Pieces redacts each value on its own.
+// valid UTF-8. A redactor without Pieces redacts each value on its own, and hides a value marked Whole.
 func (s *Set) decide(l *layout) {
 	var out []string
 	if pr, ok := s.redactor.(pieceRedactor); ok {
@@ -75,7 +76,10 @@ func (s *Set) decide(l *layout) {
 		out = make([]string, len(l.pieces))
 		for i, p := range l.pieces {
 			out[i] = p.Text
-			if p.Data {
+			switch {
+			case p.Whole:
+				out[i] = redact.Marker(redact.KindCredential, len(p.Text))
+			case p.Data:
 				out[i] = s.redactor.String(p.Text)
 			}
 		}
@@ -211,10 +215,15 @@ func (l *layout) strings(v reflect.Value) bool {
 }
 
 // under appends the values that body lays out, under a line "name:" at indentation ind when name is set (body
-// then lays out one level deeper); the line is left out when body appends no value.
+// then lays out one level deeper); the line is left out when body appends no value. Under a name that
+// redact.SecretCollection reports, every value body appends is hidden whole, as main hid that collection.
 func (l *layout) under(ind, name string, body func(inner string) bool) bool {
 	if name == "" {
 		return body(ind)
+	}
+	if redact.SecretCollection(name) {
+		l.whole++
+		defer func() { l.whole-- }()
 	}
 	mark := len(l.pieces)
 	l.text(ind + name + ":\n")
@@ -251,7 +260,14 @@ func (l *layout) mapEntries(v reflect.Value, ind string) bool {
 			continue
 		}
 		l.text(":\n")
+		secret := redact.SecretCollection(en.k.String())
+		if secret {
+			l.whole++
+		}
 		l.lay(en.e, ind+"  ", "")
+		if secret {
+			l.whole--
+		}
 	}
 	l.after = append(l.after, func() {
 		c := reflect.MakeMapWithSize(v.Type(), len(es))

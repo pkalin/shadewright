@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -49,29 +48,6 @@ import (
 // with string keys, one place at a time. The answers are compared with what main hid
 // (testdata/fields-main-entry.tsv, written by TestWriteFieldsMainTable in a checkout of main): a value main
 // hid that is shown now fails. The file uses only the read tools' API, so it runs unchanged in that checkout.
-
-// fieldPlaceClass lists the places where main hid any value by its place alone and the layout shows it (#845,
-// third decision of 2026-11-18): the reference values (a Secret's name, a key and path of its items, a token's
-// path) inside an object under a secret-named field. main's second pass read the JSON answer, where that
-// object is a flow collection after the key "secret", "imagePullSecrets" or "serviceAccountToken", and hid it
-// whole; the layout writes it as a block, where a reference child keeps its value as it does in any text. Only
-// a name or a path shows; the class is listed so that any other place fails.
-var fieldPlaceClass = func() []string {
-	out := make([]string, 0, 24)
-	for _, root := range []string{"Deployment.Spec.Template.Spec", "Pod.Spec", "ReplicaSet.Spec.Template.Spec", "StatefulSet.Spec.Template.Spec"} {
-		for _, place := range []string{
-			"ImagePullSecrets[].Name",
-			"Volumes[].VolumeSource.Projected.Sources[].Secret.Items[].Path",
-			"Volumes[].VolumeSource.Projected.Sources[].Secret.LocalObjectReference.Name",
-			"Volumes[].VolumeSource.Projected.Sources[].ServiceAccountToken.Path",
-			"Volumes[].VolumeSource.Secret.Items[].Path",
-			"Volumes[].VolumeSource.Secret.SecretName",
-		} {
-			out = append(out, tools.NameGetResource+" "+root+"."+place)
-		}
-	}
-	return out
-}()
 
 // fieldsMainTable holds, for each place and form, whether main hid the value.
 const fieldsMainTable = "testdata/fields-main-entry.tsv"
@@ -535,7 +511,7 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	t.Logf("relation calls per tool %v", calls)
 	main := readFieldsMainTable(t)
 	lost, hidden, mainHidden := 0, 0, 0
-	seen, byPlace := map[string]bool{}, map[string]bool{}
+	seen := map[string]bool{}
 	for _, r := range results {
 		seen[r.key()] = true
 		if r.skipped {
@@ -553,16 +529,6 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 			mainHidden++
 		}
 		if was && !r.hidden {
-			// A value main hid by its place alone, with no key in the call (fieldPlaceClass), is counted
-			// apart.
-			value := r.place
-			if _, q, ok := strings.Cut(r.place, " > "); ok {
-				value = q
-			}
-			if main[r.tool+"\t"+value+"\tplain value"] {
-				byPlace[r.tool+" "+value] = true
-				continue
-			}
 			if lost++; lost <= 20 {
 				t.Errorf("%s %s, %s: the secret shows, main hid it", r.tool, r.place, r.form)
 			}
@@ -575,12 +541,6 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	}
 	if lost > 0 {
 		t.Errorf("%d secrets show that main hid", lost)
-	}
-	classPlaces := slices.Sorted(maps.Keys(byPlace))
-	skipped := slices.ContainsFunc(results, func(r fieldResult) bool { return r.skipped })
-	extra := slices.ContainsFunc(classPlaces, func(p string) bool { return !slices.Contains(fieldPlaceClass, p) })
-	if extra || !skipped && !slices.Equal(classPlaces, fieldPlaceClass) {
-		t.Errorf("values main hid by their place alone and shown now: %q, want %q", classPlaces, fieldPlaceClass)
 	}
 	t.Logf("%d calls, places per tool %v; hidden %d, by main %d", len(results), places, hidden, mainHidden)
 }
@@ -665,7 +625,8 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 				if p.kind == reflect.Map {
 					continue
 				}
-				// The value alone, with no key: what main hid by the place alone (fieldPlaceClass).
+				// The value alone, with no key: what main hid by the place alone (a value in a
+				// collection under a secret-named field).
 				n++
 				v := fmt.Sprintf("Vl%06dxK9w", n)
 				if sample && !redact.RaceKeeps("fields relations", n) {

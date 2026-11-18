@@ -16,7 +16,10 @@ limitations under the License.
 
 package redact
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // A tool result is one text, decided once (#845, third decision of 2026-11-18). A read tool lays out what it
 // shows as one text: the fields in document order, each as a "name: value" line, list items as items, nothing
@@ -31,6 +34,24 @@ import "strings"
 type Piece struct {
 	Text string
 	Data bool
+	// Whole hides a data piece whole: the layout sets it on every value inside a collection under a field
+	// whose name SecretCollection reports.
+	Whole bool
+}
+
+// secretCollectionName is a field name or map key that holds a secret word, written only in the characters
+// of a key name, as main's flow rule read a key before "{" or "[".
+var secretCollectionName = regexp.MustCompile(`(?i)^[A-Za-z0-9_.-]*` + secretWordExpr + `[A-Za-z0-9_.-]*$`)
+
+// SecretCollection reports whether every value in a collection (an object, a list or a map) under a field or
+// map key of this name is hidden whole: the name holds a secret word and is no reference (isReference)
+// (#845, fourth decision of 2026-11-18). main read a tool result as JSON, where such a collection is a flow
+// collection after a secret key, and hid it up to its closing bracket, so the name of a Secret a volume or
+// imagePullSecrets refers to and a path in its items stayed hidden; the layout writes the collection as a
+// block, where a reference child ("secretName", "path") keeps its value as in any text. Whether those names
+// may be shown is #860. The work is linear in the length of name.
+func SecretCollection(name string) bool {
+	return secretCollectionName.MatchString(name) && !isReference(name)
 }
 
 // Pieces takes the one decision on the text the pieces make, joined as they are, and returns each piece with
@@ -38,7 +59,8 @@ type Piece struct {
 // of it in the joined text (cut at its ends), what String redacts of it alone, and the value the rule for the
 // strings of a sequence (seqValues) finds in it, read over the data pieces in their order: a key, a separator
 // or a flag in one value and its value in a later one. The string after a secret flag is its value, whatever
-// it looks like ("--token", "--verbose" hides "--verbose"). The work is linear in the length of the pieces.
+// it looks like ("--token", "--verbose" hides "--verbose"). A piece marked Whole is hidden whole. The work is
+// linear in the length of the pieces.
 func (r *Redactor) Pieces(ps []Piece) []string {
 	var b strings.Builder
 	var data []string
@@ -73,6 +95,9 @@ func (r *Redactor) Pieces(ps []Piece) []string {
 			if sp.end > sp.start {
 				own = append(own, sp)
 			}
+		}
+		if p.Whole {
+			own = append(own, span{start: 0, end: len(p.Text), kind: KindCredential, rule: len(r.rules)})
 		}
 		own = append(own, r.spans(p.Text)...)
 		if s := starts[k]; s >= 0 && s < len(p.Text) {

@@ -447,22 +447,3 @@ func (s *Set) watched(ns string) bool {
 	_, ok := s.namespaces[ns]
 	return ok
 }
-
-// lines builds the text of a result, one line at a time, and records the values from a source in it.
-type lines struct {
-	b      strings.Builder
-	values []string
-}
-
-// data records v, a value from a source as rendered, as quotable ([Result.Data]) and returns it.
-func (l *lines) data(v string) string {
-	l.values = append(l.values, v)
-	return v
-}
-
-func (l *lines) add(format string, a ...any) {
-	fmt.Fprintf(&l.b, format, a...)
-	l.b.WriteByte('\n')
-}
-
-func (l *lines) String() string { return l.b.String() }

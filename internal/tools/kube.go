@@ -20,10 +20,10 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -125,27 +125,20 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	// The object is laid out as one text and decided once (#845, third decision of 2026-11-18); the decided
-	// values are written into a copy that owns everything it holds (never the cache's), which is then encoded
-	// and not redacted again. The encoding leaves out HTML escapes, so a reader sees the values as decided.
+	// The object's JSON is the answer, decided once on its bytes (#845, sixth decision of 2026-11-18,
+	// jsonAnswer), in a copy that owns everything it holds (never the cache's). The encoding leaves out HTML
+	// escapes, so a reader sees the values as decided.
 	stripped, ok := strip(obj).(runtime.Object)
 	if !ok {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	view := stripped.DeepCopyObject()
-	var l layout
-	l.lay(reflect.ValueOf(view).Elem(), "", "")
-	s.decide(&l)
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", " ")
-	if err := enc.Encode(view); err != nil {
+	text, err := s.jsonAnswer(reflect.ValueOf(stripped.DeepCopyObject()).Elem())
+	if err != nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	r.Text, r.raw = b.String(), true
+	r.Text, r.raw = text, true
 	return nil
 }
 
@@ -320,28 +313,28 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 	slices.SortStableFunc(evs, func(x, y *eventsv1.Event) int {
 		return cmp.Or(eventTime(y).Compare(eventTime(x)), cmp.Compare(x.Name, y.Name))
 	})
-	// The events shown are one text, decided once (layout).
-	shownEvs := evs[:min(len(evs), a.Limit.v)]
-	vals := make([][5]string, len(shownEvs))
-	var lay layout
-	for i, e := range shownEvs {
-		lead := "- "
-		for j, f := range []struct{ name, v string }{
-			{"type", e.Type}, {"reason", e.Reason}, {"kind", e.Regarding.Kind}, {"name", e.Regarding.Name}, {"note", e.Note},
-		} {
-			lay.field(lead, f.name, f.v, shown(&vals[i][j]))
-			lead = "  "
-		}
+	// The answer is one text, decided once on the lines it returns (layout.go).
+	var ans answer
+	ans.text(fmt.Sprintf("%d events match; the newest %d are shown\n", len(evs), min(len(evs), a.Limit.v)))
+	var at []int
+	for _, e := range evs[:min(len(evs), a.Limit.v)] {
+		ans.text(eventTime(e).UTC().Format(time.RFC3339) + " ")
+		at = append(at, ans.value("type", e.Type))
+		ans.text(" ")
+		at = append(at, ans.value("reason", e.Reason))
+		ans.text(" ")
+		at = append(at, ans.value("kind", e.Regarding.Kind))
+		ans.text("/")
+		at = append(at, ans.value("name", e.Regarding.Name))
+		ans.text(fmt.Sprintf(" count %d: ", eventCount(e)))
+		at = append(at, ans.value("note", e.Note))
+		ans.text("\n")
 	}
-	s.decide(&lay)
-	var l lines
-	l.add("%d events match; the newest %d are shown", len(evs), min(len(evs), a.Limit.v))
-	for i, e := range shownEvs {
-		v := vals[i]
-		l.add("%s %s %s %s/%s count %d: %s", eventTime(e).UTC().Format(time.RFC3339), l.data(v[0]),
-			l.data(v[1]), l.data(v[2]), l.data(v[3]), eventCount(e), l.data(v[4]))
+	out, text := s.lines(&ans)
+	r.Text = text
+	for _, i := range at {
+		r.Values = append(r.Values, out[i])
 	}
-	r.Text, r.Values = l.String(), l.values
 	return nil
 }
 
@@ -408,34 +401,26 @@ func (s *Set) checkReference(ctx context.Context, a checkReferenceArgs, r *Resul
 		return nil
 	}
 	res := refcheck.Check(&pod, list.Items, refcheck.Kind(a.Kind), a.Name, s.now())
-	// The values shown are one text, decided once (layout).
-	var key, container, volume string
-	var lay layout
-	for _, f := range []struct {
-		name, v string
-		dst     *string
-	}{{"key", res.Key, &key}, {"container", res.Container, &container}, {"volume", res.Volume, &volume}} {
-		if f.v != "" {
-			lay.field("", f.name, f.v, shown(f.dst))
-		}
-	}
-	s.decide(&lay)
-	var l lines
-	l.add("answer: %s", res.Answer)
-	l.add("referenced by the pod spec: %s", strconv.FormatBool(res.Referenced))
+	// The answer is one text, decided once on the lines it returns (layout.go).
+	var ans answer
+	ans.text("answer: " + string(res.Answer) + "\n")
+	ans.text("referenced by the pod spec: " + strconv.FormatBool(res.Referenced) + "\n")
+	var at []int
 	if res.Answer == refcheck.Missing {
-		l.add("what is missing: %s", res.What)
-		l.add("evidence: %s", res.Source)
-		if res.Key != "" {
-			l.add("key: %s", l.data(key))
-		}
-		if res.Container != "" {
-			l.add("container: %s", l.data(container))
-		}
-		if res.Volume != "" {
-			l.add("volume: %s", l.data(volume))
+		ans.text("what is missing: " + string(res.What) + "\n")
+		ans.text("evidence: " + string(res.Source) + "\n")
+		for _, f := range []struct{ name, v string }{{"key", res.Key}, {"container", res.Container}, {"volume", res.Volume}} {
+			if f.v != "" {
+				ans.text(f.name + ": ")
+				at = append(at, ans.value(f.name, f.v))
+				ans.text("\n")
+			}
 		}
 	}
-	r.Text, r.Values = l.String(), l.values
+	out, text := s.lines(&ans)
+	r.Text = text
+	for _, i := range at {
+		r.Values = append(r.Values, out[i])
+	}
 	return nil
 }

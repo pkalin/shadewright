@@ -1094,9 +1094,10 @@ func seqValues(items []string) []int {
 
 // Strings redacts the strings of a sequence, such as a container's arguments, with the one decision Pieces
 // takes on them joined by line breaks: each string loses what String redacts of it in the joined text, what
-// String redacts of it alone, and the value seqValues finds in it (a key, a separator or a flag in one string and
-// the value in a later one, the rule String also applies to a sequence written in a text). So what String hides
-// in the strings joined, Strings hides in them apart.
+// String redacts of it alone, the value seqValues finds in it (a key, a separator or a flag in one string and
+// the value in a later one, the rule String also applies to a sequence written in a text), and what String
+// redacts of the joined text once those are marked. So what String hides in the strings joined, Strings hides in
+// them apart.
 func (r *Redactor) Strings(items []string) []string {
 	ps := make([]Piece, 0, 2*len(items))
 	for i, it := range items {
@@ -1106,7 +1107,7 @@ func (r *Redactor) Strings(items []string) []string {
 		}
 		ps = append(ps, Piece{Text: it, Data: true})
 	}
-	all := r.Pieces(ps)
+	all := r.pieces(ps, true)
 	out := make([]string, len(items))
 	for i := range out {
 		tick(1)
@@ -1230,58 +1231,4 @@ func seqLineEnd(s string, start, end int) int {
 		return start + i
 	}
 	return end
-}
-
-// connStringSpan is the span function of the rule for a URL with user info: the whole match, except for a URL
-// in angle brackets whose closing bracket comes before the "@" (autolinkClosed), which is no URL with user
-// info at all.
-func connStringSpan(s string, m []int, _ int) (int, int, bool) {
-	return m[0], m[1], !autolinkClosed(s, m[0], m[1])
-}
-
-// autolinkClosed reports whether the URL match s[start:end] stands right after "<" and a ">" closes it before
-// the "@" of its user info: a ">" followed by the end of the text or a blank, or by a comma or a semicolon and
-// then the end, a blank or the "<" of the next link, as the bracket that closes a link in a list is. A ">"
-// glued to more text ("Hunter>2", "Hunter><2", "Hunter>,2") is part of the user info, as in a password. Such
-// brackets are not allowed unencoded in a URL's user info; a raw password holding ">" and then one of these
-// closers inside angle brackets is the one form this leaves out (#845). A URL whose text before the bracket
-// holds a user and a password (autolinkPassword) is not closed there.
-func autolinkClosed(s string, start, end int) bool {
-	if start == 0 || s[start-1] != '<' {
-		return false
-	}
-	at := start + indexByte(s[start:end], '@')
-	for i := start; i < at; i++ {
-		tick(1)
-		if s[i] != '>' {
-			continue
-		}
-		j := i + 1
-		if j < len(s) && (s[j] == ',' || s[j] == ';') {
-			j++
-			if j < len(s) && s[j] == '<' {
-				return !autolinkPassword(s, start, i)
-			}
-		}
-		if j == len(s) || indentLen(s, j) > 0 {
-			return !autolinkPassword(s, start, i)
-		}
-	}
-	return false
-}
-
-// autolinkPassword reports whether the URL in angle brackets from start to its closing bracket at gt holds a
-// user and a password ("<postgres://alice:mint>"): a colon after its "://" with text after it. Such a URL is no
-// link of a list: its match is kept whole, as main kept it (#845, fourth round). The text after the colon may
-// be all digits, a port or a password: "<postgres://alice:12345>" cannot be told from "<https://host:8080>",
-// so both are read as a password (#845, decision of 2026-11-18), and "<https://host:8080>,<mailto:a@b>" is
-// redacted whole, as on main.
-func autolinkPassword(s string, start, gt int) bool {
-	sep := index(s[start:gt], "://")
-	if sep < 0 {
-		return false
-	}
-	auth := s[start+sep+3 : gt]
-	c := indexByte(auth, ':')
-	return c >= 0 && c+1 < len(auth) && !strings.HasPrefix(auth, "[")
 }

@@ -377,6 +377,45 @@ func TestCanonEntryPointsLeakNothingMainHid(t *testing.T) {
 	}
 }
 
+// canonOverRedaction is the stored over-redaction table of the entry points (#845, sixth decision of
+// 2026-11-18, point 6): the kept pieces of the corpus that main keeps and the rule loses, per entry point.
+const canonOverRedaction = "testdata/canonical-overredaction-entry.tsv"
+
+// The kept pieces main keeps and the rule loses are a stored table, so that a later change that hides more
+// shows up as a diff of it, and one that hides less as a row that no longer holds. The counts per entry point are
+// logged.
+func TestCanonOverRedactionAgainstMain(t *testing.T) {
+	corpus, found := canonCorpusLeaks()
+	main, _ := redact.ReadCanonTable(t, redact.CanonMainEntryLeaks)
+	key := func(r redact.CanonLeak) string { return r.Check + "\t" + r.Hash + "\t" + r.Item }
+	mainLost := map[string]bool{}
+	for _, r := range main {
+		mainLost[key(r)] = true
+	}
+	var over []redact.CanonLeak
+	per := map[string]int{}
+	for _, r := range found.leaks {
+		if !strings.HasPrefix(r.Item, "k") || mainLost[key(r)] {
+			continue
+		}
+		over = append(over, r)
+		per[r.Check]++
+	}
+	t.Logf("kept pieces main keeps and the rule loses: %d, by entry point %v", len(over), per)
+	if redact.CanonWriteTables(t, corpus.sampled) {
+		redact.WriteCanonTable(t, canonOverRedaction, []string{
+			"# Kept pieces of the canonical view corpus that main keeps and the rule loses, by entry point (#845), written by CANON_LEAKS_WRITE=1.",
+		}, over)
+		return
+	}
+	checked := map[string]string{}
+	for _, c := range corpus.cases {
+		checked[c.Hash] = c.Name
+	}
+	want, _ := redact.ReadCanonTable(t, canonOverRedaction)
+	redact.CheckCanonLeaks(t, canonOverRedaction, redact.CanonIndex(), checked, want, over)
+}
+
 // TestWriteCanonMainEntryTable writes redact.CanonMainEntryLeaks from the entry points it runs with, when
 // CANON_MAIN_ENTRY_TABLE names the output path (and CANON_MAIN_COMMIT the commit, for its first line); it is
 // run once in a checkout of the commit of the main table, with entryPoints reduced to the entry points that

@@ -17,6 +17,8 @@ limitations under the License.
 package redact
 
 import (
+	"encoding/json"
+	"fmt"
 	"math/rand/v2"
 	"strings"
 	"testing"
@@ -75,14 +77,35 @@ func checkBoundaries(in string) string {
 			return "Pieces gave invalid UTF-8 " + strqq(out)
 		}
 	}
+	// Values that keep their line breaks (#845, sixth decision of 2026-11-18, point 6): the input cut at each
+	// comma, each part one value written in each form, under a key and after one, as a tool writes them. In JSON
+	// the answer must stay a valid JSON string: a replacement takes an escape whole or not at all.
+	parts := strings.Split(in, ",")
+	for _, f := range []Form{AsIs, Line, JSON} {
+		ps := make([]Piece, 0, 3*len(parts))
+		for i, it := range parts {
+			ps = append(ps, Piece{Text: `"`}, Piece{Text: it, Data: true, Form: f, Key: []string{"", "note", passwordKey}[i%3]}, Piece{Text: "\"\n"})
+		}
+		out := Pieces(ps)
+		for i, o := range out {
+			if !utf8.ValidString(o) {
+				return fmt.Sprintf("Pieces in form %d gave invalid UTF-8 %s", f, strqq(o))
+			}
+			if f == JSON && ps[i].Data && !json.Valid([]byte(`"`+o+`"`)) {
+				return fmt.Sprintf("Pieces in JSON gave no JSON string %s", strqq(o))
+			}
+		}
+	}
 	return ""
 }
 
 func strqq(s string) string { return strings.ReplaceAll(strings.ReplaceAll(s, "\n", `\n`), "\r", `\r`) }
 
-// boundarySeeds are the inputs found to break property 4 on 38cf1a37, and a few of their neighbours.
+// boundarySeeds are the inputs found to break property 4 on 38cf1a37, a few of their neighbours, and values
+// with line breaks, quotes and backslashes that JSON escapes.
 var boundarySeeds = []string{
 	"password：\u200b<<：", "--token=\u00ad\r=：", "password：：", "token=\u2060：x", "auth: ∷\u200bV9q", "：：",
+	"token: expired\nretrying in 5s", "password: \"V9q\\\"x\"\r\n  host", "|\n  block,other: keepme", "token=\tV9q\u2028x",
 }
 
 func FuzzReplacementBoundaries(f *testing.F) {

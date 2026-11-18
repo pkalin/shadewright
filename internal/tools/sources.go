@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -292,30 +293,32 @@ func (s *Set) queryMetrics(ctx context.Context, t metricTemplate, a queryMetrics
 	if res.Partial {
 		r.addLabel(LabelMetricsPartial)
 	}
-	// The series are one text, decided once (layout): each label a "name: value" line, the name and value of a
-	// label decided together, the value under its name (a label named like a secret key hides its whole value).
-	type label struct{ name, value string }
-	labels := make([][]label, len(res.Series))
-	var lay layout
-	for i, se := range res.Series {
-		keys := slices.Sorted(maps.Keys(se.Labels))
-		labels[i] = make([]label, len(keys))
-		for j, k := range keys {
-			lay.entry("- ", k, se.Labels[k], shown(&labels[i][j].name), shown(&labels[i][j].value))
+	// The answer is one text, decided once on the lines it returns (layout.go): each label's name and value
+	// as the line shows them, the value under its name (a label named like a secret key hides its whole value).
+	var ans answer
+	ans.text(fmt.Sprintf("%s: %d series\n", t.name, len(res.Series)))
+	type line struct{ from, to int }
+	var ls []line
+	for _, se := range res.Series {
+		from := ans.text("{")
+		for j, k := range slices.Sorted(maps.Keys(se.Labels)) {
+			if j > 0 {
+				ans.text(", ")
+			}
+			ans.value("", k)
+			ans.text("=")
+			ans.value(k, se.Labels[k])
 		}
+		ans.text("} " + summary(se.Samples, t.overWindow))
+		ls = append(ls, line{from, len(ans.pieces)})
+		ans.text("\n")
 	}
-	s.decide(&lay)
-	var l lines
-	l.add("%s: %d series", t.name, len(res.Series))
-	for i, se := range res.Series {
-		var lb []string
-		for _, lv := range labels[i] {
-			lb = append(lb, lv.name+"="+lv.value)
-		}
-		// A series line is the source's answer.
-		l.add("%s", l.data("{"+strings.Join(lb, ", ")+"} "+summary(se.Samples, t.overWindow)))
+	out, text := s.lines(&ans)
+	r.Text = text
+	// A series line is the source's answer.
+	for _, l := range ls {
+		r.Values = append(r.Values, strings.Join(out[l.from:l.to], ""))
 	}
-	r.Text, r.Values = l.String(), l.values
 	return nil
 }
 
@@ -392,18 +395,15 @@ func (s *Set) deliveryStatus(ctx context.Context, a deliveryArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	// The values shown are one text, decided once (layout).
-	var rev, msg string
-	var lay layout
-	lay.field("", "applied revision", st.AppliedRevision, shown(&rev))
-	lay.field("", "message", st.Message, shown(&msg))
-	s.decide(&lay)
-	var l lines
-	l.add("delivery: %s", deliveryState(st))
-	l.add("applied revision: %s", l.data(rev))
-	l.add("ready: %s", strconv.FormatBool(st.Ready))
-	l.add("message: %s", l.data(msg))
-	r.Text, r.Values = l.String(), l.values
+	// The answer is one text, decided once on the lines it returns (layout.go).
+	var ans answer
+	ans.text("delivery: " + deliveryState(st) + "\napplied revision: ")
+	rev := ans.value("applied revision", st.AppliedRevision)
+	ans.text("\nready: " + strconv.FormatBool(st.Ready) + "\nmessage: ")
+	msg := ans.value("message", st.Message)
+	ans.text("\n")
+	out, text := s.lines(&ans)
+	r.Text, r.Values = text, []string{out[rev], out[msg]}
 	return nil
 }
 

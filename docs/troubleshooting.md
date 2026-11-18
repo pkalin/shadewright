@@ -433,6 +433,16 @@ The `reason` of an `Abandoned` entry is set with that state and never changes:
 | `NameTaken` | A request with the revert's name exists and does not revert this request; it is left as it is | Look at that request: it was not made by the proposer for this failure |
 | `CreateInvalid` | The API server refused the revert as invalid. The event has a fixed sentence; the analyzer's log has the API server's error | Read the log line "The API server refused the revert as invalid" and report it: the proposer builds every field of the revert |
 
+## Text hidden around a secret
+
+A diagnosis or a stored record shows `[REDACTED:...]` (or `[credential]`, `***`) where you expected more of the text. Redaction hides the secret and sometimes text next to it, on the safe side ([#845](https://github.com/pkalin/shadewright/issues/845)):
+
+- **A field whose name says secret.** The whole value of a map key, a field or a metric label whose name is a secret key (`password`, `api_key`, `auth`, `pass`, `DB_PASSWORD`) is hidden, line breaks included, but not the entries after it. So are every value under a field named like `secret` or `imagePullSecrets` (names and paths of the Secrets it refers to), and the `value` or `values` next to a `key` or `name` that is a secret key.
+- **A key inside free text.** In an Event note, a log line or a message, the value after a secret key and a separator (`token: <value>`, `password=<value>`) is hidden up to where the rule ends it: in the one-line Event list, the end of that line of the note, or the end of the indented lines of a block under it, and the rest of the note stays; in `get_resource`, where a line break is written `\n`, up to the next blank. A key of the `Password=` connection-string form and an `Authorization` value run to the end of the line. Text after `->`, `=>` or `==` behind a key word, and after a lone carriage return, goes with the value too.
+- **A list of links.** `<https://example.com>,<mailto:ops@example.com>` is hidden from the first link to the `@`, as a URL with user info.
+
+None of this can be turned off; patterns supplied by the operator only add to it.
+
 ## The Incident cap is reached
 
 Symptoms: `shadewright_incident_observations_refused_total` rises, a Warning event with reason `IncidentCapReached` on the analyzer's Pod, and a new problem produces no Incident, nor does a symptom of a `Resolved` Incident seen again more than 24 hours after its resolution (its next occurrence is a new Incident too). The cap is `--max-incidents` (500) and counts every Incident, `Resolved` ones included. Before it is reached, at 80% of the cap (400 Incidents), the gauge `shadewright_incident_cap_near` turns 1 and the analyzer's Pod gets a Warning event `IncidentCapNear`; watch `shadewright_incidents` by `phase` to see how many are `Resolved` and safe to clear. The analyzer resolves an Incident after an hour with nothing new and no active request, or when its request `Succeeded`; a request in `Merged` counts as ended until verification is built (#92). An Incident whose newest occurrence is a lasting state of a module never goes quiet, so it leaves only by a request or a person.

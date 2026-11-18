@@ -20,27 +20,49 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
-// A tool result is one text, decided once (#845, third decision of 2026-11-18). A read tool lays out what it
-// shows as one text: the fields in document order, each as a "name: value" line, list items as items, nothing
-// escaped or encoded. The decision is taken once on that text ([Redactor.Pieces]) and applied back to the
-// values, so a key in one field and its value in a sibling or the next field (an HTTP header's name and value,
-// a flag at the end of a command and its value in the arguments) are seen together, as they were by main's
-// second pass over the whole answer, and nothing is redacted after the result is encoded.
+// A tool result is one text, decided once (#845, third decision of 2026-11-18), and the text decided on is the
+// text the tool returns (sixth decision of 2026-11-18): a tool gives its answer as pieces, the text it writes
+// (a field name, JSON punctuation, a header line) and the values from a source, each written as the answer
+// writes it (Form). The decision is taken once on those bytes ([Redactor.Pieces]) and the answer is the pieces
+// as decided, joined: a pattern that exists only in the answer (a reason "Bearer" and the name of the object
+// after it on an Event's line) is seen, and nothing is redacted after the decision.
 
-// Piece is one piece of a text laid out from the fields of a tool result: a value from a source (Data), or the
-// layout code writes around the values (indentation, a field name and its colon, a list dash, a line break),
-// which is read with them and never changed.
+// Form says how a tool writes a value from a source into its answer. Every form writes each character of the
+// value as one unit of its own, so a match on the answer is widened to whole units and a match on the value is
+// carried to the units it was written as.
+type Form int
+
+const (
+	// AsIs writes the value as it is.
+	AsIs Form = iota
+	// Line writes the value on one line of the answer, as incidentcontext.Shown does: a control character,
+	// U+2028 and U+2029 become a space, and an invalid byte becomes "?".
+	Line
+	// JSON writes the value as the content of a JSON string, as encoding/json does without HTML escapes: '"' and
+	// '\\' escaped, a control character as "\n", "\r", "\t", "\b", "\f" or "\u00XX", U+2028 and U+2029 as
+	// "\u2028" and "\u2029", and an invalid byte as "\ufffd".
+	JSON
+)
+
+// Piece is one piece of a tool's answer: a value from a source (Data), or text the tool writes around the
+// values (a field name and its colon, JSON punctuation, a line break), which is read with them and never
+// changed.
 type Piece struct {
+	// Text is the text the tool writes, or the value as it was read.
 	Text string
 	Data bool
+	// Form is how a data piece is written into the answer; a piece the tool writes is written as it is.
+	Form Form
 	// Whole hides a data piece whole: the layout sets it on every value inside a collection under a field
 	// whose name SecretCollection reports.
 	Whole bool
 	// Key is the key the object gives a data piece: a map key, a field name, a metric label's name (#845,
 	// fifth decision of 2026-11-18). A key that SecretKey reports hides the piece whole, whatever it holds
-	// (line breaks, blanks, markers): the object says where the value ends, the laid-out text does not.
+	// (line breaks, blanks, markers): the object says where the value ends, the answer does not.
 	Key string
 }
 
@@ -77,187 +99,336 @@ func SecretCollection(name string) bool {
 	return secretCollectionName.MatchString(name) && !isReference(name)
 }
 
-// Pieces takes the one decision on the text the pieces make, joined as they are, and returns each piece with
-// what is redacted in it replaced; a layout piece comes back as it was. A data piece loses what String redacts
-// of it in the joined text (cut at its ends), what String redacts of it alone, and the value the rule for the
-// strings of a sequence (seqValues) finds in it, read over the data pieces in their order: a key, a separator
-// or a flag in one value and its value in a later one. The string after a secret flag is its value, whatever
-// it looks like ("--token", "--verbose" hides "--verbose").
+// Pieces takes the one decision on the answer the pieces make, each data piece written in its Form and all
+// joined as they are, and returns each piece as the answer writes it with what is redacted in it replaced; a
+// piece the tool writes comes back as it was. A data piece loses, in the units it was written as:
 //
-// A data piece is one value, as the object has it (#845, fifth decision of 2026-11-18). When a data piece holds
-// a line break, the joined text and each such piece alone are also read with the line breaks inside data
-// pieces written as the JSON escapes "\n" and "\r" (escapedReading), the text main read in its pass over the
-// encoded answer, and what that reading hides is hidden too, so a value that begins on one line of a piece runs
-// on over its line breaks wherever main's reading ran on. A data piece is hidden whole when it is marked Whole
-// or its Key is a secret key (SecretKey), and from its first byte that is no blank to its end when the escaped
-// reading takes it as the value of a key outside it (valueOfKey). The work is linear in the length of the
-// pieces.
-func (r *Redactor) Pieces(ps []Piece) []string {
-	var b strings.Builder
+//   - what String redacts of the answer, cut at the piece's ends and widened to whole units (an escape is
+//     hidden whole or kept whole);
+//   - what String redacts of the value alone, as it was read (with its line breaks: a block under a key in the
+//     value is found by its lines), as main redacted each value before it wrote its answer;
+//   - the value the rule for the strings of a sequence (seqValues) finds in it, read over the values in their
+//     order: a key, a separator or a flag in one value and its value in a later one. The string after a secret
+//     flag is its value, whatever it looks like ("--token", "--verbose" hides "--verbose");
+//   - all of it when it is marked Whole or its Key is a secret key (SecretKey): the object says where the value
+//     ends, and nothing beyond it is hidden: a match of the answer that reaches into such a value ends with it
+//     (endAtObjectValues), so a block or a flow collection that the value opens takes no later entry (sixth
+//     decision, point 2);
+//   - all of it from its first byte that is no blank when a match of the answer takes it as the value of a key
+//     outside it (valueOfKey: a header's value after its name in the field before).
+//
+// A key found inside a value hides as far as String hides it on the answer and on the value alone, and no
+// further: on a line of the answer (Line) its value ends where the rule ends it on that line, in JSON a line
+// break is "\n" and the next blank ends it, as main read each answer (sixth decision, point 3). The work is
+// linear in the length of the pieces, apart from the sorts of the matches (mergeSpans, valueOfKey): m log m
+// comparisons for m matches, and m is at most linear in that length.
+func (r *Redactor) Pieces(ps []Piece) []string { return r.pieces(ps, false) }
+
+// pieces is Pieces; with joined set, the first step also takes what String hides of the answer as written
+// before any marker, cut at each value's ends, so that what String hides in the values joined is hidden in them
+// apart whatever the markers change (Strings).
+func (r *Redactor) pieces(ps []Piece, joined bool) []string {
+	// First each value alone, as main redacted each value before it wrote its answer: what String hides of it as
+	// it was read, the value seqValues finds in it, or all of it when the object says so.
 	var data []string
-	breaks := false
 	for _, p := range ps {
 		tick(1)
-		b.WriteString(p.Text)
 		if p.Data {
 			data = append(data, p.Text)
-			breaks = breaks || strings.ContainsAny(p.Text, "\r\n")
 		}
 	}
-	text := b.String()
-	matches := r.ruleMatches(text)
-	esc := escapedReading(ps, text, breaks)
-	escMatches := matches
-	if breaks {
-		escMatches = esc.back(r.ruleMatches(esc.text), 0)
-		matches = append(matches, escMatches...)
-	}
-	whole := valueOfKey(esc.firsts, slices.Clone(escMatches))
-	joined := settle(text, matches)
 	starts := seqValues(data)
-	out := make([]string, len(ps))
-	off, next, k := 0, 0, 0
+	ws := make([]written, len(ps))
 	for i, p := range ps {
 		tick(1)
-		end := off + len(p.Text)
-		if !p.Data {
-			out[i] = p.Text
-			off = end
-			continue
-		}
-		if p.Whole || (p.Key != "" && SecretKey(p.Key)) {
-			out[i] = render(p.Text, []span{{start: 0, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}})
-			k++
-			off = end
-			continue
-		}
-		if whole[i] {
-			// The value of a key outside the piece: all of it from its first byte that is no blank, the
-			// blanks and line breaks before that kept as the indentation they are.
-			v := esc.firsts[i] - off
-			out[i] = p.Text[:v] + render(p.Text[v:], []span{{start: 0, end: len(p.Text) - v, kind: KindCredential, rule: len(r.rules)}})
-			k++
-			off = end
-			continue
-		}
-		var own []span
-		for next < len(joined) && joined[next].end <= off {
+		ws[i] = write(p)
+	}
+	var plain []span
+	if joined {
+		var b strings.Builder
+		for _, w := range ws {
 			tick(1)
-			next++
+			b.WriteString(w.text)
 		}
-		for j := next; j < len(joined) && joined[j].start < end; j++ {
-			tick(1)
-			sp := joined[j]
-			sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
-			if sp.end > sp.start {
-				own = append(own, sp)
-			}
-		}
-		own = append(own, r.spans(p.Text)...)
-		if from, to := esc.escapedAt(off), esc.escapedAt(end); to-from != len(p.Text) {
-			// The piece alone, its line breaks read escaped.
-			for _, sp := range esc.back(r.ruleMatches(esc.text[from:to]), from) {
+		plain = r.spans(b.String())
+	}
+	var b strings.Builder
+	k, off, next := 0, 0, 0
+	for i, p := range ps {
+		tick(1)
+		w := ws[i]
+		end := off + len(w.text)
+		if p.Data {
+			var own []span
+			for next < len(plain) && plain[next].end <= off {
 				tick(1)
-				sp.start, sp.end = sp.start-off, sp.end-off
-				own = append(own, sp)
+				next++
 			}
+			for j := next; j < len(plain) && plain[j].start < end; j++ {
+				tick(1)
+				sp := plain[j]
+				sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
+				if sp.end > sp.start {
+					own = append(own, w.widen(sp))
+				}
+			}
+			if hiddenByObject(p) {
+				own = []span{{start: 0, end: len(w.text), kind: KindCredential, rule: len(r.rules)}}
+			} else {
+				for _, sp := range r.spans(p.Text) {
+					tick(1)
+					own = append(own, w.carry(sp))
+				}
+				if s := starts[k]; s >= 0 && s < len(p.Text) {
+					own = append(own, w.carry(span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))
+				}
+			}
+			w = w.marked(mergeSpans(own))
+			k++
 		}
-		if s := starts[k]; s >= 0 && s < len(p.Text) {
-			own = append(own, span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)})
+		ws[i] = w
+		b.WriteString(w.text)
+		off = end
+	}
+	// Then the answer, as written with those markers: what String hides of it, cut at each value's ends and
+	// widened to whole units, and a value that a key outside it takes.
+	text := b.String()
+	matches := r.ruleMatches(text)
+	firsts := firstBytes(ps, ws)
+	whole := valueOfKey(firsts, slices.Clone(matches))
+	settled := settle(text, matches)
+	out := make([]string, len(ps))
+	off, next = 0, 0
+	for i, p := range ps {
+		tick(1)
+		w := ws[i]
+		end := off + len(w.text)
+		switch {
+		case !p.Data || len(w.text) == 0:
+			out[i] = w.text
+		case whole[i]:
+			// The value of a key outside the piece: all of it from its first byte that is no blank, the
+			// blanks before that kept as the indentation they are.
+			v := firsts[i] - off
+			out[i] = w.text[:v] + render(w.text[v:], []span{{start: 0, end: len(w.text) - v, kind: KindCredential, rule: len(r.rules)}})
+		default:
+			var own []span
+			for next < len(settled) && settled[next].end <= off {
+				tick(1)
+				next++
+			}
+			for j := next; j < len(settled) && settled[j].start < end; j++ {
+				tick(1)
+				sp := settled[j]
+				sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
+				if sp.end > sp.start {
+					own = append(own, w.widen(sp))
+				}
+			}
+			out[i] = render(w.text, mergeSpans(own))
 		}
-		out[i] = render(p.Text, mergeSpans(own))
-		k++
 		off = end
 	}
 	return out
 }
 
-// escaped is the text pieces make with each line break inside a data piece written as its JSON escape, with
-// the maps between its offsets and those of the text.
-type escaped struct {
+// hiddenByObject reports whether the object says the data piece p is hidden whole: it is marked Whole or its
+// key is a secret key.
+func hiddenByObject(p Piece) bool { return p.Data && (p.Whole || (p.Key != "" && SecretKey(p.Key))) }
+
+// written is a piece as the answer writes it, with the units it was written in: each character of a data piece
+// (an invalid byte counts as one) is one unit of the value and one of the answer.
+type written struct {
 	text string
-	// from and to give, for each byte of text, the bytes of the original text it was written from: an escape's
-	// two bytes both come from its line break.
-	from, to []int
-	// at gives, for each offset of the original text and its end, the offset in text it was written at; nil when
-	// text is the original text.
-	at []int
-	// firsts gives, for each piece, the offset in the original text of its first byte that is no blank and no
-	// line break; -1 for a layout piece or a piece of blanks only.
-	firsts []int
+	// For a piece written in another form than AsIs: start and end give, for each byte of the value, the
+	// offsets in text where the unit holding it starts and ends; unitStart and unitEnd give the same for each
+	// byte of text. nil when text is the value.
+	start, end, unitStart, unitEnd []int
 }
 
-// escapedReading returns the text the pieces make (joined) with each CR and LF inside a data piece written as
-// "\r" and "\n", as JSON escapes them, and the first byte of each piece that is no blank. Layout pieces keep
-// their line breaks, so the lines of the layout stay lines. With breaks false (no data piece holds a line
-// break) the text is joined itself and only firsts is set.
-func escapedReading(ps []Piece, joined string, breaks bool) escaped {
-	e := escaped{text: joined, firsts: make([]int, len(ps))}
-	var b strings.Builder
-	if breaks {
-		e.at = make([]int, len(joined)+1)
-		e.from, e.to = make([]int, 0, len(joined)), make([]int, 0, len(joined))
+// write writes the piece p as the answer writes it.
+func write(p Piece) written {
+	if !p.Data || p.Form == AsIs {
+		return written{text: p.Text}
 	}
+	n := len(p.Text)
+	w := written{start: make([]int, n), end: make([]int, n)}
+	var b strings.Builder
+	b.Grow(n)
+	for i := 0; i < n; {
+		tick(1)
+		c, size := utf8.DecodeRuneInString(p.Text[i:])
+		from := b.Len()
+		writeUnit(&b, p.Form, p.Text[i:i+size], c, size)
+		to := b.Len()
+		for j := i; j < i+size; j++ {
+			tick(1)
+			w.start[j], w.end[j] = from, to
+		}
+		for range to - from {
+			tick(1)
+			w.unitStart, w.unitEnd = append(w.unitStart, from), append(w.unitEnd, to)
+		}
+		i += size
+	}
+	w.text = b.String()
+	return w
+}
+
+// jsonHex are the digits of a "\u00XX" escape.
+const jsonHex = "0123456789abcdef"
+
+// writeUnit writes one unit of a value, the character c of size bytes (raw), in form f.
+func writeUnit(b *strings.Builder, f Form, raw string, c rune, size int) {
+	invalid := c == utf8.RuneError && size == 1
+	switch f {
+	case Line:
+		switch {
+		case invalid:
+			b.WriteByte('?')
+		case unicode.IsControl(c) || c == '\u2028' || c == '\u2029':
+			b.WriteByte(' ')
+		default:
+			b.WriteString(raw)
+		}
+	case JSON:
+		switch {
+		case invalid:
+			b.WriteString(`\ufffd`)
+		case c == '"' || c == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(c)
+		case c == '\n':
+			b.WriteString(`\n`)
+		case c == '\r':
+			b.WriteString(`\r`)
+		case c == '\t':
+			b.WriteString(`\t`)
+		case c == '\b':
+			b.WriteString(`\b`)
+		case c == '\f':
+			b.WriteString(`\f`)
+		case c < 0x20:
+			b.WriteString(`\u00`)
+			b.WriteByte(jsonHex[c>>4])
+			b.WriteByte(jsonHex[c&0xF])
+		case c == '\u2028':
+			b.WriteString(`\u2028`)
+		case c == '\u2029':
+			b.WriteString(`\u2029`)
+		default:
+			b.WriteString(raw)
+		}
+	default:
+		b.WriteString(raw)
+	}
+}
+
+// marked returns w with each of the sorted, disjoint spans of its text replaced by its marker, a marker one unit
+// of the new text. The units of the value it was written from map to the units they were written as, a unit
+// inside a marker to the marker.
+func (w written) marked(spans []span) written {
+	if len(spans) == 0 {
+		return w
+	}
+	n := len(w.text)
+	// unit returns the unit of w.text that holds byte j: the bytes of a value written as it is are units of their
+	// own, so a span (on character boundaries) is never cut.
+	unit := func(j int) (int, int) {
+		if w.unitStart == nil {
+			return j, j + 1
+		}
+		return w.unitStart[j], w.unitEnd[j]
+	}
+	var b strings.Builder
+	m := written{unitStart: make([]int, 0, n), unitEnd: make([]int, 0, n)}
+	at := make([]int, n+1) // the offset in the new text of each unit start of w.text; a byte in a marker maps to it
+	ends := make([]int, n+1)
+	pos := 0
+	keep := func(to int) {
+		for pos < to {
+			tick(1)
+			s, e := unit(pos)
+			from := b.Len()
+			b.WriteString(w.text[s:e])
+			for j := s; j < e; j++ {
+				tick(1)
+				at[j], ends[j] = from, b.Len()
+				m.unitStart, m.unitEnd = append(m.unitStart, from), append(m.unitEnd, b.Len())
+			}
+			pos = e
+		}
+	}
+	for _, sp := range spans {
+		tick(1)
+		keep(sp.start)
+		from := b.Len()
+		b.WriteString(marker(sp.kind, sp.end-sp.start))
+		for j := sp.start; j < sp.end; j++ {
+			tick(1)
+			at[j], ends[j] = from, b.Len()
+		}
+		for range b.Len() - from {
+			tick(1)
+			m.unitStart, m.unitEnd = append(m.unitStart, from), append(m.unitEnd, b.Len())
+		}
+		pos = sp.end
+	}
+	keep(n)
+	m.text = b.String()
+	if w.start != nil {
+		m.start, m.end = make([]int, len(w.start)), make([]int, len(w.end))
+		for j := range w.start {
+			tick(1)
+			m.start[j], m.end[j] = at[w.start[j]], ends[w.end[j]-1]
+		}
+	}
+	return m
+}
+
+// widen widens a span of the written text to the whole units it touches.
+func (w written) widen(sp span) span {
+	if w.unitStart != nil {
+		sp.start, sp.end = w.unitStart[sp.start], w.unitEnd[sp.end-1]
+	}
+	return sp
+}
+
+// carry carries a span of the value to the units of the written text it was written as.
+func (w written) carry(sp span) span {
+	if w.start != nil {
+		sp.start, sp.end = w.start[sp.start], w.end[sp.end-1]
+	}
+	return sp
+}
+
+// firstBytes returns, for each piece, the offset in the answer of its first written byte that is no blank and
+// no line break; -1 for a piece the tool writes or a piece of blanks only.
+func firstBytes(ps []Piece, ws []written) []int {
+	out := make([]int, len(ps))
 	off := 0
 	for i, p := range ps {
 		tick(1)
-		e.firsts[i] = -1
-		for j := range len(p.Text) {
+		out[i] = -1
+		t := ws[i].text
+		for j := 0; p.Data && j < len(t); j++ {
 			tick(1)
-			c := p.Text[j]
-			if p.Data && e.firsts[i] < 0 && c != ' ' && c != '\t' && c != '\r' && c != '\n' {
-				e.firsts[i] = off + j
+			if c := t[j]; c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+				out[i] = off + j
+				break
 			}
-			if !breaks {
-				continue
-			}
-			e.at[off+j] = b.Len()
-			if p.Data && (c == '\r' || c == '\n') {
-				esc := byte('n')
-				if c == '\r' {
-					esc = 'r'
-				}
-				b.WriteByte('\\')
-				b.WriteByte(esc)
-				e.from, e.to = append(e.from, off+j, off+j), append(e.to, off+j+1, off+j+1)
-				continue
-			}
-			b.WriteByte(c)
-			e.from, e.to = append(e.from, off+j), append(e.to, off+j+1)
 		}
-		off += len(p.Text)
+		off += len(t)
 	}
-	if breaks {
-		e.at[len(joined)] = b.Len()
-		e.text = b.String()
-	}
-	return e
+	return out
 }
 
-// escapedAt returns the offset in e.text that the offset pos of the original text was written at.
-func (e escaped) escapedAt(pos int) int {
-	if e.at == nil {
-		return pos
-	}
-	return e.at[pos]
-}
-
-// back maps matches found in e.text from offset base on to the bytes of the original text.
-func (e escaped) back(ms []span, base int) []span {
-	for i := range ms {
-		tick(1)
-		start, end := ms[i].start, ms[i].end
-		ms[i].start, ms[i].end = e.from[base+start], e.to[base+max(end-1, start)]
-	}
-	return ms
-}
-
-// valueOfKey reports, by piece, whether the escaped reading (escapedReading) takes a data piece as the value of a key
-// outside it (a header's name in the field before it, a key and colon in the string before): a match covers the
-// first byte of the piece that is no blank (firsts), and the match is a key's value (KindCredential) or began
-// before that byte. In the laid-out text only the first line of a value belongs to the key in front of it; the
-// object says the value is all of the piece (#845, fifth decision of 2026-11-18). matches are the matches of
-// that reading, sorted here. The work is linear in the number of pieces and matches, apart from that sort.
+// valueOfKey reports, by piece, whether the answer takes a data piece as the value of a key outside it (a
+// header's name in the field before it, a key and colon in the string before): a match covers the first byte of
+// the piece that is no blank (firsts), and the match is a key's value (KindCredential) or began before that
+// byte. In the answer only part of a value may belong to the key in front of it; the object says the value is
+// all of the piece (#845, fifth decision of 2026-11-18). matches are the matches of the answer, sorted here: m
+// log m comparisons for m matches. The rest of the work is linear in the number of pieces and matches.
 func valueOfKey(firsts []int, matches []span) []bool {
 	out := make([]bool, len(firsts))
 	slices.SortFunc(matches, func(a, b span) int { return a.start - b.start })
@@ -286,3 +457,7 @@ func valueOfKey(firsts []int, matches []span) []bool {
 
 // Pieces is the package's Pieces with the built-in rules.
 func Pieces(ps []Piece) []string { return defaultRedactor.Pieces(ps) }
+
+// Written returns s as the answer writes it in form f, with nothing redacted: what a redactor that takes no
+// decision on pieces writes after it redacted the value alone.
+func Written(f Form, s string) string { return write(Piece{Text: s, Data: true, Form: f}).text }

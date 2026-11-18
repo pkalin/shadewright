@@ -3016,9 +3016,9 @@ func builtinRules() []rule {
 		// password such as "Hunter<2"), which a JSON or HTML encoder would have escaped and text read raw
 		// does not (#840); it still ends at "/", so it never reaches into the next URL. The host part ends at
 		// "<" and ">", so a bracket of the markup around the URL ("<postgres://u:p@h/x>") stays.
-		// A URL in angle brackets ("<https://example.com>,<mailto:ops@example.com>") ends at its closing bracket
-		// when that bracket stands before the "@" and is not glued to more text (autolinkClosed, #845).
-		{kind: KindConnectionString, span: connStringSpan, re: regexp.MustCompile(
+		// A list of URLs in angle brackets ("<https://example.com>,<mailto:ops@example.com>") is one match up to
+		// the "@", as on main: property 1 of #845 has no exceptions, and showing more is #860.
+		{kind: KindConnectionString, re: regexp.MustCompile(
 			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"]+@[^\s'"<>]+`)},
 		// Secret fields of semicolon-separated connection strings (Azure Storage, Service Bus, SQL Server):
 		// quoted with doubled quotes, or bare up to the next ";" or line end, spaces included.

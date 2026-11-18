@@ -64,6 +64,11 @@ type Piece struct {
 	// fifth decision of 2026-11-18). A key that SecretKey reports hides the piece whole, whatever it holds
 	// (line breaks, blanks, markers): the object says where the value ends, the answer does not.
 	Key string
+	// MapKey marks a data piece that is a key of a map in the answer, not a value (#845, eighth decision of
+	// 2026-11-18). main redacted no key alone, only its answer, where a key is written in its Form (a line break
+	// in JSON is "\n"): what String hides of the key as written is hidden too, so a match that the value alone
+	// ends at a line break runs on as far as main ran it.
+	MapKey bool
 }
 
 // secretKeyName is a whole key name that holds a secret: the key part of main's rule for a quoted key.
@@ -110,6 +115,7 @@ func SecretCollection(name string) bool {
 //   - the value the rule for the strings of a sequence (seqValues) finds in it, read over the values in their
 //     order: a key, a separator or a flag in one value and its value in a later one. The string after a secret
 //     flag is its value, whatever it looks like ("--token", "--verbose" hides "--verbose");
+//   - for a map key (MapKey), also what String hides of the key as the answer writes it, as main hid it;
 //   - all of it when it is marked Whole or its Key is a secret key (SecretKey): the object says where the value
 //     ends, and nothing beyond it is hidden: a match of the answer that reaches into such a value ends with it
 //     (endAtObjectValues), so a block or a flow collection that the value opens takes no later entry (sixth
@@ -178,6 +184,12 @@ func (r *Redactor) pieces(ps []Piece, joined bool) []string {
 				for _, sp := range r.spans(p.Text) {
 					tick(1)
 					own = append(own, w.carry(sp))
+				}
+				if p.MapKey {
+					for _, sp := range r.spans(w.text) {
+						tick(1)
+						own = append(own, w.widen(sp))
+					}
 				}
 				if s := starts[k]; s >= 0 && s < len(p.Text) {
 					own = append(own, w.carry(span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))

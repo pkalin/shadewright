@@ -647,8 +647,8 @@ func TestRedactsPlantedSecrets(t *testing.T) {
 	p.Labels["leak"] = canaryMark
 	objs := []client.Object{p, deployment(), event("e1", podName, "pull failed "+leakDSN+" "+canaryMark, testNow)}
 	for name, secrets := range map[string][]string{
-		"built-in rules": {leakJWT, leakPassword},
-		"canary":         {canaryMark},
+		builtInRules: {leakJWT, leakPassword},
+		"canary":     {canaryMark},
 	} {
 		e := newEnv(t, objs, func(c *Config) {
 			if name == "canary" {
@@ -923,7 +923,7 @@ func TestGetResourceHidesCollectionsUnderSecretNamedFields(t *testing.T) {
 			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: tokenPath}}},
 		}}},
 	}
-	for name, red := range map[string]Redactor{"built-in rules": nil, "no Pieces": canary{}} {
+	for name, red := range map[string]Redactor{builtInRules: nil, "no Pieces": canary{}} {
 		e := newEnv(t, []client.Object{p}, func(c *Config) {
 			if red != nil {
 				c.Redactor = red
@@ -943,3 +943,67 @@ func TestGetResourceHidesCollectionsUnderSecretNamedFields(t *testing.T) {
 		}
 	}
 }
+
+// A map key is decided like a value, as far as main hid it (#845, eighth decision of 2026-11-18, point 1): main
+// redacted no key alone, only its answer as JSON, where a line break in a key is "\n" and a connection string
+// runs on to the closing quote, so main answered the key below with "[REDACTED:connection-string]" alone. A key
+// decided alone first ended the connection string at the line break and showed the text after it.
+func TestGetResourceHidesAMapKeyAsMainDid(t *testing.T) {
+	tail := "Qz7secret" + "Value1"
+	key := "postgres" + "://u:" + "Pw9secret" + "Xyz@h/db" + "\n" + tail
+	p := pod()
+	p.Spec.Volumes = []corev1.Volume{{Name: "csi", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+		Driver: "d", VolumeAttributes: map[string]string{key: "v"},
+	}}}}
+	r := newEnv(t, []client.Object{p}).call(t, NameGetResource, with(NameGetResource, nil))
+	if r.Status != StatusOK {
+		t.Fatalf("%s: %s", r.Status, r.Text)
+	}
+	if strings.Contains(r.Text, tail) || strings.Contains(r.Text, "Pw9secret") {
+		t.Errorf("the key shows, main hid it:\n%s", r.Text)
+	}
+	if !strings.Contains(r.Text, `"driver": "d"`) || !strings.Contains(r.Text, `: "v"`) {
+		t.Errorf("text around the key is gone:\n%s", r.Text)
+	}
+}
+
+// Numbers, booleans and null are tokens of the walk too (#845, eighth decision of 2026-11-18, point 2): where main
+// hid a whole object or list, every token inside is hidden, and the answer stays valid JSON. main answered the
+// volume below with
+//
+//	"secret": [REDACTED:credential]
+//
+// (the whole object, no longer JSON), so "secretName", "defaultMode" and "optional" showed nothing of their
+// values there.
+func TestGetResourceHidesEveryTokenOfAHiddenCollection(t *testing.T) {
+	mode, optional := int32(256), true
+	p := pod()
+	p.Spec.Volumes = []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+		SecretName: "credentials", DefaultMode: &mode, Optional: &optional,
+	}}}}
+	for name, red := range map[string]Redactor{builtInRules: nil, "no Pieces": canary{}} {
+		e := newEnv(t, []client.Object{p}, func(c *Config) {
+			if red != nil {
+				c.Redactor = red
+			}
+		})
+		r := e.call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK {
+			t.Fatalf("%s: %s: %s", name, r.Status, r.Text)
+		}
+		for _, shown := range []string{`"credentials"`, "256", `"optional": true`} {
+			if strings.Contains(r.Text, shown) {
+				t.Errorf("%s: %s shows, main hid it:\n%s", name, shown, r.Text)
+			}
+		}
+		if !json.Valid([]byte(r.Text)) {
+			t.Errorf("%s: the answer is no JSON:\n%s", name, r.Text)
+		}
+		if !strings.Contains(r.Text, `"name": "creds"`) {
+			t.Errorf("%s: the volume's name is missing:\n%s", name, r.Text)
+		}
+	}
+}
+
+// builtInRules names the cases of a test run with the built-in redactor.
+const builtInRules = "built-in rules"

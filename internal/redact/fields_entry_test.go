@@ -675,10 +675,14 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	results, places := fieldResults(t, true)
 	relations, calls := fieldRelationResults(t, true)
 	marshaled, byType := fieldMarshaledResults(t, true)
-	results = append(append(results, relations...), marshaled...)
-	t.Logf("relation calls per tool %v; places of types that write their own JSON %v", calls, byType)
+	keys, maps := fieldKeyResults(t, true)
+	literals, literalsByType := fieldLiteralResults(t, true, true)
+	results = append(append(append(append(results, relations...), marshaled...), keys...), literals...)
+	t.Logf("relation calls per tool %v; places of types that write their own JSON %v; maps per tool %v; literal places per type %v",
+		calls, byType, maps, literalsByType)
 	main := readFieldsMainTable(t)
 	lost, hidden, mainHidden := 0, 0, 0
+	rows, lostBy := map[string]int{}, map[string]int{}
 	seen := map[string]bool{}
 	for _, r := range results {
 		seen[r.id()] = true
@@ -696,7 +700,10 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 		if was {
 			mainHidden++
 		}
+		group := fieldRowGroup(r)
+		rows[group]++
 		if was && !r.hidden {
+			lostBy[group]++
 			if lost++; lost <= 20 {
 				t.Errorf("%s %s, %s: the secret shows, main hid it", r.tool, r.place, r.form)
 			}
@@ -710,7 +717,8 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	if lost > 0 {
 		t.Errorf("%d secrets show that main hid", lost)
 	}
-	t.Logf("%d calls, places per tool %v; hidden %d, by main %d", len(results), places, hidden, mainHidden)
+	t.Logf("%d calls, places per tool %v; hidden %d, by main %d; rows called %v, shown that main hid %v",
+		len(results), places, hidden, mainHidden, rows, lostBy)
 }
 
 // TestWriteFieldsMainTable writes fieldsMainTable from the code it runs with, when FIELDS_MAIN_TABLE names the
@@ -723,7 +731,9 @@ func TestWriteFieldsMainTable(t *testing.T) {
 	results, _ := fieldResults(t, false)
 	relations, _ := fieldRelationResults(t, false)
 	marshaled, _ := fieldMarshaledResults(t, false)
-	results = append(append(results, relations...), marshaled...)
+	keys, _ := fieldKeyResults(t, false)
+	literals, _ := fieldLiteralResults(t, false, false)
+	results = append(append(append(append(results, relations...), marshaled...), keys...), literals...)
 	var b strings.Builder
 	b.WriteString("# Whether each read tool hid a secret placed in each field of the objects it reads, at main " +
 		os.Getenv("FIELDS_MAIN_COMMIT") + " (#845).\n# row (the first 16 hex digits of the SHA-256 of \"tool<TAB>place<TAB>form\")\thidden or shown\n")

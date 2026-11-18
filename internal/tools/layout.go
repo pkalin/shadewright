@@ -114,8 +114,9 @@ var errUnwritten = errors.New("the JSON of the object could not be read back alo
 // encoded once, without HTML escapes and with an indent of one space, and the JSON tokens of that output are
 // walked in one pass (tokens). Every string token that holds a value is a piece, in its place in the answer, with
 // the key the tokens around it give it; a type that writes its own JSON (an IntOrString, a quantity, a time, raw
-// content) is tokens like any other. The text between the values (punctuation, field names, numbers) is text the
-// tool writes. The redactor decides on the pieces, each value written back as the content of a JSON string, so the
+// content) is tokens like any other. The text between the values (punctuation, field names, numbers, booleans,
+// null) is text the tool writes; a number, boolean or null the walk hides is written as a JSON string holding the
+// marker. The redactor decides on the pieces, each value written back as the content of a JSON string, so the
 // text decided on is the text returned. Two keys of a map that are decided alike stay two entries: the later one
 // in the encoding's order gets " (2)", " (3)" and so on (distinctKeys). obj is only read.
 func (s *Set) jsonAnswer(obj any) (string, error) {
@@ -195,6 +196,10 @@ type walked struct {
 //   - the fields "value" and "values" of a struct whose field "key" or "name" names a secret key (a selector's
 //     requirement {key, operator, values}, an HTTP header {name, value}).
 //
+// A number, boolean or null is text the tool writes, hidden when it is inside such a range or its own key is a
+// secret key, as main hid it (#845, eighth decision of 2026-11-18). A map key is a piece marked MapKey, decided
+// also as the answer writes it, as main decided it.
+//
 // The work is linear in len(b) and the size of root: each byte is read once, each map's keys once, and each piece
 // is marked whole by a difference array, not once for each range around it.
 func tokens(b []byte, root reflect.Value) (walked, error) {
@@ -231,6 +236,8 @@ type walker struct {
 	stack  []frame
 	ranges [][2]int // pieces hidden whole, [from, to)
 	text   int      // the start of the text not yet in a piece
+	// literals are the pieces of the numbers, booleans and nulls, in order.
+	literals []literalAt
 }
 
 // piece adds the data piece p for the bytes b[from:to], after the text before it.
@@ -377,22 +384,37 @@ func (k *walker) key(f *frame, i, end int, v string) error {
 			return errUnwritten
 		}
 		f.key, f.member = mk.String(), direct(f.val.MapIndex(mk))
-		k.piece(i+1, end, redact.Piece{Text: f.key, Data: true, Form: redact.JSON}, f.mapID)
+		k.piece(i+1, end, redact.Piece{Text: f.key, Data: true, Form: redact.JSON, MapKey: true}, f.mapID)
 	default:
-		k.piece(i+1, end, redact.Piece{Text: v, Data: true, Form: redact.JSON}, f.mapID)
+		k.piece(i+1, end, redact.Piece{Text: v, Data: true, Form: redact.JSON, MapKey: true}, f.mapID)
 	}
 	f.from = len(k.w.ps)
 	return nil
 }
 
-// literal reads the number, true, false or null at b[i] and returns the index after it.
+// literal reads the number, true, false or null at b[i] and returns the index after it. The token is a piece of
+// text the tool writes, so that a range hidden whole holds it, and is hidden by finish when it is in one or its key
+// is a secret key (redact.SecretKey), as main hid "automountServiceAccountToken": true.
 func (k *walker) literal(i int) int {
+	from := i
 	for i < len(k.b) && !strings.ContainsRune(" \n\t\r,:]}", rune(k.b[i])) {
 		redact.Tick(1)
 		i++
 	}
+	keyed := false
+	if f := k.top(); f != nil && f.kind != itemsOf {
+		keyed = redact.SecretKey(f.key)
+	}
+	k.piece(from, i, redact.Piece{Text: string(k.b[from:i])}, -1)
+	k.literals = append(k.literals, literalAt{piece: len(k.w.ps) - 1, keyed: keyed})
 	k.done(false, "", false)
 	return i
+}
+
+// literalAt is the piece of a number, true, false or null, and whether its key is a secret key.
+type literalAt struct {
+	piece int
+	keyed bool
 }
 
 // finish returns the pieces once every byte is read, with each piece inside a range hidden whole marked Whole.
@@ -410,11 +432,19 @@ func (k *walker) finish() (walked, error) {
 		diff[r[0]]++
 		diff[r[1]]--
 	}
-	in := 0
+	in, lit := 0, 0
 	for i := range w.ps {
 		redact.Tick(1)
 		in += diff[i]
 		w.ps[i].Whole = in > 0 && w.ps[i].Data
+		if lit < len(k.literals) && k.literals[lit].piece == i {
+			// A number, boolean or null hidden is written as a JSON string holding the marker, so the answer
+			// stays JSON (#845, eighth decision of 2026-11-18, point 2).
+			if in > 0 || k.literals[lit].keyed {
+				w.ps[i].Text = `"` + redact.Marker(redact.KindCredential, len(w.ps[i].Text)) + `"`
+			}
+			lit++
+		}
 	}
 	return w, nil
 }

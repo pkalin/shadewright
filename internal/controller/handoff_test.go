@@ -785,7 +785,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		)
 	})
 
-	It("ends a refused recovery at its bound with the handoff aborted, and the predecessor stops as for a foreign push (#786)", func() {
+	It("ends a refused recovery at its bound with its handoff Reserved, and the predecessor stops as for a foreign push (#786)", func() {
 		replace("512Mi", ref(hint))
 		untilIntent()
 		hook = func(rr *remediationv1alpha1.RemediationRequest) (bool, bool) {
@@ -808,7 +808,8 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		r := get(repl)
 		Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(ReasonRecoveryWaitExpired))
-		Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+		// The end is no verdict: a later merge of its commit is still recorded (third decision of 2026-11-18).
+		Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffReserved))
 		comments := len(git.Comments(number))
 		for range 3 {
 			pollOf(pred)
@@ -824,8 +825,9 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 
 	// The waits of a recovery whose commit was pushed and whose takeover write was lost (decisions of 2026-11-18 on
 	// #786): a 503 past the deadline records the HandoffGrace entry (the deadline plus the grace); the first refusal
-	// aborts the handoff and records the HandoffRecovery entry (the refusal plus 24 hours), once, never moved; the
-	// replacement then watches the pull request and ends when its recorded waits have passed.
+	// aborts the handoff and records the HandoffRecovery entry (the refusal plus 24 hours), once, never moved, in the
+	// write that removes the grace; the replacement then watches the pull request and ends at the end of that entry
+	// (third decision of 2026-11-18).
 	Context("when the recovery of a pushed commit cannot read (#786)", func() {
 		const (
 			fail503 = "503"
@@ -881,7 +883,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 			})
 		}
 		// endsAt checks that the recovery has not ended one minute before end, and has ended one minute after it, with
-		// RecoveryWaitExpired, the handoff aborted and the lock kept.
+		// RecoveryWaitExpired, its handoff still Reserved and the lock kept.
 		endsAt := func(end time.Time) {
 			clock = end.Add(-time.Minute)
 			reconcileRepl()
@@ -891,12 +893,12 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 			r := get(repl)
 			Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 			Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(ReasonRecoveryWaitExpired))
-			Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+			Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffReserved))
 			Expect(r.Status.HoldsTarget).To(HaveValue(BeTrue()))
 			Expect(r.Status.GitWaits).To(BeEmpty())
 		}
 
-		It("records the grace of a 503, then aborts at a 403 with its 24 hours, and ends at the later end", func() {
+		It("records the grace of a 503, then aborts at a 403 with its 24 hours, removes the grace, and ends at its own end", func() {
 			pushed()
 			deadline := get(repl).Status.Deadline.Time
 			clock = deadline.Add(time.Minute)
@@ -905,7 +907,6 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 			grace := recoveryEntry(get(repl), remediationv1alpha1.GitWaitHandoffGrace)
 			Expect(grace).NotTo(BeNil(), "the 503 past the deadline records the grace")
 			Expect(grace.Ends.Time).To(BeTemporally("==", deadline.Add(handoffRecoveryGrace)))
-			grace = grace.DeepCopy()
 
 			clock = clock.Add(time.Minute)
 			refusedAt := clock
@@ -918,6 +919,8 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 			Expect(bound).NotTo(BeNil(), "the 403 records the 24 hours")
 			Expect(bound.Since.Time).To(BeTemporally("==", refusedAt))
 			Expect(bound.Ends.Time).To(BeTemporally("==", refusedAt.Add(recoveryWaitBound)))
+			Expect(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffGrace)).To(BeNil(),
+				"the write of the refusal removes the grace of the intent it aborts")
 			bound = bound.DeepCopy()
 
 			for range 10 {
@@ -925,15 +928,13 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 				reconcileRepl()
 				r := get(repl)
 				Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
-				if g := recoveryEntry(r, remediationv1alpha1.GitWaitHandoffGrace); g != nil {
-					Expect(g).To(Equal(grace), "the grace never moves")
-				}
+				Expect(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffGrace)).To(BeNil(), "no grace comes back")
 				sameBound(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffRecovery), bound)
 			}
 			endsAt(bound.Ends.Time)
 		})
 
-		It("aborts at a 403 before the deadline with its 24 hours, keeps them through a 503 past it, and ends at the later end", func() {
+		It("aborts at a 403 before the deadline with its 24 hours, keeps them through a 503 past it, and ends at its own end", func() {
 			pushed()
 			deadline := get(repl).Status.Deadline.Time
 			refusedAt := clock
@@ -948,26 +949,17 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 
 			clock = deadline.Add(time.Minute)
 			failing = fail503
-			var grace *remediationv1alpha1.GitWait
 			for range 10 {
 				reconcileRepl()
 				r := get(repl)
 				Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
-				if g := recoveryEntry(r, remediationv1alpha1.GitWaitHandoffGrace); g != nil {
-					if grace != nil {
-						Expect(g).To(Equal(grace), "the grace never moves")
-					}
-					grace = g.DeepCopy()
-				}
+				Expect(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffGrace)).To(BeNil(),
+					"a 503 after the abort records no grace: the intent it bounds is aborted")
 				sameBound(recoveryEntry(r, remediationv1alpha1.GitWaitHandoffRecovery), bound)
 				clock = clock.Add(time.Minute)
 			}
-			end := bound.Ends.Time
-			if grace != nil && grace.Ends.After(end) {
-				end = grace.Ends.Time
-			}
 			failing = fail403
-			endsAt(end)
+			endsAt(bound.Ends.Time)
 		})
 
 		It("keeps the first refusal's 24 hours while the refusal comes and goes", func() {
@@ -1037,21 +1029,16 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 					Expect(q.Reason).To(Equal(ReasonTargetLocked), step)
 				}
 			}
-			deadline := get(repl).Status.Deadline.Time
-			refusedAt := clock
-			ends := refusedAt.Add(recoveryWaitBound)
-			if g := deadline.Add(handoffRecoveryGrace); g.After(ends) {
-				ends = g
-			}
+			ends := clock.Add(recoveryWaitBound)
 			for i := 0; !clock.After(ends.Add(time.Hour)); i++ {
 				round(fmt.Sprintf("refused, step %d", i))
 				clock = clock.Add(2 * time.Hour)
 			}
-			round("past both ends")
+			round("past the end")
 			r := get(repl)
 			Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 			Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(Equal(ReasonRecoveryWaitExpired))
-			Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffAborted))
+			Expect(r.Status.Handoff.From.Phase).To(Equal(remediationv1alpha1.HandoffReserved))
 
 			git.SetFail(nil)
 			answering = true

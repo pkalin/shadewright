@@ -216,7 +216,7 @@ func TestPredecessorEndsAStandingIntentAtItsOwnEnd(t *testing.T) {
 				}
 				return nil
 			})
-			standing := func(when string) *api.RemediationRequest {
+			standing := func() *api.RemediationRequest {
 				t.Helper()
 				for range 2 {
 					_, _ = reconcileOnce(t, r, rr)
@@ -229,7 +229,7 @@ func TestPredecessorEndsAStandingIntentAtItsOwnEnd(t *testing.T) {
 				return got
 			}
 			move(end.Sub(r.now()) - time.Minute)
-			if got := standing("before"); intent(got) == nil {
+			if got := standing(); intent(got) == nil {
 				t.Fatalf("the intent ended before its end: %+v", got.Status.Handoff.To)
 			} else if _, wait, err := r.handoffHolds(ctx, got.DeepCopy()); err != nil || !wait {
 				t.Fatalf("handoffHolds before the end = wait %v, %v; want it to wait for the replacement", wait, err)
@@ -242,7 +242,7 @@ func TestPredecessorEndsAStandingIntentAtItsOwnEnd(t *testing.T) {
 				t.Fatal("the replacement stored its refusal; the test wants every write of it refused")
 			}
 			move(time.Minute)
-			got := standing("after")
+			got := standing()
 			if intent(got) != nil || got.Status.Handoff.To.Phase != api.HandoffAborted {
 				t.Fatalf("the intent stands past its end %v: %+v", end, got.Status.Handoff.To)
 			}

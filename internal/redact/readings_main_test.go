@@ -78,6 +78,9 @@ const (
 	readingsPod       = "web-abc-1"
 	// readingsTemplate is the template of query_metrics.
 	readingsTemplate = "container_restarts_total"
+	// readingsArgs is the field of the generated list, and readingsEnd the end of the JSON answers.
+	readingsArgs = "args"
+	readingsEnd  = "\"\n}\n"
 )
 
 // readingsEvent returns the pieces of one line of list_events: an event at time at with the note.
@@ -85,8 +88,8 @@ func readingsEvent(at, note string) []readingsPiece {
 	return []readingsPiece{
 		{text: at + " "}, {text: readingsEventType, data: true, form: readingsLine, key: "type"},
 		{text: " "}, {text: readingsReason, data: true, form: readingsLine, key: "reason"},
-		{text: " "}, {text: readingsKind, data: true, form: readingsLine, key: "kind"},
-		{text: "/"}, {text: readingsPod, data: true, form: readingsLine, key: "name"},
+		{text: " "}, {text: readingsKind, data: true, form: readingsLine, key: argKind},
+		{text: "/"}, {text: readingsPod, data: true, form: readingsLine, key: argName},
 		{text: " count 1: "}, {text: note, data: true, form: readingsLine, key: "note"}, {text: "\n"},
 	}
 }
@@ -113,19 +116,19 @@ var readingsPlaces = []readingsPlace{
 		out := append([]readingsPiece{{text: "{\n \""}}, first...)
 		out = append(out, readingsPiece{text: "\",\n \""})
 		out = append(out, second...)
-		return append(out, readingsPiece{text: "\"\n}\n"})
+		return append(out, readingsPiece{text: readingsEnd})
 	}},
 	{"value", true, func(f signalForm, secret string) []readingsPiece {
 		return []readingsPiece{
 			{text: "{\n \"message\": \""}, {text: f.prefix + f.sep + secret, data: true, form: readingsJSON, key: "message"},
-			{text: "\",\n \"other\": \""}, {text: readingsNeighbour, data: true, form: readingsJSON, key: readingsOther}, {text: "\"\n}\n"},
+			{text: "\",\n \"other\": \""}, {text: readingsNeighbour, data: true, form: readingsJSON, key: readingsOther}, {text: readingsEnd},
 		}
 	}},
 	{"list items", false, func(f signalForm, secret string) []readingsPiece {
 		return []readingsPiece{
-			{text: "{\n \"args\": [\n  \""}, {text: readingsListItems(f, secret)[0], data: true, form: readingsJSON, key: "args"},
-			{text: "\",\n  \""}, {text: secret, data: true, form: readingsJSON, key: "args"},
-			{text: "\"\n ],\n \"other\": \""}, {text: readingsNeighbour, data: true, form: readingsJSON, key: readingsOther}, {text: "\"\n}\n"},
+			{text: "{\n \"" + readingsArgs + "\": [\n  \""}, {text: readingsListItems(f, secret)[0], data: true, form: readingsJSON, key: readingsArgs},
+			{text: "\",\n  \""}, {text: secret, data: true, form: readingsJSON, key: readingsArgs},
+			{text: "\"\n ],\n \"other\": \""}, {text: readingsNeighbour, data: true, form: readingsJSON, key: readingsOther}, {text: readingsEnd},
 		}
 	}},
 	{"labels of a series", false, func(f signalForm, secret string) []readingsPiece {
@@ -219,10 +222,17 @@ func readingsMainHides(ps []readingsPiece, secret string) bool {
 	return !strings.Contains(pass(b.String()), secret)
 }
 
-// readReadingsMainTable reads readingsMainTable: main's decision by row.
-func readReadingsMainTable(t *testing.T) map[string]bool {
+// The decisions of a row of the tables written from main.
+const (
+	readingsHidden = "hidden"
+	readingsShown  = "shown"
+)
+
+// readReadingsMainTable reads a table written from main (readingsMainTable, readingsToolsTable): main's decision
+// by row.
+func readReadingsMainTable(t *testing.T, path string) map[string]bool {
 	t.Helper()
-	f, err := os.Open(readingsMainTable)
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,10 +245,10 @@ func readReadingsMainTable(t *testing.T) map[string]bool {
 			continue
 		}
 		row, v, ok := strings.Cut(line, "\t")
-		if !ok || (v != "hidden" && v != "shown") {
-			t.Fatalf("%s: malformed line %q", readingsMainTable, line)
+		if !ok || (v != readingsHidden && v != readingsShown) {
+			t.Fatalf("%s: malformed line %q", path, line)
 		}
-		out[row] = v == "hidden"
+		out[row] = v == readingsHidden
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
@@ -259,14 +269,14 @@ func TestWriteReadingsMainTable(t *testing.T) {
 		os.Getenv("READINGS_MAIN_COMMIT") + " (#845).\n# row (the first 16 hex digits of the SHA-256 of \"place<TAB>form\")\thidden or shown\n")
 	for i, f := range signalForms() {
 		for _, pl := range readingsPlaces {
-			v := "shown"
+			v := readingsShown
 			if readingsMainHides(pl.ps(f, readingsSecret(i)), readingsSecret(i)) {
-				v = "hidden"
+				v = readingsHidden
 			}
 			b.WriteString(readingsRow(pl.name, f.name) + "\t" + v + "\n")
 		}
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil { // #nosec G703 -- a path the person running the test names
 		t.Fatal(err)
 	}
 }

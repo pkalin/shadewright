@@ -17,9 +17,7 @@ limitations under the License.
 package redact_test
 
 import (
-	"bufio"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 
@@ -137,6 +135,49 @@ func TestReadingsWriteAsTheLayout(t *testing.T) {
 	}
 }
 
+// readingsCheckAsMainRows checks, for a run without sampling, the rows decided as main: asMain are exactly the
+// split forms in the places of one value, and oneLine the three with "_authorization=" after a connection string
+// and a line break, on the line of the secret (twelfth decision of 2026-11-18, #868): String over the answer hides
+// them, main and the value alone show them.
+func readingsCheckAsMainRows(t *testing.T, forms []signalForm, asMain, oneLine int) {
+	t.Helper()
+	want := 0
+	for _, f := range forms {
+		for _, pl := range readingsPlaces {
+			if f.split && pl.oneValue {
+				want++
+			}
+		}
+	}
+	if asMain != want || want == 0 {
+		t.Errorf("%d rows decided as main, %d split forms in a value", asMain, want)
+	}
+	if oneLine != 3 {
+		t.Errorf("%d rows of one value that main and the value alone show, want 3", oneLine)
+	}
+}
+
+// readingsStringsKeepTheSignal checks that Strings hides in the items apart at least what String hides of them
+// joined (property 2), for an item that carries a hidden text and a signal and the secret in the next item. It
+// returns the number of calls and of failures; reported is the number of failures reported before.
+func readingsStringsKeepTheSignal(t *testing.T, forms []signalForm, reported int) (calls, failed int) {
+	t.Helper()
+	for i, f := range forms {
+		if !redact.RaceKeeps("readings strings", i) {
+			continue
+		}
+		calls++
+		secret := readingsSecret(i)
+		items := readingsListItems(f, secret)
+		if !strings.Contains(redact.String(strings.Join(items, "\n")), secret) && strings.Contains(strings.Join(redact.Strings(items), "\n"), secret) {
+			if failed++; reported+failed <= 10 {
+				t.Errorf("Strings, %s: the secret shows, String hides it joined: %q", f.name, redact.Strings(items))
+			}
+		}
+	}
+	return calls, failed
+}
+
 // readingsEncode is the answer of get_resource for v without the layout: encoding/json without HTML escapes and
 // with an indent of one space, as the tool encodes the object.
 func readingsEncode(t *testing.T, v any) string {
@@ -177,7 +218,7 @@ func TestReadingsPlacesAreTheToolsAnswers(t *testing.T) {
 		for name, v := range map[string]any{
 			"map key":    map[string]string{f.prefix: secret, readingsOther: readingsNeighbour},
 			"value":      map[string]string{"message": f.prefix + f.sep + secret, readingsOther: readingsNeighbour},
-			"list items": map[string]any{"args": items, readingsOther: readingsNeighbour},
+			"list items": map[string]any{readingsArgs: items, readingsOther: readingsNeighbour},
 		} {
 			if got, want := answer(byName[name].ps(f, secret)), readingsEncode(t, v); got != want {
 				t.Fatalf("%s, %s: the generated answer\n%q\nencoding/json writes\n%q", name, f.name, got, want)
@@ -188,7 +229,7 @@ func TestReadingsPlacesAreTheToolsAnswers(t *testing.T) {
 	neutral, word := signalForm{name: "neutral", prefix: "alpha\r\nbeta", sep: " "}, "gamma"
 	want := answer(byName["free text"].ps(neutral, word))
 	ts := newReadingsToolSet(readingsRedactor())
-	got := ts.call(tools.NameListEvents, map[string]any{"namespace": readingsNS, "kind": readingsKind, "name": readingsPod, "limit": 2},
+	got := ts.call(tools.NameListEvents, map[string]any{argNamespace: readingsNS, argKind: readingsKind, argName: readingsPod, readingsArgLimit: 2},
 		[]string{neutral.prefix + neutral.sep + word, readingsNeighbour}, nil)
 	if got != want {
 		t.Errorf("list_events answers\n%q\nthe generated free text is\n%q", got, want)
@@ -196,7 +237,7 @@ func TestReadingsPlacesAreTheToolsAnswers(t *testing.T) {
 	// query_metrics writes the labels as generated.
 	items := readingsListItems(neutral, word)
 	want = answer(byName["labels of a series"].ps(neutral, word))
-	got = ts.call(tools.NameQueryMetrics, map[string]any{"namespace": readingsNS, "pod": readingsPod, "template": readingsTemplate},
+	got = ts.call(tools.NameQueryMetrics, map[string]any{argNamespace: readingsNS, readingsArgPod: readingsPod, readingsArgTempl: readingsTemplate},
 		nil, []providers.Series{readingsSeries(map[string]string{"arg0": items[0], "arg1": items[1], readingsOther: readingsNeighbour})})
 	if got != want {
 		t.Errorf("query_metrics answers\n%q\nthe generated labels are\n%q", got, want)
@@ -205,7 +246,7 @@ func TestReadingsPlacesAreTheToolsAnswers(t *testing.T) {
 
 func TestReadingsKeepTheSignalOfAHiddenText(t *testing.T) {
 	forms := signalForms()
-	mainHid := readReadingsMainTable(t)
+	mainHid := readReadingsMainTable(t, readingsMainTable)
 	if len(mainHid) != len(forms)*len(readingsPlaces) {
 		t.Fatalf("%s has %d rows, the corpus %d answers: write it again in a checkout of main", readingsMainTable, len(mainHid), len(forms)*len(readingsPlaces))
 	}
@@ -260,41 +301,13 @@ func TestReadingsKeepTheSignalOfAHiddenText(t *testing.T) {
 			}
 		}
 	}
-	// Without sampling, the rows decided as main are exactly the split forms in the places of one value.
 	if calls == len(forms)*len(readingsPlaces) {
-		want := 0
-		for _, f := range forms {
-			for _, pl := range readingsPlaces {
-				if f.split && pl.oneValue {
-					want++
-				}
-			}
-		}
-		if asMain != want || want == 0 {
-			t.Errorf("%d rows decided as main, %d split forms in a value", asMain, want)
-		}
-		// The three with "_authorization=" after a connection string and a line break, on the line of the secret
-		// (twelfth decision of 2026-11-18, #868): String over the answer hides them, main and the value alone show
-		// them, and they are decided as main.
-		if oneLine != 3 {
-			t.Errorf("%d rows of one value that main and the value alone show, want 3", oneLine)
-		}
+		readingsCheckAsMainRows(t, forms, asMain, oneLine)
 	}
-	// Strings hides in the items apart at least what String hides of them joined (property 2), for an item that
-	// carries a hidden text and a signal and the secret in the next item.
-	for i, f := range forms {
-		if !redact.RaceKeeps("readings strings", i) {
-			continue
-		}
-		calls++
-		secret := readingsSecret(i)
-		items := []string{f.prefix + strings.TrimRight(f.sep, " \r\n"), secret}
-		if !strings.Contains(redact.String(strings.Join(items, "\n")), secret) && strings.Contains(strings.Join(redact.Strings(items), "\n"), secret) {
-			byPlace["Strings"]++
-			if failed++; failed <= 10 {
-				t.Errorf("Strings, %s: the secret shows, String hides it joined: %q", f.name, redact.Strings(items))
-			}
-		}
+	sc, sf := readingsStringsKeepTheSignal(t, forms, failed)
+	calls, failed = calls+sc, failed+sf
+	if sf > 0 {
+		byPlace["Strings"] = sf
 	}
 	if failed > 0 || leaks > 0 || lostNeighbour > 0 {
 		t.Errorf("%d of %d answers show a secret String hides (by place %v), %d a secret main hid, %d lose the neighbouring word", failed, calls, byPlace, leaks, lostNeighbour)
@@ -318,27 +331,7 @@ func readingsTheTwelve(f signalForm) bool {
 // of JSON are decided as main decides them at every tool. None of these tools writes a list on one line with a
 // line break of an item kept as a line break, so main shows those 12 everywhere (the twelfth decision).
 func TestReadingsListsAtTheToolsAsMain(t *testing.T) {
-	main := map[string]bool{}
-	f, err := os.Open(readingsToolsTable)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = f.Close() }()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		row, v, ok := strings.Cut(line, "\t")
-		if !ok || (v != "hidden" && v != "shown") {
-			t.Fatalf("%s: malformed line %q", readingsToolsTable, line)
-		}
-		main[row] = v == "hidden"
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatal(err)
-	}
+	main := readReadingsMainTable(t, readingsToolsTable)
 	forms := signalForms()
 	if len(main) != len(forms)*len(readingsListTools) {
 		t.Fatalf("%s has %d rows, the corpus %d: write it again in a checkout of main", readingsToolsTable, len(main), len(forms)*len(readingsListTools))

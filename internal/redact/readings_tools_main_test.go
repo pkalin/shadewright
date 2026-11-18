@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -48,8 +49,13 @@ const readingsToolsTable = "testdata/readings-tools-main.tsv"
 
 // The arguments and objects of the list tools (the template is in readings_main_test.go).
 const (
-	readingsNS    = "shop"
-	readingsLabel = "message"
+	readingsNS        = "shop"
+	readingsLabel     = "message"
+	readingsContainer = "app"
+	readingsArgLimit  = "limit"
+	readingsArgTempl  = "template"
+	readingsArgPod    = "pod"
+	readingsArgCont   = "container"
 )
 
 // readingsLists is the source of the list tools: a pod whose container arguments are the items, one Event of the
@@ -66,7 +72,7 @@ func (r *readingsLists) Get(_ context.Context, key client.ObjectKey, obj client.
 	}
 	*p = corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Args: r.items}}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: readingsContainer, Args: r.items}}},
 	}
 	return nil
 }
@@ -128,7 +134,7 @@ func (ts *readingsToolSet) call(name string, args map[string]any, items []string
 	ts.Lock()
 	defer ts.Unlock()
 	ts.src.items = items
-	ts.logs.Set(fake.LogKey{Namespace: readingsNS, Pod: readingsPod, Container: "app"}, strings.Join(items, "\n")+"\n")
+	ts.logs.Set(fake.LogKey{Namespace: readingsNS, Pod: readingsPod, Container: readingsContainer}, strings.Join(items, "\n")+"\n")
 	ts.metrics.Set(readingsTemplate, series)
 	raw, err := json.Marshal(args)
 	if err != nil {
@@ -162,28 +168,28 @@ func readingsSeries(labels map[string]string) providers.Series {
 // names the kubelet reported) carry no list of source text.
 var readingsListTools = []readingsListTool{
 	{tools.NameGetResource + " of the container arguments", func(ts *readingsToolSet, items []string) string {
-		return ts.call(tools.NameGetResource, map[string]any{"kind": readingsKind, "namespace": readingsNS, "name": readingsPod}, items, nil)
+		return ts.call(tools.NameGetResource, map[string]any{argKind: readingsKind, argNamespace: readingsNS, argName: readingsPod}, items, nil)
 	}},
 	{tools.NameListEvents + " of the notes", func(ts *readingsToolSet, items []string) string {
-		return ts.call(tools.NameListEvents, map[string]any{"namespace": readingsNS, "kind": readingsKind, "name": readingsPod, "limit": len(items)}, items, nil)
+		return ts.call(tools.NameListEvents, map[string]any{argNamespace: readingsNS, argKind: readingsKind, argName: readingsPod, readingsArgLimit: len(items)}, items, nil)
 	}},
 	{tools.NameGetPodLogs + " of the lines", func(ts *readingsToolSet, items []string) string {
-		return ts.call(tools.NameGetPodLogs, map[string]any{"namespace": readingsNS, "pod": readingsPod, "container": "app"}, items, nil)
+		return ts.call(tools.NameGetPodLogs, map[string]any{argNamespace: readingsNS, readingsArgPod: readingsPod, readingsArgCont: readingsContainer}, items, nil)
 	}},
 	{tools.NameQueryMetrics + " of the labels of a series", func(ts *readingsToolSet, items []string) string {
 		labels := map[string]string{}
 		for i, it := range items {
 			labels[fmt.Sprintf("arg%d", i)] = it
 		}
-		return ts.call(tools.NameQueryMetrics, map[string]any{"namespace": readingsNS, "pod": readingsPod, "template": readingsTemplate},
+		return ts.call(tools.NameQueryMetrics, map[string]any{argNamespace: readingsNS, readingsArgPod: readingsPod, readingsArgTempl: readingsTemplate},
 			items, []providers.Series{readingsSeries(labels)})
 	}},
 	{tools.NameQueryMetrics + " of the series", func(ts *readingsToolSet, items []string) string {
-		var series []providers.Series
+		series := make([]providers.Series, 0, len(items))
 		for _, it := range items {
 			series = append(series, readingsSeries(map[string]string{readingsLabel: it}))
 		}
-		return ts.call(tools.NameQueryMetrics, map[string]any{"namespace": readingsNS, "pod": readingsPod, "template": readingsTemplate},
+		return ts.call(tools.NameQueryMetrics, map[string]any{argNamespace: readingsNS, readingsArgPod: readingsPod, readingsArgTempl: readingsTemplate},
 			items, series)
 	}},
 }
@@ -211,9 +217,7 @@ func readingsToolsHidden(keep func(tool string, i int) bool) map[string]bool {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			for k, v := range got {
-				out[k] = v
-			}
+			maps.Copy(out, got)
 		})
 	}
 	wg.Wait()
@@ -234,14 +238,14 @@ func TestWriteReadingsToolsMainTable(t *testing.T) {
 		os.Getenv("READINGS_MAIN_COMMIT") + " (#845).\n# row (the first 16 hex digits of the SHA-256 of \"tool<TAB>form\")\thidden or shown\n")
 	for _, lt := range readingsListTools {
 		for _, f := range signalForms() {
-			v := "shown"
+			v := readingsShown
 			if hidden[readingsRow(lt.name, f.name)] {
-				v = "hidden"
+				v = readingsHidden
 			}
 			b.WriteString(readingsRow(lt.name, f.name) + "\t" + v + "\n")
 		}
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil { // #nosec G703 -- a path the person running the test names
 		t.Fatal(err)
 	}
 }

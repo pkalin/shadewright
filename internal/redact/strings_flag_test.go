@@ -22,10 +22,10 @@ import (
 	"testing"
 )
 
-// In a sequence, a string that is itself a flag is not the value of the flag before it (#845, decision of
-// 2026-11-18, kept as on main, which redacted the strings one by one): ["--token", "--verbose"] keeps
-// "--verbose". A secret flag after it still takes the next string, and a string that is no flag is still the
-// value. The inputs are built from the parts below, so the answer is known by construction.
+// In a sequence, the string after a secret flag is its value whatever it looks like (#845, third decision of
+// 2026-11-18, which corrects the second): ["--token", "--verbose"] hides "--verbose", as main's second pass over
+// a tool's whole answer hid it. A string that is no flag is the value too. The inputs are built from the parts
+// below, so the answer is known by construction.
 
 // flagNames and flagValues make the flags that stand after a secret flag: a name, with "=" and a value or
 // without.
@@ -53,14 +53,14 @@ func flagAfterFlagCases() (cases [][]string, flags []string) {
 	return cases, flags
 }
 
-func TestStringsKeepsAFlagAfterAFlag(t *testing.T) {
+func TestStringsTakesAFlagAfterAFlagAsItsValue(t *testing.T) {
 	cases, flags := flagAfterFlagCases()
 	failed := 0
 	for i, items := range cases {
 		got := Strings(items)
-		if got[1] != flags[i] {
+		if got[0] != items[0] || strings.Contains(got[1], flags[i]) || strings.ContainsAny(got[1], "=-") {
 			if failed++; failed <= 10 {
-				t.Errorf("Strings(%q) = %q: the flag after the flag is redacted", items, got)
+				t.Errorf("Strings(%q) = %q: the flag after the secret flag is not hidden whole", items, got)
 			}
 		}
 		// A secret flag after the flag takes the string after it, and a secret after the first flag is hidden.

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
 )
 
@@ -47,6 +49,29 @@ import (
 // with string keys, one place at a time. The answers are compared with what main hid
 // (testdata/fields-main-entry.tsv, written by TestWriteFieldsMainTable in a checkout of main): a value main
 // hid that is shown now fails. The file uses only the read tools' API, so it runs unchanged in that checkout.
+
+// fieldPlaceClass lists the places where main hid any value by its place alone and the layout shows it (#845,
+// third decision of 2026-11-18): the reference values (a Secret's name, a key and path of its items, a token's
+// path) inside an object under a secret-named field. main's second pass read the JSON answer, where that
+// object is a flow collection after the key "secret", "imagePullSecrets" or "serviceAccountToken", and hid it
+// whole; the layout writes it as a block, where a reference child keeps its value as it does in any text. Only
+// a name or a path shows; the class is listed so that any other place fails.
+var fieldPlaceClass = func() []string {
+	out := make([]string, 0, 24)
+	for _, root := range []string{"Deployment.Spec.Template.Spec", "Pod.Spec", "ReplicaSet.Spec.Template.Spec", "StatefulSet.Spec.Template.Spec"} {
+		for _, place := range []string{
+			"ImagePullSecrets[].Name",
+			"Volumes[].VolumeSource.Projected.Sources[].Secret.Items[].Path",
+			"Volumes[].VolumeSource.Projected.Sources[].Secret.LocalObjectReference.Name",
+			"Volumes[].VolumeSource.Projected.Sources[].ServiceAccountToken.Path",
+			"Volumes[].VolumeSource.Secret.Items[].Path",
+			"Volumes[].VolumeSource.Secret.SecretName",
+		} {
+			out = append(out, tools.NameGetResource+" "+root+"."+place)
+		}
+	}
+	return out
+}()
 
 // fieldsMainTable holds, for each place and form, whether main hid the value.
 const fieldsMainTable = "testdata/fields-main-entry.tsv"
@@ -156,6 +181,78 @@ var (
 		{name: "secret in the key", key: func(v string) string { return fieldsKey + "=" + v }, value: func(string) string { return "x" }},
 	}
 )
+
+// fieldListForms place a secret flag and its value as two elements of one list of strings: the string after a
+// secret flag is its value whatever it looks like (#845, third decision of 2026-11-18).
+var fieldListForms = []fieldListForm{
+	{name: "flag, dashed value", items: func(v string) []string { return []string{"--" + fieldsKey, "--" + v} }},
+	{name: "token flag, short dashed value", items: func(v string) []string { return []string{"--token", "-" + v} }},
+	{name: "flag, short flag with value", items: func(v string) []string { return []string{"--" + fieldsKey, "-p=" + v} }},
+	{name: "client-secret flag, flag with value", items: func(v string) []string { return []string{"--client-secret", "--x=" + v} }},
+	{name: "flag, plain value", items: func(v string) []string { return []string{"--" + fieldsKey, v} }},
+}
+
+// fieldListForm is one way of placing a secret key and its value in two elements of a list of strings.
+type fieldListForm struct {
+	name  string
+	items func(v string) []string
+}
+
+// fieldPairForms place a secret key name in one place and the secret in another (#845, third decision of
+// 2026-11-18): a sibling of the same object, or the place that follows in document order. An HTTP header's
+// name and value, a flag at the end of a command and its value in the arguments, a selector's key and values.
+var fieldPairForms = []fieldPairForm{
+	{name: "flag, value", key: "--" + fieldsKey},
+	{name: "key and colon, value", key: fieldsKey + ":"},
+	{name: "header name, value", key: "X-Api-Key"},
+	{name: "key name, value", key: fieldsKey},
+}
+
+// fieldPairForm is one way of placing a key in one place and its value in another: the key is the whole text of
+// the first place (or of the one element of its list), the value the whole text of the second.
+type fieldPairForm struct {
+	name, key string
+}
+
+// fieldPairs returns the pairs of places of a type that a pair form fills: two string places or lists of strings
+// that are siblings (fields of the same object), the first before the second, and each such place with the one
+// after it in document order.
+func fieldPairs(places []fieldPlace) [][2]fieldPlace {
+	var text []fieldPlace
+	for _, p := range places {
+		if p.kind != reflect.Map {
+			text = append(text, p)
+		}
+	}
+	parent := func(p fieldPlace) string {
+		var b strings.Builder
+		for _, s := range p.path[:len(p.path)-1] {
+			fmt.Fprintf(&b, "%d.", s.field)
+		}
+		return b.String()
+	}
+	var out [][2]fieldPlace
+	seen := map[[2]int]bool{}
+	for i, p := range text {
+		for j, q := range text {
+			if i == j || len(p.path) == 0 || len(q.path) == 0 {
+				continue
+			}
+			if (i < j && parent(p) == parent(q) && len(p.path) == len(q.path)) || j == i+1 {
+				if !seen[[2]int{i, j}] {
+					seen[[2]int{i, j}] = true
+					out = append(out, [2]fieldPlace{p, q})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// setText writes text into the string place p of root, or as the one element of the list p.
+func (p fieldPlace) setText(root reflect.Value, text string) {
+	p.set(root, fieldForm{text: func(string) string { return text }}, "")
+}
 
 // forms returns the forms of a place.
 func (p fieldPlace) forms() []fieldForm {
@@ -338,6 +435,8 @@ type fieldLog struct{ Text string }
 type fieldResult struct {
 	tool, place, form string
 	hidden            bool
+	// skipped: not called in this run (a relation row outside the sample under -race).
+	skipped bool
 }
 
 // key is the result's row key in the table.
@@ -345,7 +444,8 @@ func (r fieldResult) key() string { return r.tool + "\t" + r.place + "\t" + r.fo
 
 // fieldResults calls every tool with a secret in every place of the types it reads, in every form of that
 // place, and returns the results and the number of places per tool.
-func fieldResults(t *testing.T) ([]fieldResult, map[string]int) {
+// With sample set, only the rows redact.RaceKeeps keeps are called under -race, the others are returned skipped.
+func fieldResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) {
 	t.Helper()
 	var out []fieldResult
 	places := map[string]int{}
@@ -358,6 +458,10 @@ func fieldResults(t *testing.T) ([]fieldResult, map[string]int) {
 				for _, f := range p.forms() {
 					n++
 					v := fmt.Sprintf("Vf%06dxK9w", n)
+					if sample && !redact.RaceKeeps("fields", n) {
+						out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: f.name, skipped: true})
+						continue
+					}
 					obj := reflect.New(typ)
 					p.set(obj, f, v)
 					if m, ok := reflect.TypeAssert[metav1.Object](obj); ok && m.GetName() == "" {
@@ -425,12 +529,18 @@ func readFieldsMainTable(t *testing.T) map[string]bool {
 }
 
 func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
-	results, places := fieldResults(t)
+	results, places := fieldResults(t, true)
+	relations, calls := fieldRelationResults(t, true)
+	results = append(results, relations...)
+	t.Logf("relation calls per tool %v", calls)
 	main := readFieldsMainTable(t)
 	lost, hidden, mainHidden := 0, 0, 0
-	seen := map[string]bool{}
+	seen, byPlace := map[string]bool{}, map[string]bool{}
 	for _, r := range results {
 		seen[r.key()] = true
+		if r.skipped {
+			continue
+		}
 		was, ok := main[r.key()]
 		if !ok {
 			t.Errorf("%s: no row in %s (write it again from main)", r.key(), fieldsMainTable)
@@ -443,6 +553,16 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 			mainHidden++
 		}
 		if was && !r.hidden {
+			// A value main hid by its place alone, with no key in the call (fieldPlaceClass), is counted
+			// apart.
+			value := r.place
+			if _, q, ok := strings.Cut(r.place, " > "); ok {
+				value = q
+			}
+			if main[r.tool+"\t"+value+"\tplain value"] {
+				byPlace[r.tool+" "+value] = true
+				continue
+			}
 			if lost++; lost <= 20 {
 				t.Errorf("%s %s, %s: the secret shows, main hid it", r.tool, r.place, r.form)
 			}
@@ -456,6 +576,12 @@ func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
 	if lost > 0 {
 		t.Errorf("%d secrets show that main hid", lost)
 	}
+	classPlaces := slices.Sorted(maps.Keys(byPlace))
+	skipped := slices.ContainsFunc(results, func(r fieldResult) bool { return r.skipped })
+	extra := slices.ContainsFunc(classPlaces, func(p string) bool { return !slices.Contains(fieldPlaceClass, p) })
+	if extra || !skipped && !slices.Equal(classPlaces, fieldPlaceClass) {
+		t.Errorf("values main hid by their place alone and shown now: %q, want %q", classPlaces, fieldPlaceClass)
+	}
 	t.Logf("%d calls, places per tool %v; hidden %d, by main %d", len(results), places, hidden, mainHidden)
 }
 
@@ -466,7 +592,9 @@ func TestWriteFieldsMainTable(t *testing.T) {
 	if path == "" {
 		t.Skip("FIELDS_MAIN_TABLE is not set")
 	}
-	results, _ := fieldResults(t)
+	results, _ := fieldResults(t, false)
+	relations, _ := fieldRelationResults(t, false)
+	results = append(results, relations...)
 	var b strings.Builder
 	b.WriteString("# Whether each read tool hid a secret placed in each field of the objects it reads, at main " +
 		os.Getenv("FIELDS_MAIN_COMMIT") + " (#845).\n# tool\tplace\tform\thidden or shown\n")
@@ -476,4 +604,120 @@ func TestWriteFieldsMainTable(t *testing.T) {
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil { // #nosec G703 -- a path the person running the test names
 		t.Fatal(err)
 	}
+}
+
+// call fills a new object of typ with fill, gives it to the tool and reports whether v shows in the answer.
+func (ft fieldTool) call(t *testing.T, e *fieldEnv, typ reflect.Type, v string, fill func(obj reflect.Value)) bool {
+	t.Helper()
+	obj := reflect.New(typ)
+	fill(obj)
+	if m, ok := reflect.TypeAssert[metav1.Object](obj); ok && m.GetName() == "" {
+		m.SetName(fieldsPod)
+		m.SetNamespace(fieldsNS)
+	}
+	e.reader.obj, e.reader.events = nil, nil
+	ft.put(e, obj)
+	args := ft.args
+	if ft.name == tools.NameGetResource {
+		args = map[string]any{fieldsArgKind: typ.Name(), fieldsArgNS: fieldsNS, fieldsArgName: fieldsPod}
+	}
+	text := callFieldTool(t, e.set, ft.name, args)
+	return strings.Contains(text, v[:8]) || strings.Contains(text, v[len(v)-8:])
+}
+
+// at returns the value at the place p of root, creating the pointers and the first elements of slices on the
+// way.
+func (p fieldPlace) at(root reflect.Value) reflect.Value {
+	cur := root.Elem()
+	for _, s := range p.path {
+		switch s.field {
+		case -1:
+			if cur.IsNil() {
+				cur.Set(reflect.New(cur.Type().Elem()))
+			}
+			cur = cur.Elem()
+		case -2:
+			if cur.Len() == 0 {
+				cur.Set(reflect.MakeSlice(cur.Type(), 1, 1))
+			}
+			cur = cur.Index(0)
+		default:
+			cur = cur.Field(s.field)
+		}
+	}
+	return cur
+}
+
+// fieldRelationResults calls every tool with a secret key in one element of a list and its value in the next
+// (fieldListForms), and with a key in one place and its value in another (fieldPairs, fieldPairForms), and
+// returns the results and the number of calls per tool. Its rows follow those of fieldResults in the table.
+// With sample set, only the rows redact.RaceKeeps keeps are called under -race, the others are returned skipped.
+func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) {
+	t.Helper()
+	var out []fieldResult
+	calls := map[string]int{}
+	n := 0
+	for _, ft := range fieldTools {
+		e := newFieldEnv(t)
+		for _, typ := range ft.types {
+			places := fieldPlaces(typ)
+			for _, p := range places {
+				if p.kind == reflect.Map {
+					continue
+				}
+				// The value alone, with no key: what main hid by the place alone (fieldPlaceClass).
+				n++
+				v := fmt.Sprintf("Vl%06dxK9w", n)
+				if sample && !redact.RaceKeeps("fields relations", n) {
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "plain value", skipped: true})
+				} else {
+					calls[ft.name]++
+					shown := ft.call(t, e, typ, v, func(obj reflect.Value) { p.setText(obj, v) })
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "plain value", hidden: !shown})
+				}
+			}
+			for _, p := range places {
+				if p.kind != reflect.Slice {
+					continue
+				}
+				for _, f := range fieldListForms {
+					n++
+					v := fmt.Sprintf("Vl%06dxK9w", n)
+					if sample && !redact.RaceKeeps("fields relations", n) {
+						out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "list " + f.name, skipped: true})
+						continue
+					}
+					calls[ft.name]++
+					shown := ft.call(t, e, typ, v, func(obj reflect.Value) {
+						cur := p.at(obj)
+						items := f.items(v)
+						l := reflect.MakeSlice(cur.Type(), len(items), len(items))
+						for i, it := range items {
+							l.Index(i).SetString(it)
+						}
+						cur.Set(l)
+					})
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "list " + f.name, hidden: !shown})
+				}
+			}
+			for _, pq := range fieldPairs(places) {
+				p, q := pq[0], pq[1]
+				for _, f := range fieldPairForms {
+					n++
+					v := fmt.Sprintf("Vp%06dxK9w", n)
+					if sample && !redact.RaceKeeps("fields relations", n) {
+						out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: "pair " + f.name, skipped: true})
+						continue
+					}
+					calls[ft.name]++
+					shown := ft.call(t, e, typ, v, func(obj reflect.Value) {
+						p.setText(obj, f.key)
+						q.setText(obj, v)
+					})
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: "pair " + f.name, hidden: !shown})
+				}
+			}
+		}
+	}
+	return out, calls
 }

@@ -648,7 +648,10 @@ func addAround(s string, start, end int, block bool, add func(start, end int)) {
 // A bracket glued to more text ("a]b") is part of the value, however it could pair with an earlier one.
 func flowCloseAt(s string, start, end int, opener byte) int {
 	var inner []byte
-	last := -1
+	// runEnd is the end of the run of closing brackets and quotes read last: a later bracket in the same run
+	// ends there too, so the run is read once, not once for each of its brackets (#845, third decision of
+	// 2026-11-18: "{password: x" and n closing braces cost n*n/2 steps).
+	last, runEnd := -1, -1
 	for i := start; i < end; i++ {
 		tick(1)
 		switch c := s[i]; c {
@@ -662,11 +665,12 @@ func flowCloseAt(s string, start, end int, opener byte) int {
 			if c != opener+2 {
 				continue
 			}
-			j := i
+			j := max(i, runEnd)
 			for j < end && strings.IndexByte(`]})"'`, s[j]) >= 0 {
 				tick(1)
 				j++
 			}
+			runEnd = j
 			if j == end || indentLen(s, j) > 0 || strings.IndexByte(",;#", s[j]) >= 0 {
 				last = i
 			}
@@ -707,12 +711,13 @@ func (b *bracketCursor) at(pos, from int) []byte {
 }
 
 // viewEnvName matches the text of a line that names a Kubernetes environment variable holding a secret, in
-// block form ("- name: DB_PASSWORD"), up to the line's end; group 1 is the name.
-var viewEnvName = regexp.MustCompile(`(?i)^-[ \t]+name[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?$`)
+// block form ("- name: DB_PASSWORD"), up to the line's end, or a key of the same shape with its values below
+// it ("- key: password", a selector's key and values, #845, third decision of 2026-11-18); group 1 is the name.
+var viewEnvName = regexp.MustCompile(`(?i)^-[ \t]+(?:name|key)[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?$`)
 
 // viewEnvOwnName matches the text of a line, after its indentation, that is an environment entry's own "name"
 // key naming a secret (group 1), as it follows the entry's "value" key in block form.
-var viewEnvOwnName = regexp.MustCompile(`(?i)^name[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?$`)
+var viewEnvOwnName = regexp.MustCompile(`(?i)^(?:name|key)[ \t]*:[ \t]*["']?(` + bareKeyExpr + `)["']?$`)
 
 // viewEnvLine redacts, on the canonical view, the value of the environment variable that line l names
 // (viewEnvName), as envValueSpan does on lines that end at a line feed: the "value" key among the entry's own
@@ -789,11 +794,13 @@ func viewEnvValueFirst(s string, l viewLine, at int, entry col, add func(start, 
 	}
 }
 
-// viewEnvValue reports whether s[from:end], on line e, is an environment entry's "value" key, and with add set
+// viewEnvValue reports whether s[from:end], on line e, is an environment entry's "value" key (or "values", a
+// selector's list), and with add set
 // redacts its value: inline after the colon, without blanks and quotes around it, or the block below the line
-// (viewBlock) under a block indicator or nothing.
+// (viewBlock) under a block indicator or nothing, or with no block, the lines right after it at column 0.
 func viewEnvValue(s string, e viewLine, from, end int, entry col, add func(start, end int)) bool {
 	rest, ok := strings.CutPrefix(s[from:end], "value")
+	rest = strings.TrimPrefix(rest, "s")
 	rest = strings.TrimLeft(rest, " \t")
 	if !ok || rest == "" || rest[0] != ':' {
 		return false
@@ -810,6 +817,18 @@ func viewEnvValue(s string, e viewLine, from, end int, entry col, add func(start
 		var holes [][2]int
 		if start, bEnd, _ := viewBlock(s, e.next, entry, &holes); start >= 0 {
 			addHoles(start, bEnd, holes, add)
+			return true
+		}
+		// With no block below it, the lines right after it at column 0 are its items: the strings of a list as
+		// a read tool lays them out, each a line of its own at column 0 (#845, third decision of 2026-11-18).
+		for pos := e.next; pos < len(s); {
+			tick(1)
+			l := readLine(s, pos)
+			if l.blank() || l.ind.n != 0 {
+				break
+			}
+			add(l.text, l.end)
+			pos = l.next
 		}
 		return true
 	}
@@ -876,24 +895,6 @@ var seqKeyEnd = regexp.MustCompile(`(?i)(` + bareKeyExpr + `)(?:\\*["'])?(?:` + 
 // group 1 is the name.
 var seqFlagEnd = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])-{1,2}(` + bareKeyExpr + `)$`)
 
-// seqLoneFlag matches a string that is itself a flag, with its own value after "=" or none ("--verbose", "-v",
-// "--port=8080"). After a secret flag it is no value (seqValues).
-var seqLoneFlag = regexp.MustCompile(`(?s)^-{1,2}[A-Za-z][A-Za-z0-9_.-]*(?:=.*)?$`)
-
-// keepFlagAfterFlag returns seqFlagAfterFlag in place of start, the value seqValues found in the string t
-// after a secret flag, when on and t is itself a flag (seqLoneFlag): the flag keeps its text, and what comes
-// after it is decided as in the strings joined.
-func keepFlagAfterFlag(on bool, start int, t string) int {
-	if on && start >= 0 && seqLoneFlag.MatchString(counted(t)) {
-		return seqFlagAfterFlag
-	}
-	return start
-}
-
-// seqFlagAfterFlag is the place seqValues gives a flag after a secret flag: no value, and a string that keeps
-// what the flag rule of the joined text would take of it.
-const seqFlagAfterFlag = -2
-
 // seqWordEnd matches a secret key at the end of a string with no colon after it, alone or after other words
 // (group 1): its colon or equals sign may come in a string of its own, or at the start of the next.
 var seqWordEnd = regexp.MustCompile(`(?i)(?:^|\s)(` + bareKeyExpr + `)(?:\\*["'])?$`)
@@ -904,7 +905,7 @@ var seqBlockHeader = regexp.MustCompile(`^(?:[|>][1-9+-]{0,2}(?:` + keySpaceExpr
 
 // seqEnvValue matches the start of the string after an environment entry's name (viewEnvName): its "value" key
 // and separator, quoted or not.
-var seqEnvValue = regexp.MustCompile(`(?i)^\\*["']?value\\*["']?` + keySpaceExpr + `*:` + keySpaceExpr + `*`)
+var seqEnvValue = regexp.MustCompile(`(?i)^\\*["']?values?\\*["']?` + keySpaceExpr + `*:` + keySpaceExpr + `*`)
 
 // seqSeparator reports whether the string t holds only a separator run of the class (sepRunAt: blanks, control
 // and invisible characters, colons and their look-alikes, equals signs and arrows, with at least one mark), with
@@ -996,7 +997,8 @@ func seqValueStart(item string) int {
 // before it, blank strings skipped, ends with a secret key and ":" or "=" (seqKeyEnd), or with a secret-named
 // flag (seqFlagEnd), or when a string that holds only a separator (seqSeparator) stands between it and a string
 // that ends with a secret key (seqWordEnd), or between it and a key that already took it ("--password", "=",
-// "V"). After a string that ends with a secret key, a string that starts with a separator holds the value after
+// "V"). The string after a secret flag is its value, whatever it looks like ("--token", "--verbose": #845,
+// third decision of 2026-11-18). After a string that ends with a secret key, a string that starts with a separator holds the value after
 // it ("? password", ": V"), and after an environment entry's name ("- name: DB_PASSWORD"), a string that starts
 // with its "value" key holds the value after that ("  value: V"). After a key and a colon, with a block
 // indicator or nothing after it, the strings that start with indentation after its value are the lines of its
@@ -1004,12 +1006,8 @@ func seqValueStart(item string) int {
 // of it looks like a secret. Every string is also read as a key of its own, a value included ("--token",
 // "--password", "V"). Each string is read in its folded view (foldView), as String reads a text: an invisible
 // character inside a key or a flag, or before its separator, is dropped, a colon look-alike reads as ":", and a
-// separator of other characters reads as ": ". With flagAfterFlag (the strings of a sequence apart, Strings), a
-// string that is itself a flag (seqLoneFlag) after a secret flag is no value of it, as main had it when it
-// redacted each string on its own ("--token", "--verbose"): its place holds seqFlagAfterFlag, and Strings does
-// not give it what the joined text's flag rule redacts either. In a sequence written in a text (seqScan), it is
-// the value, as String on main read it there.
-func seqValues(items []string, flagAfterFlag bool) []int {
+// separator of other characters reads as ": ".
+func seqValues(items []string) []int {
 	const (
 		none = iota
 		value
@@ -1017,7 +1015,7 @@ func seqValues(items []string, flagAfterFlag bool) []int {
 		env
 	)
 	out := make([]int, len(items))
-	pending, bare, block, inBlock, flag := none, false, false, false, false
+	pending, bare, block, inBlock := none, false, false, false
 	for i, it := range items {
 		tick(1)
 		out[i] = -1
@@ -1050,7 +1048,6 @@ func seqValues(items []string, flagAfterFlag bool) []int {
 			take(seqValueStart(it), t)
 			inBlock = block && out[i] >= 0
 			pending = none
-			out[i] = keepFlagAfterFlag(flagAfterFlag && flag, out[i], t)
 		case word:
 			pending = none
 			if ok, colon := seqSeparator(t); ok {
@@ -1078,64 +1075,42 @@ func seqValues(items []string, flagAfterFlag bool) []int {
 		if m := seqKeyEnd.FindStringSubmatchIndex(counted(t)); m != nil {
 			if !isReference(t[m[2]:m[3]]) {
 				// A colon may have a block below it, with an indicator or with nothing after it.
-				pending, bare, block, flag = value, isBareShortKey(t[m[2]:m[3]]), t[len(t)-1] != '=', false
+				pending, bare, block = value, isBareShortKey(t[m[2]:m[3]]), t[len(t)-1] != '='
 			}
 			continue
 		}
 		if m := seqFlagEnd.FindStringSubmatchIndex(counted(t)); m != nil {
 			if !referenceKey(t[m[2]:m[3]], true) {
-				pending, bare, block, flag = value, false, false, true
+				pending, bare, block = value, false, false
 			}
 			continue
 		}
 		if m := seqWordEnd.FindStringSubmatchIndex(counted(t)); m != nil && !isReference(t[m[2]:m[3]]) {
-			pending, bare, flag = word, isBareShortKey(t[m[2]:m[3]]), false
+			pending, bare = word, isBareShortKey(t[m[2]:m[3]])
 		}
 	}
 	return out
 }
 
-// Strings redacts the strings of a sequence, such as a container's arguments, with the one decision String
+// Strings redacts the strings of a sequence, such as a container's arguments, with the one decision Pieces
 // takes on them joined by line breaks: each string loses what String redacts of it in the joined text, what
-// String redacts of it alone, and, after its indentation, the value seqValues finds in it (the rule for a key,
-// a separator or a flag in one string and the value in a later one, which String also applies to a sequence
-// written in a text). So what String hides in the strings joined, Strings hides in them apart, with one
-// exception kept from main, which redacted each string on its own: a string that is itself a flag after a
-// secret flag keeps its text ("--token", "--verbose"; seqLoneFlag, decision of 2026-11-18 on #845). Callers that walk
-// an object (the read tool get_resource) call it for every sequence of strings instead of redacting the strings
-// one by one.
+// String redacts of it alone, and the value seqValues finds in it (a key, a separator or a flag in one string and
+// the value in a later one, the rule String also applies to a sequence written in a text). So what String hides
+// in the strings joined, Strings hides in them apart.
 func (r *Redactor) Strings(items []string) []string {
-	joined := r.spans(strings.Join(items, "\n"))
-	starts := seqValues(items, true)
-	out := make([]string, len(items))
-	off, next := 0, 0
+	ps := make([]Piece, 0, 2*len(items))
 	for i, it := range items {
 		tick(1)
-		end := off + len(it)
-		var own []span
-		for next < len(joined) && joined[next].end <= off {
-			tick(1)
-			next++
+		if i > 0 {
+			ps = append(ps, Piece{Text: "\n"})
 		}
-		for k := next; k < len(joined) && joined[k].start < end; k++ {
-			tick(1)
-			sp := joined[k]
-			if starts[i] == seqFlagAfterFlag {
-				// The flag rule of the joined text reads this flag as the value of the flag before it; what the
-				// string holds on its own is redacted below.
-				continue
-			}
-			sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
-			if sp.end > sp.start {
-				own = append(own, sp)
-			}
-		}
-		own = append(own, r.spans(it)...)
-		if starts[i] >= 0 && starts[i] < len(it) {
-			own = append(own, span{start: starts[i], end: len(it), kind: KindCredential, rule: len(r.rules)})
-		}
-		out[i] = render(it, mergeSpans(own))
-		off = end + 1
+		ps = append(ps, Piece{Text: it, Data: true})
+	}
+	all := r.Pieces(ps)
+	out := make([]string, len(items))
+	for i := range out {
+		tick(1)
+		out[i] = all[2*i]
 	}
 	return out
 }
@@ -1196,7 +1171,7 @@ func seqScan(s string, add func(start, end int)) {
 			tick(1)
 			texts[k] = s[it[0]:it[1]]
 		}
-		for k, start := range seqValues(texts, false) {
+		for k, start := range seqValues(texts) {
 			tick(1)
 			if start >= 0 {
 				add(items[k][0]+start, items[k][1])

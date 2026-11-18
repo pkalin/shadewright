@@ -849,3 +849,51 @@ func TestQueryMetricsRedactsALabelWithItsName(t *testing.T) {
 		}
 	}
 }
+
+// get_resource lays the object out as one text and decides it once (#845, third decision of 2026-11-18): a key
+// in one field and its value in a sibling or the next field are seen together. An HTTP header's name and value
+// and a flag followed by a string that looks like a flag were hidden by main's second pass over the whole
+// answer and shown by a decision per field; a flag at the end of the command with its value in the arguments,
+// and a selector's key with its values, showed on main too.
+func TestGetResourceDecidesTheObjectAsOneText(t *testing.T) {
+	const passwordFlag, key = "--password", "password"
+	secret := "S3cr3t" + "Value9"
+	header := func(name string) func(p *corev1.Pod) {
+		return func(p *corev1.Pod) {
+			p.Spec.Containers[0].LivenessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz", HTTPHeaders: []corev1.HTTPHeader{{Name: name, Value: secret}},
+			}}}
+		}
+	}
+	args := func(cmd, a []string) func(p *corev1.Pod) {
+		return func(p *corev1.Pod) { p.Spec.Containers[0].Command, p.Spec.Containers[0].Args = cmd, a }
+	}
+	for name, set := range map[string]func(p *corev1.Pod){
+		"header X-Api-Key":           header("X-Api-Key"),
+		"header X-Auth-Token":        header("X-Auth-Token"),
+		"header password":            header(key),
+		"flag, dashed value":         args(nil, []string{passwordFlag, "--" + secret}),
+		"token flag, short value":    args(nil, []string{"--token", "-" + secret}),
+		"flag, short flag":           args(nil, []string{passwordFlag, "-p=" + secret}),
+		"client-secret flag, flag":   args(nil, []string{"--client-secret", "--x=" + secret}),
+		"flag in command, arguments": args([]string{"serve", passwordFlag}, []string{secret}),
+		"selector key and values": func(p *corev1.Pod) {
+			p.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{secret}}},
+				}}},
+			}}
+		},
+	} {
+		p := pod()
+		set(p)
+		e := newEnv(t, []client.Object{p})
+		r := e.call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK || strings.Contains(r.Text, secret[:6]) || strings.Contains(r.Text, secret[6:]) {
+			t.Errorf("%s: %s\n%s", name, r.Status, r.Text)
+		}
+		if !strings.Contains(r.Text, `"name": "`+container+`"`) {
+			t.Errorf("%s: the container's name is missing:\n%s", name, r.Text)
+		}
+	}
+}

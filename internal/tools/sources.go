@@ -292,12 +292,29 @@ func (s *Set) queryMetrics(ctx context.Context, t metricTemplate, a queryMetrics
 	if res.Partial {
 		r.addLabel(LabelMetricsPartial)
 	}
+	// The series are one text, decided once (layout): each label a "name: value" line, the name and value of a
+	// label decided together.
+	type label struct{ name, value string }
+	labels := make([][]label, len(res.Series))
+	var lay layout
+	for i, se := range res.Series {
+		keys := slices.Sorted(maps.Keys(se.Labels))
+		labels[i] = make([]label, len(keys))
+		for j, k := range keys {
+			lay.text("- ")
+			lay.value(k, shown(&labels[i][j].name))
+			lay.text(": ")
+			lay.value(se.Labels[k], shown(&labels[i][j].value))
+			lay.text("\n")
+		}
+	}
+	s.decide(&lay)
 	var l lines
 	l.add("%s: %d series", t.name, len(res.Series))
-	for _, se := range res.Series {
+	for i, se := range res.Series {
 		var lb []string
-		for _, k := range slices.Sorted(maps.Keys(se.Labels)) {
-			lb = append(lb, s.label(k, se.Labels[k]))
+		for _, lv := range labels[i] {
+			lb = append(lb, lv.name+"="+lv.value)
 		}
 		// A series line is the source's answer.
 		l.add("%s", l.data("{"+strings.Join(lb, ", ")+"} "+summary(se.Samples, t.overWindow)))
@@ -379,11 +396,17 @@ func (s *Set) deliveryStatus(ctx context.Context, a deliveryArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
+	// The values shown are one text, decided once (layout).
+	var rev, msg string
+	var lay layout
+	lay.field("", "applied revision", st.AppliedRevision, shown(&rev))
+	lay.field("", "message", st.Message, shown(&msg))
+	s.decide(&lay)
 	var l lines
 	l.add("delivery: %s", deliveryState(st))
-	l.add("applied revision: %s", l.data(s.value(st.AppliedRevision)))
+	l.add("applied revision: %s", l.data(rev))
 	l.add("ready: %s", strconv.FormatBool(st.Ready))
-	l.add("message: %s", l.data(s.value(st.Message)))
+	l.add("message: %s", l.data(msg))
 	r.Text, r.Values = l.String(), l.values
 	return nil
 }

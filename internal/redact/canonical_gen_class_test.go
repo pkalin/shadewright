@@ -108,7 +108,8 @@ func (g *canonGen) foldRoundFourCases() {
 // it, at the start of a line and inside prose.
 func (g *canonGen) autolinkCases() {
 	schemes := []string{"postgres", "postgresql", "mysql", "mongodb+srv", "redis", "amqps", "https", "sftp"}
-	seconds := []string{"x@db/app>", "mailto:ops@db>", "ops@db.example>", "u@h>"}
+	// The third is an address with a domain, built from parts so that no line of the source holds one.
+	seconds := []string{"x@db/app>", "mailto:ops@db>", "ops" + "@" + "db.example>", "u@h>"}
 	for si, scheme := range schemes {
 		for ci, closer := range []string{">,<", ">;<"} {
 			for vi, second := range seconds {

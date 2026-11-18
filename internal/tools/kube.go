@@ -31,6 +31,7 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/analyzer/refcheck"
@@ -124,16 +125,23 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	// Every string of the object is redacted as it was read, before JSON escapes its line breaks and quotes
-	// (a block under a secret key is found by its lines), each list of strings as one sequence (#845), and the
-	// encoding leaves out HTML escapes (an escaped ">" hid a folded block indicator from the rules, #840).
-	view := reflect.ValueOf(strip(obj))
-	redactStrings(view, s.redact, s.redactSequence)
+	// The object is laid out as one text and decided once (#845, third decision of 2026-11-18); the decided
+	// values are written into a copy that owns everything it holds (never the cache's), which is then encoded
+	// and not redacted again. The encoding leaves out HTML escapes, so a reader sees the values as decided.
+	stripped, ok := strip(obj).(runtime.Object)
+	if !ok {
+		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
+		return nil
+	}
+	view := stripped.DeepCopyObject()
+	var l layout
+	l.lay(reflect.ValueOf(view).Elem(), "", "")
+	s.decide(&l)
 	var b strings.Builder
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", " ")
-	if err := enc.Encode(view.Interface()); err != nil {
+	if err := enc.Encode(view); err != nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
@@ -173,90 +181,6 @@ func strip(obj client.Object) any {
 		return c
 	}
 	return nil
-}
-
-// redactStrings replaces every exported string reachable from v with f of it, every slice of strings (a
-// container's command or arguments) with seq of it, which decides on the sequence as a whole: a key in one
-// string and its value in the next (#845), and every key of a map with f of it, or, when its values are
-// strings, the key with ":" and its value with seq of the two, so a secret key takes its value. It writes
-// through pointers, slices and maps into new copies, never into what v shares with the object that was read (a
-// cache's). Unexported fields (a time, a quantity) hold no free text and are left as they are.
-func redactStrings(v reflect.Value, f func(string) string, seq func([]string) []string) {
-	switch v.Kind() {
-	case reflect.Pointer:
-		if v.IsNil() {
-			return
-		}
-		c := reflect.New(v.Elem().Type())
-		c.Elem().Set(v.Elem())
-		redactStrings(c.Elem(), f, seq)
-		if v.CanSet() {
-			v.Set(c)
-		} else {
-			v.Elem().Set(c.Elem())
-		}
-	case reflect.Struct:
-		for _, field := range v.Fields() {
-			if field.CanSet() {
-				redactStrings(field, f, seq)
-			}
-		}
-	case reflect.Slice:
-		if v.IsNil() || !v.CanSet() {
-			return
-		}
-		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
-		reflect.Copy(c, v)
-		if v.Type().Elem().Kind() == reflect.String {
-			items := make([]string, c.Len())
-			for i := range items {
-				items[i] = c.Index(i).String()
-			}
-			for i, it := range seq(items) {
-				c.Index(i).SetString(it)
-			}
-			v.Set(c)
-			return
-		}
-		for i := range c.Len() {
-			redactStrings(c.Index(i), f, seq)
-		}
-		v.Set(c)
-	case reflect.Map:
-		if v.IsNil() || !v.CanSet() {
-			return
-		}
-		c := reflect.MakeMapWithSize(v.Type(), v.Len())
-		for it := v.MapRange(); it.Next(); {
-			k := reflect.New(v.Type().Key()).Elem()
-			k.Set(it.Key())
-			e := reflect.New(v.Type().Elem()).Elem()
-			e.Set(it.Value())
-			switch {
-			case k.Kind() == reflect.String && e.Kind() == reflect.String:
-				// A key and its value are decided together (#845, second decision of 2026-11-18): a map value
-				// under a secret key (a CSI volume's volumeAttributes, a nodeSelector, labels) was redacted
-				// without its key and shown, where main's second pass over the whole answer hid it.
-				out := seq([]string{k.String() + ":", e.String()})
-				k.SetString(strings.TrimSuffix(out[0], ":"))
-				e.SetString(out[1])
-			case k.Kind() == reflect.String:
-				k.SetString(f(k.String()))
-				redactStrings(e, f, seq)
-			default:
-				redactStrings(e, f, seq)
-			}
-			// Two keys redacted alike are one entry: the value of the one written last is shown, never a
-			// secret.
-			c.SetMapIndex(k, e)
-		}
-		v.Set(c)
-	case reflect.String:
-		if v.CanSet() {
-			v.SetString(f(v.String()))
-		}
-	default:
-	}
 }
 
 func tm(apiVersion, kind string) metav1.TypeMeta {
@@ -396,12 +320,26 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 	slices.SortStableFunc(evs, func(x, y *eventsv1.Event) int {
 		return cmp.Or(eventTime(y).Compare(eventTime(x)), cmp.Compare(x.Name, y.Name))
 	})
+	// The events shown are one text, decided once (layout).
+	shownEvs := evs[:min(len(evs), a.Limit.v)]
+	vals := make([][5]string, len(shownEvs))
+	var lay layout
+	for i, e := range shownEvs {
+		lead := "- "
+		for j, f := range []struct{ name, v string }{
+			{"type", e.Type}, {"reason", e.Reason}, {"kind", e.Regarding.Kind}, {"name", e.Regarding.Name}, {"note", e.Note},
+		} {
+			lay.field(lead, f.name, f.v, shown(&vals[i][j]))
+			lead = "  "
+		}
+	}
+	s.decide(&lay)
 	var l lines
 	l.add("%d events match; the newest %d are shown", len(evs), min(len(evs), a.Limit.v))
-	for _, e := range evs[:min(len(evs), a.Limit.v)] {
-		l.add("%s %s %s %s/%s count %d: %s", eventTime(e).UTC().Format(time.RFC3339), l.data(s.value(e.Type)),
-			l.data(s.value(e.Reason)), l.data(s.value(e.Regarding.Kind)), l.data(s.value(e.Regarding.Name)),
-			eventCount(e), l.data(s.value(e.Note)))
+	for i, e := range shownEvs {
+		v := vals[i]
+		l.add("%s %s %s %s/%s count %d: %s", eventTime(e).UTC().Format(time.RFC3339), l.data(v[0]),
+			l.data(v[1]), l.data(v[2]), l.data(v[3]), eventCount(e), l.data(v[4]))
 	}
 	r.Text, r.Values = l.String(), l.values
 	return nil
@@ -470,6 +408,18 @@ func (s *Set) checkReference(ctx context.Context, a checkReferenceArgs, r *Resul
 		return nil
 	}
 	res := refcheck.Check(&pod, list.Items, refcheck.Kind(a.Kind), a.Name, s.now())
+	// The values shown are one text, decided once (layout).
+	var key, container, volume string
+	var lay layout
+	for _, f := range []struct {
+		name, v string
+		dst     *string
+	}{{"key", res.Key, &key}, {"container", res.Container, &container}, {"volume", res.Volume, &volume}} {
+		if f.v != "" {
+			lay.field("", f.name, f.v, shown(f.dst))
+		}
+	}
+	s.decide(&lay)
 	var l lines
 	l.add("answer: %s", res.Answer)
 	l.add("referenced by the pod spec: %s", strconv.FormatBool(res.Referenced))
@@ -477,13 +427,13 @@ func (s *Set) checkReference(ctx context.Context, a checkReferenceArgs, r *Resul
 		l.add("what is missing: %s", res.What)
 		l.add("evidence: %s", res.Source)
 		if res.Key != "" {
-			l.add("key: %s", l.data(s.value(res.Key)))
+			l.add("key: %s", l.data(key))
 		}
 		if res.Container != "" {
-			l.add("container: %s", l.data(s.value(res.Container)))
+			l.add("container: %s", l.data(container))
 		}
 		if res.Volume != "" {
-			l.add("volume: %s", l.data(s.value(res.Volume)))
+			l.add("volume: %s", l.data(volume))
 		}
 	}
 	r.Text, r.Values = l.String(), l.values

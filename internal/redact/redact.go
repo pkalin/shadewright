@@ -39,9 +39,10 @@ limitations under the License.
 // indentation and LF, CRLF and a lone CR as line ends, a flow value up to the bracket that closes it after any
 // brackets inside the secret, a block that a comment line at column 0 interrupts, a value in a string of a
 // sequence after the string that holds its key ("password:", "--password=", also with blank strings between,
-// the colon in a string of its own, or a flag after other words; decided once for a list and for a sequence
-// written in a text, seqValues), and an environment entry whose value comes before its name, in flow and in
-// block form; and, read on the folded view of the text (fold.go), a key name with an invisible character
+// the colon in a string of its own, or a flag after other words; decided once for a list, for a sequence
+// written in a text and for a tool result laid out as one text, seqValues and Pieces in layout.go), an
+// environment entry whose value comes before its name, in flow and in block form, and a "- key:" naming a
+// secret with its "values" (a selector); and, read on the folded view of the text (fold.go), a key name with an invisible character
 // inside it or before its colon, a key followed by a colon look-alike of Unicode's confusables list, an explicit
 // YAML key ("? password" over ": x", also "password" alone below "?" or "? |"), and a key followed by a
 // separator of other characters ("userPassword:: x", "password => x", "token\x00: x"),
@@ -468,6 +469,10 @@ func mergeSpans(spans []span) []span {
 func (r *Redactor) ruleSpans(s string, spans []span, folded bool) []span {
 	for i, ru := range r.rules {
 		tick(1)
+		if folded && ru.kind == KindIP {
+			// The folded view reads keys and separators; an address is read as written ("：：" is no "::").
+			continue
+		}
 		prevEnd := 0
 		add := func(start, end int) {
 			if end > start {
@@ -1043,6 +1048,7 @@ func nestedHeader(s string, l blockLine) []int {
 // for nextLineSpans, and returns the end of the last line of the block, or pos when it has none. With bare,
 // each value counts only when it looks like a secret.
 func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int)) int {
+	tick(1) // a call, which may be a turn of its recursion
 	const (
 		undecided = iota
 		scalar
@@ -2184,6 +2190,7 @@ func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
 // (groupEnd). Where the extent rule gives no extent, the value is valueSpan's. With wide false the extents
 // #769 widens are read as on main before it (keyValueSpans).
 func extendedValueSpan(s string, pos, boundary, keyCol, ctx, keyPos int, wide bool) (int, int) {
+	tick(1) // a call, which may be a turn of its recursion
 	if pos >= len(s) {
 		return pos, pos
 	}

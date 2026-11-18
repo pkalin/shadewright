@@ -135,9 +135,12 @@ func foldView(s string) (foldedView, bool) {
 	return newFoldBuilder(len(t)).build(func(emit func(text string, from, to int, copied bool)) {
 		sepWalk(t, func(text string, a, b int, copied bool) {
 			if copied {
+				// Each byte stands for what its byte of the glyph fold stood for: a look-alike colon folded to
+				// ":" stands for all of its bytes, so a range that ends on it ends on a character boundary
+				// (#845, third decision of 2026-11-18).
 				for i := a; i < b; i++ {
 					tick(1)
-					emit(t[i:i+1], from(i), to(i), true)
+					emit(t[i:i+1], from(i), to(i), false)
 				}
 				return
 			}

@@ -21,6 +21,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -62,19 +63,47 @@ func loopName(fn *ast.FuncDecl, n int) string {
 	return fmt.Sprintf("%s#%d", name, n)
 }
 
-// ticksInBody reports whether body calls tick as one of its own statements, so that every turn counts: a tick
-// inside an if, a switch, a nested loop or a function literal does not.
+// ticksInBody reports whether body calls tick as one of its own statements before any statement that can leave
+// the turn early, so that every turn counts: a tick inside an if, a switch, a nested loop or a function literal
+// does not, nor one after a statement holding a continue, a break, a goto or a return (#845, third decision of
+// 2026-11-18: a tick placed after an early continue does not count the turns that continue).
 func ticksInBody(body *ast.BlockStmt) bool {
 	for _, st := range body.List {
-		if e, ok := st.(*ast.ExprStmt); ok {
-			if c, ok := e.X.(*ast.CallExpr); ok {
-				if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "tick" {
-					return true
-				}
+		if isTick(st) {
+			return true
+		}
+		if leavesEarly(st) {
+			return false
+		}
+	}
+	return false
+}
+
+// isTick reports whether st is a call of tick.
+func isTick(st ast.Stmt) bool {
+	if e, ok := st.(*ast.ExprStmt); ok {
+		if c, ok := e.X.(*ast.CallExpr); ok {
+			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "tick" {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+// leavesEarly reports whether st holds a branch (continue, break, goto) or a return outside a function literal.
+func leavesEarly(st ast.Stmt) bool {
+	found := false
+	ast.Inspect(st, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.BranchStmt, *ast.ReturnStmt:
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // packageLoops returns, for each non-test file of the package, the loops of its functions by name, and for
@@ -157,4 +186,267 @@ func TestEveryLoopCountsItsWork(t *testing.T) {
 		}
 	}
 	t.Logf("%d loops: %d count their turns, %d are listed with their bound", len(loops), counted, listed)
+}
+
+// The loop check also covers what turns without a for statement (#845, third decision of 2026-11-18): a
+// function that calls itself, directly or through other functions of the package, and a goto that jumps back
+// to a label. Each turn of such a cycle counts with a tick as the first statements of the function's body (or
+// of the labeled statement), before anything that can leave it early, or the cycle is listed in boundedCycles
+// with the constant that bounds it.
+
+// boundedCycles are the recursions and backward gotos that do not count their turns, each with its bound.
+var boundedCycles = map[string]string{}
+
+// parsePackage parses the non-test files of the package.
+func parsePackage(t *testing.T) []*ast.File {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []*ast.File
+	fset := token.NewFileSet()
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, file)
+	}
+	return out
+}
+
+// recvType returns the name of the type of a method's receiver, or "" for a function.
+func recvType(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) != 1 {
+		return ""
+	}
+	switch t := fn.Recv.List[0].Type.(type) {
+	case *ast.StarExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return id.Name
+		}
+	case *ast.Ident:
+		return t.Name
+	}
+	return ""
+}
+
+// funcKey is the name a function's calls use: the function's name, or "Type.name" for a method.
+func funcKey(fn *ast.FuncDecl) string {
+	if r := recvType(fn); r != "" {
+		return r + "." + fn.Name.Name
+	}
+	return fn.Name.Name
+}
+
+// recvName returns the name of a method's receiver variable, or "".
+func recvName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) != 1 || len(fn.Recv.List[0].Names) != 1 {
+		return ""
+	}
+	return fn.Recv.List[0].Names[0].Name
+}
+
+// cycles returns, for each function of files that is part of a cycle of calls (itself included), whether it
+// counts its turns (ticksInBody of its body), by loopName with -1 for the place. A call is a call of a function
+// of the package by its name, or of a method on the calling method's own receiver.
+func cycles(files []*ast.File) map[string]bool {
+	decls := map[string][]*ast.FuncDecl{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Body != nil {
+				decls[funcKey(fn)] = append(decls[funcKey(fn)], fn)
+			}
+		}
+	}
+	calls := map[string]map[string]bool{}
+	for key, fns := range decls {
+		calls[key] = map[string]bool{}
+		for _, fn := range fns {
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				c, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch f := c.Fun.(type) {
+				case *ast.Ident:
+					if _, ok := decls[f.Name]; ok {
+						calls[key][f.Name] = true
+					}
+				case *ast.SelectorExpr:
+					// A method called on the method's own receiver; calls on other values (a builder's String)
+					// are no calls of the package's methods.
+					if x, ok := f.X.(*ast.Ident); ok && x.Name != "" && x.Name == recvName(fn) {
+						if m := recvType(fn) + "." + f.Sel.Name; len(decls[m]) > 0 {
+							calls[key][m] = true
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	// reaches reports whether from calls to, through any chain of calls.
+	reaches := func(from, to string) bool {
+		seen := map[string]bool{}
+		stack := []string{from}
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for next := range calls[cur] {
+				if next == to {
+					return true
+				}
+				if !seen[next] {
+					seen[next] = true
+					stack = append(stack, next)
+				}
+			}
+		}
+		return false
+	}
+	out := map[string]bool{}
+	for key, fns := range decls {
+		if !reaches(key, key) {
+			continue
+		}
+		for _, fn := range fns {
+			out[loopName(fn, -1)] = ticksInBody(fn.Body)
+		}
+	}
+	return out
+}
+
+// backwardGotos returns, for each goto of files that jumps back to a label before it, whether the labeled
+// statement is a tick, by the function's loopName and the label.
+func backwardGotos(files []*ast.File) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			labels := map[string]*ast.LabeledStmt{}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch s := n.(type) {
+				case *ast.LabeledStmt:
+					labels[s.Label.Name] = s
+				case *ast.BranchStmt:
+					if s.Tok != token.GOTO || s.Label == nil {
+						break
+					}
+					if l, ok := labels[s.Label.Name]; ok && l.Pos() < s.Pos() {
+						out[loopName(fn, -1)+":"+s.Label.Name] = isTick(l.Stmt)
+					}
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+func TestEveryCycleCountsItsWork(t *testing.T) {
+	files := parsePackage(t)
+	found := map[string]bool{}
+	for _, m := range []map[string]bool{cycles(files), backwardGotos(files)} {
+		for name, counts := range m {
+			found[name] = true
+			_, listed := boundedCycles[name]
+			switch {
+			case counts && listed:
+				t.Errorf("%s counts its turns and is listed in boundedCycles too: remove the listing", name)
+			case !counts && !listed:
+				t.Errorf("%s turns without a tick before it can leave a turn, and is not listed in boundedCycles", name)
+			}
+		}
+	}
+	for name := range boundedCycles {
+		if !found[name] {
+			t.Errorf("boundedCycles lists %s, which is no cycle of the package", name)
+		}
+	}
+	t.Logf("%d recursions and backward gotos", len(found))
+}
+
+// The checks see what they are for: a tick after an early continue, a recursion through another function
+// without a tick, and a goto back to a label that is no tick; and they take the counted forms.
+func TestLoopChecksSeeEveryForm(t *testing.T) {
+	const src = `package p
+func tick(int) {}
+func early(xs []int) {
+	for _, x := range xs {
+		if x > 0 {
+			continue
+		}
+		tick(1)
+	}
+}
+func good(xs []int) {
+	for range xs {
+		tick(1)
+		if len(xs) > 0 {
+			continue
+		}
+	}
+}
+func a(n int) int { if n == 0 { return 0 }; return b(n - 1) }
+func b(n int) int { return a(n) }
+func c(n int) int { tick(1); if n == 0 { return 0 }; return c(n - 1) }
+type T struct{}
+func (t *T) m(n int) { if n > 0 { t.m(n - 1) } }
+func (t *T) String() string { var b T; return b.String() }
+func g(n int) {
+again:
+	n--
+	if n > 0 {
+		goto again
+	}
+}
+func h(n int) {
+again:
+	tick(1)
+	n--
+	if n > 0 {
+		goto again
+	}
+	goto done
+done:
+}
+`
+	file, err := parser.ParseFile(token.NewFileSet(), "p.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loops := map[string]bool{}
+	for _, d := range file.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if l, ok := n.(*ast.RangeStmt); ok {
+				loops[fn.Name.Name] = ticksInBody(l.Body)
+			}
+			return true
+		})
+	}
+	want := map[string]bool{"early": false, "good": true}
+	for name, w := range want {
+		if loops[name] != w {
+			t.Errorf("loop of %s counts its turns: %v, want %v", name, loops[name], w)
+		}
+	}
+	files := []*ast.File{file}
+	if got, want := cycles(files), map[string]bool{"a#-1": false, "b#-1": false, "c#-1": true, "(*T).m#-1": false}; !maps.Equal(got, want) {
+		t.Errorf("cycles = %v, want %v", got, want)
+	}
+	if got, want := backwardGotos(files), map[string]bool{"g#-1:again": false, "h#-1:again": true}; !maps.Equal(got, want) {
+		t.Errorf("backward gotos = %v, want %v", got, want)
+	}
 }

@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -93,7 +94,9 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 	reconcile.Result, error) {
 	if s, ok := settleNeverHeld(rr); ok && rr.Status.HoldsTarget == nil {
 		// As for a refusal: false keeps it out of the limits' lock list (limitsSelectors).
-		release(rr, s)
+		if err := lockverdict.Release(&rr.Status, s); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 	rr.Status.ObservedGeneration = rr.Generation
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
@@ -143,7 +146,8 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	checkErr := r.failCancelCheck(ctx, rr)
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := r.closeChangeRequest(cleanCtx, rr)
-	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
+	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead).
+	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
 	if done, endErr := r.endUnrecordedMerge(ctx, rr, err); done {
 		// Its own pull request was merged before any status recorded it: the change landed, so the request ends

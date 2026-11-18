@@ -41,6 +41,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy"
@@ -649,10 +650,8 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		acquire(rr)
 		// A replacement names the request it takes over in the same write (handoff step 1, handoff.go).
 		reserveOnAdmission(rr)
-	} else if rr.Status.HoldsTarget == nil {
-		// A refusal never takes the lock; false keeps it out of the limits' lock list (limitsSelectors).
-		s, _ := settleNeverHeld(rr)
-		release(rr, s)
+	} else if err := releaseRefused(rr); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	rr.Status.ObservedGeneration = rr.Generation
@@ -1616,7 +1615,9 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 	// is written from it. A step of the new installation that ran past it is still that step's failure (#797).
 	timedOut := ctx.Err() == nil && cleanCtx.Err() != nil
 	stepErr := closeErr
-	closeErr = boundErr(ctx, cleanCtx, "cleanup of the change request", closeErr)
+	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead): never an error
+	// for the rate limiter.
+	closeErr = keepGitRead(ctx, cleanCtx, "cleanup of the change request", closeErr)
 	if timedOut {
 		closeErr = reinstalledTimeout(stepErr, closeErr)
 	}
@@ -2348,3 +2349,14 @@ type closeConflictError struct {
 func (e *closeConflictError) Unwrap() error { return e.err }
 
 func (e *closeConflictError) Error() string { return e.err.Error() }
+
+// releaseRefused records the lock of a request the policy check refused as free, in the status about to be written:
+// a refusal never takes the lock, and false keeps it out of the limits' lock list (limitsSelectors). A request that
+// recorded the field before is left as it is.
+func releaseRefused(rr *remediationv1alpha1.RemediationRequest) error {
+	if rr.Status.HoldsTarget != nil {
+		return nil
+	}
+	s, _ := settleNeverHeld(rr)
+	return lockverdict.Release(&rr.Status, s)
+}

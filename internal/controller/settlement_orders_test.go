@@ -252,9 +252,10 @@ func TestAdoptedRetargetedHeadNotPushedGetsNoReceipt(t *testing.T) {
 	}
 }
 
-// A Git wait past its end ends at the start of the next reconcile, before any read of the Git host: the content
-// wait and the merge wait (no Git call), the handoff grace (no Git call), and the request's deadline (its expiry,
-// which may read to close a pull request of its own, ends the request Expired).
+// A Git wait past its end ends at the start of the next reconcile, before any read of the Git host, and needs none:
+// the content wait, the merge wait and the handoff grace make no Git call, and the request's deadline (its expiry
+// tries to close a pull request of its own) ends the request Expired with every Git call failing, with no error
+// and no retry (fourth decision of 2026-11-18 on #771).
 func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 	type wait struct {
 		kind  waitKind
@@ -273,11 +274,12 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 			}
 		}},
 		"merge check": {kind: waitMergeCheck, setup: func(rr *api.RemediationRequest, now time.Time) {
-			rr.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Add(-mergeCommitWait)}
-		}, reads: true, check: func(t *testing.T, rr *api.RemediationRequest) {
+			setMergeWait(rr, now.Add(-mergeCommitWait))
+		}, check: func(t *testing.T, rr *api.RemediationRequest) {
 			if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPlanFresh); c == nil ||
-				c.Reason != freshness.ReasonPlanChanged {
-				t.Fatalf("PlanFresh = %+v; want the plan not shown fresh", c)
+				c.Reason != freshness.ReasonPlanChanged || !mergeRecorded(rr) || rr.Status.MergeReceipt != nil {
+				t.Fatalf("PlanFresh = %+v, merge recorded %t; want the plan not shown fresh and the merge recorded "+
+					"without a receipt", c, mergeRecorded(rr))
 			}
 		}},
 		"handoff grace": {kind: waitHandoffGrace, setup: func(rr *api.RemediationRequest, now time.Time) {
@@ -318,7 +320,7 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 				rr.ResourceVersion = spec.ResourceVersion
 			}
 			if gitWait(rr, w.kind) == nil {
-				entry, _ := newWait(w.kind, "x", clock.at.Add(-time.Hour))
+				entry, _ := newWait(rr, w.kind, "x", clock.at.Add(-time.Hour))
 				rr.Status.GitWaits = append(rr.Status.GitWaits, entry)
 			}
 			gitWaitSummary(rr, clock.at)
@@ -326,10 +328,12 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 				t.Fatal(err)
 			}
 			var gitCalls atomic.Int32
-			g.SetFail(func(string) error { gitCalls.Add(1); return nil })
-			if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
-				t.Fatal(err)
+			g.SetFail(func(string) error { gitCalls.Add(1); return errors.New("the Git host failed") })
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+			if err != nil {
+				t.Fatalf("the end of a passed wait returned %v; want no retry", err)
 			}
+			_ = res
 			if !w.reads && gitCalls.Load() > 0 {
 				t.Fatalf("the end of a passed wait read the Git host %d times", gitCalls.Load())
 			}

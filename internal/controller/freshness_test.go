@@ -3203,6 +3203,58 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, twice))).To(BeTrue(), "one entry per kind")
 	})
 
+	// Fourth decision of 2026-11-18 on #771: an entry can always be recorded, whatever branch or path its read names.
+	It("records a Git wait for the longest branch name and path the API allows, on the API server (#771)", func() {
+		got := fetch()
+		pr := got.Status.PullRequest
+		merged := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
+			State: providers.ChangeRequestMerged, BaseBranch: strings.Repeat("r", 255)}
+		path := strings.Repeat("p/", 254) + "a.yaml"
+		read := readFailure("check what the merge brought to "+merged.BaseBranch+" at "+path, errors.New("outage"))
+		r := retargetedReconciler(nil)
+		res, err := r.retryGitRead(ctx, got, readOfContent(merged, read), unboundedRead(noBoundHeldLock))
+		Expect(err).NotTo(HaveOccurred(), "the API server accepts the entry")
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		got = fetch()
+		content := gitWait(got, waitMergeContent)
+		Expect(content).NotTo(BeNil())
+		Expect(len([]rune(content.Operation))).To(BeNumerically("<=", maxOperation))
+		Expect(content.PullRequest.BaseBranch).To(Equal(remediationv1alpha1.GitBranch(merged.BaseBranch)))
+		Expect(content.Ends).NotTo(BeNil())
+	})
+
+	It("refuses a bounded Git wait without its end, a Paced one with one, a merge wait without its pull request, and an end that moves (#771)", func() {
+		const waitOp = "list the pull requests"
+		got := fetch()
+		now := metav1.NewTime(time.Now().Truncate(time.Second))
+		later := metav1.NewTime(now.Add(time.Minute))
+		pr := &remediationv1alpha1.GitWaitPullRequest{Number: got.Status.PullRequest.Number,
+			URL: got.Status.PullRequest.URL, HeadSHA: got.Status.PullRequest.HeadSHA}
+		with := func(w remediationv1alpha1.GitWait) *remediationv1alpha1.RemediationRequest {
+			c := got.DeepCopy()
+			c.Status.GitWaits = []remediationv1alpha1.GitWait{w}
+			return c
+		}
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, with(remediationv1alpha1.GitWait{
+			Kind: remediationv1alpha1.GitWaitRequestDeadline, Since: now, Operation: waitOp})))).To(BeTrue(),
+			"a bounded wait records its end")
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, with(remediationv1alpha1.GitWait{
+			Kind: remediationv1alpha1.GitWaitPaced, Since: now, Ends: &later, Operation: waitOp})))).To(BeTrue(),
+			"a Paced wait has no end")
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, with(remediationv1alpha1.GitWait{
+			Kind: remediationv1alpha1.GitWaitMergeCheck, Since: now, Ends: &later, Operation: waitOp})))).To(BeTrue(),
+			"a merge wait names its pull request")
+		merge := with(remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck, Since: now, Ends: &later,
+			Operation: "wait for the merge commit", PullRequest: pr})
+		Expect(k8sClient.Status().Update(ctx, merge)).To(Succeed())
+		moved := fetch()
+		moved.Status.GitWaits[0].Ends = &metav1.Time{Time: later.Add(time.Hour)}
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, moved))).To(BeTrue(), "a standing wait keeps its end")
+		long := fetch()
+		long.Status.GitWaits[0].Operation = strings.Repeat("o", maxOperation+1)
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, long))).To(BeTrue(), "the operation is bounded")
+	})
+
 	// The reads of what a retargeted merge brought have their own wait: a wait for the merge commit that is over
 	// already does not end the request on the first failed read.
 	It("retries a failed read of what a retargeted merge brought after the wait for the merge commit is over (#771)",

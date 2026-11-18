@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 )
 
 // The breaker's watermark (design section 10.7, #390). The circuit breaker needs, of all the requests that ended,
@@ -106,7 +107,9 @@ func (r *RemediationRequestReconciler) backfill(ctx context.Context, rr *remedia
 		// The lock holdsLock reads now (derivedHold) is recorded as it is: taken when held, released only with the
 		// verdict that the status shows it free, so the backfill never clears a held lock.
 		if s, ok := settleReleasedBeforeField(rr); ok {
-			release(rr, s)
+			if err := lockverdict.Release(&rr.Status, s); err != nil {
+				return err
+			}
 		} else {
 			acquire(rr)
 		}

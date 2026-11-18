@@ -243,7 +243,9 @@ func TestMergeCommitWaitIsBoundedWhenTheClockGoesBack(t *testing.T) {
 		"clock back by an hour":     {start.Add(-time.Hour), 0},
 		"clock back past the slack": {start.Add(-mergeCommitClockSlack - time.Second), 0},
 	} {
-		if got := mergeCommitWaitRemaining(start, tc.now); got != tc.want {
+		rr := &remediationv1alpha1.RemediationRequest{}
+		setMergeWait(rr, start)
+		if got := mergeWaitRemaining(rr, tc.now); got != tc.want {
 			t.Errorf("%s: got %s, want %s", name, got, tc.want)
 		}
 	}

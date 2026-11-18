@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +30,6 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -112,7 +112,7 @@ func (b waitBound) within(d time.Duration) waitBound {
 // lookBy is the earliest of the end of b's kind for rr and its times to look again, from now; ok is false when
 // nothing bounds b.
 func (b waitBound) lookBy(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
-	by, ok := b.kind.end(rr, now)
+	by, ok := b.kind.boundEnd(rr, now)
 	if !b.paceAt.IsZero() && (!ok || b.paceAt.Before(by)) {
 		by, ok = b.paceAt, true
 	}
@@ -153,12 +153,12 @@ type kindedReadError struct {
 func (e *kindedReadError) Error() string { return e.err.Error() }
 func (e *kindedReadError) Unwrap() error { return e.err }
 
-// readOfMergeCheck marks err, a failed Git read of the check at the merge, as one of the merge wait.
-func readOfMergeCheck(err error) error {
+// readOfMergeCheck marks err, a failed Git read of the check at the merge of cr, as one of the merge wait about cr.
+func readOfMergeCheck(cr providers.ChangeRequest, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &kindedReadError{wait: api.GitWait{Kind: api.GitWaitMergeCheck}, err: err}
+	return &kindedReadError{wait: api.GitWait{Kind: api.GitWaitMergeCheck, PullRequest: waitPullRequest(cr)}, err: err}
 }
 
 // readOfContent marks err, a failed read of what the merge of cr brought, as one of the content wait about cr: the
@@ -168,8 +168,18 @@ func readOfContent(cr providers.ChangeRequest, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &kindedReadError{err: err, wait: api.GitWait{Kind: api.GitWaitMergeContent,
-		PullRequest: &api.GitWaitPullRequest{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}}}
+	return &kindedReadError{err: err, wait: api.GitWait{Kind: api.GitWaitMergeContent, PullRequest: waitPullRequest(cr)}}
+}
+
+// waitPullRequest is what an entry of status.gitWaits records of cr, merged: its number, URL and head, the branch
+// it went into and its merge commit when the host reported a full one.
+func waitPullRequest(cr providers.ChangeRequest) *api.GitWaitPullRequest {
+	pr := &api.GitWaitPullRequest{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA,
+		BaseBranch: api.GitBranch(cr.BaseBranch)}
+	if shaPattern.MatchString(cr.MergeCommit) {
+		pr.MergeCommitSHA = cr.MergeCommit
+	}
+	return pr
 }
 
 // keepGitRead is boundErr for a step that ended on a failed Git read: a read that ran out of the step's time is
@@ -243,7 +253,9 @@ func readOp(err error) string {
 //   - the caller's kind (bound) gets its entry in status.gitWaits, and so does the wait err belongs to
 //     (readOfMergeCheck, readOfContent), each its own: an entry that stands keeps its start, and no other entry is
 //     touched. In the path that ends a wait (expiring) only a Paced entry is recorded;
-//   - the merge wait gets its clock (status.mergeCommitAwaitedSince) when it has none (startClock);
+//   - every entry records its end, from the request's status or the merge it is about (newWait, wholeWait), and an
+//     operation cut to the schema's bound (cutOperation), so the API server accepts it whatever branch or path it
+//     names;
 //   - condition GitReadRetry summarizes the entries (gitWaitSummary);
 //   - the retry comes after the poll interval or the delay the host asked for, whichever is longer, and never later
 //     than the end of any entry nor the time to look again; an end that passed while the reads ran leaves
@@ -259,26 +271,24 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	}
 	now := r.now()
 	op := readOp(err)
-	since := metav1.NewTime(now.Truncate(time.Second))
 	var adds []api.GitWait
 	if expiring(ctx) {
 		// The path that ends a wait: nothing it reads starts a bounded wait, and its caller's bound has passed.
-		w, _ := newWait(waitNone, op, now)
+		w, _ := newWait(rr, waitNone, op, now)
 		adds = append(adds, w)
 		bound.kind = waitNone
 	} else {
 		if e, ok := errors.AsType[*kindedReadError](err); ok {
-			w := *e.wait.DeepCopy()
-			w.Since, w.Operation = since, op
-			adds = append(adds, w)
+			if w, ok := wholeWait(rr, e.wait, op, now); ok {
+				adds = append(adds, w)
+			}
 		}
-		if w, ok := newWait(bound.kind, op, now); ok {
+		if w, ok := newWait(rr, bound.kind, op, now); ok {
 			adds = append(adds, w)
-		}
-	}
-	for _, w := range adds {
-		if werr := r.startClock(ctx, rr, kindOfEntry(w)); werr != nil {
-			return reconcile.Result{}, werr
+		} else if bound.kind != waitNone {
+			// The bound cannot be recorded (no deadline): the read is retried at the pace, never without a record.
+			w, _ := newWait(rr, waitNone, op, now)
+			adds = append(adds, w)
 		}
 	}
 	if e := r.putGitWaits(ctx, rr, adds); e != nil {
@@ -361,9 +371,9 @@ func (r *RemediationRequestReconciler) gitRetries() *gitRetryMarks {
 }
 
 // clearGitReadRetry runs after a reconcile that ended without an error and saw or recorded a Git wait. With clear
-// (the reconcile scheduled no Git read retry) it removes every wait but the content wait, which only a successful
-// read of what the merge brought removes (clearContentWait): a reconcile that did not make that read says nothing
-// about it. left is how long until the earliest end of the waits that stand, zero when none has an end: the
+// (the reconcile scheduled no Git read retry) it removes every wait but the merge waits: the content wait, which only
+// a successful read of what the merge brought removes (clearContentWait), and the merge wait, which ends at its end
+// or with the merge it waits for recorded: a reconcile that did not make those reads says nothing about them. left is how long until the earliest end of the waits that stand, zero when none has an end: the
 // reconcile is looked at again by then, whatever pace it chose, so a wait that stands always reaches its end.
 func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, key types.NamespacedName, clear bool) (
 	time.Duration, error) {
@@ -377,10 +387,15 @@ func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, ke
 		return 0, nil
 	}
 	shown := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) != nil
-	onlyContent := len(rr.Status.GitWaits) == 1 && rr.Status.GitWaits[0].Kind == api.GitWaitMergeContent
-	if clear && (len(rr.Status.GitWaits) > 0 || shown) && (!onlyContent || !shown) {
+	mergeWait := func(w api.GitWait) bool {
+		return w.Kind == api.GitWaitMergeContent || w.Kind == api.GitWaitMergeCheck
+	}
+	onlyMerge := len(rr.Status.GitWaits) > 0 && !slices.ContainsFunc(rr.Status.GitWaits, func(w api.GitWait) bool {
+		return !mergeWait(w)
+	})
+	if clear && (len(rr.Status.GitWaits) > 0 || shown) && (!onlyMerge || !shown) {
 		// A request gone from the API server (its finalizer removed after the read) has nothing left to clear.
-		err := r.dropGitWaits(ctx, rr, func(w api.GitWait) bool { return w.Kind != api.GitWaitMergeContent })
+		err := r.dropGitWaits(ctx, rr, func(w api.GitWait) bool { return !mergeWait(w) })
 		if apierrors.IsNotFound(err) {
 			return 0, nil
 		}

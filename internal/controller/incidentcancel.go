@@ -277,7 +277,8 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 		"pullRequest", rr.Status.PullRequest.Number)
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := r.closeChangeRequest(cleanCtx, rr)
-	err = boundErr(ctx, cleanCtx, "cleanup of the change request", err)
+	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead).
+	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err

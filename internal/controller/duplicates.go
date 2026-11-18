@@ -30,6 +30,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 )
 
@@ -390,7 +391,9 @@ func (r *RemediationRequestReconciler) supersedeDuplicate(ctx context.Context, r
 	rr.Status.ObservedGeneration = rr.Generation
 	// It waited in the queue and never took the lock: false keeps it out of the limits' lock list.
 	if s, ok := settleNeverHeld(rr); ok {
-		release(rr, s)
+		if err := lockverdict.Release(&rr.Status, s); err != nil {
+			return err
+		}
 	}
 	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionQueued)
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{

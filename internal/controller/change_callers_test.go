@@ -133,18 +133,19 @@ func other(git providers.GitProvider) {
 	}
 }
 
-// lockWriters are the functions that may write status.holdsTarget, and releasers those that may call release.
-// release is the one status.holdsTarget=false writer and acquire the one that takes the lock. Only settleTargetLock
+// lockWriters are the functions of this package that may write status.holdsTarget, and releasers those that may call
+// lockverdict.Release, the one status.holdsTarget=false writer (in its own package); acquire is the one that takes
+// the lock. Only settleTargetLock
 // may release a lock for Git work. Other allowed callers never acquired a lock (admission refusal and duplicates),
 // transfer it at a completed handoff, or record a lock already free before the field existed (backfill, with the
 // verdict settleReleasedBeforeField). No stopped request, including an Incident cancellation, has a separate release
 // rule.
-const releaseFunc = "release"
+const releaseFunc = "Release"
 
 var (
-	lockWriters = map[string]bool{releaseFunc: true, "acquire": true}
+	lockWriters = map[string]bool{"acquire": true}
 	releasers   = map[string]bool{
-		"settleTargetLock": true, "reconcile": true, "supersedeDuplicate": true,
+		"settleTargetLock": true, "checkHeld": true, "releaseRefused": true, "supersedeDuplicate": true,
 		"endHandoff": true, "supersedePredecessor": true, "cancelUndecided": true, "backfill": true,
 	}
 	// statusReplacers may replace a request's whole status: restoreStatus puts back the status the same caller saved
@@ -242,7 +243,7 @@ func callWrites(owner string, n *ast.CallExpr) []string {
 	if !isSel || sel.Sel.Name != "Deref" {
 		found = append(found, pointerCopies(n.Args, "passes the pointer of status.holdsTarget")...)
 	}
-	if id, ok := n.Fun.(*ast.Ident); ok && id.Name == releaseFunc && !releasers[owner] {
+	if isSel && sel.Sel.Name == releaseFunc && isPackage(sel.X, "lockverdict") && !releasers[owner] {
 		found = append(found, "releases the lock outside the lock rule")
 	}
 	if isSel && (sel.Sel.Name == "DeepCopyInto" || sel.Sel.Name == "Unmarshal") && len(n.Args) > 0 {
@@ -254,8 +255,8 @@ func callWrites(owner string, n *ast.CallExpr) []string {
 	return found
 }
 
-// TestLockClearedInOnePlace fails when any function writes status.holdsTarget other than acquire and release, a
-// function outside releasers calls release, or a status is replaced whole or patched by name outside the allowed
+// TestLockClearedInOnePlace fails when any function writes status.holdsTarget other than acquire (and
+// lockverdict.Release, in its own package), a function outside releasers calls lockverdict.Release, or a status is replaced whole or patched by name outside the allowed
 // places (#688, decision of 2026-11-17 on #771): a caller such as the deadline's cleanup, which closes only the pull
 // requests with this request's marker, never releases the lock on its own. The package-level field selector of the
 // limits (lockField, owner "") only reads it.
@@ -289,9 +290,10 @@ func replace(rr, o *R) { rr.Status = o.Status }
 func copyInto(rr, o *R) { o.Status.DeepCopyInto(&rr.Status) }
 func decode(rr *R, b []byte) { _ = json.Unmarshal(b, &rr.Status) }
 func patch(rr *R) { _ = client.RawPatch(types.MergePatchType, []byte(` + "`" + `{"status":{"holdsTarget":false}}` + "`" + `)) }
-func early(rr *R) { release(rr, s) }
-func acquire(rr *R) { rr.Status.HoldsTarget = new(true) }
+func early(rr *R) { _ = lockverdict.Release(&rr.Status, s) }
 func release(rr *R, s L) { rr.Status.HoldsTarget = new(false) }
+func acquire(rr *R) { rr.Status.HoldsTarget = new(true) }
+func releaseRefused(rr *R) { _ = lockverdict.Release(&rr.Status, s) }
 func restoreStatus(rr *R, before *S) { rr.Status = *before }
 `
 	fset := token.NewFileSet()
@@ -306,43 +308,46 @@ func restoreStatus(rr *R, before *S) { rr.Status = *before }
 		}
 	})
 	for _, owner := range []string{"star", "plain", "alias", "varAlias", "passed", "returned", "parenStar", "viaStatus",
-		"addr", "literal", "replace", "copyInto", "decode", "patch", "early"} {
+		"addr", "literal", "replace", "copyInto", "decode", "patch", "early", "release"} {
 		if !caught[owner] {
 			t.Errorf("the guard misses the write in %s", owner)
 		}
 	}
-	for _, owner := range []string{"acquire", "release", "restoreStatus", "reads"} {
+	for _, owner := range []string{"acquire", "releaseRefused", "restoreStatus", "reads"} {
 		if caught[owner] {
 			t.Errorf("the guard refuses %s", owner)
 		}
 	}
 }
 
-// settlementBuilders are the only functions that may build a lockSettlement with a proof: each is called by the read
-// or the state that proves it.
+// settlementBuilders are the only functions of this package that may call a constructor of package lockverdict:
+// each is called by the read or the state that proves its verdict.
 var settlementBuilders = map[string]bool{
 	"settleByRead": true, "settleNeverHeld": true, "settleHandedOver": true, "settleHandoffAborted": true,
-	"settleReleasedBeforeField": true,
+	"settleReleasedBeforeField": true, "settleByReceipt": true,
 }
 
-// TestLockSettlementBuiltByItsProofs fails when a function outside settlementBuilders builds a lockSettlement with
-// a field set, or sets its proof: a release of the target lock takes a verdict only the proving reads build
-// (decision of 2026-11-17 on #771).
+// isPackage reports whether e is the package name pkg.
+func isPackage(e ast.Expr, pkg string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == pkg
+}
+
+// TestLockSettlementBuiltByItsProofs fails when a function outside settlementBuilders calls a constructor of
+// package lockverdict: a release of the target lock takes a verdict only the proving reads build (decisions of
+// 2026-11-17 and 2026-11-18 on #771). The type itself is sealed in its package, so no other code can build one.
 func TestLockSettlementBuiltByItsProofs(t *testing.T) {
 	forEachSource(t, func(fset *token.FileSet, owner string, n ast.Node) {
-		switch n := n.(type) {
-		case *ast.CompositeLit:
-			if id, ok := n.Type.(*ast.Ident); ok && id.Name == "lockSettlement" && len(n.Elts) > 0 &&
-				!settlementBuilders[owner] {
-				t.Errorf("%s: %q builds a lockSettlement; only its proving reads do", fset.Position(n.Pos()), owner)
-			}
-		case *ast.AssignStmt:
-			for _, lhs := range n.Lhs {
-				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "proof" {
-					t.Errorf("%s: %q sets the proof of a lockSettlement", fset.Position(sel.Pos()), owner)
-				}
-			}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return
 		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !isPackage(sel.X, "lockverdict") || sel.Sel.Name == releaseFunc || settlementBuilders[owner] {
+			return
+		}
+		t.Errorf("%s: %q builds a lock verdict (lockverdict.%s); only its proving reads do", fset.Position(n.Pos()),
+			owner, sel.Sel.Name)
 	})
 }
 
@@ -383,7 +388,7 @@ func TestEveryRuleCoversEveryVerdict(t *testing.T) {
 	check("finalizeRule", len(finalizeRule), finalizeRule[changeUnknown] == finalizeRetry)
 	check("recoverRule", len(recoverRule), recoverRule[changeUnknown] == recoverRetry)
 	// The zero value of each outcome is the safe one, so a verdict missing from a table keeps and retries.
-	if proofNone != 0 || adoptRetry != 0 || finalizeRetry != 0 || recoverRetry != 0 {
+	if adoptRetry != 0 || finalizeRetry != 0 || recoverRetry != 0 {
 		t.Error("the zero outcome of a rule must keep and retry")
 	}
 }

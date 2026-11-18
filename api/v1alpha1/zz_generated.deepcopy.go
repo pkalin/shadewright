@@ -256,6 +256,10 @@ func (in *GitRepository) DeepCopy() *GitRepository {
 func (in *GitWait) DeepCopyInto(out *GitWait) {
 	*out = *in
 	in.Since.DeepCopyInto(&out.Since)
+	if in.Ends != nil {
+		in, out := &in.Ends, &out.Ends
+		*out = (*in).DeepCopy()
+	}
 	if in.PullRequest != nil {
 		in, out := &in.PullRequest, &out.PullRequest
 		*out = new(GitWaitPullRequest)

@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -678,7 +679,7 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 	// start of the wait checkAtMerge recorded), and the look at the recorded pull request checks the plan again
 	// before it records the merge, until the wait is over; a failed read never records the merge as fresh.
 	if cr.State == providers.ChangeRequestMerged && shaPattern.MatchString(cr.MergeCommit) {
-		err := r.checkAtMerge(ctx, rr)
+		err := r.checkAtMerge(ctx, rr, cr)
 		if err == nil {
 			recordMerge(ctx, rr, cr)
 			return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
@@ -710,7 +711,9 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 	}
 	// Without the proof (a pull request of its own recorded), the lock stays for the read that settles it (checkHeld).
 	if s, ok := settleHandoffAborted(rr); ok {
-		release(rr, s)
+		if err := lockverdict.Release(&rr.Status, s); err != nil {
+			return err
+		}
 	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, reason, message)
 }
@@ -940,7 +943,9 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 		h.State = remediationv1alpha1.HintConsumed
 	}
 	if s, ok := settleHandedOver(to, rr); ok {
-		release(pred, s)
+		if err := lockverdict.Release(&pred.Status, s); err != nil {
+			return err
+		}
 	}
 	err := r.stop(ctx, pred, remediationv1alpha1.PhaseSuperseded, remediationv1alpha1.ReasonHandedOff,
 		fmt.Sprintf("RemediationRequest %s took over the pull request and its branch with a new plan", rr.Name))

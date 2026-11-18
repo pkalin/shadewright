@@ -182,7 +182,7 @@ func (r *RemediationRequestReconciler) recordRetargetedMerge(ctx context.Context
 	}
 	if reason, cancelled := cancelledForIncident(rr); cancelled {
 		markCancelledMerge(rr, reason)
-	} else if err := r.checkAtMerge(ctx, rr); err != nil {
+	} else if err := r.checkAtMerge(ctx, rr, cr); err != nil {
 		return err
 	}
 	markStaleForBranch(rr, branch)
@@ -529,7 +529,7 @@ func (r *RemediationRequestReconciler) recordHeldMerge(ctx context.Context, rr *
 			return err
 		}
 	}
-	if err := r.checkAtMerge(ctx, rr); err != nil {
+	if err := r.checkAtMerge(ctx, rr, cr); err != nil {
 		return err
 	}
 	if !markedStale(rr) {

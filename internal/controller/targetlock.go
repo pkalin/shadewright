@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -343,93 +344,53 @@ func closedOnly(rr *remediationv1alpha1.RemediationRequest) bool {
 	return c != nil && (c.Reason == ReasonPullRequestClosed || c.Reason == ReasonChangeRequestClosed)
 }
 
-// lockSettlement is the verdict a release of the target lock takes (decision of 2026-11-17 on #771): the proof that
-// no pull request of the request can still merge into its target, or that the request never held the lock or
-// handed it over. Its field is unexported and only the constructors below build one, each from what proves it
-// (TestLockSettlementBuiltByItsProofs): a release without a verdict cannot be written.
-type lockSettlement struct {
-	proof settlementProof
-}
-
-// settlementProof is what a lockSettlement proves.
-type settlementProof int
-
-const (
-	// proofNone is the zero value: no proof, and release does nothing with it.
-	proofNone settlementProof = iota
-	// proofMergeRecorded: the read found the request's pull request merged, and the status records that merge
-	// (with its receipt, or the end that says it brought another change than the plan's, mergeRecorded).
-	proofMergeRecorded
-	// proofClosedOrGone: the read found the recorded pull request closed without a merge, or gone as #688
-	// requires (missing by its number and from the listing of its branch for confirmWait, settleGone).
-	proofClosedOrGone
-	// proofNoPullRequest: no pull request is recorded, and the search of the branch by the request's marker
-	// found none (confirmed as above).
-	proofNoPullRequest
-	// proofNeverHeld: the request never took the lock (a refusal, a cancel before the decision, a queued request).
-	proofNeverHeld
-	// proofHandedOver: the request's pull request was taken over by its replacement, which holds the lock.
-	proofHandedOver
-	// proofHandoffAborted: a replacement whose handoff did not happen, which never had a pull request of its own.
-	proofHandoffAborted
-	// proofReleasedBeforeField: a request decided before status.holdsTarget existed, whose status alone shows the
-	// lock released as the release before the field decided it (derivedHold false: not deleted with the finalizer,
-	// not moved on any more, and no recorded pull request that may be open). Its lock was already free: holdsLock
-	// reads derivedHold for it, so recording false changes no lock (backfill).
-	proofReleasedBeforeField
-)
+// The verdicts a release of the target lock takes are built in package lockverdict (sealed: only its constructors
+// build one, and Release refuses none). The functions below are the proving reads and states that call those
+// constructors, and the only ones that may (TestLockSettlementBuiltByItsProofs).
 
 // settleByRead is the verdict of the read of a stopped holder's pull requests (settleTargetLock): v what the read
 // of its branch found, holding an open pull request of the branch that may still deliver the change (nil when none
 // may). ok is false when the read proves nothing (open, unknown, another pull request open, or a merge the status
 // does not record yet: the caller records it first, settleStopException).
 func settleByRead(rr *remediationv1alpha1.RemediationRequest, v changeVerdict, holding *providers.ChangeRequest) (
-	lockSettlement, bool) {
-	if holding != nil {
-		return lockSettlement{}, false
-	}
+	*lockverdict.Verdict, bool) {
+	found := lockverdict.FoundOther
 	switch v.state {
 	case changeMerged:
-		if mergeRecorded(rr) {
-			return lockSettlement{proof: proofMergeRecorded}, true
-		}
+		found = lockverdict.FoundMerged
 	case changeClosed:
-		return lockSettlement{proof: proofClosedOrGone}, true
+		found = lockverdict.FoundClosed
 	case changeGone:
-		if rr.Status.PullRequest == nil {
-			return lockSettlement{proof: proofNoPullRequest}, true
-		}
-		return lockSettlement{proof: proofClosedOrGone}, true
+		found = lockverdict.FoundGone
 	}
-	return lockSettlement{}, false
+	return lockverdict.ByRead(found, mergeRecorded(rr), rr.Status.PullRequest != nil, holding != nil)
 }
 
 // settleNeverHeld is the verdict of a request that never took the lock: status.holdsTarget not set, or false. A
 // request that holds it gets none.
-func settleNeverHeld(rr *remediationv1alpha1.RemediationRequest) (lockSettlement, bool) {
-	if ptr.Deref(rr.Status.HoldsTarget, false) {
-		return lockSettlement{}, false
-	}
-	return lockSettlement{proof: proofNeverHeld}, true
+func settleNeverHeld(rr *remediationv1alpha1.RemediationRequest) (*lockverdict.Verdict, bool) {
+	return lockverdict.NeverHeld(&rr.Status)
 }
 
 // settleHandedOver is the verdict of pred, whose intent to hands its pull request over to by: to is Done and names
 // by, and by holds the lock, so the target stays locked through the pull request.
 func settleHandedOver(to *remediationv1alpha1.OutgoingHandoff, by *remediationv1alpha1.RemediationRequest) (
-	lockSettlement, bool) {
-	if to == nil || to.Phase != remediationv1alpha1.HandoffDone || to.UID != remediationv1alpha1.UID(by.UID) || !holdsLock(by) {
-		return lockSettlement{}, false
-	}
-	return lockSettlement{proof: proofHandedOver}, true
+	*lockverdict.Verdict, bool) {
+	return lockverdict.HandedOver(to, by.UID, holdsLock(by))
 }
 
 // settleHandoffAborted is the verdict of a replacement whose handoff did not happen: it reserved a predecessor and
 // has no pull request of its own (it only ever takes the predecessor's over).
-func settleHandoffAborted(rr *remediationv1alpha1.RemediationRequest) (lockSettlement, bool) {
-	if rr.Status.Handoff == nil || rr.Status.Handoff.From == nil || rr.Status.PullRequest != nil {
-		return lockSettlement{}, false
-	}
-	return lockSettlement{proof: proofHandoffAborted}, true
+func settleHandoffAborted(rr *remediationv1alpha1.RemediationRequest) (*lockverdict.Verdict, bool) {
+	return lockverdict.HandoffAborted(&rr.Status)
+}
+
+// settleByReceipt is the verdict of a stopped holder whose merge is recorded with its receipt, Merged or
+// Inconclusive, and that no verification holds (decision of 2026-11-18 on #771): the recorded merge settles the lock
+// by itself, without a read of the branch, so a repository removed from the settings does not keep it.
+func (r *RemediationRequestReconciler) settleByReceipt(rr *remediationv1alpha1.RemediationRequest) (
+	*lockverdict.Verdict, bool) {
+	return lockverdict.MergeReceipt(&rr.Status, heldForVerification(rr, r.VerifyOutcomes))
 }
 
 // mergeRecorded reports whether the status records the merge of the request's pull request: a merge receipt, a
@@ -450,29 +411,15 @@ func mergeRecorded(rr *remediationv1alpha1.RemediationRequest) bool {
 // settleReleasedBeforeField is the verdict of a request decided before status.holdsTarget existed whose status
 // shows the lock free (derivedHold false). A request with the field set, or one derivedHold holds, gets none, so it
 // can never clear a held lock.
-func settleReleasedBeforeField(rr *remediationv1alpha1.RemediationRequest) (lockSettlement, bool) {
-	if rr.Status.HoldsTarget != nil || derivedHold(rr) {
-		return lockSettlement{}, false
-	}
-	return lockSettlement{proof: proofReleasedBeforeField}, true
+func settleReleasedBeforeField(rr *remediationv1alpha1.RemediationRequest) (*lockverdict.Verdict, bool) {
+	return lockverdict.ReleasedBeforeField(&rr.Status, derivedHold(rr))
 }
 
 // acquire takes the lock on the request's target in the status about to be written: the policy decision that
 // admits it (reconcile), or the backfill of a request decided before status.holdsTarget existed that derivedHold
-// holds. With release it is the only writer of status.holdsTarget (TestLockClearedInOnePlace).
+// holds. With lockverdict.Release it is the only writer of status.holdsTarget (TestLockClearedInOnePlace).
 func acquire(rr *remediationv1alpha1.RemediationRequest) {
 	rr.Status.HoldsTarget = new(true)
-}
-
-// release clears the lock in the status about to be written, with the condition that said why it was kept, for the
-// verdict s. It is the one place that writes status.holdsTarget false (TestLockClearedInOnePlace), and it releases
-// nothing without a verdict (a zero lockSettlement).
-func release(rr *remediationv1alpha1.RemediationRequest, s lockSettlement) {
-	if s.proof == proofNone {
-		return
-	}
-	rr.Status.HoldsTarget = new(false)
-	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
 }
 
 // checkHeld persists the common target-lock decision for a stopped holder. Branch-change and Incident-cancel
@@ -485,6 +432,18 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, nil
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
+	if s, ok := r.settleByReceipt(rr); ok {
+		// The recorded merge with its receipt settles the lock: no read of the branch, so neither a repository that
+		// cannot be opened nor a failing Git host keeps it.
+		if err := lockverdict.Release(&rr.Status, s); err != nil {
+			return reconcile.Result{}, err
+		}
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		}
+		log.Info("Released the target lock of RemediationRequest: its merge is recorded with its receipt")
+		return reconcile.Result{}, nil
+	}
 	before := rr.Status.DeepCopy()
 	lookCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	v, holding, err := r.settleTargetLock(lookCtx, rr)
@@ -499,10 +458,12 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if ctx.Err() != nil {
 		return reconcile.Result{}, err
 	}
-	if _, ok := cancelledForIncident(rr); ok && errors.Is(err, freshness.ErrPaused) {
-		// Writes are paused before the read: a close of its own may be left to make, and the kill switch holds it.
-		// WritesPaused says so, as when the pause comes between the read and the close (closeCancelled); the read
-		// after the pause removes it (settleCancelled, or the release below).
+	if errors.Is(err, freshness.ErrPaused) {
+		// The kill switch holds the look (the settings are read paused before any read of the Git host): the lock
+		// is kept, WritesPaused says why, and the look runs again after freshRecheckDelay, never as an error for the
+		// rate limiter. For a request cancelled for its Incident a close of its own may be left to make, as when the
+		// pause comes between the read and the close (closeCancelled). The read after the pause removes the
+		// condition (settleCancelled, or resume below).
 		return r.waitWhilePaused(ctx, rr)
 	}
 	c := repositoryRead(rr, err)
@@ -530,10 +491,11 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	reason, cancelled := cancelledForIncident(rr)
 	if cancelled {
 		// Closed (by Shadewright, its answer lost, or by a person) or not this request's: no close is left to make,
-		// so neither a failed close nor a pause that held it is left to say.
+		// so a failed close is not left to say.
 		clearNotClosed(rr)
-		resume(rr)
 	}
+	// The read ran through settings that are not paused: a pause that held an earlier look is over.
+	resume(rr)
 	if v.state != changeGone {
 		recordFound(rr, v.pr)
 		if cancelled {
@@ -599,7 +561,9 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 		return v, holding, err
 	}
 	if s, ok := settleByRead(rr, v, holding); ok && !heldForVerification(rr, r.VerifyOutcomes) {
-		release(rr, s)
+		if err := lockverdict.Release(&rr.Status, s); err != nil {
+			return v, holding, err
+		}
 	} else if holding != nil {
 		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 			Type: remediationv1alpha1.ConditionTargetHeld, Status: metav1.ConditionTrue, Reason: ReasonOpenOnBranch,

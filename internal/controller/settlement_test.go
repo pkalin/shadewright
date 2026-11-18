@@ -348,6 +348,14 @@ func TestSettlementGitReadFailures(t *testing.T) {
 					if getErr := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); getErr != nil {
 						t.Fatal(getErr)
 					}
+					if path == pathExpiry && err == nil && rr.Status.Phase == api.PhaseExpired {
+						// Past the deadline the cleanup's failed read ends the request Expired, never a retry of the
+						// expiry (fourth decision of 2026-11-18 on #771); the lock stays for checkHeld.
+						if !holdsLock(rr) {
+							t.Fatal("an expiry whose cleanup could not read the Git host released the target lock")
+						}
+						return
+					}
 					c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry)
 					// The condition names the read: by its method, or by the fixed text of the step that made it (a
 					// provider error keeps no chain), never the catch-all.
@@ -370,7 +378,11 @@ func TestSettlementRetryMarksDoNotWakeTheWatch(t *testing.T) {
 			return err
 		},
 		func() error { return startContentWait(ctx, r, rr) },
-		func() error { return r.startMergeWait(ctx, rr) },
+		func() error {
+			return r.startMergeWait(ctx, rr, providers.ChangeRequest{Number: rr.Status.PullRequest.Number,
+				URL: rr.Status.PullRequest.URL, HeadSHA: rr.Status.PullRequest.HeadSHA,
+				State: providers.ChangeRequestMerged}, "wait for the merge commit")
+		},
 		func() error { return r.clearContentWait(ctx, rr) },
 		func() error { return r.dropGitWaits(ctx, rr, func(api.GitWait) bool { return true }) },
 	} {

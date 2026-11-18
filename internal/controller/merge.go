@@ -119,7 +119,8 @@ var errMergeCheck = errors.New("the pull request was merged, and its merge is no
 // It is never taken as fresh. The decision reads only the recorded start and the executor's own clock. The reads
 // run within half of what is left of ctx (mergeCheckContext), so a check that runs out of time still records
 // the start and lets the caller write, in every path.
-func (r *RemediationRequestReconciler) checkAtMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+func (r *RemediationRequestReconciler) checkAtMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cr providers.ChangeRequest) error {
 	if staleMark(rr) != nil || markedStale(rr) {
 		// Marked already (a stale plan, or not shown fresh after the wait for the merge): nothing to check.
 		return nil
@@ -132,7 +133,7 @@ func (r *RemediationRequestReconciler) checkAtMerge(ctx context.Context, rr *rem
 	}
 	staleErr, ok := errors.AsType[*freshness.StaleError](err)
 	if !ok {
-		return r.mergeCheckFailed(ctx, rr, err)
+		return r.mergeCheckFailed(ctx, rr, cr, err)
 	}
 	markStaleAtMerge(rr, staleErr.Reason, "The plan was stale when the merge was seen: "+staleErr.Message)
 	logf.FromContext(ctx).Info("Found the plan of RemediationRequest stale at the merge",
@@ -153,28 +154,26 @@ func (r *RemediationRequestReconciler) mergeCheckContext(ctx context.Context) (c
 	return context.WithTimeout(ctx, time.Until(deadline)/2)
 }
 
-// mergeCheckFailed handles a check at the merge that did not answer (checkAtMerge). It records the start of the wait
-// for the merge (status.mergeCommitAwaitedSince) when there is none and the context still allows a write, as the
-// check of any kind of failure is bounded by that wait:
-//   - a failed Git read is one of the wait (readOfMergeCheck), returned wrapped in errMergeCheck for a
-//     retry: retryGitRead starts the clock too when it could not be started here, and the check at the start of a
-//     reconcile past its end marks the plan not shown fresh (endPassedWait), after which the merge is recorded with
-//     that mark. Nothing here looks at the end of that wait;
+// mergeCheckFailed handles a check at the merge of cr that did not answer (checkAtMerge). It records the wait for
+// the merge (its entry in status.gitWaits, startMergeWait) when there is none and the context still allows a
+// write, as the check of any kind of failure is bounded by that wait:
+//   - a failed Git read is one of the wait (readOfMergeCheck), returned wrapped in errMergeCheck for a retry: the
+//     check at the start of a reconcile past its end records the merge with the plan not shown fresh, from the
+//     entry alone (endPassedWait, endMergeWait). Nothing here looks at the end of that wait;
 //   - any other failure (a Kubernetes read, a timeout of one) is no Git wait and goes to the error backoff: it is
 //     returned wrapped in errMergeCheck while the wait lasts, and once it is over the plan is marked not shown fresh
 //     here (markNotShownFresh) and nil is returned, so the merge is recorded.
 func (r *RemediationRequestReconciler) mergeCheckFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	checkErr error) error {
-	if rr.Status.MergeCommitAwaitedSince == nil && ctx.Err() == nil {
-		if err := r.startMergeWait(ctx, rr); err != nil {
+	cr providers.ChangeRequest, checkErr error) error {
+	if gitWait(rr, waitMergeCheck) == nil && ctx.Err() == nil {
+		if err := r.startMergeWait(ctx, rr, cr, "check the plan at the merge"); err != nil {
 			return fmt.Errorf("%w: %w (%w)", errMergeCheck, checkErr, err)
 		}
 	}
 	if gitReadFailure(checkErr) {
-		return fmt.Errorf("%w: %w", errMergeCheck, readOfMergeCheck(checkErr))
+		return fmt.Errorf("%w: %w", errMergeCheck, readOfMergeCheck(cr, checkErr))
 	}
-	since := rr.Status.MergeCommitAwaitedSince
-	if since == nil || mergeCommitWaitRemaining(since.Time, r.now()) > 0 {
+	if gitWait(rr, waitMergeCheck) == nil || mergeWaitRemaining(rr, r.now()) > 0 {
 		return fmt.Errorf("%w: %w", errMergeCheck, checkErr)
 	}
 	markNotShownFresh(rr, checkErr.Error())
@@ -263,40 +262,58 @@ var errMergeCommitPending = errors.New("waiting for the Git host to report the m
 
 // awaitMergeCommit returns how much longer to wait for the merge commit of cr, merged without a full merge
 // commit ID, before its merge is recorded anyway; zero when cr is not merged, has one, or the wait is over.
-// The wait starts when the executor first sees that state: it records the time, on its own clock, in
-// status.mergeCommitAwaitedSince, alone in a patch with the resourceVersion read, so the start is kept over a
-// restart and never moved (a validation rule). It never reads a time of the Git host. A failed write is
-// returned for a retry and decides nothing. A clock that went back never makes the whole wait longer
-// than mergeCommitWait plus mergeCommitClockSlack (mergeCommitWaitRemaining).
+// The wait starts when the executor first sees that state: it records the wait as an entry of status.gitWaits
+// (startMergeWait), with its start on its own clock and its end, so the start is kept over a restart and never
+// moved (a validation rule), and the check at the start of a reconcile past its end records the merge without a
+// receipt from the entry alone, also while the reads fail (endMergeWait). It never reads a time of the Git host. A
+// failed write is returned for a retry and decides nothing. A clock that went back never makes the whole wait
+// longer than mergeCommitWait plus mergeCommitClockSlack (mergeWaitRemaining).
 func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) (time.Duration, error) {
 	if cr.State != providers.ChangeRequestMerged || shaPattern.MatchString(cr.MergeCommit) {
 		return 0, nil
 	}
-	if since := rr.Status.MergeCommitAwaitedSince; since != nil {
-		return mergeCommitWaitRemaining(since.Time, r.now()), nil
+	if gitWait(rr, waitMergeCheck) != nil {
+		return mergeWaitRemaining(rr, r.now()), nil
 	}
-	if err := r.startMergeWait(ctx, rr); err != nil {
+	if err := r.startMergeWait(ctx, rr, cr, "wait for the merge commit"); err != nil {
 		return 0, err
 	}
 	logf.FromContext(ctx).Info("Waiting for the merge commit of RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "wait", mergeCommitWait)
-	return mergeCommitWait, nil
+	return mergeWaitRemaining(rr, r.now()), nil
 }
 
-// startMergeWait records status.mergeCommitAwaitedSince, the start of the wait for a merge seen but not recorded
-// (the merge commit, or the check of the plan at the merge), on the executor's own clock, alone in a patch with
-// the resourceVersion read. Only the field and the resourceVersion of rr change, so a caller's unwritten changes
-// to rr stay for its own write. A failed write leaves rr as it was and is returned for a retry.
-func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+// startMergeWait records the wait for a merge of cr seen but not recorded (the merge commit, or the check of the plan
+// at the merge, op naming which), on the executor's own clock: its entry in status.gitWaits (wholeWait), with the
+// pull request and its end, and status.mergeCommitAwaitedSince when unset (kept as before the entry existed; the
+// entry's end counts from it when it records an earlier start). Both go in one patch with the resourceVersion of rr,
+// so a copy read earlier than the server's is refused as a conflict, and rr takes only these fields and the new
+// resourceVersion: a caller's unwritten changes to rr stay for its own write. A failed write leaves rr as it was
+// and is returned for a retry.
+func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cr providers.ChangeRequest, op string) error {
+	now := r.now()
 	base := rr.DeepCopy()
 	upd := rr.DeepCopy()
-	t := metav1.NewTime(r.now().Truncate(time.Second))
-	upd.Status.MergeCommitAwaitedSince = &t
+	if upd.Status.MergeCommitAwaitedSince == nil {
+		upd.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Truncate(time.Second)}
+	}
+	w, ok := wholeWait(upd, remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
+		PullRequest: waitPullRequest(cr)}, op, now)
+	if ok && gitWait(upd, waitMergeCheck) == nil {
+		upd.Status.GitWaits = append(upd.Status.GitWaits, w)
+		gitWaitSummary(upd, now)
+	}
 	if err := r.Status().Patch(ctx, upd, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	rr.Status.MergeCommitAwaitedSince = upd.Status.MergeCommitAwaitedSince
+	rr.Status.GitWaits = upd.Status.GitWaits
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
+	if c := meta.FindStatusCondition(upd.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry); c != nil {
+		meta.SetStatusCondition(&rr.Status.Conditions, *c)
+	}
 	rr.ResourceVersion = upd.ResourceVersion
 	return nil
 }
@@ -306,26 +323,26 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 // after now only when the clock was set back.
 const mergeCommitClockSlack = time.Minute
 
-// mergeCommitWaitRemaining is what is left of mergeCommitWait since the recorded start, never negative. When the
-// start lies more than mergeCommitClockSlack after now, the clock went back and the wait can no longer be
-// measured: it is over, so the whole wait is bounded by mergeCommitWait plus the slack and never holds the target
-// lock for as long as the clock was set back. Ending it early records the merge without a receipt, which is the
-// inconclusive end and never a success.
-func mergeCommitWaitRemaining(since, now time.Time) time.Duration {
-	if since.After(now.Add(mergeCommitClockSlack)) {
+// mergeWaitRemaining is what is left of rr's merge wait (its entry of status.gitWaits) at now, never negative;
+// mergeCommitWait when none is recorded. When the entry's start lies more than mergeCommitClockSlack after now, the
+// clock went back and the wait can no longer be measured: it is over (waitKind.end), so the whole wait is bounded
+// by mergeCommitWait plus the slack and never holds the target lock for as long as the clock was set back. Ending
+// it early records the merge without a receipt, which is the inconclusive end and never a success.
+func mergeWaitRemaining(rr *remediationv1alpha1.RemediationRequest, now time.Time) time.Duration {
+	if gitWait(rr, waitMergeCheck) == nil {
+		return mergeCommitWait
+	}
+	end, ok := waitMergeCheck.end(rr, now)
+	if !ok {
 		return 0
 	}
-	return max(since.Add(mergeCommitWait).Sub(now), 0)
+	return max(end.Sub(now), 0)
 }
 
 // mergeCommitWaitLeft is what is left of the wait awaitMergeCommit recorded, at least stepDelay so a request
 // whose wait just ended is looked at again soon.
 func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alpha1.RemediationRequest) time.Duration {
-	left := mergeCommitWait
-	if since := rr.Status.MergeCommitAwaitedSince; since != nil {
-		left = mergeCommitWaitRemaining(since.Time, r.now())
-	}
-	return max(left, stepDelay)
+	return max(mergeWaitRemaining(rr, r.now()), stepDelay)
 }
 
 // mergeNotRecorded is recheck's answer to a look that found the pull request merged without recording the merge:

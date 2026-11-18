@@ -255,7 +255,8 @@ var _ = Describe("RemediationRequest", func() {
 		since := metav1.NewTime(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 		pr := &v1alpha1.GitWaitPullRequest{Number: 7, URL: "https://github.com/example/fleet/pull/7",
 			HeadSHA: "0123456789abcdef0123456789abcdef01234567"}
-		content := v1alpha1.GitWait{Kind: v1alpha1.GitWaitMergeContent, Since: since,
+		ends := metav1.NewTime(since.Add(5 * time.Minute))
+		content := v1alpha1.GitWait{Kind: v1alpha1.GitWaitMergeContent, Since: since, Ends: &ends,
 			Operation: "read the parents of the merge commit", PullRequest: pr}
 		paced := v1alpha1.GitWait{Kind: v1alpha1.GitWaitPaced, Since: since, Operation: "read the pull request"}
 		rr.Status.GitWaits = []v1alpha1.GitWait{content, paced}
@@ -273,21 +274,42 @@ var _ = Describe("RemediationRequest", func() {
 			}
 		}
 		later := metav1.NewTime(since.Add(time.Minute))
+		const op = "read the parents"
 		refused("a moved start", "a Git wait keeps its start", func(got *v1alpha1.RemediationRequest) {
 			got.Status.GitWaits[0].Since = later
 		})
 		refused("another pull request", "a Git wait keeps its start", func(got *v1alpha1.RemediationRequest) {
 			got.Status.GitWaits[0].PullRequest.Number = 8
 		})
-		refused("a content wait without its pull request", "a MergeContent wait names its pull request",
+		refused("a moved end", "a Git wait keeps its start, its end", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[0].Ends = &later
+		})
+		refused("a content wait without its pull request", "a MergeContent or MergeCheck wait names its pull request",
 			func(got *v1alpha1.RemediationRequest) {
 				got.Status.GitWaits = []v1alpha1.GitWait{{Kind: v1alpha1.GitWaitMergeContent, Since: since,
-					Operation: "read"}}
+					Ends: &ends, Operation: op}}
 			})
-		refused("a paced wait with a pull request", "a MergeContent wait names its pull request",
+		refused("a merge wait without its pull request", "a MergeContent or MergeCheck wait names its pull request",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits = []v1alpha1.GitWait{{Kind: v1alpha1.GitWaitMergeCheck, Since: since,
+					Ends: &ends, Operation: op}}
+			})
+		refused("a paced wait with a pull request", "a MergeContent or MergeCheck wait names its pull request",
 			func(got *v1alpha1.RemediationRequest) {
 				got.Status.GitWaits[1].PullRequest = pr
 			})
+		refused("a bounded wait without its end", "a wait of a bounded kind records its end",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits = []v1alpha1.GitWait{{Kind: v1alpha1.GitWaitRequestDeadline, Since: since,
+					Operation: op}}
+			})
+		refused("a paced wait with an end", "a wait of a bounded kind records its end",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits[1].Ends = &ends
+			})
+		refused("an operation past its bound", "", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[1].Operation = strings.Repeat("o", 257)
+		})
 		refused("two entries of one kind", "", func(got *v1alpha1.RemediationRequest) {
 			got.Status.GitWaits = append(got.Status.GitWaits, paced)
 		})

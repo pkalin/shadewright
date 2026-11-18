@@ -41,8 +41,10 @@ import (
 // A Git wait is recorded state (decisions of 2026-11-17 on #771): an entry of status.gitWaits per kind of bound
 // (waitKind), with its start on the executor's clock, the read that failed, and, for the content wait, the pull
 // request it is about. Starting or ending one kind never touches another (putGitWaits, dropGitWaits), and an entry
-// is built whole (newWait, readOfContent): the content wait cannot be recorded without its pull request. The end
-// of a kind is computed from recorded state alone (waitKind.end), and the check at the start of every reconcile
+// is built whole (newWait, wholeWait): it records its end (status.gitWaits[].ends) for every kind but Paced, and the
+// merge waits record the pull request they are about. The end of an entry is read from the entry alone
+// (waitKind.end), its operation is cut to the schema's bound where it is built (cutOperation), and ending it reads
+// nothing from the Git host (endWait). The check at the start of every reconcile
 // (endPassedWait) ends each entry past its end before any read or step runs. A call site only starts or continues
 // a wait (retryGitRead); it never looks at whether the end has passed, so an error, a timeout or an early return in
 // a step cannot skip the end. An entry past its end always ends: by its kind's end, or, when the kind no longer
@@ -56,14 +58,14 @@ const (
 	// waitNone has no end: the retry is paced, nothing ends it (entry kind Paced, condition reason GitReadFailed).
 	waitNone waitKind = iota
 	// waitRequestDeadline ends at status.deadline of a request in PolicyChecked whose stale plan's cleanup has not
-	// started: the request expires (expire).
+	// started: the request expires (expireEnded).
 	waitRequestDeadline
 	// waitHandoffGrace ends handoffRecoveryGrace after status.deadline of a request recovering a handoff: it ends
 	// NeedsIntervention with HandoffRecoveryFailed.
 	waitHandoffGrace
-	// waitMergeCheck ends mergeCommitWait after status.mergeCommitAwaitedSince (the entry's start when that is
-	// unset), the wait for the check at the merge: the plan is marked not shown fresh, and the merge is recorded
-	// with that mark.
+	// waitMergeCheck ends mergeCommitWait after the executor first saw the pull request merged without the merge
+	// commit or an answer of the check at the merge (status.mergeCommitAwaitedSince when set before, the entry's
+	// start otherwise): the merge the entry names is recorded with the plan not shown fresh (endMergeWait).
 	waitMergeCheck
 	// waitMergeContent ends mergeContentWait after the entry's start, the reads of what a merge into the target
 	// branch the settings name now brought (#771): the request ends NeedsIntervention with MergeContentUnreadable,
@@ -98,17 +100,6 @@ var gitWaitKinds = map[waitKind]api.GitWaitKind{
 // reason is the reason of condition GitReadRetry for a wait of kind k.
 func (k waitKind) reason() string { return gitWaitReasons[k] }
 
-// waitKindOf is the kind a GitReadRetry reason records; any other reason (one written by hand) is waitNone, which
-// ends nothing.
-func waitKindOf(reason string) waitKind {
-	for k, r := range gitWaitReasons {
-		if r == reason {
-			return k
-		}
-	}
-	return waitNone
-}
-
 // kindOfEntry is the kind of an entry of status.gitWaits.
 func kindOfEntry(w api.GitWait) waitKind {
 	for k, a := range gitWaitKinds {
@@ -129,71 +120,116 @@ func gitWait(rr *api.RemediationRequest, k waitKind) *api.GitWait {
 	return nil
 }
 
-// newWait is a whole entry of kind k for a read op that failed at now. The content wait is not built here: it needs
-// its pull request (readOfContent), so ok is false for it.
-func newWait(k waitKind, op string, now time.Time) (api.GitWait, bool) {
-	if k == waitMergeContent {
-		return api.GitWait{}, false
+// maxOperation is the schema's bound of status.gitWaits[].operation (MaxLength, characters).
+const maxOperation = 256
+
+// cutOperation bounds op, the fixed name of a read, to maxOperation characters: a name that carries a branch or a
+// path may be longer, and an entry the API server refuses could never be recorded. A cut name ends in "...".
+func cutOperation(op string) string {
+	runes := []rune(op)
+	if len(runes) <= maxOperation {
+		return op
 	}
-	return api.GitWait{Kind: gitWaitKinds[k], Since: metav1.NewTime(now.Truncate(time.Second)), Operation: op}, true
+	return string(runes[:maxOperation-3]) + "..."
 }
 
-// end is when a wait of kind k ends, from the recorded state of rr alone; ok is false when nothing recorded bounds
-// it (the kind does not apply to rr any more, or it has no entry and no clock). A clock that lies more than
-// mergeCommitClockSlack after now (the clock went back) ends at now, as mergeCommitWaitRemaining does.
-func (k waitKind) end(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
-	clocked := func(since *metav1.Time, wait time.Duration) (time.Time, bool) {
-		switch {
-		case since == nil:
-			return time.Time{}, false
-		case since.After(now.Add(mergeCommitClockSlack)):
-			return now, true
+// newWait is a whole entry of kind k for a read op that failed at now, with its end from the recorded state of rr:
+// the deadline (waitRequestDeadline), the deadline and the grace (waitHandoffGrace), none (waitNone). The merge waits
+// are not built here: they need their pull request (wholeWait), so ok is false for them, and for a deadline that rr
+// does not record.
+func newWait(rr *api.RemediationRequest, k waitKind, op string, now time.Time) (api.GitWait, bool) {
+	w := api.GitWait{Kind: gitWaitKinds[k], Since: metav1.NewTime(now.Truncate(time.Second)), Operation: cutOperation(op)}
+	switch k {
+	case waitNone:
+		return w, true
+	case waitRequestDeadline, waitHandoffGrace:
+		if rr.Status.Deadline == nil {
+			return api.GitWait{}, false
 		}
-		return since.Add(wait), true
-	}
-	entrySince := func() *metav1.Time {
-		if w := gitWait(rr, k); w != nil {
-			return &w.Since
+		ends := rr.Status.Deadline.Time
+		if k == waitHandoffGrace {
+			ends = ends.Add(handoffRecoveryGrace)
 		}
-		return nil
+		w.Ends = &metav1.Time{Time: ends}
+		return w, true
 	}
+	return api.GitWait{}, false
+}
+
+// wholeWait completes tmpl, an entry of a merge wait with its pull request (readOfMergeCheck, readOfContent,
+// mergeWaitEntry), for a read op that failed at now: its start, the operation, and its end, mergeContentWait after
+// the start for the content wait, mergeCommitWait after the merge was first seen for the merge wait
+// (status.mergeCommitAwaitedSince when it records an earlier start, the entry's start otherwise). ok is false for an
+// entry without its pull request.
+func wholeWait(rr *api.RemediationRequest, tmpl api.GitWait, op string, now time.Time) (api.GitWait, bool) {
+	k := kindOfEntry(tmpl)
+	if tmpl.PullRequest == nil || (k != waitMergeCheck && k != waitMergeContent) {
+		return api.GitWait{}, false
+	}
+	w := *tmpl.DeepCopy()
+	w.Since, w.Operation = metav1.NewTime(now.Truncate(time.Second)), cutOperation(op)
+	from, wait := w.Since.Time, mergeContentWait
+	if k == waitMergeCheck {
+		wait = mergeCommitWait
+		if s := rr.Status.MergeCommitAwaitedSince; s != nil && s.Before(&w.Since) {
+			from = s.Time
+		}
+	}
+	w.Ends = &metav1.Time{Time: from.Add(wait)}
+	return w, true
+}
+
+// applies reports whether an entry of kind k still has something to end on rr: the request deadline only in
+// PolicyChecked before a stale plan's cleanup or a handoff, the handoff grace only while the handoff is recovered,
+// the merge waits only while the merge is not recorded.
+func (k waitKind) applies(rr *api.RemediationRequest) bool {
 	switch k {
 	case waitRequestDeadline:
-		if rr.Status.Phase == api.PhasePolicyChecked && rr.Status.Deadline != nil && staleMark(rr) == nil &&
-			intent(rr) == nil && !recoveringHandoff(rr) {
-			return rr.Status.Deadline.Time, true
-		}
+		return rr.Status.Phase == api.PhasePolicyChecked && staleMark(rr) == nil && intent(rr) == nil &&
+			!recoveringHandoff(rr)
 	case waitHandoffGrace:
-		if recoveringHandoff(rr) && rr.Status.Deadline != nil {
-			return rr.Status.Deadline.Add(handoffRecoveryGrace), true
+		return recoveringHandoff(rr)
+	case waitMergeCheck, waitMergeContent:
+		return !mergeRecorded(rr)
+	}
+	return false
+}
+
+// boundEnd is when a wait of kind k bounds rr: its entry's end (end), or, before an entry is recorded, the end the
+// entry would record from rr's status (newWait for the deadline kinds, mergeCommitWait after
+// status.mergeCommitAwaitedSince for the merge wait). ok is false when nothing bounds it.
+func (k waitKind) boundEnd(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
+	if gitWait(rr, k) != nil || !k.applies(rr) {
+		return k.end(rr, now)
+	}
+	switch k {
+	case waitRequestDeadline, waitHandoffGrace:
+		if w, ok := newWait(rr, k, "bound", now); ok {
+			return w.Ends.Time, true
 		}
 	case waitMergeCheck:
-		if mergeRecorded(rr) {
-			return time.Time{}, false
+		if s := rr.Status.MergeCommitAwaitedSince; s != nil {
+			if s.After(now.Add(mergeCommitClockSlack)) {
+				return now, true
+			}
+			return s.Add(mergeCommitWait), true
 		}
-		if rr.Status.MergeCommitAwaitedSince != nil {
-			return clocked(rr.Status.MergeCommitAwaitedSince, mergeCommitWait)
-		}
-		return clocked(entrySince(), mergeCommitWait)
-	case waitMergeContent:
-		if mergeRecorded(rr) {
-			return time.Time{}, false
-		}
-		return clocked(entrySince(), mergeContentWait)
 	}
 	return time.Time{}, false
 }
 
-// startClock records the start of the merge wait (status.mergeCommitAwaitedSince) for a wait of kind waitMergeCheck
-// when it is not started, as the check at the merge does. A failed write is returned: the wait is not started, and
-// the read is retried with the error backoff.
-func (r *RemediationRequestReconciler) startClock(ctx context.Context, rr *api.RemediationRequest, k waitKind) error {
-	if k == waitMergeCheck && rr.Status.MergeCommitAwaitedSince == nil {
-		if err := r.startMergeWait(ctx, rr); err != nil {
-			return &clusterError{err: err}
-		}
+// end is when rr's entry of kind k ends, read from the entry alone (status.gitWaits[].ends); ok is false when nothing
+// bounds it (no entry, a Paced one, or a kind that no longer applies to rr). An entry whose start lies more than
+// mergeCommitClockSlack after now (the clock went back) ends at now.
+func (k waitKind) end(rr *api.RemediationRequest, now time.Time) (time.Time, bool) {
+	w := gitWait(rr, k)
+	if w == nil || w.Ends == nil || !k.applies(rr) {
+		return time.Time{}, false
 	}
-	return nil
+	if w.Since.After(now.Add(mergeCommitClockSlack)) {
+		return now, true
+	}
+	return w.Ends.Time, true
 }
 
 // withinWaits caps d, a wait a path chose after retryGitRead (a slower pace of its own), at the earliest end of
@@ -293,7 +329,10 @@ func (r *RemediationRequestReconciler) dropGitWaits(ctx context.Context, rr *api
 }
 
 // patchGitWaits applies change to the entries of a fresh read of rr, sets the summary, and writes both alone; rr
-// takes the result. A request replaced under the same name is a cluster error.
+// takes the entries and the summary. rr takes the new resourceVersion only when it was the object the server held
+// (the same resourceVersion as the fresh read): a copy read earlier (the cache served an older one) keeps its
+// own, so a later status write of it is refused as a conflict instead of putting back what the older read held (a
+// released holdsTarget, an earlier phase). A request replaced under the same name is a cluster error.
 func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *api.RemediationRequest,
 	change func(live *api.RemediationRequest)) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -304,6 +343,7 @@ func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *ap
 		if live.UID != rr.UID {
 			return &clusterError{err: errors.New("RemediationRequest was replaced")}
 		}
+		current := live.ResourceVersion == rr.ResourceVersion
 		base := live.DeepCopy()
 		change(live)
 		gitWaitSummary(live, r.now())
@@ -312,7 +352,9 @@ func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *ap
 				return fmt.Errorf("record the Git waits: %w", err)
 			}
 		}
-		rr.ResourceVersion = live.ResourceVersion
+		if current {
+			rr.ResourceVersion = live.ResourceVersion
+		}
 		rr.Status.GitWaits = live.Status.GitWaits
 		if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); c != nil {
 			meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionGitReadRetry)
@@ -382,6 +424,8 @@ func (r *RemediationRequestReconciler) endWait(ctx context.Context, rr *api.Reme
 	ctx = expiringCtx(ctx)
 	// The wait ends in the write of its end below; it is not left to end again.
 	dropWait(rr, kind, now)
+	// Each end reads nothing from the Git host and returns no retry of one: only a failed write or read of the
+	// Kubernetes API is returned, for the error backoff.
 	switch kind {
 	case waitRequestDeadline:
 		res, err := r.expire(ctx, rr)
@@ -389,19 +433,82 @@ func (r *RemediationRequestReconciler) endWait(ctx context.Context, rr *api.Reme
 	case waitHandoffGrace:
 		return ctrl.Result{}, true, r.endRecoveryFailed(ctx, rr)
 	case waitMergeCheck:
-		markNotShownFresh(rr, "it did not answer")
-		if r.Recorder != nil {
-			r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonStalePlanMerged, notShownFreshMessage("it did not answer"))
-		}
-		if err := r.Status().Update(ctx, rr); err != nil {
-			return ctrl.Result{}, true, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
-				rr.Name, err)
-		}
-		return ctrl.Result{}, false, nil
+		return ctrl.Result{}, true, r.ignoreStopped(r.endMergeWait(ctx, rr, entry))
 	case waitMergeContent:
 		return ctrl.Result{}, true, r.ignoreStopped(r.endContentUnreadable(ctx, rr, entry))
 	}
 	return ctrl.Result{}, false, nil
+}
+
+// endMergeWait ends a request whose merge wait passed (waitMergeCheck, entry w): the host did not report the merge
+// commit, or the check at the merge did not answer, within mergeCommitWait. It decides from the entry and the
+// recorded status alone, with no read of the Git host:
+//   - the pull request w names is the recorded one (number and head): its merge is recorded, the plan marked not
+//     shown fresh (PlanChanged) unless it carries a stale mark (or the mark of a cancel for its Incident), and the
+//     merge gets its receipt only when w records a merge commit (a wait for the check at the merge, which runs only
+//     after what the merge brought was checked), else the NoMergeReceipt mark, which ends it Inconclusive. A merge
+//     into the branch the settings name now (w's base branch, a retargeted merge) is recorded into that branch with
+//     the stale mark SettingsChanged when w records its merge commit, and ends NeedsIntervention with
+//     MergeContentUnreadable without one (what it brought was never read);
+//   - any other pull request (none recorded, another number or head, found on the adopt path): nothing proves what
+//     the merge brought, so it ends NeedsIntervention without a receipt, MergedWithForeignChange (BranchDiverged when
+//     no merge commit was reported, as checkMerged answers) or MergeContentUnreadable into another branch.
+func (r *RemediationRequestReconciler) endMergeWait(ctx context.Context, rr *api.RemediationRequest,
+	w api.GitWait) error {
+	pr := w.PullRequest
+	cr := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA, BaseBranch: string(pr.BaseBranch),
+		MergeCommit: pr.MergeCommitSHA, State: providers.ChangeRequestMerged}
+	reason, cancelled := cancelledForIncident(rr)
+	why := "it did not answer within the wait for the merge"
+	if pr.MergeCommitSHA == "" {
+		why = "the Git host reported no merge commit within the wait for the merge"
+	}
+	recorded, source := rr.Status.PullRequest, rr.Status.Source
+	ours := recorded != nil && recorded.Number == cr.Number && recorded.HeadSHA == cr.HeadSHA && source != nil
+	branch := api.GitBranch(cr.BaseBranch)
+	other := source != nil && branch != "" && branch != source.TargetBranch
+	unread := &renderRefusal{reason: ReasonMergeContentUnreadable,
+		message: "what the merge brought could not be checked within " + mergeCommitWait.String() + " (" + why + ")"}
+	if !ours || (other && pr.MergeCommitSHA == "") {
+		recordFound(rr, cr)
+		if cancelled {
+			keepCancelReason(rr, reason, "found merged afterwards")
+		}
+		if other {
+			markStaleForBranch(rr, branch)
+			return r.mergedForeignInto(ctx, rr, branch, unread)
+		}
+		ref := unread
+		if pr.MergeCommitSHA == "" {
+			// As checkMerged answers after the wait for the merge commit: without it nothing can be checked.
+			ref = &renderRefusal{reason: ReasonBranchDiverged, message: "The Git host reported no full merge commit " +
+				"ID for the merged pull request, so what the merge brought cannot be checked"}
+		}
+		if !markedStale(rr) && !cancelled {
+			markNotShownFresh(rr, why)
+		}
+		return r.mergedForeign(ctx, rr, ref)
+	}
+	switch {
+	case cancelled:
+		markCancelledMerge(rr, reason)
+	case other:
+		markStaleForBranch(rr, branch)
+	case !markedStale(rr):
+		markNotShownFresh(rr, why)
+		if r.Recorder != nil {
+			r.Recorder.Event(rr, corev1.EventTypeWarning, ReasonStalePlanMerged, notShownFreshMessage(why))
+		}
+	}
+	message := "The pull request was merged"
+	if other {
+		message = "The pull request was merged into " + string(branch) + ", the target branch the settings name now"
+	} else {
+		branch = source.TargetBranch
+	}
+	markClosed(rr, ReasonChangeRequestMerged, "was merged")
+	recordMergeInto(ctx, rr, cr, branch)
+	return r.stop(ctx, rr, api.PhaseMerged, ReasonChangeRequestMerged, message)
 }
 
 // endContentUnreadable ends a request whose reads of what a retargeted merge brought kept failing for

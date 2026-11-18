@@ -637,9 +637,18 @@ spec:
                   MergeContent entry, and a reconcile with no failed Git read removes the others. Condition GitReadRetry
                   summarizes the entries for people.
                 items:
-                  description: GitWait is one wait on a read of the Git host that
-                    failed (status.gitWaits).
+                  description: |-
+                    GitWait is one wait on a read of the Git host that failed (status.gitWaits). It holds everything needed to end it,
+                    so its end is decided from the entry alone.
                   properties:
+                    ends:
+                      description: |-
+                        ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
+                        request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
+                        the merge was first seen (MergeCheck) or after the start (MergeContent). It does not move while the entry
+                        stands.
+                      format: date-time
+                      type: string
                     kind:
                       description: kind is the kind of bound of the wait.
                       enum:
@@ -650,19 +659,40 @@ spec:
                       - MergeContent
                       type: string
                     operation:
-                      description: operation is the fixed name of the read that failed
-                        last, never the Git host's answer.
+                      description: |-
+                        operation is the fixed name of the read that failed last, never the Git host's answer. A name that would be
+                        longer than the bound (one that names a branch or a path) is cut where the entry is built.
                       maxLength: 256
                       minLength: 1
                       type: string
                     pullRequest:
                       description: |-
-                        pullRequest is, for a MergeContent wait only, the pull request whose merge the reads are about: the recorded
-                        one, or one found by the request's marker whose head was checked, so the end of the wait can record it.
+                        pullRequest is, for a MergeContent or a MergeCheck wait only, the pull request whose merge the wait is about:
+                        the recorded one, or one found by the request's marker, so the end of the wait can record it without a read.
                       properties:
+                        baseBranch:
+                          description: baseBranch is the branch the pull request was
+                            merged into, as the read that started the wait saw it.
+                          maxLength: 255
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$
+                          type: string
+                          x-kubernetes-validations:
+                          - message: must be a plain branch name, not HEAD, refs/...,
+                              shadewright/... or one containing '..' or '.lock'
+                            rule: '!self.contains(''..'') && !self.endsWith(''.lock'')
+                              && !self.contains(''.lock/'') && self != ''HEAD'' &&
+                              !self.startsWith(''refs/'') && !self.startsWith(''shadewright/'')'
                         headSHA:
                           description: headSHA is the head of the pull request, one
                             Shadewright pushed.
+                          pattern: ^[0-9a-f]{40}$
+                          type: string
+                        mergeCommitSHA:
+                          description: |-
+                            mergeCommitSHA is the merge commit the Git host reported for the pull request, when it reported one (a
+                            MergeCheck wait for the check at the merge); the end of a MergeCheck wait records the merge with a receipt
+                            only with it.
                           pattern: ^[0-9a-f]{40}$
                           type: string
                         number:
@@ -691,9 +721,13 @@ spec:
                   - since
                   type: object
                   x-kubernetes-validations:
-                  - message: a MergeContent wait names its pull request, and no other
-                      kind names one
-                    rule: (self.kind == 'MergeContent') == has(self.pullRequest)
+                  - message: a MergeContent or MergeCheck wait names its pull request,
+                      and no other kind names one
+                    rule: (self.kind == 'MergeContent' || self.kind == 'MergeCheck')
+                      == has(self.pullRequest)
+                  - message: a wait of a bounded kind records its end, and a Paced
+                      wait has none
+                    rule: (self.kind == 'Paced') != has(self.ends)
                 maxItems: 5
                 type: array
                 x-kubernetes-list-map-keys:
@@ -1855,11 +1889,12 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince)
             || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince
             == oldSelf.status.mergeCommitAwaitedSince)'
-        - message: a Git wait keeps its start and its pull request while it stands;
-            remove it to start another
+        - message: a Git wait keeps its start, its end and its pull request while
+            it stands; remove it to start another
           rule: '!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status)
             || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o,
-            o.kind != w.kind || (o.since == w.since && has(o.pullRequest) == has(w.pullRequest)
+            o.kind != w.kind || (o.since == w.since && has(o.ends) == has(w.ends)
+            && (!has(o.ends) || o.ends == w.ends) && has(o.pullRequest) == has(w.pullRequest)
             && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))'
         - message: status.mergeReceipt is set only in Merged or a phase after it
           rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)

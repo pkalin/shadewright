@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // gitReadSite is one call that gives a failed Git read its bound: retryGitRead, waitOrFail (which hands a failed
@@ -151,9 +152,12 @@ var gitReadSites = map[string]gitReadSite{
 		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 			clock := clockOf(r)
-			rr.Status.MergeCommitAwaitedSince = &metav1.Time{Time: clock.at.Add(-mergeCommitWait + c.left)}
+			pr := rr.Status.PullRequest
+			cr := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
+				State: providers.ChangeRequestMerged, BaseBranch: mainBranch}
+			setMergeWait(rr, clock.at.Add(-mergeCommitWait+c.left))
 			clock.advance(c.during)
-			err := r.mergeCheckFailed(context.Background(), rr, failedRead())
+			err := r.mergeCheckFailed(context.Background(), rr, cr, failedRead())
 			res, err := r.waitOrFail(context.Background(), rr, err, unboundedRead(noBoundHeldLock))
 			return mustWait(t, res, err), false
 		}},

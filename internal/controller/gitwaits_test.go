@@ -200,7 +200,30 @@ func setContentWait(rr *api.RemediationRequest, since *metav1.Time) {
 		pr = &api.GitWaitPullRequest{Number: p.Number, URL: p.URL, HeadSHA: p.HeadSHA}
 	}
 	rr.Status.GitWaits = append(rr.Status.GitWaits, api.GitWait{Kind: api.GitWaitMergeContent, Since: *since,
-		Operation: "read the parents of the merge commit", PullRequest: pr})
+		Ends: &metav1.Time{Time: since.Add(mergeContentWait)}, Operation: "read the parents of the merge commit",
+		PullRequest: pr})
+}
+
+// setMergeWait records a merge wait started at since about rr's recorded pull request (a stand-in when none is
+// recorded), merged into its recorded target branch without a merge commit seen, as awaitMergeCommit does; the
+// wait's start in status.mergeCommitAwaitedSince too.
+func setMergeWait(rr *api.RemediationRequest, since time.Time) {
+	rr.Status.GitWaits = slices.DeleteFunc(rr.Status.GitWaits, func(w api.GitWait) bool {
+		return w.Kind == api.GitWaitMergeCheck
+	})
+	cr := providers.ChangeRequest{Number: 1, URL: "https://github.com/example/pr/1", HeadSHA: strings.Repeat("a", 40),
+		State: providers.ChangeRequestMerged}
+	if p := rr.Status.PullRequest; p != nil {
+		cr.Number, cr.URL, cr.HeadSHA = p.Number, p.URL, p.HeadSHA
+	}
+	if rr.Status.Source != nil {
+		cr.BaseBranch = string(rr.Status.Source.TargetBranch)
+	}
+	t := metav1.NewTime(since)
+	rr.Status.MergeCommitAwaitedSince = &t
+	w, _ := wholeWait(rr, api.GitWait{Kind: api.GitWaitMergeCheck, PullRequest: waitPullRequest(cr)},
+		"wait for the merge commit", since)
+	rr.Status.GitWaits = append(rr.Status.GitWaits, w)
 }
 
 // startContentWait records a content wait about rr's recorded pull request, as a failed read of what its merge

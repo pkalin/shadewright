@@ -471,21 +471,25 @@ const (
 	// executor names in code (a request that has no deadline at that step, or a target lock kept until a read
 	// settles it).
 	GitWaitPaced GitWaitKind = "Paced"
-	// GitWaitRequestDeadline ends at status.deadline of a request in PolicyChecked: the request expires.
+	// GitWaitRequestDeadline ends at status.deadline of a request in PolicyChecked, as it stood when the entry was
+	// recorded: the request expires, also when the cleanup of its pull requests cannot read the Git host.
 	GitWaitRequestDeadline GitWaitKind = "RequestDeadline"
 	// GitWaitHandoffGrace ends a grace after status.deadline of a replacement recovering a handoff: the request ends
 	// NeedsIntervention with HandoffRecoveryFailed.
 	GitWaitHandoffGrace GitWaitKind = "HandoffGrace"
-	// GitWaitMergeCheck ends five minutes after status.mergeCommitAwaitedSince (or its own start when that is
-	// unset): the merge is recorded with the plan not shown fresh.
+	// GitWaitMergeCheck ends five minutes after the executor first saw the pull request merged without the merge
+	// commit or without an answer of the check at the merge: the merge it names is recorded, with the plan not
+	// shown fresh, and without a receipt when no merge commit was seen.
 	GitWaitMergeCheck GitWaitKind = "MergeCheck"
 	// GitWaitMergeContent ends five minutes after its start: the request ends NeedsIntervention with
 	// MergeContentUnreadable. It names the pull request whose merge it reads.
 	GitWaitMergeContent GitWaitKind = "MergeContent"
 )
 
-// GitWait is one wait on a read of the Git host that failed (status.gitWaits).
-// +kubebuilder:validation:XValidation:rule="(self.kind == 'MergeContent') == has(self.pullRequest)",message="a MergeContent wait names its pull request, and no other kind names one"
+// GitWait is one wait on a read of the Git host that failed (status.gitWaits). It holds everything needed to end it,
+// so its end is decided from the entry alone.
+// +kubebuilder:validation:XValidation:rule="(self.kind == 'MergeContent' || self.kind == 'MergeCheck') == has(self.pullRequest)",message="a MergeContent or MergeCheck wait names its pull request, and no other kind names one"
+// +kubebuilder:validation:XValidation:rule="(self.kind == 'Paced') != has(self.ends)",message="a wait of a bounded kind records its end, and a Paced wait has none"
 type GitWait struct {
 	// kind is the kind of bound of the wait.
 	// +required
@@ -495,14 +499,22 @@ type GitWait struct {
 	// +required
 	Since metav1.Time `json:"since"`
 
-	// operation is the fixed name of the read that failed last, never the Git host's answer.
+	// ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
+	// request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
+	// the merge was first seen (MergeCheck) or after the start (MergeContent). It does not move while the entry
+	// stands.
+	// +optional
+	Ends *metav1.Time `json:"ends,omitempty"`
+
+	// operation is the fixed name of the read that failed last, never the Git host's answer. A name that would be
+	// longer than the bound (one that names a branch or a path) is cut where the entry is built.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +required
 	Operation string `json:"operation"`
 
-	// pullRequest is, for a MergeContent wait only, the pull request whose merge the reads are about: the recorded
-	// one, or one found by the request's marker whose head was checked, so the end of the wait can record it.
+	// pullRequest is, for a MergeContent or a MergeCheck wait only, the pull request whose merge the wait is about:
+	// the recorded one, or one found by the request's marker, so the end of the wait can record it without a read.
 	// +optional
 	PullRequest *GitWaitPullRequest `json:"pullRequest,omitempty"`
 }
@@ -524,6 +536,17 @@ type GitWaitPullRequest struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
 	// +required
 	HeadSHA string `json:"headSHA"`
+
+	// baseBranch is the branch the pull request was merged into, as the read that started the wait saw it.
+	// +optional
+	BaseBranch GitBranch `json:"baseBranch,omitempty"`
+
+	// mergeCommitSHA is the merge commit the Git host reported for the pull request, when it reported one (a
+	// MergeCheck wait for the check at the merge); the end of a MergeCheck wait records the merge with a receipt
+	// only with it.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +optional
+	MergeCommitSHA string `json:"mergeCommitSHA,omitempty"`
 }
 
 // ReasonIncidentCountUnchanged is the reason of condition IncidentStopped True: the Incident's count did not
@@ -1130,7 +1153,7 @@ type RemediationRequestStatus struct {
 // is neither added, removed nor changed (#748).
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck) == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck) || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))",message="status.pullRequest.reviewCheck does not change once status.mergeReceipt exists"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)",message="status.mergeCommitAwaitedSince is set once and never changed"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status) || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o, o.kind != w.kind || (o.since == w.since && has(o.pullRequest) == has(w.pullRequest) && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))",message="a Git wait keeps its start and its pull request while it stands; remove it to start another"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status) || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o, o.kind != w.kind || (o.since == w.since && has(o.ends) == has(w.ends) && (!has(o.ends) || o.ends == w.ends) && has(o.pullRequest) == has(w.pullRequest) && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))",message="a Git wait keeps its start, its end and its pull request while it stands; remove it to start another"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))",message="status.mergeReceipt is set only in Merged or a phase after it"
 // WaitingForDelivery and Verifying are measured from the receipt (ADR-0030 section 2), and Verifying from the
 // applied time, which the executor writes in the same status write that sets Verifying.

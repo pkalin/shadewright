@@ -4951,10 +4951,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			wait, finds, heads = look(r)
 			Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged), "the merge is seen at the next poll")
 			Expect(wait).To(BeZero())
-			// The look that sees the merge, then the read of settleTargetLock, the one decision that releases the
-			// lock (decision of 2026-11-17), in the same reconcile.
-			Expect(finds).To(Equal(2))
-			Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "released by that read")
+			// The look that sees the merge alone: the merge recorded with its receipt releases the lock without a
+			// read of the branch (decision of 2026-11-18 on #771).
+			Expect(finds).To(Equal(1))
+			Expect(fetch().Status.HoldsTarget).To(HaveValue(BeFalse()), "released by the receipt")
 			Expect(heads).To(BeZero(), "a merge is recorded before any freshness read")
 			_, kept := r.checked.Load(key().NamespacedName)
 			Expect(kept).To(BeFalse(), "an ended request is not remembered")
@@ -6881,13 +6881,14 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					return observe(own, other, res, err)
 				},
 				want: map[verdictCase]outcome{
-					isOpen:         o(expired, "own", held, kept, done),
-					isMerged:       o(awaiting, "own", held, kept, failed),
-					isClosed:       o(expired, "own", held, kept, done),
-					isGone:         o(expired, none, held, kept, done),
-					goneOtherOpen:  o(expired, none, held, kept, done),
-					goneFirstLook:  o(awaiting, none, held, kept, requeue),
-					failedRead:     o(awaiting, none, held, kept, requeue),
+					isOpen:        o(expired, "own", held, kept, done),
+					isMerged:      o(awaiting, "own", held, kept, failed),
+					isClosed:      o(expired, "own", held, kept, done),
+					isGone:        o(expired, none, held, kept, done),
+					goneOtherOpen: o(expired, none, held, kept, done),
+					goneFirstLook: o(awaiting, none, held, kept, requeue),
+					// Expired with no retry, as above (fourth decision of 2026-11-18 on #771).
+					failedRead:     o(expired, none, held, kept, done),
 					unconfirmed404: o(awaiting, none, held, kept, failed),
 					contradicting:  o(awaiting, none, held, kept, failed),
 					forbidden:      o(expired, none, held, kept, done),
@@ -6942,14 +6943,16 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					return observe(own, other, res, err)
 				},
 				want: map[verdictCase]outcome{
-					isOpen:         o(expired, "own", held, kept, done),
-					isMerged:       o(merged, none, released, kept, done),
-					isClosed:       o(expired, none, held, kept, done),
-					isGone:         o(expired, none, held, kept, done),
-					goneOtherOpen:  o(expired, none, held, kept, done),
-					goneFirstLook:  na,
-					failedRead:     o(checked, none, held, kept, requeue),
-					unconfirmed404: o(checked, none, held, kept, requeue),
+					isOpen:        o(expired, "own", held, kept, done),
+					isMerged:      o(merged, none, released, kept, done),
+					isClosed:      o(expired, none, held, kept, done),
+					isGone:        o(expired, none, held, kept, done),
+					goneOtherOpen: o(expired, none, held, kept, done),
+					goneFirstLook: na,
+					// Past the deadline a read that fails ends the request Expired, with no retry of the expiry
+					// (fourth decision of 2026-11-18 on #771); the lock stays for the read that settles it.
+					failedRead:     o(expired, none, held, kept, done),
+					unconfirmed404: o(expired, none, held, kept, done),
 					contradicting:  na,
 					forbidden:      o(expired, none, held, kept, done),
 				},

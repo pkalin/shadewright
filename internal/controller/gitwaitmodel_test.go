@@ -37,34 +37,57 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
-// The generated test of the third decision of 2026-11-17 on #771: a small model of the world around one request
-// whose plan's target branch changed, driven through Reconcile with a moving clock over seeded random orders of
-// events. It uses only what the request shows (conditions, phase, lock) and what the model injects, so it runs on
-// any build of the branch.
+// The generated test of the decisions of 2026-11-17 and 2026-11-18 on #771: a small model of the world around one
+// request, driven through Reconcile with a moving clock over seeded random orders of events. It uses only what the
+// request shows (its status, conditions, phase, lock) and what the model injects, so it runs on any build of the
+// branch.
 //
-// The world: the request starts waiting for review or stopped (for the branch change on PlanFresh, on Approved, or
-// with its pull request never recorded because that status write was lost, cancelled for its Incident, or stopped
-// for another reason). Its pull request is open, closed, merged into the recorded branch, moved to the configured
-// branch (and merged there), deleted (gone from the host), or none at all. Between reconciles: a Git read fails
-// or runs out of the step's time (the pull request reads, the listing, the read of what a merge brought, a file),
-// or reads work again; the next status write is lost or meets a conflicting write; the executor restarts (nothing
-// kept in memory). The clock moves on by the wait each reconcile returns (a second after an error).
+// The world: the request starts waiting for review, in PolicyChecked before its pull request is recorded (with a
+// deadline a few minutes away), or stopped (for the branch change on PlanFresh, on Approved, or with its pull
+// request never recorded because that status write was lost, cancelled for its Incident, or stopped for another
+// reason). The branch the settings name now may be the longest name the API allows. Its pull request is open,
+// closed, merged into the recorded branch, moved to the configured branch (and merged there), deleted (gone from the
+// host), or none at all; a merge may be reported without its commit for a while. Between reconciles: one or two Git
+// reads fail or run out of the step's time (the pull request reads, the listing, the read of what a merge brought, a
+// file, the opening of the repository), or reads work again; the repository leaves the settings or comes back; the
+// kill switch pauses writes or lifts the pause; a person cancels the request; the settings name another target
+// branch; the next status write is lost, meets a conflicting write, or is applied and reported failed; the cache
+// serves an older copy of the request at the next read; the executor restarts (nothing kept in memory). The clock
+// moves on by the wait each reconcile returns (a second after an error). Every status write is checked against the
+// schema of the CRD, as the API server does: a write it would refuse is a violation.
 //
 // After each reconcile:
-//   - bound: a wait condition GitReadRetry shows has not passed its end by more than one poll interval, and the
-//     reads of what a merge brought that kept failing since a time T end the request (MergeContentUnreadable or
-//     the merge recorded) by T plus mergeContentWait plus one poll interval, whatever else fails meanwhile;
-//   - errors: no three reconciles in a row return an error while no status write is made to fail;
-//   - lock: the lock is never released while a pull request of the request is open, nor on a merge the status
-//     does not record.
+//   - waits: every entry of status.gitWaits has not passed the end of its kind by more than one poll interval: the
+//     request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after its
+//     start or the merge clock (MergeCheck), five minutes after its start (MergeContent);
+//   - clocks: every time field of the status that bounds a wait has not passed its end by more than one poll
+//     interval (gitWaitClocks): a request in PolicyChecked past its deadline, a merge seen without its commit
+//     (mergeCommitAwaitedSince) whose merge is not recorded;
+//   - content: the reads of what a merge brought that kept failing since a time T end the request
+//     (MergeContentUnreadable or the merge recorded) by T plus mergeContentWait plus one poll interval;
+//   - errors: no three reconciles in a row return an error while no write is made to fail;
+//   - pace: no three reconciles in a row ask to be run again within a second without an error (a wait that ends
+//     and is not ended runs hot, and the clock that bounds it never moves);
+//   - record: a merge the status records names its pull request;
+//   - lock: the lock is never released while a pull request of the request is open, nor on a merge the status does
+//     not record, and a lock once released never comes back;
+//   - schema: no status write is one the API server refuses.
 //
-// At the end the world heals (reads work, no write fails) and, after a few reconciles, the lock is free, or held
-// by a request whose pull request is open and can still merge.
+// At the end the world heals (reads work, no write fails, writes are not paused; the repository comes back in half
+// of the runs) and, after a few reconciles, the lock is free, or held by a request whose pull request is open and
+// can still merge; a merge recorded with its receipt never holds it, whether the repository came back or not.
+//
+// Each seed has a focus (seed modulo the number of focuses, modelFocuses): none, or one that makes an order of the
+// fourth decision of 2026-11-18 on #771 likely (a deadline that passes while the repository cannot be opened, a
+// merge reported without its commit while the reads fail, a merge recorded with its receipt and the repository gone,
+// the cache serving a copy that held the lock after it was released, a retargeted merge into the longest branch name
+// whose reads fail). A focus only weights the start and the events; every event can still happen.
 //
 // Seeds: modelSeeds in CI (a fixed set, fewer under the race detector or -short); SHADEWRIGHT_MODEL_SEEDS=n runs n
 // more seeds from the time, SHADEWRIGHT_MODEL_SEED=s one seed and SHADEWRIGHT_MODEL_SEED_RANGE=a-b the seeds a to b
@@ -75,18 +98,42 @@ const (
 
 	faultNone    = "none"
 	faultContent = "content"
+	faultOpen    = "open"
+	// faultBetween fails the reads that compare what a merge brought (CheckBetween, CountAhead), after the merge
+	// commit's parents were read.
+	faultBetween = "between"
 	faultTimeout = "+timeout"
+	// faultBoth joins two faults of one pass.
+	faultBoth = "&"
 
 	// startRunning: the request waits for review, not stopped.
 	startRunning = "running"
 	// startNoPullRequest: no pull request exists at all (the open's write was lost and it was deleted).
 	startNoPullRequest = "no-pull-request-at-all"
+	// startPolicyChecked: the request is in PolicyChecked, its deadline minutes away, and its pull request was opened
+	// while the write that would record it was lost; the settings name the plan's branch.
+	startPolicyChecked = "policy-checked"
+
+	// modelPolicyDeadline is how far the deadline of a request that starts in PolicyChecked lies.
+	modelPolicyDeadline = 3 * time.Minute
+
+	focusNone     = "none"
+	focusDeadline = "deadline"
+	focusCommit   = "commit"
+	focusReceipt  = "receipt"
+	focusStale    = "stale"
+	focusLong     = "long"
 )
 
 var (
-	modelStarts = []string{startRunning, stopPlanFresh, stopApproved, stopUnrecord, stopCancelled, stopOther, startNoPullRequest}
-	modelFaults = []string{faultNone, opGet, opList, faultContent, opReadFile, opGet + faultTimeout,
-		faultContent + faultTimeout}
+	modelStarts = []string{startRunning, stopPlanFresh, stopApproved, stopUnrecord, stopCancelled, stopOther,
+		startNoPullRequest, startPolicyChecked}
+	modelFaults = []string{faultNone, opGet, opList, faultContent, opReadFile, faultOpen, opGet + faultTimeout,
+		faultContent + faultTimeout, faultBetween, opGet + faultBoth + faultContent, faultOpen + faultBoth + opList}
+	// longBranch is the longest target branch name the schema allows (api.GitBranch).
+	longBranch = strings.Repeat("r", 255)
+	// modelFocuses are the focuses of the seeds, in the order of seed modulo their number.
+	modelFocuses = []string{focusNone, focusDeadline, focusCommit, focusReceipt, focusStale, focusLong}
 )
 
 // modelSeeds is the fixed seed set: 1 to n.
@@ -98,9 +145,10 @@ func modelSeeds(t *testing.T) []uint64 {
 		}
 		return []uint64{seed}
 	}
-	n := 80
+	n := 240
 	if testing.Short() || raceDetector {
-		n = 24
+		// Each order of the fourth decision of 2026-11-18 on #771 is found in this range on the build before its fix.
+		n = 90
 	}
 	seeds := make([]uint64, 0, n)
 	for i := range n {
@@ -132,10 +180,11 @@ func modelSeeds(t *testing.T) []uint64 {
 }
 
 func TestGitWaitModel(t *testing.T) {
+	schema := requestStatusSchema(t)
 	for _, seed := range modelSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			t.Parallel()
-			m := newModel(t, seed)
+			m := newModel(t, seed, schema)
 			m.run()
 		})
 	}
@@ -156,46 +205,125 @@ type modelWorld struct {
 	trace  []string
 	// template is the request as it started, for the second request's spec.
 	template *api.RemediationRequest
+	schema   *statusSchema
+	// configured is the target branch the settings name now; repo is the settings' repository entry as it was
+	// before it left them.
+	configured string
+	repo       *api.GitRepository
 
 	mu sync.Mutex
-	// fault is the Git read that fails (or runs out of the step's time), faultNone when reads work.
+	// fault is the Git read that fails (or runs out of the step's time), faultNone when reads work; two faults of
+	// one pass are joined by faultBoth.
 	fault string
-	// loseNext and conflictNext make the next status write fail, or meet a write made between its read and it.
-	loseNext, conflictNext bool
-	// writeFaulted reports that this reconcile met an injected write fault.
+	// loseNext and conflictNext make the next status write fail, or meet a write made between its read and it;
+	// applyNext applies it and reports it failed.
+	loseNext, conflictNext, applyNext bool
+	// staleNext makes the cache serve stale at the next read of the request.
+	staleNext bool
+	stale     *api.RemediationRequest
+	// writeFaulted reports that this reconcile met an injected write fault or a stale read.
 	writeFaulted bool
 	// deleted hides the pull request from every read (gone from the host).
 	deleted bool
-	number  int64
-	merge   string
+	// noCommit makes the host report the merge without its merge commit.
+	noCommit bool
+	number   int64
+	merge    string
 	// contentFailing is when the reads of what the merge brought began to fail without a success since, from the
 	// first failure in a reconcile that ended without an error (a wait whose status write failed is not started:
 	// the reconcile returns the error for a retry); zero when they work, or were never made. contentTried is the
 	// first failure of the reconcile running.
 	contentFailing, contentTried time.Time
-	errorsInRow                  int
+	errorsInRow, hotInRow        int
 	startAt                      time.Time
-	violations                   []string
+	// released: the request's lock was seen released; recorded: the request's merge was seen recorded.
+	released, recorded bool
+	// handoff: the request is a replacement recovering a handoff; the pull request is its predecessor's, which
+	// holds the lock on it, so the lock properties about the request's own pull request do not apply.
+	handoff bool
+	// lastingUntil keeps the fault as it is until then (an outage that lasts): fault events wait.
+	lastingUntil time.Time
+	// history is every copy of the request the API server held after a reconcile, for the stale cache.
+	history    []*api.RemediationRequest
+	violations []string
+	// focus weights the events (modelFocuses).
+	focus string
 }
 
-func newModel(t *testing.T, seed uint64) *modelWorld {
+// modelStart is how a run of the model begins: drawn from the seed (drawStart), or given by a scripted test.
+type modelStart struct {
+	start string
+	// long: the branch the settings name now is the longest name the schema allows.
+	long bool
+	// fresh: a running request whose settings name the plan's branch, so it watches a fresh plan.
+	fresh bool
+	// open: the repository cannot be opened from the start (a token that cannot be minted), lasting the minutes.
+	open    bool
+	lasting time.Duration
+	// handoff: the request in PolicyChecked is a replacement recovering a handoff (with open).
+	handoff bool
+	verify  bool
+	// focus weights the events of the run (modelFocuses); focusNone when empty.
+	focus string
+}
+
+// drawStart draws a start from rng for a run with focus.
+func drawStart(rng *rand.Rand, focus string) modelStart {
+	switch focus {
+	case focusDeadline:
+		return modelStart{start: startPolicyChecked, open: true, lasting: time.Duration(5+rng.IntN(26)) * time.Minute,
+			handoff: rng.IntN(4) == 0, verify: rng.IntN(2) == 0, focus: focus}
+	case focusCommit, focusReceipt, focusStale:
+		return modelStart{start: startRunning, fresh: true, verify: focus != focusCommit || rng.IntN(2) == 0,
+			focus: focus}
+	case focusLong:
+		starts := []string{startRunning, stopPlanFresh, stopApproved, stopUnrecord}
+		return modelStart{start: starts[rng.IntN(len(starts))], long: true, verify: rng.IntN(2) == 0, focus: focus}
+	}
+	st := modelStart{start: modelStarts[rng.IntN(len(modelStarts))], focus: focusNone}
+	st.long = st.start != startPolicyChecked && rng.IntN(3) == 0
+	st.fresh = st.start == startRunning && rng.IntN(2) == 0
+	if st.start == startPolicyChecked && rng.IntN(2) == 0 {
+		st.open, st.lasting = true, time.Duration(rng.IntN(30))*time.Minute
+		st.handoff = rng.IntN(2) == 0
+	}
+	st.verify = rng.IntN(2) == 0
+	return st
+}
+
+func newModel(t *testing.T, seed uint64, schema *statusSchema) *modelWorld {
 	// #nosec G404 -- a seeded generator, so a failing order can be run again from its seed.
-	m := &modelWorld{t: t, seed: seed, rng: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), fault: faultNone}
-	start := modelStarts[m.rng.IntN(len(modelStarts))]
+	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
+	return newModelFrom(t, seed, rng, schema, drawStart(rng, modelFocuses[seed%uint64(len(modelFocuses))]))
+}
+
+func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchema, st modelStart) *modelWorld {
+	m := &modelWorld{t: t, seed: seed, rng: rng, fault: faultNone, schema: schema, configured: freshOtherBranch,
+		focus: st.focus}
+	start := st.start
 	phase := api.PhaseNeedsIntervention
 	switch start {
 	case startRunning:
 		phase = api.PhaseAwaitingApproval
 	case stopCancelled:
 		phase = api.PhaseCancelled
+	case startPolicyChecked:
+		phase = api.PhasePolicyChecked
 	}
 	r, g, rr := settlementWorld(t, phase)
 	m.r, m.g, m.key = r, g, client.ObjectKeyFromObject(rr)
 	m.template = rr.DeepCopy()
 	m.number = rr.Status.PullRequest.Number
 	ctx := context.Background()
+	if st.long {
+		m.setConfigured(longBranch)
+	}
 	switch start {
 	case startRunning:
+		if st.fresh {
+			m.setConfigured(mainBranch)
+			m.freshPlan(rr)
+		}
 		meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
 		if err := r.Status().Update(ctx, rr); err != nil {
 			t.Fatal(err)
@@ -205,31 +333,63 @@ func newModel(t *testing.T, seed uint64) *modelWorld {
 	case startNoPullRequest:
 		lostRecord(t, r, rr, api.ConditionPROpened)
 		m.deleted = true
+	case startPolicyChecked:
+		m.setConfigured(mainBranch)
+		m.freshPlan(rr)
+		rr.Status.PullRequest = nil
+		meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+		rr.Status.Deadline = &metav1.Time{Time: time.Now().Truncate(time.Second).Add(modelPolicyDeadline)}
+		if err := r.Status().Update(ctx, rr); err != nil {
+			t.Fatal(err)
+		}
+		if st.open {
+			m.fault = faultOpen
+			m.lastingUntil = time.Now().Add(st.lasting)
+			if st.handoff {
+				m.recovering(rr)
+			}
+		}
 	default:
 		orderStop(t, r, rr, start)
 	}
-	m.logf("start %s", start)
+	r.VerifyOutcomes = st.verify
+	m.logf("start %+v", st)
 	m.clock = clockOf(r)
 	m.startAt = m.clock.at
 	m.base = r.Client.(client.WithWatch)
-	c := interceptor.NewClient(m.base, interceptor.Funcs{
+	direct := interceptor.NewClient(m.base, interceptor.Funcs{
 		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
 			opts ...client.SubResourceUpdateOption) error {
-			if err := m.writeFault(ctx, obj); err != nil {
-				return err
-			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return m.write(ctx, obj, func() error { return c.SubResource(sub).Update(ctx, obj, opts...) })
 		},
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch,
 			opts ...client.SubResourcePatchOption) error {
-			if err := m.writeFault(ctx, obj); err != nil {
-				return err
-			}
-			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+			return m.write(ctx, obj, func() error { return c.SubResource(sub).Patch(ctx, obj, patch, opts...) })
 		},
 	})
-	r.Client, r.APIReader = c, c
-	r.OpenRepository = func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+	// The cache: the request may be served as an older copy at the next read (staleNext).
+	cache := interceptor.NewClient(direct, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if rr, ok := obj.(*api.RemediationRequest); ok && key == m.key {
+				m.mu.Lock()
+				stale := m.stale
+				if m.staleNext && stale != nil {
+					m.staleNext, m.writeFaulted = false, true
+					m.mu.Unlock()
+					stale.DeepCopyInto(rr)
+					return nil
+				}
+				m.mu.Unlock()
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	r.Client, r.APIReader = cache, direct
+	r.Source = &modelResolver{m: m}
+	r.OpenRepository = func(ctx context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+		if err := (&modelGit{m: m}).fail(ctx, faultOpen); err != nil {
+			return nil, err
+		}
 		return &modelGit{GitProvider: g.ForTarget(string(repo.TargetBranch)), m: m}, nil
 	}
 	// Long enough for every step that does not wait on a slow read, also under the race detector.
@@ -237,19 +397,131 @@ func newModel(t *testing.T, seed uint64) *modelWorld {
 	return m
 }
 
-// writeFault fails the status write, or makes a write between its read and it, when the model says so.
-func (m *modelWorld) writeFault(ctx context.Context, obj client.Object) error {
+// freshPlan makes rr's plan the one made on the head of its target branch, as the source mapping finds it
+// (modelResolver), and the pull request carry its marker (request UID and plan digest).
+func (m *modelWorld) freshPlan(rr *api.RemediationRequest) {
+	ctx := context.Background()
+	head, err := m.g.BranchHead(ctx, string(rr.Status.Source.TargetBranch))
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	pol := &api.RemediationPolicy{}
+	settings := &api.RemediationSettings{}
+	if err := m.r.Get(ctx, client.ObjectKey{Name: string(rr.Spec.PolicyRef)}, pol); err != nil {
+		m.t.Fatal(err)
+	}
+	if err := m.r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		m.t.Fatal(err)
+	}
+	rr.Status.Source.BaseCommit = head
+	if rr.Status.PlanDigest, err = freshness.ComputeDigest(rr, rr.Status.Source, pol, settings); err != nil {
+		m.t.Fatal(err)
+	}
+	if err := m.g.SetBody(m.number, marker(rr)); err != nil {
+		m.t.Fatal(err)
+	}
+}
+
+// recovering makes rr a replacement recovering the handoff of a predecessor ("rr-old") that recorded its intent to
+// hand rr its pull request: the recovery reads the branch until it learns whether rr's commit is on it, bounded by
+// the deadline and the handoff grace (HandoffGrace).
+func (m *modelWorld) recovering(rr *api.RemediationRequest) {
+	ctx := context.Background()
+	cr, _ := m.pr()
+	pred := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Name: rr.Name + "-old", Namespace: rr.Namespace,
+		UID: "11111111-2222-4333-8444-555555555555"}, Spec: *rr.Spec.DeepCopy()}
+	h := api.Hint{Source: api.HintSourceGitHub, CommentID: 7, Digest: "sha256:" + strings.Repeat("b", 64),
+		State: api.HintReserved, Author: api.HintAuthor{ID: 1001, Login: "reviewer"}}
+	if err := m.r.Create(ctx, pred); err != nil {
+		m.t.Fatal(err)
+	}
+	pred.Status = *rr.Status.DeepCopy()
+	pred.Status.Phase = api.PhaseAwaitingApproval
+	pred.Status.HoldsTarget = new(true)
+	pred.Status.Hints = []api.Hint{h}
+	pred.Status.PullRequest = &api.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA}
+	pred.Status.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Name: api.Name(rr.Name), UID: api.UID(rr.UID),
+		Hint: refOf(&h), ExpectedHead: cr.HeadSHA, Phase: api.HandoffIntent}}
+	if err := m.r.Status().Update(ctx, pred); err != nil {
+		m.t.Fatal(err)
+	}
+	rr.Spec.Replaces = &api.RequestReplacement{Name: api.Name(pred.Name), UID: api.UID(pred.UID), Hint: refOf(&h)}
+	if err := m.r.Update(ctx, rr); err != nil {
+		m.t.Fatal(err)
+	}
+	rr.Status.Handoff = &api.Handoff{From: &api.IncomingHandoff{Name: api.Name(pred.Name), UID: api.UID(pred.UID),
+		Hint: refOf(&h), Phase: api.HandoffReserved}}
+	if err := m.r.Status().Update(ctx, rr); err != nil {
+		m.t.Fatal(err)
+	}
+	m.r.ReviewerHints = true
+	m.handoff = true
+}
+
+// setConfigured makes branch the target branch the settings name now (created on the host when missing).
+func (m *modelWorld) setConfigured(branch string) {
+	ctx := context.Background()
+	if _, err := m.g.BranchHead(ctx, branch); err != nil {
+		head, err := m.g.BranchHead(ctx, mainBranch)
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		if err := m.g.CreateBranch(ctx, branch, head); err != nil {
+			m.t.Fatal(err)
+		}
+	}
+	m.updateSettings(func(s *api.RemediationSettings) {
+		for i := range s.Spec.Repositories {
+			s.Spec.Repositories[i].TargetBranch = api.GitBranch(branch)
+		}
+		if m.repo != nil {
+			m.repo.TargetBranch = api.GitBranch(branch)
+		}
+	})
+	m.configured = branch
+}
+
+func (m *modelWorld) updateSettings(change func(*api.RemediationSettings)) {
+	ctx := context.Background()
+	s := &api.RemediationSettings{}
+	c := m.r.Client
+	if m.base != nil {
+		c = m.base
+	}
+	if err := c.Get(ctx, client.ObjectKey{Name: api.SettingsName}, s); err != nil {
+		m.t.Fatal(err)
+	}
+	change(s)
+	if err := c.Update(ctx, s); err != nil {
+		m.t.Fatal(err)
+	}
+}
+
+// write makes the status write do, unless the model makes it fail, conflict, or apply and report a failure; a write
+// the API server would refuse (the CRD schema) is refused, and noted.
+func (m *modelWorld) write(ctx context.Context, obj client.Object, do func() error) error {
+	if rr, ok := obj.(*api.RemediationRequest); ok {
+		if errs := m.schema.validate(rr); len(errs) > 0 {
+			m.fatalf("schema: the API server refuses a status write of %s: %v", rr.Name, errs)
+			return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
+		}
+	}
 	m.mu.Lock()
-	lose, conflict := m.loseNext, m.conflictNext
-	m.loseNext, m.conflictNext = false, false
-	if lose || conflict {
+	lose, conflict, apply := m.loseNext, m.conflictNext, m.applyNext
+	m.loseNext, m.conflictNext, m.applyNext = false, false, false
+	if lose || conflict || apply {
 		m.writeFaulted = true
 	}
 	m.mu.Unlock()
-	if lose {
+	switch {
+	case lose:
 		return apierrors.NewServiceUnavailable("lost")
-	}
-	if conflict {
+	case apply:
+		if err := do(); err != nil {
+			return err
+		}
+		return apierrors.NewTimeoutError("applied, the answer lost", 1)
+	case conflict:
 		live := &api.RemediationRequest{}
 		if err := m.base.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
 			return err
@@ -258,9 +530,11 @@ func (m *modelWorld) writeFault(ctx context.Context, obj client.Object) error {
 			live.Annotations = map[string]string{}
 		}
 		live.Annotations["example.test/model"] = strconv.Itoa(len(live.Annotations["example.test/model"]) + 1)
-		return m.base.Update(ctx, live)
+		if err := m.base.Update(ctx, live); err != nil {
+			return err
+		}
 	}
-	return nil
+	return do()
 }
 
 func (m *modelWorld) logf(format string, args ...any) {
@@ -283,7 +557,7 @@ func (m *modelWorld) fatalf(format string, args ...any) {
 	what := fmt.Sprintf(format, args...)
 	kind, _, _ := strings.Cut(what, ":")
 	for _, v := range m.violations {
-		if strings.HasPrefix(v, kind) {
+		if strings.HasPrefix(v, kind+":") {
 			return
 		}
 	}
@@ -305,19 +579,26 @@ func (m *modelWorld) report() {
 }
 
 func (m *modelWorld) run() {
-	if !m.deleted && m.rng.IntN(3) == 0 {
+	if !m.deleted && (m.focus == focusLong || m.rng.IntN(3) == 0) {
 		// A person moves the pull request and merges it before the executor looks (decision of 2026-11-16: every
 		// order of the settings change, the move and the merge).
 		m.prelude()
 	}
+	// The copy the API server held before the first reconcile, for the stale cache.
+	m.history = append(m.history, m.live())
 	for range modelSteps {
 		m.event()
 		m.step(true)
 	}
 	m.mu.Lock()
-	m.fault, m.loseNext, m.conflictNext = faultNone, false, false
+	m.fault, m.loseNext, m.conflictNext, m.applyNext, m.staleNext, m.noCommit = faultNone, false, false, false, false, false
+	m.lastingUntil = time.Time{}
 	m.mu.Unlock()
-	m.logf("heal")
+	m.updateSettings(func(s *api.RemediationSettings) { s.Spec.Paused = nil })
+	if m.repo != nil && m.rng.IntN(2) == 0 {
+		m.restoreRepository()
+	}
+	m.logf("heal (repository in the settings: %t)", m.repo == nil)
 	for range 8 {
 		m.step(true)
 	}
@@ -327,7 +608,7 @@ func (m *modelWorld) run() {
 
 // prelude moves the pull request to the configured branch and merges it there, before the first reconcile.
 func (m *modelWorld) prelude() {
-	if err := m.g.SetBase(m.number, freshOtherBranch); err != nil {
+	if err := m.g.SetBase(m.number, m.configured); err != nil {
 		m.t.Fatal(err)
 	}
 	sha, err := m.g.Merge(m.number)
@@ -335,7 +616,12 @@ func (m *modelWorld) prelude() {
 		m.t.Fatal(err)
 	}
 	m.merge = sha
-	if m.rng.IntN(2) == 0 {
+	switch {
+	case m.focus == focusLong:
+		// What the merge into the longest branch name brought cannot be compared, for a while.
+		m.fault = []string{faultBetween, faultContent}[m.rng.IntN(2)]
+		m.lastingUntil = m.clock.at.Add(time.Duration(m.rng.IntN(10)) * time.Minute)
+	case m.rng.IntN(2) == 0 && !time.Now().Before(m.lastingUntil):
 		m.fault = faultContent
 	}
 	m.logf("move the pull request to the configured branch and merge it there (reads: %s)", m.fault)
@@ -355,7 +641,10 @@ func (m *modelWorld) pr() (providers.ChangeRequest, bool) {
 func (m *modelWorld) event() {
 	ctx := context.Background()
 	cr, _ := m.pr()
-	switch m.rng.IntN(11) {
+	if m.focusEvent(cr) {
+		return
+	}
+	switch m.rng.IntN(17) {
 	case 0, 1, 8:
 		if cr.State != providers.ChangeRequestOpen || m.deleted {
 			return
@@ -365,8 +654,8 @@ func (m *modelWorld) event() {
 			_ = m.g.CloseChangeRequest(ctx, m.number)
 			m.logf("close the pull request")
 		case 1, 4:
-			if cr.BaseBranch == mainBranch {
-				_ = m.g.SetBase(m.number, freshOtherBranch)
+			if cr.BaseBranch == mainBranch && m.configured != mainBranch {
+				_ = m.g.SetBase(m.number, m.configured)
 				m.logf("move the pull request to the configured branch")
 			}
 		case 2:
@@ -379,20 +668,30 @@ func (m *modelWorld) event() {
 			if err == nil {
 				m.mu.Lock()
 				m.merge = sha
-				if m.rng.IntN(2) == 0 {
-					// The host fails the reads of what the merge brought from the merge on.
-					m.fault = faultContent
+				if m.rng.IntN(2) == 0 && !m.clock.at.Before(m.lastingUntil) {
+					// The host fails the reads of what the merge brought (or every read) from the merge on, for a while.
+					m.fault = []string{faultContent, faultBetween, opGet, opReadFile}[m.rng.IntN(4)]
+					m.lastingUntil = m.clock.at.Add(time.Duration(m.rng.IntN(20)) * time.Minute)
 				}
-				fault := m.fault
+				// The host reports the merge without its commit for a while.
+				m.noCommit = m.rng.IntN(3) == 0
+				fault, noCommit := m.fault, m.noCommit
 				m.mu.Unlock()
-				m.logf("merge the pull request into %s (reads: %s)", cr.BaseBranch, fault)
+				m.logf("merge the pull request into %.12s (reads: %s, merge commit withheld: %t)", cr.BaseBranch,
+					fault, noCommit)
 			}
 		}
 	case 2, 3, 4, 9:
+		if m.clock.at.Before(m.lastingUntil) {
+			return
+		}
 		m.mu.Lock()
 		m.fault = modelFaults[m.rng.IntN(len(modelFaults))]
+		if m.rng.IntN(3) == 0 {
+			m.lastingUntil = m.clock.at.Add(time.Duration(m.rng.IntN(20)) * time.Minute)
+		}
 		m.mu.Unlock()
-		m.logf("reads: %s", m.fault)
+		m.logf("reads: %s (lasting until +%v)", m.fault, max(m.lastingUntil.Sub(m.start()), 0))
 	case 5:
 		m.mu.Lock()
 		m.loseNext = true
@@ -407,7 +706,210 @@ func (m *modelWorld) event() {
 		m.restart()
 	case 10:
 		m.addSecond()
+	case 11:
+		if m.repo == nil {
+			m.removeRepository()
+		} else {
+			m.restoreRepository()
+		}
+	case 12:
+		m.mu.Lock()
+		m.applyNext = true
+		m.mu.Unlock()
+		m.logf("apply the next status write and report it failed")
+	case 13:
+		m.serveStale()
+	case 14:
+		m.stop()
+	case 15:
+		m.mu.Lock()
+		if m.noCommit {
+			m.noCommit = false
+			m.logf("the host reports the merge commit")
+		}
+		m.mu.Unlock()
+	case 16:
+		if m.clock.at.Before(m.lastingUntil) {
+			return
+		}
+		// Two faults in one pass: a read fails and the next status write is lost.
+		m.mu.Lock()
+		m.fault, m.loseNext = modelFaults[1+m.rng.IntN(len(modelFaults)-1)], true
+		m.mu.Unlock()
+		m.logf("reads: %s, and lose the next status write", m.fault)
 	}
+}
+
+// focusEvent is the event of the run's focus, when it draws one; false leaves the event to the common draw.
+func (m *modelWorld) focusEvent(cr providers.ChangeRequest) bool {
+	open := cr.State == providers.ChangeRequestOpen && !m.deleted
+	switch m.focus {
+	case focusDeadline:
+		// Mostly quiet until the deadline and a poll interval after it have passed, while the outage lasts.
+		quiet := m.clock.at.Before(m.start().Add(modelPolicyDeadline + 2*DefaultPullRequestPollInterval))
+		return quiet && m.rng.IntN(4) > 0
+	case focusCommit:
+		live := m.live()
+		switch {
+		case open && m.rng.IntN(2) == 0:
+			// Merged without its commit.
+			sha, err := m.g.Merge(m.number)
+			if err != nil {
+				return false
+			}
+			m.mu.Lock()
+			m.merge, m.noCommit = sha, true
+			m.mu.Unlock()
+			m.logf("merge the pull request without its commit")
+			return true
+		case live.Status.MergeCommitAwaitedSince != nil && !mergeRecorded(live) && m.lastingUntil.IsZero():
+			// The executor saw the merge without its commit; from now on the reads fail, for a while.
+			m.mu.Lock()
+			m.fault = []string{opGet, opGet + faultTimeout, faultOpen}[m.rng.IntN(3)]
+			m.lastingUntil = m.clock.at.Add(time.Duration(6+m.rng.IntN(20)) * time.Minute)
+			m.mu.Unlock()
+			m.logf("reads: %s until +%v", m.fault, m.lastingUntil.Sub(m.start()))
+			return true
+		case m.clock.at.Before(m.lastingUntil):
+			// Mostly quiet while the outage lasts.
+			return m.rng.IntN(4) > 0
+		}
+	case focusReceipt:
+		switch {
+		case open && m.rng.IntN(2) == 0:
+			sha, err := m.g.Merge(m.number)
+			if err != nil {
+				return false
+			}
+			m.mu.Lock()
+			m.merge = sha
+			m.mu.Unlock()
+			m.logf("merge the pull request with its commit")
+			return true
+		case cr.State == providers.ChangeRequestMerged && m.rng.IntN(3) == 0:
+			if m.repo == nil {
+				m.removeRepository()
+			} else {
+				m.restart()
+			}
+			return true
+		}
+	case focusStale:
+		if !m.released {
+			// First the lock is released: the pull request is merged and verified (WaitingForDelivery holds the
+			// lock), then an executor without verification ends it.
+			switch {
+			case open && m.rng.IntN(2) == 0:
+				sha, err := m.g.Merge(m.number)
+				if err != nil {
+					return false
+				}
+				m.mu.Lock()
+				m.merge, m.fault = sha, faultNone
+				m.mu.Unlock()
+				m.logf("merge the pull request with its commit")
+				return true
+			case cr.State == providers.ChangeRequestMerged && m.r.VerifyOutcomes && m.rng.IntN(3) == 0:
+				m.restart()
+				m.r.VerifyOutcomes = false
+				m.logf("verification off")
+				return true
+			}
+			return m.rng.IntN(2) == 0
+		}
+		if m.rng.IntN(2) == 0 {
+			// Then the cache serves an older copy while a read fails, so a helper that writes the Git waits runs on it.
+			m.serveStale()
+			if !m.clock.at.Before(m.lastingUntil) {
+				m.mu.Lock()
+				m.fault = []string{opGet, opList, faultContent, faultOpen}[m.rng.IntN(4)]
+				m.mu.Unlock()
+				m.logf("reads: %s", m.fault)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// serveStale makes the cache serve an older copy of the request at the next read: one that held the lock when the
+// lock was seen released, else one that recorded a Git wait when there is one (what the helpers that write waits
+// read again), any older one otherwise.
+func (m *modelWorld) serveStale() {
+	if len(m.history) < 2 {
+		return
+	}
+	older := m.history[:len(m.history)-1]
+	var waiting, holding []*api.RemediationRequest
+	for _, o := range older {
+		if len(o.Status.GitWaits) > 0 {
+			waiting = append(waiting, o)
+		}
+		if holdsLock(o) {
+			holding = append(holding, o)
+		}
+	}
+	switch {
+	case m.released && len(holding) > 0 && m.rng.IntN(2) == 0:
+		older = holding
+	case len(waiting) > 0 && m.rng.IntN(3) > 0:
+		older = waiting
+	}
+	m.mu.Lock()
+	m.stale, m.staleNext = older[m.rng.IntN(len(older))], true
+	m.mu.Unlock()
+	m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d)",
+		m.stale.Status.Phase, len(m.stale.Status.GitWaits))
+}
+
+// stop stops the request from outside: the kill switch, a person's cancel, or another target branch in the
+// settings.
+func (m *modelWorld) stop() {
+	switch m.rng.IntN(3) {
+	case 0:
+		paused := false
+		m.updateSettings(func(s *api.RemediationSettings) {
+			paused = s.Spec.Paused == nil || !*s.Spec.Paused
+			s.Spec.Paused = new(paused)
+		})
+		m.logf("the kill switch: writes paused %t", paused)
+	case 1:
+		live := &api.RemediationRequest{}
+		if err := m.base.Get(context.Background(), m.key, live); err != nil {
+			m.t.Fatal(err)
+		}
+		live.Spec.Cancel = true
+		if err := m.base.Update(context.Background(), live); err != nil {
+			m.t.Fatal(err)
+		}
+		m.logf("a person cancels the request")
+	default:
+		branch := freshOtherBranch
+		if m.configured == freshOtherBranch {
+			branch = mainBranch
+		}
+		m.setConfigured(branch)
+		m.logf("the settings name target branch %s", branch)
+	}
+}
+
+// removeRepository takes the repository entry out of the settings.
+func (m *modelWorld) removeRepository() {
+	m.updateSettings(func(s *api.RemediationSettings) {
+		m.repo = s.Spec.Repositories[0].DeepCopy()
+		s.Spec.Repositories = s.Spec.Repositories[1:]
+	})
+	m.logf("the repository leaves the settings")
+}
+
+// restoreRepository puts the repository entry back into the settings.
+func (m *modelWorld) restoreRepository() {
+	repo := m.repo
+	m.updateSettings(func(s *api.RemediationSettings) {
+		s.Spec.Repositories = append([]api.GitRepository{*repo}, s.Spec.Repositories...)
+	})
+	m.repo = nil
+	m.logf("the repository is back in the settings")
 }
 
 // addSecond creates a second request for the same target, proposed after the first: it must wait for the lock
@@ -443,8 +945,9 @@ func (m *modelWorld) addSecond() {
 func (m *modelWorld) restart() {
 	r := m.r
 	m.r = &RemediationRequestReconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, Source: r.Source,
-		OpenRepository: r.OpenRepository, Now: r.Now, CleanupTimeout: r.CleanupTimeout}
-	m.logf("restart")
+		OpenRepository: r.OpenRepository, Now: r.Now, CleanupTimeout: r.CleanupTimeout, ReviewerHints: r.ReviewerHints,
+		VerifyOutcomes: m.rng.IntN(2) == 0}
+	m.logf("restart (verify outcomes %t)", m.r.VerifyOutcomes)
 }
 
 // step runs one reconcile, checks the properties, and moves the clock on by its wait.
@@ -458,6 +961,7 @@ func (m *modelWorld) step(check bool) {
 	if gerr := m.base.Get(ctx, m.key, live); gerr != nil {
 		m.t.Fatal(gerr)
 	}
+	m.history = append(m.history, live.DeepCopy())
 	m.mu.Lock()
 	faulted := m.writeFaulted
 	if err == nil && !m.contentTried.IsZero() && m.contentFailing.IsZero() {
@@ -470,8 +974,12 @@ func (m *modelWorld) step(check bool) {
 	}
 	retry := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry)
 	approved := meta.FindStatusCondition(live.Status.Conditions, api.ConditionApproved)
-	m.logf("reconcile: phase %s, holds %t, wait %v, err %v, retry %s, approved %s", live.Status.Phase,
-		holdsLock(live), res.RequeueAfter, err, reasonOf(retry), reasonOf(approved))
+	kinds := make([]string, 0, len(live.Status.GitWaits))
+	for _, w := range live.Status.GitWaits {
+		kinds = append(kinds, string(w.Kind))
+	}
+	m.logf("reconcile: phase %s, holds %t, wait %v, err %v, retry %s, waits %v, approved %s%s", live.Status.Phase,
+		holdsLock(live), res.RequeueAfter, err, reasonOf(retry), kinds, reasonOf(approved), conditionsOf(live))
 	if check {
 		m.properties(live, res, err, faulted)
 	}
@@ -495,9 +1003,9 @@ func (m *modelWorld) stepSecond(ctx context.Context, first *api.RemediationReque
 	// the target is free; its own reconciler, as the first one's resolver answers for the first's plan, and with no
 	// Git host, as the limits tests run admission (limitsWorld): the model checks its lock, not its pull request.
 	res := resolved()
-	res.Source.TargetBranch = freshOtherBranch
+	res.Source.TargetBranch = api.GitBranch(m.configured)
 	// The fake client does not serve the field selectors the lock's list uses; apiServerReader does.
-	r := &RemediationRequestReconciler{Client: m.r.Client, APIReader: &apiServerReader{Reader: m.r.APIReader}, Scheme: m.r.Scheme,
+	r := &RemediationRequestReconciler{Client: m.base, APIReader: &apiServerReader{Reader: m.base}, Scheme: m.r.Scheme,
 		Source: &stubResolver{result: res}, Now: m.r.Now,
 		CleanupTimeout: m.r.CleanupTimeout}
 	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: m.second})
@@ -508,11 +1016,24 @@ func (m *modelWorld) stepSecond(ctx context.Context, first *api.RemediationReque
 	if gerr := m.base.Get(ctx, m.key, first); gerr != nil {
 		m.t.Fatal(gerr)
 	}
-	m.logf("reconcile the second: phase %s, holds %t, err %v, conditions %v", live.Status.Phase, holdsLock(live), err,
-		live.Status.Conditions)
+	m.logf("reconcile the second: phase %s, holds %t, err %v", live.Status.Phase, holdsLock(live), err)
 	if check && holdsLock(live) && holdsLock(first) {
 		m.fatalf("two holders: the second request holds the target while the first does")
 	}
+}
+
+// conditionsOf names the conditions of rr other than GitReadRetry and Approved, with SHADEWRIGHT_MODEL_TRACE=2.
+func conditionsOf(rr *api.RemediationRequest) string {
+	if os.Getenv("SHADEWRIGHT_MODEL_TRACE") != "2" {
+		return ""
+	}
+	var out []string
+	for _, c := range rr.Status.Conditions {
+		if c.Type != api.ConditionGitReadRetry && c.Type != api.ConditionApproved {
+			out = append(out, c.Type+"="+string(c.Status)+"/"+c.Reason)
+		}
+	}
+	return fmt.Sprintf(", conditions %v", out)
 }
 
 func reasonOf(c *metav1.Condition) string {
@@ -522,23 +1043,71 @@ func reasonOf(c *metav1.Condition) string {
 	return c.Reason
 }
 
+// paused reports whether rr shows the kill switch holding it (WritesPaused True): nothing is ended while it does.
+func paused(rr *api.RemediationRequest) bool {
+	return meta.IsStatusConditionTrue(rr.Status.Conditions, api.ConditionWritesPaused)
+}
+
+// modelWaitEnd is when the model expects an entry of kind k of rr to end, from what the model knows of the kind
+// (not from the code under test); ok is false for a Paced entry, which has no end.
+func modelWaitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Time, bool) {
+	switch w.Kind {
+	case api.GitWaitRequestDeadline:
+		if rr.Status.Deadline != nil {
+			return rr.Status.Deadline.Time, true
+		}
+		return w.Since.Time, true
+	case api.GitWaitHandoffGrace:
+		if rr.Status.Deadline != nil {
+			return rr.Status.Deadline.Add(handoffRecoveryGrace), true
+		}
+		return w.Since.Add(handoffRecoveryGrace), true
+	case api.GitWaitMergeCheck:
+		since := w.Since.Time
+		if c := rr.Status.MergeCommitAwaitedSince; c != nil && c.Before(&w.Since) {
+			since = c.Time
+		}
+		return since.Add(mergeCommitWait), true
+	case api.GitWaitMergeContent:
+		return w.Since.Add(mergeContentWait), true
+	}
+	return time.Time{}, false
+}
+
+// properties checks the model's properties after a reconcile (see the top of this file).
 func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Result, err error, faulted bool) {
 	now := m.clock.at
 	poll := m.r.pullRequestPollInterval()
-	if retry := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); retry != nil &&
-		retry.Status == "True" {
-		if end, ok := waitKindOf(retry.Reason).end(live, now); ok && waitKindOf(retry.Reason) != waitNone &&
-			now.After(end.Add(poll)) {
-			m.fatalf("bound: the wait %s passed its end %v ago and stands", retry.Reason, now.Sub(end))
+	for _, w := range live.Status.GitWaits {
+		if end, ok := modelWaitEnd(live, w); ok && now.After(end.Add(poll)) {
+			m.fatalf("waits: the %s wait passed its end %v ago and stands (phase %s)", w.Kind, now.Sub(end),
+				live.Status.Phase)
 		}
+	}
+	// A request a person cancelled is bounded by the cancel's own bound and then watched with CancelPending
+	// (cancelFailed, TestEveryGitReadRetrySiteKeepsItsBound), not by its deadline.
+	if d := live.Status.Deadline; d != nil && live.Status.Phase == api.PhasePolicyChecked && staleMark(live) == nil &&
+		intent(live) == nil && !recoveringHandoff(live) && !paused(live) && !live.Spec.Cancel && now.After(d.Add(poll)) {
+		m.fatalf("clocks: the request is in PolicyChecked %v after its deadline", now.Sub(d.Time))
+	}
+	if since := live.Status.MergeCommitAwaitedSince; since != nil && progresses(live) && !mergeRecorded(live) &&
+		now.After(since.Add(mergeCommitWait+poll)) {
+		m.fatalf("clocks: the merge seen at +%v is not recorded %v later (phase %s)", since.Sub(m.start()),
+			now.Sub(since.Time), live.Status.Phase)
 	}
 	m.mu.Lock()
 	since := m.contentFailing
 	m.mu.Unlock()
 	if !since.IsZero() && now.After(since.Add(mergeContentWait+poll)) && !mergeRecorded(live) {
-		m.fatalf("content bound: the reads of what the merge brought have failed since +%v and the request has not ended",
+		m.fatalf("content: the reads of what the merge brought have failed since +%v and the request has not ended",
 			since.Sub(m.start()))
 	}
+	m.paceProperties(live, res, err, faulted)
+	m.lockProperties(live)
+}
+
+// paceProperties: no three errors in a row with no write made to fail, and no three hot requeues in a row.
+func (m *modelWorld) paceProperties(live *api.RemediationRequest, res reconcile.Result, err error, faulted bool) {
 	if err != nil && !faulted {
 		m.errorsInRow++
 		if m.errorsInRow >= 3 {
@@ -547,38 +1116,96 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	} else {
 		m.errorsInRow = 0
 	}
-	if !holdsLock(live) {
-		cr, found := m.pr()
-		switch {
-		case found && cr.State == providers.ChangeRequestOpen && !m.deleted:
-			m.fatalf("lock open: the lock was released while the pull request is open")
-		case found && cr.State == providers.ChangeRequestMerged && !mergeRecorded(live):
-			m.fatalf("lock merge: the lock was released on a merge the status does not record")
+	if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
+		m.hotInRow++
+		if m.hotInRow >= 3 {
+			m.fatalf("pace: three reconciles in a row asked to run again within a second (phase %s, waits %d)",
+				live.Status.Phase, len(live.Status.GitWaits))
 		}
+	} else {
+		m.hotInRow = 0
 	}
-	_ = res
 }
 
-// settled: after the world healed, the lock is free, or held by a request whose pull request is open.
+// lockProperties: a recorded merge names its pull request and stays recorded; the lock is never released while the
+// pull request is open or on a merge the status does not record, and never comes back.
+func (m *modelWorld) lockProperties(live *api.RemediationRequest) {
+	if mergeRecorded(live) && live.Status.PullRequest == nil {
+		m.fatalf("record: the merge is recorded without the pull request it is about (phase %s)", live.Status.Phase)
+	}
+	if mergeRecorded(live) {
+		m.recorded = true
+	} else if m.recorded {
+		m.fatalf("record lost: the merge was recorded and the status no longer records it (phase %s)", live.Status.Phase)
+	}
+	if !holdsLock(live) && !m.handoff {
+		cr, found := m.pr()
+		switch {
+		case found && cr.State == providers.ChangeRequestOpen && m.delivers(live, cr) && !m.deleted:
+			m.fatalf("lock open: the lock was released while the pull request is open")
+		case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live):
+			m.fatalf("lock merge: the lock was released on a merge the status does not record")
+		}
+		if !progresses(live) {
+			m.released = true
+		}
+	} else if m.released {
+		m.fatalf("lock back: the lock was released and is held again (phase %s)", live.Status.Phase)
+	}
+}
+
+// delivers reports whether cr was merged into a branch that delivers the request's change: the branch its plan was
+// made for, or the one the settings name now. A merge into a branch the settings named for a while and no longer
+// name delivers nothing.
+func (m *modelWorld) delivers(live *api.RemediationRequest, cr providers.ChangeRequest) bool {
+	return cr.BaseBranch == m.configured || live.Status.Source != nil && cr.BaseBranch == string(live.Status.Source.TargetBranch)
+}
+
+// settled: after the world healed, the lock is free, or held by a request whose pull request is open; a merge
+// recorded with its receipt never holds it.
 func (m *modelWorld) settled() {
 	live := &api.RemediationRequest{}
 	if err := m.base.Get(context.Background(), m.key, live); err != nil {
 		m.t.Fatal(err)
 	}
 	cr, found := m.pr()
-	open := found && cr.State == providers.ChangeRequestOpen && !m.deleted
+	open := found && cr.State == providers.ChangeRequestOpen && !m.deleted && m.delivers(live, cr)
 	switch {
-	case holdsLock(live) && !open && !progresses(live):
+	case live.Status.MergeReceipt != nil && holdsLock(live) && !progresses(live) &&
+		!heldForVerification(live, m.r.VerifyOutcomes):
+		m.fatalf("settled receipt: the merge is recorded with its receipt and the lock is held: phase %s",
+			live.Status.Phase)
+	case m.repo != nil, m.handoff:
+		// The repository left the settings: no read can settle anything else. Or the pull request is the
+		// predecessor's, which holds it.
+	case live.Spec.Cancel && meta.IsStatusConditionTrue(live.Status.Conditions, api.ConditionCancelPending):
+		// A cancel that cannot finish is watched, and CancelPending asks a person to act (cancelWatch).
+	case holdsLock(live) && !open && !progresses(live) && !heldForVerification(live, m.r.VerifyOutcomes):
 		m.fatalf("settled lock: the lock is held after the world healed, and the pull request cannot merge (%s): phase %s",
 			cr.State, live.Status.Phase)
-	case found && cr.State == providers.ChangeRequestMerged && !mergeRecorded(live):
+	case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live) && !m.deleted:
 		m.fatalf("settled merge: the merge is not recorded after the world healed: phase %s", live.Status.Phase)
 	}
 }
 
-// modelGit is the Git host of the model: the request's pull request hidden once deleted, and the read the model
-// says failing or running out of the step's time. Reads of what a merge brought are the Parents read of the merge
-// commit; the model notes when they began to fail and when one worked.
+// modelResolver maps the request's target to the file on the target branch the settings name now, at its head.
+type modelResolver struct{ m *modelWorld }
+
+func (s *modelResolver) Resolve(ctx context.Context, _ sourcemap.Input) (sourcemap.Result, error) {
+	res := resolved()
+	res.Source.TargetBranch = api.GitBranch(s.m.configured)
+	head, err := s.m.g.BranchHead(ctx, s.m.configured)
+	if err != nil {
+		return sourcemap.Result{}, err
+	}
+	res.Source.BaseCommit = head
+	return res, nil
+}
+
+// modelGit is the Git host of the model: the request's pull request hidden once deleted, its merge commit withheld
+// while the model says so, and the read the model says failing or running out of the step's time. Reads of what a
+// merge brought are the Parents read of the merge commit; the model notes when they began to fail and when one
+// worked.
 type modelGit struct {
 	providers.GitProvider
 	m *modelWorld
@@ -591,23 +1218,36 @@ func (g *modelGit) fail(ctx context.Context, op string) error {
 	g.m.mu.Lock()
 	fault := g.m.fault
 	g.m.mu.Unlock()
-	name, timeout := strings.CutSuffix(fault, faultTimeout)
-	if name != op {
-		return nil
+	for f := range strings.SplitSeq(fault, faultBoth) {
+		name, timeout := strings.CutSuffix(f, faultTimeout)
+		if name != op {
+			continue
+		}
+		if deadline, bounded := ctx.Deadline(); timeout && bounded && time.Until(deadline) < 2*time.Second {
+			// The step's time (CleanupTimeout) runs out while the host does not answer.
+			<-ctx.Done()
+			return freshness.WrapProvider("read "+op, ctx.Err())
+		}
+		// A read with no short deadline of its own fails as the host's client gives up.
+		return errModelOutage
 	}
-	if deadline, bounded := ctx.Deadline(); timeout && bounded && time.Until(deadline) < 2*time.Second {
-		// The step's time (CleanupTimeout) runs out while the host does not answer.
-		<-ctx.Done()
-		return freshness.WrapProvider("read "+op, ctx.Err())
-	}
-	// A read with no short deadline of its own fails as the host's client gives up.
-	return errModelOutage
+	return nil
 }
 
 func (g *modelGit) hidden(n int64) bool {
 	g.m.mu.Lock()
 	defer g.m.mu.Unlock()
 	return g.m.deleted && n == g.m.number
+}
+
+// shown is cr as the host reports it: without its merge commit while the model withholds it.
+func (g *modelGit) shown(cr providers.ChangeRequest) providers.ChangeRequest {
+	g.m.mu.Lock()
+	defer g.m.mu.Unlock()
+	if g.m.noCommit && cr.Number == g.m.number && cr.State == providers.ChangeRequestMerged {
+		cr.MergeCommit = ""
+	}
+	return cr
 }
 
 func (g *modelGit) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
@@ -617,7 +1257,8 @@ func (g *modelGit) GetChangeRequest(ctx context.Context, n int64) (providers.Cha
 	if g.hidden(n) {
 		return providers.ChangeRequest{}, fmt.Errorf("pull request %d: %w", n, providers.ErrNotFound)
 	}
-	return g.GitProvider.GetChangeRequest(ctx, n)
+	cr, err := g.GitProvider.GetChangeRequest(ctx, n)
+	return g.shown(cr), err
 }
 
 func (g *modelGit) ListChangeRequests(ctx context.Context, head string, openOnly bool) ([]providers.ChangeRequest, error) {
@@ -625,6 +1266,9 @@ func (g *modelGit) ListChangeRequests(ctx context.Context, head string, openOnly
 		return nil, err
 	}
 	all, err := g.GitProvider.ListChangeRequests(ctx, head, openOnly)
+	for i := range all {
+		all[i] = g.shown(all[i])
+	}
 	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return g.hidden(cr.Number) }), err
 }
 
@@ -636,7 +1280,7 @@ func (g *modelGit) FindChangeRequest(ctx context.Context, head string) (provider
 	if err == nil && g.hidden(cr.Number) {
 		return providers.ChangeRequest{}, fmt.Errorf("branch %s: %w", head, providers.ErrNotFound)
 	}
-	return cr, err
+	return g.shown(cr), err
 }
 
 func (g *modelGit) ReadFile(ctx context.Context, sha, path string, limit int) (providers.File, error) {
@@ -644,6 +1288,41 @@ func (g *modelGit) ReadFile(ctx context.Context, sha, path string, limit int) (p
 		return providers.File{}, err
 	}
 	return g.GitProvider.ReadFile(ctx, sha, path, limit)
+}
+
+// CheckBetween and CountAhead are reads of what a merge brought too (retargetedContent); they fail with the
+// content fault.
+func (g *modelGit) CheckBetween(ctx context.Context, from, to, path string) (providers.BranchState, error) {
+	if err := g.contentFail(ctx); err != nil {
+		return 0, err
+	}
+	return g.GitProvider.CheckBetween(ctx, from, to, path)
+}
+
+func (g *modelGit) CountAhead(ctx context.Context, base, head string) (int, error) {
+	if err := g.contentFail(ctx); err != nil {
+		return 0, err
+	}
+	return g.GitProvider.CountAhead(ctx, base, head)
+}
+
+// contentFail is the content fault of a read of what a merge brought, noted for the content property.
+func (g *modelGit) contentFail(ctx context.Context) error {
+	g.m.mu.Lock()
+	merged := g.m.merge != ""
+	g.m.mu.Unlock()
+	if !merged {
+		return nil
+	}
+	err := g.fail(ctx, faultBetween)
+	if err != nil {
+		g.m.mu.Lock()
+		if g.m.contentTried.IsZero() {
+			g.m.contentTried = g.m.clock.at
+		}
+		g.m.mu.Unlock()
+	}
+	return err
 }
 
 func (g *modelGit) Parents(ctx context.Context, sha string) ([]string, error) {
@@ -665,4 +1344,13 @@ func (g *modelGit) Parents(ctx context.Context, sha string) ([]string, error) {
 	g.m.contentFailing, g.m.contentTried = time.Time{}, time.Time{}
 	g.m.mu.Unlock()
 	return g.GitProvider.Parents(ctx, sha)
+}
+
+// live is the request as the API server holds it.
+func (m *modelWorld) live() *api.RemediationRequest {
+	live := &api.RemediationRequest{}
+	if err := m.base.Get(context.Background(), m.key, live); err != nil {
+		m.t.Fatal(err)
+	}
+	return live
 }

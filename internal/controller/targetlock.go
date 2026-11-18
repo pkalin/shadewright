@@ -469,7 +469,14 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
 	if s, ok := r.settleByReceipt(rr); ok {
 		// The recorded merge with its receipt settles the lock: no read of the branch, so neither a repository that
-		// cannot be opened nor a failing Git host keeps it.
+		// cannot be opened nor a failing Git host keeps it. A pause holds it as it holds every settlement (sixth
+		// decision of 2026-11-18 on #771): the first reconcile after the pause releases it.
+		switch paused, err := r.writesPaused(ctx); {
+		case err != nil:
+			return reconcile.Result{}, err
+		case paused:
+			return r.waitWhilePaused(ctx, rr)
+		}
 		if err := lockverdict.Release(&rr.Status, s); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -494,11 +501,10 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, err
 	}
 	if errors.Is(err, freshness.ErrPaused) {
-		// The kill switch holds the look (the settings are read paused before any read of the Git host): the lock
-		// is kept, WritesPaused says why, and the look runs again after freshRecheckDelay, never as an error for the
-		// rate limiter. For a request cancelled for its Incident a close of its own may be left to make, as when the
-		// pause comes between the read and the close (closeCancelled). The read after the pause removes the
-		// condition (settleCancelled, or resume below).
+		// The kill switch holds the look: planEntry reads the settings live and returns ErrPaused before any read of
+		// the Git host. The lock is kept, WritesPaused says why, and the look runs again after freshRecheckDelay,
+		// never as an error for the rate limiter. The first look after the pause settles the lock and removes the
+		// condition (resume below, or settleCancelled for a request cancelled for its Incident).
 		return r.waitWhilePaused(ctx, rr)
 	}
 	c := repositoryRead(rr, err)
@@ -523,6 +529,8 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if res, done, err := r.settleStopException(ctx, rr, v); done {
 		return res, err
 	}
+	// No pull request of an expired request's own is open any more: a close that was failing is over.
+	closeNoLongerFailing(rr)
 	reason, cancelled := cancelledForIncident(rr)
 	if cancelled {
 		// Closed (by Shadewright, its answer lost, or by a person) or not this request's: no close is left to make,

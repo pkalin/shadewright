@@ -39,7 +39,7 @@ func scripted(t *testing.T, st modelStart) *modelWorld {
 
 func (m *modelWorld) steps(n int) {
 	for range n {
-		m.step(true)
+		m.step()
 	}
 }
 

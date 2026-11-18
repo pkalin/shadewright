@@ -396,6 +396,11 @@ func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *ap
 // reconcile stops there; a merge wait ended by its mark lets the reconcile go on, which then records the merge. A
 // failed status write is returned for the error backoff. Only recorded state is read: the entries, the clocks, the
 // deadline, and the executor's clock.
+//
+// While writes are paused (the kill switch, read live) a passed wait is not ended: the request keeps its phase and
+// waits for the pause (waitWhilePaused), as every other step does (sixth decision of 2026-11-18 on #771). Time spent
+// paused counts against the bound, so the first reconcile after the pause ends every wait that passed meanwhile,
+// before any other step. A failed read of the settings is returned for the error backoff.
 func (r *RemediationRequestReconciler) endPassedWait(ctx context.Context, rr *api.RemediationRequest) (
 	ctrl.Result, bool, error) {
 	now := r.now()
@@ -411,6 +416,16 @@ func (r *RemediationRequestReconciler) endPassedWait(ctx context.Context, rr *ap
 		// Nothing is left for these to end: removed, never ended again.
 		if err := r.dropGitWaits(ctx, rr, func(w api.GitWait) bool { return slices.Contains(stale, kindOfEntry(w)) }); err != nil {
 			return ctrl.Result{}, true, err
+		}
+	}
+	if _, ok := passedWait(rr, now); ok {
+		paused, err := r.writesPaused(ctx)
+		if err != nil {
+			return ctrl.Result{}, true, err
+		}
+		if paused {
+			res, err := r.waitWhilePaused(ctx, rr)
+			return res, true, err
 		}
 	}
 	for {

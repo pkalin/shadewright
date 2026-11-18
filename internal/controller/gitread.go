@@ -412,6 +412,11 @@ func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, ke
 			return 0, err
 		}
 	}
+	if meta.IsStatusConditionTrue(rr.Status.Conditions, api.ConditionWritesPaused) {
+		// The kill switch holds the request (waitWhilePaused): no wait ends while it lasts (endPassedWait), so an end
+		// that passed is not looked at sooner than the pause's own recheck.
+		return 0, nil
+	}
 	const none = time.Duration(1<<63 - 1)
 	if left := r.withinWaits(rr, none); left < none {
 		return left, nil

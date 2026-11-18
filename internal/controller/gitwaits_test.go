@@ -338,8 +338,6 @@ var unboundedReads = map[string]noBoundReason{
 	// A request cancelled for its Incident keeps the lock until a read settles its pull request.
 	"followCancelledMerge": noBoundHeldLock,
 	"closeCancelled":       noBoundHeldLock,
-	// An expired request keeps the lock until its own pull request is closed or found closed (cleanUpExpired).
-	"cleanUpExpired": noBoundHeldLock,
 }
 
 func TestUnboundedReadsAreListed(t *testing.T) {

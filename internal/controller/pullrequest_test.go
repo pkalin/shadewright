@@ -2880,21 +2880,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			Expect(reconcileSecond().Status.Phase).To(Equal(remediationv1alpha1.PhasePolicyChecked))
 		})
 
-		It("settles its lock while writes are paused when no pull request of its own is on the branch", func() {
-			// A pause stops writes to the Git host and nothing else (fifth decision of 2026-11-18 on #771): the read
-			// that settles the lock goes on, and with no close to make nothing waits for the pause.
-			naming()
-			afterCommit(remove)
-			cancelled(remediationv1alpha1.ReasonIncidentGone)
-			pauseWrites(true)
-			Expect(reconcileOnce()).To(Succeed())
-			got := fetch()
-			Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()), "the read settles the lock during the pause")
-			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).
-				To(BeNil(), "no close is left for the pause to hold")
-		})
-
-		DescribeTable("says writes are paused when the pause holds its close, and removes it after the pause",
+		DescribeTable("says writes are paused when the pause comes before the read, and removes it after the pause",
 			func(found pausedFind) {
 				naming()
 				afterCommit(remove)
@@ -2907,14 +2893,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					recordedOpen(own, remediationv1alpha1.ReasonIncidentGone)
 				}
 				pauseWrites(true)
-				if found == findOpen {
-					// The read that finds it and the status write that records it go on during a pause (fifth
-					// decision of 2026-11-18 on #771); only the close waits.
-					res, err := reconcileResult()
-					Expect(err).NotTo(HaveOccurred())
-					Expect(res.RequeueAfter).To(Equal(stepDelay))
-					Expect(fetch().Status.PullRequest).NotTo(BeNil(), "recorded during the pause")
-				}
 				for range 2 {
 					res, err := reconcileResult()
 					Expect(err).NotTo(HaveOccurred(), "a pause is a wait")
@@ -2934,8 +2912,16 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				got = fetch()
 				Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)).
 					To(BeNil(), "the read after the pause removes it")
-				Expect(stateOf(own.Number)).To(Equal(providers.ChangeRequestClosed), "the close waited for the pause")
+				switch found {
+				case findNone:
+					Expect(got.Status.HoldsTarget).To(HaveValue(BeFalse()))
+				case findRecorded:
+					Expect(stateOf(own.Number)).To(Equal(providers.ChangeRequestClosed))
+				default:
+					Expect(got.Status.PullRequest).NotTo(BeNil(), "recorded, and closed next")
+				}
 			},
+			Entry("with no pull request on the branch", findNone),
 			Entry("with its own pull request found open, not recorded yet", findOpen),
 			Entry("with its own pull request recorded, to be closed", findRecorded),
 		)
@@ -5118,7 +5104,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				return meta.FindStatusCondition(fetch().Status.Conditions, remediationv1alpha1.ConditionWritesPaused)
 			}
 			// pauseBetweenFullRechecks reaches a waiting request whose last full recheck is recent and which
-			// carries WritesPaused, as a write held back by a pause between two full rechecks leaves it.
+			// carries WritesPaused, as a pause between two full rechecks leaves it.
 			pauseBetweenFullRechecks := func() *RemediationRequestReconciler {
 				recorder = record.NewFakeRecorder(20)
 				drive(remediationv1alpha1.PhaseAwaitingApproval)
@@ -5127,16 +5113,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				setPaused(true)
 				clock = clock.Add(DefaultPullRequestPollInterval)
 				look(r)
-				// A pause stops writes only (fifth decision of 2026-11-18 on #771): the look reads on and, with no
-				// write to hold, sets nothing.
-				Expect(paused()).To(BeNil(), "a look that writes nothing is not held back")
-				Expect(recorder.Events).To(BeEmpty())
-				// The condition a held write leaves.
-				got := fetch()
-				meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
-					Type: remediationv1alpha1.ConditionWritesPaused, Status: metav1.ConditionTrue,
-					Reason: ReasonWritesPaused, Message: messageWritesPaused})
-				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+				Expect(paused()).NotTo(BeNil())
+				Expect(recorder.Events).To(Receive(Equal("Normal " + ReasonWritesPaused + " " + messageWritesPaused)))
 				setPaused(false)
 				clock = clock.Add(DefaultPullRequestPollInterval)
 				return r

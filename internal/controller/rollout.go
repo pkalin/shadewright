@@ -53,9 +53,8 @@ import (
 // the Kustomization with the get the executor already holds on them and asks the Git host, a read, whether a
 // later applied commit holds the merge commit; it writes only the request's status and one Event (invariant 6).
 // No Git write is made, so the kill switch has nothing to gate; the Git provider is chosen by mergeQuery (the merge
-// receipt's repository, or the plan's for a request merged before receipts existed), and this check reads on while
-// writes are paused (fifth decision of 2026-11-18 on #771); a pause only moves the end of the delivery window by its
-// length (status.rollout.pausedSince), so a window never ends during a pause.
+// receipt's repository, or the plan's for a request merged before receipts existed), and this check asks it
+// nothing while writes are paused: it waits.
 //
 // A read that fails, a delivery not yet seen applied and a cancelled reconcile are never a verdict: the request
 // keeps its status and is looked at again. The check is bounded in time and always ends with a verdict in
@@ -67,7 +66,7 @@ import (
 const (
 	// deliveryWindow is how long after the merge (the request's move to Merged) the executor waits for the
 	// delivery to be seen applied. Past it, a delivery checked and not seen ends the check with
-	// DeliveryNotObserved; a pause moves that end by its length, so the window never ends while writes are paused.
+	// DeliveryNotObserved; while writes are paused it waits.
 	deliveryWindow = time.Hour
 	// stuckWatch is how long after the deadline the executor keeps reading a rollout it reported stuck, so a
 	// rollout a person unblocks turns RolledOut True.
@@ -238,7 +237,7 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 		}
 	}
 	windowEnd := deliveryWindowEnd(rr, start, now)
-	d, err := r.delivered(stepCtx, rr, r.mergeQuery(rr))
+	d, err := r.delivered(stepCtx, rr, r.mergeQuery(rr, true))
 	err = boundErr(ctx, stepCtx, "delivery check", err)
 	if ctx.Err() != nil {
 		return reconcile.Result{}, nil, err
@@ -263,8 +262,7 @@ func (r *RemediationRequestReconciler) waitForDelivery(ctx, stepCtx context.Cont
 	}
 	switch {
 	case errors.Is(err, freshness.ErrPaused):
-		// A read refused by the gate of a provider that is paused (none of this check's reads is gated today): wait;
-		// the pause does not count against the window.
+		// The Git host is not asked while writes are paused; the pause does not count against the window.
 		return reconcile.Result{RequeueAfter: freshRecheckDelay}, nil, nil
 	case errors.Is(err, errDeliveryMoved):
 		return reconcile.Result{RequeueAfter: time.Second}, nil, nil
@@ -597,11 +595,13 @@ type deliveryQuery struct {
 // settings name now; after a merge seen on the recorded branch, that one) and its repository, opened by the
 // receipt's URL and installation whatever target branch the settings name (receiptAncestry). Only a request
 // merged before receipts existed asks about its recorded pull request and source, through the plan's repository
-// (planAncestry). Both only read, so both go on while writes are paused (fifth decision of 2026-11-18 on #771).
-func (r *RemediationRequestReconciler) mergeQuery(rr *remediationv1alpha1.RemediationRequest) deliveryQuery {
+// (planAncestry). pauseGated is true for the check without --verify-outcomes, which asks the Git host nothing
+// while writes are paused (freshness.ErrPaused) and waits.
+func (r *RemediationRequestReconciler) mergeQuery(rr *remediationv1alpha1.RemediationRequest,
+	pauseGated bool) deliveryQuery {
 	if mr := rr.Status.MergeReceipt; mr != nil {
 		return deliveryQuery{commit: mr.MergeCommitSHA, branch: string(deliveryBranch(rr)),
-			ancestry: receiptAncestry{r: r, receipt: mr, stale: stalePlanMerged(rr)}}
+			ancestry: receiptAncestry{r: r, receipt: mr, stale: stalePlanMerged(rr), pauseGated: pauseGated}}
 	}
 	return deliveryQuery{commit: rr.Status.PullRequest.MergeCommitSHA, branch: string(deliveryBranch(rr)),
 		ancestry: planAncestry{r: r, rr: rr}}

@@ -55,7 +55,7 @@ var statusClocks = map[string]statusClock{
 		why: "the wait to confirm a merge conflict, bounded by its own check"},
 	"status.rollout.waitStartedAt": {test: "TestRolloutLateReconcileEndsWithAVerdict",
 		why: "the delivery window, ended by the rollout's verdict"},
-	"status.rollout.pausedSince": {test: "TestRolloutPausedHoldsAnEndedWindow",
+	"status.rollout.pausedSince": {test: "TestRolloutPausedDoesNotEndTheWindow",
 		why: "a paused rollout, which moves the delivery window by the pause"},
 	"status.pullRequest.appliedObservedAt": {test: "TestEveryGitReadRetrySiteKeepsItsBound",
 		why: "the start of the delivery window (paceAt(windowEnd) of deliveryStep and waitForDelivery)"},

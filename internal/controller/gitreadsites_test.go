@@ -190,8 +190,6 @@ var gitReadSites = map[string]gitReadSite{
 	"remediationrequest_controller.go:recheck:1":     {bound: "lookBound", check: checkLookBound},
 	"remediationrequest_controller.go:recheck:2":     {bound: "lookBound", check: checkLookBound},
 	"targetlock.go:heldUnsettled:1":                  {bound: heldLockBound},
-	// The close of an expired request's own pull request, after the stop (fifth decision of 2026-11-18 on #771).
-	"pullrequest.go:cleanUpExpired:1": {bound: heldLockBound},
 }
 
 // checkRequestBound: a request in PolicyChecked c.left before its deadline (requestBound) fails a read that takes

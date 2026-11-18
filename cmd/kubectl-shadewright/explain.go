@@ -188,6 +188,7 @@ var troubleshootingSections = map[string][]string{
 	"PreviousValueUnknown":              {secNotRequest},
 	"PullRequestClosed":                 {secPullRequest},
 	"PullRequestDeadline":               {secPullRequest},
+	"PullRequestDeadlineCleanupFailed":  {secPullRequest},
 	"PullRequestDeadlineCleanupRefused": {secPullRequest},
 	"PullRequestOpened":                 {secPullRequest},
 	"PullRequestRewriteRefused":         {secPullRequest},

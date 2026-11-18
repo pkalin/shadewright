@@ -63,13 +63,19 @@ import (
 // schema of the CRD, as the API server does: a write it would refuse is a violation.
 //
 // After each reconcile:
-//   - waits: every entry of status.gitWaits has not passed the end of its kind by more than one poll interval: the
+//   - pause: a reconcile that starts while writes are paused calls the Git host nothing (opening the repository
+//     included) and leaves the phase of a request whose merge is not recorded as it was: a pause stops the look at a recorded pull request, the settlement,
+//     the cancel watch, the deadline's end and the end of every other wait (sixth decision of 2026-11-18 on #771);
+//   - lift: the first reconcile after the pause is lifted ends every wait that passed meanwhile (time paused counts
+//     against a started bound) and, with reads working and no write made to fail, settles the lock of a stopped holder
+//     whose pull request is closed, before any other step;
+//   - waits (not while paused): every entry of status.gitWaits has not passed the end of its kind by more than one poll interval: the
 //     request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after its
 //     start or the merge clock (MergeCheck), five minutes after its start (MergeContent);
-//   - clocks: every time field of the status that bounds a wait has not passed its end by more than one poll
+//   - clocks (not while paused): every time field of the status that bounds a wait has not passed its end by more than one poll
 //     interval (gitWaitClocks): a request in PolicyChecked past its deadline, a merge seen without its commit
 //     (mergeCommitAwaitedSince) whose merge is not recorded;
-//   - content: the reads of what a merge brought that kept failing since a time T end the request
+//   - content (not while paused): the reads of what a merge brought that kept failing since a time T end the request
 //     (MergeContentUnreadable or the merge recorded) by T plus mergeContentWait plus one poll interval;
 //   - errors: no three reconciles in a row return an error while no write is made to fail;
 //   - pace: no three reconciles in a row ask to be run again within a second without an error (a wait that ends
@@ -80,11 +86,12 @@ import (
 //     only after the settings moved, is recorded as released aside), and a lock once released never comes back
 //     while the request does not hold it;
 //   - ending: a reconcile that starts with a wait past its end (status.gitWaits) calls the Git host nothing before
-//     its first status write: the end decides from recorded state alone (fifth decision of 2026-11-18 on #771);
+//     its first status write: the end decides from recorded state alone (fifth decision of 2026-11-18 on #771, point
+//     5 as the sixth kept it);
 //   - schema: no status write is one the API server refuses.
 //
-// At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; writes stay
-// paused in half of the runs and always under the pause focus, since a pause stops writes only) and, after a few
+// At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; a pause is
+// lifted, after a few more reconciles under it in half of the runs and always under the pause focus) and, after a few
 // reconciles, the lock is free, or held by a request whose pull request is open and can still merge; a merge
 // recorded with its receipt never holds it, whether the repository came back or not; a merge is recorded; and a
 // cancelled request whose pull request is closed or gone holds no lock (settled cancel).
@@ -273,6 +280,10 @@ type modelWorld struct {
 	calls  int
 	passed string
 	ended  bool
+	// lifted: the pause was lifted since the last reconcile (property "lift"); liftedAt is when the last pause was
+	// lifted: an end that passed during it is due by then (afterPause).
+	lifted             bool
+	pausedAt, liftedAt time.Time
 }
 
 // modelStart is how a run of the model begins: drawn from the seed (drawStart), or given by a scripted test.
@@ -640,17 +651,21 @@ func (m *modelWorld) run() {
 	m.history = append(m.history, m.live())
 	for range modelSteps {
 		m.event()
-		m.step(true)
+		m.step()
 	}
 	m.mu.Lock()
 	m.fault, m.loseNext, m.conflictNext, m.applyNext, m.staleNext, m.noCommit = faultNone, false, false, false, false, false
 	m.lastingUntil = time.Time{}
 	m.mu.Unlock()
 	if m.paused && (m.focus == focusPause || m.rng.IntN(2) == 0) {
-		// A pause stops writes to the Git host only (fifth decision of 2026-11-18 on #771): reads go on, so every
-		// settlement below that needs no write is reached while it lasts.
-		m.logf("the pause stays")
-	} else if m.paused {
+		// A pause stops everything (sixth decision of 2026-11-18 on #771): the healed world changes nothing while it
+		// lasts, and the reconcile after the lift settles what passed meanwhile.
+		m.logf("the pause stays a while")
+		for range 3 {
+			m.step()
+		}
+	}
+	if m.paused {
 		m.pause(false)
 	}
 	if m.repo != nil && m.rng.IntN(2) == 0 {
@@ -658,7 +673,7 @@ func (m *modelWorld) run() {
 	}
 	m.logf("heal (repository in the settings: %t, writes paused: %t)", m.repo == nil, m.paused)
 	for range 8 {
-		m.step(true)
+		m.step()
 	}
 	m.settled()
 	m.report()
@@ -803,6 +818,12 @@ func (m *modelWorld) event() {
 // pause sets or lifts the kill switch's pause of writes.
 func (m *modelWorld) pause(on bool) {
 	m.updateSettings(func(s *api.RemediationSettings) { s.Spec.Paused = new(on) })
+	switch {
+	case m.paused && !on:
+		m.lifted, m.liftedAt = true, m.clock.at
+	case !m.paused && on && m.clock != nil:
+		m.pausedAt = m.clock.at
+	}
 	m.paused = on
 	m.logf("the kill switch: writes paused %t", on)
 }
@@ -1094,7 +1115,7 @@ func (m *modelWorld) restart() {
 }
 
 // step runs one reconcile, checks the properties, and moves the clock on by its wait.
-func (m *modelWorld) step(check bool) {
+func (m *modelWorld) step() {
 	ctx := context.Background()
 	passed := ""
 	before := m.live()
@@ -1113,6 +1134,8 @@ func (m *modelWorld) step(check bool) {
 	m.mu.Lock()
 	m.writeFaulted, m.calls, m.passed, m.ended = false, 0, passed, false
 	m.mu.Unlock()
+	paused, lifted, startedAt := m.paused, m.lifted, m.clock.at
+	m.lifted = false
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.key})
 	m.mu.Lock()
 	m.passed = ""
@@ -1130,7 +1153,7 @@ func (m *modelWorld) step(check bool) {
 	m.contentTried = time.Time{}
 	m.mu.Unlock()
 	if m.second.Name != "" {
-		m.stepSecond(ctx, live, check)
+		m.stepSecond(ctx, live)
 	}
 	retry := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry)
 	approved := meta.FindStatusCondition(live.Status.Conditions, api.ConditionApproved)
@@ -1140,9 +1163,8 @@ func (m *modelWorld) step(check bool) {
 	}
 	m.logf("reconcile: phase %s, holds %t, wait %v, err %v, retry %s, waits %v, approved %s%s", live.Status.Phase,
 		holdsLock(live), res.RequeueAfter, err, reasonOf(retry), kinds, reasonOf(approved), conditionsOf(live))
-	if check {
-		m.properties(live, res, err, faulted)
-	}
+	m.pauseProperties(before, live, paused, lifted && !staleRead, startedAt, faulted)
+	m.properties(live, res, err, faulted, paused)
 	switch {
 	case err != nil:
 		m.clock.advance(time.Second)
@@ -1155,7 +1177,7 @@ func (m *modelWorld) step(check bool) {
 }
 
 // stepSecond reconciles the second request, and checks that it never holds the target while the first does.
-func (m *modelWorld) stepSecond(ctx context.Context, first *api.RemediationRequest, check bool) {
+func (m *modelWorld) stepSecond(ctx context.Context, first *api.RemediationRequest) {
 	m.mu.Lock()
 	m.writeFaulted = false
 	m.mu.Unlock()
@@ -1177,7 +1199,7 @@ func (m *modelWorld) stepSecond(ctx context.Context, first *api.RemediationReque
 		m.t.Fatal(gerr)
 	}
 	m.logf("reconcile the second: phase %s, holds %t, err %v", live.Status.Phase, holdsLock(live), err)
-	if check && holdsLock(live) && holdsLock(first) {
+	if holdsLock(live) && holdsLock(first) {
 		m.fatalf("two holders: the second request holds the target while the first does")
 	}
 }
@@ -1230,11 +1252,18 @@ func modelWaitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Time, bool) {
 }
 
 // properties checks the model's properties after a reconcile (see the top of this file).
-func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Result, err error, faulted bool) {
+func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Result, err error, faulted, paused bool) {
 	now := m.clock.at
 	poll := m.r.pullRequestPollInterval()
+	if paused {
+		// A pause holds every wait and every clock (property "pause"); the reconcile after the lift answers for them
+		// (property "lift").
+		m.paceProperties(live, res, err, faulted)
+		m.lockProperties(live)
+		return
+	}
 	for _, w := range live.Status.GitWaits {
-		if end, ok := modelWaitEnd(live, w); ok && now.After(end.Add(poll)) {
+		if end, ok := modelWaitEnd(live, w); ok && now.After(m.afterPause(end).Add(poll)) {
 			m.fatalf("waits: the %s wait passed its end %v ago and stands (phase %s)", w.Kind, now.Sub(end),
 				live.Status.Phase)
 		}
@@ -1242,23 +1271,74 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	// A request a person cancelled is bounded by the cancel's own bound and then watched with CancelPending
 	// (cancelFailed, TestEveryGitReadRetrySiteKeepsItsBound), not by its deadline.
 	if d := live.Status.Deadline; d != nil && live.Status.Phase == api.PhasePolicyChecked && staleMark(live) == nil &&
-		intent(live) == nil && !recoveringHandoff(live) && !live.Spec.Cancel && !faulted && now.After(d.Add(poll)) {
+		intent(live) == nil && !recoveringHandoff(live) && !live.Spec.Cancel && !faulted &&
+		now.After(m.afterPause(d.Time).Add(poll)) {
 		m.fatalf("clocks: the request is in PolicyChecked %v after its deadline", now.Sub(d.Time))
 	}
 	if since := live.Status.MergeCommitAwaitedSince; since != nil && progresses(live) && !mergeRecorded(live) &&
-		now.After(since.Add(mergeCommitWait+poll)) {
+		now.After(m.afterPause(since.Add(mergeCommitWait)).Add(poll)) {
 		m.fatalf("clocks: the merge seen at +%v is not recorded %v later (phase %s)", since.Sub(m.start()),
 			now.Sub(since.Time), live.Status.Phase)
 	}
 	m.mu.Lock()
 	since := m.contentFailing
 	m.mu.Unlock()
-	if !since.IsZero() && now.After(since.Add(mergeContentWait+poll)) && !mergeRecorded(live) {
+	if !since.IsZero() && now.After(m.afterPause(since.Add(mergeContentWait)).Add(poll)) && !mergeRecorded(live) {
 		m.fatalf("content: the reads of what the merge brought have failed since +%v and the request has not ended",
 			since.Sub(m.start()))
 	}
 	m.paceProperties(live, res, err, faulted)
 	m.lockProperties(live)
+}
+
+// afterPause is end, or the time the last pause was lifted when end was not overdue by a poll interval when the pause
+// began and passed before the lift: a pause holds every end, and time paused counts against the bound, so such an
+// end is due at the lift.
+func (m *modelWorld) afterPause(end time.Time) time.Time {
+	if end.Before(m.liftedAt) && !end.Add(m.r.pullRequestPollInterval()).Before(m.pausedAt) {
+		return m.liftedAt
+	}
+	return end
+}
+
+// pauseProperties checks the properties of the pause (see the top of this file): while paused, no call to the Git
+// host and no phase change; at the first reconcile after the lift (lifted), no wait past its end at the start of that
+// reconcile stands, and a stopped holder whose pull request is closed holds no lock, unless a read or a write was made
+// to fail.
+func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, paused, lifted bool, startedAt time.Time,
+	faulted bool) {
+	m.mu.Lock()
+	calls, fault := m.calls, m.fault
+	m.mu.Unlock()
+	if paused {
+		if calls > 0 {
+			m.fatalf("pause call: writes are paused and the reconcile called the Git host %d times (phase %s)", calls,
+				live.Status.Phase)
+		}
+		// The phases after a recorded merge go on during a pause as on main: they read and write only the request's
+		// own status (afterMerge), and the rollout's window does not count the time paused.
+		if live.Status.Phase != before.Status.Phase && !mergeRecorded(before) {
+			m.fatalf("pause phase: writes are paused and the phase changed from %s to %s", before.Status.Phase,
+				live.Status.Phase)
+		}
+		return
+	}
+	if !lifted || faulted {
+		return
+	}
+	for _, w := range live.Status.GitWaits {
+		if end, ok := modelWaitEnd(live, w); ok && !startedAt.Before(end) {
+			m.fatalf("lift wait: the %s wait passed its end during the pause and stands after the first reconcile "+
+				"after the lift (phase %s)", w.Kind, live.Status.Phase)
+		}
+	}
+	cr, found := m.pr()
+	if fault == faultNone && m.repo == nil && !m.handoff && found && !m.deleted &&
+		cr.State == providers.ChangeRequestClosed && holdsLock(live) && !progresses(live) &&
+		!heldForVerification(live, m.r.VerifyOutcomes) {
+		m.fatalf("lift lock: the pull request is closed and the stopped holder keeps the lock after the first "+
+			"reconcile after the lift (phase %s)", live.Status.Phase)
+	}
 }
 
 // paceProperties: no three errors in a row with no write made to fail, and no three hot requeues in a row.

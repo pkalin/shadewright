@@ -131,6 +131,10 @@ const (
 	// Git host refused to find or close one Shadewright may have opened on the branch (its status write lost).
 	// The request keeps the lock on its target until a look-up finds none of its own open (targetlock.go).
 	ReasonPullRequestDeadlineCleanupRefused = "PullRequestDeadlineCleanupRefused"
+	// ReasonPullRequestDeadlineCleanupFailed: the pull request was not opened before status.deadline, and the close
+	// of one Shadewright opened on the branch kept failing (not a refusal) for 24 hours after the first failure
+	// (condition CleanupFailing). The request keeps the lock on its target until a look-up finds none of its own open.
+	ReasonPullRequestDeadlineCleanupFailed = "PullRequestDeadlineCleanupFailed"
 	// ReasonChangeRequestGone: the recorded pull request cannot be found any more.
 	ReasonChangeRequestGone = "ChangeRequestGone"
 	// ReasonPlanIncomplete: the request's status.source has no buildPath, so the change cannot be rendered.
@@ -233,10 +237,11 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 		return remediationv1alpha1.GitRepository{}, false, fmt.Errorf("get RemediationSettings %s: %w",
 			remediationv1alpha1.SettingsName, err)
 	}
-	// A pause of the kill switch is not looked at here: it stops writes to the Git host and nothing else (fifth
-	// decision of 2026-11-18 on #771). Every provider opened from this entry is gated (openPlanEntry,
-	// openRecordedBranch), so a write refuses with freshness.ErrPaused at the gate right before it, and the reads,
-	// the settlement of the target lock among them, go on while writes are paused.
+	// A pause of the kill switch stops every path that opens the plan's repository, reads included (sixth decision of
+	// 2026-11-18 on #771): while it lasts the executor asks the Git host nothing for the request.
+	if freshness.Paused(settings) {
+		return remediationv1alpha1.GitRepository{}, false, freshness.ErrPaused
+	}
 	repo, reinstalled, ok := cleanupRepository(settings, rr, staleMark(rr) != nil)
 	if !ok {
 		return remediationv1alpha1.GitRepository{}, false, errRepositoryGone
@@ -957,11 +962,25 @@ func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git provid
 // checkAtMerge started; the full freshness check never runs on the merged change, which makes the plan look stale
 // (TargetFileChanged) and would end a fresh plan capped. A failed write is joined to checkErr: nothing is
 // recorded, and the retry finds the pull request through the branch again.
+//
+// A request that no longer progresses (it ended Expired, or stopped, and its own pull request was found merged by
+// the read after the stop) keeps its phase and its deadline: such a request leaves its phase only for the record of
+// the merge (sixth decision of 2026-11-18 on #771, #808), never back to PRCreated. The stop's condition moves from
+// PullRequestOpened to Approved, where stop puts it once a pull request is recorded, so the read after the stop
+// still sees why the request ended (expiredUncleaned) and records the merge when the check answers or its wait ends.
 func (r *RemediationRequestReconciler) mergeUnchecked(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, checkErr error) error {
-	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
+	if progresses(rr) {
+		r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
+		rr.Status.Deadline = nil
+	} else if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened); c != nil &&
+		c.Status == metav1.ConditionFalse {
+		// The stop was written before a pull request was recorded (endMerged has just recorded it in memory).
+		moved := *c
+		moved.Type = remediationv1alpha1.ConditionApproved
+		meta.SetStatusCondition(&rr.Status.Conditions, moved)
+	}
 	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
-	rr.Status.Deadline = nil
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:   remediationv1alpha1.ConditionPROpened,
 		Status: metav1.ConditionTrue,
@@ -1627,6 +1646,11 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 	// closed stale plan (endFreshness) replaces it. The pull request is merged or closed now, or no longer this
 	// request's to close, so PullRequestNotClosed goes.
 	clearNotClosed(rr)
+	if rr.Status.Phase == remediationv1alpha1.PhaseExpired && rr.DeletionTimestamp.IsZero() {
+		// The close of an expired request's cleanup (expiredCloseFailed) is over once it ends again or its merge is
+		// recorded.
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
+	}
 	r.setPhase(rr, phase)
 	if phase == remediationv1alpha1.PhaseMerged {
 		// The Incident's count at the merge, in the write that sets Merged with the receipt (ADR-0030 section
@@ -1665,16 +1689,25 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 }
 
 // expire ends a request whose pull request was not opened before its deadline: Expired with reason
-// PullRequestDeadline, in one status write and with no read of the Git host (fifth decision of 2026-11-18 on #771):
-// the deadline has passed, so neither a Git host that fails nor a pause of the kill switch holds the end back.
+// PullRequestDeadline, in one status write and with no read of the Git host (fifth decision of 2026-11-18 on #771,
+// points 3 to 5 as the sixth kept them): the deadline has passed, so a Git host that fails does not hold the end back.
+// A pause of the kill switch does (sixth decision of 2026-11-18 on #771): while writes are paused the request keeps
+// its phase and waits (waitWhilePaused); the time paused counts against the deadline, so the first reconcile after
+// the pause ends it.
 //
 // The cleanup is a step of its own after the stop (cleanUpExpired, through checkHeld): a pull request of its own
-// opened while the write that would record it was lost is closed (a write, which waits for a pause), and one found
-// merged is recorded as the request's merge (endMerged). The target lock stays until the read of the branch after
-// the stop finds none open that may deliver the change (#808). Only a failure of the Kubernetes API is returned,
-// for the error backoff; the result asks for that step a second later.
+// opened while the write that would record it was lost is closed, and one found merged is recorded as the request's
+// merge (endMerged). The target lock stays until the read of the branch after the stop finds none open that may
+// deliver the change (#808). Only a failure of the Kubernetes API is returned, for the error backoff; the result asks
+// for that step a second later.
 func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
+	switch paused, err := r.writesPaused(ctx); {
+	case err != nil:
+		return reconcile.Result{}, err
+	case paused:
+		return r.waitWhilePaused(ctx, rr)
+	}
 	err := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired, ReasonPullRequestDeadline,
 		messageDeadlinePassed))
 	if err != nil || !ptr.Deref(rr.Status.HoldsTarget, false) {
@@ -1684,8 +1717,8 @@ func (r *RemediationRequestReconciler) expire(ctx context.Context, rr *remediati
 }
 
 // messageDeadlinePassed is the message of an expired request whose cleanup has not finished (expiredUncleaned).
-const messageDeadlinePassed = "The pull request was not opened before the deadline; a pull request Shadewright may " +
-	"have opened on the branch is closed after the stop, and the target stays locked until none is found open"
+const messageDeadlinePassed = "The pull request was not opened before the deadline; Shadewright looks for a pull " +
+	"request it may have opened on the branch and closes it, and the target stays locked until none is found open"
 
 // expiredUncleaned reports whether rr ended Expired at its deadline (reason PullRequestDeadline, on the condition stop
 // writes: PullRequestOpened, or Approved once a pull request is recorded), so a pull request of its own may be left
@@ -1705,8 +1738,9 @@ func expiredUncleaned(rr *remediationv1alpha1.RemediationRequest) bool {
 
 // cleanUpExpired is the cleanup of an expired request (expiredUncleaned) whose own pull request the read of the
 // branch after the stop found open (v): it is closed, within CleanupTimeout. A close the kill switch holds waits for
-// the pause (waitWhilePaused), the lock and the pull request kept; a Git host that fails is retried visibly at the
-// pace of a stopped holder's looks (heldUnsettled); a pull request found merged meanwhile is recorded (endMerged); a
+// the pause (waitWhilePaused), the lock and the pull request kept; a failed read is retried visibly at the pace of a
+// stopped holder's looks (heldUnsettled); a close that fails for a reason worth a retry is shown and bounded
+// (expiredCloseFailed); a pull request found merged meanwhile is recorded (endMerged); a
 // close the Git host refuses, or one that cannot be made on this entry (the target branch changed, the repository
 // is unusable), ends the cleanup with reason PullRequestDeadlineCleanupRefused and a message that asks a person to
 // close it. The next look settles the lock.
@@ -1746,15 +1780,85 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 		// A failed read of the cleanup: a visible retry at the pace of a stopped holder's looks.
 		return r.heldUnsettled(ctx, rr, changeVerdict{state: changeUnknown}, err, false)
 	default:
-		// A close the Git host failed to answer: its delay, or the error backoff.
-		logf.FromContext(ctx).Info("Could not close the pull request of an expired RemediationRequest; tried again",
-			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
+		// A close the Git host failed to answer (a 5xx, a rate limit, a conflict, a token it does not give): retried
+		// visibly and within a bound (expiredCloseFailed).
+		return r.expiredCloseFailed(ctx, rr, err)
 	}
 	// Decided on for good: nothing is closed by the executor; the lock stays until none is found open.
 	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
 		ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and "+what+
 			"; if one is open, close it by hand. The target stays locked until none is found open"))
+}
+
+// messageDeadlineCloseFailing is the message of an expired request whose close of its own pull request failed and is
+// tried again (expiredCloseFailed).
+const messageDeadlineCloseFailing = "The pull request was not opened before the deadline; closing a pull request " +
+	"Shadewright opened on the branch failed and is tried again every 10 minutes, for at most 24 hours after the " +
+	"first failure (condition CleanupFailing), and the target stays locked until none is found open"
+
+// expiredCloseFailed handles err, a close of an expired request's own pull request (cleanUpExpired) that failed in a
+// way worth a retry. It is bounded as the cleanup of a deleted request is (cleanupFailingBound, on the executor's
+// clock):
+//   - the first failure sets condition CleanupFailing (reason CleanupFailed, its lastTransitionTime the start of the
+//     bound), with one Warning Event, and rewrites the message of the deadline's condition so it says the close is
+//     failing (messageDeadlineCloseFailing), in one status write; a failed write is returned for the error backoff;
+//   - until the bound passes the close is tried again at the pace of a stopped holder's looks (heldRecheckInterval,
+//     or a longer Retry-After), never later than the end of the bound, and never as an error for the rate limiter;
+//   - once it has passed the cleanup ends with reason PullRequestDeadlineCleanupFailed and a message that asks a
+//     person to close the pull request; the lock stays until the read of the branch finds none open.
+//
+// The condition goes when the cleanup ends or the merge is recorded (stop), or when the read after the stop finds no
+// pull request of its own open (checkHeld, closeNoLongerFailing). A deletion that follows counts its own bound from the same condition.
+func (r *RemediationRequestReconciler) expiredCloseFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) (reconcile.Result, error) {
+	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
+	now := r.now()
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
+	if c == nil || c.Status != metav1.ConditionTrue {
+		failing := metav1.Condition{Type: remediationv1alpha1.ConditionCleanupFailing, Status: metav1.ConditionTrue,
+			Reason: ReasonCleanupFailed, Message: "The close of a pull request Shadewright opened on the branch " +
+				"after the deadline failed; it is tried again, and 24 hours after the first failure the cleanup ends " +
+				"and asks a person to close it", ObservedGeneration: rr.Generation}
+		r.setRefused(rr, failing)
+		setDeadlineMessage(rr, messageDeadlineCloseFailing)
+		if uerr := r.Status().Update(ctx, rr); uerr != nil {
+			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
+				rr.Name, uerr)
+		}
+		r.refusedEvent(rr, EventCleanupFailing, failing)
+		log.Info("Could not close the pull request of an expired RemediationRequest; tried again", "error", err.Error())
+		c = meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
+	}
+	left := boundLeft(c, cleanupFailingBound, now)
+	if left <= 0 {
+		log.Info("Ended the cleanup of an expired RemediationRequest: its close kept failing", "error", err.Error())
+		return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
+			ReasonPullRequestDeadlineCleanupFailed, "The pull request was not opened before the deadline, and "+
+				"closing a pull request Shadewright opened on the branch kept failing for 24 hours; if one is open, "+
+				"close it by hand. The target stays locked until none is found open"))
+	}
+	return reconcile.Result{RequeueAfter: min(max(retryAfterOf(err), heldRecheckInterval), left)}, nil
+}
+
+// setDeadlineMessage sets message on the condition that holds reason PullRequestDeadline of an expired request
+// (expiredUncleaned), in memory.
+func setDeadlineMessage(rr *remediationv1alpha1.RemediationRequest, message string) {
+	for _, t := range []string{remediationv1alpha1.ConditionPROpened, remediationv1alpha1.ConditionApproved} {
+		if c := meta.FindStatusCondition(rr.Status.Conditions, t); c != nil && c.Reason == ReasonPullRequestDeadline {
+			c.Message = message
+		}
+	}
+}
+
+// closeNoLongerFailing removes condition CleanupFailing of an expired request whose read after the stop found no
+// pull request of its own open, and puts back the deadline's message (messageDeadlinePassed), in memory.
+func closeNoLongerFailing(rr *remediationv1alpha1.RemediationRequest) {
+	if rr.Status.Phase != remediationv1alpha1.PhaseExpired ||
+		meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing) == nil {
+		return
+	}
+	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
+	setDeadlineMessage(rr, messageDeadlinePassed)
 }
 
 // retry maps a step error to a requeue: paused writes wait, a host that asked for a delay gets it, the rest

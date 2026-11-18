@@ -665,8 +665,8 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		byWriter("/shadewright reanalyze: the sidecar")
 		pause(true)
 		poll()
-		// A pause stops writes only (fifth decision of 2026-11-18 on #771): the look reads the comments, and the
-		// kill switch, asked before the status write, keeps the hint out.
+		lists, _ := git.FeedbackCalls()
+		Expect(lists).To(BeZero(), "a paused executor does not read the pull request")
 		Expect(fetch().Status.Hints).To(BeEmpty())
 
 		pause(false)

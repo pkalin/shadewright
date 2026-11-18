@@ -88,15 +88,19 @@ import (
 //	P5 every status write passes the CRD schema and its CEL rules (transition rules included), and a reconcile that
 //	   could act leaves no entry of status.gitWaits that stood past its own end at its start;
 //	P6 after the settling run, once the pull request is merged or closed, or its branch or its repository is gone, no
-//	   request holds the target lock.
+//	   request holds the target lock, but for two named expectations while the repository is not in the settings
+//	   (decision of 2026-11-19 on #786): a holder with no verdict stored (a merge recorded with its receipt or a phase
+//	   after it; a read whose status write was lost is none) that had stopped, or that waited for the other
+//	   request's merge record (MergeRecordPending) when the repository left, keeps the lock and shows condition
+//	   PullRequestUnreadable with reason RepositoryUnavailable; both are asserted and counted. A sequence that ends
+//	   with the repository removed then puts it back, and a second settling run checks P6, P1 and P2 again: the lock
+//	   is free and a merge is recorded once.
 //
 // Exclusions, each named and recognised by its shape, never by a seed (hmShapes, and the checks that name them): the
 // #288 cleanup bound (a request whose cleanup was failing let go of its finalizer at the end of a bound of that
 // cleanup, elapsed on the model's clock, with the pull request open), the #870 head (P3), a reopen after a release (a
 // request whose lock a verdict released when a person reopened the pull request does not take it back and records
-// nothing of it, design 6.5), a stopped holder whose repository left the settings before any verdict of its pull
-// request was readable (it keeps the lock, design 6 table of stops; only the replacement whose recovery holds it
-// releases), and #875: a replacement deleted before it recorded the merge of its pull request after its predecessor
+// nothing of it, design 6.5), and #875: a replacement deleted before it recorded the merge of its pull request after its predecessor
 // ended HandedOff (the pull request was the replacement's alone, and a request deleted before it records the merge of
 // its own pull request records nothing, as any request; the predecessor has ended). With the repository gone, reads
 // never answer, so P1 and P2 ask nothing of a merge then.
@@ -161,6 +165,9 @@ const (
 	settingsUnusable = "entry-unusable"
 	settingsBranch   = "target-branch-changed"
 	settingsFixed    = "entry-fixed"
+	// settingsRestored puts the plan's repository back in the settings after it left them: the step that follows
+	// the settling run of a sequence that ends with the repository removed.
+	settingsRestored = "repository-restored"
 
 	// hmOtherBranch is the target branch a settings change names; hmOtherURL the repository that replaces the plan's.
 	hmOtherBranch = "release"
@@ -276,10 +283,15 @@ type hmWorld struct {
 	// gone) when a person reopened the pull request: the named exclusion "a reopen after a release" (design 6.5), a
 	// released request does not take the lock back and records nothing of the reopened pull request.
 	releasedAtReopen map[string]bool
-	// verdictSeen names the requests a read of the pull request answered for while it was merged or closed or its
-	// branch gone (prEnded, as of the last step), with the repository in the settings: a verdict was readable to them.
-	verdictSeen map[string]bool
-	prEnded     bool
+	// prEnded: the pull request was merged or closed or its branch gone, as of the last step.
+	prEnded bool
+	// planURL is the plan's repository, put back by settingsRestored; branchChanged: a settings change named
+	// another target branch, which a restored repository keeps.
+	planURL       string
+	branchChanged bool
+	// waitingAtRemoval names the requests that waited for the other request's merge record (condition Approved,
+	// reason MergeRecordPending) when the repository left the settings.
+	waitingAtRemoval map[string]bool
 	// lastRes and lastErr are what the last reconcile of each request returned.
 	lastRes map[string]reconcile.Result
 	lastErr map[string]error
@@ -289,9 +301,11 @@ type hmWorld struct {
 	gone288  bool
 	lastRepl *api.RemediationRequest
 	lastPred *api.RemediationRequest
-	// reach is what the sequence reached, for the counts; excused counts the violations a named shape excuses.
-	reach   map[string]bool
-	excused map[string]int
+	// reach is what the sequence reached, for the counts; excused counts the violations a named shape excuses;
+	// expected counts the named expectations that held (a state the design requires, checked, not excused).
+	reach    map[string]bool
+	excused  map[string]int
+	expected map[string]int
 
 	mu          sync.Mutex
 	actor       string
@@ -406,7 +420,8 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		personCommits: map[string]bool{}, replCommits: map[string]bool{}, once: map[string]error{},
 		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{},
 		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
-		verdictSeen: map[string]bool{}, lastErr: map[string]error{}, lastRes: map[string]reconcile.Result{}}
+		waitingAtRemoval: map[string]bool{},
+		expected: map[string]int{}, lastErr: map[string]error{}, lastRes: map[string]reconcile.Result{}}
 	base, err := g.BranchHead(ctx, mainBranch)
 	if err != nil {
 		t.Fatal(err)
@@ -661,16 +676,8 @@ func (m *hmWorld) gitFail(op string) error {
 	if m.sticky != nil {
 		return m.sticky
 	}
-	if hmPRReads[op] && m.prEnded && m.settings != settingsRemoved {
-		// A read of the pull request that answers while it is merged or closed, or its branch is gone: a verdict
-		// was readable to the actor.
-		m.verdictSeen[m.actor] = true
-	}
 	return nil
 }
-
-// hmPRReads are the reads that find the pull request and its state.
-var hmPRReads = map[string]bool{opGet: true, "FindChangeRequest": true, opList: true}
 
 func (m *hmWorld) gitAfter(op string) error {
 	m.mu.Lock()
@@ -1168,8 +1175,13 @@ func (m *hmWorld) apply(s hmStep) {
 
 // changeSettings makes a settings change: the plan's repository leaves the settings (an entry for another repository
 // takes its place), its entry cannot open a provider, its target branch changes, or an unusable entry is fixed. A
-// repository that left the settings and a changed branch stay so: the model does not bring them back.
+// repository that left the settings and a changed branch stay so; only settingsRestored, after the settling run, puts
+// the repository back (with the branch a settings change named, if one did).
 func (m *hmWorld) changeSettings(variant string) {
+	if variant == settingsRestored {
+		m.restoreRepository()
+		return
+	}
 	if m.settings == settingsRemoved || (m.settings == settingsBranch && variant != settingsRemoved) {
 		return
 	}
@@ -1191,15 +1203,51 @@ func (m *hmWorld) changeSettings(variant string) {
 	}
 	switch variant {
 	case settingsRemoved:
+		m.planURL = st.Spec.Repositories[0].URL
 		st.Spec.Repositories[0].URL = hmOtherURL
+		for _, who := range []string{hmPred, hmRepl} {
+			if x := m.get(who); x != nil && waitsForRecord(x) {
+				m.waitingAtRemoval[who] = true
+			}
+		}
 	case settingsBranch:
 		st.Spec.Repositories[0].TargetBranch = hmOtherBranch
+		m.branchChanged = true
 	}
 	if err := m.base.Update(ctx, st); err != nil {
 		m.t.Fatal(err)
 	}
 	m.settings = variant
 	m.reach["settings-change"] = true
+}
+
+// restoreRepository puts the plan's repository back in the settings after it left them (decision of 2026-11-19 on
+// #786, point 2): the settling run that follows must free the lock and record a merge once.
+func (m *hmWorld) restoreRepository() {
+	if m.settings != settingsRemoved {
+		return
+	}
+	ctx := context.Background()
+	st := &api.RemediationSettings{}
+	if err := m.base.Get(ctx, client.ObjectKey{Name: api.SettingsName}, st); err != nil {
+		m.t.Fatal(err)
+	}
+	st.Spec.Repositories[0].URL = m.planURL
+	if err := m.base.Update(ctx, st); err != nil {
+		m.t.Fatal(err)
+	}
+	m.settings = ""
+	if m.branchChanged {
+		m.settings = settingsBranch
+	}
+	clear(m.waitingAtRemoval)
+	m.reach["repository-restored"] = true
+}
+
+// waitsForRecord reports whether x waits for the other request of the handoff to record the merge of its pull request.
+func waitsForRecord(x *api.RemediationRequest) bool {
+	c := meta.FindStatusCondition(x.Status.Conditions, api.ConditionApproved)
+	return c != nil && c.Reason == ReasonMergeRecordPending
 }
 
 // reopen is a person reopening the closed pull request. A reopen while no request holds the lock is the named
@@ -1478,19 +1526,52 @@ func (m *hmWorld) liveness() {
 	}
 	for _, who := range []string{hmPred, hmRepl} {
 		if x := m.get(who); x != nil && ptr.Deref(x.Status.HoldsTarget, false) {
-			if m.settings == settingsRemoved && m.stopped(x) && !m.verdictSeen[who] {
-				// A stopped holder whose repository left the settings keeps the lock, as nothing can read its pull
-				// request any more (design 6, the table of stops, "the repository is unavailable or unusable"; tenth
-				// decision of 2026-11-18 on #771): only the replacement whose recovery holds it releases (second round
-				// of #786). Only a holder that had stopped, and that saw its pull request open at every read that
-				// answered before the settings changed (no verdict was readable); a request still at work, or one that
-				// could have read a verdict, is not excused (fourth round of #786).
-				m.excused["stopped holder of a repository that left the settings"]++
+			if name := m.keptWhileMissing(who, x); name != "" {
+				m.expectMissingShown(who, x, name)
 				continue
 			}
 			m.fail("P6", "%s, and the %s still holds the target lock after the settling run (%s)", why, who, describe(x))
 		}
 	}
+}
+
+// keptWhileMissing names the expectation a holder of the lock meets while the repository is not in the settings, ""
+// for none. A holder with no verdict stored keeps the lock, as nothing can read its pull request any more (design 6,
+// the table of stops; tenth decision of 2026-11-18 on #771; decision of 2026-11-19 on #786, points 1 and 3): one that
+// had stopped, and one that waited for the other request's merge record when the repository left. Only the
+// replacement whose recovery holds the lock releases it (second round of #786); a request still at work, or one with a
+// verdict stored, has no such expectation.
+func (m *hmWorld) keptWhileMissing(who string, x *api.RemediationRequest) string {
+	switch {
+	case m.settings != settingsRemoved || verdictStored(x):
+		return ""
+	case m.waitingAtRemoval[who]:
+		return "holder waiting for the merge record keeps the lock while the repository is missing"
+	case m.stopped(x):
+		return "stopped holder keeps the lock while the repository is missing"
+	}
+	return ""
+}
+
+// verdictStored reports whether x's status records a merge that settles its lock without a read: its receipt, or a
+// phase after the merge. A verdict counts once it is stored (decision of 2026-11-19 on #786, point 3): a read whose
+// status write was lost, conflicted or cut by a crash is none, nor is a wait for the other request's merge record
+// (MergeRecordPending stores no merge). A close stored without a merge (closedOnly) is no verdict of the lock either:
+// another pull request of the branch may still carry the change, so the lock waits for a read of the branch.
+func verdictStored(x *api.RemediationRequest) bool {
+	return x.Status.MergeReceipt != nil || slices.Contains(successPhases, x.Status.Phase) || mergedAndEnded(x)
+}
+
+// expectMissingShown checks the other half of a named expectation of keptWhileMissing: the holder shows why it keeps
+// the lock (condition PullRequestUnreadable, reason RepositoryUnavailable), and counts it.
+func (m *hmWorld) expectMissingShown(who string, x *api.RemediationRequest, name string) {
+	c := meta.FindStatusCondition(x.Status.Conditions, api.ConditionPullRequestUnreadable)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != reasonRepositoryUnavailable {
+		m.fail("P6", "the repository left the settings and the %s keeps the lock (%s), but does not show condition "+
+			"%s with reason %s (%+v)", who, name, api.ConditionPullRequestUnreadable, reasonRepositoryUnavailable, c)
+		return
+	}
+	m.expected[name]++
 }
 
 // stopped reports whether x had stopped: ended, or NeedsIntervention, and not the replacement whose recovery watches.
@@ -1516,6 +1597,14 @@ func hmRun(t *testing.T, schema *statusSchema, start string, steps []hmStep) *hm
 	}
 	m.stepNo = len(steps) + 1
 	m.settle()
+	if m.settings == settingsRemoved {
+		// The repository comes back, and the settling run that follows frees the lock and records a merge once
+		// (decision of 2026-11-19 on #786, point 2): settle checks P6, P1 and P2 again with reads answering.
+		m.stepNo++
+		m.apply(hmStep{Kind: hSettings, Variant: settingsRestored})
+		m.observe()
+		m.settle()
+	}
 	return m
 }
 
@@ -1701,6 +1790,9 @@ func TestHandoffModel(t *testing.T) {
 			}
 			for k := range m.excused {
 				counts["excused "+k]++
+			}
+			for k := range m.expected {
+				counts["expected "+k]++
 			}
 			mu.Unlock()
 			if os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_TRACE") != "" {

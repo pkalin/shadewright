@@ -63,11 +63,14 @@ import (
 // After every step, and at the end after a settling run (the pause lifted, reads answering, both requests reconciled
 // in both orders while the clock moves on), the properties:
 //
-//	P1 a merge of a request's commit is recorded on the request whose commit it is, with its merge receipt, never on
-//	   the other one, and, once reads answer, never on none (a merged head with further commits on top of the
-//	   replacement's commit is the documented gap #870: excluded and counted apart);
+//	P1 a merge of a request's commit is recorded once: on the request whose commit it is, with its merge receipt, or,
+//	   when that request is the replacement and it is deleted before it recorded the merge, on the predecessor as
+//	   MergedWithForeignChange with no receipt (#786, decision 2 of the model result of 2026-11-18); never on both,
+//	   and, once reads answer, never on none (a merged head with further commits on top of the replacement's commit
+//	   is the documented gap #870: excluded and counted apart);
 //	P2 the circuit breaker counts that merge once (one success at most), and, once reads answer, no request is a
-//	   failure for the breaker that was not one when a person merged a request's own commit;
+//	   failure for the breaker that was not one when a person merged a request's own commit, except the
+//	   predecessor's MergedWithForeignChange of P1, a failure as on main;
 //	P3 the target lock is never free while an open pull request carries a commit of either request, the replacement
 //	   never releases it while its commit is on the open pull request, and no request releases it on a merge of its
 //	   own commit it does not record;
@@ -77,9 +80,8 @@ import (
 //	   could act leaves no entry of status.gitWaits that stood past its own end at its start.
 //
 // A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property.
-// The sequences that fail on this branch today are listed in handoffModelKnown and the directed cases below, which skip
-// unless SHADEWRIGHT_HANDOFF_MODEL_STRICT=1. The default set is the seeds 1 to 60
-// (1 to 30 under the race detector or -short); SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed,
+// The default set is the seeds 1 to 500 (about ten seconds), 1 to 100 under the race detector or -short; the code was
+// checked against the seeds 1 to 5,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed,
 // SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1
 // prints the trace of every seed (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile), and
 // SHADEWRIGHT_HANDOFF_MODEL_SUMMARY=1 logs the count of failures per property.
@@ -103,28 +105,15 @@ const (
 	hmSettleRounds = 10
 )
 
-// hmStrict reports whether the known failing seeds and directed cases run.
-func hmStrict() bool { return os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_STRICT") == "1" }
-
-// The reasons of handoffModelKnown that more than one seed shares.
-const (
-	hmKnownPush    = "P4: a person pushes, the predecessor comments before it stores the abort of its intent"
-	hmKnownRelease = "P3: a person pushes on top of the replacement's commit, the replacement ends Cancelled and " +
-		"releases the lock"
-)
-
-// handoffModelKnown are the seeds of the default set that fail today, with the property each breaks first. The fix of
-// #786 removes them.
-var handoffModelKnown = map[uint64]string{
-	3:  hmKnownRelease,
-	7:  hmKnownPush,
-	17: hmKnownPush,
-	24: hmKnownRelease,
-	27: hmKnownPush,
-	30: hmKnownPush,
-	41: "P1: after a refusal a merge of the replacement's commit is recorded on the predecessor (MergedWithForeignChange)",
-	50: "P1: the replacement is deleted, a merge of its commit is recorded on the predecessor (MergedWithForeignChange)",
-	54: "P4: the replacement is deleted, the predecessor comments before it stores the abort of its intent",
+// handoffModelSkips are the seeds whose first failing property the design does not require, with the sentence that
+// lets it happen. They are outside the default set and skip when a range names them.
+var handoffModelSkips = map[uint64]string{
+	// A replacement that took the pull request over is deleted while every read or the close fails; its finalizer
+	// lets go at the end of the CleanupRefused or CleanupFailing bound with the pull request left open (design 6,
+	// "The Git cleanup cannot hold a deletion for good", #288), so no request holds the lock of that open pull
+	// request. P3 asks more than that sentence.
+	4017: "P3: a deleted replacement's cleanup ran out of its bound (#288), the pull request is left open",
+	4726: "P3: a deleted replacement's cleanup ran out of its bound (#288), the pull request is left open",
 }
 
 type hmKind string
@@ -268,6 +257,8 @@ type hmMerge struct {
 	owner string // hmPred, hmRepl, "gap870" or "foreign"
 	// failed is which requests the breaker counted as a failure when the merge was made.
 	failed map[string]bool
+	// recorded is which requests have recorded the merge.
+	recorded map[string]bool
 }
 
 func (m *hmWorld) logf(format string, args ...any) {
@@ -465,8 +456,9 @@ func hmFixture(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.
 // restart is a new executor process: a new reconciler, nothing kept in memory.
 func (m *hmWorld) restart() {
 	g := m.g
-	m.r = &RemediationRequestReconciler{Client: m.cl, APIReader: m.cl, ReviewerHints: true, Scheme: m.base.Scheme(),
-		Now: func() time.Time { return m.now }, Source: &hmResolver{m: m},
+	// The API server answers the != field selectors of the limits, which the fake client refuses (apiServerReader).
+	m.r = &RemediationRequestReconciler{Client: m.cl, APIReader: &apiServerReader{Reader: m.cl}, ReviewerHints: true,
+		Scheme: m.base.Scheme(), Now: func() time.Time { return m.now }, Source: &hmResolver{m: m},
 		OpenRepository: func(context.Context, api.GitRepository) (providers.GitProvider, error) {
 			if err := m.gitFail("open"); err != nil {
 				return nil, err
@@ -670,6 +662,21 @@ func (m *hmWorld) history(sha string) ([]string, bool) {
 	return out, false
 }
 
+// foreignForGone reports the one case where a merge of the replacement's commit is recorded on the predecessor
+// (#786, decision 2 of the model result of 2026-11-18): the replacement is deleted (gone or being deleted), it did not
+// record the merge, and the predecessor records it as MergedWithForeignChange with no receipt.
+func (m *hmWorld) foreignForGone(reqs map[string]*api.RemediationRequest) bool {
+	mg, repl, p := m.merge, reqs[hmRepl], reqs[hmPred]
+	if mg == nil || mg.owner != hmRepl || mg.recorded[hmRepl] || p == nil {
+		return false
+	}
+	if repl != nil && repl.DeletionTimestamp.IsZero() {
+		return false
+	}
+	c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionApproved)
+	return p.Status.MergeReceipt == nil && c != nil && c.Reason == ReasonMergedWithForeignChange
+}
+
 // carries reports whether head carries a commit of either request.
 func (m *hmWorld) carries(head string) bool {
 	_, ok := m.history(head)
@@ -779,8 +786,16 @@ func (m *hmWorld) observe() {
 	// P1 and P2 after a merge of a request's own commit.
 	if mg := m.merge; mg != nil && (mg.owner == hmPred || mg.owner == hmRepl) {
 		other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[mg.owner]
-		if recordsMerge(reqs[other]) {
+		if recordsMerge(reqs[other]) && !m.foreignForGone(reqs) {
 			m.fail("P1", "the merge of the %s's commit is recorded on the %s (%s)", mg.owner, other, describe(reqs[other]))
+		}
+		for who, x := range reqs {
+			if recordsMerge(x) {
+				mg.recorded[who] = true
+			}
+		}
+		if len(mg.recorded) > 1 {
+			m.fail("P1", "the merge of the %s's commit is recorded on both requests", mg.owner)
 		}
 		successes := 0
 		for _, x := range reqs {
@@ -954,7 +969,8 @@ func (m *hmWorld) personEvent(s hmStep) {
 			m.logf("  the merge is refused: %v", err)
 			return
 		}
-		m.merge = &hmMerge{head: cr.HeadSHA, owner: m.ownerOf(cr.HeadSHA), failed: map[string]bool{}}
+		m.merge = &hmMerge{head: cr.HeadSHA, owner: m.ownerOf(cr.HeadSHA), failed: map[string]bool{},
+			recorded: map[string]bool{}}
 		for _, who := range []string{hmPred, hmRepl} {
 			if x := m.get(who); x != nil && breakerOutcome(x) == outcomeFailure {
 				m.merge.failed[who] = true
@@ -1024,14 +1040,33 @@ func (m *hmWorld) settle() {
 		return
 	}
 	// P2 once reads answer: no request is a failure for the breaker that was not one when the merge was made.
+	reqs := map[string]*api.RemediationRequest{hmPred: m.get(hmPred), hmRepl: m.get(hmRepl)}
 	for _, who := range []string{hmPred, hmRepl} {
-		if x := m.get(who); x != nil && breakerOutcome(x) == outcomeFailure && !mg.failed[who] {
+		if who == hmPred && m.foreignForGone(reqs) {
+			// #786, decision 2 of the model result of 2026-11-18: MergedWithForeignChange is a failure for the
+			// breaker, as on main.
+			continue
+		}
+		if x := reqs[who]; who == hmRepl && x != nil && !x.DeletionTimestamp.IsZero() && !mg.recorded[hmRepl] {
+			// #786, decision 2 of the model result of 2026-11-18: a replacement being deleted records nothing, so its
+			// end stays as it was.
+			continue
+		}
+		if x := reqs[who]; x != nil && breakerOutcome(x) == outcomeFailure && !mg.failed[who] {
 			m.fail("P2", "the %s ended a failure for the breaker after the merge of the %s's commit (%s)", who,
 				mg.owner, describe(x))
 		}
 	}
 	owner := m.get(mg.owner)
-	if owner == nil {
+	if owner == nil || (mg.owner == hmRepl && !owner.DeletionTimestamp.IsZero() && !mg.recorded[hmRepl]) {
+		// #786, decision 2 of the model result of 2026-11-18: a deleted replacement records nothing; unless it
+		// recorded the merge before it went, the predecessor records it as a foreign change. A predecessor that handed its pull request over (to Done) has
+		// none left to record, as for any request deleted after its merge.
+		if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && !handedOff(reqs[hmPred]) &&
+			!m.foreignForGone(reqs) {
+			m.fail("P1", "the merge of the deleted replacement's commit %s is recorded on neither request (pred: %s)",
+				short(mg.head), describe(reqs[hmPred]))
+		}
 		return
 	}
 	if owner.Status.MergeReceipt == nil || owner.Status.MergeReceipt.HeadSHA != mg.head {
@@ -1176,9 +1211,9 @@ func hmSeeds(t *testing.T) []uint64 {
 		}
 		return []uint64{seed}
 	}
-	from, to := uint64(1), uint64(60)
+	from, to := uint64(1), uint64(500)
 	if testing.Short() || raceDetector {
-		to = 30
+		to = 100
 	}
 	if s := os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE"); s != "" {
 		a, b, _ := strings.Cut(s, "-")
@@ -1208,8 +1243,8 @@ func TestHandoffModel(t *testing.T) {
 	for _, seed := range hmSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			t.Parallel()
-			if why, ok := handoffModelKnown[seed]; ok && !hmStrict() {
-				t.Skipf("fails today (#786): %s; SHADEWRIGHT_HANDOFF_MODEL_STRICT=1 runs it", why)
+			if why, ok := handoffModelSkips[seed]; ok {
+				t.Skipf("the design does not require it: %s", why)
 			}
 			start, steps := hmGenerate(seed)
 			m := hmRun(t, schema, start, steps)
@@ -1238,13 +1273,9 @@ func TestHandoffModel(t *testing.T) {
 	}
 }
 
-// hmDirected runs a scripted sequence and fails with the violations; known is the reason it fails today, which skips it
-// unless SHADEWRIGHT_HANDOFF_MODEL_STRICT=1.
-func hmDirected(t *testing.T, known, start string, steps []hmStep) *hmWorld {
+// hmDirected runs a scripted sequence and fails with the violations.
+func hmDirected(t *testing.T, start string, steps []hmStep) *hmWorld {
 	t.Helper()
-	if known != "" && !hmStrict() {
-		t.Skipf("fails today (#786): %s; SHADEWRIGHT_HANDOFF_MODEL_STRICT=1 runs it", known)
-	}
 	m := hmRun(t, requestStatusSchema(t), start, steps)
 	if len(m.violations) > 0 || os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_TRACE") != "" {
 		t.Logf("trace:\n  %s", strings.Join(m.trace, "\n  "))
@@ -1268,7 +1299,7 @@ func stClock(c string) hmStep  { return hmStep{Kind: hClock, Clock: c} }
 // The replacement in a world where the intent is reserved and nothing is pushed takes the pull request over, and a merge
 // of its commit is recorded on it alone.
 func TestHandoffModelIntentTakeover(t *testing.T) {
-	m := hmDirected(t, "", hmStartIntent, []hmStep{stRecRepl, stRecRepl, stRecPred, stRecRepl, stMerge, stRecPred,
+	m := hmDirected(t, hmStartIntent, []hmStep{stRecRepl, stRecRepl, stRecPred, stRecRepl, stMerge, stRecPred,
 		stRecRepl})
 	if m.replCommit == "" {
 		t.Fatal("the replacement pushed no commit from the intent")
@@ -1279,8 +1310,7 @@ func TestHandoffModelIntentTakeover(t *testing.T) {
 // replacement's commit, and the predecessor, still AwaitingApproval, looks first: the merge must be recorded on the
 // replacement alone, and the breaker must not count a failure for it.
 func TestHandoffModelMergeAfterTheWatchPredecessorFirst(t *testing.T) {
-	hmDirected(t, "recorded on both requests, the predecessor NeedsIntervention with MergedWithForeignChange and a "+
-		"failure for the breaker", hmStartPushed, []hmStep{stSticky(403), stRecRepl, stClock(clockDay), stRecRepl,
+	hmDirected(t, hmStartPushed, []hmStep{stSticky(403), stRecRepl, stClock(clockDay), stRecRepl,
 		stAnswer, stMerge, stRecPred, stRecRepl})
 }
 
@@ -1288,8 +1318,7 @@ func TestHandoffModelMergeAfterTheWatchPredecessorFirst(t *testing.T) {
 // predecessor looks first, the replacement then ends, and a person merges its commit: the merge must be recorded on
 // the replacement.
 func TestHandoffModelMergeAfterTheGrace(t *testing.T) {
-	hmDirected(t, "the merge is recorded on neither request (the replacement ended HandoffRecoveryFailed with its "+
-		"handoff Aborted)", hmStartPushed, []hmStep{{Kind: hLose, Obj: hmRepl}, stRecRepl, stClock(clockDeadline),
+	hmDirected(t, hmStartPushed, []hmStep{{Kind: hLose, Obj: hmRepl}, stRecRepl, stClock(clockDeadline),
 		stSticky(503), stRecRepl, stClock(clockGrace), stRecPred, stRecRepl, stAnswer, stMerge, stRecPred, stRecRepl})
 }
 
@@ -1297,8 +1326,7 @@ func TestHandoffModelMergeAfterTheGrace(t *testing.T) {
 // HandoffGrace, the grace passes, the predecessor is deleted (its finalizer waits for the replacement), and a person
 // merges the replacement's commit before the replacement looks again: the merge must be recorded on the replacement.
 func TestHandoffModelMergeAfterThePredecessorIsDeleted(t *testing.T) {
-	hmDirected(t, "the replacement ends HandoffRecoveryFailed from recorded state and the merge is recorded on neither "+
-		"request", hmStartPushed,
+	hmDirected(t, hmStartPushed,
 		[]hmStep{{Kind: hRestart}, stClock(clockDeadline), stSticky(503), stRecRepl, stAnswer, stClock(clockGrace),
 			{Kind: hDelete, Obj: hmPred}, stRecPred, stMerge, stRecRepl, stRecPred})
 }

@@ -150,16 +150,34 @@ func heldForVerification(rr *remediationv1alpha1.RemediationRequest, verify bool
 }
 
 // handingOverMerge reports whether rr, a stopped holder, leaves what v found to its outgoing handoff: always while the
-// handoff stands or is Done, and, once it is Aborted, unless v is a merge of the head rr recorded as its own.
-func handingOverMerge(rr *remediationv1alpha1.RemediationRequest, v changeVerdict) bool {
+// handoff stands or is Done; once it is Aborted, only a merge whose head the rule for who records a merge
+// (mergedHeadOwner) gives to the replacement (owner). A merge of its own head, or of any other head (a deleted
+// replacement's commit included), is rr's to record.
+func handingOverMerge(rr *remediationv1alpha1.RemediationRequest, v changeVerdict, owner mergeOwner) bool {
 	if rr.Status.Handoff == nil || rr.Status.Handoff.To == nil {
 		return false
 	}
 	if rr.Status.Handoff.To.Phase != remediationv1alpha1.HandoffAborted {
 		return true
 	}
-	own := v.state == changeMerged && rr.Status.PullRequest != nil && v.pr.HeadSHA == rr.Status.PullRequest.HeadSHA
-	return !own
+	return v.state == changeMerged && owner == ownerReplacement
+}
+
+// stoppedMergeOwner is mergedHeadOwner for a stopped holder rr whose aborted handoff names a replacement and whose
+// pull request v found merged with a head that is not rr's recorded one; ownerPredecessor for anything else, read
+// from nothing. A failed read is returned.
+func (r *RemediationRequestReconciler) stoppedMergeOwner(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict) (mergeOwner, error) {
+	ho := rr.Status.Handoff
+	if v.state != changeMerged || ho == nil || ho.To == nil || ho.To.Phase != remediationv1alpha1.HandoffAborted ||
+		rr.Status.PullRequest == nil || v.pr.HeadSHA == rr.Status.PullRequest.HeadSHA || mergeRecorded(rr) {
+		return ownerPredecessor, nil
+	}
+	git, err := r.openPlanRepository(ctx, rr)
+	if err != nil {
+		return ownerForeign, err
+	}
+	return r.predecessorMergeOwner(ctx, git, rr, v.pr.HeadSHA)
 }
 
 // settleStopException handles, once a read worked, what checkHeld must record before the lock may be settled:
@@ -189,7 +207,24 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 	// merge of another head than its own recorded one: that may be the replacement's commit, recorded on the
 	// replacement (recordWatchedMerge, #786) when the head is exactly that commit, never on this request. A merge of its
 	// own head is its own. A head with further commits on top of the replacement's is recorded by no request (#870).
-	handingOver := handingOverMerge(rr, v)
+	owner, err := r.stoppedMergeOwner(ctx, rr, v)
+	switch {
+	case err != nil && (ctx.Err() != nil || isClusterError(err)):
+		return reconcile.Result{}, true, err
+	case errors.Is(err, freshness.ErrPaused):
+		res, err := r.waitWhilePaused(ctx, rr)
+		return res, true, err
+	case err != nil:
+		// A failed read of the Git host keeps the lock and is retried visibly, as any failed look of a stopped holder.
+		res, err := r.heldUnsettled(ctx, rr, changeVerdict{state: changeUnknown}, err, false)
+		return res, true, err
+	}
+	if owner == ownerReplacement && ptr.Deref(rr.Status.HoldsTarget, false) {
+		// Merged with the replacement's commit, which the replacement records: the lock goes on that verdict.
+		res, err := r.releaseReplacementMerge(ctx, rr, v, owner)
+		return res, true, err
+	}
+	handingOver := handingOverMerge(rr, v, owner)
 	if expiredUncleaned(rr) && !handingOver && rr.Status.Source != nil {
 		switch {
 		case v.state == changeMerged && !mergeRecorded(rr) && v.pr.BaseBranch == string(rr.Status.Source.TargetBranch):
@@ -498,6 +533,17 @@ func settleHandoffAborted(rr *remediationv1alpha1.RemediationRequest) (*lockverd
 	return lockverdict.HandoffAborted(&rr.Status)
 }
 
+// settleReplacementMerge is the verdict of a predecessor whose recorded pull request v found merged, when owner, the
+// rule for who records that merge (mergedHeadOwner), says its replacement does: nothing can be merged through it any
+// more, and the merge is not this request's to record (#786).
+func settleReplacementMerge(v changeVerdict, owner mergeOwner) (*lockverdict.Verdict, bool) {
+	found := lockverdict.FoundOther
+	if v.state == changeMerged {
+		found = lockverdict.FoundMerged
+	}
+	return lockverdict.ReplacementMerge(found, owner == ownerReplacement)
+}
+
 // settleRecordedMerge is the verdict of a request that no longer moves on and whose status records a merge that
 // delivered the plan, as main's status rule told it less the merges that did not deliver it as shown
 // (lockverdict.RecordedMerge): a phase after the merge (Merged, WaitingForDelivery, Verifying, Succeeded,
@@ -608,11 +654,12 @@ func acquire(rr *remediationv1alpha1.RemediationRequest) {
 // checkHeld persists the common target-lock decision for a stopped holder. Branch-change and Incident-cancel
 // merges pass through settleStopException before any release is stored. A successful look is repeated every
 // heldRecheckInterval while the lock stays held; Git failures use retryGitRead, Kubernetes errors remain errors. A
-// replacement whose watch after a refused recovery reached its end (endedAtRecoveryBound, #786) first reads the pull
-// request it was to take over (heldRecovery): a merge of its commit is recorded on it with its receipt, whenever it
-// comes, and that record settles the lock; an open pull request keeps the lock; a failed read keeps it and is retried
-// visibly. Only when that read settles nothing (closed, gone, merged with another head) does the verdict of the look
-// decide, which releases the lock. The end of the watch itself never releases it.
+// replacement that ended before it took the pull request over, whatever ended it (endedBeforeTakeover, #786: the
+// end of its watch, HandoffRecoveryFailed, Expired, Cancelled), first reads the pull request it was to take over
+// (heldRecovery): a merge of its commit is recorded on it with its receipt, whenever it comes, and that record settles
+// the lock; a merge without its commit, or an open pull request with the predecessor's own head, releases it with its
+// handoff Aborted; any other open pull request keeps it; a failed read keeps it and is retried visibly. Only when that
+// read settles nothing (closed, gone) does the verdict of the look decide. The end itself never releases the lock.
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	reading := openReadWait(rr)
@@ -710,6 +757,11 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		}
 	}
 	free := !ptr.Deref(rr.Status.HoldsTarget, false)
+	if free && held && endedBeforeTakeover(rr) {
+		// The verdict says its commit can no longer be merged through a pull request of the branch: its handoff did
+		// not happen, which the same write records (#786).
+		rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
+	}
 	if equality.Semantic.DeepEqual(before, &rr.Status) {
 		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 	}
@@ -717,6 +769,19 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	return r.heldLookResult(ctx, rr, free, held, holding, v.pr), nil
+}
+
+// releaseReplacementMerge is checkHeld's release of the lock of rr, a stopped predecessor whose pull request v found
+// merged with its replacement's commit (owner, settleReplacementMerge), in one status write (releaseUnread). A failed
+// write is returned for a retry.
+func (r *RemediationRequestReconciler) releaseReplacementMerge(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, owner mergeOwner) (reconcile.Result, error) {
+	s, ok := settleReplacementMerge(v, owner)
+	if !ok {
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+	}
+	return reconcile.Result{}, r.releaseUnread(ctx, rr, s, fmt.Sprintf("its pull request #%d was merged with its "+
+		"replacement's commit, which the replacement records", v.pr.Number))
 }
 
 // releaseUnread is checkHeld's release of the lock of rr by a verdict that needs no read of the branch (a recorded

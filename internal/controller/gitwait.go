@@ -209,10 +209,11 @@ func (k waitKind) applies(rr *api.RemediationRequest) bool {
 		return rr.Status.Phase == api.PhasePolicyChecked && staleMark(rr) == nil && intent(rr) == nil &&
 			!recoveringHandoff(rr)
 	case waitHandoffGrace:
-		// The grace bounds a standing intent; a refusal aborted it (third decision of 2026-11-18 on #786).
-		return recoveringHandoff(rr) && gitWait(rr, waitHandoffRecovery) == nil
+		// The grace bounds a standing intent; a refusal aborted it (third decision of 2026-11-18 on #786). Neither
+		// handoff wait applies to a request being deleted: its finalizer removes them (#786).
+		return recoveringHandoff(rr) && gitWait(rr, waitHandoffRecovery) == nil && rr.DeletionTimestamp.IsZero()
 	case waitHandoffRecovery:
-		return recoveringHandoff(rr)
+		return recoveringHandoff(rr) && rr.DeletionTimestamp.IsZero()
 	case waitMergeCheck, waitMergeContent:
 		return !mergeRecorded(rr)
 	}

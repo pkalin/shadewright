@@ -258,10 +258,15 @@ func checkBoundEnd(t *testing.T, m *boundModel, got *api.RemediationRequest) {
 			t.Fatalf("the watch lost the condition that says what is refused: %+v", got.Status.Conditions)
 		}
 	case stBound:
+		// The handoff stays Reserved while the lock is kept; the verdict that releases it records it Aborted (#786).
+		want := api.HandoffReserved
+		if !m.held {
+			want = api.HandoffAborted
+		}
 		if got.Status.Phase != api.PhaseNeedsIntervention || opened == nil || opened.Reason != ReasonRecoveryWaitExpired ||
-			got.Status.Handoff.From.Phase != api.HandoffReserved {
-			t.Fatalf("phase %q, PullRequestOpened %+v, handoff %q: want the end at the bound, the handoff Reserved",
-				got.Status.Phase, opened, got.Status.Handoff.From.Phase)
+			got.Status.Handoff.From.Phase != want {
+			t.Fatalf("phase %q, PullRequestOpened %+v, handoff %q: want the end at the bound, the handoff %s",
+				got.Status.Phase, opened, got.Status.Handoff.From.Phase, want)
 		}
 		if ptr.Deref(got.Status.HoldsTarget, false) != m.held {
 			t.Fatalf("holdsTarget = %v, want %v", ptr.Deref(got.Status.HoldsTarget, false), m.held)

@@ -145,9 +145,9 @@ func TestRecoveryCloseAfterTheEndReleasesTheLock(t *testing.T) {
 	opened := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPROpened)
 	if ptr.Deref(got.Status.HoldsTarget, false) || got.Status.MergeReceipt != nil ||
 		got.Status.Phase != api.PhaseNeedsIntervention || opened == nil || opened.Reason != ReasonRecoveryWaitExpired ||
-		got.Status.Handoff.From.Phase != api.HandoffReserved {
+		got.Status.Handoff.From.Phase != api.HandoffAborted {
 		t.Fatalf("phase %q, PullRequestOpened %+v, handoff %q, holdsTarget %v, receipt %v: want the lock released "+
-			"on the close and nothing else changed", got.Status.Phase, opened, got.Status.Handoff.From.Phase,
+			"on the close, the handoff Aborted in that write and nothing else changed", got.Status.Phase, opened, got.Status.Handoff.From.Phase,
 			got.Status.HoldsTarget, got.Status.MergeReceipt)
 	}
 }

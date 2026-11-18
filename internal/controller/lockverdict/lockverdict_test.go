@@ -95,6 +95,9 @@ func TestEachVerdictOnlyFromItsProof(t *testing.T) {
 		"undelivered, repository gone":     {of(UndeliveredRepositoryGone(true, true)), true},
 		"undelivered, repository there":    {of(UndeliveredRepositoryGone(true, false)), false},
 		"delivered, repository gone":       {of(UndeliveredRepositoryGone(false, true)), false},
+		"merged by the replacement":        {of(ReplacementMerge(FoundMerged, true)), true},
+		"merged, not by the replacement":   {of(ReplacementMerge(FoundMerged, false)), false},
+		"open, replacement's commit":       {of(ReplacementMerge(FoundOther, true)), false},
 	} {
 		if tc.got.ok != tc.want || (tc.got.v != nil) != tc.want {
 			t.Errorf("%s: verdict %v, ok %t; want ok %t", name, tc.got.v, tc.got.ok, tc.want)

@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -49,7 +50,8 @@ func pastDeadline(t *testing.T, r *RemediationRequestReconciler, rr *api.Remedia
 }
 
 // A recovery that keeps failing does not hold the target for good: once the grace after the deadline is over,
-// the replacement ends NeedsIntervention with a reason that says why, and its handoff Aborted.
+// the replacement ends NeedsIntervention with a reason that says why. Its commit may be on the pull request, so its
+// handoff stays Reserved and it keeps the lock for the look at stopped holders (heldRecovery, #786).
 func TestRecoveryEndsOnceTheGraceAfterTheDeadlinePassed(t *testing.T) {
 	r, _, _, rr, _, _ := gateWorld(t)
 	ctx := context.Background()
@@ -74,8 +76,9 @@ func TestRecoveryEndsOnceTheGraceAfterTheDeadlinePassed(t *testing.T) {
 	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened); c == nil || c.Reason != ReasonHandoffRecoveryFailed {
 		t.Fatalf("PullRequestOpened: %+v", c)
 	}
-	if got := rr.Status.Handoff.From.Phase; got != api.HandoffAborted {
-		t.Fatalf("the handoff of an ended replacement is %s", got)
+	if got := rr.Status.Handoff.From.Phase; got != api.HandoffReserved || !ptr.Deref(rr.Status.HoldsTarget, false) {
+		t.Fatalf("the handoff of the ended replacement is %s, holdsTarget %v: want it Reserved with the lock kept",
+			got, rr.Status.HoldsTarget)
 	}
 }
 

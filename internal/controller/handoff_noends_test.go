@@ -153,7 +153,8 @@ func TestRecoveryMergeRecordedWithThePredecessorGone(t *testing.T) {
 }
 
 // With the predecessor gone, a merged head that is not the replacement's commit (a person pushed another change to
-// the target file) records nothing on the replacement: the verdict of the look releases the lock.
+// the target file) records nothing on the replacement: its handoff can no longer happen, so it ends Cancelled
+// (HandoffAborted, no failure for the breaker), its handoff Aborted and its lock released (endOnOtherMerge, #786).
 func TestRecoveryForeignMergeWithThePredecessorGone(t *testing.T) {
 	r, g, p, rr, cr, move := endedWatch(t)
 	ctx := context.Background()
@@ -179,8 +180,9 @@ func TestRecoveryForeignMergeWithThePredecessorGone(t *testing.T) {
 		_, _ = reconcileOnce(t, r, rr)
 	}
 	got := storedRR(t, r, rr)
-	if got.Status.MergeReceipt != nil || tookOver(got) || got.Status.Phase != api.PhaseNeedsIntervention {
-		t.Fatalf("phase %q, receipt %v, handoff %q: a merge of another head was recorded as the replacement's",
+	if got.Status.MergeReceipt != nil || tookOver(got) || got.Status.Phase != api.PhaseCancelled ||
+		got.Status.Handoff.From.Phase != api.HandoffAborted {
+		t.Fatalf("phase %q, receipt %v, handoff %q: want no merge recorded and the handoff ended on the merge",
 			got.Status.Phase, got.Status.MergeReceipt, got.Status.Handoff.From.Phase)
 	}
 	if ptr.Deref(got.Status.HoldsTarget, false) {

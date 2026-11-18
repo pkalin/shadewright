@@ -1032,7 +1032,21 @@ func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git prov
 		return &renderRefusal{reason: ReasonBranchDiverged, message: "The Git host reported no full merge commit " +
 			"ID for the merged pull request, so what the merge brought cannot be checked"}, nil
 	}
-	state, parent, err := git.CheckMerged(ctx, cr.HeadSHA, cr.MergeCommit, path)
+	// A replacement's branch carries the chain of the requests it took over, one commit each (chainDepth): each commit
+	// above the lowest must change only the target file over its own parent, and the lowest is judged against the
+	// target branch as it was before the merge (#786).
+	lowest := cr.HeadSHA
+	for range chainDepth(rr) - 1 {
+		state, parent, err := git.CheckCommit(ctx, lowest, path)
+		switch {
+		case err != nil:
+			return nil, freshness.WrapProvider("check a commit of the merged chain", err)
+		case state != providers.BranchOneChange || parent == "":
+			return diverged, nil
+		}
+		lowest = parent
+	}
+	state, parent, err := git.CheckMerged(ctx, lowest, cr.MergeCommit, path)
 	switch {
 	case err != nil:
 		return nil, freshness.WrapProvider("check what the merged pull request held", err)
@@ -1472,6 +1486,19 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 				return hintLook{}, err
 			case ok:
 				return hintLook{}, nil
+			}
+			// Any other head ends the handoff: the abort is stored before this request writes anything to the pull
+			// request (its comment, headMoved), as nothing is written to Git while the intent stands (#786).
+			if err := r.abortStandingIntent(ctx, rr); err != nil {
+				return hintLook{}, err
+			}
+		}
+		if cr.State == providers.ChangeRequestMerged && rr.Status.Handoff != nil && rr.Status.Handoff.To != nil {
+			switch owner, err := r.predecessorMergeOwner(ctx, git, rr, cr.HeadSHA); {
+			case err != nil:
+				return hintLook{}, err
+			case owner == ownerReplacement:
+				return hintLook{}, r.leaveReplacementMerge(ctx, rr, v, owner)
 			}
 		}
 		return hintLook{}, r.headMoved(ctx, git, rr, cr)
@@ -2109,11 +2136,28 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
-	if markDeleting(rr) {
+	marked := markDeleting(rr)
+	if removeInapplicable(rr) {
+		// The waits of a handoff's recovery end with the deletion (#786): nothing recovers the handoff any more.
+		gitWaitSummary(rr, r.now())
+		marked = true
+	}
+	if marked {
 		// Before the close below: the limits read this request, and count it against the cap, until the
 		// finalizer is gone (breakercounts.go).
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		}
+	}
+	if tookOver(rr) && r.ReviewerHints {
+		// Step 5 of a handoff before the finalizer goes: a replacement that recorded the takeover (and maybe the merge
+		// of its commit) ends its predecessor HandedOff first, so the predecessor never takes this request's merge for
+		// a foreign one once this request is gone (#786).
+		switch err := r.supersedePredecessor(ctx, rr); {
+		case errors.Is(err, freshness.ErrPaused):
+			return r.waitWhilePaused(ctx, rr)
+		case err != nil:
+			return reconcile.Result{}, err
 		}
 	}
 	closes := r.OpenRepository != nil && rr.Status.PlanRepository != nil &&

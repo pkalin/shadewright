@@ -143,8 +143,11 @@ func other(git providers.GitProvider) {
 // records its merge (settleRecordedMerge, as main's settleLock did), or an undelivered merge whose repository left the
 // settings (settleUndeliveredGone). Other allowed callers never acquired a lock (admission refusal and duplicates),
 // transfer it at a completed handoff, or record a lock already free before the field existed (backfill, with the
-// verdict settleReleasedBeforeField). No stopped request, including an Incident cancellation, has a separate release
-// rule.
+// verdict settleReleasedBeforeField). The handoff's reads of the pull request release on their verdicts too (#786):
+// leaveReplacementMerge for a predecessor whose pull request merged with its replacement's commit
+// (settleReplacementMerge); endOnOtherMerge and endWithoutCommit for an ended replacement whose predecessor's pull
+// request merged without its commit or is open with the predecessor's head (settleHandoffAborted). No stopped
+// request, including an Incident cancellation, has a separate release rule.
 const releaseFunc = "Release"
 
 var (
@@ -152,6 +155,7 @@ var (
 	releasers   = map[string]bool{
 		"settleTargetLock": true, "releaseUnread": true, "settleRecorded": true, "releaseRefused": true, "supersedeDuplicate": true,
 		"endHandoff": true, "supersedePredecessor": true, "cancelUndecided": true, "backfill": true,
+		"leaveReplacementMerge": true, "endOnOtherMerge": true, "endWithoutCommit": true,
 	}
 	// statusReplacers may replace a request's whole status: restoreStatus puts back the status the same caller saved
 	// earlier in the same reconcile, which holds the lock as it was then (a release since then is undone, so the lock
@@ -330,6 +334,7 @@ func restoreStatus(rr *R, before *S) { rr.Status = *before }
 var settlementBuilders = map[string]bool{
 	"settleByRead": true, "settleNeverHeld": true, "settleHandedOver": true, "settleHandoffAborted": true,
 	"settleReleasedBeforeField": true, "settleRecordedMerge": true, "settleUndeliveredGone": true,
+	"settleReplacementMerge": true,
 }
 
 // isPackage reports whether e is the package name pkg.

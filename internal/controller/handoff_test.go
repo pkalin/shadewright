@@ -649,7 +649,13 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 			Expect(head()).NotTo(Equal(oldHead), "the commit was pushed, its record lost")
 			hintsOff = true
 			drive(3)
-			cancelled()
+			// Its commit is on the open pull request, so it keeps the lock until a verdict (#786, decision 3).
+			r := get(repl)
+			Expect(r.Status.Phase).To(Equal(remediationv1alpha1.PhaseCancelled))
+			Expect(condition(r, remediationv1alpha1.ConditionPROpened).Reason).To(
+				Equal(remediationv1alpha1.ReasonHintsTurnedOff))
+			Expect(tookOver(r)).To(BeFalse())
+			Expect(r.Status.HoldsTarget).To(Equal(new(true)))
 			p := get(pred)
 			Expect(p.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 			Expect(git.ChangeRequests()).To(ConsistOf(HaveField("State", providers.ChangeRequestOpen)), "the pull request stays open for a person")

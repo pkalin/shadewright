@@ -125,7 +125,8 @@ func SecretCollection(name string) bool {
 //  3. The reading of the release before (releasedPieces, before.go): its redactor, kept unchanged in package
 //     released, applied as its read tools applied it (each value redacted, made valid UTF-8 and redacted again,
 //     then written into the answer as they wrote it, and the whole answer redacted the same way), each of its
-//     spans carried back to the bytes of the pieces it stands for.
+//     spans carried back to the bytes of the pieces it stands for; a span that begins before a piece takes it from
+//     its first byte that is no blank, as reading 2 does, so the indentation of a value stays.
 //
 // So everything the release before hid is hidden because its own code says so, and readings 1 and 2 can only
 // add. Where the object says a value ends (Whole, a secret Key), a match of reading 2 that reaches into it ends
@@ -199,8 +200,19 @@ func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
 		for j := h; p.Data && j < len(hidden) && hidden[j].start < end; j++ {
 			tick(1)
 			sp := hidden[j]
-			sp.start, sp.end = max(sp.start, off)-off, min(sp.end, end)-off
-			own[i] = append(own[i], ws[i].carry(sp))
+			from := max(sp.start, off) - off
+			if sp.start < off {
+				// A span that begins before the piece takes it from its first byte that is no blank, the blanks before
+				// that kept as the indentation they are, as for reading 2 (cutAnswer).
+				for from < len(p.Text) && strings.IndexByte(" \t\r\n", p.Text[from]) >= 0 {
+					tick(1)
+					from++
+				}
+			}
+			sp.start, sp.end = from, min(sp.end, end)-off
+			if sp.end > sp.start { // an empty value has no byte to carry the span to
+				own[i] = append(own[i], ws[i].carry(sp))
+			}
 		}
 		off = end
 	}

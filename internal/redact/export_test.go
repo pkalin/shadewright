@@ -59,3 +59,6 @@ func EntryCorpus() []EntryCase {
 var RaceKeeps = raceKeeps
 
 const RaceSampleEvery = raceSampleEvery
+
+// MaxShownBytes is maxShownBytes, for TestReleasedShownMatchesValue.
+const MaxShownBytes = maxShownBytes

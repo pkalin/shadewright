@@ -222,7 +222,8 @@ func TestListEventsNotesOfTheSixthDecision(t *testing.T) {
 // The object gives the key: under a secret map key the whole value is hidden, and nothing beyond it (#845,
 // sixth decision of 2026-11-18, point 2). A value that opens a block ("|\n  block") took the next entry of the
 // map with it. Each map of strings that a tool shows gets an entry under each secret key with a value in each
-// shape, between two entries that must show.
+// shape, between two entries that must show, except where main hid the next entry too (a flow mapping among the
+// labels of a series, which share one line).
 func TestASecretMapValueTakesNoOtherEntry(t *testing.T) {
 	shapes := append([]fieldShape{
 		{name: "a literal block", shape: func(v string) string { return "|\n  " + v }},
@@ -260,6 +261,12 @@ func TestASecretMapValueTakesNoOtherEntry(t *testing.T) {
 					})
 					text := ft.answer(t, e)
 					for _, w := range []string{"keepme1", "keepme2"} {
+						if w == "keepme2" && ft.name == tools.NameQueryMetrics && sh.name == "a flow mapping" {
+							// The labels of a series share one line, and main read a flow mapping under a secret key
+							// on it to the brace that closes the labels: the reading of the release before hides the
+							// next label as main did (#845, thirteenth decision of 2026-11-18).
+							continue
+						}
 						if !strings.Contains(text, w) {
 							if lost++; lost <= 10 {
 								t.Errorf("%s %s, key %q, value %s: the entry %s is hidden:\n%s", ft.name, p.name(typ), k, sh.name, w, text)

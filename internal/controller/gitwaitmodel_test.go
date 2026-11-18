@@ -554,7 +554,8 @@ func (m *modelWorld) recovering(rr *api.RemediationRequest) {
 	pred := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Name: rr.Name + "-old", Namespace: rr.Namespace,
 		UID: "11111111-2222-4333-8444-555555555555"}, Spec: *rr.Spec.DeepCopy()}
 	h := api.Hint{Source: api.HintSourceGitHub, CommentID: 7, Digest: "sha256:" + strings.Repeat("b", 64),
-		State: api.HintReserved, Author: api.HintAuthor{ID: 1001, Login: "reviewer"}}
+		State: api.HintReserved, Author: api.HintAuthor{ID: 1001, Login: "reviewer"}, Text: "raise the limit",
+		UpdatedAt: metav1.NewTime(reconcilerClock), AcceptedAt: metav1.NewTime(reconcilerClock)}
 	if err := m.r.Create(ctx, pred); err != nil {
 		m.t.Fatal(err)
 	}
@@ -569,6 +570,7 @@ func (m *modelWorld) recovering(rr *api.RemediationRequest) {
 		m.t.Fatal(err)
 	}
 	rr.Spec.Replaces = &api.RequestReplacement{Name: api.Name(pred.Name), UID: api.UID(pred.UID), Hint: refOf(&h)}
+	rr.Spec.ChainRoot = chainRootOf(pred)
 	if err := m.r.Update(ctx, rr); err != nil {
 		m.t.Fatal(err)
 	}
@@ -628,6 +630,33 @@ func (m *modelWorld) write(ctx context.Context, obj client.Object, do func() err
 		if errs := m.schema.validate(rr); len(errs) > 0 {
 			m.fatalf("schema: the API server refuses a status write of %s: %v", rr.Name, errs)
 			return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
+		}
+		// The CRD's CEL rules, transition rules included, on what the write stores against what was stored before it:
+		// an entry of status.gitWaits whose start or end moved, or a handoff moved back, is refused as the API server
+		// refuses it. A write the store refuses (a conflict on the resourceVersion, which the API server checks before
+		// the rules) is not checked.
+		write := do
+		do = func() error {
+			old := &api.RemediationRequest{}
+			if err := m.base.Get(ctx, client.ObjectKeyFromObject(rr), old); err != nil {
+				return write()
+			}
+			if err := write(); err != nil {
+				return err
+			}
+			stored := &api.RemediationRequest{}
+			if err := m.base.Get(ctx, client.ObjectKeyFromObject(rr), stored); err != nil {
+				return err
+			}
+			if errs := m.schema.validateUpdate(old, stored); len(errs) > 0 {
+				m.fatalf("rules: the API server refuses a status write of %s: %v", rr.Name, errs)
+				old.ResourceVersion = stored.ResourceVersion
+				if err := m.base.Status().Update(ctx, old); err != nil {
+					return err
+				}
+				return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
+			}
+			return nil
 		}
 	}
 	m.mu.Lock()

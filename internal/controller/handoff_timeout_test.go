@@ -47,15 +47,31 @@ type hangingGit struct {
 }
 
 func (g *hangingGit) BranchHead(ctx context.Context, branch string) (string, error) {
-	if g.hang.Load() {
-		g.hangings.Add(1)
-		if g.onHang != nil {
-			g.onHang()
-		}
-		<-ctx.Done()
+	if g.hung(ctx) {
 		return "", ctx.Err()
 	}
 	return g.Git.BranchHead(ctx, branch)
+}
+
+// GetChangeRequest hangs as BranchHead does: a replacement whose handoff was aborted reads the pull request (#786).
+func (g *hangingGit) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	if g.hung(ctx) {
+		return providers.ChangeRequest{}, ctx.Err()
+	}
+	return g.Git.GetChangeRequest(ctx, n)
+}
+
+// hung waits for the end of ctx while g hangs, and reports whether it did.
+func (g *hangingGit) hung(ctx context.Context) bool {
+	if !g.hang.Load() {
+		return false
+	}
+	g.hangings.Add(1)
+	if g.onHang != nil {
+		g.onHang()
+	}
+	<-ctx.Done()
+	return true
 }
 
 // hangingWorld is handoffAppendedWorld whose repository opens to a hangingGit, with a short step deadline.
@@ -69,9 +85,9 @@ func hangingWorld(t *testing.T) (*RemediationRequestReconciler, *hangingGit, *ap
 	return r, h, rr, cr
 }
 
-// While a recovery waits, a read of the branch that reaches the step's deadline keeps the wait past the deadline
-// and its grace, with the poll interval as pacing and the condition naming the read that times out; once the host
-// answers again, a merge of the replacement's commit is recorded.
+// After the abort at a refusal, a read of the pull request that reaches the step's deadline keeps the watch past the
+// deadline and its grace, with the poll interval as pacing and the condition naming the read that times out; once
+// the host answers again, a merge of the replacement's commit is recorded.
 func TestRecoveryKeepsWaitingThroughAStepTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason string
@@ -82,10 +98,10 @@ func TestRecoveryKeepsWaitingThroughAStepTimeout(t *testing.T) {
 	}{
 		{name: "refused branch read", reason: ReasonGitForbidden,
 			cause: func(_ *RemediationRequestReconciler, h *hangingGit) func() {
-				refuseBranchHead(h.Git)
+				refuseRecoveryReads(h.Git)
 				return func() { h.SetFail(nil) }
 			},
-			want: ReasonGitForbidden},
+			want: ReasonRecoveryReadFailed},
 		{name: "unusable settings", reason: reasonRepositoryUnusable,
 			cause: func(r *RemediationRequestReconciler, _ *hangingGit) func() {
 				open := r.OpenRepository
@@ -129,12 +145,12 @@ func TestRecoveryKeepsWaitingThroughAStepTimeout(t *testing.T) {
 					t.Fatalf("phase = %q: a step timeout ended a replacement that waits", rr.Status.Phase)
 				}
 				c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable)
-				if c == nil || c.Reason != tc.want || !strings.Contains(c.Message, branchHeadRead) {
-					t.Fatalf("PullRequestUnreadable = %+v, want reason %s naming %q", c, tc.want, branchHeadRead)
+				if c == nil || c.Reason != tc.want || !strings.Contains(c.Message, findChangeRead) {
+					t.Fatalf("PullRequestUnreadable = %+v, want reason %s naming %q", c, tc.want, findChangeRead)
 				}
 			}
 			if h.hangings.Load() == 0 {
-				t.Fatal("the read of the branch never hung")
+				t.Fatal("the read of the pull request never hung")
 			}
 
 			h.hang.Store(false)
@@ -171,7 +187,7 @@ func TestRecoveryReturnsTheEndOfTheReconcileWhileWaiting(t *testing.T) {
 			r, h, rr, _ := hangingWorld(t)
 			r.WriteTimeout = time.Minute
 			ctx := context.Background()
-			refuseBranchHead(h.Git)
+			refuseRecoveryReads(h.Git)
 			if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 				t.Fatal(err)
 			}

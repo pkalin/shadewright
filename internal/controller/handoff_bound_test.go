@@ -33,13 +33,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
-// The bound of the wait of a recovery that met a refusal (#786, decision of 2026-11-17): 24 hours from the first
-// refusal, then the handoff is aborted and the replacement ends NeedsIntervention with the lock kept, and the look
-// that settles the lock records a merge of its commit found later.
+// The abort of a handoff at a refused read of its recovery (#786, decision of 2026-11-18): the intent is aborted at
+// the first refusal, the replacement watches for a merge of its commit until 24 hours after it and never takes the
+// pull request over again, then ends NeedsIntervention with the lock kept; the look that settles the lock keeps it
+// while the pull request is open.
 
 // refuseAll makes the Git host refuse (403) every call of the provider.
 func refuseAll(g *fakegit.Git) {
@@ -78,7 +80,8 @@ const (
 type boundState int
 
 const (
-	stWaiting   boundState = iota // PolicyChecked, the recovery waiting or not started
+	stWaiting   boundState = iota // PolicyChecked, the recovery not refused yet
+	stWatching                    // PolicyChecked, the handoff aborted at the refusal, watching for a merge
 	stBound                       // NeedsIntervention at the bound of the wait
 	stTakenOver                   // the takeover recorded
 	stMerged                      // the merge of its commit recorded
@@ -114,30 +117,33 @@ func (m *boundModel) apply(e boundEvent) {
 	}
 }
 
-// step is one reconcile: a waiting recovery that cannot read starts its wait, or ends at the bound; one that reads
-// ends as the pull request says. A request ended at the bound reads the pull request on: a merge is recorded, a
-// close releases the lock, anything else keeps it.
+// step is one reconcile: a recovery that meets its first refusal aborts the handoff and watches; one that reads before
+// any refusal ends as the pull request says. A watching request ends at the bound from recorded state, and before it
+// records a merge of its commit once a read shows one, nothing else. A request ended at the bound keeps the lock while
+// a read shows the pull request open, and leaves it once a read shows it merged or closed: a merge after the end is not
+// recorded on it.
 func (m *boundModel) step() {
 	switch m.phase {
 	case stWaiting:
 		if m.refusing {
-			if m.waitStart == nil {
-				start := m.now
-				m.waitStart = &start
-			} else if m.now-*m.waitStart >= cleanupFailingBound {
-				m.phase, m.held = stBound, true
-			}
+			start := m.now
+			m.waitStart = &start
+			m.phase = stWatching
 			return
 		}
 		m.phase = map[boundPR]boundState{prIsOpen: stTakenOver, prIsMerged: stMerged, prIsClosed: stCancelled}[m.pr]
+	case stWatching:
+		switch {
+		case m.now-*m.waitStart >= cleanupFailingBound:
+			m.phase, m.held = stBound, true
+		case !m.refusing && m.pr == prIsMerged:
+			m.phase = stMerged
+		}
 	case stBound:
 		if m.refusing || !m.held {
 			return
 		}
-		switch m.pr {
-		case prIsMerged:
-			m.phase = stMerged
-		case prIsClosed:
+		if m.pr != prIsOpen {
 			m.held = false
 		}
 	}
@@ -236,13 +242,16 @@ func checkBoundEnd(t *testing.T, m *boundModel, got *api.RemediationRequest) {
 	t.Helper()
 	opened := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPROpened)
 	switch m.phase {
-	case stWaiting:
+	case stWaiting, stWatching:
 		if got.Status.Phase != api.PhasePolicyChecked || got.Status.Handoff.From.Phase != api.HandoffReserved {
-			t.Fatalf("phase %q, handoff %q: want the recovery still waiting", got.Status.Phase,
+			t.Fatalf("phase %q, handoff %q: want the recovery still going", got.Status.Phase,
 				got.Status.Handoff.From.Phase)
 		}
-		if (m.waitStart != nil) != (watchedRecovery(got) != nil) {
-			t.Fatalf("PullRequestUnreadable = %+v, want a wait recorded: %v", watchedRecovery(got), m.waitStart != nil)
+		if (m.phase == stWatching) != abortedOnRefusal(got) {
+			t.Fatalf("waits = %+v, want the handoff aborted at a refusal: %v", got.Status.GitWaits, m.phase == stWatching)
+		}
+		if m.phase == stWatching && m.refusing && watchedRecovery(got) == nil {
+			t.Fatalf("the watch lost the condition that says what is refused: %+v", got.Status.Conditions)
 		}
 	case stBound:
 		if got.Status.Phase != api.PhaseNeedsIntervention || opened == nil || opened.Reason != ReasonRecoveryWaitExpired ||
@@ -296,66 +305,44 @@ func boundWorld(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api
 	return r, g, p, rr, move
 }
 
-// While the replacement's recovery waits, the predecessor's freshness check, its merge gate and its deletion are
-// held for the handoff; once the bound has ended the replacement, each of them works again.
-func TestRecoveryBoundReleasesThePredecessor(t *testing.T) {
+// At the first refusal the predecessor's intent is aborted (decision of 2026-11-18 on #786): its freshness check, its
+// merge gate and its deletion work again at once, not at the bound, and its next look stops it as for a foreign push
+// (the head is the replacement's commit), while the replacement keeps watching.
+func TestRecoveryAbortReleasesThePredecessor(t *testing.T) {
 	r, g, p, rr, move := boundWorld(t)
 	ctx := context.Background()
-	reconcilePred := func() {
-		for range 3 {
-			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(p)})
-		}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
-			t.Fatal(err)
-		}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+		t.Fatal(err)
 	}
-
-	// Before the bound, with the Git host answering the predecessor: it waits for the handoff.
+	if intent(p) != nil || p.Status.Handoff.To.Phase != api.HandoffAborted {
+		t.Fatalf("the refusal left the intent standing: %+v", p.Status.Handoff.To)
+	}
+	if !r.gateDue(p) {
+		t.Fatal("the merge gate is not due after the abort")
+	}
+	if keep, wait, err := r.handoffHolds(ctx, p.DeepCopy()); err != nil || wait || keep {
+		t.Fatalf("handoffHolds = keep %v, wait %v, %v: want the close of a request that was not handed over", keep,
+			wait, err)
+	}
 	g.SetFail(nil)
-	move(cleanupFailingBound - time.Hour)
-	reconcilePred()
-	if intent(p) == nil || p.Status.Phase != api.PhaseAwaitingApproval {
-		t.Fatalf("before the bound the predecessor left the handoff: phase %q, handoff %+v", p.Status.Phase,
-			p.Status.Handoff.To)
+	move(time.Hour)
+	for range 3 {
+		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(p)})
 	}
-	if r.gateDue(p) {
-		t.Fatal("the merge gate ran while the intent stands")
+	if err := r.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+		t.Fatal(err)
 	}
-	if _, wait, err := r.handoffHolds(ctx, p); err != nil || !wait {
-		t.Fatalf("handoffHolds = wait %v, %v: the deletion did not wait for the replacement", wait, err)
+	if p.Status.Phase == api.PhaseAwaitingApproval {
+		t.Fatalf("the predecessor still waits on a head that is the replacement's commit: phase %q", p.Status.Phase)
 	}
-
-	// The bound passes while the replacement still cannot read.
-	refuseAll(g)
-	move(2 * time.Hour)
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
-	if rr.Status.Phase != api.PhaseNeedsIntervention {
-		t.Fatalf("phase = %q, want NeedsIntervention at the bound", rr.Status.Phase)
-	}
-	g.SetFail(nil)
-
-	// The deletion no longer waits, and the merge gate is due again once the predecessor's look aborts its intent.
-	if keep, wait, err := r.handoffHolds(ctx, p.DeepCopy()); err != nil || wait || keep {
-		t.Fatalf("handoffHolds = keep %v, wait %v, %v: want the close of a request that was not handed over", keep,
-			wait, err)
-	}
-	gate := p.DeepCopy()
-	r.settleHandoff(ctx, gate)
-	if intent(gate) != nil || !r.gateDue(gate) {
-		t.Fatalf("the merge gate is not due after the bound: handoff %+v", gate.Status.Handoff.To)
-	}
-
-	// The predecessor's look checks it again: the head the replacement pushed is not its own any more (the stop as
-	// for a foreign push, BranchDiverged with its comment, is the envtest spec of #786 in handoff_test.go).
-	reconcilePred()
-	if p.Status.Handoff.To.Phase != api.HandoffAborted || p.Status.Phase == api.PhaseAwaitingApproval {
-		t.Fatalf("after the bound the predecessor is still held: phase %q, handoff %q", p.Status.Phase,
-			p.Status.Handoff.To.Phase)
+	if !abortedOnRefusal(rr) || tookOver(rr) || !ptr.Deref(rr.Status.HoldsTarget, false) {
+		t.Fatalf("phase %q, waits %+v: want the replacement watching with the lock", rr.Status.Phase, rr.Status.GitWaits)
 	}
 }
 
@@ -395,7 +382,10 @@ func TestRecoveryBoundCountsFromTheFirstRefusal(t *testing.T) {
 	if err != nil || res.RequeueAfter != DefaultPullRequestPollInterval {
 		t.Fatalf("Reconcile = %+v, %v; want the poll interval before the bound", res, err)
 	}
-	failBranchHeadRetryable(g, 10*time.Minute)
+	// The watch reads the pull request, not the branch: every call fails with a delay asked for.
+	g.SetFail(func(string) error {
+		return &providers.RetryableError{Err: errors.New("status 503"), RetryAfter: 10 * time.Minute}
+	})
 	res, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	if err != nil || res.RequeueAfter != 10*time.Minute {
 		t.Fatalf("Reconcile = %+v, %v; want the delay the host asked for", res, err)
@@ -558,7 +548,7 @@ func TestRecoveryGraceNeverEndsOnAnAPIFailure(t *testing.T) {
 func TestRecoveryGraceEndNamesTheGitHost(t *testing.T) {
 	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
-	failBranchHeadRetryable(g, 0)
+	failRecoveryReadsRetryable(g, 0)
 	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Hour)
 	for range 2 {
 		if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
@@ -674,8 +664,8 @@ func TestRecoveryWaitStartsItsOwnClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	move(time.Hour)
-	want := refusedRead(rr, ReasonGitForbidden, fmt.Errorf("status 403: %w", providers.ErrForbidden), 0)
-	if err := r.setRecoveryWait(ctx, rr, want); err != nil {
+	refused := freshness.WrapProvider("read the head of the branch", fmt.Errorf("status 403: %w", providers.ErrForbidden))
+	if _, err := r.abortOnRefusal(ctx, rr, recoveryUnreadable(rr, refused), refused); err != nil {
 		t.Fatal(err)
 	}
 	got := &api.RemediationRequest{}
@@ -699,22 +689,18 @@ func TestRecoveryWaitSurvivesALostWriteAtTheFirstRefusal(t *testing.T) {
 		rr, ok := obj.(*api.RemediationRequest)
 		return ok && rr.Name == newName && gitWait(rr, waitHandoffRecovery) != nil
 	}
-	isCondition := func(obj client.Object) bool {
-		rr, ok := obj.(*api.RemediationRequest)
-		return ok && rr.Name == newName && watchedRecovery(rr) != nil && gitWait(rr, waitHandoffRecovery) == nil
-	}
 	for name, c := range map[string]struct {
 		// hit picks the status patch the fault is put on; lose fails it unapplied, otherwise the request is changed
 		// (an annotation) between the read and the patch, a conflict.
 		hit  func(client.Object) bool
 		lose bool
-		// fromFirst: the entry counts from the first refusal; otherwise from the reconcile after the lost condition.
+		// fromFirst: the entry counts from the first refusal; otherwise from the reconcile after the lost write.
 		fromFirst bool
 	}{
-		"condition lost":      {hit: isCondition, lose: true},
-		"condition conflicts": {hit: isCondition},
-		"entry lost":          {hit: isEntry, lose: true, fromFirst: true},
-		"entry conflicts":     {hit: isEntry, fromFirst: true},
+		// The condition and the entry are one write (abortOnRefusal): lost, neither is recorded, and the next
+		// refusal records both; a conflict is retried on a fresh read in the same reconcile.
+		"write lost":      {hit: isEntry, lose: true},
+		"write conflicts": {hit: isEntry, fromFirst: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
@@ -761,16 +747,15 @@ func TestRecoveryWaitSurvivesALostWriteAtTheFirstRefusal(t *testing.T) {
 			}
 			want := first
 			if !c.fromFirst {
-				// Nothing of the first refusal was recorded (a conflict on the condition's write is returned for a
-				// retry): the wait starts with the refusal the status records.
+				// Nothing of the first refusal was recorded: the wait starts with the refusal the status records.
 				want = first.Add(time.Hour)
 			}
 			w := gitWait(rr, waitHandoffRecovery)
 			if w == nil || !w.Since.Time.Equal(want) || !w.Ends.Time.Equal(want.Add(recoveryWaitBound)) {
 				t.Fatalf("HandoffRecovery wait = %+v, want it from %v to %v after it", w, want, recoveryWaitBound)
 			}
-			if n := len(rr.Status.GitWaits); n != 2 {
-				t.Fatalf("waits = %+v, want the HandoffRecovery and HandoffGrace entries", rr.Status.GitWaits)
+			if n := len(rr.Status.GitWaits); n != 1 {
+				t.Fatalf("waits = %+v, want the HandoffRecovery entry alone", rr.Status.GitWaits)
 			}
 			if c := watchedRecovery(rr); c == nil || !c.LastTransitionTime.Time.Equal(want) {
 				t.Fatalf("PullRequestUnreadable = %+v, want it from %v", c, want)

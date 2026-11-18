@@ -102,10 +102,9 @@ func TestRecoveryHonoursRetryAfterPastTheDeadline(t *testing.T) {
 	}
 }
 
-// Past the grace, a failure that is no Git read (here a 404 for the branch while its pull request is open, answers
-// that disagree) does not end a recovery whose HandoffRecovery wait from an earlier refusal still stands: the recovery
-// ends when every recorded wait has passed (decision of 2026-11-18 on #786), and this path reads that end as
-// endPassedWait does.
+// Past the grace, a request whose HandoffRecovery entry stands (its handoff was aborted at a refusal) does not end at
+// the grace: it watches the pull request until the end of that entry (decision of 2026-11-18 on #786), whatever its
+// reads answer meanwhile, and this path reads that end as endPassedWait does.
 func TestRecoveryPastTheGraceKeepsARecordedRefusalWait(t *testing.T) {
 	r, g, _, rr, _, _ := gateWorld(t)
 	ctx := context.Background()
@@ -122,8 +121,8 @@ func TestRecoveryPastTheGraceKeepsARecordedRefusalWait(t *testing.T) {
 		}
 		return nil
 	})
-	if _, err := r.recheck(ctx, rr); !errors.Is(err, errConflictingReads) {
-		t.Fatalf("recheck = %v, want the answers that disagree for the error backoff", err)
+	if _, err := r.recheck(ctx, rr); err != nil {
+		t.Fatalf("recheck = %v, want the watch to go on", err)
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)

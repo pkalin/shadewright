@@ -153,8 +153,7 @@ var gitReadSites = map[string]gitReadSite{
 		}},
 	helperSite:                                 {},
 	"handoff.go:retryRecovery:1":               {bound: handoffGraceBound, check: checkRecoveryBound},
-	"recoverywait.go:waitRecovery:1":           {bound: handoffRecoveryBound, check: checkRecoveryWaitBound(false)},
-	"recoverywait.go:waitingRecovery:1":        {bound: handoffRecoveryBound, check: checkRecoveryWaitBound(true)},
+	"recoverywait.go:observeFailed:1":          {bound: handoffRecoveryBound, check: checkRecoveryWaitBound},
 	"recoverywait.go:heldRecovery:1":           {bound: heldLockBound},
 	"incidentcancel.go:followCancelledMerge:1": {bound: heldLockBound},
 	"incidentcancel.go:closeCancelled:1":       {bound: heldLockBound},
@@ -244,40 +243,39 @@ func checkRecoveryBound(t *testing.T, c boundCase) (time.Duration, bool) {
 	return mustWait(t, res, err), false
 }
 
-// checkRecoveryWaitBound: a replacement whose recovery waits on a refusal (#786) c.left before the end of that wait
-// (recoveryWaitBound from the condition's lastTransitionTime, the deadline long past) fails a read that takes
-// c.during: the refusal again (waitRecovery) or a failure worth retrying (waitingRecovery, when retryable). The wait
-// never ends here; only the check at the start of a reconcile ends it (endPassedWait).
-func checkRecoveryWaitBound(retryable bool) func(t *testing.T, c boundCase) (time.Duration, bool) {
-	return func(t *testing.T, c boundCase) (time.Duration, bool) {
-		r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
-		clock := clockOf(r)
-		ctx := context.Background()
-		// The spec too: the wait's entry is written on the request as the API server holds it (putGitWaits).
-		status := rr.Status.DeepCopy()
-		rr.Spec.Replaces = &api.RequestReplacement{Name: oldName, UID: "old-uid", Hint: api.HintRef{
-			Source: api.HintSourceGitHub, CommentID: 7, Digest: "sha256:" + strings.Repeat("a", 64)}}
-		if err := r.Update(ctx, rr); err != nil {
-			t.Fatal(err)
-		}
-		rr.Status = *status
-		rr.Status.Handoff = &api.Handoff{From: &api.IncomingHandoff{Phase: api.HandoffReserved}}
-		rr.Status.Deadline = &metav1.Time{Time: clock.at.Add(-recoveryWaitBound)}
-		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
-			Type: api.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: ReasonGitForbidden,
-			Message: "The Git host refused the read of the branch", LastTransitionTime: metav1.NewTime(clock.at.Add(-recoveryWaitBound + c.left - time.Second))})
-		if err := r.Status().Update(ctx, rr); err != nil {
-			t.Fatal(err)
-		}
-		clock.advance(c.during)
-		if retryable {
-			res, err := r.waitingRecovery(ctx, rr, watchedRecovery(rr), failedRead())
-			return mustWait(t, res, err), false
-		}
-		refused := readFailure(opBranchHead, fmt.Errorf("status 403: %w", providers.ErrForbidden))
-		res, err := r.waitRecovery(ctx, rr, watchedRecovery(rr).DeepCopy(), refused)
-		return mustWait(t, res, err), false
+// checkRecoveryWaitBound: a replacement whose handoff was aborted at a refusal (#786) c.left before the end of its
+// HandoffRecovery entry (recoveryWaitBound from the refusal, the deadline long past) fails a read that takes c.during,
+// alternately refused again and worth retrying (observeFailed). The watch never ends here; only the check at the start
+// of a reconcile ends it (endPassedWait).
+func checkRecoveryWaitBound(t *testing.T, c boundCase) (time.Duration, bool) {
+	r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
+	clock := clockOf(r)
+	ctx := context.Background()
+	// The spec too: the wait's entry is written on the request as the API server holds it (putGitWaits).
+	status := rr.Status.DeepCopy()
+	rr.Spec.Replaces = &api.RequestReplacement{Name: oldName, UID: "old-uid", Hint: api.HintRef{
+		Source: api.HintSourceGitHub, CommentID: 7, Digest: "sha256:" + strings.Repeat("a", 64)}}
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
 	}
+	rr.Status = *status
+	rr.Status.Handoff = &api.Handoff{From: &api.IncomingHandoff{Phase: api.HandoffReserved}}
+	rr.Status.Deadline = &metav1.Time{Time: clock.at.Add(-recoveryWaitBound)}
+	refusedAt := clock.at.Add(-recoveryWaitBound + c.left - time.Second)
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type: api.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: ReasonGitForbidden,
+		Message: "The Git host refused the read of the branch", LastTransitionTime: metav1.NewTime(refusedAt)})
+	rr.Status.GitWaits = []api.GitWait{refusalEntry(refusedAt, opBranchHead)}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(c.during)
+	err := failedRead()
+	if c.during%2 == 0 {
+		err = readFailure(opBranchHead, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+	}
+	res, err := r.observeFailed(ctx, rr, err)
+	return mustWait(t, res, err), false
 }
 
 // checkDeliveryBound: the ancestry read of the delivery fails c.left before the grace ends.

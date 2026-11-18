@@ -65,7 +65,7 @@ func settlementWorld(t *testing.T, phase api.RemediationPhase) (*RemediationRequ
 	t.Helper()
 	ctx := context.Background()
 	c, rr := plannedWorld(t)
-	rr.UID = "settlement"
+	rr.UID = "5e771e00-0000-4000-8000-000000000001"
 	if err := c.Update(ctx, rr); err != nil {
 		t.Fatal(err)
 	}

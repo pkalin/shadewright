@@ -666,7 +666,7 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 	}
 	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: newHead})
 	rr.Status.Deadline = nil
-	// The reads of the takeover worked: condition PullRequestUnreadable of a recovery that waited (watchRecovery,
+	// The reads of the takeover worked: condition PullRequestUnreadable of a recovery that met a failure before (#688,
 	// #786) goes in the same write, and its Normal Event after it.
 	var unreadable *metav1.Condition
 	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
@@ -975,10 +975,11 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 // write, and the request goes on to the read after the update (afterUpdate) instead of the freshness check, so a
 // merge of the new commit, or a target branch that moved since, is the replacement's and never taken for a
 // stale plan. done is false when there is nothing to recover; the caller then goes on as before, after condition
-// PullRequestUnreadable of an earlier look that could not read is removed. With spec.cancel set, a failure of the
-// recovery is the cancel's (cancelRecovery), never an end of the request (#289); without it, retryRecovery. The end of
-// a recovery that waits is the end of its HandoffGrace and HandoffRecovery waits (endPassedWait, endRecoveryFailed),
-// never a step here.
+// PullRequestUnreadable of an earlier look that could not read is removed. A final refusal of a read of the recovery
+// aborts the handoff (abortOnRefusal, #786), and from then on the request only watches for a merge of its commit until
+// the end of its HandoffRecovery wait (observeStep, observeFailed), never taking the pull request over again; done is
+// false then only for a cancel whose read worked. With spec.cancel set, any other failure of the recovery is the
+// cancel's (cancelRecoveryFailed), never an end of the request (#289); without it, retryRecovery.
 func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	res reconcile.Result, done bool, err error) {
 	ho := rr.Status.Handoff
@@ -1002,15 +1003,29 @@ func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *r
 	switch {
 	case errors.Is(err, errStopped):
 		return reconcile.Result{}, true, nil
+	case err != nil && abortedOnRefusal(rr):
+		res, err = r.observeFailed(ctx, rr, err)
+		return res, true, err
+	case err == nil && !done && abortedOnRefusal(rr):
+		// A cancel whose read worked: the cancel goes on (observeStep removed the condition).
+		return res, false, nil
 	case err == nil && !done:
-		// Nothing to recover: a condition of an earlier look that could not read (waitRecovery) is removed before
-		// the request goes on. A takeover removes it in its own write (recordHandoff).
+		// Nothing to recover: a condition of an earlier look that could not read is removed before the request goes
+		// on. A takeover removes it in its own write (recordHandoff).
 		if werr := r.setUnreadable(ctx, rr, nil); werr != nil {
 			return reconcile.Result{}, true, werr
 		}
 		return res, false, nil
+	case err != nil && ctx.Err() == nil && !errors.Is(err, freshness.ErrPaused) && recoveryUnreadable(rr, err) != nil:
+		refused := err
+		res, err = r.abortOnRefusal(ctx, rr, recoveryUnreadable(rr, refused), refused)
+		if err == nil && cancelRequested(rr) && abortedOnRefusal(rr) {
+			// The cancel cannot finish while nothing can be read: it is watched with the refusal's reason (#289).
+			res, err = r.cancelRecoveryFailed(ctx, rr, refused)
+		}
+		return res, true, err
 	case err != nil && cancelRequested(rr):
-		res, err = r.cancelRecovery(ctx, rr, err)
+		res, err = r.cancelRecoveryFailed(ctx, rr, err)
 		return res, true, err
 	case err != nil:
 		res, err = r.retryRecovery(ctx, rr, err)
@@ -1022,9 +1037,8 @@ func (r *RemediationRequestReconciler) recoverHandoff(ctx context.Context, rr *r
 // handoffRecoveryGrace is how long after its deadline a replacement keeps retrying a recovery that fails for a
 // reason worth retrying (the Git host did not answer): its commit may be on the pull request already, so the
 // deadline alone does not end it, but the target is not held for as long as the failure lasts. A failure of the
-// Kubernetes API never reaches it: that is the error backoff's, whatever the deadline. A recovery that met a refusal or
-// settings that cannot reach its repository also has its HandoffRecovery wait, recoveryWaitBound from the first one,
-// and ends at the later of the two (#786).
+// Kubernetes API never reaches it: that is the error backoff's, whatever the deadline. A final refusal aborts the
+// handoff instead (abortOnRefusal, #786).
 const handoffRecoveryGrace = 15 * time.Minute
 
 // ReasonHandoffRecoveryFailed is the reason of NeedsIntervention when the recovery of a handoff kept failing on
@@ -1032,30 +1046,16 @@ const handoffRecoveryGrace = 15 * time.Minute
 // unknown.
 const ReasonHandoffRecoveryFailed = "HandoffRecoveryFailed"
 
-// retryRecovery is retry for an error of recoverStep. A final refusal of the Git host (of a read of the branch or of
-// a pull request alike) and settings that cannot reach the plan's repository never end the request (#786): its
-// commit may still be merged and it holds the target lock, so the recovery waits (waitRecovery). While it waits
-// (watchedRecovery), no error ends it (waitingRecovery): only what the recovery reads does (a merge, a takeover,
-// nothing to recover), a cancel or a deletion, or the end of its waits: the HandoffRecovery entry, recoveryWaitBound
-// after the first refusal, and the HandoffGrace entry of the deadline, whichever ends later (endPassedWait,
-// endRecoveryFailed). A pause waits as before. A request that never met a refusal is retried
-// as before #786: before the deadline it is retry; past it a failed Git read is retried visibly (retryGitRead), never
-// later than the end of the grace, and any other failure worth retrying after the delay the host asked for
-// (Retry-After, which the deadline does not cut short) or with the error backoff, until handoffRecoveryGrace after the
-// deadline, or the end of a HandoffRecovery entry recorded by an earlier refusal when later; then the request ends
-// NeedsIntervention with ReasonHandoffRecoveryFailed, and its handoff Aborted (declineOnEnd). A failure of the Kubernetes API (a *clusterError) is never taken for the Git host's: past the
-// deadline it goes to the error backoff and ends nothing (decision of 2026-11-17).
+// retryRecovery is retry for an error of recoverStep that is no final refusal (those abort the handoff,
+// abortOnRefusal), as before #786: before the deadline it is retry; past it a failed Git read is retried visibly
+// (retryGitRead) within the grace (the HandoffGrace entry), and any other failure worth retrying after the delay the
+// host asked for (Retry-After, which the deadline does not cut short) or with the error backoff, until
+// handoffRecoveryGrace after the deadline; then the request ends NeedsIntervention with ReasonHandoffRecoveryFailed,
+// and its handoff Aborted (declineOnEnd). A failure of the Kubernetes API (a *clusterError) is never taken for the Git
+// host's: past the deadline it goes to the error backoff and ends nothing (decision of 2026-11-17).
 func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error) (reconcile.Result, error) {
 	paused := errors.Is(err, freshness.ErrPaused)
-	if c := watchedRecovery(rr); c != nil && !paused {
-		return r.waitingRecovery(ctx, rr, c, err)
-	}
-	if ctx.Err() == nil && !paused {
-		if want := recoveryUnreadable(rr, err); want != nil {
-			return r.waitRecovery(ctx, rr, want, err)
-		}
-	}
 	if rr.Status.Deadline == nil || !r.now().After(rr.Status.Deadline.Time) || ctx.Err() != nil || paused {
 		return r.retry(ctx, rr, err)
 	}
@@ -1067,7 +1067,7 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 		// ends the request (endPassedWait, endRecoveryFailed), so no failed read, timeout or early return skips it.
 		return r.retryGitRead(ctx, rr, err, boundBy(waitHandoffGrace))
 	}
-	// The end of the recovery's waits, as endPassedWait reads it: the grace, or a HandoffRecovery entry when later.
+	// The end of the recovery's waits, as endPassedWait reads it.
 	end, ok := waitHandoffGrace.boundEnd(rr, r.now())
 	if !ok {
 		end = rr.Status.Deadline.Add(handoffRecoveryGrace)
@@ -1077,7 +1077,7 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 		// Any other failure is no Git wait: it ends the request here, on its own retry.
 		logf.FromContext(ctx).Info("Could not recover the handoff of RemediationRequest before the grace ended",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return reconcile.Result{}, r.endRecoveryFailed(ctx, rr)
+		return reconcile.Result{}, r.endRecoveryFailed(ctx, rr, nil, time.Time{})
 	}
 	d := retryAfterOf(err)
 	if d <= 0 {
@@ -1089,13 +1089,19 @@ func (r *RemediationRequestReconciler) retryRecovery(ctx context.Context, rr *re
 	return reconcile.Result{RequeueAfter: d}, nil
 }
 
-// endRecoveryFailed ends a request whose HandoffGrace and HandoffRecovery waits passed their end. A recovery that waited on a refusal or on
-// settings that cannot reach its repository (watchedRecovery) ends with ReasonRecoveryWaitExpired and keeps the target
-// lock (endRecoveryWait, #786); any other could not be recovered before handoffRecoveryGrace after its deadline:
-// NeedsIntervention with ReasonHandoffRecoveryFailed. Its handoff is aborted with the end (declineOnEnd).
-func (r *RemediationRequestReconciler) endRecoveryFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	if c := watchedRecovery(rr); c != nil {
-		return r.ignoreStopped(r.endRecoveryWait(ctx, rr, c))
+// endRecoveryFailed ends a request whose HandoffGrace and HandoffRecovery waits passed their end; refused is its
+// HandoffRecovery entry as it stood before the end removed it, nil without one, and end the latest end of its waits
+// then (zero when unknown). A replacement whose handoff was aborted
+// at a refusal ends with ReasonRecoveryWaitExpired and keeps the target lock (endRecoveryWait); any other could not be
+// recovered before handoffRecoveryGrace after its deadline: NeedsIntervention with ReasonHandoffRecoveryFailed. Its
+// handoff is aborted with the end (declineOnEnd).
+func (r *RemediationRequestReconciler) endRecoveryFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	refused *remediationv1alpha1.GitWait, end time.Time) error {
+	if refused != nil {
+		if end.Before(refused.Ends.Time) {
+			end = refused.Ends.Time
+		}
+		return r.ignoreStopped(r.endRecoveryWait(ctx, rr, *refused, end))
 	}
 	return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
 		ReasonHandoffRecoveryFailed, "The deadline passed and the Git host could not be read to learn whether "+
@@ -1110,7 +1116,8 @@ func recoveringHandoff(rr *remediationv1alpha1.RemediationRequest) bool {
 		rr.Status.Phase == remediationv1alpha1.PhasePolicyChecked && staleMark(rr) == nil
 }
 
-// recoverStep is the look of recoverHandoff.
+// recoverStep is the look of recoverHandoff. A replacement whose handoff was aborted at a refusal only watches
+// (observeStep).
 func (r *RemediationRequestReconciler) recoverStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, bool, error) {
 	from := rr.Status.Handoff.From
@@ -1120,6 +1127,9 @@ func (r *RemediationRequestReconciler) recoverStep(ctx context.Context, rr *reme
 		// so no Shadewright request holds a head that a hint steered without the merge gate.
 		return reconcile.Result{}, true, r.endHandoff(ctx, rr, remediationv1alpha1.ReasonHintsTurnedOff,
 			msgHintsTurnedOff+"; nothing was recorded as taken over")
+	}
+	if abortedOnRefusal(rr) {
+		return r.observeStep(ctx, rr)
 	}
 	pred := &remediationv1alpha1.RemediationRequest{}
 	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
@@ -1215,7 +1225,7 @@ func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *rem
 	case repl.UID != types.UID(to.UID):
 	case tookOver(repl):
 		return true, false, nil
-	case !ended(repl.Status.Phase):
+	case !ended(repl.Status.Phase) && !abortedOnRefusal(repl):
 		return false, true, nil
 	}
 	abortIntent(rr, ReasonHintHandoffAborted)
@@ -1231,6 +1241,9 @@ func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *r
 	gaveUp := func(repl *remediationv1alpha1.RemediationRequest) bool {
 		return ended(repl.Status.Phase) && !tookOver(repl)
 	}
+	// A replacement whose handoff was aborted at a refused read (abortedOnRefusal, #786) never takes over: its intent
+	// is aborted, though it still runs.
+	abandoned := func(repl *remediationv1alpha1.RemediationRequest) bool { return gaveUp(repl) || abortedOnRefusal(repl) }
 	reasonOf := func(repl *remediationv1alpha1.RemediationRequest) string {
 		if repl != nil && repl.Status.Phase == remediationv1alpha1.PhaseDenied {
 			return ReasonHintReplacementDenied
@@ -1252,7 +1265,7 @@ func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *r
 			}
 		case repl.UID != types.UID(to.UID):
 			abortIntent(upd, ReasonHintHandoffAborted)
-		case gaveUp(repl):
+		case abandoned(repl):
 			abortIntent(upd, reasonOf(repl))
 		}
 	}

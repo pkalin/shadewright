@@ -434,21 +434,40 @@ const (
 	tableIncident = "inc"
 )
 
+// mergedTakeoverCalls are the calls of a watch after the abort that finds the replacement's commit merged and records
+// it: the predecessor is read for its abort (abortPredecessor) and again for the watch.
 var mergedTakeoverCalls = []string{
 	"k8s get RemediationRequest/" + oldName + "#1",
+	"k8s get RemediationRequest/" + oldName + "#2",
 	"k8s get RemediationSettings/" + api.SettingsName + "#1",
 	callOpen,
-	callBranchHead,
+	callGetChange1,
 	callParents,
 	callCheckChain,
 	"git CheckCommit#1",
 	callReadFile1,
 	callReadFile2,
-	callGetChange1,
 	"k8s get RemediationSettings/" + api.SettingsName + "#2",
 	callSettings3,
 	callPolicy,
 	"k8s update status RemediationRequest/" + newName + "#1",
+}
+
+// watchCalls are the calls of a watch after the abort that reads the pull request and finds no merge of the
+// replacement's commit (more, when the read by number needs the listing), and removes the condition.
+func watchCalls(more ...string) []string {
+	return append(append([]string{
+		"k8s get RemediationRequest/" + oldName + "#1",
+		"k8s get RemediationRequest/" + oldName + "#2",
+		"k8s get RemediationSettings/" + api.SettingsName + "#1",
+		callOpen,
+		callGetChange1,
+	}, more...), "k8s get RemediationRequest/"+newName+"#1", "k8s patch status RemediationRequest/"+newName+"#1")
+}
+
+// watching is the end of a look that leaves the replacement watching after the abort, with the condition removed.
+func watching(rr *api.RemediationRequest) bool {
+	return rr.Status.Phase == api.PhasePolicyChecked && abortedOnRefusal(rr) && watchedRecovery(rr) == nil
 }
 
 // afterFailure is how a look ends when a call whose failure it logs and goes on without fails: end tells the
@@ -527,79 +546,23 @@ const (
 
 var recoveryPaths = []recoveryPath{
 	{
-		name: "takeover of the open pull request",
+		name: "watch of the open pull request",
 		arrange: func(*testing.T, *RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest, providers.ChangeRequest) {
 		},
-		calls: []string{
-			"k8s get RemediationRequest/" + oldName + "#1",
-			"k8s get RemediationSettings/" + api.SettingsName + "#1",
-			callOpen,
-			callBranchHead,
-			callParents,
-			callCheckChain,
-			callReadFile1,
-			callReadFile2,
-			callGetChange1,
-			"k8s get RemediationSettings/" + api.SettingsName + "#2",
-			"k8s update status RemediationRequest/" + newName + "#1",
-		},
-		ended: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhasePRCreated },
+		calls: watchCalls(),
+		ended: watching,
 	},
 	{
-		name: "pull request closed around the handoff",
+		// The watch goes on for a closed pull request too: a person may open it again and merge it.
+		name: "watch of the closed pull request",
 		arrange: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, _ *api.RemediationRequest,
 			cr providers.ChangeRequest) {
 			if err := g.CloseChangeRequest(context.Background(), cr.Number); err != nil {
 				t.Fatal(err)
 			}
 		},
-		calls: []string{
-			"k8s get RemediationRequest/" + oldName + "#1",
-			"k8s get RemediationSettings/" + api.SettingsName + "#1",
-			callOpen,
-			callBranchHead,
-			callParents,
-			callCheckChain,
-			callReadFile1,
-			callReadFile2,
-			callGetChange1,
-			"git ListChangeRequests(open=true)#1",
-			"k8s get RemediationSettings/" + api.SettingsName + "#2",
-			"k8s update status RemediationRequest/" + newName + "#1",
-		},
-		ended: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhaseCancelled },
-	},
-	{
-		name: "branch answers 404 and the pull request is closed",
-		arrange: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, _ *api.RemediationRequest,
-			cr providers.ChangeRequest) {
-			if err := g.CloseChangeRequest(context.Background(), cr.Number); err != nil {
-				t.Fatal(err)
-			}
-			g.SetFail(func(op string) error {
-				if op == opBranchHead {
-					return fmt.Errorf("status 404: %w", providers.ErrNotFound)
-				}
-				return nil
-			})
-		},
-		calls: []string{
-			"k8s get RemediationRequest/" + oldName + "#1",
-			"k8s get RemediationSettings/" + api.SettingsName + "#1",
-			callOpen,
-			callBranchHead,
-			callGetChange1,
-			"git ListChangeRequests(open=true)#1",
-			callParents,
-			callCheckChain,
-			callReadFile1,
-			callReadFile2,
-			"git GetChangeRequest#2",
-			"git ListChangeRequests(open=true)#2",
-			"k8s get RemediationSettings/" + api.SettingsName + "#2",
-			"k8s update status RemediationRequest/" + newName + "#1",
-		},
-		ended: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhaseCancelled },
+		calls: watchCalls("git ListChangeRequests(open=true)#1"),
+		ended: watching,
 	},
 	{
 		name: "takeover of the merged pull request",
@@ -657,40 +620,6 @@ var recoveryPaths = []recoveryPath{
 		},
 	},
 	{
-		name: "branch answers 404 and the pull request is merged",
-		arrange: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, _ *api.RemediationRequest,
-			cr providers.ChangeRequest) {
-			if _, err := g.MergeWithCommit(cr.Number); err != nil {
-				t.Fatal(err)
-			}
-			g.SetFail(func(op string) error {
-				if op == opBranchHead {
-					return fmt.Errorf("status 404: %w", providers.ErrNotFound)
-				}
-				return nil
-			})
-		},
-		calls: []string{
-			"k8s get RemediationRequest/" + oldName + "#1",
-			"k8s get RemediationSettings/" + api.SettingsName + "#1",
-			callOpen,
-			callBranchHead,
-			callGetChange1,
-			callParents,
-			callCheckChain,
-			"git CheckCommit#1",
-			callReadFile1,
-			callReadFile2,
-			"git GetChangeRequest#2",
-			"k8s get RemediationSettings/" + api.SettingsName + "#2",
-			callSettings3,
-			callPolicy,
-			"k8s update status RemediationRequest/" + newName + "#1",
-		},
-		bestEffort: checkAtMergeReads,
-		ended:      mergedEnd,
-	},
-	{
 		name: "reviewer hints turned off",
 		arrange: func(_ *testing.T, r *RemediationRequestReconciler, _ *fakegit.Git, _ *api.RemediationRequest,
 			_ providers.ChangeRequest) {
@@ -703,41 +632,41 @@ var recoveryPaths = []recoveryPath{
 		ended: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhaseCancelled },
 	},
 	{
-		name: "predecessor gone: nothing to recover",
+		name: "predecessor gone",
 		arrange: func(t *testing.T, r *RemediationRequestReconciler, _ *fakegit.Git, p *api.RemediationRequest,
 			_ providers.ChangeRequest) {
 			if err := r.Delete(context.Background(), p); err != nil {
 				t.Fatal(err)
 			}
 		},
+		// Nothing is read from the Git host: the watch goes on with the condition of the refusal.
 		calls: []string{
 			"k8s get RemediationRequest/" + oldName + "#1",
-			"k8s get RemediationRequest/" + newName + "#1",
-			"k8s patch status RemediationRequest/" + newName + "#1",
+			"k8s get RemediationRequest/" + oldName + "#2",
 		},
 		ended: func(rr *api.RemediationRequest) bool {
-			return rr.Status.Phase == api.PhasePolicyChecked && watchedRecovery(rr) == nil
+			return rr.Status.Phase == api.PhasePolicyChecked && abortedOnRefusal(rr) && watchedRecovery(rr) != nil
 		},
 	},
 }
 
-// waitingWorld is a replacement whose recovery waits on a refused read of the branch past the deadline and its
-// grace, set up on path, with every later call of r to the Kubernetes API and to the Git host going through l. It
+// waitingWorld is a replacement whose handoff was aborted at a refused read of the branch and that watches past the
+// deadline and its grace (#786, decision of 2026-11-18), set up on path, with every later call of r to the Kubernetes API and to the Git host going through l. It
 // also returns the client without l, for the test's own reads.
 func waitingWorld(t *testing.T, path recoveryPath, l *callLog) (*RemediationRequestReconciler, client.Client,
 	*api.RemediationRequest) {
 	t.Helper()
 	r, g, p, rr, cr, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
-	refuseBranchHead(g)
+	refuseRecoveryReads(g)
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
-	if c := watchedRecovery(rr); c == nil || c.Reason != ReasonGitForbidden {
-		t.Fatalf("the recovery does not wait on the refusal: %+v", c)
+	if c := watchedRecovery(rr); c == nil || c.Reason != ReasonGitForbidden || !abortedOnRefusal(rr) {
+		t.Fatalf("the handoff was not aborted at the refusal: %+v", c)
 	}
 	g.SetFail(nil)
 	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Hour)
@@ -763,9 +692,9 @@ func waitingWorld(t *testing.T, path recoveryPath, l *callLog) (*RemediationRequ
 }
 
 // waitOutcome is what the rule gives for a failure of kind at a call to the Kubernetes API (cluster) or to the Git
-// host, in a recovery that waits: wait is true when the request keeps waiting with the poll interval and no error,
-// false when the failure goes to the error backoff; keep is true when the condition must stay as it was. The
-// request never ends on a failure.
+// host, in a replacement that watches after the abort: wait is true when the request keeps watching with the poll
+// interval and no error, false when the failure goes to the error backoff; keep is true when the condition must stay
+// as it was. The request never ends on a failure.
 func waitOutcome(cluster bool, kind failureKind) (wait, keep bool) {
 	switch {
 	case kind == kindCancel:
@@ -775,21 +704,15 @@ func waitOutcome(cluster bool, kind failureKind) (wait, keep bool) {
 		// Marked where it is returned, whatever it is: the error backoff, and the condition, which names a read of
 		// the Git host, stays.
 		return false, true
-	case kind == kindForbidden:
-		// A final refusal of the Git host: watched, with the refusal's reason.
-		return true, false
-	case kind == kindStatus, kind == kindStepDeadline, kind == kindJoined, kind == kindAdapterNetwork:
-		// A failure of the Git host worth retrying (a 5xx, a joined one with a 5xx), or a read past the step's own
-		// deadline: the wait and its pacing.
-		return true, false
 	}
-	// Any other failure of the Git host, a conflict or a raw transport error that carries no class (the GitHub
-	// adapter never returns one: it wraps it, kindAdapterNetwork): the error backoff.
-	return false, false
+	// Every failure of a read of the Git host, whatever its class: the watch reads the pull request as changeOf reads
+	// it for any request, a named read whose failure is retried visibly (condition GitReadRetry) within the
+	// HandoffRecovery entry, which bounds it; a refusal or a failure worth retrying names the read in the condition.
+	return true, false
 }
 
-// Every call of the recovery, crossed with every kind of failure, while the recovery waits on a refusal: the request
-// never ends, and the outcome is the one the rule gives (waitOutcome).
+// Every call of the watch after the abort, crossed with every kind of failure: the request never ends, and the
+// outcome is the one the rule gives (waitOutcome).
 func TestRecoveryWaitSortsEachFailureByItsSource(t *testing.T) {
 	for _, path := range recoveryPaths {
 		t.Run(path.name, func(t *testing.T) {

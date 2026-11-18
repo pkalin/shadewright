@@ -637,14 +637,17 @@ spec:
                   of every reconcile the executor ends each RequestDeadline entry whose bound has passed, and the recovery of a
                   handoff once every HandoffGrace and HandoffRecovery entry it records has passed, before any read:
                   RequestDeadline expires the request, the recovery's entries end it NeedsIntervention with HandoffRecoveryFailed,
-                  or RecoveryWaitExpired while condition PullRequestUnreadable says why it waits.
+                  or RecoveryWaitExpired when a HandoffRecovery entry says its handoff was aborted at a refusal.
                   A MergeCheck or MergeContent entry whose bound has passed ends only after one more read in that reconcile:
                   an answer goes on as after any read, and a failure ends it, MergeCheck by recording the merge with the plan
                   not shown fresh, MergeContent (five minutes from its start) by ending the request NeedsIntervention with
                   MergeContentUnreadable, recording the pull request the entry names when the status holds none. While writes
                   are paused nothing is read and no entry ends. An entry whose kind no longer applies to the request is
                   removed. A successful read of what a merge brought removes the MergeContent entry, and a reconcile with no
-                  failed Git read removes the others but MergeCheck. Condition GitReadRetry summarizes the entries for people.
+                  failed Git read removes the others but MergeCheck and HandoffRecovery. Condition GitReadRetry summarizes the
+                  entries for people. At most five entries stand at once though there are six kinds: RequestDeadline applies only
+                  to a request that recovers no handoff, and HandoffGrace and HandoffRecovery only to one that does, so the first
+                  never stands with either of the others (a kind that no longer applies is removed before any entry is added).
                 items:
                   description: |-
                     GitWait is one wait on a read of the Git host that failed (status.gitWaits). It holds everything needed to end it,

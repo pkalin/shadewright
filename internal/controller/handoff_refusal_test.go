@@ -52,10 +52,14 @@ const (
 	caseUnusable     = "unusable"
 )
 
-// refuseBranchHead makes the Git host refuse (403) every read of a branch head.
-func refuseBranchHead(g *fakegit.Git) {
+// findChangeRead is the text that names the watch's read of the pull request after the abort.
+const findChangeRead = "find the change request"
+
+// refuseRecoveryReads makes the Git host refuse (403) every read of the recovery: the head of a branch, which it reads
+// first, and the pull request, which a replacement whose handoff was aborted reads.
+func refuseRecoveryReads(g *fakegit.Git) {
 	g.SetFail(func(op string) error {
-		if op == opBranchHead {
+		if op == opBranchHead || op == opGet || op == opList {
 			return fmt.Errorf("status 403: %w", providers.ErrForbidden)
 		}
 		return nil
@@ -92,9 +96,10 @@ func drain(rec *record.FakeRecorder) []string {
 	}
 }
 
-// A refused read of the branch during the recovery keeps the replacement in its phase, past the deadline and its
-// grace too, with condition PullRequestUnreadable and one Warning Event, looked at again every poll interval; once
-// the host answers again, a merge of its commit ends it Merged with its receipt and the condition is gone.
+// A refused read of the branch during the recovery aborts the handoff and keeps the replacement in its phase, past
+// the deadline and its grace too, with condition PullRequestUnreadable naming the read refused now and one Warning
+// Event, looked at again every poll interval; once the host answers again, a merge of its commit ends it Merged with
+// its receipt and the condition is gone (#786, decision of 2026-11-18).
 // With outcome verification on, the merged request keeps the target lock, so only the takeover's own write removes
 // the condition.
 func TestRecoveryWatchesARefusalAndRecordsALaterMerge(t *testing.T) {
@@ -109,7 +114,7 @@ func recoveryWatchesARefusal(t *testing.T, verify bool) {
 	ctx := context.Background()
 	rec := record.NewFakeRecorder(10)
 	r.Recorder = rec
-	refuseBranchHead(g)
+	refuseRecoveryReads(g)
 	for _, ago := range []time.Duration{-time.Hour, handoffRecoveryGrace + time.Hour} {
 		pastDeadline(t, r, rr, ago)
 		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
@@ -126,13 +131,18 @@ func recoveryWatchesARefusal(t *testing.T, verify bool) {
 			t.Fatalf("phase = %q, want PolicyChecked: the replacement's commit may still be merged", rr.Status.Phase)
 		}
 		c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable)
-		if c == nil || c.Status != metav1.ConditionTrue || c.Reason != ReasonGitForbidden ||
-			!strings.Contains(c.Message, branchHeadRead) {
+		if c == nil || c.Status != metav1.ConditionTrue || c.Reason != ReasonGitForbidden {
 			t.Fatalf("PullRequestUnreadable = %+v", c)
 		}
+		if !abortedOnRefusal(rr) {
+			t.Fatalf("waits = %+v, want the handoff aborted at the refusal", rr.Status.GitWaits)
+		}
 	}
-	if ev := drain(rec); len(ev) != 1 || !strings.HasPrefix(ev[0], "Warning "+EventPullRequestUnreadable+" ") {
-		t.Fatalf("Events = %q, want one Warning %s", ev, EventPullRequestUnreadable)
+	// One Warning for the refused read of the branch, one when the watch's read of the pull request is refused; none
+	// per retry.
+	if ev := drain(rec); len(ev) != 2 || !strings.HasPrefix(ev[0], "Warning "+EventPullRequestUnreadable+" ") ||
+		!strings.Contains(ev[1], "to find the change request") {
+		t.Fatalf("Events = %q, want two Warning %s", ev, EventPullRequestUnreadable)
 	}
 
 	g.SetFail(nil)
@@ -223,88 +233,75 @@ func TestRecoveryWatchesSettingsThatCannotReachTheRepository(t *testing.T) {
 	}
 }
 
-// A read that works and finds nothing to recover removes the condition before the request goes on, with one
-// Normal Event.
+// After the abort, a read of the pull request that works removes the condition, with one Normal Event, while the
+// replacement keeps watching: the HandoffRecovery entry stands, so it never takes the pull request over (#786).
 func TestRecoveryClearsTheConditionOnAReadThatWorks(t *testing.T) {
 	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
 	rec := record.NewFakeRecorder(10)
 	r.Recorder = rec
-	refuseBranchHead(g)
+	refuseRecoveryReads(g)
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 		t.Fatal(err)
 	}
 	g.SetFail(nil)
-	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 		t.Fatal(err)
-	}
-	// The predecessor's intent is gone: nothing to recover.
-	pred := &api.RemediationRequest{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: rr.Namespace, Name: string(rr.Spec.Replaces.Name)}, pred); err != nil {
-		t.Fatal(err)
-	}
-	pred.Status.Handoff.To = nil
-	if err := r.Status().Update(ctx, pred); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := r.recoverHandoff(ctx, rr); err != nil {
-		t.Fatal(err)
-	}
-	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable); c != nil {
-		t.Fatalf("PullRequestUnreadable kept after a read that worked: %+v", c)
 	}
 	stored := &api.RemediationRequest{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), stored); err != nil {
 		t.Fatal(err)
 	}
 	if c := meta.FindStatusCondition(stored.Status.Conditions, api.ConditionPullRequestUnreadable); c != nil {
-		t.Fatalf("PullRequestUnreadable kept in the stored request: %+v", c)
+		t.Fatalf("PullRequestUnreadable kept after a read that worked: %+v", c)
+	}
+	if !abortedOnRefusal(stored) || tookOver(stored) || stored.Status.Phase != api.PhasePolicyChecked {
+		t.Fatalf("phase %q, waits %+v: want the replacement still watching", stored.Status.Phase,
+			stored.Status.GitWaits)
 	}
 	if ev := drain(rec); len(ev) != 2 || !strings.HasPrefix(ev[1], "Normal "+EventPullRequestReadable+" ") {
 		t.Fatalf("Events = %q", ev)
 	}
 }
 
-// A request changed between the read and the write of the condition (an annotation) is a conflict handed back for a
-// retry, with no Event; the next look writes the condition and records the Event once.
+// A request changed between the read and the write of the abort (an annotation) is read again and written in the
+// same reconcile: the condition and the HandoffRecovery entry are stored, the annotation kept, and the Event is
+// recorded once.
 func TestRecoveryRetriesTheConditionLostToAConflict(t *testing.T) {
 	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
 	rec := record.NewFakeRecorder(10)
 	r.Recorder = rec
-	refuseBranchHead(g)
+	refuseRecoveryReads(g)
 	stale := rr.DeepCopy()
 	touched := rr.DeepCopy()
 	touched.Annotations = map[string]string{"example.com/recovery-touched": fieldTrue}
 	if err := r.Update(ctx, touched); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.recoverHandoff(ctx, stale); err == nil {
-		t.Fatal("a condition write lost to a conflict was not handed back for a retry")
-	}
-	if ev := drain(rec); len(ev) != 0 {
-		t.Fatalf("Events after a lost write = %q", ev)
-	}
-	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
-		t.Fatal(err)
+	if _, _, err := r.recoverHandoff(ctx, stale); err != nil {
+		t.Fatalf("recoverHandoff = %v, want the write retried on a fresh read", err)
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
 	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable); c == nil ||
-		c.Reason != ReasonGitForbidden {
-		t.Fatalf("PullRequestUnreadable = %+v", c)
+		c.Reason != ReasonGitForbidden || !abortedOnRefusal(rr) {
+		t.Fatalf("PullRequestUnreadable = %+v, waits %+v", c, rr.Status.GitWaits)
+	}
+	if rr.Annotations["example.com/recovery-touched"] != fieldTrue {
+		t.Fatalf("annotations = %v, want the change kept", rr.Annotations)
 	}
 	if ev := drain(rec); len(ev) != 1 {
 		t.Fatalf("Events = %q, want one", ev)
 	}
 }
 
-// failBranchHeadRetryable makes every read of a branch head fail for a reason worth retrying (a 503), with the
-// Retry-After given (zero for none).
-func failBranchHeadRetryable(g *fakegit.Git, retryAfter time.Duration) {
+// failRecoveryReadsRetryable makes every read of the recovery (the head of a branch, the pull request) fail for a
+// reason worth retrying (a 503), with the Retry-After given (zero for none).
+func failRecoveryReadsRetryable(g *fakegit.Git, retryAfter time.Duration) {
 	g.SetFail(func(op string) error {
-		if op == opBranchHead {
+		if op == opBranchHead || op == opGet || op == opList {
 			return &providers.RetryableError{Err: errors.New("status 503"), RetryAfter: retryAfter}
 		}
 		return nil
@@ -371,9 +368,10 @@ func TestRecoveryWatchesARefusedReadOfThePullRequest(t *testing.T) {
 	}
 }
 
-// A failure worth retrying (a 503) of a recovery that already waits on a refusal keeps the condition as it is and
-// the pacing (the poll interval, or Retry-After when longer), and never ends the request HandoffRecoveryFailed,
-// however long past the grace (#786, decision of 2026-11-16). The status decides this, not a time.
+// A failure worth retrying (a 503) of a replacement that watches after the abort names the read failing now once
+// (RecoveryReadFailed, the time of the condition kept), then keeps the condition as it is and the pacing (the poll
+// interval, or Retry-After when longer), and never ends the request HandoffRecoveryFailed, however long past the
+// grace (#786, decisions of 2026-11-16 and 2026-11-18). The status decides this, not a time.
 func TestRecoveryKeepsWaitingOnARefusalThroughARetryableFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -390,7 +388,7 @@ func TestRecoveryKeepsWaitingOnARefusalThroughARetryableFailure(t *testing.T) {
 			ctx := context.Background()
 			rec := record.NewFakeRecorder(10)
 			r.Recorder = rec
-			refuseBranchHead(g)
+			refuseRecoveryReads(g)
 			pastDeadline(t, r, rr, handoffRecoveryGrace+2*time.Hour)
 			if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 				t.Fatal(err)
@@ -405,8 +403,8 @@ func TestRecoveryKeepsWaitingOnARefusalThroughARetryableFailure(t *testing.T) {
 			was = was.DeepCopy()
 			_ = drain(rec)
 
-			failBranchHeadRetryable(g, tc.retryAfter)
-			for range 2 {
+			failRecoveryReadsRetryable(g, tc.retryAfter)
+			for i := range 2 {
 				res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
 				if err != nil {
 					t.Fatalf("Reconcile: %v", err)
@@ -422,6 +420,15 @@ func TestRecoveryKeepsWaitingOnARefusalThroughARetryableFailure(t *testing.T) {
 						rr.Status.Phase)
 				}
 				c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable)
+				if i == 0 {
+					if c == nil || c.Reason != ReasonRecoveryReadFailed || !strings.Contains(c.Message,
+						"find the change request") || !c.LastTransitionTime.Equal(&was.LastTransitionTime) {
+						t.Fatalf("PullRequestUnreadable = %+v, want the read failing now named", c)
+					}
+					was = c.DeepCopy()
+					_ = drain(rec)
+					continue
+				}
 				if c == nil || c.Reason != was.Reason || c.Message != was.Message ||
 					!c.LastTransitionTime.Equal(&was.LastTransitionTime) {
 					t.Fatalf("PullRequestUnreadable = %+v, want it kept as %+v", c, was)
@@ -442,16 +449,17 @@ func TestRecoveryKeepsWaitingOnARefusalThroughARetryableFailure(t *testing.T) {
 	}
 }
 
-// Unchanged (#688): a replacement that never met a refusal, or whose refusal a read that worked has cleared, ends
-// NeedsIntervention with HandoffRecoveryFailed once a failure worth retrying outlasts the grace. Only the condition
-// in the status keeps the wait, never a memory of an earlier refusal.
+// Unchanged (#688): a replacement that never met a refusal ends NeedsIntervention with HandoffRecoveryFailed once a
+// failure worth retrying outlasts the grace. One whose recovery met a refusal had its handoff aborted then: a read that
+// worked since, and a failure past the grace, leave it watching until the end of its HandoffRecovery entry, from the
+// recorded entry alone (#786, decision of 2026-11-18).
 func TestRecoveryWithoutARefusalKeepsTheGrace(t *testing.T) {
 	for _, refusedBefore := range []bool{false, true} {
 		t.Run(fmt.Sprintf("refusedBefore=%v", refusedBefore), func(t *testing.T) {
 			r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
 			ctx := context.Background()
 			if refusedBefore {
-				refuseBranchHead(g)
+				refuseRecoveryReads(g)
 				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 					t.Fatal(err)
 				}
@@ -461,8 +469,8 @@ func TestRecoveryWithoutARefusalKeepsTheGrace(t *testing.T) {
 				if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable) == nil {
 					t.Fatal("no condition was written")
 				}
-				// A read that worked removed it (setUnreadable, as recoverHandoff does with nothing to recover), and the
-				// reconcile that read, retrying nothing, removed its waits (clearGitReadRetry).
+				// A read that worked removes the condition, and the reconcile that read, retrying nothing, ends its
+				// retries (clearGitReadRetry); the HandoffRecovery entry stays.
 				if err := r.setUnreadable(ctx, rr, nil); err != nil {
 					t.Fatal(err)
 				}
@@ -473,7 +481,7 @@ func TestRecoveryWithoutARefusalKeepsTheGrace(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			failBranchHeadRetryable(g, 0)
+			failRecoveryReadsRetryable(g, 0)
 			pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
 			// The failed read records the HandoffGrace wait, past its end; the check at the start of the next
 			// reconcile ends it (endPassedWait).
@@ -484,6 +492,13 @@ func TestRecoveryWithoutARefusalKeepsTheGrace(t *testing.T) {
 			}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 				t.Fatal(err)
+			}
+			if refusedBefore {
+				if rr.Status.Phase != api.PhasePolicyChecked || !abortedOnRefusal(rr) {
+					t.Fatalf("phase %q, waits %+v: want the aborted handoff watched past the grace", rr.Status.Phase,
+						rr.Status.GitWaits)
+				}
+				return
 			}
 			if rr.Status.Phase != api.PhaseNeedsIntervention {
 				t.Fatalf("phase = %q, want NeedsIntervention once the grace is over", rr.Status.Phase)
@@ -518,7 +533,7 @@ func conflictOnPredecessorStatus(r *RemediationRequestReconciler) {
 func TestRecoveryReturnsAnAPIFailureWhileWaiting(t *testing.T) {
 	r, g, p, rr, _, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
-	refuseBranchHead(g)
+	refuseRecoveryReads(g)
 	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Hour)
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 		t.Fatal(err)
@@ -552,37 +567,43 @@ func TestRecoveryReturnsAnAPIFailureWhileWaiting(t *testing.T) {
 	}
 }
 
-// A failure that is neither a refusal nor worth retrying (an answer that cannot be parsed) while a recovery waits on
-// a refusal never ends the request (#786, decision of 2026-11-16: let nothing unknown end a waiting recovery): it is
-// returned to the error backoff, past the grace too, and the condition still names the refused read.
-func TestRecoveryReturnsAnUnrecognisedFailureWhileWaiting(t *testing.T) {
+// An unrecognised failure of the watch's read of the pull request (an answer that cannot be parsed) is classified as
+// changeOf classifies it for any request, a read retried visibly within the HandoffRecovery entry: the reconcile
+// waits the poll interval with condition GitReadRetry, never ends the request past the grace, and keeps the
+// condition of the refusal (#786, decision of 2026-11-18).
+func TestRecoveryRetriesAnUnrecognisedFailureWhileWatching(t *testing.T) {
 	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
-	refuseBranchHead(g)
+	refuseRecoveryReads(g)
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
-	if watchedRecovery(rr) == nil {
-		t.Fatal("the recovery does not wait")
+	if !abortedOnRefusal(rr) {
+		t.Fatal("the handoff was not aborted at the refusal")
 	}
 	g.SetFail(func(op string) error {
-		if op == opBranchHead {
+		if op == opGet || op == opList {
 			return errors.New("the answer cannot be parsed")
 		}
 		return nil
 	})
 	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
-	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err == nil {
-		t.Fatal("Reconcile = nil: an unrecognised failure was not returned to the error backoff")
+	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+	if err != nil || res.RequeueAfter != DefaultPullRequestPollInterval {
+		t.Fatalf("Reconcile = %+v, %v; want the poll interval and no error", res, err)
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
 	if rr.Status.Phase != api.PhasePolicyChecked {
-		t.Fatalf("phase = %q, want PolicyChecked: an unrecognised failure ended a waiting recovery", rr.Status.Phase)
+		t.Fatalf("phase = %q, want PolicyChecked: an unrecognised failure ended a watch", rr.Status.Phase)
+	}
+	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry); c == nil ||
+		c.Reason != waitHandoffRecovery.reason() {
+		t.Fatalf("GitReadRetry = %+v, want the retry shown", c)
 	}
 	if c := watchedRecovery(rr); c == nil || c.Reason != ReasonGitForbidden || !strings.Contains(c.Message, branchHeadRead) {
 		t.Fatalf("PullRequestUnreadable = %+v, want the refused read of the branch", c)
@@ -608,24 +629,24 @@ func TestRecoveryNamesTheReadThatFailsNow(t *testing.T) {
 				}
 				return func() { r.OpenRepository = open }
 			},
-			failNow: func(g *fakegit.Git) { failBranchHeadRetryable(g, 0) }, names: branchHeadRead},
+			failNow: func(g *fakegit.Git) { failRecoveryReadsRetryable(g, 0) }, names: findChangeRead},
 		{name: caseLeftSettings, reason: reasonRepositoryUnavailable,
 			cause: func(r *RemediationRequestReconciler, _ *fakegit.Git) func() {
 				return changeSettings(t, r, func(s *api.RemediationSettings) {
 					s.Spec.Repositories[0].URL = otherRepositoryURL
 				})
 			},
-			failNow: func(g *fakegit.Git) { failBranchHeadRetryable(g, 0) }, names: branchHeadRead},
+			failNow: func(g *fakegit.Git) { failRecoveryReadsRetryable(g, 0) }, names: findChangeRead},
 		{name: "target branch", reason: reasonTargetBranchChanged,
 			cause: func(r *RemediationRequestReconciler, _ *fakegit.Git) func() {
 				return changeSettings(t, r, func(s *api.RemediationSettings) {
 					s.Spec.Repositories[0].TargetBranch = otherTargetBranch
 				})
 			},
-			failNow: func(g *fakegit.Git) { failBranchHeadRetryable(g, 0) }, names: branchHeadRead},
+			failNow: func(g *fakegit.Git) { failRecoveryReadsRetryable(g, 0) }, names: findChangeRead},
 		{name: "refused branch read answered", reason: ReasonGitForbidden,
 			cause: func(_ *RemediationRequestReconciler, g *fakegit.Git) func() {
-				refuseBranchHead(g)
+				refuseRecoveryReads(g)
 				return func() { g.SetFail(nil) }
 			},
 			failNow: func(g *fakegit.Git) {
@@ -733,7 +754,7 @@ func TestRecoveryRetriesTheReplacedConditionLostToAConflict(t *testing.T) {
 	}
 	_ = drain(rec)
 	r.OpenRepository = open
-	failBranchHeadRetryable(g, 0)
+	failRecoveryReadsRetryable(g, 0)
 	stale := rr.DeepCopy()
 	touched := rr.DeepCopy()
 	touched.Annotations = map[string]string{"example.com/recovery-touched": fieldTrue}
@@ -854,7 +875,7 @@ func TestRecoveryReturnsTheAPIFailureThatCameWithARefusal(t *testing.T) {
 			r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
 			ctx := context.Background()
 			if waiting {
-				refuseBranchHead(g)
+				refuseRecoveryReads(g)
 				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 					t.Fatal(err)
 				}
@@ -891,29 +912,45 @@ func TestRecoveryReturnsTheAPIFailureThatCameWithARefusal(t *testing.T) {
 	}
 }
 
-// A takeover of the open pull request by a recovery that waited records the Normal Event once its write went through.
-func TestRecoveryTakeoverRecordsTheReadableEvent(t *testing.T) {
+// After the abort a read that works never takes the open pull request over: the replacement records no pull request,
+// writes nothing to Git and keeps watching, with one Normal Event for the read that worked (#786, decision of
+// 2026-11-18: an aborted intent is not restarted by the same replacement).
+func TestRecoveryAfterTheAbortNeverTakesOver(t *testing.T) {
 	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
 	rec := record.NewFakeRecorder(10)
 	r.Recorder = rec
-	refuseBranchHead(g)
+	refuseRecoveryReads(g)
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
-		t.Fatal(err)
-	}
 	_ = drain(rec)
-	g.SetFail(nil)
-	if _, done, err := r.recoverHandoff(ctx, rr); err != nil || !done {
-		t.Fatalf("recoverHandoff = %v, %v", done, err)
+	var writes []string
+	g.SetFail(func(op string) error {
+		switch op {
+		case opClose, opComment, opCommit, opCreateBranch, "EnableAutoMerge", opOpen:
+			writes = append(writes, op)
+		}
+		return nil
+	})
+	for range 3 {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+			t.Fatal(err)
+		}
+		if _, done, err := r.recoverHandoff(ctx, rr); err != nil || !done {
+			t.Fatalf("recoverHandoff = %v, %v; want the watch to go on", done, err)
+		}
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
-	if rr.Status.Phase != api.PhasePRCreated || watchedRecovery(rr) != nil {
-		t.Fatalf("phase %q, conditions %+v", rr.Status.Phase, rr.Status.Conditions)
+	if rr.Status.Phase != api.PhasePolicyChecked || rr.Status.PullRequest != nil || tookOver(rr) ||
+		watchedRecovery(rr) != nil {
+		t.Fatalf("phase %q, pull request %+v, conditions %+v", rr.Status.Phase, rr.Status.PullRequest,
+			rr.Status.Conditions)
+	}
+	if len(writes) != 0 {
+		t.Fatalf("writes to Git after the abort: %q, want none", writes)
 	}
 	if ev := drain(rec); len(ev) != 1 || !strings.HasPrefix(ev[0], "Normal "+EventPullRequestReadable+" ") {
 		t.Fatalf("Events = %q, want one Normal %s", ev, EventPullRequestReadable)

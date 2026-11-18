@@ -296,3 +296,85 @@ func TestExpiredCleanupCutoffBeforeAnyRead(t *testing.T) {
 		t.Fatalf("the lock is held and the reconcile asks for no time to run again: %+v", res)
 	}
 }
+
+// Eighth decision of 2026-11-18 on #771, point 2: nothing new ends during a pause, and paused time stretches the
+// cutoff of the cleanup. The close fails (CleanupFailing recorded); writes are paused an hour before the 24 hours pass
+// and lifted an hour after. Under the pause the cleanup does not end and nothing reaches the Git host; after the lift
+// it ends only once 24 hours of time not paused have passed, still without a read.
+func TestExpiredCleanupCutoffWaitsForAndIsStretchedByAPause(t *testing.T) {
+	m := expiredWorld(t)
+	m.g.SetFail(func(op string) error {
+		if op == opClose {
+			return &providers.RetryableError{Err: errors.New("status 503")}
+		}
+		return nil
+	})
+	for range 2 {
+		res, _, err := m.reconcileExpired(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.clock.advance(max(res.RequeueAfter, time.Second))
+	}
+	c := meta.FindStatusCondition(m.live().Status.Conditions, api.ConditionCleanupFailing)
+	if c == nil {
+		t.Fatalf("setup: CleanupFailing is not recorded: %s", deadlineCondition(m.live()))
+	}
+	first := c.LastTransitionTime.Time
+	notEnded := func(when string, rr *api.RemediationRequest) {
+		t.Helper()
+		if got := deadlineCondition(rr); strings.HasPrefix(got, ReasonPullRequestDeadlineCleanupFailed) {
+			t.Fatalf("%s: the cleanup ended: %q", when, got)
+		}
+	}
+	// The pause is seen an hour before the bound.
+	m.clock.at = first.Add(cleanupFailingBound - time.Hour)
+	m.pause(true)
+	if _, rr, err := m.reconcileExpired(t); err != nil {
+		t.Fatal(err)
+	} else {
+		notEnded("under the pause", rr)
+	}
+	// The 24 hours pass under the pause: nothing ends, nothing is read.
+	m.clock.at = first.Add(cleanupFailingBound + 2*time.Second)
+	m.calls = 0
+	res, rr, err := m.reconcileExpired(t)
+	if err != nil || res.RequeueAfter != freshRecheckDelay {
+		t.Fatalf("past the bound under the pause: %+v, %v; want the pause's recheck", res, err)
+	}
+	notEnded("past the bound under the pause", rr)
+	if m.calls > 0 {
+		t.Fatalf("past the bound under the pause the reconcile called the Git host %d times", m.calls)
+	}
+	// The lift, an hour after the bound: two hours were paused, so two hours are left.
+	m.clock.at = first.Add(cleanupFailingBound + time.Hour)
+	m.pause(false)
+	if _, rr, err := m.reconcileExpired(t); err != nil {
+		t.Fatal(err)
+	} else {
+		notEnded("at the lift", rr)
+	}
+	m.clock.at = first.Add(cleanupFailingBound + 2*time.Hour - time.Minute)
+	if _, rr, err := m.reconcileExpired(t); err != nil {
+		t.Fatal(err)
+	} else {
+		notEnded("a minute before the stretched bound", rr)
+	}
+	// The stretched bound passes while the reads of the branch fail too: the cleanup ends, without a read.
+	m.clock.at = first.Add(cleanupFailingBound + 2*time.Hour + 3*time.Second)
+	calls := 0
+	m.g.SetFail(func(string) error {
+		calls++
+		return &providers.RetryableError{Err: errors.New("status 503")}
+	})
+	m.calls = 0
+	if _, rr, err = m.reconcileExpired(t); err != nil {
+		t.Fatal(err)
+	}
+	if got := deadlineCondition(rr); !strings.HasPrefix(got, ReasonPullRequestDeadlineCleanupFailed+": ") {
+		t.Fatalf("after 24 hours not paused the deadline's condition says %q", got)
+	}
+	if calls > 0 || m.calls > 0 {
+		t.Fatalf("the end of the stretched bound read the Git host (%d, %d calls)", calls, m.calls)
+	}
+}

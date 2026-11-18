@@ -231,11 +231,12 @@ func settledIn(m *modelWorld, n int) {
 	m.fatalf("settled: the lock is held %d reconciles after the lift (phase %s)", n, m.live().Status.Phase)
 }
 
-// The seventh decision of 2026-11-18 on #771, point 2: the reads of what a retargeted merge brought fail and start
-// the content wait; writes are then paused for longer than what is left of it, and lifted while the reads still fail.
-// Time paused counts against no read wait: the wait starts again at the lift, so the request does not end before a
-// full window of reads after the lift, and it ends within one poll interval after that window.
-func TestSequenceContentWaitStartsAgainAfterAPause(t *testing.T) {
+// The eighth decision of 2026-11-18 on #771, point 1: the reads of what a retargeted merge brought fail and start
+// the content wait; writes are then paused for longer than the whole wait, and lifted while the reads still fail.
+// Paused time stretches the wait: the request ends once the wait has had its five minutes of time not paused, not at
+// the first reconcile after the lift, and within one poll interval after that (three minutes of reads before the
+// pause count).
+func TestSequenceContentWaitStretchedByAPause(t *testing.T) {
 	m := scripted(t, modelStart{start: stopPlanFresh})
 	if err := m.g.SetBase(m.number, m.configured); err != nil {
 		t.Fatal(err)
@@ -247,32 +248,147 @@ func TestSequenceContentWaitStartsAgainAfterAPause(t *testing.T) {
 	m.merge = sha
 	m.fault = faultBetween
 	m.steps(2)
-	if live := m.live(); gitWait(live, waitMergeContent) == nil {
-		t.Fatalf("setup: want the content wait recorded, got waits %v, phase %s", live.Status.GitWaits, live.Status.Phase)
+	w := gitWait(m.live(), waitMergeContent)
+	if w == nil {
+		t.Fatalf("setup: want the content wait recorded, got waits %v, phase %s", m.live().Status.GitWaits,
+			m.live().Status.Phase)
+	}
+	since := w.Since.Time
+	// Three minutes of reads before the pause.
+	for m.clock.at.Before(since.Add(3 * time.Minute)) {
+		m.step()
 	}
 	m.pause(true)
+	pausedAt := m.clock.at
 	m.steps(2 * int(mergeContentWait/freshRecheckDelay))
 	m.pause(false)
 	lift := m.clock.at
-	for i := range 20 {
+	// What is left of the wait after the lift: its five minutes less the time not paused before the pause was seen.
+	due := lift.Add(mergeContentWait - pausedAt.Sub(since))
+	ended := false
+	for range 20 {
 		m.step()
 		live := m.live()
-		ended := mergeRecorded(live)
-		if w := gitWait(live, waitMergeContent); i == 0 && (w == nil || w.Since.Time.Before(lift.Truncate(time.Second))) {
-			m.fatalf("restart: after the first reconcile after the lift the content wait is %+v; want it started again "+
-				"at the lift", w)
-		}
-		if ended && m.clock.at.Before(lift.Add(mergeContentWait)) {
-			m.fatalf("early: the request ended %v after the lift, before a full window of reads after it (phase %s)",
-				m.clock.at.Sub(lift), live.Status.Phase)
-		}
-		if ended {
+		if ended = mergeRecorded(live); ended {
+			if m.clock.at.Before(due.Add(-2 * time.Second)) {
+				m.fatalf("early: the request ended %v after the lift, %v before the wait had its time not paused "+
+					"(phase %s)", m.clock.at.Sub(lift), due.Sub(m.clock.at), live.Status.Phase)
+			}
 			break
 		}
 	}
+	switch {
+	case !ended:
+		m.fatalf("end: the reads kept failing for the whole wait not paused and the request has not ended")
+	case m.clock.at.After(due.Add(m.r.pullRequestPollInterval() + 2*time.Second)):
+		m.fatalf("late: the request ended %v after the wait had its time not paused", m.clock.at.Sub(due))
+	}
+	m.report()
+}
+
+// mergeCheckWithFailingReads is a request whose pull request was merged without its merge commit and whose reads
+// fail from then on: the MergeCheck wait is recorded.
+func mergeCheckWithFailingReads(t *testing.T, verify bool) *modelWorld {
+	t.Helper()
+	m := scripted(t, modelStart{start: startRunning, fresh: true, verify: verify})
+	m.steps(1)
+	sha, err := m.g.Merge(m.number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.merge, m.noCommit = sha, true
+	m.steps(1)
+	m.fault, m.lastingUntil = opGet, m.clock.at.Add(24*time.Hour)
+	m.steps(1)
+	if live := m.live(); gitWait(live, waitMergeCheck) == nil {
+		t.Fatalf("setup: want the MergeCheck wait recorded, got waits %v, phase %s", live.Status.GitWaits,
+			live.Status.Phase)
+	}
+	return m
+}
+
+// The eighth decision of 2026-11-18 on #771, point 1: a merge recorded without its commit, a pause, the lift, and a
+// status write lost at the lift (the second write of the reconcile, the first applied and reported failed, or a
+// restart between the writes), while the reads keep failing. The MergeCheck wait is never dropped, so it ends: the
+// merge is recorded within the wait and a poll interval of time not paused.
+func TestSequenceMergeCheckSurvivesALostWriteAtTheLift(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		fault   func(m *modelWorld)
+		restart bool
+	}{
+		{"second write lost", func(m *modelWorld) { m.passWrites, m.loseNext = 1, true }, false},
+		{"first write applied, reported failed", func(m *modelWorld) { m.applyNext = true }, false},
+		{"restart between the writes", func(m *modelWorld) { m.passWrites, m.loseNext = 1, true }, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := mergeCheckWithFailingReads(t, false)
+			start := gitWait(m.live(), waitMergeCheck).Since.Time
+			m.pause(true)
+			pausedAt := m.clock.at
+			m.steps(3)
+			m.pause(false)
+			lift := m.clock.at
+			c.fault(m)
+			m.step()
+			if c.restart {
+				m.restart()
+			}
+			due := lift.Add(mergeCommitWait - pausedAt.Sub(start))
+			at := m.clock.at
+			for range 30 {
+				if mergeRecorded(m.live()) {
+					break
+				}
+				at = m.clock.at
+				m.step()
+			}
+			live := m.live()
+			switch {
+			case !mergeRecorded(live):
+				m.fatalf("end: the merge is not recorded %v after the lift (phase %s, waits %v)", m.clock.at.Sub(lift),
+					live.Status.Phase, live.Status.GitWaits)
+			case at.After(due.Add(m.r.pullRequestPollInterval())):
+				m.fatalf("late: the merge was recorded %v after the wait's end", at.Sub(due))
+			}
+			m.report()
+		})
+	}
+}
+
+// The eighth decision of 2026-11-18 on #771, point 1: while the reads fail, writes are paused for half of every minute,
+// for an hour. Each pause stretches the MergeCheck wait by what a reconcile saw of it, so the wait ends once it has had
+// its five minutes of time not paused: never before, and not an hour later.
+func TestSequenceMergeCheckEndsUnderAPauseThatComesAndGoes(t *testing.T) {
+	m := mergeCheckWithFailingReads(t, false)
+	start := gitWait(m.live(), waitMergeCheck).Since.Time
+	unpaused := m.clock.at.Sub(start)
+	run := func() {
+		res, err := m.r.Reconcile(context.Background(), reconcile.Request{NamespacedName: m.key})
+		live := m.live()
+		m.logf("reconcile: phase %s, wait %v, err %v, waits %d", live.Status.Phase, res.RequeueAfter, err,
+			len(live.Status.GitWaits))
+	}
+	for range 60 {
+		m.pause(true)
+		run()
+		m.clock.advance(30 * time.Second)
+		m.pause(false)
+		run()
+		if mergeRecorded(m.live()) {
+			break
+		}
+		m.clock.advance(30 * time.Second)
+		unpaused += 30 * time.Second
+	}
 	live := m.live()
-	if !mergeRecorded(live) {
-		m.fatalf("end: the reads kept failing for a full window after the lift and the request has not ended")
+	switch {
+	case !mergeRecorded(live):
+		m.fatalf("end: an hour of pauses coming and going and the merge is not recorded (phase %s, waits %v)",
+			live.Status.Phase, live.Status.GitWaits)
+	case unpaused < mergeCommitWait-2*time.Second:
+		m.fatalf("early: the merge was recorded after %v of time not paused, before the wait's %v", unpaused,
+			mergeCommitWait)
 	}
 	m.report()
 }
@@ -323,5 +439,33 @@ func TestSequenceCancelLookRecordsAFailedRead(t *testing.T) {
 		t.Fatal("the failed look does not show GitReadRetry")
 	case meta.FindStatusCondition(live.Status.Conditions, api.ConditionCancelPending) == nil:
 		t.Fatal("the failed look does not show why the cancel waits (CancelPending)")
+	}
+}
+
+// The eighth decision of 2026-11-18 on #771, point 3: the MergeCheck wait ends while the reads fail, so the merge is
+// recorded without a receipt; writes are then paused. A recorded merge releases the lock from recorded status, as on
+// main: in the write that records it, before the pause could hold a read that settles it.
+func TestSequenceMergeWithoutReceiptReleasesUnderAPause(t *testing.T) {
+	for _, verify := range []bool{false, true} {
+		t.Run(map[bool]string{false: "verification off", true: "verification on"}[verify], func(t *testing.T) {
+			m := mergeCheckWithFailingReads(t, verify)
+			for range 12 {
+				if mergeRecorded(m.live()) {
+					break
+				}
+				m.step()
+			}
+			if live := m.live(); !mergeRecorded(live) || live.Status.MergeReceipt != nil {
+				t.Fatalf("setup: want the merge recorded without a receipt, got phase %s, receipt %t", live.Status.Phase,
+					live.Status.MergeReceipt != nil)
+			}
+			m.pause(true)
+			m.steps(3)
+			if live := m.live(); holdsLock(live) {
+				m.fatalf("lock: the merge is recorded (phase %s) and writes are paused, and the lock is held",
+					live.Status.Phase)
+			}
+			m.report()
+		})
 	}
 }

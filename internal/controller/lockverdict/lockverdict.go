@@ -63,15 +63,16 @@ const (
 	// releasedBeforeField: a request decided before status.holdsTarget existed, whose status alone shows the lock
 	// released.
 	releasedBeforeField
-	// mergeReceipt: the status records the merge of the request's pull request with its receipt, in Merged or
-	// Inconclusive, and no verification holds the lock: the merge settles the lock without a read of the branch.
-	mergeReceipt
+	// recordedMerge: the status records the merge of the request's pull request in a phase only a recorded merge
+	// reaches (Merged, Succeeded, Inconclusive, Failed with its receipt), with or without a receipt, and no
+	// verification holds the lock: the merge settles the lock without a read of the branch, as on main.
+	recordedMerge
 )
 
 var proofNames = map[proof]string{
 	none: "none", mergeRecorded: "merge recorded", closedOrGone: "closed or gone", noPullRequest: "no pull request",
 	neverHeld: "never held", handedOver: "handed over", handoffAborted: "handoff aborted",
-	releasedBeforeField: "released before the field", mergeReceipt: "merge receipt",
+	releasedBeforeField: "released before the field", recordedMerge: "recorded merge",
 }
 
 // String names what v proves, for logs.
@@ -155,15 +156,25 @@ func ReleasedBeforeField(status *api.RemediationRequestStatus, derivedHold bool)
 	return &Verdict{proof: releasedBeforeField}, true
 }
 
-// MergeReceipt is the verdict of a recorded merge with its receipt (decision of 2026-11-18 on #771): the status
-// records the receipt, the request is Merged or Inconclusive, and no verification holds the lock (heldForVerification
-// false). It needs no read of the branch, so a repository that cannot be opened any more does not keep the lock.
-func MergeReceipt(status *api.RemediationRequestStatus, heldForVerification bool) (*Verdict, bool) {
-	if status.MergeReceipt == nil || heldForVerification ||
-		(status.Phase != api.PhaseMerged && status.Phase != api.PhaseInconclusive) {
+// RecordedMerge is the verdict of a merge the status records (eighth decision of 2026-11-18 on #771, point 3): the
+// request is in a phase only a recorded merge reaches, Merged, Succeeded or Inconclusive (a merge recorded without a
+// receipt ends there too), or Failed with its receipt (Failed before a merge has none), and no verification holds the
+// lock (heldForVerification false). A merge that was recorded was seen, and its pull request cannot merge again. It
+// needs no read of the branch, so neither a pause nor a repository that cannot be opened any more keeps the lock.
+func RecordedMerge(status *api.RemediationRequestStatus, heldForVerification bool) (*Verdict, bool) {
+	if heldForVerification {
 		return nil, false
 	}
-	return &Verdict{proof: mergeReceipt}, true
+	switch status.Phase {
+	case api.PhaseMerged, api.PhaseSucceeded, api.PhaseInconclusive:
+	case api.PhaseFailed:
+		if status.MergeReceipt == nil {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	return &Verdict{proof: recordedMerge}, true
 }
 
 // Release clears the lock in status, about to be written, for the verdict v, with the condition TargetHeld that

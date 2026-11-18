@@ -708,8 +708,9 @@ func setCondition(rr *remediationv1alpha1.RemediationRequest, typ string, status
 
 // endVerification ends a request after the merge in phase (Failed or Inconclusive) with reason, in one status
 // write: the given conditions, Verified (False for Failed, Unknown otherwise) with reason and message, the phase
-// and its breaker classification (setPhase), no deadline, and the target lock settled. One Event follows the
-// write: Warning for Failed, Normal otherwise.
+// and its breaker classification (setPhase), no deadline, and the target lock released on the recorded merge
+// (settleRecorded, as main's settleLock did in this write), with no read of the branch, so neither a pause nor a
+// repository gone from the settings keeps it. One Event follows the write: Warning for Failed, Normal otherwise.
 func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	phase remediationv1alpha1.RemediationPhase, reason, message string, conds ...metav1.Condition) error {
 	if rr.Status.Phase == remediationv1alpha1.PhaseVerifying &&
@@ -728,7 +729,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 		Status: status, Reason: reason, Message: message, ObservedGeneration: rr.Generation})
 	r.setPhase(rr, phase)
 	rr.Status.Deadline = nil
-	clearReleasedRead(rr)
+	r.settleRecorded(rr)
 	if err := r.writeIf(ctx, rr, true); err != nil {
 		return err
 	}

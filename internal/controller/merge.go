@@ -289,9 +289,9 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 // pull request and its end, and status.mergeCommitAwaitedSince when unset (kept as before the entry existed, as the
 // time the merge was first seen; the entry's end counts from the entry's own start, wholeWait). Both go in one patch
 // with the resourceVersion of rr, so a copy read earlier than the server's is refused as a conflict, and rr takes
-// only these fields and the new resourceVersion: a caller's unwritten changes to rr stay for its own write. A read
-// wait recorded while rr still shows WritesPaused takes the condition away in the same patch (readWaitAfterLift). A
-// failed write leaves rr as it was and is returned for a retry.
+// only these fields and the new resourceVersion: a caller's unwritten changes to rr stay for its own write. The entry
+// records the paused time rr had seen (wholeWait), which the patch's resourceVersion makes the live one. A failed
+// write leaves rr as it was and is returned for a retry.
 func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, op string) error {
 	now := r.now()
@@ -302,10 +302,8 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 	}
 	w, ok := wholeWait(upd, remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
 		PullRequest: waitPullRequest(cr)}, op, now)
-	lifted := false
 	if ok && gitWait(upd, waitMergeCheck) == nil {
 		upd.Status.GitWaits = append(upd.Status.GitWaits, w)
-		lifted = readWaitAfterLift(upd, w)
 		gitWaitSummary(upd, now)
 	}
 	if err := r.Status().Patch(ctx, upd, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -318,10 +316,6 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 		meta.SetStatusCondition(&rr.Status.Conditions, *c)
 	}
 	rr.ResourceVersion = upd.ResourceVersion
-	if lifted {
-		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionWritesPaused)
-		r.resumed(ctx, rr)
-	}
 	return nil
 }
 
@@ -419,7 +413,7 @@ func (r *RemediationRequestReconciler) settleReceipt(ctx context.Context, rr *re
 			"merge can be checked", verified.Reason))
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseInconclusive)
-	clearReleasedRead(rr)
+	r.settleRecorded(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return false, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}

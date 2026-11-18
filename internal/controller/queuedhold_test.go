@@ -603,3 +603,33 @@ func TestRecordedHolderEndsWaiterWhileAnotherLimitHolds(t *testing.T) {
 		})
 	}
 }
+
+// TestVerificationEndReleasesTheLockInItsWrite checks the eighth decision of 2026-11-18 on #771, point 3: a holder
+// merged with its receipt and held through verification releases the lock in the status write that ends the
+// verification (Succeeded, Failed or Inconclusive), as on main, with no read of the branch after it.
+func TestVerificationEndReleasesTheLockInItsWrite(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseSucceeded,
+		remediationv1alpha1.PhaseFailed, remediationv1alpha1.PhaseInconclusive} {
+		t.Run(string(phase), func(t *testing.T) {
+			r, c, _, stub := holdWorld(t, true)
+			mergeHolder(t, r, c, stub)
+			moveHolder(t, r, c, remediationv1alpha1.PhaseWaitingForDelivery)
+			moveHolder(t, r, c, remediationv1alpha1.PhaseVerifying)
+			deliver(t, c)
+			var err error
+			if phase == remediationv1alpha1.PhaseSucceeded {
+				err = r.succeed(context.Background(), getHolder(t, c), time.Minute, "No recurrence in the window")
+			} else {
+				err = r.endVerification(context.Background(), getHolder(t, c), phase, ReasonOOMKilled,
+					"The container was OOM killed under the new limit")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if h := getHolder(t, c); h.Status.Phase != phase || ptr.Deref(h.Status.HoldsTarget, true) {
+				t.Fatalf("phase %s, holds %v; want %s with the lock released in the ending write", h.Status.Phase,
+					ptr.Deref(h.Status.HoldsTarget, true), phase)
+			}
+		})
+	}
+}

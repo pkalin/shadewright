@@ -484,12 +484,12 @@ const (
 	GitWaitHandoffGrace GitWaitKind = "HandoffGrace"
 	// GitWaitMergeCheck ends five minutes after its start, a wait for the merge commit of a pull request seen merged
 	// without one or for an answer of the check at the merge: the merge it names is recorded, with the plan not
-	// shown fresh, and without a receipt when no merge commit was seen. A pause of writes counts against it no
-	// time: the first reconcile after the lift records it again with its full five minutes.
+	// shown fresh, and without a receipt when no merge commit was seen. Paused time that a reconcile of the request
+	// saw (status.pauseSeen) stretches it: it ends at ends plus the paused time seen since its start.
 	GitWaitMergeCheck GitWaitKind = "MergeCheck"
 	// GitWaitMergeContent ends five minutes after its start: the request ends NeedsIntervention with
-	// MergeContentUnreadable. It names the pull request whose merge it reads. Like MergeCheck it starts again, with
-	// its full five minutes, at the first reconcile after a pause of writes.
+	// MergeContentUnreadable. It names the pull request whose merge it reads. Like MergeCheck it is stretched by the
+	// paused time seen since its start.
 	GitWaitMergeContent GitWaitKind = "MergeContent"
 )
 
@@ -508,9 +508,18 @@ type GitWait struct {
 
 	// ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
 	// request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
-	// the start (MergeCheck, MergeContent). It does not move while the entry stands.
+	// the start (MergeCheck, MergeContent). It does not move while the entry stands. A MergeCheck or MergeContent
+	// wait ends later by the paused time seen since its start (pausedSecondsAtStart).
 	// +optional
 	Ends *metav1.Time `json:"ends,omitempty"`
+
+	// pausedSecondsAtStart is, for a MergeCheck or a MergeContent wait, the paused time the request had seen
+	// (status.pauseSeen: pausedSeconds plus a pause still running) when the entry was recorded. The wait ends at ends
+	// plus what status.pauseSeen counts beyond it, so paused time stretches the wait and never uses it up. It does
+	// not move while the entry stands.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	PausedSecondsAtStart int64 `json:"pausedSecondsAtStart,omitempty"`
 
 	// operation is the fixed name of the read that failed last, never the Git host's answer. A name that would be
 	// longer than the bound (one that names a branch or a path) is cut where the entry is built.
@@ -523,6 +532,33 @@ type GitWait struct {
 	// the recorded one, or one found by the request's marker, so the end of the wait can record it without a read.
 	// +optional
 	PullRequest *GitWaitPullRequest `json:"pullRequest,omitempty"`
+}
+
+// PauseSeenStatus is the time writes were paused (RemediationSettings spec.paused) as the reconciles of a request saw
+// it, in the shape of status.rollout.pausedSince and pausedSeconds (#771). A pause that begins and ends between two
+// reconciles took no read away and is not counted. It stretches the bounds that wait on reads of the Git host: the
+// MergeCheck and MergeContent entries of status.gitWaits (pausedSecondsAtStart) and the cleanup of an expired request
+// whose close keeps failing (cleanupPausedSecondsAtStart). The request deadline and the handoff grace count paused
+// time and are not stretched. Once set it is kept, pausedSince is only set or cleared, never moved, and
+// pausedSeconds never decreases.
+type PauseSeenStatus struct {
+	// pausedSince is when a reconcile of the request first saw writes paused; cleared by the first reconcile that sees
+	// them resumed, the paused time then added to pausedSeconds.
+	// +optional
+	PausedSince *metav1.Time `json:"pausedSince,omitempty"`
+
+	// pausedSeconds is how long, in seconds, writes were paused as the reconciles of the request saw it, pauses
+	// that ended. It never decreases.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	PausedSeconds int64 `json:"pausedSeconds,omitempty"`
+
+	// cleanupPausedSecondsAtStart is the paused time seen (pausedSeconds plus a pause still running) when condition
+	// CleanupFailing of an expired request turned True, recorded in the same status write. The cleanup ends 24 hours
+	// after that condition's lastTransitionTime plus the paused time seen since.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	CleanupPausedSecondsAtStart *int64 `json:"cleanupPausedSecondsAtStart,omitempty"`
 }
 
 // GitWaitPullRequest is the pull request a MergeContent wait is about.
@@ -1039,9 +1075,8 @@ type RemediationRequestStatus struct {
 	// mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
 	// merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
 	// (GitHub computes it after the merge), bounded by the MergeCheck entry of gitWaits recorded with it, which
-	// counts from its own start and starts again after a pause of writes, keeping the phase, and then records the
-	// merge without a
-	// receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
+	// counts from its own start and is stretched by the paused time a reconcile saw (pauseSeen), keeping the phase,
+	// and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
 	// change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot
 	// read what it needs, the executor records the start here if it is unset, retries until the wait is over, and
 	// then records the merge with a plan not shown fresh (PlanFresh False, reason PlanChanged). Set once and never
@@ -1065,6 +1100,12 @@ type RemediationRequestStatus struct {
 	// +kubebuilder:validation:MaxItems=5
 	// +optional
 	GitWaits []GitWait `json:"gitWaits,omitempty"`
+
+	// pauseSeen is the paused time the reconciles of the request saw, which stretches the MergeCheck and
+	// MergeContent waits and the cleanup of an expired request (PauseSeenStatus). Recorded only while one of those
+	// stands or a pause seen is running.
+	// +optional
+	PauseSeen *PauseSeenStatus `json:"pauseSeen,omitempty"`
 
 	// rollout is what the check after the merge keeps between reconciles (the RolledOut condition).
 	// +optional
@@ -1161,7 +1202,10 @@ type RemediationRequestStatus struct {
 // is neither added, removed nor changed (#748).
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeReceipt) || !has(oldSelf.status.pullRequest) || (has(self.status) && has(self.status.pullRequest) && has(self.status.pullRequest.reviewCheck) == has(oldSelf.status.pullRequest.reviewCheck) && (!has(oldSelf.status.pullRequest.reviewCheck) || self.status.pullRequest.reviewCheck == oldSelf.status.pullRequest.reviewCheck))",message="status.pullRequest.reviewCheck does not change once status.mergeReceipt exists"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince) || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince == oldSelf.status.mergeCommitAwaitedSince)",message="status.mergeCommitAwaitedSince is set once and never changed"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status) || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o, o.kind != w.kind || (o.since == w.since && has(o.ends) == has(w.ends) && (!has(o.ends) || o.ends == w.ends) && has(o.pullRequest) == has(w.pullRequest) && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))",message="a Git wait keeps its start, its end and its pull request while it stands; remove it to start another"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status) || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o, o.kind != w.kind || (o.since == w.since && has(o.ends) == has(w.ends) && (!has(o.ends) || o.ends == w.ends) && has(o.pullRequest) == has(w.pullRequest) && (!has(o.pullRequest) || o.pullRequest == w.pullRequest) && (has(o.pausedSecondsAtStart) ? o.pausedSecondsAtStart : 0) == (has(w.pausedSecondsAtStart) ? w.pausedSecondsAtStart : 0))))",message="a Git wait keeps its start, its end, its pull request and its paused time at the start while it stands; remove it to start another"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pauseSeen) || (has(self.status) && has(self.status.pauseSeen))",message="status.pauseSeen is kept once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pauseSeen) || !has(oldSelf.status.pauseSeen.pausedSince) || !has(self.status) || !has(self.status.pauseSeen) || !has(self.status.pauseSeen.pausedSince) || self.status.pauseSeen.pausedSince == oldSelf.status.pauseSeen.pausedSince",message="status.pauseSeen.pausedSince is never moved while set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.pauseSeen) || !has(oldSelf.status.pauseSeen.pausedSeconds) || (has(self.status) && has(self.status.pauseSeen) && has(self.status.pauseSeen.pausedSeconds) && self.status.pauseSeen.pausedSeconds >= oldSelf.status.pauseSeen.pausedSeconds)",message="status.pauseSeen.pausedSeconds never decreases"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase) && !(self.status.phase in ['Pending', 'PolicyChecked', 'PRCreated', 'AwaitingApproval', 'AutoMergeQueued']))",message="status.mergeReceipt is set only in Merged or a phase after it"
 // WaitingForDelivery and Verifying are measured from the receipt (ADR-0030 section 2), and Verifying from the
 // applied time, which the executor writes in the same status write that sets Verifying.

@@ -139,7 +139,8 @@ func other(git providers.GitProvider) {
 // lockWriters are the functions of this package that may write status.holdsTarget, and releasers those that may call
 // lockverdict.Release, the one status.holdsTarget=false writer (in its own package); acquire is the one that takes
 // the lock. Only settleTargetLock
-// may release a lock for Git work. Other allowed callers never acquired a lock (admission refusal and duplicates),
+// may release a lock for Git work; checkHeld and settleRecorded release one whose status records its merge
+// (settleRecordedMerge, as main's settleLock did). Other allowed callers never acquired a lock (admission refusal and duplicates),
 // transfer it at a completed handoff, or record a lock already free before the field existed (backfill, with the
 // verdict settleReleasedBeforeField). No stopped request, including an Incident cancellation, has a separate release
 // rule.
@@ -148,7 +149,7 @@ const releaseFunc = "Release"
 var (
 	lockWriters = map[string]bool{"acquire": true}
 	releasers   = map[string]bool{
-		"settleTargetLock": true, "checkHeld": true, "releaseRefused": true, "supersedeDuplicate": true,
+		"settleTargetLock": true, "checkHeld": true, "settleRecorded": true, "releaseRefused": true, "supersedeDuplicate": true,
 		"endHandoff": true, "supersedePredecessor": true, "cancelUndecided": true, "backfill": true,
 	}
 	// statusReplacers may replace a request's whole status: restoreStatus puts back the status the same caller saved
@@ -327,7 +328,7 @@ func restoreStatus(rr *R, before *S) { rr.Status = *before }
 // each is called by the read or the state that proves its verdict.
 var settlementBuilders = map[string]bool{
 	"settleByRead": true, "settleNeverHeld": true, "settleHandedOver": true, "settleHandoffAborted": true,
-	"settleReleasedBeforeField": true, "settleByReceipt": true,
+	"settleReleasedBeforeField": true, "settleRecordedMerge": true,
 }
 
 // isPackage reports whether e is the package name pkg.

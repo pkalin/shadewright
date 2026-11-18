@@ -376,3 +376,31 @@ var reasonName = map[noBoundReason]string{
 	noBoundStaleCleanup: "noBoundStaleCleanup", noBoundAfterStop: "noBoundAfterStop",
 	noBoundRefusedWatch: "noBoundRefusedWatch", noBoundCancelWatch: "noBoundCancelWatch",
 }
+
+// TestHeldUnsettledKeepsTheEndOfAWait checks that a look of a stopped holder that settles nothing never asks to run
+// again after the end of a wait the request records (heldUnsettled, withinWaits): both for answers that disagree (no
+// failed call) and for a failure PullRequestUnreadable already describes, a MergeContent wait that ends in 30 seconds
+// is not carried to heldRecheckInterval.
+func TestHeldUnsettledKeepsTheEndOfAWait(t *testing.T) {
+	r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	clock := clockOf(r)
+	left := 30 * time.Second
+	rr.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitMergeContent, Since: metav1.NewTime(clock.at),
+		Ends: &metav1.Time{Time: clock.at.Add(left)}, Operation: "read of what the merge brought",
+		PullRequest: &api.GitWaitPullRequest{Number: rr.Status.PullRequest.Number, URL: rr.Status.PullRequest.URL,
+			HeadSHA: rr.Status.PullRequest.HeadSHA}}}
+	for _, c := range []struct {
+		name string
+		v    changeVerdict
+		err  error
+		said bool
+	}{
+		{"answers disagree", changeVerdict{state: changeUnknown, err: errConflictingReads}, nil, false},
+		{"unreadable said", changeVerdict{state: changeUnknown, err: errors.New("no read")}, errors.New("no read"), true},
+	} {
+		res, err := r.heldUnsettled(context.Background(), rr, c.v, c.err, c.said)
+		if err != nil || res.RequeueAfter <= 0 || res.RequeueAfter > left {
+			t.Errorf("%s: %+v, %v; want a wait of at most %v, the end of the content wait", c.name, res, err, left)
+		}
+	}
+}

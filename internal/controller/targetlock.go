@@ -117,13 +117,14 @@ func prMayBeOpen(rr *remediationv1alpha1.RemediationRequest) bool {
 // mergedAndEnded reports whether rr ended Failed after its merge: status.mergeReceipt is written only in the
 // write that records the merge of the recorded pull request (recordMerge), so that pull request is not open. Before
 // #719 such a request had released the lock at its merge; now one held through verification (heldForVerification)
-// releases it through the common branch read after it ends Failed, as Succeeded and Inconclusive do.
+// releases it in the write that ends it Failed, as Succeeded and Inconclusive do (settleRecorded).
 func mergedAndEnded(rr *remediationv1alpha1.RemediationRequest) bool {
 	return rr.Status.Phase == remediationv1alpha1.PhaseFailed && rr.Status.MergeReceipt != nil
 }
 
-// clearReleasedRead removes a condition for a lock that has already been settled. Status alone never releases
-// a held lock; the next checkHeld calls settleTargetLock with live branch evidence.
+// clearReleasedRead removes condition PullRequestUnreadable of a request whose lock is settled. Status alone
+// releases a held lock only on a recorded merge (settleRecorded); any other release needs the read of the branch
+// (checkHeld, settleTargetLock).
 func clearReleasedRead(rr *remediationv1alpha1.RemediationRequest) {
 	if !progresses(rr) && !ptr.Deref(rr.Status.HoldsTarget, false) {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
@@ -420,12 +421,26 @@ func settleHandoffAborted(rr *remediationv1alpha1.RemediationRequest) (*lockverd
 	return lockverdict.HandoffAborted(&rr.Status)
 }
 
-// settleByReceipt is the verdict of a stopped holder whose merge is recorded with its receipt, Merged or
-// Inconclusive, and that no verification holds (decision of 2026-11-18 on #771): the recorded merge settles the lock
-// by itself, without a read of the branch, so a repository removed from the settings does not keep it.
-func (r *RemediationRequestReconciler) settleByReceipt(rr *remediationv1alpha1.RemediationRequest) (
+// settleRecordedMerge is the verdict of a request whose status records its merge, in Merged, Succeeded,
+// Inconclusive, or Failed with its receipt, and that no verification holds (eighth decision of 2026-11-18 on #771,
+// point 3): the recorded merge settles the lock by itself, without a read of the branch, so neither a pause nor a
+// repository removed from the settings keeps it.
+func (r *RemediationRequestReconciler) settleRecordedMerge(rr *remediationv1alpha1.RemediationRequest) (
 	*lockverdict.Verdict, bool) {
-	return lockverdict.MergeReceipt(&rr.Status, heldForVerification(rr, r.VerifyOutcomes))
+	return lockverdict.RecordedMerge(&rr.Status, heldForVerification(rr, r.VerifyOutcomes))
+}
+
+// settleRecorded is what main's settleLock did in every write that ends a phase: in the status about to be written,
+// it releases the lock of a request whose status records its merge (settleRecordedMerge), and removes condition
+// PullRequestUnreadable of a request that is settled (clearReleasedRead). It reads nothing, so the write that records
+// the merge or ends the verification releases the lock under a pause too. A request held for its verification keeps
+// the lock until that ends. Every other release needs its read (checkHeld).
+func (r *RemediationRequestReconciler) settleRecorded(rr *remediationv1alpha1.RemediationRequest) {
+	if s, ok := r.settleRecordedMerge(rr); ok && ptr.Deref(rr.Status.HoldsTarget, false) {
+		// Release refuses only a nil verdict, which ok rules out.
+		_ = lockverdict.Release(&rr.Status, s)
+	}
+	clearReleasedRead(rr)
 }
 
 // mergeRecorded reports whether the status records the merge of the request's pull request: a merge receipt, a
@@ -468,21 +483,31 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	}
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
 	if expiredCleanupOver(rr, r.now()) {
-		// The cutoff of an expired request's cleanup is decided from recorded state, before any read.
+		// The cutoff of an expired request's cleanup is decided from recorded state, before any read. Nothing new
+		// ends during a pause (eighth decision of 2026-11-18 on #771, point 2): the cutoff waits for it like the close
+		// it bounds, and the paused time a reconcile saw stretches it (expiredCleanupLeft).
+		switch paused, err := r.writesPaused(ctx); {
+		case err != nil:
+			return reconcile.Result{}, err
+		case paused:
+			return r.waitWhilePaused(ctx, rr)
+		}
 		log.Info("Ended the cleanup of an expired RemediationRequest: its close kept failing")
 		return r.endExpiredCleanupFailed(ctx, rr)
 	}
-	if s, ok := r.settleByReceipt(rr); ok {
-		// The recorded merge with its receipt settles the lock: no read of the branch, so neither a repository that
-		// cannot be opened nor a failing Git host keeps it. A pause does not hold it, as on main, where the release
-		// from recorded status reads nothing either (seventh decision of 2026-11-18 on #771, point 1).
+	if s, ok := r.settleRecordedMerge(rr); ok {
+		// The recorded merge settles the lock: no read of the branch, so neither a repository that cannot be opened
+		// nor a failing Git host keeps it. A pause does not hold it, as on main, where the release from recorded status
+		// reads nothing either. The writes that record the merge or end the verification release it already
+		// (settleRecorded); this one settles a lock one of them left, from a status written before.
 		if err := lockverdict.Release(&rr.Status, s); err != nil {
 			return reconcile.Result{}, err
 		}
+		clearReleasedRead(rr)
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 		}
-		log.Info("Released the target lock of RemediationRequest: its merge is recorded with its receipt")
+		log.Info("Released the target lock of RemediationRequest: its merge is recorded")
 		return reconcile.Result{}, nil
 	}
 	before := rr.Status.DeepCopy()

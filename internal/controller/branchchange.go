@@ -339,9 +339,10 @@ func (r *RemediationRequestReconciler) clearContentWait(ctx context.Context, rr 
 //     those, a squash adds one of them. before is found by walking n first parents from the merge result, and
 //     each commit the walk passes below the merge result must be a replay of the head's commit at the same depth:
 //     one parent, a change of the target file alone (CheckCommit), and the same target file as that commit. A
-//     squash merge with n above one meets its real parent, a commit the branch held before the merge, and is
-//     refused there, so the comparison never starts below the merge's real parent and never hides a change the
-//     branch made and the merge undid. n must be from one to MaxChainCommits, the most commits a Shadewright
+//     squash merge with n above one walks into its real parent, a commit the branch held before the merge: when
+//     that commit is no such replay the walk refuses it there; when it passes as one, the comparison starts below
+//     it and so covers the change it made, so a change the branch made and the merge undid is never hidden either
+//     way. n must be from one to MaxChainCommits, the most commits a Shadewright
 //     branch carries. Parents, CountAhead, then per further commit CheckCommit, Parents and two ReadFile calls.
 //
 // A merge result equal to the head (the head taken in as it is) shows no before, and every other shape is refused
@@ -382,8 +383,9 @@ func retargetedContent(ctx context.Context, git providers.GitProvider, rr *remed
 		for range added - 1 {
 			// before is a commit below the merge result. It counts as one the merge added only as a replay of
 			// the head's commit at the same depth: one parent, a change of the target file alone, leaving the
-			// file as that commit does. A commit the branch held before a squash merge is no such replay, and the
-			// walk stops at the merge's real parent with a refusal instead of going past it.
+			// file as that commit does. A commit the branch held before a squash merge that is no such replay
+			// stops the walk at the merge's real parent with a refusal; one that passes as a replay is walked
+			// past, and the comparison, which then starts below it, covers its change.
 			state, up, err := git.CheckCommit(ctx, before, path)
 			switch {
 			case err != nil:
@@ -587,8 +589,9 @@ func markStaleForBranchChange(rr *remediationv1alpha1.RemediationRequest) {
 // cleanup's deadline, as checkHeld's answer: the end written (errStopped) is done; a merge commit not reported yet
 // is looked at again when what is left of its wait is over; failed Git reads use retryGitRead; a failed Kubernetes read or write remains an error. No failed read
 // records the merge. The lock is kept meanwhile. The waits for the merge commit and for the check at the merge are
-// bounded by mergeCommitWait (status.mergeCommitAwaitedSince), the reads of what a retargeted merge brought by
-// mergeContentWait (its entry in status.gitWaits); a read of the pull request itself that keeps failing
+// bounded by mergeCommitWait from the start of their MergeCheck entry in status.gitWaits, the reads of what a
+// retargeted merge brought by mergeContentWait from the start of their MergeContent entry, each stretched by the
+// paused time a reconcile of the request saw (waitKind.end); a read of the pull request itself that keeps failing
 // shows in condition PullRequestUnreadable.
 func (r *RemediationRequestReconciler) followHeldMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	record func(context.Context) error) (reconcile.Result, error) {

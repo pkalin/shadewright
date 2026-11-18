@@ -2036,7 +2036,7 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 		ObservedGeneration: rr.Generation,
 	})
 	clearNotClosed(rr)
-	clearReleasedRead(rr)
+	r.settleRecorded(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}

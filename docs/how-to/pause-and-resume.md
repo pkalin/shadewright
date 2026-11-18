@@ -24,7 +24,15 @@ kubectl get events -n shadewright-system --field-selector reason=WritesPaused
 kubectl patch remediationsettings default --type merge -p '{"spec":{"paused":false}}'
 ```
 
-Each request goes on from where it stopped, the condition is removed and an Event `WritesResumed` is recorded. Time paused counts against a request's deadline and the grace of a handoff recovery, as before, so the first look after the pause ends what passed meanwhile (a request whose deadline passed ends `Expired`). It counts against no wait for a read of the Git host: a wait for the merge commit or for what a merge brought (`MergeCheck`, `MergeContent` in `status.gitWaits`) starts again with its full five minutes at the first look after the pause, since no read was made while it lasted. A request whose pull request can no longer merge frees its target within a few looks after the pause, each scheduled, never left waiting for an event. A merge recorded with its receipt frees its target during a pause too: that release reads nothing from the Git host.
+Each request goes on from where it stopped, the condition is removed and an Event `WritesResumed` is recorded.
+
+What a pause ends and what it does not:
+
+- Nothing ends during a pause: no request on its deadline or another wait, and no cleanup after `Expired` on its 24 hour cutoff.
+- Time paused counts against a request's deadline and the grace of a handoff recovery, as before, so the first look after the pause ends what passed meanwhile (a request whose deadline passed ends `Expired`).
+- Time paused does not count against a wait for a read of the Git host (for the merge commit or for what a merge brought: `MergeCheck`, `MergeContent` in `status.gitWaits`) or against the cutoff of the cleanup after `Expired`. The paused time a look at the request saw (`status.pauseSeen`) stretches each of them, so none ends without its full bound of time not paused, however often the pause comes and goes. A pause that begins and ends between two looks at a request stretches nothing for it.
+- A merge the executor recorded (phases `Merged`, `Succeeded`, `Inconclusive`, and `Failed` after a merge) frees its target in the write that records it, during a pause too: that release reads nothing from the Git host.
+- Any other request whose pull request can no longer merge frees its target within a few looks after the pause, each scheduled, never left waiting for an event.
 
 ## What to know
 

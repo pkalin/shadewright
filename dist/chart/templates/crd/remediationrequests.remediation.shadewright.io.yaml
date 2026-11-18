@@ -650,7 +650,8 @@ spec:
                       description: |-
                         ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
                         request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
-                        the start (MergeCheck, MergeContent). It does not move while the entry stands.
+                        the start (MergeCheck, MergeContent). It does not move while the entry stands. A MergeCheck or MergeContent
+                        wait ends later by the paused time seen since its start (pausedSecondsAtStart).
                       format: date-time
                       type: string
                     kind:
@@ -669,6 +670,15 @@ spec:
                       maxLength: 256
                       minLength: 1
                       type: string
+                    pausedSecondsAtStart:
+                      description: |-
+                        pausedSecondsAtStart is, for a MergeCheck or a MergeContent wait, the paused time the request had seen
+                        (status.pauseSeen: pausedSeconds plus a pause still running) when the entry was recorded. The wait ends at ends
+                        plus what status.pauseSeen counts beyond it, so paused time stretches the wait and never uses it up. It does
+                        not move while the entry stands.
+                      format: int64
+                      minimum: 0
+                      type: integer
                     pullRequest:
                       description: |-
                         pullRequest is, for a MergeContent or a MergeCheck wait only, the pull request whose merge the wait is about:
@@ -1121,9 +1131,8 @@ spec:
                   mergeCommitAwaitedSince is when the executor first saw this request's pull request merged without a full
                   merge commit ID, on its own clock. The executor waits for the Git host to report the commit for five minutes
                   (GitHub computes it after the merge), bounded by the MergeCheck entry of gitWaits recorded with it, which
-                  counts from its own start and starts again after a pause of writes, keeping the phase, and then records the
-                  merge without a
-                  receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
+                  counts from its own start and is stretched by the paused time a reconcile saw (pauseSeen), keeping the phase,
+                  and then records the merge without a receipt (NoMergeReceipt, ending Inconclusive) or, for a pull request it never recorded, as merged with a
                   change it cannot check. The same wait bounds the check of the plan at the merge: when that check cannot
                   read what it needs, the executor records the start here if it is unset, retries until the wait is over, and
                   then records the merge with a plan not shown fresh (PlanFresh False, reason PlanChanged). Set once and never
@@ -1210,6 +1219,34 @@ spec:
                 description: observedGeneration is the generation the status describes.
                 format: int64
                 type: integer
+              pauseSeen:
+                description: |-
+                  pauseSeen is the paused time the reconciles of the request saw, which stretches the MergeCheck and
+                  MergeContent waits and the cleanup of an expired request (PauseSeenStatus). Recorded only while one of those
+                  stands or a pause seen is running.
+                properties:
+                  cleanupPausedSecondsAtStart:
+                    description: |-
+                      cleanupPausedSecondsAtStart is the paused time seen (pausedSeconds plus a pause still running) when condition
+                      CleanupFailing of an expired request turned True, recorded in the same status write. The cleanup ends 24 hours
+                      after that condition's lastTransitionTime plus the paused time seen since.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  pausedSeconds:
+                    description: |-
+                      pausedSeconds is how long, in seconds, writes were paused as the reconciles of the request saw it, pauses
+                      that ended. It never decreases.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  pausedSince:
+                    description: |-
+                      pausedSince is when a reconcile of the request first saw writes paused; cleared by the first reconcile that sees
+                      them resumed, the paused time then added to pausedSeconds.
+                    format: date-time
+                    type: string
+                type: object
               phase:
                 description: |-
                   phase summarizes progress. It is a selectable field (field selector status.phase), so the executor's
@@ -1895,13 +1932,26 @@ spec:
           rule: '!has(oldSelf.status) || !has(oldSelf.status.mergeCommitAwaitedSince)
             || (has(self.status) && has(self.status.mergeCommitAwaitedSince) && self.status.mergeCommitAwaitedSince
             == oldSelf.status.mergeCommitAwaitedSince)'
-        - message: a Git wait keeps its start, its end and its pull request while
-            it stands; remove it to start another
+        - message: a Git wait keeps its start, its end, its pull request and its paused
+            time at the start while it stands; remove it to start another
           rule: '!has(oldSelf.status) || !has(oldSelf.status.gitWaits) || !has(self.status)
             || !has(self.status.gitWaits) || self.status.gitWaits.all(w, oldSelf.status.gitWaits.all(o,
             o.kind != w.kind || (o.since == w.since && has(o.ends) == has(w.ends)
             && (!has(o.ends) || o.ends == w.ends) && has(o.pullRequest) == has(w.pullRequest)
-            && (!has(o.pullRequest) || o.pullRequest == w.pullRequest))))'
+            && (!has(o.pullRequest) || o.pullRequest == w.pullRequest) && (has(o.pausedSecondsAtStart)
+            ? o.pausedSecondsAtStart : 0) == (has(w.pausedSecondsAtStart) ? w.pausedSecondsAtStart
+            : 0))))'
+        - message: status.pauseSeen is kept once set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pauseSeen) || (has(self.status)
+            && has(self.status.pauseSeen))'
+        - message: status.pauseSeen.pausedSince is never moved while set
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pauseSeen) || !has(oldSelf.status.pauseSeen.pausedSince)
+            || !has(self.status) || !has(self.status.pauseSeen) || !has(self.status.pauseSeen.pausedSince)
+            || self.status.pauseSeen.pausedSince == oldSelf.status.pauseSeen.pausedSince'
+        - message: status.pauseSeen.pausedSeconds never decreases
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.pauseSeen) || !has(oldSelf.status.pauseSeen.pausedSeconds)
+            || (has(self.status) && has(self.status.pauseSeen) && has(self.status.pauseSeen.pausedSeconds)
+            && self.status.pauseSeen.pausedSeconds >= oldSelf.status.pauseSeen.pausedSeconds)'
         - message: status.mergeReceipt is set only in Merged or a phase after it
           rule: '!has(self.status) || !has(self.status.mergeReceipt) || (has(self.status.phase)
             && !(self.status.phase in [''Pending'', ''PolicyChecked'', ''PRCreated'',

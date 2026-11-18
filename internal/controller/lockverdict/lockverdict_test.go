@@ -75,11 +75,16 @@ func TestEachVerdictOnlyFromItsProof(t *testing.T) {
 		"handed over to another":      {of(HandedOver(&api.OutgoingHandoff{Phase: api.HandoffDone, UID: "u"}, "v", true)), false},
 		"released before the field":   {of(ReleasedBeforeField(&api.RemediationRequestStatus{}, false)), true},
 		"derived hold":                {of(ReleasedBeforeField(&api.RemediationRequestStatus{}, true)), false},
-		"receipt, Merged":             {of(MergeReceipt(receipt(api.PhaseMerged), false)), true},
-		"receipt, Inconclusive":       {of(MergeReceipt(receipt(api.PhaseInconclusive), false)), true},
-		"receipt, held for verifying": {of(MergeReceipt(receipt(api.PhaseMerged), true)), false},
-		"receipt, Failed":             {of(MergeReceipt(receipt(api.PhaseFailed), false)), false},
-		"no receipt, Merged":          {of(MergeReceipt(&api.RemediationRequestStatus{Phase: api.PhaseMerged}, false)), false},
+		"receipt, Merged":             {of(RecordedMerge(receipt(api.PhaseMerged), false)), true},
+		"receipt, Inconclusive":       {of(RecordedMerge(receipt(api.PhaseInconclusive), false)), true},
+		"receipt, Succeeded":          {of(RecordedMerge(receipt(api.PhaseSucceeded), false)), true},
+		"receipt, Failed":             {of(RecordedMerge(receipt(api.PhaseFailed), false)), true},
+		"receipt, held for verifying": {of(RecordedMerge(receipt(api.PhaseMerged), true)), false},
+		"no receipt, Merged":          {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseMerged}, false)), true},
+		"no receipt, Inconclusive":    {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseInconclusive}, false)), true},
+		"no receipt, Failed":          {of(RecordedMerge(&api.RemediationRequestStatus{Phase: api.PhaseFailed}, false)), false},
+		"receipt, WaitingForDelivery": {of(RecordedMerge(receipt(api.PhaseWaitingForDelivery), false)), false},
+		"receipt, NeedsIntervention":  {of(RecordedMerge(receipt(api.PhaseNeedsIntervention), false)), false},
 	} {
 		if tc.got.ok != tc.want || (tc.got.v != nil) != tc.want {
 			t.Errorf("%s: verdict %v, ok %t; want ok %t", name, tc.got.v, tc.got.ok, tc.want)

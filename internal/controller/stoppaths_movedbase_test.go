@@ -353,7 +353,7 @@ func setTarget(t *testing.T, r *RemediationRequestReconciler, branch string) {
 // watch reads it closed; merged elsewhere: gone).
 func TestAdoptionOfOwnPullRequestEndedOnAnotherBase(t *testing.T) {
 	for _, merged := range []bool{false, true} {
-		t.Run(map[bool]string{false: "closed", true: "merged"}[merged], func(t *testing.T) {
+		t.Run(map[bool]string{false: foundClosed, true: endMerged}[merged], func(t *testing.T) {
 			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
 			ctx := context.Background()
 			setTarget(t, r, mainBranch)

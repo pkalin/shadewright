@@ -77,7 +77,11 @@ import (
 //	   reads answer, never on none. A merged head with further commits on
 //	   top of the replacement's commit is the documented gap #870, and the predecessor's commit put back by a force
 //	   push after the replacement took the pull request over, with the predecessor handed off or gone, is a foreign
-//	   change to the replacement: both are left out;
+//	   change to the replacement: both are left out. A merge is identified at its first read (decision of
+//	   2026-11-19 on #880): the request that first stores a record of it (a wait of kind MergeCheck or MergeContent
+//	   naming the pull request, or the merge recorded in any form, MergedWithForeignChange included) is the one that
+//	   records it. Whatever the merged head, the two requests never hold a record of it at the same time, and a live
+//	   request that is not being deleted never loses the record of its first read;
 //	P2 the circuit breaker counts that merge once (one success at most), and, once reads answer, no request is a
 //	   failure for the breaker that was not one when a person merged a request's own commit, except the
 //	   predecessor's MergedWithForeignChange of P1, a failure as on main;
@@ -365,6 +369,8 @@ type hmMerge struct {
 	afterTakeover bool
 	// noID: the host reports the merge without a merge commit ID, so it is recorded without a receipt.
 	noID bool
+	// firstRead is the request that first stored a record of the merge (readRecord), "" until one did.
+	firstRead string
 }
 
 // foreignOnReplacement reports the other record a merge of the predecessor's commit may have once the replacement took
@@ -1024,6 +1030,62 @@ func recordsMerge(rr *api.RemediationRequest) bool {
 	return false
 }
 
+// readRecord reports whether rr's status stores a record of the merge of pull request number, the first read of it
+// included (decision of 2026-11-19 on #880): a wait of kind MergeCheck or MergeContent that names the pull request, or
+// the merge recorded in any form on that pull request (recordsMerge: a receipt, mergedAt, Merged, or a merge that did
+// not deliver the plan as shown, MergedWithForeignChange among them). PullRequestOpened marked merged alone is no
+// record: the settlement of a predecessor that ended HandedOff marks it so. It is the model's own reading of the
+// status, written apart from the reconciler's.
+func readRecord(rr *api.RemediationRequest, number int64) bool {
+	if rr == nil {
+		return false
+	}
+	for _, w := range rr.Status.GitWaits {
+		if (w.Kind == api.GitWaitMergeCheck || w.Kind == api.GitWaitMergeContent) && w.PullRequest != nil &&
+			w.PullRequest.Number == number {
+			return true
+		}
+	}
+	if rr.Status.PullRequest == nil || rr.Status.PullRequest.Number != number {
+		return false
+	}
+	return recordsMerge(rr)
+}
+
+// observeFirstRead checks the first read of P1 after every step, for a merge of any head: the first request seen
+// holding a record of the merge is noted, the other never holds one at the same time, and the first one, alive and not
+// being deleted, keeps it. A request being deleted drops its merge waits (#878) and records nothing, so the other may
+// record the merge once that record is gone.
+func (m *hmWorld) observeFirstRead(reqs map[string]*api.RemediationRequest) {
+	mg := m.merge
+	if mg == nil {
+		return
+	}
+	var holding []string
+	for _, who := range []string{hmPred, hmRepl} {
+		if readRecord(reqs[who], m.number) {
+			holding = append(holding, who)
+		}
+	}
+	switch {
+	case len(holding) == 2 && mg.firstRead != "":
+		other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[mg.firstRead]
+		m.fail("P1", "the %s holds a record of the merge of %s while the %s holds the record of its first read (pred: %s, "+
+			"repl: %s)", other, short(mg.head), mg.firstRead, describe(reqs[hmPred]), describe(reqs[hmRepl]))
+	case len(holding) == 2:
+		m.fail("P1", "both requests stored a record of the merge of %s in one step", short(mg.head))
+	case len(holding) == 1 && mg.firstRead == "":
+		mg.firstRead = holding[0]
+		m.reach["first-read-"+holding[0]] = true
+		m.logf("  the %s stored the first read of the merge", holding[0])
+	case mg.firstRead != "" && !slices.Contains(holding, mg.firstRead):
+		if x := reqs[mg.firstRead]; x != nil && x.DeletionTimestamp.IsZero() {
+			m.fail("P1", "the %s lost the record of its first read of the merge of %s (%s)", mg.firstRead,
+				short(mg.head), describe(x))
+		}
+	}
+}
+
 func describe(rr *api.RemediationRequest) string {
 	if rr == nil {
 		return hmGone
@@ -1093,7 +1155,8 @@ func (m *hmWorld) observe() {
 	m.prEnded = cr.State != providers.ChangeRequestOpen || m.branchGone
 	m.mu.Unlock()
 	m.note(p, rr)
-	// P1 and P2 after a merge of a request's own commit.
+	// P1 and P2 after a merge of a request's own commit; the first read of P1 after a merge of any head.
+	m.observeFirstRead(reqs)
 	m.observeMerge(reqs)
 	m.observeLock(reqs)
 }
@@ -2114,4 +2177,28 @@ func TestHandoffModelWaitForTheReplacementsRecordIsShown(t *testing.T) {
 		t.Fatalf("Approved = %+v, want reason %s naming the replacement (%s)", c, ReasonMergeRecordPending, describe(p))
 	}
 	hmDirected(t, hmStartPushed, append(steps, stRecRepl, stRecPred))
+}
+
+// #880, seed 13030 (shape B): after the takeover a person puts the predecessor's commit back and merges it, and the
+// host reports no merge commit ID. The predecessor reads the merge first and stores its wait for the merge commit
+// (MergeCheck, naming the pull request and the merged head); the replacement, which then ends the predecessor
+// HandedOff, must read that record and leave the merge to it instead of recording it as a foreign change.
+func TestHandoffModelFirstReadByThePredecessorWithoutAMergeCommitID(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{stRecRepl, {Kind: hForce, Variant: forceDrop},
+		{Kind: hMerge, Commit: true, NoID: true}})
+	if m.merge == nil || m.merge.firstRead != hmPred {
+		t.Fatalf("the first read of the merge is not the predecessor's: %+v", m.merge)
+	}
+}
+
+// #880, seed 26733 (shape D): a person merges the replacement's commit, the host reports no merge commit ID, and the
+// replacement, stopped while the repository is out of the settings, reads it first once the repository is back and
+// records it as MergedWithForeignChange, which sets no mergedAt. The predecessor must read that record and not record
+// the same merge again.
+func TestHandoffModelFirstReadByTheReplacementAsAForeignChange(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{{Kind: hMerge, Commit: true, NoID: true},
+		{Kind: hFault, Code: 403, Op: opGet}, stRecRepl, stRecRepl, {Kind: hSettings, Variant: settingsRemoved}})
+	if m.merge == nil || m.merge.firstRead != hmRepl {
+		t.Fatalf("the first read of the merge is not the replacement's: %+v", m.merge)
+	}
 }

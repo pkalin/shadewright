@@ -1,21 +1,25 @@
 ---
-title: Use
+title: User guide
 ---
 
-# Use
+# User guide
 
-What you do with Shadewright once it is installed: understand what it proposes, review it, and find out why a request stopped.
+This guide is for people who review and approve what Shadewright proposes: you read an Incident, look at the pull request, approve or reject it, and find out why a request stopped. Installing and running it is in the [operator manual](operate.md).
+
+In the order you will need them:
 
 - [Concepts](concepts.md): the objects and parts, and how they relate.
 - [The life of a request](request-lifecycle.md): each phase and condition, and what you can do in it.
-- [How-to guides](how-to/index.md): review and approve, reject, write a policy, pause, limit namespaces, read an Incident, find why a request was refused.
-- [Your first proposal, to a reviewed pull request](first-proposal.md): the hand-written request, the pull request it opens, and what the phases mean.
-- [Troubleshooting](troubleshooting.md): every condition reason of a `RemediationRequest` with its cause and fix.
-- [Emergency stop](emergency.md): pause the executor and stop the analysis.
-- [Give a reviewer hint](#give-a-reviewer-hint): steer a proposal from its pull request (off by default: [turn reviewer hints on](how-to/turn-on-reviewer-hints.md)).
-- [FAQ](faq.md) and [Glossary](glossary.md).
+- [Read an Incident](how-to/read-an-incident.md) and [check status with kubectl](how-to/check-status.md): what it saw and where a request stands.
+- [Review and approve a proposal](how-to/review-and-approve.md) or [reject it](how-to/reject-a-proposal.md).
+- [Find why a request was refused](how-to/find-why-refused.md): the condition reason and what to do about it.
+- [Give a reviewer hint](#give-a-reviewer-hint): steer a proposal from its pull request (off by default, an operator turns it on).
+- [FAQ](faq.md), and the [glossary](glossary.md) for terms.
+- [All how-to guides](how-to/index.md), including those for operators.
 
-The concepts are explained in the design: the [request lifecycle](design/6-reconciliation.md#6-reconciliation), the [API objects](design/5-api.md#5-api) (`RemediationRequest`, `Incident`, `RemediationPolicy`, `RemediationSettings`), [what `approvalRequired` means](design/8-gitops-on-github.md#81-what-approvalrequired-means) and [how a change is made](design/8-gitops-on-github.md#82-making-a-change). The fields of each object are in the [API reference](reference/api.md).
+New to it? Start with [your first proposal](first-proposal.md): the hand-written request, the pull request it opens, and what the phases mean.
+
+How the parts fit together is in [How it works](how-it-works/index.md), seven short pages from a symptom to a verified change.
 
 ## Give a reviewer hint
 

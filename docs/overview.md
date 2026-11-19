@@ -31,5 +31,5 @@ The project is early. The [status section](index.md#status) of the home page lis
 ## Where to go next
 
 - To try it: [Get started](getting-started.md).
-- To run it: [Operate](operate.md).
+- To run it: [Operator manual](operate.md).
 - For the reasoning: [Design and decisions](design-and-decisions.md).

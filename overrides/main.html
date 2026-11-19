@@ -2,7 +2,7 @@
 
 {#- Announcement bar: the early-stage notice, on every page (moved from the home page box, #365). -#}
 {% block announce %}
-  <strong>Early:</strong> Shadewright is built up to the reviewed pull request. Analysis, auto-merge, delivery and verification are not built yet.
+  <strong>Early:</strong> Shadewright is built up to the reviewed pull request. Analysis (behind <code>--triage-model</code>), delivery tracking and verification (behind <code>--verify-outcomes</code>) are built and off by default; auto-merge and runbooks are not.
   <a href="{{ config.site_url }}#status">What is built</a>
 {% endblock %}
 

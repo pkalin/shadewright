@@ -1109,7 +1109,7 @@ func (r *Redactor) Strings(items []string) []string {
 		}
 		ps = append(ps, Piece{Text: it, Data: true})
 	}
-	all := r.piecesWithin(ps, -1, true)
+	all := r.piecesWithin(ps, -1, true, nil)
 	out := make([]string, len(items))
 	for i := range out {
 		tick(1)

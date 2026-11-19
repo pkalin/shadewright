@@ -145,13 +145,23 @@ func (r *Redactor) Pieces(ps []Piece) []string { return r.PiecesWithin(ps, -1) }
 // replacements of this package may be longer than those of the release before, which wrote its markers on the
 // values before they were escaped. The work is linear in the length of the pieces.
 func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
-	return r.piecesWithin(ps, limit, false)
+	return r.piecesWithin(ps, limit, false, nil)
+}
+
+// PiecesFitting is Pieces with each replacement in the first form of its marker (marker, down to "***") at
+// which fits holds of the pieces as decided, or the shortest when it holds at none: a caller whose answer is
+// longer than the pieces joined (get_resource, which renames two map keys decided alike) checks its own answer
+// (#845, fifteenth decision, P4). The decision is the same as Pieces'; fits is called at most once per form,
+// so the work is linear in the length of the pieces and in what fits does.
+func (r *Redactor) PiecesFitting(ps []Piece, fits func(out []string) bool) []string {
+	return r.piecesWithin(ps, -1, false, fits)
 }
 
 // piecesWithin is PiecesWithin; with joined true it also hides, cut at each piece's ends, everything String hides
 // in the answer as written, with no match ended at a line break of a value (Strings, whose answer is the strings
 // joined by line breaks: what String hides joined, Strings hides apart).
-func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool) []string {
+// With fits not nil, the form of the markers is the first at which fits holds (PiecesFitting) instead.
+func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]string) bool) []string {
 	var data []string
 	for _, p := range ps {
 		tick(1)
@@ -239,8 +249,21 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool) []string {
 			merged[i] = mergeSpans(own[i])
 		}
 	}
-	level := fitLevel(ws, merged, limit)
 	out := make([]string, len(ps))
+	if fits != nil {
+		for level := range markerLevels {
+			tick(1)
+			for i := range ps {
+				tick(1)
+				out[i] = ws[i].render(merged[i], level)
+			}
+			if fits(out) {
+				break
+			}
+		}
+		return out
+	}
+	level := fitLevel(ws, merged, limit)
 	for i := range ps {
 		tick(1)
 		out[i] = ws[i].render(merged[i], level)

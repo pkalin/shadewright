@@ -238,10 +238,7 @@ func TestMinimizeCollected(t *testing.T) {
 }
 
 // knownToolFailures are the known failing inputs of the targets of this package, by target and input bytes.
-var knownToolFailures = map[string]map[string]redacttest.KnownFailure{
-	"FuzzDiffGetResource": {string(seedGetResourceAtTheLimit): {Property: "P4",
-		Reason: "two labels told apart after the fit push the JSON of get_resource past its bound"}},
-}
+var knownToolFailures = map[string]map[string]redacttest.KnownFailure{}
 
 // foundPodLogsAfterAWideColon was found by FuzzDiffGetPodLogs in its first five minute run (#845, fifteenth
 // decision), minimised: a log excerpt (knob 0xd0: kube.Excerpt on both sides, end of the last line missing) where
@@ -516,9 +513,9 @@ func TestEveryToolHasADiffFuzzTarget(t *testing.T) {
 }
 
 // Input 3 of the fifteenth decision of #845, as a directed test: two labels that are decided alike (each an
-// address) and one argument that brings the answer to its bound make get_resource answer JSON cut before its
-// closing brace. It skips while it fails.
-func TestKnownGetResourceLabelsDecidedAlikeAtTheLimit(t *testing.T) {
+// address) and one argument that brings the answer to its bound made get_resource answer JSON cut before its
+// closing brace, while the markers were fitted before the second label was renamed " (2)".
+func TestGetResourceLabelsDecidedAlikeAtTheLimit(t *testing.T) {
 	set, src := diffSet(t)
 	in := redacttest.Decode(seedGetResourceAtTheLimit, 6)
 	scene, obj, kind := getResourceScene(in)
@@ -531,8 +528,9 @@ func TestKnownGetResourceLabelsDecidedAlikeAtTheLimit(t *testing.T) {
 	if !json.Valid([]byte(mainText)) {
 		t.Fatalf("origin/main's answer of %d bytes is not valid JSON either", len(mainText))
 	}
-	redacttest.CheckKnown(t, knownToolFailures["FuzzDiffGetResource"][string(seedGetResourceAtTheLimit)], false,
-		answerFails(NameGetResource, r, m.rec, mainText))
+	if fails := answerFails(NameGetResource, r, m.rec, mainText); len(fails) > 0 {
+		t.Error(strings.Join(fails, "\n"))
+	}
 }
 
 // The kind FuzzDiffGetPodLogs found beyond the seeds, as a directed test.

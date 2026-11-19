@@ -48,6 +48,12 @@ type pieceRedactor interface {
 	PiecesWithin(ps []redact.Piece, limit int) []string
 }
 
+// fittingRedactor is a [pieceRedactor] that fits the markers to a check of the caller's own answer
+// (*redact.Redactor's PiecesFitting).
+type fittingRedactor interface {
+	PiecesFitting(ps []redact.Piece, fits func(out []string) bool) []string
+}
+
 // answer is a tool's answer being written as pieces.
 type answer struct {
 	pieces []redact.Piece
@@ -70,11 +76,25 @@ func (a *answer) value(key, v string) int {
 // UTF-8, its markers fitted so that the pieces joined are at most limit bytes long where they can be (none when
 // limit is negative; redact.Redactor.PiecesWithin). A redactor without PiecesWithin redacts each value on its
 // own, then writes it in its form, and hides a value marked Whole.
-func (s *Set) decide(ps []redact.Piece, limit int) []string {
+//
+// With fits not nil and a redactor that has PiecesFitting, the markers take the first form at which fits holds
+// of the pieces as decided and made valid UTF-8, in place of the limit.
+func (s *Set) decide(ps []redact.Piece, limit int, fits func(out []string) bool) []string {
 	var out []string
-	if pr, ok := s.redactor.(pieceRedactor); ok {
+	fr, fitting := s.redactor.(fittingRedactor)
+	pr, pieces := s.redactor.(pieceRedactor)
+	switch {
+	case fits != nil && fitting:
+		out = fr.PiecesFitting(ps, func(out []string) bool {
+			valid := make([]string, len(out))
+			for i := range out {
+				valid[i] = strings.ToValidUTF8(out[i], "?")
+			}
+			return fits(valid)
+		})
+	case pieces:
 		out = pr.PiecesWithin(ps, limit)
-	} else {
+	default:
 		out = make([]string, len(ps))
 		for i, p := range ps {
 			out[i] = p.Text
@@ -96,7 +116,7 @@ func (s *Set) decide(ps []redact.Piece, limit int) []string {
 // shown: a value longer than 1 KiB once decided is left out whole (incidentcontext.Shown), and the text the
 // answer is made of.
 func (s *Set) lines(a *answer) ([]string, string) {
-	out := s.decide(a.pieces, -1)
+	out := s.decide(a.pieces, -1, nil)
 	var b strings.Builder
 	for i, p := range a.pieces {
 		if p.Data {
@@ -134,7 +154,17 @@ func (s *Set) jsonAnswer(obj any, limit int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := s.decide(t.ps, limit)
+	// The markers are fitted to the answer as returned: the keys renamed after the decision (distinctKeys) count
+	// too (#845, fifteenth decision, P4).
+	out := s.decide(t.ps, limit, func(out []string) bool {
+		renamed := slices.Clone(out)
+		distinctKeys(renamed, t.mapOf, t.maps)
+		n := 0
+		for _, p := range renamed {
+			n += len(p)
+		}
+		return limit < 0 || n <= limit
+	})
 	distinctKeys(out, t.mapOf, t.maps)
 	return strings.Join(out, ""), nil
 }

@@ -233,7 +233,7 @@ func (s hmStep) String() string {
 	case hMerge:
 		kind := "squash"
 		if s.Commit {
-			kind = "merge commit"
+			kind = "with a merge commit"
 		}
 		if s.NoID {
 			kind += ", the host reports no merge commit ID"

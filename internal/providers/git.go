@@ -349,9 +349,11 @@ type GitProvider interface {
 	// GetChangeRequest returns the change request with number, in any state. It finds the recorded change
 	// request of a request again after a lost status write, also when its branch carries a newer change request
 	// (ADR-0030 section 1). ErrNotFound when there is none with that number, and also when the one with that
-	// number is not from a Shadewright branch of this repository to the target branch: such a change request is
-	// never Shadewright's. An answer for another number than the one asked for is ErrUntrustedAnswer. Any other
-	// error is a failure to find out, never an answer. It only reads.
+	// number is not from a Shadewright branch of this repository to a branch of this repository: such a change
+	// request is never Shadewright's. One to another base branch than the target branch (a person moved it, #892)
+	// is returned, with BaseBranch empty when its name is not valid by the provider's rule for target branches: the
+	// caller compares the base with the target branch. An answer for another number than the one asked for is
+	// ErrUntrustedAnswer. Any other error is a failure to find out, never an answer. It only reads.
 	GetChangeRequest(ctx context.Context, number int64) (ChangeRequest, error)
 
 	// EnableAutoMerge asks the host to merge the change request once its rules pass, only if its head is
@@ -361,6 +363,11 @@ type GitProvider interface {
 	// CloseChangeRequest closes a change request without merging. Closing a closed one succeeds; closing a
 	// merged one returns ErrConflict.
 	CloseChangeRequest(ctx context.Context, number int64) error
+
+	// CloseChangeRequestAnyBase is CloseChangeRequest for a change request from a Shadewright branch of this
+	// repository to any base branch of this repository, also one a person moved off the target branch (#892). Only
+	// the finalizer calls it, with the request's recorded number. It is a write.
+	CloseChangeRequestAnyBase(ctx context.Context, number int64) error
 
 	// UpdateChangeRequest replaces the title and the body of an open change request from a Shadewright branch
 	// of this repository to the target branch. A closed or merged one is ErrConflict; any other change request

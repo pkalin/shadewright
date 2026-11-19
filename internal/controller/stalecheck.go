@@ -120,6 +120,10 @@ func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 			return v.err
 		case changeGone:
 			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
+		case changeElsewhere:
+			// Open on a base a person moved it to (#892): nothing is written to it there.
+			return &openElsewhereError{pr: v.pr}
+		case changeOpen, changeMerged, changeClosed:
 		}
 	}
 	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run); err != nil {

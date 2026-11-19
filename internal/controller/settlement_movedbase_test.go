@@ -151,36 +151,49 @@ func TestSettlementMovedBaseKeepsLockWhileOpen(t *testing.T) {
 	}
 }
 
-// #892: a failed listing of the open pull requests of the branch to every base keeps the lock with no verdict, and
-// is retried as a failed Git read: no error for the rate limiter, a wait of the poll interval at least, and a Git wait recorded in
-// status (condition GitReadRetry), never at once.
-//
-// An untrusted answer of that listing (an entry not asked for, such as one from another branch) is a failed read too.
+// #892: a failed read of the request's own pull request moved to another base keeps the lock with no verdict, and is
+// retried as a failed Git read: no error for the rate limiter, a wait of the poll interval at least, and a Git wait
+// recorded in status (condition GitReadRetry), never at once. With a number recorded that is the read by its number;
+// with none recorded (the write that recorded it lost), the listing of the open pull requests of the branch to every
+// base, whose untrusted answer (an entry not asked for, such as one from another branch) is a failed read too.
 func TestSettlementMovedBaseFailedReadKeepsLock(t *testing.T) {
-	for name, fail := range map[string]error{
-		"host error": &providers.RetryableError{Err: errors.New("server error")},
-		"untrusted":  fmt.Errorf("an entry from another branch: %w", providers.ErrUntrustedAnswer),
+	for name, c := range map[string]struct {
+		stop, op string
+		fail     error
+	}{
+		"by number, host error": {"branch", opGet, &providers.RetryableError{Err: errors.New("server error")}},
+		"listing, host error":   {stopLost, opListAnyBase, &providers.RetryableError{Err: errors.New("server error")}},
+		"listing, untrusted": {stopLost, opListAnyBase,
+			fmt.Errorf("an entry from another branch: %w", providers.ErrUntrustedAnswer)},
 	} {
-		t.Run(name, func(t *testing.T) { movedBaseFailedRead(t, fail) })
+		t.Run(name, func(t *testing.T) { movedBaseFailedRead(t, c.stop, c.op, c.fail) })
 	}
 }
 
-// movedBaseFailedRead is TestSettlementMovedBaseFailedReadKeepsLock with the listing failing with fail.
-func movedBaseFailedRead(t *testing.T, fail error) {
-	r, g, rr, clock, _ := movedBaseWorld(t, "branch")
+// movedBaseFailedRead is TestSettlementMovedBaseFailedReadKeepsLock in the world of stop with op failing with fail:
+// from the first look for the listing of every base (it runs only while no number is recorded), after the first
+// looks for the read by number.
+func movedBaseFailedRead(t *testing.T, stop, op string, fail error) {
+	r, g, rr, clock, _ := movedBaseWorld(t, stop)
 	ctx := context.Background()
-	// The first looks find the pull request on hotfix and confirm it gone from both target branches.
-	live := lookMoved(t, r, rr, clock)
-	if !holdsLock(live) {
-		t.Fatal("the lock was released while the pull request is open on its moved base")
+	failNow := func() {
+		g.SetFail(func(got string) error {
+			if got == op {
+				return fail
+			}
+			return nil
+		})
 	}
-	// Now the listing of the open pull requests of the branch to every base fails.
-	g.SetFail(func(op string) error {
-		if op == opListAnyBase {
-			return fail
+	if op == opListAnyBase {
+		failNow()
+	} else {
+		// The first looks find the pull request on hotfix.
+		if live := lookMoved(t, r, rr, clock); !holdsLock(live) {
+			t.Fatal("the lock was released while the pull request is open on its moved base")
 		}
-		return nil
-	})
+		failNow()
+	}
+	live := &api.RemediationRequest{}
 	for range 3 {
 		live = &api.RemediationRequest{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
@@ -191,7 +204,7 @@ func movedBaseFailedRead(t *testing.T, fail error) {
 			t.Fatalf("checkHeld: %v; want a paced retry, not an error", err)
 		}
 		if !holdsLock(live) {
-			t.Fatal("a failed listing of the other bases released the lock")
+			t.Fatal("a failed read of the moved pull request released the lock")
 		}
 		if res.RequeueAfter < r.pullRequestPollInterval() {
 			t.Fatalf("result %+v: a retry sooner than the poll interval", res)
@@ -199,7 +212,7 @@ func movedBaseFailedRead(t *testing.T, fail error) {
 		clock.advance(confirmWait + time.Minute)
 	}
 	if len(live.Status.GitWaits) == 0 {
-		t.Fatalf("no Git wait recorded for the failed listing of the other bases: %+v", live.Status)
+		t.Fatalf("no Git wait recorded for the failed read: %+v", live.Status)
 	}
 	if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); c == nil ||
 		c.Status != metav1.ConditionTrue {
@@ -482,9 +495,9 @@ func TestCancelMovedBaseThroughReconcile(t *testing.T) {
 	}
 }
 
-// #892: on the cancel's look after a change of the target branch, a failed listing of the other bases is a failed
-// Git read: the request is not ended (closed is not concluded from one branch), no error goes to the rate limiter,
-// and the retry waits the poll interval at least with a condition that says the read fails.
+// #892: on the cancel's look after a change of the target branch, a failed read of the moved pull request by its
+// number is a failed Git read: the request is not ended (closed is not concluded from one branch), no error goes to
+// the rate limiter, and the retry waits the poll interval at least with a condition that says the read fails.
 func TestCancelMovedBaseFailedListingThroughReconcile(t *testing.T) {
 	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
 	ctx := context.Background()
@@ -498,7 +511,7 @@ func TestCancelMovedBaseFailedListingThroughReconcile(t *testing.T) {
 	}
 	moveTo(t, g, rr.Status.PullRequest.Number, movedBranch)
 	g.SetFail(func(op string) error {
-		if op == opListAnyBase {
+		if op == opGet {
 			return &providers.RetryableError{Err: errors.New("server error")}
 		}
 		return nil
@@ -519,8 +532,8 @@ func TestCancelMovedBaseFailedListingThroughReconcile(t *testing.T) {
 		t.Fatalf("phase %s, holds=%v: a failed listing ended the cancel", live.Status.Phase, holdsLock(live))
 	}
 	if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); c == nil ||
-		c.Status != metav1.ConditionTrue || !strings.Contains(c.Message, "every base") {
-		t.Fatalf("GitReadRetry %+v: want it naming the listing of every base", c)
+		c.Status != metav1.ConditionTrue {
+		t.Fatalf("GitReadRetry %+v: want it saying the read is retried", c)
 	}
 }
 

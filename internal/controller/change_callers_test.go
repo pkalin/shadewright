@@ -522,3 +522,90 @@ func TestEveryRuleCoversEveryVerdict(t *testing.T) {
 		t.Error("the zero outcome of a rule must keep and retry")
 	}
 }
+
+// changeStateNames are the names of every changeState, as the switches of this package write them.
+var changeStateNames = []string{"changeUnknown", "changeOpen", "changeMerged", "changeClosed", "changeGone",
+	"changeElsewhere"}
+
+// missingStates returns, for a switch whose cases name a changeState (over true), every changeState it does not name
+// in a case of its own. A default never stands in for one: a verdict added later (changeElsewhere, #892) must be
+// handled where each switch decides, not taken for whatever the default does.
+func missingStates(sw *ast.SwitchStmt) (missing []string, over bool) {
+	if sw.Tag == nil {
+		return nil, false
+	}
+	named := map[string]bool{}
+	for _, stmt := range sw.Body.List {
+		for _, e := range stmt.(*ast.CaseClause).List {
+			if id, ok := e.(*ast.Ident); ok && slices.Contains(changeStateNames, id.Name) {
+				named[id.Name] = true
+			}
+		}
+	}
+	if len(named) == 0 {
+		return nil, false
+	}
+	for _, name := range changeStateNames {
+		if !named[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing, true
+}
+
+// TestEverySwitchNamesEveryVerdict fails when a switch of this package over a changeState leaves a verdict out of
+// its cases, so the open-on-another-base verdict (changeElsewhere, #892) and any later one is handled by each
+// caller on purpose. The rule tables are checked by TestEveryRuleCoversEveryVerdict.
+func TestEverySwitchNamesEveryVerdict(t *testing.T) {
+	if len(changeStateNames) != len(changeStates) {
+		t.Fatalf("changeStateNames has %d names for %d verdicts", len(changeStateNames), len(changeStates))
+	}
+	switches := 0
+	forEachSource(t, func(fset *token.FileSet, owner string, n ast.Node) {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok {
+			return
+		}
+		missing, over := missingStates(sw)
+		if !over {
+			return
+		}
+		switches++
+		if len(missing) > 0 {
+			t.Errorf("%s: a switch over a changeState in %q has no case for %v", fset.Position(sw.Pos()), owner, missing)
+		}
+	})
+	if switches < 10 {
+		t.Fatalf("found %d switches over a changeState; the guard does not see them", switches)
+	}
+}
+
+// TestSwitchGuardRefusesADefault checks the guard above: a default does not stand in for changeElsewhere, and a
+// switch over something else is not looked at.
+func TestSwitchGuardRefusesADefault(t *testing.T) {
+	for _, c := range []struct {
+		name, body string
+		missing    int
+	}{
+		{"default", `switch v.state { case changeUnknown, changeGone: default: }`, 4},
+		{"all but one", `switch v.state { case changeUnknown, changeOpen, changeMerged, changeClosed, changeGone: }`, 1},
+		{"all", `switch v.state { case changeUnknown, changeOpen, changeMerged: case changeClosed, changeGone, changeElsewhere: }`, 0},
+		{"another switch", `switch x { case 1: default: }`, 0},
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package controller\nfunc f() {\n"+c.body+"\n}\n", 0)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var got int
+		ast.Inspect(f, func(n ast.Node) bool {
+			if sw, ok := n.(*ast.SwitchStmt); ok {
+				missing, _ := missingStates(sw)
+				got = len(missing)
+			}
+			return true
+		})
+		if got != c.missing {
+			t.Errorf("%s: %d missing, want %d", c.name, got, c.missing)
+		}
+	}
+}

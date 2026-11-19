@@ -176,6 +176,10 @@ func (p *checkpointProbe) CloseChangeRequest(ctx context.Context, _ int64) error
 	return p.probe(ctx, "CloseChangeRequest")
 }
 
+func (p *checkpointProbe) CloseChangeRequestAnyBase(ctx context.Context, _ int64) error {
+	return p.probe(ctx, "CloseChangeRequestAnyBase")
+}
+
 func (p *checkpointProbe) CheckChain(ctx context.Context, _, _ string, _ int) (providers.BranchState, error) {
 	return 0, p.probe(ctx, "CheckChain")
 }
@@ -257,6 +261,8 @@ var staleWrites = map[string]bool{
 	"UpdateChangeRequest":  false,
 	opCreateCheckRun:       false, // but a failed review check (TestGatedGitStalePlanFailsTheReviewCheck, #713)
 	"CloseChangeRequest":   true,
+	// The finalizer's close on any base (#892) is a close too.
+	"CloseChangeRequestAnyBase": true,
 }
 
 // TestGatedGitStalePlanWritesOnlyTheClose calls every write of a gated provider with closeOnly true, false and

@@ -298,11 +298,12 @@ func (r *RemediationRequestReconciler) heldPace(ctx context.Context, rr *remedia
 }
 
 // nothingToClose reports whether err, from the close after a stale stop, means there is nothing for that close to
-// do: the pull request merged while it was being closed (a conflict), it is not this request's or its handoff is in
-// flight, or the plan's repository entry is gone, changed its target branch or can no longer be used. The look that
+// do: the pull request merged while it was being closed (a conflict), it is not this request's, it is open on a base a
+// person moved it to (#892, nothing is closed there) or its handoff is in flight, or the plan's repository entry is gone, changed its target branch or can no longer be used. The look that
 // follows decides from what it reads. Any other error is a failure and is not one of these.
 func nothingToClose(err error) bool {
 	return providers.IsConflict(err) || errors.Is(err, errChangeRequestNotOurs) || errors.Is(err, errHandoffInFlight) ||
+		errors.Is(err, errOpenElsewhere) ||
 		errors.Is(err, errRepositoryGone) || errors.Is(err, errTargetBranchChanged) ||
 		errors.Is(err, freshness.ErrRepositoryUnusable)
 }
@@ -473,6 +474,11 @@ func settleByRead(rr *remediationv1alpha1.RemediationRequest, v changeVerdict, h
 		found = lockverdict.FoundClosed
 	case changeGone:
 		found = lockverdict.FoundGone
+	case changeElsewhere:
+		// The request's own pull request is open on a base a person moved it to (#892): it can still merge, and it
+		// keeps the lock (lookHeld puts it among the open ones, so holding is set as well).
+		return nil, false
+	case changeOpen, changeUnknown:
 	}
 	return lockverdict.ByRead(found, mergeRecorded(rr), rr.Status.PullRequest != nil, holding != nil)
 }
@@ -677,7 +683,8 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if res, done, err := r.settleStopException(ctx, rr, v); done {
 		return res, err
 	}
-	// No pull request of an expired request's own is open any more: a close that was failing is over.
+	// No pull request of an expired request's own is open on the target branch any more: a close that was failing is
+	// over (one open on another base is not closed there, #892).
 	closeNoLongerFailing(rr)
 	reason, cancelled := cancelledForIncident(rr)
 	if cancelled {
@@ -692,7 +699,11 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		if cancelled {
 			// recordFound rewrote PullRequestOpened, where the reason of the cancel was while no pull request was
 			// recorded: it moves to Approved in the same write, as for one found open (recordCancelledOpen).
-			keepCancelReason(rr, reason, "found closed on the branch afterwards")
+			found := "found closed on the branch afterwards"
+			if v.state == changeElsewhere {
+				found = "found open on another base branch afterwards, where it was moved"
+			}
+			keepCancelReason(rr, reason, found)
 		}
 	}
 	free := !ptr.Deref(rr.Status.HoldsTarget, false)
@@ -804,7 +815,7 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 		}
 	} else if holding != nil {
 		msg := fmt.Sprintf("Pull request #%d is open on the request's branch and may still deliver its change; the target stays locked until it is closed or merged", holding.Number)
-		if v.moved != 0 && holding.Number == v.moved {
+		if v.state == changeElsewhere && holding.Number == v.pr.Number {
 			msg = movedMessage(*holding)
 		}
 		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
@@ -817,10 +828,10 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 	return v, holding, nil
 }
 
-// lookHeld reads both the recorded and configured branches of the plan's repository. When neither shows the
-// request's own pull request, it also lists the open pull requests from its branch to every base (#892), and the
-// request's own one open on another base joins the open listings. They are combined before openHolding decides
-// whether another request already holds any of those pull requests.
+// lookHeld reads both the recorded and configured branches of the plan's repository. The request's own pull request
+// read by its number open on another base (changeElsewhere, #892) joins the open listings; with no number recorded,
+// openElsewhere lists the other bases for one with the request's marker. They are combined before openHolding
+// decides whether another request already holds any of those pull requests.
 func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	changeVerdict, *providers.ChangeRequest, error) {
 	if r.OpenRepository == nil {
@@ -877,6 +888,11 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 			return v, nil, nil
 		}
 		open = append(open, v.open...)
+		if v.state == changeElsewhere {
+			// The request's own pull request, read by its number, is open on a base a person moved it to (#892): it
+			// can still merge, so it keeps the lock wherever it is.
+			open = append(open, v.pr)
+		}
 		// Prefer the request's own merge, then its own open or closed PR, over a missing answer on the other base.
 		if verdict.state == changeUnknown || verdict.state == changeGone || v.state == changeMerged {
 			verdict = v
@@ -898,30 +914,29 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 	return verdict, holding, nil
 }
 
-// openElsewhere is lookHeld's read after neither target branch in read showed the request's own pull request (or,
-// with none recorded, one with its marker), when *verdict is gone: a person may have moved its base to another
-// branch (#892). It also runs when *verdict is closed: a closed pull request on a target branch is no verdict by
-// itself while another with the request's marker may be open elsewhere (decision of 2026-11-19 on #892). That
-// closed one is recorded by the look that finds it when none was (recordFound), so the listing runs with a number
-// recorded as well, and takes the recorded number or the marker as the request's own. An open pull request can
-// still merge, so it keeps the lock wherever it is: it joins *open, and verdict.moved names its number, the trusted
-// part of the answer (its base name may be left out). Only the request's own one does: another pull request from its
-// branch on another base, whatever its base is called, never keeps the lock (openOnOtherBase). Once it is closed or merged there, the listing no longer has it, and the lock goes.
-// A merge there is not recorded as the request's: it delivers nothing the plan was made for. A failed listing returns
-// its unknown verdict and false: the lock is kept, and the look retried as a failed Git read.
+// openElsewhere is lookHeld's read for a request with no pull request recorded, after neither target branch in read
+// showed one with its marker open (*verdict gone or closed): a person may have moved its base to another branch
+// (#892). A closed pull request with the marker on a target branch is no verdict by itself while another with the
+// marker may be open elsewhere (decision of 2026-11-19 on #892). With a number recorded the read by number answers
+// changeElsewhere itself, and no listing of every base is made. The listing (openOnOtherBase) takes the marker as the
+// request's own: one open on another base can still merge, so it keeps the lock wherever it is: it joins *open, and
+// *verdict becomes its changeElsewhere, whose pull request the look then records (recordFound), so the next looks
+// read it by its number. Another pull request from its branch without the marker never keeps the lock. A failed
+// listing returns its unknown verdict and false: the lock is kept, and the look retried as a failed Git read.
 func (r *RemediationRequestReconciler) openElsewhere(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, read []remediationv1alpha1.GitBranch, reinstalled bool,
 	verdict *changeVerdict, open *[]providers.ChangeRequest) (changeVerdict, bool) {
-	if verdict.state != changeGone && verdict.state != changeClosed {
+	if rr.Status.PullRequest != nil || verdict.state != changeGone && verdict.state != changeClosed {
 		return changeVerdict{}, true
 	}
 	elsewhere := r.changeOf(ctx, git, rr, changeQuery{otherBases: read, reinstalled: reinstalled})
 	switch elsewhere.state {
 	case changeUnknown:
 		return elsewhere, false
-	case changeOpen:
+	case changeElsewhere:
 		*open = append(*open, elsewhere.pr)
-		verdict.moved = elsewhere.pr.Number
+		*verdict = elsewhere
+	case changeOpen, changeMerged, changeClosed, changeGone:
 	}
 	return changeVerdict{}, true
 }
@@ -930,12 +945,8 @@ func (r *RemediationRequestReconciler) openElsewhere(ctx context.Context, git pr
 // moved it to (#892, decision of 2026-11-19): its number, and its base through hostBranchText when the provider
 // answered a name.
 func movedMessage(cr providers.ChangeRequest) string {
-	where := "another base branch"
-	if cr.BaseBranch != "" {
-		where += " (" + hostBranchText(cr.BaseBranch) + ")"
-	}
-	return fmt.Sprintf("Pull request #%d of the request is open on %s, where it was moved, and may still merge; "+
-		"the target stays locked: closing it releases the lock, and moved back to the target branch it is watched there as before", cr.Number, where)
+	return "P" + strings.TrimPrefix(openElsewhereText(cr), "p") + ", and may still merge; the target stays locked: " +
+		"closing it releases the lock, and moved back to the target branch it is watched there as before"
 }
 
 // disproveRepositoryReason is lookHeld's removal of condition PullRequestUnreadable with a reason about the

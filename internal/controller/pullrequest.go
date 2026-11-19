@@ -137,6 +137,10 @@ const (
 	ReasonPullRequestDeadlineCleanupFailed = "PullRequestDeadlineCleanupFailed"
 	// ReasonChangeRequestGone: the recorded pull request cannot be found any more.
 	ReasonChangeRequestGone = "ChangeRequestGone"
+	// ReasonChangeRequestOnOtherBase: the recorded pull request is open on another base branch than the target
+	// branch, where a person moved it (#892): automation stopped, nothing more is written to it, and the target stays
+	// locked while it is open.
+	ReasonChangeRequestOnOtherBase = "ChangeRequestOnOtherBase"
 	// ReasonPlanIncomplete: the request's status.source has no buildPath, so the change cannot be rendered.
 	ReasonPlanIncomplete = "PlanIncomplete"
 	// ReasonTargetFileDiverged: the target file at the head of the target branch is not the file the change
@@ -173,9 +177,41 @@ var errStopped = errors.New("the pull request step stopped the request")
 // errClosed means the recorded pull request is closed without a merge; see prClosed.
 var errClosed = errors.New("the pull request is closed")
 
-// errOpenElsewhere means the request's own pull request is open on a base a person moved it to, after a change of
-// the target branch, on a look for a cancel (watchBranchChanged, #892); see prOpenElsewhere.
+// errOpenElsewhere means the request's own pull request is open on a base a person moved it to (changeElsewhere,
+// #892): on the watch of a cancelled request (watchStep, watchBranchChanged; see prOpenElsewhere), and, as an
+// *openElsewhereError, from the close of a stop (closeOwn), which closes nothing there.
 var errOpenElsewhere = errors.New("the pull request is open on another base branch")
+
+// openElsewhereError is errOpenElsewhere for pull request pr, the request's own, read by its number open on another
+// base (changeElsewhere): its number is trusted, its base is shown only through hostBranchText.
+type openElsewhereError struct{ pr providers.ChangeRequest }
+
+func (e *openElsewhereError) Error() string { return openElsewhereText(e.pr) }
+
+func (e *openElsewhereError) Is(target error) bool { return target == errOpenElsewhere }
+
+// openElsewhereText says that pull request cr of the request is open on another base, where a person moved it: its
+// number, and its base through hostBranchText when the provider answered a name (#892).
+func openElsewhereText(cr providers.ChangeRequest) string {
+	where := "another base branch"
+	if cr.BaseBranch != "" {
+		where += " (" + hostBranchText(cr.BaseBranch) + ")"
+	}
+	return fmt.Sprintf("pull request #%d of the request is open on %s, where it was moved", cr.Number, where)
+}
+
+// messageOpenElsewhere is the tail of every message that ends a stop on the request's own pull request open on
+// another base (#892): nothing is written to it there, and the lock stays while it is open.
+const messageOpenElsewhere = "; Shadewright writes nothing more to it there, and the target stays locked until it " +
+	"is closed or merged (condition TargetHeld)"
+
+// openElsewhereOf returns the pull request of err when err is or wraps an *openElsewhereError, the zero one otherwise.
+func openElsewhereOf(err error) providers.ChangeRequest {
+	if e, ok := errors.AsType[*openElsewhereError](err); ok {
+		return e.pr
+	}
+	return providers.ChangeRequest{}
+}
 
 // errConflicted means the Git host reports the recorded pull request open with a merge conflict; see
 // prConflicted.
@@ -507,6 +543,10 @@ func (r *RemediationRequestReconciler) refuseWaiting(ctx context.Context, rr *re
 	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errTargetBranchChanged),
 		errors.Is(err, errRepositoryGone):
 		outcome = "; the settings no longer reach its repository, so the pull request was not closed"
+	case errors.Is(err, errOpenElsewhere):
+		pr := openElsewhereOf(err)
+		return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,
+			ref.message+"; the "+openElsewhereText(pr)+", so it was not closed"+messageOpenElsewhere)
 	case errors.Is(err, errChangeRequestNotOurs):
 		outcome = "; the recorded pull request could not be confirmed as this request's, so it was not closed"
 	default:
@@ -596,6 +636,8 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 		return reconcile.Result{}, v.err
 	case adoptIt:
 		return reconcile.Result{}, r.adoptChangeRequest(ctx, git, rr, v.pr, fresh.File)
+	case adoptElsewhere:
+		return reconcile.Result{}, r.stopOpenElsewhere(ctx, rr, v.pr)
 	case adoptNone:
 		if v.foreign {
 			return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
@@ -724,12 +766,18 @@ const (
 	adoptRetry adoptOutcome = iota
 	adoptIt
 	adoptNone
+	// adoptElsewhere: the request's own pull request is open on a base a person moved it to (#892): the request
+	// stops as the watch does (stopOpenElsewhere), and nothing is opened on the target branch next to it. The listing
+	// of the branch, read when no number is recorded, lists the target branch only, so it is answered for a recorded
+	// number alone.
+	adoptElsewhere
 )
 
 // adoptRule is pullRequestStep's rule per verdict: open, merged and closed adopt the pull request (record it, end
 // Merged, or stop as closed), gone goes on to the branch steps, unknown is retried.
 var adoptRule = map[changeState]adoptOutcome{
-	changeOpen: adoptIt, changeMerged: adoptIt, changeClosed: adoptIt, changeGone: adoptNone, changeUnknown: adoptRetry,
+	changeOpen: adoptIt, changeMerged: adoptIt, changeClosed: adoptIt, changeGone: adoptNone,
+	changeElsewhere: adoptElsewhere, changeUnknown: adoptRetry,
 }
 
 // checkPlanned checks a branch head whose file holds the planned value before its pull request is opened or
@@ -811,10 +859,15 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
 	// decides nothing; the close by number below still runs.
 	read := changeQuery{number: cr.Number}
-	if v := r.changeOf(cleanCtx, git, rr, read); v.state == changeMerged || v.state == changeClosed {
+	switch v := r.changeOf(cleanCtx, git, rr, read); v.state {
+	case changeMerged, changeClosed:
 		if ok, err := ended(v.pr); ok {
 			return err
 		}
+	case changeElsewhere:
+		// A person moved it to another base since the open (#892): nothing is closed there.
+		return r.stopOpenElsewhere(ctx, rr, v.pr)
+	case changeOpen, changeGone, changeUnknown:
 	}
 	err := git.CloseChangeRequest(cleanCtx, cr.Number)
 	err = boundErr(ctx, cleanCtx, "close the pull request", err)
@@ -1088,6 +1141,7 @@ func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr 
 		return r.endMerged(ctx, git, rr, v.pr)
 	case changeUnknown:
 		return errors.Join(closeErr, v.err)
+	case changeOpen, changeClosed, changeGone, changeElsewhere:
 	}
 	return closeErr
 }
@@ -1260,11 +1314,10 @@ const (
 	// could not be opened (watchBranchChanged). Nothing else is done: the error is retried, since the full
 	// freshness check would end the request without knowing whether it was merged.
 	prBranchUnread
-	// prOpenElsewhere: the target branch of the plan's repository changed, spec.cancel is set, and the request's own
-	// pull request is gone from the recorded target branch and open on a base other than both target branches, where
-	// a person moved it
-	// (watchBranchChanged, #892). Only the cancel acts on it (cancelOpen): the request ends Cancelled saying so, and
-	// nothing marks the pull request closed.
+	// prOpenElsewhere: spec.cancel is set, and the request's own pull request, read by its number, is open on a base
+	// other than the target branch (and, after a change of the target branch, other than the one the settings name
+	// now), where a person moved it (changeElsewhere, watchStep, watchBranchChanged, #892). Only the cancel acts on it
+	// (cancelOpen): the request ends Cancelled saying so, and nothing marks the pull request closed.
 	prOpenElsewhere
 )
 
@@ -1490,6 +1543,9 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	case changeGone:
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
 			"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
+	case changeElsewhere:
+		return hintLook{}, r.stopOpenElsewhere(ctx, rr, v.pr)
+	case changeOpen, changeMerged, changeClosed:
 	}
 	// changeOf read the recorded number and answers about it only, so cr is that pull request.
 	cr := v.pr
@@ -1538,6 +1594,20 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 		return hintLook{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	return hintLook{}, nil
+}
+
+// stopOpenElsewhere is the watch's answer to the request's own pull request, cr, read by its number open on another
+// base than the target branch, where a person moved it (#892). A cancelled request ends Cancelled saying so
+// (errOpenElsewhere, prOpenElsewhere, cancelOpen), whether or not its target branch changed. Any other request stops
+// in NeedsIntervention with ChangeRequestOnOtherBase. Nothing is written to the pull request, and the lock stays
+// while it is open (lookHeld, TargetHeld).
+func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cr providers.ChangeRequest) error {
+	if cancelRequested(rr) {
+		return errOpenElsewhere
+	}
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,
+		"The recorded "+openElsewhereText(cr)+"; automation stopped"+messageOpenElsewhere)
 }
 
 // recordMergeSeen records the merge of the recorded pull request, cr, seen merged with the head Shadewright
@@ -1830,6 +1900,9 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 	case errors.Is(err, errTargetBranchChanged):
 		what = "the repository of the plan now targets another branch, so the pull request on the recorded branch " +
 			"was not closed"
+	case errors.Is(err, errOpenElsewhere):
+		pr := openElsewhereOf(err)
+		what = "its " + openElsewhereText(pr) + ", and Shadewright does not close it there"
 	case errors.Is(err, freshness.ErrRepositoryUnusable), errors.Is(err, errRepositoryGone),
 		errors.Is(err, errChangeRequestNotOurs):
 		what = "the repository of the plan cannot be used to close it"

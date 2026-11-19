@@ -1875,6 +1875,69 @@ func TestCloseChangeRequestRefusesOthers(t *testing.T) {
 	}
 }
 
+// pull15 is the path of pull request #15.
+const pull15 = "/pulls/15"
+
+// pullOn is GET /pulls/15 answering pull request #15 of the branch in state, to base base of this repository.
+func pullOn(state, base string) step {
+	quoted, err := json.Marshal(base)
+	if err != nil {
+		panic(err)
+	}
+	raw := strings.Replace(branchPull(15, state, branch, "acme/fleet", "BASE"), `"BASE"`, string(quoted), 1)
+	return step{method: http.MethodGet, path: pull15, status: http.StatusOK, raw: raw}
+}
+
+// TestGetChangeRequestOnAnotherBase checks that a pull request of a Shadewright branch of this repository that a
+// person moved to another base of this repository is read by its number with that base (#892), with the name left
+// out when it is outside the rule for target branches, and that one whose head or base is in another repository is
+// still not found.
+func TestGetChangeRequestOnAnotherBase(t *testing.T) {
+	// #nosec G101 -- a made-up value that a redaction rule must catch, not a credential
+	for name, c := range map[string]struct{ base, want string }{
+		"named":                {other, other},
+		"a Shadewright branch": {"shadewright/other-request", ""},
+		"a plus sign":          {"release+1", ""},
+		"300 bytes":            {strings.Repeat("r", 300), ""},
+		"control characters":   {"x\nReleased the lock\x1b[31m", ""},
+		"a key and a value":    {"hotfix/credential=review-secret", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, pullOn(stateOpen, c.base))
+			cr, err := h.p.GetChangeRequest(ctx, 15)
+			if err != nil || cr.Number != 15 || cr.BaseBranch != c.want || cr.State != providers.ChangeRequestOpen {
+				t.Fatalf("got %+v, %v; want #15 open with base %q", cr, err, c.want)
+			}
+		})
+	}
+	forkBase := strings.Replace(branchPull(15, stateOpen, branch, "acme/fleet", other),
+		`"repo":{"full_name":"acme/fleet"}}}`, `"repo":{"full_name":"fork/fleet"}}}`, 1)
+	h := newHarness(t, step{method: http.MethodGet, path: pull15, status: http.StatusOK, raw: forkBase})
+	if _, err := h.p.GetChangeRequest(ctx, 15); !providers.IsNotFound(err) {
+		t.Fatalf("a base in another repository: got %v, want not found", err)
+	}
+}
+
+// TestCloseChangeRequestAnyBase checks that the finalizer's close (#892) closes the request's pull request on a base
+// a person moved it to, while CloseChangeRequest refuses it there, and that it still refuses a pull request of
+// another head branch.
+func TestCloseChangeRequestAnyBase(t *testing.T) {
+	patch := step{method: http.MethodPatch, path: pull15, status: http.StatusOK,
+		raw: branchPull(15, stateClosed, branch, "acme/fleet", other)}
+	h := newHarness(t, pullOn(stateOpen, other), patch)
+	if err := h.p.CloseChangeRequestAnyBase(ctx, 15); err != nil {
+		t.Fatal(err)
+	}
+	h = newHarness(t, pullOn(stateOpen, other))
+	if err := h.p.CloseChangeRequest(ctx, 15); err == nil {
+		t.Fatal("CloseChangeRequest closed a pull request on another base")
+	}
+	h = newHarness(t, get("/pulls/13", "pull_foreign.json"))
+	if err := h.p.CloseChangeRequestAnyBase(ctx, 13); err == nil || providers.IsConflict(err) {
+		t.Fatalf("another head branch: got %v", err)
+	}
+}
+
 // commentMarker is the marker of the comments in the tests of CommentChangeRequest.
 const commentMarker = "<!-- shadewright comment -->"
 

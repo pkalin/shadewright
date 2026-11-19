@@ -75,8 +75,8 @@ const (
 		"Shadewright closed its pull request, if one was open; the branch is left as it is"
 	messageCancelledFoundClosed = "spec.cancel is set: the request was cancelled before its change was merged; " +
 		"its pull request was found closed; the branch is left as it is"
-	// messageCancelledOpenElsewhere ends a request cancelled after a change of the target branch whose own pull
-	// request is open on another base branch, where a person moved it (#892): it is not closed by Shadewright, and
+	// messageCancelledOpenElsewhere ends a cancelled request whose own pull request is open on another base branch,
+	// where a person moved it (#892), whether or not the target branch changed: it is not closed by Shadewright, and
 	// the target stays locked until it is closed or merged.
 	messageCancelledOpenElsewhere = "spec.cancel is set: the request was cancelled before its change was merged; " +
 		"its pull request is open on another base branch, where it was moved, and Shadewright does not close it " +
@@ -140,8 +140,13 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 //   - A pause of writes waits (waitWhilePaused) and starts no bound.
 func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	outcome prOutcome) (reconcile.Result, error) {
-	if outcome == prClosed || outcome == prOpenElsewhere {
-		return r.endCancelFound(ctx, rr, r.failCancelCheck(ctx, rr), outcome == prOpenElsewhere)
+	switch outcome {
+	case prClosed:
+		return r.endCancelFound(ctx, rr, r.failCancelCheck(ctx, rr), false)
+	case prOpenElsewhere:
+		// Open on a base a person moved it to (#892): nothing is written to it there, the failed check included.
+		return r.endCancelFound(ctx, rr, nil, true)
+	case prOpen, prUnchecked, prStopped, prConflicted, prMergeCommitPending, prMergeUnchecked, prBranchUnread:
 	}
 	if intent(rr) != nil {
 		return r.cancelHandoffWait(ctx, rr)
@@ -183,6 +188,9 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	case errors.Is(err, errHandoffInFlight):
 		// An intent written since this reconcile read the request (stillOwns read it fresh).
 		return r.cancelHandoffWait(ctx, rr)
+	case errors.Is(err, errOpenElsewhere):
+		// Its own pull request is open on a base a person moved it to since the look (#892): nothing is closed there.
+		return r.endCancelFound(ctx, rr, checkErr, true)
 	case errors.Is(err, errRepositoryGone):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnavailable, "the repository it was made for is not configured any more")
 	case errors.Is(err, errTargetBranchChanged):
@@ -208,9 +216,10 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 //   - Merged and not recorded: recorded as the request's merge, into the recorded branch (recordOwnMerge) or, moved
 //     to the configured branch, as #771 decided on 2026-11-16 (recordMergeOnConfigured).
 //   - Closed or gone: the request ends Cancelled (endCancelClosed); the read of the branch after the end settles the
-//     lock. A review check that waits for a pause keeps the request in its phase until the pause ends. When its own
-//     pull request is open on another base (v.moved, #892), it ends Cancelled with messageCancelledOpenElsewhere
-//     and nothing marks the pull request closed: the lock stays while it is open, and nothing closes it there.
+//     lock. A review check that waits for a pause keeps the request in its phase until the pause ends.
+//   - Open on a base a person moved it to (changeElsewhere, #892): it ends Cancelled with
+//     messageCancelledOpenElsewhere and nothing marks the pull request closed: the lock stays while it is open, and
+//     nothing closes it there.
 //
 // A pause set since the close was tried stops the look before any read of the Git host (planEntry): the request
 // waits for the pause (waitWhilePaused). A failed Git read is retried visibly and without an end, with the cancel
@@ -261,8 +270,12 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 		})
 		return res, true, err
 	case changeClosed, changeGone:
-		res, err := r.endCancelFound(ctx, rr, checkErr, v.moved != 0)
+		res, err := r.endCancelFound(ctx, rr, checkErr, false)
 		return res, true, err
+	case changeElsewhere:
+		res, err := r.endCancelFound(ctx, rr, checkErr, true)
+		return res, true, err
+	case changeOpen, changeUnknown:
 	}
 	return reconcile.Result{}, false, nil
 }

@@ -297,6 +297,15 @@ func (g *gatedGit) CloseChangeRequest(ctx context.Context, number int64) error {
 	return g.git.CloseChangeRequest(ctx, number)
 }
 
+// CloseChangeRequestAnyBase is gated like CloseChangeRequest: a close, also of a stale plan's pull request.
+func (g *gatedGit) CloseChangeRequestAnyBase(ctx context.Context, number int64) error {
+	ctx, err := g.gate(ctx)
+	if err != nil {
+		return err
+	}
+	return g.git.CloseChangeRequestAnyBase(ctx, number)
+}
+
 func (g *gatedGit) CheckChain(ctx context.Context, commit, path string, commits int) (providers.BranchState, error) {
 	value, err := g.git.CheckChain(ctx, commit, path, commits)
 	return value, readFailure("CheckChain", err)

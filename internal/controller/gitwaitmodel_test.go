@@ -239,6 +239,12 @@ func modelSeeds(t *testing.T) []uint64 {
 
 func TestGitWaitModel(t *testing.T) {
 	schema := requestStatusSchema(t)
+	t.Cleanup(func() {
+		modelMoves.mu.Lock()
+		defer modelMoves.mu.Unlock()
+		t.Logf("moves to another base and back: %d, in %d sequences; deleted while moved: %d", modelMoves.moves,
+			modelMoves.sequences, modelMoves.movedBeforeDelete)
+	})
 	for _, seed := range modelSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			t.Parallel()
@@ -286,6 +292,10 @@ type modelWorld struct {
 	writeFaulted bool
 	// deleted hides the pull request from every read (gone from the host).
 	deleted bool
+	// movedFrom is the base the pull request had before a person moved it to the third base, and moves how often
+	// it was moved there or back in this sequence (moveEvent).
+	movedFrom string
+	moves     int
 	// noCommit makes the host report the merge without its merge commit.
 	noCommit bool
 	number   int64
@@ -435,6 +445,13 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 	}
 	r, g, rr := settlementWorld(t, phase)
 	m.r, m.g, m.key = r, g, client.ObjectKeyFromObject(rr)
+	// A third base, neither the plan's target branch nor a configured one, that a person may move the pull request to
+	// (moveEvent, #892).
+	if head, err := g.BranchHead(context.Background(), mainBranch); err != nil {
+		t.Fatal(err)
+	} else if err := g.CreateBranch(context.Background(), movedBranch, head); err != nil {
+		t.Fatal(err)
+	}
 	m.template = rr.DeepCopy()
 	m.number = rr.Status.PullRequest.Number
 	ctx := context.Background()
@@ -811,7 +828,9 @@ func (m *modelWorld) pullRequestEvent(cr providers.ChangeRequest) {
 	if cr.State != providers.ChangeRequestOpen || m.deleted {
 		return
 	}
-	switch m.rng.IntN(6) {
+	switch m.rng.IntN(10) {
+	case 6, 7, 8, 9:
+		m.moveEvent(cr)
 	case 0:
 		_ = m.g.CloseChangeRequest(ctx, m.number)
 		m.logf("close the pull request")
@@ -824,6 +843,11 @@ func (m *modelWorld) pullRequestEvent(cr providers.ChangeRequest) {
 		m.mu.Lock()
 		m.deleted = true
 		m.mu.Unlock()
+		if cr.BaseBranch == movedBranch {
+			modelMoves.mu.Lock()
+			modelMoves.movedBeforeDelete++
+			modelMoves.mu.Unlock()
+		}
 		m.logf("delete the pull request")
 	default:
 		sha, err := m.g.Merge(m.number)
@@ -843,6 +867,37 @@ func (m *modelWorld) pullRequestEvent(cr providers.ChangeRequest) {
 				fault, noCommit)
 		}
 	}
+}
+
+// modelMoves counts, over every sequence of the run, the moves of the pull request to the third base and back
+// (moveEvent), and the sequences with at least one, for the run's log (TestGitWaitModel).
+var modelMoves struct {
+	mu                sync.Mutex
+	moves, sequences  int
+	movedBeforeDelete int
+}
+
+// moveEvent is a person who moves the open pull request cr to the third base (movedBranch), or back to the base it
+// had before (#892): the read by its number then answers it open on another base (changeElsewhere) on whatever path
+// the request is, a stop, a cancel, a pause or a deletion of the pull request that may follow.
+func (m *modelWorld) moveEvent(cr providers.ChangeRequest) {
+	to := movedBranch
+	if cr.BaseBranch == movedBranch {
+		to = m.movedFrom
+	} else {
+		m.movedFrom = cr.BaseBranch
+	}
+	if err := m.g.SetBase(m.number, to); err != nil {
+		m.t.Fatal(err)
+	}
+	modelMoves.mu.Lock()
+	modelMoves.moves++
+	if m.moves == 0 {
+		modelMoves.sequences++
+	}
+	modelMoves.mu.Unlock()
+	m.moves++
+	m.logf("move the pull request from %.12s to %.12s", cr.BaseBranch, to)
 }
 
 // event changes the world at random before a reconcile.
@@ -997,7 +1052,7 @@ func (m *modelWorld) cancelEvent(cr providers.ChangeRequest, open bool) bool {
 		m.logf("the settings name target branch %s", freshOtherBranch)
 		return true
 	case open && m.rng.IntN(2) == 0:
-		m.byHand(cr, m.rng.IntN(4))
+		m.byHand(cr, m.rng.IntN(5))
 		return true
 	}
 	return m.rng.IntN(3) > 0
@@ -1014,7 +1069,7 @@ func (m *modelWorld) pauseEvent(cr providers.ChangeRequest, open bool) bool {
 		m.pause(true)
 		return true
 	case m.paused && open && m.rng.IntN(3) == 0:
-		m.byHand(cr, m.rng.IntN(4))
+		m.byHand(cr, m.rng.IntN(5))
 		return true
 	case m.paused:
 		return m.rng.IntN(3) > 0
@@ -1278,10 +1333,12 @@ func (m *modelWorld) cancel() {
 }
 
 // byHand is what a person does to the open pull request cr: close it (0), delete it (1), or move it to the configured
-// branch and merge it there (2), or merge it where it is (3).
+// branch and merge it there (2), or merge it where it is (3), or move it to the third base or back (4, moveEvent).
 func (m *modelWorld) byHand(cr providers.ChangeRequest, what int) {
 	ctx := context.Background()
 	switch what {
+	case 4:
+		m.moveEvent(cr)
 	case 0:
 		_ = m.g.CloseChangeRequest(ctx, m.number)
 		m.logf("close the pull request by hand")
@@ -1289,6 +1346,11 @@ func (m *modelWorld) byHand(cr providers.ChangeRequest, what int) {
 		m.mu.Lock()
 		m.deleted = true
 		m.mu.Unlock()
+		if cr.BaseBranch == movedBranch {
+			modelMoves.mu.Lock()
+			modelMoves.movedBeforeDelete++
+			modelMoves.mu.Unlock()
+		}
 		m.logf("delete the pull request")
 	default:
 		if what == 2 && cr.BaseBranch != m.configured {
@@ -1903,8 +1965,9 @@ func (m *modelWorld) lockProperties(live *api.RemediationRequest) {
 		// settings name that branch later.
 		cr, found := m.pr()
 		switch {
-		case found && cr.State == providers.ChangeRequestOpen && m.delivers(live, cr) && !m.deleted:
-			m.fatalf("lock open: the lock was released while the pull request is open")
+		case found && cr.State == providers.ChangeRequestOpen && !m.deleted:
+			// Open on any base, a third one included: it can still merge (decision of 2026-11-19 on #892).
+			m.fatalf("lock open: the lock was released while the pull request is open (on %.12s)", cr.BaseBranch)
 		case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live):
 			m.fatalf("lock merge: the lock was released on a merge the status does not record")
 		}

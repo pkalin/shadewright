@@ -1012,8 +1012,25 @@ func (p *Provider) ownRepo(r *pullRepoJSON) bool {
 // ours reports whether a pull request comes from a shadewright/ branch of this repository and targets the
 // target branch of this repository. A fork may use the same branch name; its pull requests are not ours.
 func (p *Provider) ours(pr pullJSON) bool {
-	return pr.Number > 0 && isHeadBranch(pr.Head.Ref) && p.ownRepo(pr.Head.Repo) &&
-		pr.Base.Ref == p.target && p.ownRepo(pr.Base.Repo)
+	return p.oursAnyBase(pr) && pr.Base.Ref == p.target
+}
+
+// oursAnyBase reports whether a pull request comes from a shadewright/ branch of this repository and targets any
+// branch of this repository: also one whose base a person moved off the target branch (#892).
+func (p *Provider) oursAnyBase(pr pullJSON) bool {
+	return pr.Number > 0 && isHeadBranch(pr.Head.Ref) && p.ownRepo(pr.Head.Repo) && p.ownRepo(pr.Base.Repo)
+}
+
+// baseText is the base name of cr as the caller may see it: the target branch, or another name only when it is
+// valid by the rule for target branches. A base is text from the code host that would reach a condition message
+// and the log (invariant 4), and a code host allows more base names than that rule does (shadewright/ branches,
+// "+", long names), so a name outside it is left out, never the pull request: its number is still the answer
+// (decision of 2026-11-19 on #892).
+func (p *Provider) baseText(base string) string {
+	if base == p.target || validTargetBranch(base) {
+		return base
+	}
+	return ""
 }
 
 func (p *Provider) toChangeRequest(op string, pr pullJSON) (providers.ChangeRequest, error) {
@@ -1260,7 +1277,7 @@ func (p *Provider) listBranch(ctx context.Context, op, headBranch string, openOn
 		for _, pr := range *prs {
 			ours := p.ours(pr)
 			if anyBase {
-				ours = pr.Number > 0 && isHeadBranch(pr.Head.Ref) && p.ownRepo(pr.Head.Repo) && p.ownRepo(pr.Base.Repo)
+				ours = p.oursAnyBase(pr)
 			}
 			if !ours || pr.Head.Ref != headBranch || (openOnly && (pr.State != stateOpen || pr.MergedAt != nil)) {
 				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", op,
@@ -1270,13 +1287,7 @@ func (p *Provider) listBranch(ctx context.Context, op, headBranch string, openOn
 			if err != nil {
 				return nil, err
 			}
-			if anyBase && !validTargetBranch(cr.BaseBranch) {
-				// The base is text from the code host that would reach a condition message and the log (invariant
-				// 4). A code host allows more base names than the rule for target branches does (shadewright/
-				// branches, "+", long names), so a name outside that rule is left out, never the pull request: its
-				// number is still the answer (decision of 2026-11-19 on #892).
-				cr.BaseBranch = ""
-			}
+			cr.BaseBranch = p.baseText(cr.BaseBranch)
 			if prev, ok := seen[pr.Number]; ok {
 				if prev.State != cr.State || prev.HeadSHA != cr.HeadSHA {
 					// Two pages answered differently about one pull request: neither answer is believed.
@@ -1338,19 +1349,27 @@ func (p *Provider) GetChangeRequest(ctx context.Context, number int64) (provider
 		return providers.ChangeRequest{}, fmt.Errorf("%s: GitHub returned another pull request: %w", opGetCR,
 			providers.ErrUntrustedAnswer)
 	}
-	if !p.ours(pr) {
-		return providers.ChangeRequest{}, fmt.Errorf("%s: not a Shadewright pull request to the target branch: %w",
+	if !p.oursAnyBase(pr) {
+		return providers.ChangeRequest{}, fmt.Errorf("%s: not a Shadewright pull request of this repository: %w",
 			opGetCR, providers.ErrNotFound)
 	}
-	return p.toChangeRequest(opGetCR, pr)
-}
-
-func (p *Provider) pull(ctx context.Context, number int64) (pullJSON, error) {
-	return p.pullFor(ctx, opCloseCR, number)
+	cr, err := p.toChangeRequest(opGetCR, pr)
+	if err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	// A pull request a person moved to another base is still read by its number (#892): the caller compares the
+	// base with the target branch, and sees another base's name only when it passes the rule (baseText).
+	cr.BaseBranch = p.baseText(cr.BaseBranch)
+	return cr, nil
 }
 
 // pullFor reads pull request number for op and refuses one that is not ours.
 func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJSON, error) {
+	return p.pullIf(ctx, op, number, p.ours)
+}
+
+// pullIf reads pull request number for op and refuses one that is not ok.
+func (p *Provider) pullIf(ctx context.Context, op string, number int64, ok func(pullJSON) bool) (pullJSON, error) {
 	r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: "/pulls/" + strconv.FormatInt(number, 10)})
 	if err != nil {
 		return pullJSON{}, err
@@ -1365,7 +1384,7 @@ func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJS
 	if pr.Number != number {
 		return pullJSON{}, errors.New(op + ": GitHub returned an unexpected pull request")
 	}
-	if !p.ours(pr) {
+	if !ok(pr) {
 		return pullJSON{}, errors.New(op + ": not a Shadewright pull request to the target branch")
 	}
 	return pr, nil
@@ -1599,12 +1618,23 @@ func closeState(pr pullJSON) (bool, error) {
 // CloseChangeRequest closes a pull request from a shadewright/ branch to the target branch without merging
 // it. Closing a closed one succeeds; a merged one is ErrConflict. Other pull requests are refused.
 func (p *Provider) CloseChangeRequest(ctx context.Context, number int64) error {
+	return p.closeIf(ctx, number, p.ours)
+}
+
+// CloseChangeRequestAnyBase is CloseChangeRequest for a pull request from a shadewright/ branch of this repository to
+// any base branch of this repository (#892): the finalizer closes the request's own one wherever a person moved it.
+func (p *Provider) CloseChangeRequestAnyBase(ctx context.Context, number int64) error {
+	return p.closeIf(ctx, number, p.oursAnyBase)
+}
+
+// closeIf closes pull request number when ok accepts it, read before the close and after a refused one.
+func (p *Provider) closeIf(ctx context.Context, number int64, ok func(pullJSON) bool) error {
 	if number < 1 {
 		return errors.New(opCloseCR + ": number must be positive")
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
-	pr, err := p.pull(ctx, number)
+	pr, err := p.pullIf(ctx, opCloseCR, number, ok)
 	if err != nil {
 		return err
 	}
@@ -1630,7 +1660,7 @@ func (p *Provider) CloseChangeRequest(ctx context.Context, number int64) error {
 		pr = closed
 	case http.StatusUnprocessableEntity:
 		// It may have been merged or closed in the meantime: read it again.
-		if pr, err = p.pull(ctx, number); err != nil {
+		if pr, err = p.pullIf(ctx, opCloseCR, number, ok); err != nil {
 			return err
 		}
 	default:

@@ -22,7 +22,7 @@ flowchart LR
   P --> R["Pull request<br/>PullRequestOpened, Approved,<br/>PlanFresh"]
   R --> M["After the merge<br/>Delivered, Configured,<br/>RolledOut, Cleared, Verified"]
   M --> L["Request ended<br/>on the Incident: Lifecycle,<br/>Recurred"]
-  A["Any time<br/>WritesPaused, GitReadRetry,<br/>cancel and cleanup conditions"] -.-> R
+  A["Any time<br/>WritesPaused, GitReadRetry, ReviewCheckNotFailed,<br/>cancel and cleanup conditions"] -.-> R
 ```
 
 On this page:
@@ -371,6 +371,17 @@ The same condition can also carry `SettingsNotFound`, `RepositoryUnavailable`, `
 #### PullRequestNotClosed
 
 The Git host refuses for good (`GitForbidden` or `GitRejected`) to close the pull request of a stale plan, or a step through a new installation fails (`GitNotFound`, `GitFailed`). The request keeps its phase and the close is tried again on every look. Reasons: see [PullRequestUnreadable](#pullrequestunreadable) and [Git host refusals](#deadline-and-git-host-refusals). Close the pull request by hand if the refusal is permanent. [More](troubleshooting.md#pull-request-step)
+
+#### ReviewCheckNotFailed
+
+With reviewer hints on, a request stopped while its own pull request is open, and the failed check run `shadewright/review` could not be written on its head, so a check written before the stop may still show on the pull request. Not a stop: the write is tried again at each look of the stopped request (every 10 minutes while it holds the lock), and the condition goes once the failed check is written. A Warning Event of the same name is recorded when it is set or its reason changes.
+
+| Reason | What it means | What to do |
+| --- | --- | --- |
+| <span id="rc-gitfailed"></span>`GitFailed` | The Git host failed the write (a server error, a timeout, a rate limit). | Do not merge the pull request on an earlier check; close it, or wait for the next look. [More](troubleshooting.md#pull-request-step) |
+| <span id="rc-writespaused"></span>`WritesPaused` | RemediationSettings `spec.paused` holds Git writes. | The first look after the pause writes the check. [More](troubleshooting.md#pull-request-step) |
+
+It can also carry `TargetBranchChanged`, `RepositoryUnavailable`, `RepositoryUnusable` and `SettingsNotFound`, described under [PolicyAllowed](#pa-settingsnotfound) and [the pull request step](#deadline-and-git-host-refusals): the settings permit no write to the repository of the plan (a changed target branch permits reads only) until they are fixed.
 
 #### CleanupRefused
 

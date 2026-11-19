@@ -1655,13 +1655,15 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 // in NeedsIntervention with ChangeRequestOnOtherBase. Nothing is written to the pull request, and the lock stays
 // while it is open (lookHeld, TargetHeld). In the same step the review check of its head is failed (failStoppedCheck,
 // #925): moved back to the target branch, the pull request cannot merge on a check written before the stop. A failed
-// write of the check does not hold the stop: the stopped holder's next look tries it again.
+// write of the check does not hold the stop: the stop's status write carries condition ReviewCheckNotFailed, which
+// says why (failStoppedCheck), and the stopped holder's next look tries it again. A cancelled reconcile and a failure
+// of the Kubernetes API are returned, for the error backoff, before anything is written.
 func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) error {
 	if cancelRequested(rr) {
 		return errOpenElsewhere
 	}
-	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase); ctx.Err() != nil {
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase); ctx.Err() != nil || isClusterError(err) {
 		return err
 	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,

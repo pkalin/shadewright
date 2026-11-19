@@ -115,7 +115,11 @@ import (
 // lifted, after a few more reconciles under it in half of the runs and always under the pause focus) and, after a few
 // reconciles, the lock is free, or held by a request whose pull request is open and can still merge; a merge
 // recorded with its receipt never holds it, whether the repository came back or not; a merge is recorded; and a
-// cancelled request whose pull request is closed or gone holds no lock (settled cancel).
+// cancelled request whose pull request is closed or gone holds no lock (settled cancel). With reviewer hints on, a
+// request that stopped while its own pull request is open, with its repository in the settings, has its review check
+// failed (settled check) or, where the settings permit no write (another target branch named), says so with condition
+// ReviewCheckNotFailed (settled note, #925); a request whose failed check is recorded as Stale carries no such
+// condition (note cleared).
 //
 // Each seed has a focus (seed modulo the number of focuses, modelFocuses): none, or one that makes an order of the
 // fourth or fifth decision of 2026-11-18 on #771 likely (a deadline that passes while the repository cannot be
@@ -2194,6 +2198,8 @@ func (m *modelWorld) settled() {
 		m.fatalf("settled check: the request stopped (phase %s) while its pull request is open on %.12s, and the "+
 			"last review check of its head is not failed: %+v", live.Status.Phase, cr.BaseBranch,
 			m.g.CheckRuns(cr.HeadSHA))
+	case m.settledNote(live, cr, found, open):
+		// Said by settledNote.
 	case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live) && !m.deleted &&
 		!m.releasedAside && !m.reopenedAfterRelease:
 		m.fatalf("settled merge: the merge is not recorded after the world healed: phase %s", live.Status.Phase)
@@ -2219,6 +2225,58 @@ func (m *modelWorld) uncheckedStop(live *api.RemediationRequest, cr providers.Ch
 		}
 	}
 	return last == nil || last.Status != providers.CheckRunFailure
+}
+
+// settledNote checks the properties "settled note" and "note cleared" (see the top of this file) after the world
+// healed, and reports whether one failed.
+func (m *modelWorld) settledNote(live *api.RemediationRequest, cr providers.ChangeRequest, found, open bool) bool {
+	pr := live.Status.PullRequest
+	switch {
+	case m.unsaidStop(live, cr, open):
+		m.fatalf("settled note: the request stopped (phase %s) while its pull request is open on %.12s, the last "+
+			"review check of its head is not failed (%+v), and condition ReviewCheckNotFailed does not say so: %s",
+			live.Status.Phase, cr.BaseBranch, m.g.CheckRuns(cr.HeadSHA), conditionsOf(live))
+		return true
+	case m.r.ReviewerHints && !m.paused && staleRecorded(live) && open && found && pr != nil &&
+		cr.Number == pr.Number && holdsLock(live) &&
+		meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil:
+		m.fatalf("note cleared: the failed review check is recorded, and condition ReviewCheckNotFailed is still "+
+			"set: %s", conditionsOf(live))
+		return true
+	}
+	return false
+}
+
+// unsaidStop reports whether live, after the world healed, stopped while its own pull request cr is open on any
+// base, with reviewer hints on and its repository in the settings, the last review check run of the head is not a
+// failure, and condition ReviewCheckNotFailed is not True: the request must say so where a person looks when the
+// failed check could not be written (#925). Only the settings that name another target branch keep the write from
+// happening after the world healed; uncheckedStop covers the rest.
+func (m *modelWorld) unsaidStop(live *api.RemediationRequest, cr providers.ChangeRequest, open bool) bool {
+	pr := live.Status.PullRequest
+	if !m.r.ReviewerHints || m.handoff || m.repo != nil || m.paused || pr == nil || progresses(live) ||
+		!holdsLock(live) || !open || m.deleted || cr.Number != pr.Number || cr.State != providers.ChangeRequestOpen ||
+		cr.HeadSHA != pr.HeadSHA || handedOff(live) || intent(live) != nil {
+		return false
+	}
+	var last *providers.CheckRun
+	for _, run := range m.g.CheckRuns(cr.HeadSHA) {
+		if run.Name == providers.CheckRunName {
+			last = &run
+		}
+	}
+	if last != nil && last.Status == providers.CheckRunFailure {
+		return false
+	}
+	c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
+	return c == nil || c.Status != metav1.ConditionTrue
+}
+
+// staleRecorded reports whether live records the review check of its pull request's head as Stale.
+func staleRecorded(live *api.RemediationRequest) bool {
+	pr := live.Status.PullRequest
+	return pr != nil && pr.ReviewCheck != nil && pr.ReviewCheck.Head == pr.HeadSHA &&
+		pr.ReviewCheck.State == api.ReviewCheckStale
 }
 
 // modelResolver maps the request's target to the file on the target branch the settings name now, at its head.

@@ -222,6 +222,85 @@ func movedBaseFailedRead(t *testing.T, stop, op string, fail error) {
 	}
 }
 
+// #925, review state of 2026-11-19: a stopped holder whose own pull request is merged on the target branch lists the
+// open pull requests of its branch to every base before the lock may go (lockLooksElsewhere). A listing that keeps
+// failing (the host's error, an answer too large or not trusted) holds the record of that merge, and says so: no
+// error for the rate limiter, the look's pace of heldRecheckInterval, and condition GitReadRetry naming the listing,
+// with a Paced wait and no end (noBoundHeldLock), as every failed read of a stopped holder. The first look whose
+// listing works records the merge. This pins today's behaviour; it changes nothing.
+func TestSettlementListingFailsMergeOnTargetIsSaid(t *testing.T) {
+	for name, fail := range map[string]error{
+		"host error": &providers.RetryableError{Err: errors.New("server error")},
+		"too large":  fmt.Errorf("more than the adapter reads: %w", providers.ErrTooLarge),
+		"untrusted":  fmt.Errorf("an entry from another branch: %w", providers.ErrUntrustedAnswer),
+	} {
+		for _, stop := range []string{stopBranch, "another stop"} {
+			t.Run(name+"/"+stop, func(t *testing.T) {
+				r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+				ctx := context.Background()
+				if stop != stopBranch {
+					setTargetMain(t, r)
+					meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionApproved,
+						Status: metav1.ConditionFalse, Reason: ReasonChangeRequestOnOtherBase, Message: "stopped"})
+					if err := r.Status().Update(ctx, rr); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := g.Merge(rr.Status.PullRequest.Number); err != nil {
+					t.Fatal(err)
+				}
+				failing := true
+				g.SetFail(func(op string) error {
+					if op == opListAnyBase && failing {
+						return fail
+					}
+					return nil
+				})
+				clock := clockOf(r)
+				live := &api.RemediationRequest{}
+				for range 4 {
+					if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+						t.Fatal(err)
+					}
+					res, err := r.checkHeld(ctx, live)
+					if err != nil || res.RequeueAfter < heldRecheckInterval {
+						t.Fatalf("checkHeld: %+v, %v; want the look's pace and no error", res, err)
+					}
+					clock.advance(confirmWait + time.Minute)
+				}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+					t.Fatal(err)
+				}
+				c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry)
+				if mergeRecorded(live) || !holdsLock(live) || c == nil || c.Status != metav1.ConditionTrue ||
+					!strings.Contains(c.Message, "every base") || len(live.Status.GitWaits) != 1 ||
+					live.Status.GitWaits[0].Kind != api.GitWaitPaced {
+					t.Fatalf("merged %v, holds %v, GitReadRetry %+v, waits %+v: want the merge not yet recorded, "+
+						"the lock kept and the failed listing said", mergeRecorded(live), holdsLock(live), c,
+						live.Status.GitWaits)
+				}
+				failing = false
+				for range 3 {
+					if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := r.checkHeld(ctx, live); err != nil {
+						t.Logf("checkHeld: %v", err)
+					}
+					clock.advance(confirmWait + time.Minute)
+				}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+					t.Fatal(err)
+				}
+				if !mergeRecorded(live) {
+					t.Fatalf("phase %s, conditions %s: want the merge recorded once the listing works",
+						live.Status.Phase, conditionsOf(live))
+				}
+			})
+		}
+	}
+}
+
 // #892, decision of 2026-11-19: with no pull request recorded, a closed pull request with the request's marker on
 // the target branch is no verdict by itself. A second one with the marker, open on another base, keeps the lock:
 // the listing over every base runs before any release.

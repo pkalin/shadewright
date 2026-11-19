@@ -464,6 +464,16 @@ const (
 	// entry; an entry past its end is ended at the start of the next reconcile. A failure of the Kubernetes API
 	// never sets it. It is removed with the last entry.
 	ConditionGitReadRetry = "GitReadRetry"
+	// ConditionReviewCheckNotFailed is True, with reviewer hints on, while a request that stopped with its own pull
+	// request open (on the target branch or on a base a person moved it to) could not fail the check run
+	// shadewright/review on its head (#925), so a check written before the stop may still show on the pull request.
+	// The reason says why: TargetBranchChanged, RepositoryUnavailable, RepositoryUnusable or SettingsNotFound while
+	// the settings do not let the executor write to the repository of the plan, WritesPaused while RemediationSettings
+	// spec.paused holds Git writes, and GitFailed when the Git host failed the write. The message names the pull
+	// request, never the Git host's answer. The write is tried again at each look of the stopped request, every 10
+	// minutes while it holds the lock; the condition is removed when the failed check is written and recorded as
+	// Stale. One Warning Event, ReviewCheckNotFailed, is recorded when it is set or its reason changes.
+	ConditionReviewCheckNotFailed = "ReviewCheckNotFailed"
 )
 
 // ReasonGitReadFailed is the reason of condition GitReadRetry True: a read of the Git host failed and is retried.
@@ -626,8 +636,10 @@ type PullRequestStatus struct {
 	// condition Approved False with reason ReviewListTooLong; final on that head but for Stale), Refused when the
 	// Git host refused for good to write it (condition Approved then says so and what the host shows; asked again
 	// after a backoff), Stale when the freshness check found the plan stale and the executor completed it with
-	// failure, whether or not the close of the pull request went through (#713); the request then never writes
-	// the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
+	// failure, whether or not the close of the pull request went through (#713), when the request was cancelled
+	// with spec.cancel (#289), or when it stopped while its own pull request is open, on the target branch or on
+	// another base (#925; condition ReviewCheckNotFailed says while that write fails); the request then never
+	// writes the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
 	// starts without it, so a state never outlives its head. Once a merge receipt exists it never changes.
 	// +optional
 	ReviewCheck *ReviewCheck `json:"reviewCheck,omitempty"`

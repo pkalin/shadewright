@@ -678,6 +678,25 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if res, done, err := r.settleStopException(ctx, rr, v); done {
 		return res, err
 	}
+	if err := r.afterHeldLook(ctx, rr, v); err != nil {
+		return reconcile.Result{}, err
+	}
+	free := !ptr.Deref(rr.Status.HoldsTarget, false)
+	if equality.Semantic.DeepEqual(before, &rr.Status) {
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+	}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return r.heldLookResult(ctx, rr, free, held, holding, v.pr)
+}
+
+// afterHeldLook is checkHeld's change to rr's status in memory after a look v that settled the lock and that no stop
+// exception took over (settleStopException): the failed close and the pause it ends, the failed review check of a
+// stopped holder (failCheckAfterLook), and the pull request the look found. Only a failure of the Kubernetes API is
+// returned, for the error backoff.
+func (r *RemediationRequestReconciler) afterHeldLook(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict) error {
 	// No pull request of an expired request's own is open on the target branch any more: a close that was failing is
 	// over (one open on another base is not closed there, #892).
 	closeNoLongerFailing(rr)
@@ -689,7 +708,9 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	}
 	// The read ran through settings that are not paused: a pause that held an earlier look is over.
 	resume(rr)
-	r.failCheckAfterLook(ctx, rr, v)
+	if err := r.failCheckAfterLook(ctx, rr, v); err != nil {
+		return err
+	}
 	if record := v.rule().heldRecord; record != heldRecordNone {
 		recordFound(rr, v.pr)
 		if cancelled {
@@ -702,14 +723,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 			keepCancelReason(rr, reason, found)
 		}
 	}
-	free := !ptr.Deref(rr.Status.HoldsTarget, false)
-	if equality.Semantic.DeepEqual(before, &rr.Status) {
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
-	}
-	if err := r.Status().Update(ctx, rr); err != nil {
-		return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
-	}
-	return r.heldLookResult(ctx, rr, free, held, holding, v.pr)
+	return nil
 }
 
 // releaseUnread is checkHeld's release of the lock of rr by a verdict that needs no read of the branch (a recorded
@@ -1115,12 +1129,17 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 
 // failCheckAfterLook fails the review check of a stopped holder whose look v read its own pull request open, on the
 // target branch or on another base (stoppedCheck, #925): tried at every look while it is pending, and recorded by the
-// look's status write. A failure is said by failStoppedCheck and does not hold the look; a cancelled reconcile fails
-// that status write.
+// look's status write, with condition ReviewCheckNotFailed while it cannot be written (failStoppedCheck). Only a
+// failure of the Kubernetes API is returned, for the error backoff; any other failure is said in status and does not
+// hold the look, whose pace stays heldRecheckInterval.
 func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) {
-	if pr := rr.Status.PullRequest; v.rule().stoppedCheck && pr != nil && v.pr.Number == pr.Number {
-		// The error is logged and said by failStoppedCheck; the next look tries again.
-		_ = r.failStoppedCheck(ctx, rr, string(rr.Status.Phase))
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) error {
+	pr := rr.Status.PullRequest
+	if !v.rule().stoppedCheck || pr == nil || v.pr.Number != pr.Number {
+		return nil
 	}
+	if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase)); isClusterError(err) {
+		return err
+	}
+	return nil
 }

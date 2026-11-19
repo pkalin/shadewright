@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -767,9 +768,9 @@ func TestCancelReadsBeforeTheCheckOnMovedBase(t *testing.T) {
 	}
 }
 
-// failedOnly reports whether runs, the check runs of a head, hold a failed shadewright/review with title and no run
-// that passes.
-func failedOnly(runs []providers.CheckRun, title string) bool {
+// failedOnly reports whether runs, the check runs of a head, hold a failed shadewright/review of a stopped request
+// (stoppedCheckTitle) and no run that passes.
+func failedOnly(runs []providers.CheckRun) bool {
 	failed := false
 	for _, run := range runs {
 		if run.Name != providers.CheckRunName {
@@ -778,7 +779,7 @@ func failedOnly(runs []providers.CheckRun, title string) bool {
 		if run.Status != providers.CheckRunFailure {
 			return false
 		}
-		failed = failed || run.Title == title
+		failed = failed || run.Title == stoppedCheckTitle
 	}
 	return failed
 }
@@ -820,7 +821,7 @@ func TestStopOnMovedBaseFailsTheCheckAndMovedBackKeepsLock(t *testing.T) {
 		t.Fatalf("phase %s, conditions %s: want NeedsIntervention with ChangeRequestOnOtherBase", live.Status.Phase,
 			conditionsOf(live))
 	}
-	if !failedOnly(g.CheckRuns(head), stoppedCheckTitle) {
+	if !failedOnly(g.CheckRuns(head)) {
 		t.Fatalf("check runs of the head %+v: want the review check failed in the step that stopped the request",
 			g.CheckRuns(head))
 	}
@@ -835,7 +836,7 @@ func TestStopOnMovedBaseFailsTheCheckAndMovedBackKeepsLock(t *testing.T) {
 		t.Fatalf("moved back: phase %s, holds=%v; want the stopped request holding the lock", live.Status.Phase,
 			holdsLock(live))
 	}
-	if !failedOnly(g.CheckRuns(head), stoppedCheckTitle) {
+	if !failedOnly(g.CheckRuns(head)) {
 		t.Fatalf("moved back: check runs of the head %+v: want the failed check alone", g.CheckRuns(head))
 	}
 }
@@ -890,12 +891,276 @@ func TestStoppedHolderFailsTheCheckOfItsOpenPullRequest(t *testing.T) {
 					EventReviewCheckNotFailed)
 			}
 			live := look()
-			if !failedOnly(g.CheckRuns(head), stoppedCheckTitle) || !holdsLock(live) {
+			if !failedOnly(g.CheckRuns(head)) || !holdsLock(live) {
 				t.Fatalf("check runs %+v, holds=%v: want the failed check at the next look and the lock kept",
 					g.CheckRuns(head), holdsLock(live))
 			}
 			if rc := live.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale {
 				t.Fatalf("review check %+v: want state Stale", rc)
+			}
+		})
+	}
+}
+
+// dropRepository points the settings' repository entry at another repository, so the plan's repository is no longer
+// in the settings.
+func dropRepository(t *testing.T, r *RemediationRequestReconciler) {
+	t.Helper()
+	settings := &api.RemediationSettings{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Repositories[0].URL = "https://github.com/example/elsewhere"
+	if err := r.Update(context.Background(), settings); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// warningsOf counts the Warning Events with reason in recorder and empties it.
+func warningsOf(recorder *record.FakeRecorder, reason string) int {
+	n := 0
+	for {
+		select {
+		case e := <-recorder.Events:
+			if strings.HasPrefix(e, corev1.EventTypeWarning+" "+reason+" ") {
+				n++
+			}
+		default:
+			return n
+		}
+	}
+}
+
+// #925, review state of 2026-11-19: a stopped request whose failed review check cannot be written (the Git host
+// fails the write, or the settings name another target branch, which permits reads only) says so where a person
+// looks: condition ReviewCheckNotFailed with the cause, and one Warning Event ReviewCheckNotFailed over ten looks, not
+// one per look. No look asks to run again sooner than heldRecheckInterval, and none returns an error. The first look
+// that can write the check writes it, records Stale and removes the condition, with no further Event. On main the
+// branch change left only a log line, and the Git host's failure an Event at every look.
+func TestStoppedHolderSaysTheCheckWasNotFailed(t *testing.T) {
+	for _, c := range []struct {
+		name, reason string
+		branch       bool
+	}{
+		{"Git host fails", ReasonGitFailed, false},
+		{"target branch changed", reasonTargetBranchChanged, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			ctx := context.Background()
+			r.ReviewerHints = true
+			if !c.branch {
+				setTargetMain(t, r)
+			}
+			recorder := record.NewFakeRecorder(100)
+			r.Recorder = recorder
+			head := rr.Status.PullRequest.HeadSHA
+			failing := !c.branch
+			g.SetFail(func(op string) error {
+				if op == opCreateCheckRun && failing {
+					return &providers.RetryableError{Err: errors.New("status 502: bad gateway")}
+				}
+				return nil
+			})
+			look := func() *api.RemediationRequest {
+				t.Helper()
+				live := &api.RemediationRequest{}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+					t.Fatal(err)
+				}
+				res, err := r.checkHeld(ctx, live)
+				if err != nil {
+					t.Fatalf("checkHeld: %v; want no error for the rate limiter", err)
+				}
+				if res.RequeueAfter < heldRecheckInterval {
+					t.Fatalf("result %+v: want the look's pace of %v at least", res, heldRecheckInterval)
+				}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+					t.Fatal(err)
+				}
+				return live
+			}
+			var live *api.RemediationRequest
+			for range 10 {
+				live = look()
+			}
+			if runs := g.CheckRuns(head); len(runs) != 0 {
+				t.Fatalf("check runs %+v: want none written", runs)
+			}
+			if got := warningsOf(recorder, EventReviewCheckNotFailed); got != 1 {
+				t.Fatalf("%d Warning Events %s over ten looks: want one", got, EventReviewCheckNotFailed)
+			}
+			cond := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
+			if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != c.reason ||
+				!strings.Contains(cond.Message, fmt.Sprintf("#%d", live.Status.PullRequest.Number)) {
+				t.Fatalf("ReviewCheckNotFailed %+v: want it True with reason %s naming the pull request", cond, c.reason)
+			}
+			if c.branch {
+				setTargetMain(t, r)
+			}
+			failing = false
+			live = look()
+			if !failedOnly(g.CheckRuns(head)) {
+				t.Fatalf("check runs %+v: want the failed check once it can be written", g.CheckRuns(head))
+			}
+			if rc := live.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale {
+				t.Fatalf("review check %+v: want state Stale", rc)
+			}
+			if cond := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed); cond != nil {
+				t.Fatalf("ReviewCheckNotFailed %+v after the check was written: want it removed", cond)
+			}
+			if got := warningsOf(recorder, EventReviewCheckNotFailed); got != 0 {
+				t.Fatalf("%d more Warning Events %s after the write: want none", got, EventReviewCheckNotFailed)
+			}
+		})
+	}
+}
+
+// #925: a look whose status write is lost (the request changed between its read and its write) leaves the stored
+// status as it was, and the next look tells that from what it stands for: a condition ReviewCheckNotFailed that was
+// not stored is set again, and a failed check whose Stale was not stored is written again and recorded, removing the
+// condition.
+func TestStoppedHolderCheckNoteSurvivesALostWrite(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	ctx := context.Background()
+	r.ReviewerHints = true
+	setTargetMain(t, r)
+	r.Recorder = record.NewFakeRecorder(100)
+	head := rr.Status.PullRequest.HeadSHA
+	failing := true
+	g.SetFail(func(op string) error {
+		if op == opCreateCheckRun && failing {
+			return &providers.RetryableError{Err: errors.New("status 502: bad gateway")}
+		}
+		return nil
+	})
+	key := client.ObjectKeyFromObject(rr)
+	get := func() *api.RemediationRequest {
+		t.Helper()
+		live := &api.RemediationRequest{}
+		if err := r.Get(ctx, key, live); err != nil {
+			t.Fatal(err)
+		}
+		return live
+	}
+	lostLook := func() {
+		t.Helper()
+		stale := get()
+		other := get()
+		if other.Annotations == nil {
+			other.Annotations = map[string]string{}
+		}
+		other.Annotations["example.com/touched"] = fmt.Sprint(time.Now().UnixNano())
+		if err := r.Update(ctx, other); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.checkHeld(ctx, stale); !apierrors.IsConflict(err) {
+			t.Fatalf("checkHeld on a stale copy: %v; want a conflict", err)
+		}
+	}
+	note := func(live *api.RemediationRequest) *metav1.Condition {
+		return meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
+	}
+	lostLook()
+	if c := note(get()); c != nil {
+		t.Fatalf("ReviewCheckNotFailed %+v stored by a lost write", c)
+	}
+	live := get()
+	if _, err := r.checkHeld(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	if c := note(get()); c == nil || c.Reason != ReasonGitFailed {
+		t.Fatalf("ReviewCheckNotFailed %+v after the lost write: want it set by the next look", c)
+	}
+	failing = false
+	lostLook()
+	if !failedOnly(g.CheckRuns(head)) || note(get()) == nil {
+		t.Fatalf("check runs %+v, conditions %s: want the check written and the condition still stored",
+			g.CheckRuns(head), conditionsOf(get()))
+	}
+	live = get()
+	if _, err := r.checkHeld(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	live = get()
+	if rc := live.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale || note(live) != nil {
+		t.Fatalf("review check %+v, conditions %s: want Stale recorded and the condition removed", rc,
+			conditionsOf(live))
+	}
+}
+
+// #925, review state of 2026-11-19: the step that stops a request for its pull request open on another base
+// (stopOpenElsewhere) goes on when the failed review check cannot be written, and its status write says so with
+// condition ReviewCheckNotFailed and one Warning Event: writes paused, the repository gone from the settings, or a
+// target branch changed. After the pause, the stopped holder's look writes the check and removes the condition. On
+// main the stop recorded nothing but a log line.
+func TestStopOnMovedBaseSaysTheCheckWasNotFailed(t *testing.T) {
+	for _, c := range []struct {
+		name, reason string
+		set          func(t *testing.T, r *RemediationRequestReconciler)
+	}{
+		{"paused", ReasonWritesPaused, func(t *testing.T, r *RemediationRequestReconciler) { setPaused(t, r, true) }},
+		{"repository left the settings", reasonRepositoryUnavailable, dropRepository},
+		{"settings name another branch", reasonTargetBranchChanged, func(t *testing.T, r *RemediationRequestReconciler) {
+			settings := &api.RemediationSettings{}
+			if err := r.Get(context.Background(), client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+				t.Fatal(err)
+			}
+			settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
+			if err := r.Update(context.Background(), settings); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+			ctx := context.Background()
+			r.ReviewerHints = true
+			setTargetMain(t, r)
+			recorder := record.NewFakeRecorder(100)
+			r.Recorder = recorder
+			n, head := rr.Status.PullRequest.Number, rr.Status.PullRequest.HeadSHA
+			moveTo(t, g, n, movedBranch)
+			c.set(t, r)
+			cr, err := g.GetChangeRequest(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			live := &api.RemediationRequest{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.stopOpenElsewhere(ctx, live, cr); !errors.Is(err, errStopped) {
+				t.Fatalf("stopOpenElsewhere: %v; want the stop", err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+				t.Fatal(err)
+			}
+			cond := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
+			if live.Status.Phase != api.PhaseNeedsIntervention || cond == nil || cond.Reason != c.reason {
+				t.Fatalf("phase %s, ReviewCheckNotFailed %+v: want NeedsIntervention and the condition with reason %s",
+					live.Status.Phase, cond, c.reason)
+			}
+			if runs := g.CheckRuns(head); len(runs) != 0 {
+				t.Fatalf("check runs %+v: want none written", runs)
+			}
+			if got := warningsOf(recorder, EventReviewCheckNotFailed); got != 1 {
+				t.Fatalf("%d Warning Events %s: want one", got, EventReviewCheckNotFailed)
+			}
+			if c.reason != ReasonWritesPaused {
+				return
+			}
+			setPaused(t, r, false)
+			if _, err := r.checkHeld(ctx, live); err != nil {
+				t.Fatalf("checkHeld: %v", err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+				t.Fatal(err)
+			}
+			if !failedOnly(g.CheckRuns(head)) ||
+				meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil {
+				t.Fatalf("after the pause: check runs %+v, conditions %s: want the failed check and the condition "+
+					"removed", g.CheckRuns(head), conditionsOf(live))
 			}
 		})
 	}
@@ -931,14 +1196,7 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 				t.Fatal(err)
 			}
 			if gone {
-				settings := &api.RemediationSettings{}
-				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
-					t.Fatal(err)
-				}
-				settings.Spec.Repositories[0].URL = "https://github.com/example/elsewhere"
-				if err := r.Update(ctx, settings); err != nil {
-					t.Fatal(err)
-				}
+				dropRepository(t, r)
 			}
 			if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
 				return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}

@@ -22,10 +22,13 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -171,8 +174,8 @@ func stoppedCheckRun(reason string) providers.CheckRun {
 			"plan, so it must not be merged on an earlier check. This check stays failed."}
 }
 
-// EventReviewCheckNotFailed is the Warning Event recorded when a stopped request could not fail the review check of
-// its open pull request (failStoppedCheck). The next look of the stopped holder tries again.
+// EventReviewCheckNotFailed is the Warning Event recorded when condition ReviewCheckNotFailed is set or its reason
+// changes: a stopped request could not fail the review check of its open pull request (failStoppedCheck).
 const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 
 // failStoppedCheck fails the review check shadewright/review of a request that stopped while its own pull request is
@@ -184,13 +187,18 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // stop for any other reason gets it at its first look, and a failed write is tried again at the next. Those looks run
 // while the request keeps its lock, which an open pull request keeps. It reads no pull request itself, so it never
 // changes what a look concludes (a first look at a missing number, goneLooks). A lost status write leaves the check
-// pending, and the next look writes the same failed run again. A failure is logged with a Warning Event
-// ReviewCheckNotFailed and returned; the stop goes on whatever it returns, since a final phase waits for nothing. A
-// repository entry that names another target branch, or none, writes nothing and records no Event: a branch change
-// permits reads only (#771).
+// pending, and the next look writes the same failed run again.
+//
+// The stop goes on whatever it returns, since a final phase waits for nothing, so a check that is not written is said
+// in status, in the same write: condition ReviewCheckNotFailed, with the reason of the failure (checkNotFailed), and a
+// Warning Event when it is set or its reason changes, not at each look. The write that records Stale removes it. A
+// repository entry that names another target branch writes nothing, since a branch change permits reads only (#771):
+// that is said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so
+// is a failure of the Kubernetes API (reading the settings), for the error backoff.
 func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason string) error {
 	if !r.staleCheckPending(rr) {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 		return nil
 	}
 	pr := rr.Status.PullRequest
@@ -201,28 +209,55 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 		err = git.CreateCheckRun(stepCtx, pr.HeadSHA, stoppedCheckRun(reason))
 		err = boundErr(ctx, stepCtx, "write the check run", err)
 	}
+	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest",
+		pr.Number, "head", pr.HeadSHA)
 	switch {
 	case err == nil:
 		pr.ReviewCheck = &remediationv1alpha1.ReviewCheck{Head: pr.HeadSHA, State: remediationv1alpha1.ReviewCheckStale}
-		logf.FromContext(ctx).Info("Failed the review check of a stopped RemediationRequest", "remediationRequest",
-			client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA)
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
+		log.Info("Failed the review check of a stopped RemediationRequest")
 		return nil
-	case ctx.Err() != nil || errors.Is(err, freshness.ErrPaused):
+	case ctx.Err() != nil:
 		return err
-	case errors.Is(err, errTargetBranchChanged), errors.Is(err, errRepositoryGone),
-		errors.Is(err, freshness.ErrRepositoryUnusable):
-		logf.FromContext(ctx).Info("Did not fail the review check of a stopped RemediationRequest: its repository "+
-			"entry does not allow it", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number,
-			"error", err.Error())
+	case isClusterError(err):
+		log.Error(err, "Could not read the settings to fail the review check of a stopped RemediationRequest")
 		return err
 	}
-	logf.FromContext(ctx).Info("Could not fail the review check of a stopped RemediationRequest; tried again at its "+
-		"next look", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA,
-		"error", err.Error())
-	if r.Recorder != nil {
-		r.Recorder.Event(rr, corev1.EventTypeWarning, EventReviewCheckNotFailed, fmt.Sprintf("The review check of "+
-			"pull request #%d could not be failed after the request stopped (%s); it is tried again at the next look",
-			pr.Number, reason))
+	why, text := checkNotFailed(err)
+	log.Info("Could not fail the review check of a stopped RemediationRequest; tried again at its next look",
+		"reason", why, "error", err.Error())
+	before := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
+	changed := before == nil || before.Reason != why
+	message := fmt.Sprintf("The review check shadewright/review of pull request #%d could not be failed after the "+
+		"request stopped: %s. A check written before the stop may still show on the pull request; do not merge it "+
+		"on that check. The write is tried again at the next look of the request", pr.Number, text)
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type: remediationv1alpha1.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: why,
+		Message: message, ObservedGeneration: rr.Generation,
+	})
+	if changed && r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, EventReviewCheckNotFailed, message)
 	}
 	return err
+}
+
+// checkNotFailed is the reason of condition ReviewCheckNotFailed for err, the failure to write a stopped request's
+// failed review check, and what it says: the settings that permit no write to the repository of the plan, a pause of
+// the kill switch, or any other failure of the Git host (GitFailed), never with the host's answer.
+func checkNotFailed(err error) (reason, text string) {
+	switch {
+	case errors.Is(err, freshness.ErrPaused):
+		return ReasonWritesPaused, "RemediationSettings spec.paused holds Git writes"
+	case errors.Is(err, errNoSettings):
+		return ReasonSettingsNotFound, "RemediationSettings " + remediationv1alpha1.SettingsName + " does not exist"
+	case errors.Is(err, errRepositoryGone):
+		return reasonRepositoryUnavailable, "the repository of the plan is not in RemediationSettings any more"
+	case errors.Is(err, errTargetBranchChanged):
+		return reasonTargetBranchChanged, "the repository of the plan names another target branch in " +
+			"RemediationSettings now, which permits reads only"
+	case errors.Is(err, freshness.ErrRepositoryUnusable):
+		return string(sourcemap.ReasonRepositoryUnusable), "the entry of the repository of the plan in " +
+			"RemediationSettings cannot be used"
+	}
+	return ReasonGitFailed, "the Git host did not take the write"
 }

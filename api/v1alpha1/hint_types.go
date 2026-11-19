@@ -309,7 +309,10 @@ const (
 // pull request goes through, until it is recorded, and never changes it, so the request never sets the check green
 // again. A Failed check may still become Stale on its head, so the run says why the plan must not be merged. The
 // executor writes the same failed state, with a run that says so, for a request cancelled with spec.cancel (#289),
-// before it closes the pull request.
+// before it closes the pull request, and for any request that stops while its own pull request is open, on the
+// target branch or on a base a person moved it to (#925): in the step that stops it for a pull request open on
+// another base, and at each later look of the stopped request until it is recorded (condition ReviewCheckNotFailed
+// says while it cannot be written).
 // +kubebuilder:validation:Enum=InProgress;Passed;Failed;Refused;Stale
 type ReviewCheckState string
 
@@ -327,8 +330,8 @@ const (
 // or adopts starts without one, and the executor creates the check in progress on it. On one head a Failed check
 // changes only to Stale; every other state may follow any other, as the reviews and the Git host's answers change
 // (#748), or become Stale (#713). A Stale check never changes, neither its state nor its head: the request records
-// it only while the plan's cleanup runs, nothing pushes to the pull request then, and the request never writes the
-// check again on any head (#713).
+// it only when nothing pushes to the pull request any more (the plan's cleanup, a cancel, or a stop while the pull
+// request is open, #925), and the request never writes the check again on any head (#713).
 // +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || oldSelf.state != 'Failed' || self.state == 'Stale'",message="on one head a Failed check run changes only to Stale"
 // +kubebuilder:validation:XValidation:rule="oldSelf.state != 'Stale' || (self.state == 'Stale' && self.head == oldSelf.head)",message="a Stale check run never changes"
 // +kubebuilder:validation:XValidation:rule="self.state == 'Refused' || (!has(self.refusals) && !has(self.refusedAt))",message="refusals and refusedAt are recorded only on a Refused check run"

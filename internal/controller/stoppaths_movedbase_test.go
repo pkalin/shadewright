@@ -900,3 +900,88 @@ func TestStoppedHolderFailsTheCheckOfItsOpenPullRequest(t *testing.T) {
 		})
 	}
 }
+
+// #925 case 2: deleting a request after the configured target branch changed closes its pull request by number and by
+// marker, on the recorded target branch and on the base it was moved to, instead of letting the finalizer go with
+// "target branch changed" before the Git host is asked. A pull request from the branch without the marker stays open.
+// When the repository is no longer in the settings nothing can be closed, and the deletion says so with a Warning
+// Event PullRequestLeftOpen. On main both pull requests stayed open and no Event was recorded.
+func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
+	for _, gone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("repository gone %v", gone), func(t *testing.T) {
+			// settlementWorld leaves the settings naming freshOtherBranch, not the recorded main.
+			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+			ctx := context.Background()
+			recorder := record.NewFakeRecorder(10)
+			r.Recorder = recorder
+			n := rr.Status.PullRequest.Number
+			head, err := g.BranchHead(ctx, mainBranch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := g.CreateBranch(ctx, movedBranch, head); err != nil {
+				t.Fatal(err)
+			}
+			second, err := g.AddOpenChangeRequest(freshness.BranchName(rr), movedBranch, marker(rr))
+			if err != nil {
+				t.Fatal(err)
+			}
+			foreign, err := g.AddOpenChangeRequest(freshness.BranchName(rr), freshOtherBranch, "a person's")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gone {
+				settings := &api.RemediationSettings{}
+				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+					t.Fatal(err)
+				}
+				settings.Spec.Repositories[0].URL = "https://github.com/example/elsewhere"
+				if err := r.Update(ctx, settings); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
+				return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			rr.Finalizers = append(rr.Finalizers, FinalizerName)
+			if err := r.Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			key := client.ObjectKeyFromObject(rr)
+			for i := range 3 {
+				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+					t.Logf("Reconcile %d: %v", i, err)
+				}
+			}
+			if err := r.Get(ctx, key, &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("the request is still there (%v)", err)
+			}
+			crs := g.ChangeRequests()
+			if crs[foreign-1].State != providers.ChangeRequestOpen {
+				t.Errorf("pull request #%d without the marker is %s: want it left open", foreign, crs[foreign-1].State)
+			}
+			if gone {
+				var events []string
+				for len(recorder.Events) > 0 {
+					events = append(events, <-recorder.Events)
+				}
+				if len(events) != 1 || !strings.Contains(events[0], EventPullRequestLeftOpen) ||
+					!strings.Contains(events[0], fmt.Sprintf("#%d", n)) {
+					t.Fatalf("events %q: want one Warning Event %s naming #%d", events, EventPullRequestLeftOpen, n)
+				}
+				return
+			}
+			for _, m := range []int64{n, second} {
+				if crs[m-1].State != providers.ChangeRequestClosed {
+					t.Errorf("pull request #%d with the marker on %s is %s: want it closed", m, crs[m-1].BaseBranch,
+						crs[m-1].State)
+				}
+			}
+		})
+	}
+}

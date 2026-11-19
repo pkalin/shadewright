@@ -2185,7 +2185,8 @@ func (r *RemediationRequestReconciler) closeOnDeleteOf(ctx context.Context, rr *
 	return r.closeOwn(ctx, rr, true)
 }
 
-// closeOwn is closeChangeRequest; deleting is true for the finalizer (closeOnDeleteOf).
+// closeOwn is closeChangeRequest; deleting is true for the finalizer (closeOnDeleteOf), which closes through the
+// recorded target branch when the repository's entry now names another one, instead of errTargetBranchChanged.
 func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	deleting bool) error {
 	if r.OpenRepository == nil {
@@ -2218,7 +2219,13 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		return errRepositoryGone
 	}
 	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {
-		return errTargetBranchChanged
+		if !deleting {
+			return errTargetBranchChanged
+		}
+		// The finalizer closes the request's own pull requests whatever target branch the settings name now (#925):
+		// by the recorded number and by the marker, through a provider for the recorded target branch, and on every
+		// other base, the configured one included (closeOwnOnOtherBases). Only marked pull requests are closed.
+		repo.TargetBranch = src.TargetBranch
 	}
 	if reinstalled {
 		// Writes nothing but the close and a failed check run; every close below reads the pull request with this

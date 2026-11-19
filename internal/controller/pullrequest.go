@@ -2330,6 +2330,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		defer freeSlot()
 	}
 	var left *cleanupRelease
+	unreachable := false
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeOnDeleteOf(cleanCtx, rr)
@@ -2345,9 +2346,14 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 				return res, err
 			}
 			left = release
-		case err == nil, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
-			errors.Is(err, freshness.ErrRepositoryUnusable), isMergedUnrecorded(err),
-			errors.Is(err, errChangeRequestNotOurs):
+		case errors.Is(err, errRepositoryGone), errors.Is(err, freshness.ErrRepositoryUnusable):
+			// No usable entry of the plan's repository in the settings, so nothing can be read or closed: the deletion
+			// goes, and says so (leftUnreachable, #925), since its pull request may still be open.
+			unreachable = true
+			if err := r.clearCleanupConditions(ctx, rr); err != nil {
+				return reconcile.Result{}, err
+			}
+		case err == nil, isMergedUnrecorded(err), errors.Is(err, errChangeRequestNotOurs):
 			// Closed, nothing reachable to close, the open ones closed and a merged one read as merged, or not
 			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
 			if err := r.clearCleanupConditions(ctx, rr); err != nil {
@@ -2373,6 +2379,10 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			return r.restoreRefused(ctx, rr, err), nil
 		}
 		return reconcile.Result{}, err
+	}
+	if unreachable {
+		// Before the patch, as for left below.
+		r.leftUnreachable(ctx, rr)
 	}
 	if left != nil {
 		// Before the patch, so a patch that finds the request gone, or a restart right after it, loses neither the

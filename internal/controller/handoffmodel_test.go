@@ -430,7 +430,7 @@ const (
 
 // goneShape reports whether a violation about about is the one a request of gone (that let go of its finalizer with
 // the pull request open) leaves: the lock free while the pull request is open and every request whose commit its head
-// carries is gone, one of them in gone; with all, also the record missing of a merge of the commit of a request in
+// carries is gone (or is the predecessor that ended HandedOff) and a request of gone left that pull request open; with all, also the record missing of a merge of the commit of a request in
 // gone, and a lock held after the settling run by the other request of one in gone.
 func (m *hmWorld) goneShape(gone map[string]bool, about string, all bool) bool {
 	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}
@@ -440,17 +440,18 @@ func (m *hmWorld) goneShape(gone map[string]bool, about string, all bool) bool {
 		if cr.State != providers.ChangeRequestOpen || !m.carries(cr.HeadSHA) {
 			return false
 		}
-		left := false
 		for _, who := range []string{hmPred, hmRepl} {
 			if !m.carriesOwn(cr.HeadSHA, who) {
 				continue
 			}
-			if m.get(who) != nil {
+			if x := m.get(who); x != nil && !(who == hmPred && handedOff(x)) {
+				// A live request on the pull request, unless it is the predecessor that ended HandedOff: the pull
+				// request was then the replacement's alone.
 				return false
 			}
-			left = left || gone[who]
 		}
-		return left
+		// The model has one pull request, the one the request in gone left open when it let go.
+		return len(gone) > 0
 	case !all:
 		return false
 	case about == aboutUnrecorded:

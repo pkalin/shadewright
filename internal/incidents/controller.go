@@ -237,6 +237,10 @@ type Controller struct {
 	// these are created when not found ([Controller.write]); one gone otherwise was deleted (#893 for the first
 	// occurrence).
 	opening map[string]struct{}
+	// watched counts, per Incident name that a call without mu is reading or writing (a status write, a closure
+	// move, a fold), the deletes of that Incident handled meanwhile ([Controller.incidentDeleted]), so the call
+	// can tell that its answer is stale ([Controller.watchDeletes]). An entry lives only while such a call does.
+	watched map[string]*deleteWatch
 	// resolvedAt is, per Incident name, the resolvedTime of an Incident that is Resolved with one: from load,
 	// every trigger pass (which lists every Incident) and each write. It decides whether a symptom seen again
 	// opens the next occurrence ([Controller.rolls]). It holds only Incidents listed or written, at most one
@@ -406,6 +410,7 @@ func New(cfg Config) (*Controller, error) {
 		deletedOccurrences:     newBoundedSet(deletedOccurrencesRemembered),
 		current:                map[string]int32{},
 		opening:                map[string]struct{}{},
+		watched:                map[string]*deleteWatch{},
 		resolvedAt:             map[string]time.Time{},
 		causes:                 map[string]causeIncident{},
 		absorbedDroppedThrough: map[string]time.Time{},
@@ -1141,6 +1146,7 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		return
 	}
 	c.takeOff(fp, batches)
+	deletedMeanwhile := c.watchDeletes(name)
 	c.mu.Unlock()
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
@@ -1149,16 +1155,22 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	defer c.mu.Unlock()
 	c.landed(fp)
 	defer c.recount(fp)
+	if deletedMeanwhile() {
+		// The informers reported the delete while this write was in flight ([Controller.incidentDeleted]), which
+		// already moved the memory past it, and an observation counted since then may be opening the Incident
+		// again. Whatever the write answered (stored, deleted, refused, failed), it is about the deleted object:
+		// only what it carried goes, and neither the new opening nor the memory after the delete changes.
+		deleted, ok := errors.AsType[*deletedError](err)
+		if !ok {
+			deleted = &deletedError{name: name}
+		}
+		c.dropStale(ctx, name, batches, deleted)
+		return
+	}
 	if res.created {
 		delete(c.opening, name)
 	}
 	if deleted, ok := errors.AsType[*deletedError](err); ok {
-		if _, reopened := c.opening[name]; reopened && !opening {
-			// The informers reported the delete while this write was in flight ([Controller.incidentDeleted]), and
-			// an observation counted since then opens the Incident again: only what this write carried goes.
-			c.dropStale(ctx, name, batches, deleted)
-			return
-		}
 		c.dropDeleted(ctx, fp, name, batches, deleted, !opening)
 		return
 	}
@@ -1331,10 +1343,11 @@ func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches [
 		"latest", c.nameOf(fp), "count", count, "absorbed", absorbed)
 }
 
-// dropStale drops the batches of a write in flight when the informers reported the delete of its Incident,
-// after an observation counted since then took the name again to open it: their occurrences go to
-// deletedOccurrences and their memory goes, while the place under the cap and the new pending batch stay.
-// The caller holds mu.
+// dropStale drops the batches of a write that was in flight when the informers reported the delete of its
+// Incident, whatever the write answered: their occurrences go to deletedOccurrences and their memory goes,
+// while the memory after the delete stays as [Controller.incidentDeleted] left it, with an observation counted
+// since then that took the name again to open it, its place under the cap and its pending batch. The caller
+// holds mu.
 func (c *Controller) dropStale(ctx context.Context, name string, batches []*batch, deleted *deletedError) {
 	c.forgetDeleted(batches)
 	for _, b := range batches {
@@ -1366,9 +1379,10 @@ func (c *Controller) forgetDeleted(batches []*batch) {
 // latest occurrence of its fingerprint as this process knows it, with the same UID, its delete is handled at
 // once ([Controller.dropDeleted]): what was counted for it before the delete and is still unwritten is
 // dropped, so it is never created again from that (#893), and an observation counted from now on goes through
-// the gate of a new fingerprint. A batch in flight finds the delete at its write. Anything else (an earlier
-// occurrence, an Incident being opened, another object of the same name) is left to the next write, which
-// finds an Incident gone that it did not open ([deletedError]).
+// the gate of a new fingerprint. A call on the Incident in flight without mu (a write of a batch, a closure
+// move, a fold) learns of the delete when it returns ([Controller.watchDeletes]) and takes its answer as
+// stale. Anything else (an earlier occurrence, an Incident being opened, another object of the same name) is
+// left to the next write, which finds an Incident gone that it did not open ([deletedError]).
 func (c *Controller) incidentDeleted(ctx context.Context, obj any) {
 	if t, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
 		obj = t.Obj
@@ -1402,8 +1416,40 @@ func (c *Controller) incidentDeleted(ctx context.Context, obj any) {
 		}
 	}
 	c.dropDeleted(ctx, fp, name, batches, deleted, true)
+	if w := c.watched[name]; w != nil {
+		w.deletes++
+	}
 	if c.inflight[fp] == nil {
 		c.recount(fp)
+	}
+}
+
+// deleteWatch is an entry of watched: the calls without mu on one Incident name, and the deletes of it handled
+// since the first of them began.
+type deleteWatch struct {
+	calls   int
+	deletes uint64
+}
+
+// watchDeletes registers a call that is about to read or write the Incident name without mu. done, called
+// under mu once the call returned, unregisters it and reports whether [Controller.incidentDeleted] handled a
+// delete of the Incident meanwhile: the call's answer is then about a deleted object and must not undo what
+// the delete changed (clear an opening of the name taken since, or remember the old object again). The caller
+// holds mu.
+func (c *Controller) watchDeletes(name string) (done func() bool) {
+	w := c.watched[name]
+	if w == nil {
+		w = &deleteWatch{}
+		c.watched[name] = w
+	}
+	w.calls++
+	at := w.deletes
+	return func() bool {
+		deleted := w.deletes != at
+		if w.calls--; w.calls <= 0 {
+			delete(c.watched, name)
+		}
+		return deleted
 	}
 }
 

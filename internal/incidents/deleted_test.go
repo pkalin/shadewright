@@ -19,6 +19,7 @@ package incidents
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,7 +27,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
@@ -288,5 +291,200 @@ func TestDeleteSeenWhileAWriteIsInFlight(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	if inc := named(t, ns, Name(fp(1)), func(*remediationv1alpha1.Incident) bool { return true }); inc.Status.Count != 1 {
 		t.Fatalf("count %d after the write in flight returned, want 1", inc.Status.Count)
+	}
+}
+
+// within polls cond until it holds or 20 s pass, and reports whether it held. Unlike pollUntil it never stops
+// the test, so a hook of the client, run off the test's goroutine, can wait with it.
+func within(cond func() bool) bool {
+	deadline := time.Now().Add(20 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return true
+}
+
+// A status write of what was counted before the delete succeeds, and before the controller takes its answer
+// the informers report the delete and a kill counted after it starts to open the Incident again. The answer
+// of the write is about the deleted object: it neither clears the new opening nor makes the old object the
+// one remembered, so the new kill creates the Incident, holding only that kill, and is not dropped as one of
+// the deleted Incident (decision of 2026-11-19 on #893).
+func TestWriteThatSucceededBeforeTheDeleteKeepsTheNewOpening(t *testing.T) {
+	ns := namespace(t)
+	clk := &clock{}
+	ca := incidentCache(t, ns)
+	var r *running
+	var carriesTwo, ready atomic.Bool
+	var once sync.Once
+	hooked := make(chan struct{})
+	r = openThenHoldOne(t, ns, clk, func(c *Controller, w *countingClient) {
+		c.informers = ca
+		w.before = func(_ context.Context, inc *remediationv1alpha1.Incident) {
+			carriesTwo.Store(inc.Status.Count >= 2)
+		}
+		w.after = func(err error) error {
+			if err != nil || !ready.Load() || !carriesTwo.Load() {
+				return err
+			}
+			once.Do(func() {
+				defer close(hooked)
+				if err := env.admin.Delete(context.Background(), &remediationv1alpha1.Incident{
+					ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: Name(fp(1))}}); err != nil {
+					t.Error(err)
+					return
+				}
+				if !within(func() bool {
+					r.mu.Lock()
+					defer r.mu.Unlock()
+					_, kept := r.names[Name(fp(1))]
+					return !kept
+				}) {
+					t.Error("the informers did not report the delete")
+					return
+				}
+				select {
+				case r.obs <- immediate(seenAt(3, clk.now())):
+				case <-time.After(20 * time.Second):
+					t.Error("the kill after the delete was not taken")
+					return
+				}
+				if !within(func() bool {
+					r.mu.Lock()
+					defer r.mu.Unlock()
+					_, opening := r.opening[Name(fp(1))]
+					return opening
+				}) {
+					t.Error("the kill after the delete did not start to open the Incident")
+				}
+			})
+			return err
+		}
+	})
+	ready.Store(true)
+	clk.advance(2 * deletedWindow)
+	select {
+	case <-hooked:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the write of occurrence 2 did not succeed")
+	}
+	inc := named(t, ns, Name(fp(1)), countIs(1))
+	if ids := occurrenceIDs(inc); len(ids) != 1 || ids[0] != eventID(3) {
+		t.Fatalf("occurrences %v, want only %s", ids, eventID(3))
+	}
+	r.mu.Lock()
+	dropped := r.deletedOccurrences.has(eventID(3))
+	r.mu.Unlock()
+	if dropped {
+		t.Fatalf("%s is remembered as an occurrence of the deleted Incident", eventID(3))
+	}
+}
+
+// The known limit of decision 2 of 2026-11-19 on #893: an occurrence counted after the delete but before the
+// informers report it (here a late tombstone) cannot be told from one counted before the delete, and is
+// dropped with them: it opens nothing. The next new occurrence of the same symptom opens the Incident, holding
+// only itself, and is not blocked by the memory of the deleted Incident's occurrences.
+func TestOccurrenceBeforeTheDeleteIsReportedIsDroppedAndTheNextOpens(t *testing.T) {
+	ns := namespace(t)
+	clk := &clock{}
+	r := openThenHoldOne(t, ns, clk, nil)
+	old := named(t, ns, Name(fp(1)), countIs(1))
+	deleteIncident(t, ns, Name(fp(1)))
+	// Counted while the controller still knows the Incident: it joins the pending batch of occurrence 2, which
+	// waits for the window the clock does not reach.
+	r.obs <- immediate(seenAt(3, clk.now()))
+	pollUntil(t, "occurrence 3 held unwritten", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		_, held := r.pending[fp(1)].occurrenceOf(eventID(3))
+		return held
+	})
+	r.incidentDeleted(t.Context(), toolscache.DeletedFinalStateUnknown{Key: ns + "/" + old.Name, Obj: old})
+	time.Sleep(500 * time.Millisecond)
+	absent(t, ns, Name(fp(1)))
+	r.mu.Lock()
+	dropped := r.deletedOccurrences.has(eventID(3)) && r.pending[fp(1)] == nil
+	r.mu.Unlock()
+	if !dropped {
+		t.Fatalf("%s was not dropped with the deleted Incident", eventID(3))
+	}
+	r.obs <- immediate(seenAt(4, clk.now()))
+	inc := named(t, ns, Name(fp(1)), countIs(1))
+	if ids := occurrenceIDs(inc); len(ids) != 1 || ids[0] != eventID(4) {
+		t.Fatalf("occurrences %v, want only %s", ids, eventID(4))
+	}
+}
+
+// deleteDuringUpdate returns an after hook of countingClient that, once a status update of the Incident name
+// succeeds, deletes it from cl and reports the delete to c as the informers would, before the caller of the
+// update takes its answer.
+func deleteDuringUpdate(t *testing.T, c *Controller, cl client.Client, name string) func(error) error {
+	var once sync.Once
+	return func(err error) error {
+		if err != nil {
+			return err
+		}
+		once.Do(func() {
+			inc := &remediationv1alpha1.Incident{}
+			if err := cl.Get(t.Context(), client.ObjectKey{Namespace: fakeNamespace, Name: name}, inc); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := cl.Delete(t.Context(), inc); err != nil {
+				t.Error(err)
+				return
+			}
+			c.incidentDeleted(t.Context(), inc)
+			c.mu.Lock()
+			_, kept := c.names[name]
+			c.mu.Unlock()
+			if kept {
+				t.Error("the delete was not handled")
+			}
+		})
+		return err
+	}
+}
+
+// A closure move whose write succeeded before the Incident was deleted does not remember the deleted object
+// Resolved once the delete was handled: the next observation of the symptom must open occurrence 1 again, not
+// roll on from a resolvedTime that no stored object holds.
+func TestClosureMoveOfADeletedIncidentIsNotRemembered(t *testing.T) {
+	c, cl := closureController(t, closureIncident(remediationv1alpha1.IncidentOpen, 2*time.Hour))
+	w := &countingClient{Client: cl}
+	w.after = deleteDuringUpdate(t, c, cl, Name(fp(1)))
+	c.client = w
+	if err := c.closeIncidents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if w.updates.Load() != 1 {
+		t.Fatalf("%d status writes, want 1", w.updates.Load())
+	}
+	c.mu.Lock()
+	_, remembered := c.resolvedAt[Name(fp(1))]
+	c.mu.Unlock()
+	if remembered {
+		t.Fatal("the deleted Incident is remembered Resolved")
+	}
+}
+
+// A fold whose write succeeded before the consequence Incident was deleted does not remember the deleted
+// object Resolved once the delete was handled.
+func TestFoldOfADeletedIncidentIsNotRemembered(t *testing.T) {
+	c, cl, w := foldController(t, []*remediationv1alpha1.Incident{foldConsequence(5 * time.Minute)})
+	w.after = deleteDuringUpdate(t, c, cl, Name(fp(2)))
+	if err := c.foldInto(t.Context(), Name(fp(1))); err != nil {
+		t.Fatal(err)
+	}
+	if w.updates.Load() != 1 {
+		t.Fatalf("%d status writes, want 1", w.updates.Load())
+	}
+	c.mu.Lock()
+	_, remembered := c.resolvedAt[Name(fp(2))]
+	c.mu.Unlock()
+	if remembered {
+		t.Fatal("the deleted Incident is remembered Resolved")
 	}
 }

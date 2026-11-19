@@ -819,7 +819,7 @@ func (m *modelWorld) lostThenMoved() {
 	m.moveEvent(cr)
 	switch m.rng.IntN(3) {
 	case 0:
-		if err := m.g.CloseChangeRequest(context.Background(), m.number); err != nil {
+		if err := m.g.Close(m.number); err != nil {
 			m.t.Fatal(err)
 		}
 		modelMoves.mu.Lock()

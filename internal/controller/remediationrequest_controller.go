@@ -2289,8 +2289,19 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 	// request on the same branch never stands in for it (ADR-0030 section 1), and it is closed only when it is
 	// from the request's branch to the target branch and carries this request's marker (changeOf).
 	recorded := rr.Status.PullRequest
-	if recorded != nil && deleting {
-		return r.closeAllOwn(ctx, git, rr)
+	// The finalizer also closes every open pull request with this request's marker on a base other than the target
+	// branch, where a person may have moved one (closeOwnOnOtherBases): after the recorded one, so a refused read of
+	// it is reported alone, and before the listing of the branch without a number, which may end in a merge found.
+	switch {
+	case deleting && recorded != nil:
+		if err := r.closeAllOwn(ctx, git, rr); err != nil {
+			return err
+		}
+		return r.closeOwnOnOtherBases(ctx, git, rr)
+	case deleting:
+		if err := r.closeOwnOnOtherBases(ctx, git, rr); err != nil {
+			return err
+		}
 	}
 	if recorded == nil {
 		return r.closeUnrecorded(ctx, git, rr, deleting)
@@ -2309,7 +2320,13 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 		// Open on a base a person moved it to (#892): nothing is written to it there; each caller ends its stop
 		// saying so, and the lock stays while it is open.
 		return &openElsewhereError{pr: v.pr}
-	case changeOpen, changeMerged, changeClosed:
+	case changeClosed:
+		if v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
+			// Closed on a base a person moved it to: nothing to close, and the close to the target branch would be
+			// refused there.
+			return nil
+		}
+	case changeOpen, changeMerged:
 	}
 	if err := r.stillOwns(ctx, rr); err != nil {
 		return err
@@ -2326,10 +2343,10 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 // the close) is a *closeConflictError, which mergedUnrecorded reads again by its number. Unknown is returned for a
 // retry: a failed listing never means none was opened.
 //
-// When the target branch shows none of its own open or merged, the open pull requests from its branch to every base
-// are listed (openOnOtherBase, #892): one with its marker open on another base, where a person moved it, is closed
-// there when deleting (the finalizer, fourth decision of 2026-11-19), and is otherwise an *openElsewhereError, so the
-// stop that asked for the close closes nothing there and says so.
+// When the target branch shows none of its own open or merged, a stop lists the open pull requests from its branch to
+// every base (openOnOtherBase, #892): one with its marker open on another base, where a person moved it, is an
+// *openElsewhereError, so the stop that asked for the close closes nothing there and says so. The finalizer closed
+// every such one already (closeOwnOnOtherBases) and does not list them again.
 func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, deleting bool) error {
 	v := r.changeOf(ctx, git, rr, changeQuery{})
@@ -2337,8 +2354,11 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 	case changeUnknown:
 		return v.err
 	case changeGone, changeClosed:
-		if err := r.closeUnrecordedElsewhere(ctx, git, rr, deleting); err != nil {
-			return err
+		// The finalizer closed every one open on another base already (closeOwnOnOtherBases).
+		if !deleting {
+			if err := r.closeUnrecordedElsewhere(ctx, git, rr); err != nil {
+				return err
+			}
 		}
 	case changeOpen, changeMerged, changeElsewhere, changeMergedElsewhere:
 	}
@@ -2362,23 +2382,46 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 	return nil
 }
 
-// closeUnrecordedElsewhere is closeUnrecorded's look at the other bases, for a request with no pull request recorded
-// whose target branch shows none of its own open or merged.
+// closeUnrecordedElsewhere is closeUnrecorded's look at the other bases, for a stop of a request with no pull request
+// recorded whose target branch shows none of its own open or merged: one open on another base is an
+// *openElsewhereError, and nothing is closed there.
 func (r *RemediationRequestReconciler) closeUnrecordedElsewhere(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, deleting bool) error {
+	rr *remediationv1alpha1.RemediationRequest) error {
 	v := r.changeOf(ctx, git, rr, changeQuery{otherBases: []remediationv1alpha1.GitBranch{rr.Status.Source.TargetBranch}})
 	switch v.state {
 	case changeUnknown:
 		return v.err
 	case changeElsewhere:
-		if !deleting {
-			return &openElsewhereError{pr: v.pr}
+		return &openElsewhereError{pr: v.pr}
+	case changeOpen, changeMerged, changeClosed, changeGone, changeMergedElsewhere:
+	}
+	return nil
+}
+
+// closeOwnOnOtherBases is the finalizer's close on the bases other than the target branch, with or without a pull
+// request recorded: every open pull request from the request's branch with this request's marker there, whatever
+// its number, is closed by its number (CloseChangeRequestAnyBase), not only the one the listing ranks first. A
+// failed listing, a listing past MaxBranchChangeRequests and a failed close are returned for a retry, which keeps the
+// finalizer; every close is preceded by stillOwns.
+func (r *RemediationRequestReconciler) closeOwnOnOtherBases(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	v := r.changeOf(ctx, git, rr, changeQuery{otherBases: []remediationv1alpha1.GitBranch{rr.Status.Source.TargetBranch},
+		withRecorded: true})
+	switch v.state {
+	case changeUnknown:
+		return v.err
+	case changeOpen, changeMerged, changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
+	}
+	for _, cr := range v.own {
+		if cr.State != providers.ChangeRequestOpen {
+			continue
 		}
 		if err := r.stillOwns(ctx, rr); err != nil {
 			return err
 		}
-		return closeFailed(v.pr, git.CloseChangeRequestAnyBase(ctx, v.pr.Number))
-	case changeOpen, changeMerged, changeClosed, changeGone, changeMergedElsewhere:
+		if err := closeFailed(cr, git.CloseChangeRequestAnyBase(ctx, cr.Number)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

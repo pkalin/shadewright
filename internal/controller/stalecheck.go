@@ -105,27 +105,30 @@ func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remedi
 	return err
 }
 
-// failCheckStep is failCheck's work: it writes the failed check, then records Stale. Through a new installation of
-// the plan's repository (#290) it first reads the recorded pull request with this request's marker and writes
-// nothing when that read fails or the pull request is not this request's.
+// failCheckStep is failCheck's work: it reads the recorded pull request by its number, writes the failed check, then
+// records Stale. It writes nothing when that read fails (returned for a retry) or finds the pull request open on, or
+// merged into, a base a person moved it to. Through a new installation of the plan's repository (#290) the read also
+// asks for this request's marker, and nothing is written either when the pull request is not this request's.
 func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, run providers.CheckRun) error {
 	git, _, reinstalled, err := r.openPlanRepositoryFor(ctx, rr)
 	if err != nil {
 		return err
 	}
-	if reinstalled {
-		switch v := r.changeOf(ctx, git, rr, changeQuery{marker: true}); v.state {
-		case changeUnknown:
-			return v.err
-		case changeGone, changeMergedElsewhere:
-			// Merged into another base: nothing is written to it there, as for gone.
+	switch v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled}); v.state {
+	case changeUnknown:
+		return v.err
+	case changeMergedElsewhere:
+		// Merged into another base: nothing is written to it there, as for gone.
+		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
+	case changeGone:
+		if reinstalled {
 			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
-		case changeElsewhere:
-			// Open on a base a person moved it to (#892): nothing is written to it there.
-			return &openElsewhereError{pr: v.pr}
-		case changeOpen, changeMerged, changeClosed:
 		}
+	case changeElsewhere:
+		// Open on a base a person moved it to: nothing is written to it there.
+		return &openElsewhereError{pr: v.pr}
+	case changeOpen, changeMerged, changeClosed:
 	}
 	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run); err != nil {
 		return freshness.WrapProvider("write the check run", err)

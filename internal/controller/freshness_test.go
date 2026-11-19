@@ -2917,8 +2917,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				case stepMergeCommit:
 					sha, err = git.MergeWithCommit(cr.Number)
 				case stepClose:
-					err = git.CloseChangeRequest(ctx, cr.Number)
-					closes.Add(-1) // the person's close, not Shadewright's
+					err = git.Close(cr.Number) // the person's close, on whatever base
 				}
 				Expect(err).NotTo(HaveOccurred())
 				gap(o.gaps[i+1])
@@ -3105,7 +3104,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(git.CreateBranch(ctx, freshOtherBranch, head)).To(Succeed())
 		Expect(git.SetBase(cr.Number, freshOtherBranch)).To(Succeed())
-		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+		Expect(git.Close(cr.Number)).To(Succeed())
 		second, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(fetch()), BaseBranch: freshOtherBranch, Body: marker(fetch())})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
@@ -3124,7 +3123,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			got.Status.Phase = remediationv1alpha1.PhaseCancelled
 			meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionApproved, Status: metav1.ConditionFalse, Reason: remediationv1alpha1.ReasonIncidentGone, Message: whyIncidentGone})
 			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
-			Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+			Expect(git.Close(cr.Number)).To(Succeed())
 			Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
 			got = fetch()
 			Expect(holdsLock(got)).To(BeFalse())

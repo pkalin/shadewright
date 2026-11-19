@@ -121,7 +121,6 @@ func TestSettlementMovedBaseKeepsLockWhileOpen(t *testing.T) {
 		for _, end := range []string{foundClosed, endMerged} {
 			t.Run(stop+"/"+end, func(t *testing.T) {
 				r, g, rr, clock, n := movedBaseWorld(t, stop)
-				ctx := context.Background()
 				live := lookMoved(t, r, rr, clock)
 				held := meta.FindStatusCondition(live.Status.Conditions, api.ConditionTargetHeld)
 				if !holdsLock(live) || held == nil || held.Reason != ReasonOpenOnBranch ||
@@ -131,7 +130,7 @@ func TestSettlementMovedBaseKeepsLockWhileOpen(t *testing.T) {
 				}
 				phase := live.Status.Phase
 				if end == foundClosed {
-					if err := g.CloseChangeRequest(ctx, n); err != nil {
+					if err := g.Close(n); err != nil {
 						t.Fatal(err)
 					}
 				} else if _, err := g.Merge(n); err != nil {
@@ -227,7 +226,7 @@ func TestSettlementMovedBaseClosedOnTargetOpenElsewhereKeepsLock(t *testing.T) {
 	r, g, rr, clock, n := movedBaseWorld(t, stopLost)
 	ctx := context.Background()
 	// The first pull request is closed on the target branch; a second one with the marker is open on hotfix.
-	if err := g.CloseChangeRequest(ctx, n); err != nil {
+	if err := g.Close(n); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.SetBase(n, mainBranch); err != nil {
@@ -352,6 +351,55 @@ func TestCancelLookOpenOnMovedBaseSaysSo(t *testing.T) {
 	}
 }
 
+// A cancel after a change of the target branch whose look finds the request's own pull request merged into another
+// base, where a person moved it, says so as the watch does: NeedsIntervention with ChangeRequestOnOtherBase naming the
+// merge, never Cancelled with the pull request "found closed".
+func TestCancelLookMergedOnMovedBaseSaysSo(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	ctx := context.Background()
+	meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	rr.Spec.Cancel = true
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	n := rr.Status.PullRequest.Number
+	moveTo(t, g, n, movedBranch)
+	if _, err := g.Merge(n); err != nil {
+		t.Fatal(err)
+	}
+	clock := clockOf(r)
+	live := &api.RemediationRequest{}
+	for range 4 {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+			t.Fatal(err)
+		}
+		if live.Status.Phase != api.PhaseAwaitingApproval {
+			break
+		}
+		if _, _, err := r.cancelLook(ctx, live, nil); err != nil {
+			t.Fatalf("cancelLook: %v", err)
+		}
+		clock.advance(confirmWait + time.Minute)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+		t.Fatal(err)
+	}
+	if live.Status.Phase != api.PhaseNeedsIntervention ||
+		!hasReason(live, reasonOnOtherBase, fmt.Sprintf("#%d of the request was merged into another base branch (%s)",
+			n, movedBranch)) {
+		t.Fatalf("phase %s, conditions %s: want NeedsIntervention with %s naming the merge of #%d on %s",
+			live.Status.Phase, conditionsOf(live), reasonOnOtherBase, n, movedBranch)
+	}
+	for _, c := range live.Status.Conditions {
+		if c.Reason == ReasonPullRequestClosed || strings.Contains(c.Message, "found closed") {
+			t.Errorf("condition %s says the pull request is closed: %s: %q", c.Type, c.Reason, c.Message)
+		}
+	}
+}
+
 // unnamedBases are base names a code host allows and the rule for target branches does not (decision of 2026-11-19
 // on #892): the provider answers a pull request to one of them with no base name.
 var unnamedBases = map[string]string{
@@ -396,7 +444,7 @@ func TestSettlementMovedBaseUnnamedKeepsLock(t *testing.T) {
 			if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); c != nil {
 				t.Fatalf("GitReadRetry %+v: a base name left out is no failed read", c)
 			}
-			if err := g.CloseChangeRequest(context.Background(), n); err != nil {
+			if err := g.Close(n); err != nil {
 				t.Fatal(err)
 			}
 			if live = lookMoved(t, r, rr, clock); holdsLock(live) {

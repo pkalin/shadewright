@@ -52,9 +52,10 @@ import (
 //     which is trusted, and the base only when the provider let its name through (hostBranchText shows it).
 //   - changeMergedElsewhere: the request's pull request, read by its number or found by its marker in the listing
 //     of every base, was merged into another base than the target branch, where a person moved it. It delivered
-//     nothing the request can verify and cannot merge again: it keeps no lock and has nothing to close. The watch
-//     and the adoption stop the request for a person with that pull request named (stopMergedElsewhere, reason
-//     ChangeRequestOnOtherBase); every other caller does what it does for gone. Its pr carries the pull request, and
+//     nothing the request can verify and cannot merge again: it keeps no lock and has nothing to close. The watch,
+//     the adoption, a refused adoption (refuseOpened) and a cancel stop the request for a person with that pull
+//     request named (stopMergedElsewhere, reason ChangeRequestOnOtherBase); every other caller does what it does for
+//     gone. Its pr carries the pull request, and
 //     gone says the same for the callers that show gone's text.
 //   - changeGone: the pull request is confirmed not to be this request's: a 404 that the listing of every pull
 //     request of the branch confirms, on two looks at least confirmWait apart (goneLooks), an answer about
@@ -129,6 +130,9 @@ type changeQuery struct {
 	// everyState makes the listing of otherBases read pull requests in every state, not only open ones: the
 	// adoption's, which must find one closed or merged there too, so it never opens a second one (invariant 5).
 	everyState bool
+	// withRecorded lists otherBases also when a pull request is recorded: the finalizer closes every open one with
+	// this request's marker there (closeOwnOnOtherBases), whatever its number.
+	withRecorded bool
 	// reinstalled is a read through a new installation of the GitHub App for the plan's repository (#290): every
 	// failed read that is not an answer of the Git host sets condition PullRequestUnreadable (noteRead, #797).
 	reinstalled bool
@@ -289,8 +293,8 @@ func (r *RemediationRequestReconciler) readChange(ctx context.Context, git provi
 		return unknownChange(errors.New("no pull request recorded to read on the configured target branch")), 0
 	case q.configuredBranch != "":
 		return r.readOnConfigured(ctx, git, rr, n, q.configuredBranch), n
-	case q.otherBases != nil && n == 0:
-		return r.openOnOtherBase(ctx, git, rr, q.otherBases, q.everyState), 0
+	case q.otherBases != nil && (n == 0 || q.withRecorded):
+		return r.openOnOtherBase(ctx, git, rr, q), 0
 	case q.otherBases != nil:
 		return unknownChange(errors.New("the listing of every base is for a request with no pull request recorded")), n
 	case n == 0:
@@ -332,16 +336,18 @@ func (r *RemediationRequestReconciler) readOnConfigured(ctx context.Context, git
 	return v
 }
 
-// openOnOtherBase is readChange for q.otherBases, with no pull request recorded: the listing of the pull requests from
-// the request's branch to every base branch (open ones only unless every is set) and, among those with this request's
-// marker on a base that is not in read, the one that wins: an open one, else a merged one, else a closed one, the
+// openOnOtherBase is readChange for q.otherBases, with no pull request recorded (or q.withRecorded): the listing of the
+// pull requests from the request's branch to every base branch (open ones only unless q.everyState is set) and, among
+// those with this request's marker on a base that is not in q.otherBases, the one that wins: an open one, else a merged one, else a closed one, the
 // newest of its state first (the listing's order). The state is the rule, not the age: an old pull request still open
 // can merge, while a newer one closed cannot. Open is changeElsewhere, merged changeMergedElsewhere, closed
-// changeClosed, and none is gone. The listing is the proof that there is none; one that fails, also past
+// changeClosed, and none is gone. With q.withRecorded the verdict's own holds every one with the marker there, in the
+// listing's order (the finalizer closes each). The listing is the proof that there is none; one that fails, also past
 // MaxBranchChangeRequests (ErrTooLarge, fail closed), is unknown, never none.
 func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, read []remediationv1alpha1.GitBranch, every bool) changeVerdict {
-	open, err := git.ListChangeRequestsAnyBase(ctx, freshness.BranchName(rr), !every)
+	rr *remediationv1alpha1.RemediationRequest, q changeQuery) changeVerdict {
+	read := q.otherBases
+	open, err := git.ListChangeRequestsAnyBase(ctx, freshness.BranchName(rr), !q.everyState)
 	if providers.IsUntrustedAnswer(err) {
 		// An entry not asked for (another branch or repository, not open): a failed read, paced and shown in
 		// GitReadRetry like any other, not an answer that disagrees (answeredUnknown), which is looked at again with
@@ -353,6 +359,7 @@ func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git 
 		return unknownChange(listFailed("list the change requests of the branch to every base", err))
 	}
 	var won *providers.ChangeRequest
+	var own []providers.ChangeRequest
 	for i, cr := range open {
 		// An entry with no base name (left out by the provider) is on neither target branch: a target branch name
 		// always passes the provider's rule.
@@ -363,26 +370,32 @@ func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git 
 			return unknownChange(fmt.Errorf("pull request #%d has a state the executor does not know: %q", cr.Number,
 				cr.State))
 		}
-		if won != nil && stateRank[cr.State] <= stateRank[won.State] {
-			continue
-		}
 		switch ours, err := r.ownsMarker(ctx, cr.Body, rr); {
 		case err != nil:
 			return unknownChange(err)
 		case !ours:
 			continue
 		}
-		won = &open[i]
+		own = append(own, cr)
+		if won == nil || stateRank[cr.State] > stateRank[won.State] {
+			won = &open[i]
+		}
 	}
+	var v changeVerdict
 	switch {
 	case won == nil:
-		return changeVerdict{state: changeGone, gone: "no pull request of the request is on another base branch"}
+		v = changeVerdict{state: changeGone, gone: "no pull request of the request is on another base branch"}
 	case won.State == providers.ChangeRequestOpen:
-		return changeVerdict{state: changeElsewhere, pr: *won}
+		v = changeVerdict{state: changeElsewhere, pr: *won}
 	case won.State == providers.ChangeRequestMerged:
-		return changeVerdict{state: changeMergedElsewhere, pr: *won, gone: mergedElsewhereText(*won)}
+		v = changeVerdict{state: changeMergedElsewhere, pr: *won, gone: mergedElsewhereText(*won)}
+	default:
+		v = changeVerdict{state: changeClosed, pr: *won}
 	}
-	return changeVerdict{state: changeClosed, pr: *won}
+	if q.withRecorded {
+		v.own = own
+	}
+	return v
 }
 
 // stateRank orders the states of the pull requests with a request's marker on other bases (openOnOtherBase): the

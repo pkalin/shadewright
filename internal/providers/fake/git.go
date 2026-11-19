@@ -824,19 +824,27 @@ func (g *Git) AutoMergeEnabled(n int64) bool {
 	return g.auto[n]
 }
 
-// CloseChangeRequest closes a change request, idempotently.
+// CloseChangeRequest closes a change request to the target branch, idempotently. One on another base is refused
+// with an error of no class, as the GitHub adapter refuses a pull request that is not to its target branch, before
+// it looks at the state.
 func (g *Git) CloseChangeRequest(ctx context.Context, n int64) error {
-	return g.closeAs(ctx, "CloseChangeRequest", n)
+	return g.closeAs(ctx, "CloseChangeRequest", n, g.target)
 }
 
-// CloseChangeRequestAnyBase is GitProvider.CloseChangeRequestAnyBase: CloseChangeRequest under its own operation
-// name, so a test can tell the two apart.
+// CloseChangeRequestAnyBase is GitProvider.CloseChangeRequestAnyBase: CloseChangeRequest on any base, under its own
+// operation name, so a test can tell the two apart.
 func (g *Git) CloseChangeRequestAnyBase(ctx context.Context, n int64) error {
-	return g.closeAs(ctx, "CloseChangeRequestAnyBase", n)
+	return g.closeAs(ctx, "CloseChangeRequestAnyBase", n, "")
 }
 
-// closeAs is the close of change request n as operation op.
-func (g *Git) closeAs(ctx context.Context, op string, n int64) error {
+// CloseChangeRequest is Git.CloseChangeRequest to the view's target branch.
+func (v *TargetView) CloseChangeRequest(ctx context.Context, n int64) error {
+	return v.closeAs(ctx, "CloseChangeRequest", n, v.target)
+}
+
+// closeAs is the close of change request n as operation op, refused unless its base is target (any base when target
+// is empty).
+func (g *Git) closeAs(ctx context.Context, op string, n int64, target string) error {
 	if err := g.before(op); err != nil {
 		return err
 	}
@@ -848,6 +856,10 @@ func (g *Git) closeAs(ctx context.Context, op string, n int64) error {
 	if err != nil {
 		g.mu.Unlock()
 		return err
+	}
+	if target != "" && cr.BaseBranch != target {
+		g.mu.Unlock()
+		return errors.New(op + ": not a Shadewright pull request to the target branch")
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
@@ -861,6 +873,23 @@ func (g *Git) closeAs(ctx context.Context, op string, n int64) error {
 	delete(g.auto, n)
 	g.mu.Unlock()
 	return g.after(op)
+}
+
+// Close closes change request n on whatever base it is, as a person does on the host: no operation is recorded and
+// no hook runs. A merged one is ErrConflict; a closed one stays closed.
+func (g *Git) Close(n int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return err
+	}
+	if cr.State == providers.ChangeRequestMerged {
+		return fmt.Errorf("change request %d is merged: %w", n, providers.ErrConflict)
+	}
+	cr.State = providers.ChangeRequestClosed
+	delete(g.auto, n)
+	return nil
 }
 
 // Merge squash-merges an open change request into its base, as a reviewer would, and returns the merge

@@ -262,7 +262,7 @@ var staleWrites = map[string]bool{
 	opCreateCheckRun:       false, // but a failed review check (TestGatedGitStalePlanFailsTheReviewCheck, #713)
 	"CloseChangeRequest":   true,
 	// The finalizer's close on any base (#892) is a close too.
-	"CloseChangeRequestAnyBase": true,
+	opCloseAnyBase: true,
 }
 
 // TestGatedGitStalePlanWritesOnlyTheClose calls every write of a gated provider with closeOnly true, false and

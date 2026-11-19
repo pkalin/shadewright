@@ -913,7 +913,11 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	case changeElsewhere:
 		// A person moved it to another base since the open (#892): nothing is closed there.
 		return r.stopOpenElsewhere(ctx, rr, v.pr)
-	case changeOpen, changeGone, changeMergedElsewhere, changeUnknown:
+	case changeMergedElsewhere:
+		// Moved to another base and merged there: nothing to close (the close to the target branch would be refused),
+		// and the request stops with the pull request named, as the watch stops it.
+		return r.stopMergedElsewhere(ctx, rr, v.pr)
+	case changeOpen, changeGone, changeUnknown:
 	}
 	err := git.CloseChangeRequest(cleanCtx, cr.Number)
 	err = boundErr(ctx, cleanCtx, "close the pull request", err)

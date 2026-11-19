@@ -114,7 +114,11 @@ func (r *RemediationRequestReconciler) watchBranchChanged(ctx context.Context,
 		// (fourth decision of 2026-11-19 on #892): the cancel ends Cancelled saying so (prOpenElsewhere), and nothing
 		// says it is closed or closes it.
 		return fmt.Errorf("%w: %w", errOpenElsewhere, errTargetBranchChanged)
-	case cancelRequested(rr) && (v.state == changeClosed || v.state == changeGone || v.state == changeMergedElsewhere):
+	case cancelRequested(rr) && v.state == changeMergedElsewhere:
+		// Merged into a base a person moved it to: the cancel stops as the watch of an unchanged target branch does,
+		// with the merge named (stopMergedElsewhere), never as found closed.
+		return r.stopMergedElsewhere(ctx, rr, v.pr)
+	case cancelRequested(rr) && (v.state == changeClosed || v.state == changeGone):
 		// A cancel settles like any other stop (fifth decision of 2026-11-18 on #771): the pull request, closed or
 		// confirmed gone, cannot merge, so the cancel ends the request Cancelled (cancelOpen with prClosed).
 		return fmt.Errorf("%w: %w", errClosed, errTargetBranchChanged)

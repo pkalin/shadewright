@@ -118,7 +118,9 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 // Cancelled is final only when the pull request cannot merge any more: it is known closed, or known never opened.
 // Before each close, and before the end on a pull request found closed, the check run shadewright/review of the
 // recorded head is failed (failCancelCheck, as for a stale plan, #713), so a pull request reopened later cannot be
-// merged on a check that is still green. A closed pull request ends the request even when that check cannot be
+// merged on a check that is still green. The check reads the recorded pull request by its number first: one open on a
+// base a person moved it to gets no check, and the request ends Cancelled saying so. A closed pull request ends the
+// request even when that check cannot be
 // written: at once on a refusal, after cleanupFailingBound on a failure worth a retry, with a Warning Event that
 // says so (endCancelClosed).
 //
@@ -152,8 +154,12 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 		return r.cancelHandoffWait(ctx, rr)
 	}
 	// The check fails first, whatever becomes of the close; its failure does not stop the close, and it is tried
-	// again with the next try.
+	// again with the next try. Its read of the pull request by number comes before the write: one found open on a
+	// base a person moved it to gets no check, and the cancel ends saying so.
 	checkErr := r.failCancelCheck(ctx, rr)
+	if errors.Is(checkErr, errOpenElsewhere) {
+		return r.endCancelFound(ctx, rr, nil, true)
+	}
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := r.closeChangeRequest(cleanCtx, rr)
 	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead).
@@ -217,6 +223,8 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 //     to the configured branch, as #771 decided on 2026-11-16 (recordMergeOnConfigured).
 //   - Closed or gone: the request ends Cancelled (endCancelClosed); the read of the branch after the end settles the
 //     lock. A review check that waits for a pause keeps the request in its phase until the pause ends.
+//   - Merged into a base a person moved it to (changeMergedElsewhere): stopped as the watch stops it, in
+//     NeedsIntervention with ChangeRequestOnOtherBase naming the merge (stopMergedElsewhere).
 //   - Open on a base a person moved it to (changeElsewhere, #892): it ends Cancelled with
 //     messageCancelledOpenElsewhere and nothing marks the pull request closed: the lock stays while it is open, and
 //     nothing closes it there.
@@ -269,9 +277,16 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 			return r.recordOwnMerge(ctx, rr, v.pr)
 		})
 		return res, true, err
-	case changeClosed, changeGone, changeMergedElsewhere:
+	case changeClosed, changeGone:
 		res, err := r.endCancelFound(ctx, rr, checkErr, false)
 		return res, true, err
+	case changeMergedElsewhere:
+		// Merged into a base a person moved it to: stopped as the watch stops it (stopMergedElsewhere), never
+		// Cancelled as found closed.
+		if err := r.stopMergedElsewhere(ctx, rr, v.pr); !errors.Is(err, errStopped) {
+			return reconcile.Result{}, true, err
+		}
+		return reconcile.Result{}, true, nil
 	case changeElsewhere:
 		res, err := r.endCancelFound(ctx, rr, checkErr, true)
 		return res, true, err

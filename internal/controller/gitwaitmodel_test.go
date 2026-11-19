@@ -134,6 +134,11 @@ import (
 const (
 	modelSteps = 24
 
+	// CleanupTimeout of the model: long, but for a step that meets a read that times out (cleanupTimeout). The long
+	// one stays above the 2 s that modelGit.fail takes for a short deadline.
+	modelLongTimeout  = 30 * time.Second
+	modelShortTimeout = 150 * time.Millisecond
+
 	faultNone    = "none"
 	faultContent = "content"
 	faultOpen    = "open"
@@ -460,7 +465,6 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 		}
 		if st.open {
 			m.fault = faultOpen
-			m.lastingUntil = time.Now().Add(st.lasting)
 			if st.handoff {
 				m.recovering(rr)
 			}
@@ -472,6 +476,9 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 	m.logf("start %+v", st)
 	m.clock = clockOf(r)
 	m.startAt = m.clock.at
+	if st.start == startPolicyChecked && st.open {
+		m.lastingUntil = m.clock.at.Add(st.lasting)
+	}
 	m.base = r.Client.(client.WithWatch)
 	direct := interceptor.NewClient(m.base, interceptor.Funcs{
 		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
@@ -508,9 +515,20 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 		}
 		return &modelGit{GitProvider: g.ForTarget(string(repo.TargetBranch)), m: m}, nil
 	}
-	// Long enough for every step that does not wait on a slow read, also under the race detector.
-	r.CleanupTimeout = 150 * time.Millisecond
+	r.CleanupTimeout = modelLongTimeout
 	return m
+}
+
+// cleanupTimeout is the time a step may take (CleanupTimeout) for the fault now. It is a real deadline inside a
+// model that runs on a fake clock, so it is long (a read that is slow on a loaded machine must not end the step)
+// unless a read is to time out: then it is short, and the faulted read waits for it (modelGit.fail).
+func (m *modelWorld) cleanupTimeout() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.Contains(m.fault, faultTimeout) {
+		return modelShortTimeout
+	}
+	return modelLongTimeout
 }
 
 // freshPlan makes rr's plan the one made on the head of its target branch, as the source mapping finds it
@@ -769,7 +787,7 @@ func (m *modelWorld) prelude() {
 		// What the merge into the longest branch name brought cannot be compared, for a while.
 		m.fault = []string{faultBetween, faultContent}[m.rng.IntN(2)]
 		m.lastingUntil = m.clock.at.Add(time.Duration(m.rng.IntN(10)) * time.Minute)
-	case m.rng.IntN(2) == 0 && !time.Now().Before(m.lastingUntil):
+	case m.rng.IntN(2) == 0 && !m.clock.at.Before(m.lastingUntil):
 		m.fault = faultContent
 	}
 	m.logf("move the pull request to the configured branch and merge it there (reads: %s)", m.fault)
@@ -1422,6 +1440,7 @@ func (m *modelWorld) step() {
 	m.mu.Lock()
 	flick := m.flicker
 	m.mu.Unlock()
+	m.r.CleanupTimeout = m.cleanupTimeout()
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.key})
 	m.mu.Lock()
 	m.flickered = flick && !m.flicker
@@ -1484,7 +1503,7 @@ func (m *modelWorld) stepSecond(ctx context.Context, first *api.RemediationReque
 	// The fake client does not serve the field selectors the lock's list uses; apiServerReader does.
 	r := &RemediationRequestReconciler{Client: m.base, APIReader: &apiServerReader{Reader: m.base}, Scheme: m.r.Scheme,
 		Source: &stubResolver{result: res}, Now: m.r.Now,
-		CleanupTimeout: m.r.CleanupTimeout}
+		CleanupTimeout: m.cleanupTimeout()}
 	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: m.second})
 	live := &api.RemediationRequest{}
 	if gerr := m.base.Get(ctx, m.second, live); gerr != nil {

@@ -1621,25 +1621,50 @@ func TestListOpenChangeRequestsAnyBase(t *testing.T) {
 			providers.ErrUntrustedAnswer},
 		"listing answered 404": {[]step{status(http.MethodGet, pullsPath, http.StatusNotFound, fxForbidden)},
 			providers.ErrNotFound},
-		// The base branch is text from the code host (invariant 4): one that is not a valid branch name by the rule
-		// for target branches is an untrusted answer, never shown in a condition or a log.
-		"a base with control characters": {[]step{listAnyBase(pullWithBase("x\nReleased the lock\x1b[31m"))},
-			providers.ErrUntrustedAnswer},
-		"a base of 40,000 bytes": {[]step{listAnyBase(pullWithBase(strings.Repeat("b", 40000)))},
-			providers.ErrUntrustedAnswer},
-		"a base shaped like a URL with credentials": {[]step{listAnyBase(pullWithBase("https://user:tok@evil/x"))}, providers.ErrUntrustedAnswer},
-		"a base with a key and a value": {[]step{listAnyBase(pullWithBase("hotfix/credential=review-secret"))},
-			providers.ErrUntrustedAnswer},
-		"a Shadewright branch as the base": {[]step{listAnyBase(pullWithBase("shadewright/req-2"))},
-			providers.ErrUntrustedAnswer},
+		"a pull request listed twice with another head": {[]step{listAnyBase(branchPull(15, stateOpen, branch,
+			"acme/fleet", other), strings.Replace(branchPull(15, stateOpen, branch, "acme/fleet", "release+1"),
+			"7777777777777777777777777777777777777777", "8888888888888888888888888888888888888888", 1))}, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, tc.steps...)
 			got, err := h.p.ListOpenChangeRequestsAnyBase(ctx, branch)
-			if !errors.Is(err, tc.want) || got != nil {
+			if err == nil || tc.want != nil && !errors.Is(err, tc.want) || got != nil {
 				t.Fatalf("got %+v, %v; want %v", got, err, tc.want)
 			}
 			assertSafe(t, err)
+		})
+	}
+}
+
+// TestListOpenChangeRequestsAnyBaseLeavesOutBaseNames checks that a base whose name is not valid by the rule for
+// target branches never fails the listing (decision of 2026-11-19 on #892): the pull request is returned with its
+// number and no base name, so the caller can still act on the number, and the name, text from the code host
+// (invariant 4), reaches no condition and no log. This holds for the request's own pull request and for any other
+// one from the branch.
+func TestListOpenChangeRequestsAnyBaseLeavesOutBaseNames(t *testing.T) {
+	// #nosec G101 -- a made-up value that a redaction rule must catch, not a credential
+	for name, base := range map[string]string{
+		"a Shadewright branch":   "shadewright/other-request",
+		"a plus sign":            "release+1",
+		"300 bytes":              strings.Repeat("r", 300),
+		"40,000 bytes":           strings.Repeat("b", 40000),
+		"control characters":     "x\nReleased the lock\x1b[31m",
+		"a URL with credentials": "https://user:tok@evil/x",
+		"a key and a value":      "hotfix/credential=review-secret",
+		"non-ASCII":              "wyd\u0105nie",
+		"no name":                "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, listAnyBase(branchPull(16, stateOpen, branch, "acme/fleet", other), pullWithBase(base),
+				branchPull(12, stateOpen, branch, "acme/fleet", target)))
+			got, err := h.p.ListOpenChangeRequestsAnyBase(ctx, branch)
+			if err != nil || len(got) != 3 {
+				t.Fatalf("got %+v, %v; want three pull requests", got, err)
+			}
+			if got[0].Number != 16 || got[0].BaseBranch != other || got[1].Number != 15 || got[1].BaseBranch != "" ||
+				got[1].State != providers.ChangeRequestOpen || got[2].Number != 12 || got[2].BaseBranch != target {
+				t.Fatalf("got %+v; want #15 with no base name and the others with theirs", got)
+			}
 		})
 	}
 }

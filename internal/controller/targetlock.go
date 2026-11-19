@@ -804,8 +804,8 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 		}
 	} else if holding != nil {
 		msg := fmt.Sprintf("Pull request #%d is open on the request's branch and may still deliver its change; the target stays locked until it is closed or merged", holding.Number)
-		if v.movedTo != "" && holding.BaseBranch == string(v.movedTo) {
-			msg = fmt.Sprintf("Pull request #%d of the request is open on base branch %s, where it was moved, and may still merge; the target stays locked until it is closed or merged", holding.Number, hostBranchText(string(v.movedTo)))
+		if v.moved != 0 && holding.Number == v.moved {
+			msg = movedMessage(*holding)
 		}
 		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 			Type: remediationv1alpha1.ConditionTargetHeld, Status: metav1.ConditionTrue, Reason: ReasonOpenOnBranch,
@@ -904,7 +904,9 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 // itself while another with the request's marker may be open elsewhere (decision of 2026-11-19 on #892). That
 // closed one is recorded by the look that finds it when none was (recordFound), so the listing runs with a number
 // recorded as well, and takes the recorded number or the marker as the request's own. An open pull request can
-// still merge, so it keeps the lock wherever it is: it joins *open, and verdict.movedTo names its base. Once it is closed or merged there, the listing no longer has it, and the lock goes.
+// still merge, so it keeps the lock wherever it is: it joins *open, and verdict.moved names its number, the trusted
+// part of the answer (its base name may be left out). Only the request's own one does: another pull request from its
+// branch on another base, whatever its base is called, never keeps the lock (openOnOtherBase). Once it is closed or merged there, the listing no longer has it, and the lock goes.
 // A merge there is not recorded as the request's: it delivers nothing the plan was made for. A failed listing returns
 // its unknown verdict and false: the lock is kept, and the look retried as a failed Git read.
 func (r *RemediationRequestReconciler) openElsewhere(ctx context.Context, git providers.GitProvider,
@@ -919,9 +921,21 @@ func (r *RemediationRequestReconciler) openElsewhere(ctx context.Context, git pr
 		return elsewhere, false
 	case changeOpen:
 		*open = append(*open, elsewhere.pr)
-		verdict.movedTo = remediationv1alpha1.GitBranch(elsewhere.pr.BaseBranch)
+		verdict.moved = elsewhere.pr.Number
 	}
 	return changeVerdict{}, true
+}
+
+// movedMessage is the message of condition TargetHeld for the request's own pull request cr, open on a base a person
+// moved it to (#892, decision of 2026-11-19): its number, and its base through hostBranchText when the provider
+// answered a name.
+func movedMessage(cr providers.ChangeRequest) string {
+	where := "another base branch"
+	if cr.BaseBranch != "" {
+		where += " (" + hostBranchText(cr.BaseBranch) + ")"
+	}
+	return fmt.Sprintf("Pull request #%d of the request is open on %s, where it was moved, and may still merge; "+
+		"the target stays locked: closing it or moving it back releases the lock", cr.Number, where)
 }
 
 // disproveRepositoryReason is lookHeld's removal of condition PullRequestUnreadable with a reason about the
@@ -947,7 +961,8 @@ const maxHostBranchBytes = 255
 // hostBranchText is a branch name the code host answered (the base of a pull request, #892), made fit for a
 // condition message and the log: valid UTF-8, control characters replaced, redacted whole with the rules every
 // other text of the code host goes through, and cut at a rune boundary to maxHostBranchBytes, then "...". The
-// provider already refuses a base that is not a branch name (invariant 4); this holds without that check too.
+// provider already leaves out a base name outside its rule for target branches (invariant 4); this holds without
+// that check too.
 // Branch names in other messages come from the schema-checked status or settings (branchName) and need none of it.
 func hostBranchText(b string) string {
 	b = strings.Map(func(r rune) rune {

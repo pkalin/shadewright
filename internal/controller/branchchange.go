@@ -105,7 +105,21 @@ func (r *RemediationRequestReconciler) watchBranchChanged(ctx context.Context,
 		return r.recordMergeSeen(ctx, rr, v.pr)
 	case cancelRequested(rr) && (v.state == changeClosed || v.state == changeGone):
 		// A cancel settles like any other stop (fifth decision of 2026-11-18 on #771): the pull request, closed or
-		// confirmed gone, cannot merge, so the cancel ends the request Cancelled (cancelOpen with prClosed).
+		// confirmed gone here, ends the request Cancelled (cancelOpen with prClosed), unless the request's own pull
+		// request is open on another base, where a person moved it (decision of 2026-11-19 on #892): then it ends
+		// Cancelled saying so (prOpenElsewhere), and nothing says it is closed. Open on the target branch the
+		// settings name now, it keeps the cancel watch, as the cancel's look decides (cancelLook). The read of the
+		// other bases is the one the settlement of the target lock makes (openOnOtherBase); one that fails is
+		// retried, never taken for closed.
+		elsewhere := r.changeOf(ctx, git, rr, changeQuery{otherBases: []remediationv1alpha1.GitBranch{src.TargetBranch}})
+		switch {
+		case elsewhere.state == changeUnknown:
+			return fmt.Errorf("%w: %w", errBranchChangedUnread, elsewhere.err)
+		case elsewhere.state == changeOpen && elsewhere.pr.BaseBranch == string(repo.TargetBranch):
+			return errTargetBranchChanged
+		case elsewhere.state == changeOpen:
+			return fmt.Errorf("%w: %w", errOpenElsewhere, errTargetBranchChanged)
+		}
 		return fmt.Errorf("%w: %w", errClosed, errTargetBranchChanged)
 	}
 	return errTargetBranchChanged

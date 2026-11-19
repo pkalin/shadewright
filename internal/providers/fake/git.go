@@ -60,6 +60,8 @@ type Git struct {
 	foreignRuns map[string][]providers.CheckRun
 	// fb is the feedback of the change requests (feedback.go), guarded by mu.
 	fb feedbackStore
+	// unnamed are the base names ListOpenChangeRequestsAnyBase leaves out (HideBaseName), guarded by mu.
+	unnamed map[string]bool
 }
 
 // NewGit returns a repository whose branch base, its target branch, has one commit holding files.
@@ -607,7 +609,44 @@ func (g *Git) ListOpenChangeRequestsAnyBase(_ context.Context, headBranch string
 	if err := g.before("ListOpenChangeRequestsAnyBase"); err != nil {
 		return nil, err
 	}
-	return g.listFor(headBranch, true, "")
+	out, err := g.listFor(headBranch, true, "")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := range out {
+		if g.unnamed[out[i].BaseBranch] {
+			out[i].BaseBranch = ""
+		}
+	}
+	return out, err
+}
+
+// HideBaseName makes ListOpenChangeRequestsAnyBase answer change requests to base with no base name, as a provider
+// does for a name outside its rule for target branches.
+func (g *Git) HideBaseName(base string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.unnamed == nil {
+		g.unnamed = map[string]bool{}
+	}
+	g.unnamed[base] = true
+}
+
+// AddOpenChangeRequest opens a change request from head to base with body, as a person can on the host, also while
+// another one of head is open (to another base). It returns its number.
+func (g *Git) AddOpenChangeRequest(head, base, body string) (int64, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	sha, ok := g.branches[head]
+	if !ok {
+		return 0, fmt.Errorf("branch %q: %w", head, providers.ErrNotFound)
+	}
+	if _, ok := g.branches[base]; !ok {
+		return 0, fmt.Errorf("branch %q: %w", base, providers.ErrNotFound)
+	}
+	n := int64(len(g.crs) + 1)
+	g.crs = append(g.crs, &providers.ChangeRequest{Number: n, URL: fmt.Sprintf("%s/pull/%d", g.url, n),
+		HeadBranch: head, BaseBranch: base, HeadSHA: sha, State: providers.ChangeRequestOpen, Body: body})
+	return n, nil
 }
 
 // listFor is ListChangeRequests to the target branch target, or to every base branch when target is empty.

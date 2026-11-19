@@ -173,6 +173,10 @@ var errStopped = errors.New("the pull request step stopped the request")
 // errClosed means the recorded pull request is closed without a merge; see prClosed.
 var errClosed = errors.New("the pull request is closed")
 
+// errOpenElsewhere means the request's own pull request is open on a base a person moved it to, after a change of
+// the target branch, on a look for a cancel (watchBranchChanged, #892); see prOpenElsewhere.
+var errOpenElsewhere = errors.New("the pull request is open on another base branch")
+
 // errConflicted means the Git host reports the recorded pull request open with a merge conflict; see
 // prConflicted.
 var errConflicted = errors.New("the pull request has a merge conflict")
@@ -1256,6 +1260,12 @@ const (
 	// could not be opened (watchBranchChanged). Nothing else is done: the error is retried, since the full
 	// freshness check would end the request without knowing whether it was merged.
 	prBranchUnread
+	// prOpenElsewhere: the target branch of the plan's repository changed, spec.cancel is set, and the request's own
+	// pull request is gone from the recorded target branch and open on a base other than both target branches, where
+	// a person moved it
+	// (watchBranchChanged, #892). Only the cancel acts on it (cancelOpen): the request ends Cancelled saying so, and
+	// nothing marks the pull request closed.
+	prOpenElsewhere
 )
 
 // watchPullRequest looks at the recorded pull request: a merge ends the request (Merged), a pull request
@@ -1294,6 +1304,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prStopped, nil
 	case errors.Is(err, errClosed):
 		return prClosed, nil
+	case errors.Is(err, errOpenElsewhere):
+		return prOpenElsewhere, nil
 	case errors.Is(err, errConflicted):
 		return prConflicted, nil
 	case errors.Is(err, errMergeCommitPending):

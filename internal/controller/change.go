@@ -129,9 +129,10 @@ type changeVerdict struct {
 	// that the call read (own, and open with openOnBranch). A verdict made unknown again by a later failure (a
 	// listing, a status write) is a new one without it, so closeAllOwn never acts on a listing it does not have.
 	ownListed bool
-	// movedTo is set by the settlement of the target lock alone (lookHeld, #892): the base branch, neither target
-	// branch it read, where the request's own pull request is open (a person moved it there). Empty otherwise.
-	movedTo remediationv1alpha1.GitBranch
+	// moved is set by the settlement of the target lock alone (lookHeld, #892): the number of the request's own pull
+	// request, open on a base that is neither target branch it read (a person moved it there). Zero otherwise. The
+	// base's name may be unknown (the provider leaves out one outside its rule for target branches), the number never.
+	moved int64
 }
 
 // errUnconfirmedNotFound means the Git host answered 404 for the pull request number, but the request's branch
@@ -304,16 +305,19 @@ func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git 
 	rr *remediationv1alpha1.RemediationRequest, n int64, read []remediationv1alpha1.GitBranch) changeVerdict {
 	open, err := git.ListOpenChangeRequestsAnyBase(ctx, freshness.BranchName(rr))
 	if providers.IsUntrustedAnswer(err) {
-		// An entry not asked for, or a base that is no branch name (decision of 2026-11-19 on #892): a failed read,
-		// paced and shown in GitReadRetry like any other, not an answer that disagrees (answeredUnknown), which is
-		// looked at again with nothing written. The host's text is dropped.
+		// An entry not asked for (another branch or repository, not open): a failed read, paced and shown in
+		// GitReadRetry like any other, not an answer that disagrees (answeredUnknown), which is looked at again with
+		// nothing written. The host's text is dropped. A base name outside the rule for target branches is no such
+		// answer: the provider returns the entry without it (decision of 2026-11-19 on #892).
 		err = readFailure("ListOpenChangeRequestsAnyBase", errors.New("the Git host answered a pull request that was not asked for"))
 	}
 	if err != nil {
 		return unknownChange(listFailed("list the open change requests of the branch to every base", err))
 	}
 	for _, cr := range open {
-		if slices.Contains(read, remediationv1alpha1.GitBranch(cr.BaseBranch)) {
+		// An entry with no base name (left out by the provider) is on neither target branch: a target branch name
+		// always passes the provider's rule.
+		if cr.BaseBranch != "" && slices.Contains(read, remediationv1alpha1.GitBranch(cr.BaseBranch)) {
 			continue
 		}
 		if n == 0 || cr.Number != n {

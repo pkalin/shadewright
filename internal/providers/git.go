@@ -66,6 +66,8 @@ type ChangeRequest struct {
 	Number     int64
 	URL        string
 	HeadBranch string
+	// BaseBranch is the branch the change request targets. It is empty only in an answer of
+	// ListOpenChangeRequestsAnyBase whose base name the provider left out.
 	BaseBranch string
 	// HeadSHA is the commit at the head of the change request.
 	HeadSHA string
@@ -337,9 +339,11 @@ type GitProvider interface {
 
 	// ListOpenChangeRequestsAnyBase returns every open change request from headBranch, a Shadewright branch of this
 	// repository, to any base branch of this repository, newest first: also those whose base a person moved off the
-	// target branch (#892). An entry from another branch or repository, one that is not open, or one whose base is
-	// not a valid branch name by the provider's rule for target branches, is ErrUntrustedAnswer for the whole call. More than MaxBranchChangeRequests is ErrTooLarge. Any error is a failure
-	// to find out, never an answer. It only reads.
+	// target branch (#892). An entry from another branch or repository, or one that is not open, is
+	// ErrUntrustedAnswer for the whole call. An entry whose base name is not valid by the provider's rule for target
+	// branches is returned with BaseBranch empty: the name is text from the code host, never shown, and the number
+	// is still the answer. More than MaxBranchChangeRequests is ErrTooLarge. Any error is a failure to find out,
+	// never an answer. It only reads.
 	ListOpenChangeRequestsAnyBase(ctx context.Context, headBranch string) ([]ChangeRequest, error)
 
 	// GetChangeRequest returns the change request with number, in any state. It finds the recorded change

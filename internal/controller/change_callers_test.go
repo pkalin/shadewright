@@ -525,7 +525,7 @@ func TestEveryRuleCoversEveryVerdict(t *testing.T) {
 
 // changeStateNames are the names of every changeState, as the switches of this package write them.
 var changeStateNames = []string{"changeUnknown", "changeOpen", "changeMerged", "changeClosed", "changeGone",
-	"changeElsewhere"}
+	"changeElsewhere", "changeMergedElsewhere"}
 
 // missingStates returns, for a switch whose cases name a changeState (over true), every changeState it does not name
 // in a case of its own. A default never stands in for one: a verdict added later (changeElsewhere, #892) must be
@@ -587,9 +587,9 @@ func TestSwitchGuardRefusesADefault(t *testing.T) {
 		name, body string
 		missing    int
 	}{
-		{"default", `switch v.state { case changeUnknown, changeGone: default: }`, 4},
-		{"all but one", `switch v.state { case changeUnknown, changeOpen, changeMerged, changeClosed, changeGone: }`, 1},
-		{"all", `switch v.state { case changeUnknown, changeOpen, changeMerged: case changeClosed, changeGone, changeElsewhere: }`, 0},
+		{"default", `switch v.state { case changeUnknown, changeGone: default: }`, 5},
+		{"all but two", `switch v.state { case changeUnknown, changeOpen, changeMerged, changeClosed, changeGone: }`, 2},
+		{"all", `switch v.state { case changeUnknown, changeOpen, changeMerged: case changeClosed, changeGone, changeElsewhere, changeMergedElsewhere: }`, 0},
 		{"another switch", `switch x { case 1: default: }`, 0},
 	} {
 		f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package controller\nfunc f() {\n"+c.body+"\n}\n", 0)

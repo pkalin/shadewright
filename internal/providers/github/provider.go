@@ -48,7 +48,7 @@ const (
 	opFindCR       = "GitHub find pull request"
 	opGetCR        = "GitHub get pull request"
 	opListCR       = "GitHub list pull requests of a branch"
-	opListAnyCR    = "GitHub list open pull requests of a branch to any base"
+	opListAnyCR    = "GitHub list pull requests of a branch to any base"
 	opCloseCR      = "GitHub close pull request"
 	opCommentCR    = "GitHub comment on pull request"
 	opAutoMerge    = "GitHub auto-merge"
@@ -1223,17 +1223,19 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 	return p.listBranch(ctx, opListCR, headBranch, openOnly, false)
 }
 
-// ListOpenChangeRequestsAnyBase returns the open pull requests from headBranch of this repository to any base
-// branch of this repository, newest first (#892): ListChangeRequests with openOnly and without the base, on the
-// same terms. Every entry must be open and from headBranch of this repository to a branch of this repository: any
-// other entry is ErrUntrustedAnswer for the whole call. A base whose name is not valid by the rule for target
-// branches is returned empty, with the pull request (decision of 2026-11-19).
-func (p *Provider) ListOpenChangeRequestsAnyBase(ctx context.Context, headBranch string) (
+// ListChangeRequestsAnyBase returns the pull requests from headBranch of this repository to any base branch of
+// this repository, newest first (#892): the open ones when openOnly is true, all of them otherwise. It is
+// ListChangeRequests without the base, on the same terms: at most MaxBranchChangeRequests in pages of
+// branchPullsPerPage, ErrTooLarge past them. Every entry must be from headBranch of this repository to a branch of
+// this repository (with openOnly, also open): any other entry is ErrUntrustedAnswer for the whole call. A base whose
+// name is not valid by the rule for target branches is returned empty, with the pull request (decision of
+// 2026-11-19).
+func (p *Provider) ListChangeRequestsAnyBase(ctx context.Context, headBranch string, openOnly bool) (
 	[]providers.ChangeRequest, error) {
-	return p.listBranch(ctx, opListAnyCR, headBranch, true, true)
+	return p.listBranch(ctx, opListAnyCR, headBranch, openOnly, true)
 }
 
-// listBranch is ListChangeRequests (anyBase false) and ListOpenChangeRequestsAnyBase (anyBase true, which asks
+// listBranch is ListChangeRequests (anyBase false) and ListChangeRequestsAnyBase (anyBase true, which asks
 // GitHub for no base and takes an entry to any base branch of this repository).
 func (p *Provider) listBranch(ctx context.Context, op, headBranch string, openOnly, anyBase bool) (
 	[]providers.ChangeRequest, error) {

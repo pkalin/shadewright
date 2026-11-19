@@ -41,8 +41,8 @@ const (
 	endMerged = "merged"
 )
 
-// opListAnyBase is the fake's name of the listing of the open pull requests of a branch to every base.
-const opListAnyBase = "ListOpenChangeRequestsAnyBase"
+// opListAnyBase is the fake's name of the listing of the pull requests of a branch to every base.
+const opListAnyBase = "ListChangeRequestsAnyBase"
 
 // plusBase is a base name a code host allows and the rule for target branches does not.
 const plusBase = "release+1"

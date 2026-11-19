@@ -137,9 +137,9 @@ const (
 	ReasonPullRequestDeadlineCleanupFailed = "PullRequestDeadlineCleanupFailed"
 	// ReasonChangeRequestGone: the recorded pull request cannot be found any more.
 	ReasonChangeRequestGone = "ChangeRequestGone"
-	// ReasonChangeRequestOnOtherBase: the recorded pull request is open on another base branch than the target
-	// branch, where a person moved it (#892): automation stopped, nothing more is written to it, and the target stays
-	// locked while it is open.
+	// ReasonChangeRequestOnOtherBase: the request's own pull request is open on, or was merged into, another base
+	// branch than the target branch, where a person moved it (#892): automation stopped and nothing more is written
+	// to it. Open, the target stays locked while it is; merged, its change did not reach the target branch.
 	ReasonChangeRequestOnOtherBase = "ChangeRequestOnOtherBase"
 	// ReasonPlanIncomplete: the request's status.source has no buildPath, so the change cannot be rendered.
 	ReasonPlanIncomplete = "PlanIncomplete"
@@ -198,6 +198,17 @@ func openElsewhereText(cr providers.ChangeRequest) string {
 		where += " (" + hostBranchText(cr.BaseBranch) + ")"
 	}
 	return fmt.Sprintf("pull request #%d of the request is open on %s, where it was moved", cr.Number, where)
+}
+
+// mergedElsewhereText says that pull request cr of the request was merged into another base than the target branch,
+// where a person moved it: its number, and its base through hostBranchText when the provider answered a name (#892).
+func mergedElsewhereText(cr providers.ChangeRequest) string {
+	where := "another base branch"
+	if cr.BaseBranch != "" {
+		where += " (" + hostBranchText(cr.BaseBranch) + ")"
+	}
+	return fmt.Sprintf("pull request #%d of the request was merged into %s, where it was moved, not into the "+
+		"target branch", cr.Number, where)
 }
 
 // messageOpenElsewhere is the tail of every message that ends a stop on the request's own pull request open on
@@ -630,32 +641,21 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	// The pull request may exist although the status write that records it failed (design section 6). Every pull
 	// request of the branch is read (changeOf), since the newest may hide an older one of this request: an open one
 	// of its own is adopted, else a merged one, else a closed one. With none of its own open or merged on the target
-	// branch, the open ones of the branch to every base are listed (openElsewhere, as the settlement does): one of
-	// its own that a person moved to another base is recorded and stops the request, and none is opened next to it
-	// (#892, decision of 2026-11-19; invariant 5). With none of its own, a pull request of the branch without its
-	// marker stops the request; with none at all the branch steps go on. Unknown is retried.
+	// branch, the pull requests of the branch to every base, in every state, are listed too (openElsewhere): a person
+	// may have moved its own to another base, and closed or merged it there (#892, decisions of 2026-11-19;
+	// invariant 5). Open there, it is recorded and stops the request as the watch does; merged there, it is recorded
+	// and stops the request as the watch does for a recorded one (stopMergedElsewhere); closed there, it stops the
+	// request as one closed on the target branch does. None is opened next to it in any case. With none of its own, a
+	// pull request of the branch without its marker stops the request; with none at all the branch steps go on.
+	// Unknown is retried, a listing past its bound included, and opens nothing.
 	v := r.changeOf(ctx, git, rr, changeQuery{})
 	var open []providers.ChangeRequest
-	if failed, ok := r.openElsewhere(ctx, git, rr, []remediationv1alpha1.GitBranch{src.TargetBranch}, false, &v,
+	if failed, ok := r.openElsewhere(ctx, git, rr, []remediationv1alpha1.GitBranch{src.TargetBranch}, false, true, &v,
 		&open); !ok {
 		v = failed
 	}
-	switch adoptRule[v.state] {
-	case adoptRetry:
-		return reconcile.Result{}, v.err
-	case adoptIt:
-		return reconcile.Result{}, r.adoptChangeRequest(ctx, git, rr, v.pr, fresh.File)
-	case adoptElsewhere:
-		// Recorded in the write that stops the request, so the watch, the lock and the finalizer read it by its
-		// number from then on. A lost write is found again by the next look.
-		recordFound(rr, v.pr)
-		return reconcile.Result{}, r.stopOpenElsewhere(ctx, rr, v.pr)
-	case adoptNone:
-		if v.foreign {
-			return reconcile.Result{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention,
-				ReasonForeignChangeRequest, "A pull request for the branch exists without this request's marker; "+
-					"it was not touched")
-		}
+	if done, err := r.adoptFound(ctx, git, rr, v, fresh.File); done {
+		return reconcile.Result{}, err
 	}
 
 	head, err := git.BranchHead(ctx, branch)
@@ -771,6 +771,36 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 	return reconcile.Result{}, r.recordPullRequest(ctx, rr, cr)
 }
 
+// adoptFound is pullRequestStep's answer to v, the read of the request's pull requests on every base: done is true
+// when it decided (adopted, stopped or a failed read to retry, err), false when the branch steps go on.
+func (r *RemediationRequestReconciler) adoptFound(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, freshFile []byte) (bool, error) {
+	switch adoptRule[v.state] {
+	case adoptRetry:
+		return true, v.err
+	case adoptIt:
+		return true, r.adoptChangeRequest(ctx, git, rr, v.pr, freshFile)
+	case adoptElsewhere:
+		// Recorded in the write that stops the request, so the watch, the lock and the finalizer read it by its
+		// number from then on. A lost write is found again by the next look.
+		recordFound(rr, v.pr)
+		return true, r.stopOpenElsewhere(ctx, rr, v.pr)
+	case adoptMergedElsewhere:
+		// Recorded in the write that stops the request, as the watch has it, without a merge: nothing reached the
+		// target branch. A lost write is found again by the next look.
+		if recordable(v.pr) {
+			recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: v.pr.Number, URL: v.pr.URL, HeadSHA: v.pr.HeadSHA})
+		}
+		return true, r.stopMergedElsewhere(ctx, rr, v.pr)
+	case adoptNone:
+		if v.foreign {
+			return true, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonForeignChangeRequest,
+				"A pull request for the branch exists without this request's marker; it was not touched")
+		}
+	}
+	return false, nil
+}
+
 // adoptOutcome is what pullRequestStep does per verdict on the pull requests of the branch.
 type adoptOutcome int
 
@@ -783,13 +813,17 @@ const (
 	// (openElsewhere). The request records it and stops as the watch does (stopOpenElsewhere), and nothing is
 	// opened on the target branch next to it.
 	adoptElsewhere
+	// adoptMergedElsewhere: the request's own pull request was merged into a base a person moved it to, found by its
+	// marker in the listing of every base in every state. The request records it and stops as the watch does for a
+	// recorded one (stopMergedElsewhere), and nothing is opened on the target branch.
+	adoptMergedElsewhere
 )
 
 // adoptRule is pullRequestStep's rule per verdict: open, merged and closed adopt the pull request (record it, end
-// Merged, or stop as closed), gone goes on to the branch steps, unknown is retried.
+// Merged, or stop as closed; closed on another base as well), gone goes on to the branch steps, unknown is retried.
 var adoptRule = map[changeState]adoptOutcome{
 	changeOpen: adoptIt, changeMerged: adoptIt, changeClosed: adoptIt, changeGone: adoptNone,
-	changeElsewhere: adoptElsewhere, changeUnknown: adoptRetry,
+	changeElsewhere: adoptElsewhere, changeMergedElsewhere: adoptMergedElsewhere, changeUnknown: adoptRetry,
 }
 
 // checkPlanned checks a branch head whose file holds the planned value before its pull request is opened or
@@ -879,7 +913,7 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	case changeElsewhere:
 		// A person moved it to another base since the open (#892): nothing is closed there.
 		return r.stopOpenElsewhere(ctx, rr, v.pr)
-	case changeOpen, changeGone, changeUnknown:
+	case changeOpen, changeGone, changeMergedElsewhere, changeUnknown:
 	}
 	err := git.CloseChangeRequest(cleanCtx, cr.Number)
 	err = boundErr(ctx, cleanCtx, "close the pull request", err)
@@ -1153,7 +1187,7 @@ func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr 
 		return r.endMerged(ctx, git, rr, v.pr)
 	case changeUnknown:
 		return errors.Join(closeErr, v.err)
-	case changeOpen, changeClosed, changeGone, changeElsewhere:
+	case changeOpen, changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
 	}
 	return closeErr
 }
@@ -1561,6 +1595,8 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 			"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
 	case changeElsewhere:
 		return hintLook{}, r.stopOpenElsewhere(ctx, rr, v.pr)
+	case changeMergedElsewhere:
+		return hintLook{}, r.stopMergedElsewhere(ctx, rr, v.pr)
 	case changeOpen, changeMerged, changeClosed:
 	}
 	// changeOf read the recorded number and answers about it only, so cr is that pull request.
@@ -1624,6 +1660,18 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,
 		"The recorded "+openElsewhereText(cr)+"; automation stopped"+messageOpenElsewhere)
+}
+
+// stopMergedElsewhere is the watch's and the adoption's answer to the request's own pull request, cr, merged into a
+// base a person moved it to, not the target branch (#892): the change did not reach the target branch, so nothing is
+// recorded as merged and nothing can be verified. The request stops in NeedsIntervention with
+// ChangeRequestOnOtherBase and a message that names the pull request, for a person to decide. Nothing is written to
+// the pull request, and it keeps no lock: it cannot merge again.
+func (r *RemediationRequestReconciler) stopMergedElsewhere(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,
+		"The "+mergedElsewhereText(cr)+", so its change did not reach the target branch; automation stopped and "+
+			"Shadewright writes nothing to it")
 }
 
 // recordMergeSeen records the merge of the recorded pull request, cr, seen merged with the head Shadewright

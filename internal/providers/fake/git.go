@@ -60,7 +60,7 @@ type Git struct {
 	foreignRuns map[string][]providers.CheckRun
 	// fb is the feedback of the change requests (feedback.go), guarded by mu.
 	fb feedbackStore
-	// unnamed are the base names ListOpenChangeRequestsAnyBase leaves out (HideBaseName), guarded by mu.
+	// unnamed are the base names ListChangeRequestsAnyBase leaves out (HideBaseName), guarded by mu.
 	unnamed map[string]bool
 }
 
@@ -604,13 +604,14 @@ func (g *Git) ListChangeRequests(ctx context.Context, headBranch string, openOnl
 	return g.listFor(headBranch, openOnly, g.target)
 }
 
-// ListOpenChangeRequestsAnyBase is GitProvider.ListOpenChangeRequestsAnyBase: the open change requests of
-// headBranch to every base branch.
-func (g *Git) ListOpenChangeRequestsAnyBase(_ context.Context, headBranch string) ([]providers.ChangeRequest, error) {
-	if err := g.before("ListOpenChangeRequestsAnyBase"); err != nil {
+// ListChangeRequestsAnyBase is GitProvider.ListChangeRequestsAnyBase: the change requests of headBranch to every
+// base branch, only the open ones when openOnly is true.
+func (g *Git) ListChangeRequestsAnyBase(_ context.Context, headBranch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	if err := g.before("ListChangeRequestsAnyBase"); err != nil {
 		return nil, err
 	}
-	out, err := g.listFor(headBranch, true, "")
+	out, err := g.listFor(headBranch, openOnly, "")
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i := range out {
@@ -621,7 +622,7 @@ func (g *Git) ListOpenChangeRequestsAnyBase(_ context.Context, headBranch string
 	return out, err
 }
 
-// HideBaseName makes ListOpenChangeRequestsAnyBase answer change requests to base with no base name, as a provider
+// HideBaseName makes ListChangeRequestsAnyBase answer change requests to base with no base name, as a provider
 // does for a name outside its rule for target branches.
 func (g *Git) HideBaseName(base string) {
 	g.mu.Lock()

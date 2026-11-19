@@ -202,10 +202,10 @@ func (g *gatedGit) ListChangeRequests(ctx context.Context, headBranch string, op
 	return value, readFailure("ListChangeRequests", err)
 }
 
-func (g *gatedGit) ListOpenChangeRequestsAnyBase(ctx context.Context, headBranch string) (
+func (g *gatedGit) ListChangeRequestsAnyBase(ctx context.Context, headBranch string, openOnly bool) (
 	[]providers.ChangeRequest, error) {
-	value, err := g.git.ListOpenChangeRequestsAnyBase(ctx, headBranch)
-	return value, readFailure("ListOpenChangeRequestsAnyBase", err)
+	value, err := g.git.ListChangeRequestsAnyBase(ctx, headBranch, openOnly)
+	return value, readFailure("ListChangeRequestsAnyBase", err)
 }
 
 // IsAncestor is a read and passes straight through, when the wrapped provider can answer it

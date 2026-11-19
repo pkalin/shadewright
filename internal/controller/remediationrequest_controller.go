@@ -2302,7 +2302,8 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 		// retried (#688), so a stale plan's cleanup, the deadline's and a render refusal's never end the request
 		// with its pull request open on a single read.
 		return v.err
-	case changeGone:
+	case changeGone, changeMergedElsewhere:
+		// Merged into another base (#892): nothing to close, and nothing is written to it there, as for gone.
 		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
 	case changeElsewhere:
 		// Open on a base a person moved it to (#892): nothing is written to it there; each caller ends its stop
@@ -2339,7 +2340,7 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 		if err := r.closeUnrecordedElsewhere(ctx, git, rr, deleting); err != nil {
 			return err
 		}
-	case changeOpen, changeMerged, changeElsewhere:
+	case changeOpen, changeMerged, changeElsewhere, changeMergedElsewhere:
 	}
 	for _, cr := range v.own {
 		if cr.State != providers.ChangeRequestOpen {
@@ -2377,7 +2378,7 @@ func (r *RemediationRequestReconciler) closeUnrecordedElsewhere(ctx context.Cont
 			return err
 		}
 		return closeFailed(v.pr, git.CloseChangeRequestAnyBase(ctx, v.pr.Number))
-	case changeOpen, changeMerged, changeClosed, changeGone:
+	case changeOpen, changeMerged, changeClosed, changeGone, changeMergedElsewhere:
 	}
 	return nil
 }
@@ -2500,7 +2501,8 @@ const (
 // and keeps the finalizer.
 var finalizeRule = map[changeState]finalizeOutcome{
 	changeOpen: finalizeClose, changeMerged: finalizeNothing, changeClosed: finalizeNothing,
-	changeGone: finalizeNothing, changeElsewhere: finalizeCloseAnyBase, changeUnknown: finalizeRetry,
+	changeGone: finalizeNothing, changeElsewhere: finalizeCloseAnyBase, changeMergedElsewhere: finalizeNothing,
+	changeUnknown: finalizeRetry,
 }
 
 // closeConflictError is closeChangeRequest's answer when the close of a pull request it found by the branch of a

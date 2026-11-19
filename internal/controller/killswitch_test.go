@@ -151,8 +151,8 @@ func (p *checkpointProbe) ListChangeRequests(ctx context.Context, _ string, _ bo
 	return nil, p.probe(ctx, "ListChangeRequests")
 }
 
-func (p *checkpointProbe) ListOpenChangeRequestsAnyBase(ctx context.Context, _ string) ([]providers.ChangeRequest, error) {
-	return nil, p.probe(ctx, "ListOpenChangeRequestsAnyBase")
+func (p *checkpointProbe) ListChangeRequestsAnyBase(ctx context.Context, _ string, _ bool) ([]providers.ChangeRequest, error) {
+	return nil, p.probe(ctx, "ListChangeRequestsAnyBase")
 }
 
 func (p *checkpointProbe) CreateBranch(ctx context.Context, _, _ string) error {

@@ -269,7 +269,7 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 			return r.recordOwnMerge(ctx, rr, v.pr)
 		})
 		return res, true, err
-	case changeClosed, changeGone:
+	case changeClosed, changeGone, changeMergedElsewhere:
 		res, err := r.endCancelFound(ctx, rr, checkErr, false)
 		return res, true, err
 	case changeElsewhere:

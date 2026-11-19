@@ -6902,13 +6902,14 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			isGone         = verdictCase{changeGone, ""}
 			goneOtherOpen  = verdictCase{changeGone, "another pull request open on the branch"}
 			isElsewhere    = verdictCase{changeElsewhere, "its own moved by a person to another base (#892)"}
+			mergedThere    = verdictCase{changeMergedElsewhere, "its own moved by a person to another base and merged there"}
 			goneFirstLook  = verdictCase{changeUnknown, "a first look that finds it missing"}
 			failedRead     = verdictCase{changeUnknown, "a server error"}
 			unconfirmed404 = verdictCase{changeUnknown, "an unconfirmed 404"}
 			contradicting  = verdictCase{changeUnknown, "contradicting reads"}
 			forbidden      = verdictCase{changeUnknown, "a 403"}
-			cases          = []verdictCase{isOpen, isMerged, isClosed, isGone, goneOtherOpen, isElsewhere, goneFirstLook,
-				failedRead, unconfirmed404, contradicting, forbidden}
+			cases          = []verdictCase{isOpen, isMerged, isClosed, isGone, goneOtherOpen, isElsewhere, mergedThere,
+				goneFirstLook, failedRead, unconfirmed404, contradicting, forbidden}
 		)
 		name := func(c verdictCase) string {
 			if c.how == "" {
@@ -6975,6 +6976,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(git.CloseChangeRequest(ctx, n)).To(Succeed())
 			case isElsewhere:
 				moveAway(n)
+			case mergedThere:
+				moveAway(n)
+				_, err := git.Merge(n)
+				Expect(err).NotTo(HaveOccurred())
 			case isGone, goneOtherOpen, goneFirstLook:
 				// Closed, and the status records a number the host has not: a 404 the branch confirms. Gone needs
 				// it seen missing once before by this process, at least confirmWait earlier (goneLooks). The closed one loses
@@ -7023,6 +7028,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(git.CloseChangeRequest(ctx, own)).To(Succeed())
 			case isElsewhere:
 				moveAway(own)
+			case mergedThere:
+				moveAway(own)
+				_, err := git.Merge(own)
+				Expect(err).NotTo(HaveOccurred())
 			}
 			fault(c, 0)
 			return own, other
@@ -7221,7 +7230,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:        lookAgain(o(stopped, none, held, kept, done)),
 					goneOtherOpen: lookAgain(o(stopped, none, held, kept, done)),
 					// Stopped ChangeRequestOnOtherBase, nothing written to it there.
-					isElsewhere:    lookAgain(o(stopped, none, held, kept, done)),
+					isElsewhere: lookAgain(o(stopped, none, held, kept, done)),
+					// Stopped ChangeRequestOnOtherBase naming it; the stopped holder is looked at again.
+					mergedThere:    lookAgain(o(stopped, none, held, kept, done)),
 					goneFirstLook:  o(awaiting, none, held, kept, requeue),
 					failedRead:     o(awaiting, none, held, kept, requeue),
 					unconfirmed404: o(awaiting, none, held, kept, requeue),
@@ -7244,6 +7255,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:         o(stopped, none, released, kept, done),
 					goneOtherOpen:  o(stopped, none, held, kept, requeue),
 					isElsewhere:    o(stopped, none, held, kept, requeue),
+					mergedThere:    o(stopped, none, released, kept, done),
 					goneFirstLook:  o(stopped, none, held, kept, requeue),
 					failedRead:     o(stopped, none, held, kept, requeue),
 					unconfirmed404: o(stopped, none, held, kept, requeue),
@@ -7262,6 +7274,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					goneOtherOpen: o(deleted, none, "-", "-", done),
 					// Closed there by its number (CloseChangeRequestAnyBase), then the finalizer goes.
 					isElsewhere:    o(deleted, "own", "-", "-", done),
+					mergedThere:    o(deleted, none, "-", "-", done),
 					goneFirstLook:  o(awaiting, none, held, kept, requeue),
 					failedRead:     o(awaiting, none, held, kept, requeue),
 					unconfirmed404: o(awaiting, none, held, kept, failed),
@@ -7282,6 +7295,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					goneOtherOpen: o(stopped, none, held, kept, done),
 					// Nothing closed there: stopped ChangeRequestOnOtherBase.
 					isElsewhere:    o(stopped, none, held, kept, done),
+					mergedThere:    o(stopped, none, held, kept, done),
 					goneFirstLook:  o(awaiting, none, held, kept, failed),
 					failedRead:     o(awaiting, none, held, kept, failed),
 					unconfirmed404: o(awaiting, none, held, kept, failed),
@@ -7313,6 +7327,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:         seenAgain(wait(o(expired, none, held, kept, requeue), heldRecheckInterval)),
 					goneOtherOpen:  seenAgain(wait(o(expired, none, held, kept, requeue), heldRecheckInterval)),
 					isElsewhere:    wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
+					mergedThere:    o(expired, none, released, kept, done),
 					goneFirstLook:  wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
 					failedRead:     wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
 					unconfirmed404: wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
@@ -7337,6 +7352,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					goneOtherOpen: o(stopped, none, held, kept, done),
 					// Nothing closed there: stopped ChangeRequestOnOtherBase.
 					isElsewhere:    o(stopped, none, held, kept, done),
+					mergedThere:    o(stopped, none, held, kept, done),
 					goneFirstLook:  o(awaiting, none, held, kept, failed),
 					failedRead:     o(awaiting, none, held, kept, failed),
 					unconfirmed404: o(awaiting, none, held, kept, failed),
@@ -7359,7 +7375,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					// Found by its marker on the other base (decision of 2026-11-19 on #892): recorded, nothing
 					// opened next to it, stopped ChangeRequestOnOtherBase like the watch; the stopped holder is looked
 					// at again, as for closed.
-					isElsewhere:    lookAgain(o(stopped, none, held, kept, done)),
+					isElsewhere: lookAgain(o(stopped, none, held, kept, done)),
+					// Found by its marker on the other base, merged there (decision of 2026-11-19 on #892): recorded,
+					// nothing opened, stopped ChangeRequestOnOtherBase as the watch does; looked at again, as for closed.
+					mergedThere:    lookAgain(o(stopped, none, held, kept, done)),
 					goneFirstLook:  na,
 					failedRead:     o(checked, none, held, kept, requeue),
 					unconfirmed404: o(checked, none, held, kept, requeue),
@@ -7391,6 +7410,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isGone:         o(expired, none, released, kept, done),
 					goneOtherOpen:  wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
 					isElsewhere:    wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
+					mergedThere:    o(expired, none, released, kept, done),
 					goneFirstLook:  na,
 					failedRead:     wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
 					unconfirmed404: wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
@@ -7409,6 +7429,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					goneOtherOpen: o(stale, none, held, kept, done),
 					// Found by its marker on the other base: nothing closed there, stopped ChangeRequestOnOtherBase.
 					isElsewhere:    o(stopped, none, held, kept, done),
+					mergedThere:    o(stale, none, held, kept, done),
 					goneFirstLook:  na,
 					failedRead:     o(checked, none, held, kept, failed),
 					unconfirmed404: o(checked, none, held, kept, failed),
@@ -7428,6 +7449,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					goneOtherOpen: o(deleted, none, "-", "-", done),
 					// Found by its marker on the other base and closed there.
 					isElsewhere:    o(deleted, "own", "-", "-", done),
+					mergedThere:    o(deleted, none, "-", "-", done),
 					goneFirstLook:  na,
 					failedRead:     o(checked, none, held, kept, requeue),
 					unconfirmed404: o(checked, none, held, kept, requeue),

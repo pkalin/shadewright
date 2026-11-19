@@ -118,7 +118,8 @@ func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 		switch v := r.changeOf(ctx, git, rr, changeQuery{marker: true}); v.state {
 		case changeUnknown:
 			return v.err
-		case changeGone:
+		case changeGone, changeMergedElsewhere:
+			// Merged into another base: nothing is written to it there, as for gone.
 			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
 		case changeElsewhere:
 			// Open on a base a person moved it to (#892): nothing is written to it there.

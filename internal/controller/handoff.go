@@ -606,7 +606,7 @@ func (r *RemediationRequestReconciler) findHanded(ctx context.Context, git provi
 	switch v.state {
 	case changeUnknown:
 		return providers.ChangeRequest{}, "", v.err
-	case changeGone:
+	case changeGone, changeMergedElsewhere:
 		return providers.ChangeRequest{}, v.gone, nil
 	case changeElsewhere:
 		// Open on a base a person moved it to (#892): it is not taken over, and nothing is written to it there.
@@ -1138,7 +1138,8 @@ const (
 // exists.
 var recoverRule = map[changeState]recoverOutcome{
 	changeOpen: recoverRetry, changeMerged: recoverFromPullRequest, changeClosed: recoverFromPullRequest,
-	changeGone: recoverNothing, changeElsewhere: recoverRetry, changeUnknown: recoverRetry,
+	changeGone: recoverNothing, changeElsewhere: recoverRetry, changeMergedElsewhere: recoverNothing,
+	changeUnknown: recoverRetry,
 }
 
 // handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep

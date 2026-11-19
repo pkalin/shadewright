@@ -816,7 +816,7 @@ func TestDropLogsCountTheAbsorbed(t *testing.T) {
 	at := time.Now().Truncate(time.Second)
 	b := &batch{spec: specOf(oomCause(1, at)), occurrences: map[string]heldOccurrence{},
 		absorbed: map[remediationv1alpha1.AbsorbedReason]tally{remediationv1alpha1.AbsorbedBackOff: {count: 4, last: at}}}
-	c.dropDeleted(logs.context(t.Context()), fp(1), Name(fp(1)), []*batch{b}, &deletedError{name: Name(fp(1))})
+	c.dropDeleted(logs.context(t.Context()), fp(1), Name(fp(1)), []*batch{b}, &deletedError{name: Name(fp(1))}, true)
 	if got := logs.with("Dropped observations of a deleted Incident", `"count"=0`, `"absorbed"=4`); len(got) != 1 {
 		t.Fatalf("drop lines with the absorbed count: %q; all lines %q", got, logs.lines)
 	}

@@ -331,6 +331,9 @@ func (c *Controller) foldInto(ctx context.Context, name string) error {
 // moving it to Proposed, the closure rules) fails on a conflict and is decided again from the new state. An
 // Incident gone meanwhile is no error.
 func (c *Controller) foldOne(ctx context.Context, name string, cause *remediationv1alpha1.Incident, now time.Time) error {
+	c.mu.Lock()
+	deletedMeanwhile := c.watchDeletes(name)
+	c.mu.Unlock()
 	var folded *remediationv1alpha1.Incident
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		folded = nil
@@ -354,6 +357,16 @@ func (c *Controller) foldOne(ctx context.Context, name string, cause *remediatio
 		folded = inc
 		return nil
 	})
+	c.mu.Lock()
+	if deletedMeanwhile() {
+		// The informers reported the delete of the Incident while the fold was in flight: what it wrote is about
+		// a deleted object and is not remembered again over what the delete changed ([Controller.watchDeletes]).
+		folded = nil
+	}
+	if err == nil && folded != nil {
+		c.noteState(folded)
+	}
+	c.mu.Unlock()
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -363,9 +376,6 @@ func (c *Controller) foldOne(ctx context.Context, name string, cause *remediatio
 	if folded == nil {
 		return nil
 	}
-	c.mu.Lock()
-	c.noteState(folded)
-	c.mu.Unlock()
 	logf.FromContext(ctx).Info("Folded a consequence Incident into its cause's Incident", "incident", name,
 		"cause", cause.Name)
 	return nil

@@ -711,7 +711,7 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		}
 		checkWork(t, name, []workSample{small, large})
 	}
-	// The figure the docs give for the largest unit (comma fields after a quoted value, "blanks commas").
+	// The figure the docs give for the unit to which String adds the most ("extent backticks in quotes").
 	t.Logf("largest unit: %s, String adds %.1f steps per byte to the release's reading", largestName, largest)
 }
 

@@ -21,8 +21,8 @@ package released
 // be edited (TestReleasedIsTheReleaseBefore pins them). Package redact applies it as one reading of each text, at
 // the places and in the order of passes the tools of that release applied it (#845, thirteenth decision of
 // 2026-11-18), so that what the release before hid is hidden because its own code says so. Only this file and
-// the tick files are new. The package is retired, with its reading, by its own issue once a release has run
-// with both readings.
+// the tick files are new. The package is retired, with its reading, by its own issue (pkalin/shadewright#922)
+// once a release has run with both readings.
 
 // Span is a byte range of a text that the redactor of the release before hides, with the kind its marker names.
 type Span struct {

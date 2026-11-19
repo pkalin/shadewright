@@ -57,7 +57,9 @@ const (
 	NameCheckMissingReference = "check_missing_reference"
 )
 
-// Redactor removes secrets from text; *redact.Redactor implements it.
+// Redactor removes secrets from text; *redact.Redactor implements it. [New] also needs the redactor to decide on
+// an answer written as pieces (PiecesWithin and PiecesFitting, as *redact.Redactor does) and refuses one that
+// cannot.
 type Redactor interface {
 	String(s string) string
 }
@@ -79,7 +81,8 @@ type Config struct {
 	// the Flux adapter's status reader by the collector's rule for the Flux module's grant (list and watch on
 	// Flux objects in the watched namespaces; collector.Granted), reading with list (analyzer.ListGetter).
 	Delivery providers.DeliveryVerifier
-	// Redactor redacts every piece of text before it is cut or returned. Required.
+	// Redactor redacts every piece of text before it is cut or returned. Required, with PiecesWithin and
+	// PiecesFitting (*redact.Redactor).
 	Redactor Redactor
 	// Namespaces is the watched set (--watch-namespaces). A tool refuses any other namespace before reading;
 	// an empty set refuses every one.
@@ -101,7 +104,7 @@ type Set struct {
 	logs                  providers.LogSource
 	metrics               providers.MetricsSource
 	delivery              providers.DeliveryVerifier
-	redactor              Redactor
+	redactor              pieceRedactor
 	namespaces            map[string]struct{}
 	deliveryNamespaces    map[string]struct{}
 	timeout               time.Duration
@@ -115,6 +118,10 @@ func New(cfg Config) (*Set, error) {
 	}
 	if cfg.Redactor == nil {
 		return nil, errors.New("tools need a redactor")
+	}
+	red, ok := cfg.Redactor.(pieceRedactor)
+	if !ok {
+		return nil, fmt.Errorf("tools need a redactor that decides on an answer as pieces (PiecesWithin and PiecesFitting), got %T", cfg.Redactor)
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = DefaultTimeout
@@ -136,7 +143,7 @@ func New(cfg Config) (*Set, error) {
 	return &Set{
 		pods: cfg.Pods, events: cfg.Events, objects: cfg.Objects,
 		logs: cfg.Logs, metrics: cfg.Metrics, delivery: cfg.Delivery,
-		redactor: cfg.Redactor, namespaces: ns, deliveryNamespaces: dns, timeout: cfg.Timeout, now: cfg.Now,
+		redactor: red, namespaces: ns, deliveryNamespaces: dns, timeout: cfg.Timeout, now: cfg.Now,
 	}, nil
 }
 
@@ -173,7 +180,8 @@ type Label string
 
 // Labels.
 const (
-	// LabelCut: the result was cut to the tool's byte bound, in whole lines.
+	// LabelCut: the result was cut to the tool's byte bound, in whole lines; or, for get_resource, values (then
+	// map keys) were left out, each replaced by a note of its size, to keep the answer valid JSON within the bound.
 	LabelCut Label = "cut to the result bound"
 	// LabelTimedOut: a read ran out of the tool's timeout.
 	LabelTimedOut Label = "timed out"

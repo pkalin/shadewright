@@ -156,9 +156,12 @@ FUZZTIME ?= 30s
 fuzz: ## Run each fuzz target (FUZZ, default all) for FUZZTIME (default 30s); a failing input is saved under the package's testdata/fuzz.
 	@hack/fuzz-targets.sh "$(CURDIR)" $(FUZZ_TARGETS)
 	@$(if $(filter-out $(FUZZ_TARGETS),$(FUZZ)),echo "Not in FUZZ_TARGETS: $(filter-out $(FUZZ_TARGETS),$(FUZZ))" >&2; exit 1)
+	@# A target in a package with a file built only with the tag redactwork runs with it, so that the targets that
+	@# check the work bound of redaction (internal/redact FuzzDiff*, P3) count the work (hack/fuzz-targets.sh --tags).
 	@for t in $(FUZZ); do \
-		echo "fuzz ./$${t%%:*} $${t##*:} for $(FUZZTIME)"; \
-		go test -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
+		tags="$$(hack/fuzz-targets.sh --tags "$(CURDIR)" "$${t%%:*}")" || exit 1; \
+		echo "fuzz ./$${t%%:*} $${t##*:} for $(FUZZTIME)$${tags:+ with -tags $$tags}"; \
+		go test -tags "$$tags" -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
 	done
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.

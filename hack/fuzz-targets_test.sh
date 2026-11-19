@@ -31,4 +31,16 @@ refuse "helper listed as a target" internal/a:FuzzParse internal/b:FuzzMatch int
 printf 'package main\n\nfunc FuzzParse(f *testing.F) {}\n' > "${tmp}/cmd/main_test.go"
 refuse "same name in a second package" internal/a:FuzzParse internal/b:FuzzMatch
 pass "both packages listed" internal/a:FuzzParse internal/b:FuzzMatch cmd:FuzzParse
+
+# --tags: redactwork for a package with a file built only with that tag, nothing for any other.
+tags() { # name, dir, want
+  local got
+  got="$("${script}" --tags "${tmp}" "$2")"
+  if [[ "${got}" == "$3" ]]; then echo "ok: $1"; else echo "FAIL: $1: tags \"${got}\", want \"$3\"" >&2; fail=1; fi
+}
+printf '//go:build redactwork\n\npackage a\n' > "${tmp}/internal/a/work_counted_test.go"
+printf '//go:build !redactwork\n\npackage b\n' > "${tmp}/internal/b/work_uncounted_test.go"
+tags "work package fuzzed with redactwork" internal/a redactwork
+tags "package without the tag" internal/b ""
+tags "package without any tag" cmd ""
 exit "${fail}"

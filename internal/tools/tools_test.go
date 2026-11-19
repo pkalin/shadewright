@@ -34,6 +34,7 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
 	"github.com/pkalin/shadewright/internal/providers/metrics/prometheus"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // validArgs are arguments each tool accepts, in the watched namespace.
@@ -639,6 +640,33 @@ const canaryMark = "CANARY-7f3a"
 
 func (canary) String(s string) string { return strings.ReplaceAll(s, canaryMark, "[x]") }
 
+func (c canary) PiecesWithin(ps []redact.Piece, _ int) []string { return eachPiece(c, ps) }
+
+func (c canary) PiecesFitting(ps []redact.Piece, _ func([]string) bool) []string {
+	return eachPiece(c, ps)
+}
+
+// eachPiece decides the pieces with r one value at a time, for a test redactor: each value redacted alone and
+// written in its form, a value marked Whole hidden.
+func eachPiece(r Redactor, ps []redact.Piece) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = p.Text
+		switch {
+		case p.Whole:
+			out[i] = redact.Marker(redact.KindCredential, len(redact.Written(p.Form, p.Text)))
+		case p.Data:
+			out[i] = redact.Written(p.Form, r.String(p.Text))
+		}
+	}
+	return out
+}
+
+// stringOnly is a redactor with String alone, which cannot decide on an answer as pieces.
+type stringOnly struct{}
+
+func (stringOnly) String(s string) string { return s }
+
 // Acceptance: redaction of a planted secret, in every tool that returns cluster or source text; a redactor
 // that removes only a canary shows that each goes through the configured redactor.
 func TestRedactsPlantedSecrets(t *testing.T) {
@@ -777,6 +805,8 @@ func TestNewRefusesBadConfig(t *testing.T) {
 		"timeout too long":  {Pods: r, Events: r, Objects: r, Redactor: red, Timeout: MaxTimeout + 1},
 		"negative timeout":  {Pods: r, Events: r, Objects: r, Redactor: red, Timeout: -1},
 		"invalid namespace": {Pods: r, Events: r, Objects: r, Redactor: red, Namespaces: []string{"Shop"}},
+		// A redactor that can only redact one value at a time would miss what the whole answer shows.
+		"redactor without pieces": {Pods: r, Events: r, Objects: r, Redactor: stringOnly{}},
 	} {
 		if _, err := New(cfg); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -900,8 +930,8 @@ func TestGetResourceDecidesTheObjectAsOneText(t *testing.T) {
 
 // The values in a collection under a secret-named field (a Secret volume, imagePullSecrets, a projected
 // service account token) are hidden whole, as main hid that JSON collection (#845, fourth decision of
-// 2026-11-18; showing them is #860), with the built-in redactor and with one that has no Pieces. A reference
-// field whose own name is a reference (envFrom's secretRef) keeps its name, as on main.
+// 2026-11-18; showing them is #860), with the built-in redactor and with one that decides each value alone
+// (canary). A reference field whose own name is a reference (envFrom's secretRef) keeps its name, as on main.
 func TestGetResourceHidesCollectionsUnderSecretNamedFields(t *testing.T) {
 	const (
 		volSecret = "vol-secret-name"
@@ -923,7 +953,7 @@ func TestGetResourceHidesCollectionsUnderSecretNamedFields(t *testing.T) {
 			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: tokenPath}}},
 		}}},
 	}
-	for name, red := range map[string]Redactor{builtInRules: nil, "no Pieces": canary{}} {
+	for name, red := range map[string]Redactor{builtInRules: nil, "each value alone": canary{}} {
 		e := newEnv(t, []client.Object{p}, func(c *Config) {
 			if red != nil {
 				c.Redactor = red
@@ -1004,7 +1034,7 @@ func TestGetResourceHidesEveryTokenOfAHiddenCollection(t *testing.T) {
 	p.Spec.Volumes = []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 		SecretName: "credentials", DefaultMode: &mode, Optional: &optional,
 	}}}}
-	for name, red := range map[string]Redactor{builtInRules: nil, "no Pieces": canary{}} {
+	for name, red := range map[string]Redactor{builtInRules: nil, "each value alone": canary{}} {
 		e := newEnv(t, []client.Object{p}, func(c *Config) {
 			if red != nil {
 				c.Redactor = red

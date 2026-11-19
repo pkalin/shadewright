@@ -42,15 +42,13 @@ import (
 // gives it (a field name, a map key, a label's name), and a secret key hides the whole value (#845, fifth
 // decision of 2026-11-18).
 
-// pieceRedactor is a [Redactor] that takes one decision on an answer written as pieces (*redact.Redactor's
-// PiecesWithin), with the markers fitted to a bound of the answer.
+// pieceRedactor is a [Redactor] that takes one decision on an answer written as pieces, with the markers fitted
+// to a bound of the answer (*redact.Redactor's PiecesWithin) or to a check of the caller's own answer (its
+// PiecesFitting). [New] refuses any other redactor: redacting each value alone would miss what only the whole
+// answer shows (a key's signal for the value after it, a match that runs across pieces).
 type pieceRedactor interface {
+	Redactor
 	PiecesWithin(ps []redact.Piece, limit int) []string
-}
-
-// fittingRedactor is a [pieceRedactor] that fits the markers to a check of the caller's own answer
-// (*redact.Redactor's PiecesFitting).
-type fittingRedactor interface {
 	PiecesFitting(ps []redact.Piece, fits func(out []string) bool) []string
 }
 
@@ -74,37 +72,22 @@ func (a *answer) value(key, v string) int {
 
 // decide takes the one decision on the pieces with the redactor and returns each piece as decided, made valid
 // UTF-8, its markers fitted so that the pieces joined are at most limit bytes long where they can be (none when
-// limit is negative; redact.Redactor.PiecesWithin). A redactor without PiecesWithin redacts each value on its
-// own, then writes it in its form, and hides a value marked Whole.
+// limit is negative; redact.Redactor.PiecesWithin).
 //
-// With fits not nil and a redactor that has PiecesFitting, the markers take the first form at which fits holds
-// of the pieces as decided and made valid UTF-8, in place of the limit.
+// With fits not nil, the markers take the first form at which fits holds of the pieces as decided and made valid
+// UTF-8, in place of the limit (redact.Redactor.PiecesFitting).
 func (s *Set) decide(ps []redact.Piece, limit int, fits func(out []string) bool) []string {
 	var out []string
-	fr, fitting := s.redactor.(fittingRedactor)
-	pr, pieces := s.redactor.(pieceRedactor)
-	switch {
-	case fits != nil && fitting:
-		out = fr.PiecesFitting(ps, func(out []string) bool {
+	if fits != nil {
+		out = s.redactor.PiecesFitting(ps, func(out []string) bool {
 			valid := make([]string, len(out))
 			for i := range out {
 				valid[i] = strings.ToValidUTF8(out[i], "?")
 			}
 			return fits(valid)
 		})
-	case pieces:
-		out = pr.PiecesWithin(ps, limit)
-	default:
-		out = make([]string, len(ps))
-		for i, p := range ps {
-			out[i] = p.Text
-			switch {
-			case p.Whole:
-				out[i] = redact.Marker(redact.KindCredential, len(redact.Written(p.Form, p.Text)))
-			case p.Data:
-				out[i] = redact.Written(p.Form, s.redactor.String(p.Text))
-			}
-		}
+	} else {
+		out = s.redactor.PiecesWithin(ps, limit)
 	}
 	for i := range out {
 		out[i] = strings.ToValidUTF8(out[i], "?")

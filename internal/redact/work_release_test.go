@@ -31,8 +31,8 @@ import (
 // reading by itself (released.Spans) on the same input, which must cost exactly what it cost inside String.
 
 // ownWorkPerByte bounds, per byte, the work String adds to the reading of the release before on every input
-// of the work tests. Measured on the build: at most 713.9 per byte (the extent rule on "blanks commas" in
-// TestRepeatedPatternsStayLinear), 31 to 77 on the staircases.
+// of the work tests. Measured on the build: at most 283.3 per byte (the extent rule on "extent backticks in
+// quotes" in TestRepeatedPatternsStayLinear), 31 to 77 on the staircases.
 const ownWorkPerByte = 768
 
 // releaseReadingShare bounds String's work against the release's reading on the same text: at most this many

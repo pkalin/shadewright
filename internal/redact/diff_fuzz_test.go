@@ -344,6 +344,7 @@ func checkOwnWork(t *testing.T, what, in string, f func()) {
 	if !counted {
 		t.Skip("redaction work is counted only with the build tag redactwork")
 	}
+	t.Logf("%s on %d bytes: the rest %.1f steps per byte", what, len(in), perByte(total-release, len(in)))
 	for _, fail := range workFails(what, total, release, len(in)) {
 		t.Error(fail)
 	}

@@ -285,10 +285,6 @@ var knownBuildFailures = map[string]redacttest.KnownFailure{}
 // had already replaced, no longer saw the key.
 const foundBuildExplicitKey = "19X\xd8Y\xb4A"
 
-// seedBuildReasonColon is input 1 of the fifteenth decision: the crashing container's waiting and terminated
-// reasons "password\uff1aAuthorization" (a fullwidth colon), their messages a secret.
-var seedBuildReasonColon = redacttest.RawSeed(0, "password\uff1aAuthorization", "\x01", "password\uff1aAuthorization", "\x01")
-
 // FuzzDiffBuild checks Build against origin/main's Build on the same answers (P1, P4).
 func FuzzDiffBuild(f *testing.F) {
 	for _, s := range [][]byte{

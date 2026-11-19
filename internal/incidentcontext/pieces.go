@@ -96,7 +96,7 @@ func fragf(format string, args ...any) frag {
 			out = append(out, f...)
 			continue
 		}
-		text.WriteString(fmt.Sprintf(spec, arg))
+		fmt.Fprintf(&text, spec, arg)
 	}
 	flush()
 	return out
@@ -162,21 +162,15 @@ func decide(r Redactor, ps frag, quotes int) (string, []string) {
 			}
 		}
 	}
-	values := make([]strings.Builder, quotes)
-	var b strings.Builder
+	vs := make([]string, quotes)
 	for i, p := range ps {
-		b.WriteString(out[i])
 		if p.quote > 0 {
-			values[p.quote-1].WriteString(out[i])
+			vs[p.quote-1] += out[i]
 		}
 	}
-	text := b.String()
+	text := strings.Join(out, "")
 	if _, ok := r.(pieceRedactor); !ok {
 		text = Redact(Twice(r), text)
-	}
-	vs := make([]string, quotes)
-	for i := range values {
-		vs[i] = values[i].String()
 	}
 	return text, vs
 }

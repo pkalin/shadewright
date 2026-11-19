@@ -25,6 +25,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -39,6 +41,7 @@ import (
 	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // A decided request holds its target until settleTargetLock proves that none of its branch's pull requests
@@ -752,7 +755,7 @@ func (r *RemediationRequestReconciler) heldLookResult(ctx context.Context, rr *r
 		return reconcile.Result{}, nil
 	case holding != nil:
 		log.Info("Kept the target lock of RemediationRequest: a pull request from its branch is open",
-			"pullRequest", holding.Number, "base", holding.BaseBranch)
+			"pullRequest", holding.Number, "base", hostBranchText(holding.BaseBranch))
 	default:
 		log.Info("Recorded the open pull request of a stopped RemediationRequest", "pullRequest", pr.Number)
 	}
@@ -802,7 +805,7 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 	} else if holding != nil {
 		msg := fmt.Sprintf("Pull request #%d is open on the request's branch and may still deliver its change; the target stays locked until it is closed or merged", holding.Number)
 		if v.movedTo != "" && holding.BaseBranch == string(v.movedTo) {
-			msg = fmt.Sprintf("Pull request #%d of the request is open on base branch %s, where it was moved, and may still merge; the target stays locked until it is closed or merged", holding.Number, v.movedTo)
+			msg = fmt.Sprintf("Pull request #%d of the request is open on base branch %s, where it was moved, and may still merge; the target stays locked until it is closed or merged", holding.Number, hostBranchText(string(v.movedTo)))
 		}
 		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 			Type: remediationv1alpha1.ConditionTargetHeld, Status: metav1.ConditionTrue, Reason: ReasonOpenOnBranch,
@@ -897,14 +900,17 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 
 // openElsewhere is lookHeld's read after neither target branch in read showed the request's own pull request (or,
 // with none recorded, one with its marker), when *verdict is gone: a person may have moved its base to another
-// branch (#892). An open pull request can still merge, so it keeps the lock wherever it is: it joins *open, and
-// verdict.movedTo names its base. Once it is closed or merged there, the listing no longer has it, and the lock goes.
+// branch (#892). It also runs when *verdict is closed: a closed pull request on a target branch is no verdict by
+// itself while another with the request's marker may be open elsewhere (decision of 2026-11-19 on #892). That
+// closed one is recorded by the look that finds it when none was (recordFound), so the listing runs with a number
+// recorded as well, and takes the recorded number or the marker as the request's own. An open pull request can
+// still merge, so it keeps the lock wherever it is: it joins *open, and verdict.movedTo names its base. Once it is closed or merged there, the listing no longer has it, and the lock goes.
 // A merge there is not recorded as the request's: it delivers nothing the plan was made for. A failed listing returns
 // its unknown verdict and false: the lock is kept, and the look retried as a failed Git read.
 func (r *RemediationRequestReconciler) openElsewhere(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, read []remediationv1alpha1.GitBranch, reinstalled bool,
 	verdict *changeVerdict, open *[]providers.ChangeRequest) (changeVerdict, bool) {
-	if verdict.state != changeGone {
+	if verdict.state != changeGone && verdict.state != changeClosed {
 		return changeVerdict{}, true
 	}
 	elsewhere := r.changeOf(ctx, git, rr, changeQuery{otherBases: read, reinstalled: reinstalled})
@@ -932,6 +938,33 @@ func (r *RemediationRequestReconciler) disproveRepositoryReason(ctx context.Cont
 		return &clusterError{err: err}
 	}
 	return nil
+}
+
+// maxHostBranchBytes bounds a branch name the code host answered in a condition message or a log line: the schema's
+// bound of a GitBranch.
+const maxHostBranchBytes = 255
+
+// hostBranchText is a branch name the code host answered (the base of a pull request, #892), made fit for a
+// condition message and the log: valid UTF-8, control characters replaced, redacted whole with the rules every
+// other text of the code host goes through, and cut at a rune boundary to maxHostBranchBytes, then "...". The
+// provider already refuses a base that is not a branch name (invariant 4); this holds without that check too.
+// Branch names in other messages come from the schema-checked status or settings (branchName) and need none of it.
+func hostBranchText(b string) string {
+	b = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, strings.ToValidUTF8(b, "?"))
+	b = redact.String(b)
+	if len(b) <= maxHostBranchBytes {
+		return b
+	}
+	cut := maxHostBranchBytes
+	for cut > 0 && !utf8.RuneStart(b[cut]) {
+		cut--
+	}
+	return b[:cut] + "..."
 }
 
 // ReasonOpenOnBranch is the reason of condition TargetHeld: a pull request from the request's branch is open and

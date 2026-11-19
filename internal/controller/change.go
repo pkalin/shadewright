@@ -98,7 +98,7 @@ type changeQuery struct {
 	configuredBranch remediationv1alpha1.GitBranch
 	// otherBases, when not nil, lists the open pull requests from the request's branch to every base branch of the
 	// repository (ListOpenChangeRequestsAnyBase) for the settlement of the target lock (lookHeld, #892), and answers
-	// open with the request's own one (its recorded number, or, with none recorded, one with this request's marker)
+	// open with the request's own one (its recorded number, or one with this request's marker)
 	// on a base not in otherBases, the target branches the settlement read already; gone when there is none.
 	otherBases []remediationv1alpha1.GitBranch
 	// reinstalled is a read through a new installation of the GitHub App for the plan's repository (#290): every
@@ -296,21 +296,27 @@ func (r *RemediationRequestReconciler) readOnConfigured(ctx context.Context, git
 	return v
 }
 
-// openOnOtherBase is readChange for q.otherBases: the request's own pull request (number n, or, when n is 0, the
-// newest with this request's marker) found open by the listing of the open pull requests from its branch to every
+// openOnOtherBase is readChange for q.otherBases: the request's own pull request (number n, or the newest with this
+// request's marker) found open by the listing of the open pull requests from its branch to every
 // base branch, on a base that is not in read. The listing is the proof that none is open elsewhere; one that fails
 // is unknown, never none.
 func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, n int64, read []remediationv1alpha1.GitBranch) changeVerdict {
 	open, err := git.ListOpenChangeRequestsAnyBase(ctx, freshness.BranchName(rr))
+	if providers.IsUntrustedAnswer(err) {
+		// An entry not asked for, or a base that is no branch name (decision of 2026-11-19 on #892): a failed read,
+		// paced and shown in GitReadRetry like any other, not an answer that disagrees (answeredUnknown), which is
+		// looked at again with nothing written. The host's text is dropped.
+		err = readFailure("ListOpenChangeRequestsAnyBase", errors.New("the Git host answered a pull request that was not asked for"))
+	}
 	if err != nil {
 		return unknownChange(listFailed("list the open change requests of the branch to every base", err))
 	}
 	for _, cr := range open {
-		if slices.Contains(read, remediationv1alpha1.GitBranch(cr.BaseBranch)) || n != 0 && cr.Number != n {
+		if slices.Contains(read, remediationv1alpha1.GitBranch(cr.BaseBranch)) {
 			continue
 		}
-		if n == 0 {
+		if n == 0 || cr.Number != n {
 			switch ours, err := r.ownsMarker(ctx, cr.Body, rr); {
 			case err != nil:
 				return unknownChange(err)

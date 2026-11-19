@@ -337,8 +337,8 @@ type GitProvider interface {
 
 	// ListOpenChangeRequestsAnyBase returns every open change request from headBranch, a Shadewright branch of this
 	// repository, to any base branch of this repository, newest first: also those whose base a person moved off the
-	// target branch (#892). An entry from another branch or repository, or one that is not open, is
-	// ErrUntrustedAnswer for the whole call. More than MaxBranchChangeRequests is ErrTooLarge. Any error is a failure
+	// target branch (#892). An entry from another branch or repository, one that is not open, or one whose base is
+	// not a valid branch name by the provider's rule for target branches, is ErrUntrustedAnswer for the whole call. More than MaxBranchChangeRequests is ErrTooLarge. Any error is a failure
 	// to find out, never an answer. It only reads.
 	ListOpenChangeRequestsAnyBase(ctx context.Context, headBranch string) ([]ChangeRequest, error)
 

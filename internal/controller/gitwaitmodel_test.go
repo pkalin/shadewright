@@ -1926,7 +1926,7 @@ func (m *modelWorld) delivers(live *api.RemediationRequest, cr providers.ChangeR
 	return cr.BaseBranch == m.configured || live.Status.Source != nil && cr.BaseBranch == string(live.Status.Source.TargetBranch)
 }
 
-// settled: after the world healed, the lock is free, or held by a request whose pull request is open; a merge
+// settled: after the world healed, the lock is free, or held by a request whose own pull request is open on any base; a merge
 // recorded with its receipt never holds it.
 func (m *modelWorld) settled() {
 	live := &api.RemediationRequest{}
@@ -1934,7 +1934,9 @@ func (m *modelWorld) settled() {
 		m.t.Fatal(err)
 	}
 	cr, found := m.pr()
-	open := found && cr.State == providers.ChangeRequestOpen && !m.deleted && m.delivers(live, cr)
+	// The request's own pull request open on any base, a third one included, can still merge and keeps the lock
+	// (decision of 2026-11-19 on #892); a closed or merged one, or none, does not.
+	open := found && cr.State == providers.ChangeRequestOpen && !m.deleted
 	switch {
 	case live.Status.MergeReceipt != nil && holdsLock(live) && !progresses(live) &&
 		!heldForVerification(live, m.r.VerifyOutcomes):

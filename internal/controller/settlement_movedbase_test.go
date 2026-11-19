@@ -19,11 +19,13 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -145,7 +147,19 @@ func TestSettlementMovedBaseKeepsLockWhileOpen(t *testing.T) {
 // #892: a failed listing of the open pull requests of the branch to every base keeps the lock with no verdict, and
 // is retried as a failed Git read: no error for the rate limiter, a wait of the poll interval at least, and a Git wait recorded in
 // status (condition GitReadRetry), never at once.
+//
+// An untrusted answer of that listing (a base that is no branch name, decision of 2026-11-19) is a failed read too.
 func TestSettlementMovedBaseFailedReadKeepsLock(t *testing.T) {
+	for name, fail := range map[string]error{
+		"host error": &providers.RetryableError{Err: errors.New("server error")},
+		"untrusted":  fmt.Errorf("a base that is no branch name: %w", providers.ErrUntrustedAnswer),
+	} {
+		t.Run(name, func(t *testing.T) { movedBaseFailedRead(t, fail) })
+	}
+}
+
+// movedBaseFailedRead is TestSettlementMovedBaseFailedReadKeepsLock with the listing failing with fail.
+func movedBaseFailedRead(t *testing.T, fail error) {
 	r, g, rr, clock, _ := movedBaseWorld(t, "branch")
 	ctx := context.Background()
 	// The first looks find the pull request on hotfix and confirm it gone from both target branches.
@@ -156,7 +170,7 @@ func TestSettlementMovedBaseFailedReadKeepsLock(t *testing.T) {
 	// Now the listing of the open pull requests of the branch to every base fails.
 	g.SetFail(func(op string) error {
 		if op == "ListOpenChangeRequestsAnyBase" {
-			return &providers.RetryableError{Err: errors.New("server error")}
+			return fail
 		}
 		return nil
 	})
@@ -179,5 +193,141 @@ func TestSettlementMovedBaseFailedReadKeepsLock(t *testing.T) {
 	}
 	if len(live.Status.GitWaits) == 0 {
 		t.Fatalf("no Git wait recorded for the failed listing of the other bases: %+v", live.Status)
+	}
+	if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); c == nil ||
+		c.Status != metav1.ConditionTrue {
+		t.Fatalf("GitReadRetry %+v: want it saying the read is retried", c)
+	}
+}
+
+// #892, decision of 2026-11-19: with no pull request recorded, a closed pull request with the request's marker on
+// the target branch is no verdict by itself. A second one with the marker, open on another base, keeps the lock:
+// the listing over every base runs before any release.
+func TestSettlementMovedBaseClosedOnTargetOpenElsewhereKeepsLock(t *testing.T) {
+	r, g, rr, clock, n := movedBaseWorld(t, stopLost)
+	ctx := context.Background()
+	// The first pull request is closed on the target branch; a second one with the marker is open on hotfix.
+	if err := g.CloseChangeRequest(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetBase(n, mainBranch); err != nil {
+		t.Fatal(err)
+	}
+	second, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(rr),
+		BaseBranch: mainBranch, Body: marker(rr)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Number == n {
+		t.Fatal("no second pull request was opened")
+	}
+	if err := g.SetBase(second.Number, movedBranch); err != nil {
+		t.Fatal(err)
+	}
+	closed := providers.ChangeRequest{Number: n}
+	live := lookMoved(t, r, rr, clock)
+	held := meta.FindStatusCondition(live.Status.Conditions, api.ConditionTargetHeld)
+	if !holdsLock(live) || held == nil || held.Reason != ReasonOpenOnBranch || !strings.Contains(held.Message, movedBranch) {
+		t.Fatalf("closed #%d on %s, the other open on %s: holds=%v TargetHeld=%+v; want the lock held",
+			closed.Number, mainBranch, movedBranch, holdsLock(live), held)
+	}
+}
+
+// #892, decision of 2026-11-19: the base of a pull request is text from the code host (invariant 4). The provider
+// refuses a base that is no branch name; without that check too, TargetHeld shows it only redacted, without control
+// characters and within maxHostBranchBytes, so a long one cannot push the message past the schema's bound and fail
+// every status write.
+func TestSettlementMovedBaseMessageBoundsTheBase(t *testing.T) {
+	// #nosec G101 -- a made-up value that a redaction rule must catch, not a credential
+	for name, base := range map[string]string{
+		"secret":  "hotfix/credential=review-secret",
+		"control": "x\nReleased the lock\x1b[31m",
+		"long":    strings.Repeat("b", 40000),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, g, rr, clock, n := movedBaseWorld(t, "branch")
+			ctx := context.Background()
+			head, err := g.BranchHead(ctx, mainBranch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := g.CreateBranch(ctx, base, head); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.SetBase(n, base); err != nil {
+				t.Fatal(err)
+			}
+			live := lookMoved(t, r, rr, clock)
+			held := meta.FindStatusCondition(live.Status.Conditions, api.ConditionTargetHeld)
+			if !holdsLock(live) || held == nil || held.Reason != ReasonOpenOnBranch {
+				t.Fatalf("holds=%v TargetHeld=%+v; want the lock held with TargetHeld", holdsLock(live), held)
+			}
+			if strings.Contains(held.Message, "review-secret") || strings.ContainsAny(held.Message, "\n\x1b") ||
+				len(held.Message) > 1024 {
+				t.Fatalf("TargetHeld shows the base as answered (%d bytes): %q", len(held.Message), held.Message)
+			}
+		})
+	}
+}
+
+// #892, decision of 2026-11-19: a cancel after a change of the target branch whose look finds the request's own pull
+// request open on another base ends Cancelled as before, but never says it is closed: it says the pull request is
+// open on another base and the target stays locked, as TargetHeld does, and it closes nothing.
+func TestCancelLookOpenOnMovedBaseSaysSo(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	ctx := context.Background()
+	meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	rr.Spec.Cancel = true
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	head, err := g.BranchHead(ctx, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.CreateBranch(ctx, movedBranch, head); err != nil {
+		t.Fatal(err)
+	}
+	n := rr.Status.PullRequest.Number
+	if err := g.SetBase(n, movedBranch); err != nil {
+		t.Fatal(err)
+	}
+	// The looks confirm the pull request gone from both target branches over confirmWait, as the requeue would.
+	clock := clockOf(r)
+	live := &api.RemediationRequest{}
+	for range 4 {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+			t.Fatal(err)
+		}
+		if live.Status.Phase == api.PhaseCancelled {
+			break
+		}
+		if _, _, err := r.cancelLook(ctx, live, nil); err != nil {
+			t.Fatalf("cancelLook: %v", err)
+		}
+		clock.advance(confirmWait + time.Minute)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+		t.Fatal(err)
+	}
+	if live.Status.Phase != api.PhaseCancelled || !holdsLock(live) {
+		t.Fatalf("phase %s, holds=%v: want Cancelled with the lock kept", live.Status.Phase, holdsLock(live))
+	}
+	for _, c := range live.Status.Conditions {
+		if strings.Contains(c.Message, "closed") && !strings.Contains(c.Message, "until") {
+			t.Errorf("condition %s says the pull request is closed: %q", c.Type, c.Message)
+		}
+	}
+	approved := meta.FindStatusCondition(live.Status.Conditions, api.ConditionApproved)
+	if approved == nil || !strings.Contains(approved.Message, "open on another base branch") ||
+		!strings.Contains(approved.Message, "locked") {
+		t.Fatalf("Approved %+v: want it saying the pull request is open on another base and the target stays locked",
+			approved)
+	}
+	if cr := g.ChangeRequests()[n-1]; cr.State != providers.ChangeRequestOpen {
+		t.Fatalf("pull request #%d is %s: the cancel closed it", n, cr.State)
 	}
 }

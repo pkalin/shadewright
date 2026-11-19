@@ -724,3 +724,73 @@ func TestSequenceStaleCleanupRefusedWithoutARecordedPullRequest(t *testing.T) {
 		}
 	}
 }
+
+// settledViolations runs the model's check after the world healed (settled) and returns its violations of kind.
+func settledViolations(m *modelWorld, kind string) []string {
+	m.settled()
+	var out []string
+	for _, v := range m.violations {
+		if strings.HasPrefix(v, kind+":") {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// thirdBase creates the branch hotfix, neither the plan's target branch nor the configured one.
+func thirdBase(t *testing.T, m *modelWorld) {
+	t.Helper()
+	ctx := context.Background()
+	head, err := m.g.BranchHead(ctx, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.g.CreateBranch(ctx, movedBranch, head); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #892, decision of 2026-11-19: the model's check after the world healed takes the request's own pull request open
+// on any base as a reason to hold the lock, a third base included.
+func TestSettledOwnOpenOnAThirdBaseHolds(t *testing.T) {
+	m := scripted(t, modelStart{start: stopOther})
+	thirdBase(t, m)
+	if err := m.g.SetBase(m.number, movedBranch); err != nil {
+		t.Fatal(err)
+	}
+	if !holdsLock(m.live()) {
+		t.Fatal("the start holds no lock")
+	}
+	if v := settledViolations(m, "settled lock"); len(v) != 0 {
+		t.Fatalf("the request's own pull request is open on %s and the check refuses the held lock: %v", movedBranch, v)
+	}
+}
+
+// #892: the narrowing stops at the request's own pull request. Its own closed, and a foreign pull request open on a
+// third base, the held lock still fails the check.
+func TestSettledForeignOpenOnAThirdBaseFails(t *testing.T) {
+	m := scripted(t, modelStart{start: stopOther})
+	ctx := context.Background()
+	thirdBase(t, m)
+	if err := m.g.CloseChangeRequest(ctx, m.number); err != nil {
+		t.Fatal(err)
+	}
+	const foreign = "shadewright/other"
+	head, err := m.g.BranchHead(ctx, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.g.CreateBranch(ctx, foreign, head); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: foreign,
+		BaseBranch: movedBranch, Body: "not this request's"}); err != nil {
+		t.Fatal(err)
+	}
+	if !holdsLock(m.live()) {
+		t.Fatal("the start holds no lock")
+	}
+	if v := settledViolations(m, "settled lock"); len(v) == 0 {
+		t.Fatal("a held lock with only a foreign pull request open on a third base passed the check")
+	}
+}

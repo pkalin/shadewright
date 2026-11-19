@@ -75,6 +75,12 @@ const (
 		"Shadewright closed its pull request, if one was open; the branch is left as it is"
 	messageCancelledFoundClosed = "spec.cancel is set: the request was cancelled before its change was merged; " +
 		"its pull request was found closed; the branch is left as it is"
+	// messageCancelledOpenElsewhere ends a request cancelled after a change of the target branch whose own pull
+	// request is open on another base branch, where a person moved it (#892): it is not closed by Shadewright, and
+	// the target stays locked until it is closed or merged.
+	messageCancelledOpenElsewhere = "spec.cancel is set: the request was cancelled before its change was merged; " +
+		"its pull request is open on another base branch, where it was moved, and Shadewright does not close it " +
+		"there; the target stays locked until a person closes or merges it"
 	// messageCheckNotFailed ends the message of a request that ended Cancelled although its review check could not
 	// be failed, and is the text of EventCancelCheckNotFailed.
 	messageCheckNotFailed = "the failed review check " + providers.CheckRunName + " could not be written on " +
@@ -204,7 +210,9 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 //   - Merged and not recorded: recorded as the request's merge, into the recorded branch (recordOwnMerge) or, moved
 //     to the configured branch, as #771 decided on 2026-11-16 (recordMergeOnConfigured).
 //   - Closed or gone: the request ends Cancelled (endCancelClosed); the read of the branch after the end settles the
-//     lock. A review check that waits for a pause keeps the request in its phase until the pause ends.
+//     lock. A review check that waits for a pause keeps the request in its phase until the pause ends. When its own
+//     pull request is open on another base (v.movedTo, #892), it ends Cancelled with messageCancelledOpenElsewhere
+//     and nothing marks the pull request closed: the lock stays while it is open, and nothing closes it there.
 //
 // A pause set since the close was tried stops the look before any read of the Git host (planEntry): the request
 // waits for the pause (waitWhilePaused). A failed Git read is retried visibly and without an end, with the cancel
@@ -255,6 +263,13 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 		})
 		return res, true, err
 	case changeClosed, changeGone:
+		if v.movedTo != "" {
+			// Its own pull request is open on a base a person moved it to (#892): the request ends Cancelled as for
+			// one gone from both target branches, but nothing says it is closed. The lock stays while it is open
+			// (lookHeld, TargetHeld) and no close is tried on that entry; a person closes or merges it.
+			res, err := r.endCancelClosed(ctx, rr, checkErr, func() {}, messageCancelledOpenElsewhere)
+			return res, true, err
+		}
 		res, err := r.endCancelClosed(ctx, rr, checkErr, func() {
 			markClosed(rr, ReasonPullRequestClosed, "is closed; the request was cancelled (spec.cancel)")
 		}, messageCancelledFoundClosed)

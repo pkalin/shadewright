@@ -1581,6 +1581,15 @@ func listAnyBase(pulls ...string) step {
 		raw:   "[" + strings.Join(pulls, ",") + "]"}
 }
 
+// pullWithBase is open pull request #15 of the branch to base, written as JSON whatever bytes base holds.
+func pullWithBase(base string) string {
+	quoted, err := json.Marshal(base)
+	if err != nil {
+		panic(err)
+	}
+	return strings.Replace(branchPull(15, stateOpen, branch, "acme/fleet", "BASE"), `"BASE"`, string(quoted), 1)
+}
+
 // TestListOpenChangeRequestsAnyBase checks that the listing of the open pull requests of a branch asks GitHub for
 // no base and returns those to any base branch of this repository, newest first (#892), and that an answer not to
 // that question is an error, never a list cut short or an empty one.
@@ -1612,6 +1621,17 @@ func TestListOpenChangeRequestsAnyBase(t *testing.T) {
 			providers.ErrUntrustedAnswer},
 		"listing answered 404": {[]step{status(http.MethodGet, pullsPath, http.StatusNotFound, fxForbidden)},
 			providers.ErrNotFound},
+		// The base branch is text from the code host (invariant 4): one that is not a valid branch name by the rule
+		// for target branches is an untrusted answer, never shown in a condition or a log.
+		"a base with control characters": {[]step{listAnyBase(pullWithBase("x\nReleased the lock\x1b[31m"))},
+			providers.ErrUntrustedAnswer},
+		"a base of 40,000 bytes": {[]step{listAnyBase(pullWithBase(strings.Repeat("b", 40000)))},
+			providers.ErrUntrustedAnswer},
+		"a base shaped like a URL with credentials": {[]step{listAnyBase(pullWithBase("https://user:tok@evil/x"))}, providers.ErrUntrustedAnswer},
+		"a base with a key and a value": {[]step{listAnyBase(pullWithBase("hotfix/credential=review-secret"))},
+			providers.ErrUntrustedAnswer},
+		"a Shadewright branch as the base": {[]step{listAnyBase(pullWithBase("shadewright/req-2"))},
+			providers.ErrUntrustedAnswer},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, tc.steps...)

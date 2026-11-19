@@ -1208,8 +1208,8 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 
 // ListOpenChangeRequestsAnyBase returns the open pull requests from headBranch of this repository to any base
 // branch of this repository, newest first (#892): ListChangeRequests with openOnly and without the base, on the
-// same terms. Every entry must be open and from headBranch of this repository to a branch of this repository: any
-// other entry is ErrUntrustedAnswer for the whole call.
+// same terms. Every entry must be open and from headBranch of this repository to a branch of this repository whose
+// name is valid by the rule for target branches: any other entry is ErrUntrustedAnswer for the whole call.
 func (p *Provider) ListOpenChangeRequestsAnyBase(ctx context.Context, headBranch string) (
 	[]providers.ChangeRequest, error) {
 	return p.listBranch(ctx, opListAnyCR, headBranch, true, true)
@@ -1259,8 +1259,10 @@ func (p *Provider) listBranch(ctx context.Context, op, headBranch string, openOn
 		for _, pr := range *prs {
 			ours := p.ours(pr)
 			if anyBase {
+				// The base is text from the code host that reaches a condition message and the log: it must be a
+				// branch name by the rule for target branches (invariant 4, decision of 2026-11-19 on #892).
 				ours = pr.Number > 0 && isHeadBranch(pr.Head.Ref) && p.ownRepo(pr.Head.Repo) && p.ownRepo(pr.Base.Repo) &&
-					pr.Base.Ref != ""
+					validTargetBranch(pr.Base.Ref)
 			}
 			if !ours || pr.Head.Ref != headBranch || (openOnly && (pr.State != stateOpen || pr.MergedAt != nil)) {
 				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", op,

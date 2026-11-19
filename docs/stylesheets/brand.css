@@ -5,12 +5,10 @@
  * the site makes no third-party font requests. Body and code text use the system font stacks (the theme's
  * Google Fonts request is switched off with `font = false` in zensical.toml).
  *
- * Two schemes: slate (dark, the original) and default (light). Contrast is WCAG 2.2 AA (4.5:1), computed on
- * the sRGB relative luminance of each pair (the ratios are in the pull request of #365):
- *   light: body #1b1830 on #fff 17.2, link #6a14e8 on #fff 7.3 (on code bg 6.5), code #2a2545 on #f3effd 12.8,
- *          muted #4f4a6b on #fff 8.3, white on #7c24fc button 6.0
- *   dark:  body #e2dff2 on #0e0e16 14.7, link #a879ff on #0e0e16 6.3 (on code bg 5.5), code #ddd8f0 on #1d1b2b 12.2,
- *          muted #a9a5c2 on #0e0e16 8.1, comment #8a86a3 on #16151f 5.2
+ * One scheme: slate (dark only, since #909). Contrast is WCAG 2.2 AA (4.5:1), computed on
+ * the sRGB relative luminance of each pair:
+ *   body #e2dff2 on #0e0e16 14.7, link #a879ff on #0e0e16 6.3 (on code bg 5.5), code #ddd8f0 on #1d1b2b 12.2,
+ *   muted #a9a5c2 on #0e0e16 8.1, comment #8a86a3 on #16151f 5.2
  */
 
 @font-face {
@@ -56,68 +54,6 @@
   --sw-heading-font: "Chakra Petch", system-ui, -apple-system, "Segoe UI", sans-serif;
   --md-text-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-}
-
-/* Light scheme (Material "default"): brand violet on white, the header stays the dark brand bar. */
-[data-md-color-scheme="default"] {
-  --sw-line: #d9d2ee;
-  --sw-surface: #f3effd;
-  --sw-h1: #2a1363;
-  --sw-link-hover: #4c0fb0;
-  --sw-brand-text: #6a14e8;
-  --md-primary-fg-color: var(--sw-ink-raised);
-  --md-primary-fg-color--light: #24223a;
-  --md-primary-fg-color--dark: var(--sw-ink);
-  --md-primary-bg-color: #ece6ff;
-  --md-primary-bg-color--light: #ece6ffb3;
-  --md-accent-fg-color: #6a14e8;
-  --md-accent-fg-color--transparent: #6a14e81f;
-  --md-default-bg-color: #ffffff;
-  --md-default-fg-color: #1b1830;
-  --md-default-fg-color--light: #4f4a6b;
-  --md-default-fg-color--lighter: #6f6a88;
-  --md-default-fg-color--lightest: #e6e1f4;
-  --md-typeset-color: #1b1830;
-  --md-typeset-a-color: #6a14e8;
-  --md-code-bg-color: var(--sw-surface);
-  --md-code-fg-color: #2a2545;
-  --md-code-hl-keyword-color: #6b1fd1;
-  --md-code-hl-string-color: #0b6b57;
-  --md-code-hl-number-color: #9a4a00;
-  --md-code-hl-comment-color: #5f5a78;
-  --md-code-hl-name-color: #2a2545;
-  --md-code-hl-function-color: #6b1fd1;
-  --md-code-hl-operator-color: #4f4a6b;
-  --md-code-hl-punctuation-color: #4f4a6b;
-  --md-code-hl-constant-color: #9a4a00;
-  --md-code-hl-special-color: #9a4a00;
-  --md-code-hl-generic-color: #4f4a6b;
-  --md-code-hl-variable-color: #4f4a6b;
-  --md-footer-bg-color: var(--sw-ink-raised);
-  --md-footer-bg-color--dark: var(--sw-ink);
-
-  --md-mermaid-font-family: var(--sw-heading-font);
-  --md-mermaid-node-bg-color: #f3effd;
-  --md-mermaid-node-fg-color: #1b1830;
-  --md-mermaid-edge-color: #6a14e8;
-  --md-mermaid-label-bg-color: #ffffff;
-  --md-mermaid-label-fg-color: #4c0fb0;
-  --md-mermaid-sequence-actor-bg-color: #f3effd;
-  --md-mermaid-sequence-actor-fg-color: #1b1830;
-  --md-mermaid-sequence-actor-border-color: #7c24fc;
-  --md-mermaid-sequence-actor-line-color: #b9aedd;
-  --md-mermaid-sequence-message-fg-color: #1b1830;
-  --md-mermaid-sequence-message-line-color: #6a14e8;
-  --md-mermaid-sequence-note-bg-color: #fff7d6;
-  --md-mermaid-sequence-note-fg-color: #1b1830;
-  --md-mermaid-sequence-note-border-color: #c9b458;
-  --md-mermaid-sequence-loop-bg-color: transparent;
-  --md-mermaid-sequence-loop-fg-color: #4c0fb0;
-  --md-mermaid-sequence-loop-border-color: #b9aedd;
-  --md-mermaid-sequence-label-bg-color: #f3effd;
-  --md-mermaid-sequence-label-fg-color: #1b1830;
-  --md-mermaid-sequence-number-bg-color: #6a14e8;
-  --md-mermaid-sequence-number-fg-color: #ffffff;
 }
 
 [data-md-color-scheme="slate"] {
@@ -268,7 +204,7 @@
   margin: 0.5rem 0 2.5rem;
   padding: 2.5rem 1rem 2rem;
   text-align: center;
-  /* The wordmark is made for a dark ground, so the hero is a dark panel in both schemes. */
+  /* The wordmark is made for a dark ground, so the hero is a dark panel . */
   background-color: var(--sw-ink);
   border-radius: 0.5rem;
   color: #e2dff2;
@@ -343,7 +279,7 @@
   letter-spacing: 0.02em;
 }
 
-/* Hand-written SVG diagrams have a dark ground: frame them so they read as figures on a light page too. */
+/* Hand-written SVG diagrams have a dark ground: frame them so they read as figures on the page. */
 .md-typeset a[href$=".svg"] > img {
   display: block;
   max-width: 100%;
@@ -365,8 +301,6 @@
   line-height: 1.6;
   white-space: nowrap;
 }
-[data-md-color-scheme="default"] .sw-built { color: #0b6b57; background-color: #e3f6f0; }
-[data-md-color-scheme="default"] .sw-planned { color: #7a3d00; background-color: #fff1de; border-style: dashed; }
 [data-md-color-scheme="slate"] .sw-built { color: #7fd6c2; background-color: #12302a; }
 [data-md-color-scheme="slate"] .sw-planned { color: #ffb86b; background-color: #35250f; border-style: dashed; }
 
@@ -421,7 +355,7 @@
   text-align: center;
 }
 
-/* The header, tabs and footer are the dark brand bar in both schemes, so their text is always light. */
+/* The header, tabs and footer are the dark brand bar, so their text is always light. */
 .md-header,
 .md-tabs,
 .md-footer,
@@ -455,9 +389,8 @@
 }
 
 /*
- * Diagram overlay (docs/javascripts/diagram-zoom.js). Contrast: dark, button text #f1edff on #1d1b2b 14.7,
- * on hover #2a2740 12.5, focus ring #a879ff on the #0e0e16 window 6.3; light, button text #1b1830 on
- * #f3effd 15.2, on hover #d9d2ee 11.8, focus ring #6a14e8 on the white window 7.3.
+ * Diagram overlay (docs/javascripts/diagram-zoom.js). Contrast: button text #f1edff on #1d1b2b 14.7,
+ * on hover #2a2740 12.5, focus ring #a879ff on the #0e0e16 window 6.3.
  */
 [data-sw-zoom] {
   cursor: zoom-in;
@@ -530,7 +463,6 @@ html.sw-zoom-open {
 [data-md-color-scheme="slate"] .sw-zoom__btn {
   color: #f1edff;
 }
-[data-md-color-scheme="default"] .sw-zoom__btn {
   color: #1b1830;
 }
 .sw-zoom__btn:hover {

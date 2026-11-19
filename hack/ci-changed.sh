@@ -24,7 +24,7 @@ images_re="^(${go_paths}|LICENSE|NOTICE)$"
 chart_re="^(${build_paths}|dist/chart/.*|config/.*|test/.*|hack/.*|ct\\.yaml|\\.trivyignore\\.yaml)$"
 # The docs site is built from docs/ and zensical.toml with the hash-locked requirements; docs/reference/api.md is
 # generated from api/ by hack/api-docs/ (also a go input, because verify-generated compares it).
-docs_re='^(docs/.*|overrides/.*|includes/.*|zensical\.toml|requirements-docs\.(in|txt)|hack/docs-check\.py|hack/docs-published-paths\.txt|hack/api-docs/.*|Makefile)$'
+docs_re='^(docs/.*|overrides/.*|includes/.*|zensical\.toml|requirements-docs\.(in|txt)|hack/docs-(reasons-)?check\.py|hack/docs-published-paths\.txt|hack/api-docs/.*|Makefile)$'
 # CodeQL analyses Go (built from the module) and the workflows and composite actions themselves.
 codeql_re='^(.*\.go|go\.mod|go\.sum|\.github/workflows/.*|\.github/actions/.*|\.github/codeql/.*)$'
 # ci.yml and the workflows it calls, and this script.

@@ -888,6 +888,10 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 			"commit is open", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number)
 		res, err := r.recoveryPace(ctx, rr, heldRecheckInterval)
 		return res, true, err
+	case changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
+		// Settled by the verdict of the look (settleTargetLock): closed or gone release; open on a base a person
+		// moved it to keeps the lock while it is open there, merged there keeps none (ADR-0043). Nothing here
+		// records a merge into another base.
 	}
 	return reconcile.Result{}, false, nil
 }

@@ -412,7 +412,8 @@ func oldRevisionPhrase(current string, other, want int32) (subject, note string)
 	}
 	note = "; the StatefulSet status does not say which old revision they run"
 	if other > 0 {
-		note += fmt.Sprintf(" (it counts %d of %d pods on neither its current nor its update revision)", other, want)
+		note += fmt.Sprintf(" (it counts %d of %d pods on neither its current nor its update revision; "+
+			"a pod that is terminating is counted on neither)", other, want)
 	}
 	return "an old revision", note
 }

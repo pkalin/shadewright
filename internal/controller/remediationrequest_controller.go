@@ -2207,6 +2207,10 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	// after a stop of that cleanup (staleCleanupStopped, #808); the finalizer does not.
 	repo, reinstalled, ok := cleanupRepository(settings, rr, (staleMark(rr) != nil || staleCleanupStopped(rr)) && !deleting)
 	if !ok {
+		// Evidence that no read of the Git host can start for the request, as planEntry notes it: the cancel watch and
+		// the end of a stale plan's cleanup stop on this error, and a wait for a read past its end ends on it
+		// (endAfterLastRead, #884).
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableReads[reasonRepositoryUnavailable])
 		return errRepositoryGone
 	}
 	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {

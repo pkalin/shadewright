@@ -1578,6 +1578,11 @@ func (m *modelWorld) restoreRepository() {
 		s.Spec.Repositories = append([]api.GitRepository{*repo}, s.Spec.Repositories...)
 	})
 	m.repo = nil
+	if m.afterLift > 0 {
+		// The count of property "lift lock" starts again, as at a lift: an end the repository's return lets through
+		// (the close of an expired request's cleanup once more) takes reconciles of its own (model seed 10135).
+		m.afterLift = 0
+	}
 	m.logf("the repository is back in the settings")
 }
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 680" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title>The Git origin of an OCI source is declared</title>
-  <desc id="d">Overview of ADR-0044, proposed. CI builds an artifact from a Git repository and pushes it to a registry; Flux pulls it through an OCIRepository and a Kustomization applies it. The executor reads the Kustomization and the OCIRepository status in the cluster, the declaration in RemediationSettings spec.ociSources (the Git repository and path the artifact is built from), and the Git repository through the Git App. The artifact's source and revision annotations are only compared with the declaration. No declaration ends NeedsIntervention with OCIOriginNotDeclared, a difference ends it with OCIOriginMismatch, an artifact without annotations ends it with OCIOriginUnrecorded, an OCIRepository the executor may not read ends it with OCISourceNotReadable, each with no Git write. A match continues with the ordinary source mapping and opens a pull request in the declared repository and path. The executor never reads the registry, the artifact content, any secret or the artifact's URL, and it does no signature check.</desc>
+  <desc id="d">Overview of ADR-0044, proposed. CI builds an artifact from a Git repository and pushes it to a registry; Flux pulls it through an OCIRepository and a Kustomization applies it. The executor reads the Kustomization and the OCIRepository status in the cluster, the declaration in RemediationSettings spec.ociSources (the Git repository and path the artifact is built from), and the Git repository through the Git App. The artifact's source and revision annotations are only compared with the declaration. No declaration ends NeedsIntervention with OCIOriginNotDeclared, a difference ends it with OCIOriginMismatch, an artifact Flux did not verify ends it with OCISourceUnverified, a signer identity that is not an exact literal naming the declared repository ends it with OCIOriginMismatch, an artifact without annotations ends it with OCIOriginUnrecorded, an OCIRepository the executor may not read ends it with OCISourceNotReadable, each with no Git write. A match continues with the ordinary source mapping and opens a pull request in the declared repository and path. The executor never reads the registry, the artifact content, any secret or the artifact's URL.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -38,7 +38,7 @@
   <rect class="key" x="36" y="190" width="420" height="250" rx="12"/>
   <text class="h" x="54" y="220">Executor reads three things</text>
   <text class="s" x="54" y="250">1. Kustomization and OCIRepository (get):</text>
-  <text class="s" x="72" y="268">Ready, applied revision, source and revision</text>
+  <text class="s" x="72" y="268">Ready, verified, applied revision, source, revision</text>
   <text class="s" x="72" y="286">annotations. Opt-in grant, off by default.</text>
   <text class="s" x="54" y="316">2. RemediationSettings spec.ociSources:</text>
   <text class="s" x="72" y="334">the repository and path the artifact is built from.</text>
@@ -51,30 +51,34 @@
   <path class="f" d="M965 116V160H300V190" marker-end="url(#a)"/>
 
   <path class="f" d="M456 315H500" marker-end="url(#a)"/>
-  <rect class="box" x="500" y="190" width="584" height="62" rx="12"/>
-  <text class="tag" x="518" y="214">NO DECLARATION</text>
-  <text class="s" x="518" y="234">NeedsIntervention, OCIOriginNotDeclared: the message says what to declare. No Git write.</text>
-  <rect class="box" x="500" y="262" width="584" height="62" rx="12"/>
-  <text class="tag" x="518" y="286">DECLARATION AND ARTIFACT DISAGREE</text>
-  <text class="s" x="518" y="306">NeedsIntervention, OCIOriginMismatch: source, branch or commit differs. No Git write.</text>
-  <rect class="box" x="500" y="334" width="584" height="62" rx="12"/>
-  <text class="tag" x="518" y="358">ARTIFACT WITHOUT ANNOTATIONS</text>
-  <text class="s" x="518" y="378">NeedsIntervention, OCIOriginUnrecorded: not accepted on the declaration alone. No Git write.</text>
-  <rect class="box" x="500" y="406" width="584" height="62" rx="12"/>
-  <text class="tag" x="518" y="430">OCIREPOSITORY NOT READABLE</text>
-  <text class="s" x="518" y="450">NeedsIntervention, OCISourceNotReadable: the opt-in grant is off. No Git write.</text>
-  <rect class="key" x="500" y="478" width="584" height="62" rx="12"/>
-  <text class="tag" x="518" y="502">THEY AGREE</text>
-  <text class="s" x="518" y="522">The ordinary mapping goes on: a pull request in the declared repository and path.</text>
-  <path class="f" d="M478 315V227H500" marker-end="url(#a)"/>
-  <path class="f" d="M478 315V293H500" marker-end="url(#a)"/>
-  <path class="f" d="M478 315V365H500" marker-end="url(#a)"/>
-  <path class="f" d="M478 315V437H500" marker-end="url(#a)"/>
-  <path class="f" d="M478 315V509H500" marker-end="url(#a)"/>
+  <rect class="box" x="500" y="190" width="584" height="52" rx="12"/>
+  <text class="tag" x="518" y="212">NO DECLARATION</text>
+  <text class="s" x="518" y="231">NeedsIntervention, OCIOriginNotDeclared: the message says what to declare. No Git write.</text>
+  <rect class="box" x="500" y="250" width="584" height="52" rx="12"/>
+  <text class="tag" x="518" y="272">NOT VERIFIED BY FLUX</text>
+  <text class="s" x="518" y="291">NeedsIntervention, OCISourceUnverified: spec.verify unset or not verified. No Git write.</text>
+  <rect class="box" x="500" y="310" width="584" height="52" rx="12"/>
+  <text class="tag" x="518" y="332">DECLARATION AND ARTIFACT OR SIGNER DISAGREE</text>
+  <text class="s" x="518" y="351">NeedsIntervention, OCIOriginMismatch: source, branch, commit or signer identity. No Git write.</text>
+  <rect class="box" x="500" y="370" width="584" height="52" rx="12"/>
+  <text class="tag" x="518" y="392">ARTIFACT WITHOUT ANNOTATIONS</text>
+  <text class="s" x="518" y="411">NeedsIntervention, OCIOriginUnrecorded: not accepted on the declaration alone. No Git write.</text>
+  <rect class="box" x="500" y="430" width="584" height="52" rx="12"/>
+  <text class="tag" x="518" y="452">OCIREPOSITORY NOT READABLE</text>
+  <text class="s" x="518" y="471">NeedsIntervention, OCISourceNotReadable: the opt-in grant is off. No Git write.</text>
+  <rect class="key" x="500" y="490" width="584" height="52" rx="12"/>
+  <text class="tag" x="518" y="512">THEY AGREE</text>
+  <text class="s" x="518" y="531">The ordinary mapping goes on: a pull request in the declared repository and path.</text>
+  <path class="f" d="M478 315V216H500" marker-end="url(#a)"/>
+  <path class="f" d="M478 315V276H500" marker-end="url(#a)"/>
+  <path class="f" d="M478 315V336H500" marker-end="url(#a)"/>
+  <path class="f" d="M478 315V396H500" marker-end="url(#a)"/>
+  <path class="f" d="M478 315V456H500" marker-end="url(#a)"/>
+  <path class="f" d="M478 315V516H500" marker-end="url(#a)"/>
   <path class="f" d="M456 315H478"/>
 
   <rect class="box" x="36" y="574" width="1048" height="78" rx="12"/>
   <text class="no" x="54" y="600">Never</text>
   <text class="s" x="54" y="622">the registry, with or without credentials; the artifact's content or its URL; any Secret, ServiceAccount or secretRef of the OCIRepository;</text>
-  <text class="s" x="54" y="640">a repository, path or branch taken from an annotation; any signature check of its own (Flux verifies only when spec.verify is set). Analyzer and verifier get no new read.</text>
+  <text class="s" x="54" y="640">a repository, path or branch taken from an annotation; a signature check of its own (Flux verifies). Analyzer and verifier get no new read.</text>
 </svg>

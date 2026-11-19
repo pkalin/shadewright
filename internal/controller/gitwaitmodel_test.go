@@ -58,7 +58,9 @@ import (
 // file, the opening of the repository), or reads work again; the repository leaves the settings or comes back; the
 // kill switch pauses writes or lifts the pause; a person cancels the request; the settings name another target
 // branch; the next status write is lost, meets a conflicting write, or is applied and reported failed; the cache
-// serves an older copy of the request at the next read; the executor restarts (nothing kept in memory); the executor
+// serves an older copy of the request at the next read through it (a reconcile starts from the API server's copy, so
+// this reaches only the later reads of the cache), and the second request, when there is one, is reconciled between
+// the next reconcile's read of the request and its first read of the Git host; the executor restarts (nothing kept in memory); the executor
 // is down for longer than a wait (no reconcile at all, then a restart: down). The clock
 // moves on by the wait each reconcile returns (a second after an error). Every status write is checked against the
 // schema of the CRD, as the API server does: a write it would refuse is a violation.
@@ -285,7 +287,14 @@ type modelWorld struct {
 	passWrites int
 	// staleNext makes the cache serve stale at the next read of the request.
 	staleNext bool
-	stale     *api.RemediationRequest
+	// interleaveNext makes the second request change between the next reconcile's read of the request and its
+	// decisions: it is reconciled before that reconcile's first read of the Git host (decision of 2026-11-19 on #786,
+	// point 4: the reconcile reads the request from the API server, so the cache's older copy no longer starts one).
+	interleaveNext bool
+	// staleStart is what the next read of the request from the API server returns: a copy the request changes from
+	// before the reconcile that read it decides (scripted sequences only).
+	staleStart *api.RemediationRequest
+	stale      *api.RemediationRequest
 	// writeFaulted reports that this reconcile met an injected write fault or a stale read.
 	writeFaulted bool
 	// deleted hides the pull request from every read (gone from the host).
@@ -789,6 +798,7 @@ func (m *modelWorld) run() {
 	}
 	m.mu.Lock()
 	m.fault, m.loseNext, m.conflictNext, m.applyNext, m.staleNext, m.noCommit = faultNone, false, false, false, false, false
+	m.interleaveNext = false
 	m.lastingUntil, m.passWrites = time.Time{}, 0
 	m.mu.Unlock()
 	if m.paused && (m.focus == focusPause || m.rng.IntN(2) == 0) {
@@ -1245,6 +1255,17 @@ type flickerReader struct {
 }
 
 func (f *flickerReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if rr, ok := obj.(*api.RemediationRequest); ok && key == f.m.key {
+		f.m.mu.Lock()
+		stale := f.m.staleStart
+		f.m.staleStart = nil
+		f.m.mu.Unlock()
+		if stale != nil {
+			// The request read here changes into what the API server holds before the reconcile decides.
+			stale.DeepCopyInto(rr)
+			return nil
+		}
+	}
 	if err := f.WithWatch.Get(ctx, key, obj, opts...); err != nil {
 		return err
 	}
@@ -1369,6 +1390,7 @@ func (m *modelWorld) serveStale() {
 	}
 	m.mu.Lock()
 	m.stale, m.staleNext = older[m.rng.IntN(len(older))], true
+	m.interleaveNext = m.second.Name != ""
 	m.mu.Unlock()
 	m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d)",
 		m.stale.Status.Phase, len(m.stale.Status.GitWaits))
@@ -1456,12 +1478,8 @@ func (m *modelWorld) step() {
 	passed := ""
 	before := m.live()
 	m.mu.Lock()
-	staleRead := m.staleNext
+	armed := m.staleNext
 	m.mu.Unlock()
-	if staleRead {
-		// The reconcile reads an older copy: it cannot end a wait it does not see.
-		before.Status.GitWaits = nil
-	}
 	var readPassed []api.GitWaitKind
 	for _, w := range before.Status.GitWaits {
 		if end, ok := m.waitEnd(before, w); ok && !m.clock.at.Before(end) {
@@ -1488,6 +1506,10 @@ func (m *modelWorld) step() {
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.key})
 	m.mu.Lock()
 	m.flickered = flick && !m.flicker
+	// The reconcile starts from the API server's copy; the cache's older copy reaches only a later read of it (the
+	// look at what is left to clear), and the properties that judge what the reconcile ended skip such a reconcile.
+	staleRead := armed && !m.staleNext
+	m.interleaveNext = false
 	m.mu.Unlock()
 	m.mu.Lock()
 	m.passed = ""
@@ -2056,6 +2078,16 @@ var errModelOutage = &providers.RetryableError{Err: errors.New("outage")}
 
 // fail is the failure of op for the model now: nil, an outage, or the step's time run out.
 func (g *modelGit) fail(ctx context.Context, op string) error {
+	g.m.mu.Lock()
+	interleave := g.m.interleaveNext
+	g.m.interleaveNext = false
+	g.m.mu.Unlock()
+	if interleave {
+		// The other request changes between what this reconcile read and what it decides next.
+		g.m.logf("before %s, the second request is reconciled", op)
+		first := &api.RemediationRequest{}
+		g.m.stepSecond(context.WithoutCancel(ctx), first)
+	}
 	g.m.mu.Lock()
 	g.m.calls++
 	fault := g.m.fault

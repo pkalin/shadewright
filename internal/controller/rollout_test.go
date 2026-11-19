@@ -426,7 +426,7 @@ func TestRolloutDeliveryNotObservedIsReported(t *testing.T) {
 	}
 	// Stopped: no more reads, no second Event.
 	reads := 0
-	w.reader.fail = func(client.Object) error { reads++; return nil }
+	w.reader.fail = countRolloutReads(&reads)
 	w.now = w.now.Add(time.Hour)
 	if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
 		t.Fatalf("Reconcile = %+v, %v; want done", res, err)
@@ -530,7 +530,7 @@ func TestRolloutKindNotChecked(t *testing.T) {
 		t.Fatal(err)
 	}
 	reads := 0
-	w.reader.fail = func(client.Object) error { reads++; return nil }
+	w.reader.fail = countRolloutReads(&reads)
 	for range 2 {
 		if res, err := w.reconcile(t, t.Context()); err != nil || res.RequeueAfter != 0 {
 			t.Fatalf("Reconcile = %+v, %v; want done", res, err)
@@ -672,7 +672,7 @@ func TestRolloutLateReconcileEndsWithAVerdict(t *testing.T) {
 		}
 		// Ended: nothing more is read.
 		reads := 0
-		w.reader.fail = func(client.Object) error { reads++; return nil }
+		w.reader.fail = countRolloutReads(&reads)
 		if _, err := w.reconcile(t, t.Context()); err != nil || reads != 0 {
 			t.Fatalf("after the end: err %v, %d reads", err, reads)
 		}
@@ -1391,4 +1391,15 @@ func TestRolloutReceiptAncestryWaitsForThePause(t *testing.T) {
 	}
 	w.setPaused(t, false)
 	w.untilApplied(t)
+}
+
+// countRolloutReads counts the reads of the rollout check, not the read of the request every reconcile starts with (from
+// the API server since the decision of 2026-11-19 on #786).
+func countRolloutReads(reads *int) func(client.Object) error {
+	return func(obj client.Object) error {
+		if _, ok := obj.(*remediationv1alpha1.RemediationRequest); !ok {
+			*reads++
+		}
+		return nil
+	}
 }

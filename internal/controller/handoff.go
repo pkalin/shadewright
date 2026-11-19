@@ -557,7 +557,8 @@ func (r *RemediationRequestReconciler) expectedHandoffHead(ctx context.Context, 
 		return false, nil
 	}
 	repl := &remediationv1alpha1.RemediationRequest{}
-	switch err := r.Get(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(to.Name)}, repl); {
+	// Read from the API server: what the head is decides the predecessor's next write (decision of 2026-11-19 on #786).
+	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(to.Name)}, repl); {
 	case apierrors.IsNotFound(err):
 		return false, nil
 	case err != nil:
@@ -973,46 +974,106 @@ func recordHold(ctx context.Context) error {
 }
 
 // recordHeld returns errRecordHeld while rr waits for the other request of its handoff to record a merge of their pull
-// request (decision of 2026-11-19 on #880, "a pending wait is a claim"): the other request, read from the API server,
-// holds a claim on a merge of that pull request (holdsMergeClaim: a wait of kind MergeCheck or MergeContent naming it),
-// or rr shows that it waits for that record (condition Approved False with ReasonMergeRecordPending) while the other
-// may still record it (mayStillRecord). It is decided from what is stored, not from a read of the Git host, so a write
-// that would come before the look at the pull request in a reconcile (the rewrite after a handoff, followHandoff) is
-// held too, also when rr's copy is older than the claim. A request with no handoff, or whose other request is gone or
-// made again, is not held. A failed read holds the write too, as freshness.ErrWriteBlocked (the Kubernetes API's),
-// for a retry.
+// request (decision of 2026-11-19 on #880, "a pending wait is a claim"): the other request holds a claim on a merge of
+// that pull request (holdsMergeClaim: a wait of kind MergeCheck or MergeContent naming it), or rr shows that it waits
+// for that record (condition Approved False with ReasonMergeRecordPending) while the other may still record it
+// (mayStillRecord). It decides on live copies of both requests, read from the API server at the write (decision of
+// 2026-11-19 on #786): rr's copy in the reconcile may be older than what is stored, and a write that would come before
+// the look at the pull request in a reconcile (the rewrite after a handoff, followHandoff) is held whatever that copy
+// shows. rr's own copy can only add a hold (a wait it shows that a lost write did not store). It is decided from what
+// is stored, not from a read of the Git host. A request with no handoff, or whose other request is gone or made
+// again, is not held. A failed read, or rr gone or made again, holds the write too, as freshness.ErrWriteBlocked (the
+// Kubernetes API's), for a retry.
 func (r *RemediationRequestReconciler) recordHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	ho := rr.Status.Handoff
-	if ho == nil {
-		return nil
+	live := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.getLive(ctx, client.ObjectKeyFromObject(rr), live); {
+	case err != nil:
+		return fmt.Errorf("%w: get RemediationRequest %s/%s before a Git write: %w", freshness.ErrWriteBlocked,
+			rr.Namespace, rr.Name, err)
+	case live.UID != rr.UID:
+		return fmt.Errorf("%w: RemediationRequest %s/%s was replaced", freshness.ErrWriteBlocked, rr.Namespace, rr.Name)
 	}
-	// A request in the middle of a chain has a handoff at both ends: each is asked.
-	if ho.From != nil {
-		if err := r.heldBy(ctx, rr, string(ho.From.Name), ho.From.UID); err != nil {
-			return err
+	// A request in the middle of a chain has a handoff at both ends: each is asked, by the ends either copy names.
+	asked := map[string]bool{}
+	for _, x := range []*remediationv1alpha1.RemediationRequest{live, rr} {
+		ho := x.Status.Handoff
+		if ho == nil {
+			continue
 		}
-	}
-	if ho.To != nil {
-		return r.heldBy(ctx, rr, string(ho.To.Name), ho.To.UID)
+		for _, end := range []struct {
+			name string
+			uid  remediationv1alpha1.UID
+			ok   bool
+		}{
+			{name: nameOfFrom(ho), uid: uidOfFrom(ho), ok: ho.From != nil},
+			{name: nameOfTo(ho), uid: uidOfTo(ho), ok: ho.To != nil},
+		} {
+			if !end.ok || asked[end.name] {
+				continue
+			}
+			asked[end.name] = true
+			if err := r.heldBy(ctx, live, rr, end.name, end.uid); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
-// heldBy is recordHeld for one other request of rr's handoffs, by its name and UID.
-func (r *RemediationRequestReconciler) heldBy(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+func nameOfFrom(ho *remediationv1alpha1.Handoff) string {
+	if ho.From == nil {
+		return ""
+	}
+	return string(ho.From.Name)
+}
+
+func uidOfFrom(ho *remediationv1alpha1.Handoff) remediationv1alpha1.UID {
+	if ho.From == nil {
+		return ""
+	}
+	return ho.From.UID
+}
+
+func nameOfTo(ho *remediationv1alpha1.Handoff) string {
+	if ho.To == nil {
+		return ""
+	}
+	return string(ho.To.Name)
+}
+
+func uidOfTo(ho *remediationv1alpha1.Handoff) remediationv1alpha1.UID {
+	if ho.To == nil {
+		return ""
+	}
+	return ho.To.UID
+}
+
+// waitsOnRecord reports whether x shows that it waits for the other request of its handoff to record a merge
+// (condition Approved False with ReasonMergeRecordPending).
+func waitsOnRecord(x *remediationv1alpha1.RemediationRequest) bool {
+	c := meta.FindStatusCondition(x.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == ReasonMergeRecordPending
+}
+
+// heldBy is recordHeld for one other request of the handoffs of live (the request as stored) and rr (the reconcile's
+// copy of it), by its name and UID; the other request is read from the API server here.
+func (r *RemediationRequestReconciler) heldBy(ctx context.Context, live, rr *remediationv1alpha1.RemediationRequest,
 	name string, uid remediationv1alpha1.UID) error {
 	other := &remediationv1alpha1.RemediationRequest{}
-	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: name}, other); {
+	switch err := r.getLive(ctx, types.NamespacedName{Namespace: live.Namespace, Name: name}, other); {
 	case apierrors.IsNotFound(err):
 		return nil
 	case err != nil:
 		return fmt.Errorf("%w: get RemediationRequest %s of the handoff of %s: %w", freshness.ErrWriteBlocked, name,
-			rr.Name, err)
+			live.Name, err)
 	}
 	if other.UID != types.UID(uid) {
 		return nil
 	}
-	pr := rr.Status.PullRequest
+	pr := live.Status.PullRequest
+	if pr == nil {
+		pr = rr.Status.PullRequest
+	}
 	if pr == nil {
 		// A replacement before its takeover: the pull request of the handoff is the predecessor's.
 		pr = other.Status.PullRequest
@@ -1026,8 +1087,7 @@ func (r *RemediationRequestReconciler) heldBy(ctx context.Context, rr *remediati
 			return errRecordHeld
 		}
 	}
-	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
-	if c != nil && c.Status == metav1.ConditionFalse && c.Reason == ReasonMergeRecordPending && mayStillRecord(other) {
+	if (waitsOnRecord(live) || waitsOnRecord(rr)) && mayStillRecord(other) {
 		return errRecordHeld
 	}
 	return nil
@@ -1776,7 +1836,9 @@ func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *r
 	}
 	if to := intent(upd); to != nil {
 		repl := &remediationv1alpha1.RemediationRequest{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: upd.Namespace, Name: string(to.Name)}, repl)
+		// Read from the API server: a replacement the cache has not seen yet is not gone, and the abort of the intent
+		// lets the predecessor write to Git (decision of 2026-11-19 on #786).
+		err := r.getLive(ctx, types.NamespacedName{Namespace: upd.Namespace, Name: string(to.Name)}, repl)
 		switch {
 		case apierrors.IsNotFound(err):
 			abortIntent(upd, ReasonHintHandoffAborted)

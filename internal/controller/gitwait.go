@@ -217,9 +217,60 @@ func (k waitKind) applies(rr *api.RemediationRequest) bool {
 	case waitHandoffRecovery:
 		return recoveringHandoff(rr) && rr.DeletionTimestamp.IsZero()
 	case waitMergeCheck, waitMergeContent:
-		return !mergeRecorded(rr) && rr.DeletionTimestamp.IsZero()
+		return !mergeRecorded(rr) && !settledByOther(rr) && rr.DeletionTimestamp.IsZero()
 	}
 	return false
+}
+
+// settledByOther reports whether rr ended on a merge of its pull request that the other request of its handoff records
+// (Superseded with ReasonMergedForReplacement or ReasonMergedForPredecessor): it records nothing of that merge, so no
+// wait for a read of it applies to rr, whichever request recorded it (decision of 2026-11-19 on #786, point 3).
+func settledByOther(rr *api.RemediationRequest) bool {
+	if rr.Status.Phase != api.PhaseSuperseded {
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved)
+	return c != nil && (c.Reason == ReasonMergedForReplacement || c.Reason == ReasonMergedForPredecessor)
+}
+
+// admits reports whether w, an entry about to be added to live (the request as the API server holds it, read for this
+// write), may stand on it: its kind applies to live (waitKind.applies), and, for a wait for a read of a merge
+// (MergeCheck, MergeContent), no other request of live's handoff, read from the API server here, holds the record of
+// that pull request's merge (holdsMergeRecord). Both requests are read at the admission, so a copy older than either
+// never adds a wait to a request that is settled (decision of 2026-11-19 on #786). A failed read of the other request
+// is the Kubernetes API's (a *clusterError), for a retry; one gone or made again holds no record.
+func (r *RemediationRequestReconciler) admits(ctx context.Context, live *api.RemediationRequest, w api.GitWait) (bool, error) {
+	k := kindOfEntry(w)
+	if k == waitNone {
+		return true, nil
+	}
+	if !k.applies(live) {
+		return false, nil
+	}
+	if (k != waitMergeCheck && k != waitMergeContent) || w.PullRequest == nil || live.Status.Handoff == nil {
+		return true, nil
+	}
+	ho := live.Status.Handoff
+	for _, end := range []struct {
+		name string
+		uid  api.UID
+	}{{nameOfFrom(ho), uidOfFrom(ho)}, {nameOfTo(ho), uidOfTo(ho)}} {
+		if end.name == "" {
+			continue
+		}
+		other := &api.RemediationRequest{}
+		switch err := r.getLive(ctx, types.NamespacedName{Namespace: live.Namespace, Name: end.name}, other); {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return false, &clusterError{err: fmt.Errorf("get RemediationRequest %s of the handoff of %s: %w", end.name,
+				live.Name, err)}
+		}
+		if other.UID == types.UID(end.uid) && holdsMergeRecord(other, w.PullRequest.Number, w.PullRequest.HeadSHA) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // boundEnd is when a wait of kind k bounds rr: its entry's end (end), or, before an entry is recorded, the end the
@@ -394,16 +445,22 @@ func removeInapplicable(rr *api.RemediationRequest) bool {
 // putGitWaits records adds in status.gitWaits, removing the entries whose kind no longer applies to the live request
 // before and after (a HandoffRecovery entry added removes the HandoffGrace entry): an entry of a kind that stands
 // keeps its start and its pull request and takes the read that failed now; any other is added whole, as Paced when
-// its kind no longer applies to the live request (waitKind.applies).
+// the admission refuses it (admits: its kind no longer applies to the live request, or the other request of its
+// handoff, read here, holds the record of that merge). A failed read of the other request is returned for a retry.
 // Only the entries and their summary are written, in a patch with the resourceVersion read, retried on a conflict
 // from a fresh read.
 func (r *RemediationRequestReconciler) putGitWaits(ctx context.Context, rr *api.RemediationRequest, adds []api.GitWait) error {
-	return r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) {
+	return r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) error {
 		removeInapplicable(live)
 		for _, a := range adds {
-			if k := kindOfEntry(a); k != waitNone && !k.applies(live) {
-				// The live request has left the state this kind bounds (a step after the read ended it, or the cache
-				// served an older copy): the retry is recorded as Paced, so it stays visible and has no end to pass.
+			ok, err := r.admits(ctx, live, a)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				// The live request has left the state this kind bounds, or the other request of its handoff holds the
+				// record of that merge (admits: a step after the read ended it, or either request changed since the
+				// reconcile read it): the retry is recorded as Paced, so it stays visible and has no end to pass.
 				a = api.GitWait{Kind: gitWaitKinds[waitNone], Since: a.Since, Operation: a.Operation}
 			}
 			if w := gitWait(live, kindOfEntry(a)); w != nil {
@@ -413,17 +470,19 @@ func (r *RemediationRequestReconciler) putGitWaits(ctx context.Context, rr *api.
 			live.Status.GitWaits = append(live.Status.GitWaits, a)
 		}
 		removeInapplicable(live)
+		return nil
 	})
 }
 
 // dropGitWaits removes the entries drop names, and the summary with the last.
 func (r *RemediationRequestReconciler) dropGitWaits(ctx context.Context, rr *api.RemediationRequest,
 	drop func(api.GitWait) bool) error {
-	return r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) {
+	return r.patchGitWaits(ctx, rr, func(live *api.RemediationRequest) error {
 		live.Status.GitWaits = slices.DeleteFunc(live.Status.GitWaits, drop)
 		if len(live.Status.GitWaits) == 0 {
 			live.Status.GitWaits = nil
 		}
+		return nil
 	})
 }
 
@@ -433,7 +492,7 @@ func (r *RemediationRequestReconciler) dropGitWaits(ctx context.Context, rr *api
 // own, so a later status write of it is refused as a conflict instead of putting back what the older read held (a
 // released holdsTarget, an earlier phase). A request replaced under the same name is a cluster error.
 func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *api.RemediationRequest,
-	change func(live *api.RemediationRequest)) error {
+	change func(live *api.RemediationRequest) error) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		live := &api.RemediationRequest{}
 		if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
@@ -444,7 +503,9 @@ func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *ap
 		}
 		current := live.ResourceVersion == rr.ResourceVersion
 		base := live.DeepCopy()
-		change(live)
+		if err := change(live); err != nil {
+			return err
+		}
 		gitWaitSummary(live, r.now())
 		if !equality.Semantic.DeepEqual(base.Status, live.Status) {
 			if err := r.Status().Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {

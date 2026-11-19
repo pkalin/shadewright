@@ -65,7 +65,10 @@ import (
 // either request deleted, a settings change (the repository leaves the settings, its entry cannot be used or is fixed
 // again, its target branch changes), and a person merging the pull request at its head, pushing a commit on top of it,
 // force pushing it back to the predecessor's commit (alone, or with a person's commit on it), closing it, reopening it
-// or deleting its branch (which closes it); one merge in eight is reported by the host without a merge commit ID on
+// or deleting its branch (which closes it), the other request changing between a read of the next reconcile of one
+// request and its decisions (that other request reconciled in full before a read of the Git host the reconcile makes,
+// outside the per-request lock of a look at a pull request), or the cache serving a request as it was before its last
+// status write; one merge in eight is reported by the host without a merge commit ID on
 // every read, so it can only be recorded without a receipt. Nine sequences in ten that draw no merge, close or branch deletion get one
 // in their second half, so most reach the end of the pull request.
 //
@@ -182,6 +185,14 @@ const (
 	// hRestartLate is a restart after the executor was down for longer than the longest wait a request records
 	// (hmLongestWait): every wait that stands is past its end at the first reconcile.
 	hRestartLate hmKind = "restart-after-every-wait"
+	// hInterleave: the other request changes between a read and a decision of the next reconcile of Obj. Before the
+	// (N+1)th read of the Git host that reconcile makes, the other request is reconciled in full, so what Obj read of
+	// both requests is older than the API server's copy when it decides (the gate before a Git write, the admission
+	// of a wait), as when two workers or an old and a new leader run side by side.
+	hInterleave hmKind = "other-changes-between-read-and-decision"
+	// hStale: the cache serves the copy of Obj from before its last stored status write at the next read of it
+	// through the cache (the reconciler's client), as an informer that has not seen that write yet.
+	hStale hmKind = "cache-serves-older-copy"
 )
 
 // hmLongestWait is how long the executor is down at hRestartLate: an hour past the longest bound of an entry of
@@ -256,8 +267,11 @@ func (s hmStep) String() string {
 			return string(s.Kind) + " the request holding only a claim on the merge"
 		}
 		return string(s.Kind) + " " + s.Obj
-	case hLose, hConflict:
+	case hLose, hConflict, hStale:
 		return string(s.Kind) + " " + s.Obj
+	case hInterleave:
+		return fmt.Sprintf("%s: the %s changes before read %d of the next reconcile of the %s", s.Kind,
+			map[string]string{hmPred: hmRepl, hmRepl: hmPred}[s.Obj], s.N+1, s.Obj)
 	case hCrash:
 		return fmt.Sprintf("crash after %d writes of the next reconcile", s.N)
 	case hMerge:
@@ -382,6 +396,15 @@ type hmWorld struct {
 	// awaiting names the requests that wait for the other request's merge record: a status write of theirs carried
 	// MergeRecordPending (stored, lost or meeting a conflict), and none without it was stored since (P4).
 	awaiting map[string]bool
+	// interleave is the request whose next reconcile meets a change of the other request (hInterleave) before its
+	// read interleaveAt of the Git host ("" for none); interleaving is set while that other reconcile runs.
+	interleave   string
+	interleaveAt int
+	interleaving bool
+	// prev holds each request as stored before its last stored status write; stale the copies the cache serves at
+	// the next read of each (hStale).
+	prev  map[string]*api.RemediationRequest
+	stale map[string]*api.RemediationRequest
 
 	merge *hmMerge
 	held  map[string]bool
@@ -549,7 +572,8 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		gone288: map[string]bool{}, goneMissing: map[string]bool{},
 		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
 		waitingAtRemoval: map[string]bool{}, expected: map[string]int{}, lastErr: map[string]error{},
-		lastRes: map[string]reconcile.Result{}}
+		lastRes: map[string]reconcile.Result{}, prev: map[string]*api.RemediationRequest{},
+		stale: map[string]*api.RemediationRequest{}}
 	base, err := g.BranchHead(ctx, mainBranch)
 	if err != nil {
 		t.Fatal(err)
@@ -733,11 +757,90 @@ func hmFixture(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.
 	return r, g, p, rr, cr, head
 }
 
+// cache is the reconciler's client: the API server's, but for a read of a request the cache serves an older copy of
+// (hStale), once.
+func (m *hmWorld) cache() client.Client {
+	return interceptor.NewClient(m.cl.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if rr, ok := obj.(*api.RemediationRequest); ok {
+				m.mu.Lock()
+				old := m.stale[key.Name]
+				delete(m.stale, key.Name)
+				m.mu.Unlock()
+				if old != nil {
+					m.logf("  the cache serves %s as it was before its last status write", key.Name)
+					old.DeepCopyInto(rr)
+					return nil
+				}
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+}
+
+// interleaveBefore runs the reconcile of the other request when the reconcile running is the one hInterleave named and
+// op is the read it named: a change of the other request between what the running one read and what it decides next.
+func (m *hmWorld) interleaveBefore(op string) {
+	m.mu.Lock()
+	who := m.actor
+	if m.interleaving || who == "" || who == hmPerson || who != m.interleave || hmWrites[op] || m.crashed {
+		m.mu.Unlock()
+		return
+	}
+	if m.interleaveAt > 0 {
+		m.interleaveAt--
+		m.mu.Unlock()
+		return
+	}
+	if lookHeld(m.r) {
+		// The read runs under the per-request lock of the look at a pull request (goneLooks), which a second worker
+		// waits for: the change comes at a later read, outside it.
+		m.mu.Unlock()
+		return
+	}
+	m.interleave, m.interleaving = "", true
+	m.mu.Unlock()
+	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[who]
+	m.logf("  before %s of the %s, the %s is reconciled", op, who, other)
+	m.reach["interleaved"] = true
+	if m.get(other) != nil {
+		m.mu.Lock()
+		m.actor = other
+		m.mu.Unlock()
+		res, err := m.r.Reconcile(context.Background(), reconcile.Request{NamespacedName: m.keys[other]})
+		m.logf("    -> %s: %s (requeue %v, err %v)", other, describe(m.get(other)), res.RequeueAfter, err)
+		if other == hmRepl {
+			m.learnReplCommit()
+		}
+		if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
+			m.fail("P7", "the reconcile of the %s asked to run again after %v, below the floor of a second", other,
+				res.RequeueAfter)
+		}
+	}
+	m.mu.Lock()
+	m.actor, m.interleaving = who, false
+	m.mu.Unlock()
+}
+
+// lookHeld reports whether a call of r holds or waits for the per-request lock of the look at a pull request.
+func lookHeld(r *RemediationRequestReconciler) bool {
+	g := r.looks()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, k := range g.keys {
+		if k.holders > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // restart is a new executor process: a new reconciler, nothing kept in memory.
 func (m *hmWorld) restart() {
 	g := m.g
 	// The API server answers the != field selectors of the limits, which the fake client refuses (apiServerReader).
-	m.r = &RemediationRequestReconciler{Client: m.cl, APIReader: &apiServerReader{Reader: m.cl}, ReviewerHints: true,
+	m.r = &RemediationRequestReconciler{Client: m.cache(), APIReader: &apiServerReader{Reader: m.cl}, ReviewerHints: true,
 		Scheme: m.base.Scheme(), Now: func() time.Time { return m.now }, Source: &hmResolver{m: m},
 		OpenRepository: func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
 			if err := m.gitFail("open"); err != nil {
@@ -806,6 +909,7 @@ func (m *hmWorld) policyReadFault() error {
 }
 
 func (m *hmWorld) gitFail(op string) error {
+	m.interleaveBefore(op)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.actor == hmPerson || m.actor == "" {
@@ -955,11 +1059,12 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 		}
 		return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
 	}
+	m.mu.Lock()
 	if !awaiting {
-		m.mu.Lock()
 		delete(m.awaiting, who)
-		m.mu.Unlock()
 	}
+	m.prev[rr.Name] = old
+	m.mu.Unlock()
 	// P4 follows the abort from the write that stores it, so a write to Git later in the same reconcile counts.
 	if stored.Name == m.keys[hmPred].Name && stored.Status.Handoff != nil && stored.Status.Handoff.To != nil &&
 		stored.Status.Handoff.To.Phase == api.HandoffAborted {
@@ -1339,6 +1444,10 @@ func (m *hmWorld) reconcile(who string) {
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]})
 	m.mu.Lock()
 	m.actor = ""
+	if m.interleave == who {
+		// The reconcile made fewer reads than the step named: the change did not come.
+		m.interleave = ""
+	}
 	crashed, faulted := m.crashed, m.faulted
 	m.crashed, m.crashAt = false, -1
 	m.mu.Unlock()
@@ -1422,6 +1531,16 @@ func (m *hmWorld) apply(s hmStep) {
 		m.reach["restart-after-every-wait"] = true
 	case hCrash:
 		m.crashAt = s.N
+	case hInterleave:
+		m.mu.Lock()
+		m.interleave, m.interleaveAt = s.Obj, s.N
+		m.mu.Unlock()
+	case hStale:
+		m.mu.Lock()
+		if old := m.prev[m.keys[s.Obj].Name]; old != nil {
+			m.stale[m.keys[s.Obj].Name] = old.DeepCopy()
+		}
+		m.mu.Unlock()
 	case hPause, hLift:
 		m.paused = s.Kind == hPause
 		s := &api.RemediationSettings{}
@@ -2003,7 +2122,8 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 	}
 	weights := []weighted{{6, hRecPred}, {6, hRecRepl}, {4, hClock}, {3, hFault}, {2, hAnswer}, {1, hLose},
 		{1, hConflict}, {1, hRestart}, {1, hCrash}, {1, hPause}, {1, hLift}, {1, hDelete}, {2, hMerge}, {1, hPush},
-		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}, {2, hDeleteClaim}, {1, hRestartLate}}
+		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}, {2, hDeleteClaim}, {1, hRestartLate},
+		{3, hInterleave}, {1, hStale}}
 	switch focus {
 	case 1:
 		weights = append(weights, weighted{3, hFault}, weighted{2, hClock}, weighted{2, hMerge}, weighted{3, hDeleteClaim})
@@ -2064,8 +2184,11 @@ func hmDrawStep(rng *rand.Rand, k hmKind, focus uint64) hmStep {
 		}
 		s.Sticky = rng.IntN(3) == 0
 		s.Op = hmReads[rng.IntN(len(hmReads))]
-	case hLose, hConflict:
+	case hLose, hConflict, hStale:
 		s.Obj = objs[rng.IntN(2)]
+	case hInterleave:
+		s.Obj = objs[rng.IntN(2)]
+		s.N = rng.IntN(6)
 	case hDelete:
 		s.Obj = objs[rng.IntN(2)]
 		if focus == 3 {

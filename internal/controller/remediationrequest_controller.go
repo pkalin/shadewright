@@ -430,7 +430,9 @@ func (r *RemediationRequestReconciler) reader() client.Reader {
 	return r.Client
 }
 
-// getLive reads a cluster-scoped authorizing object (the policy or the settings) straight from the API server.
+// getLive reads an object straight from the API server: a cluster-scoped authorizing object (the policy or the
+// settings), the request a reconcile works on, and the other request of its handoff wherever a Git write or a wait
+// is decided on it.
 // The cache is not used: a cached copy can still hold a deleted policy, an older approval mode or a repository
 // removed from the settings, and the request's resourceVersion does not change when either of them does, so a
 // stale copy would authorize a request the live configuration refuses. A policy created together with the
@@ -592,7 +594,10 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 
 	rr := &remediationv1alpha1.RemediationRequest{}
 	defer func() { res = r.lookAgainWhileHeld(rr, res, err) }()
-	if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
+	// The request is read from the API server, not the cache (decision of 2026-11-19 on #786): every step decides on
+	// the request as stored, so no reconcile starts from a copy older than a write the executor already made. The
+	// cache still triggers the reconcile and serves the lists.
+	if err := r.getLive(ctx, req.NamespacedName, rr); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.forget(req.NamespacedName)
 			r.reportCounters.forget(req.NamespacedName)

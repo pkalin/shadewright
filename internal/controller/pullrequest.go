@@ -2576,7 +2576,8 @@ func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body stri
 		}
 		from := cur.Status.Handoff.From
 		pred := &remediationv1alpha1.RemediationRequest{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred)
+		// Read from the API server: the answer decides whether a close may be written (decision of 2026-11-19 on #786).
+		err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred)
 		if apierrors.IsNotFound(err) {
 			logf.FromContext(ctx).V(1).Info("Stopped at a missing request of the supersede chain",
 				"remediationRequest", client.ObjectKeyFromObject(rr), "missing", from.Name)

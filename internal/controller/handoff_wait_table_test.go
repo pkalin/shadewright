@@ -621,11 +621,15 @@ var recoveryPaths = []recoveryPath{
 			// The start is written on the request as the API server holds it (startMergeWait, patchGitWaits).
 			"k8s get RemediationRequest/" + newName + "#1": {stepWide: true,
 				end: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhasePRCreated }},
+			// The admission of the wait reads the predecessor too (admits, decision of 2026-11-19 on #786).
+			"k8s get RemediationRequest/" + oldName + "#3": {stepWide: true,
+				end: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhasePRCreated }},
 			"k8s patch status RemediationRequest/" + newName + "#1": {stepWide: true,
 				end: func(rr *api.RemediationRequest) bool { return rr.Status.Phase == api.PhasePRCreated }},
 		},
 		calls: append(slices.Clone(mergedTakeoverCalls[:13]), "k8s get RemediationRequest/"+newName+"#1",
-			"k8s patch status RemediationRequest/"+newName+"#1", mergedTakeoverCalls[13]),
+			"k8s get RemediationRequest/"+oldName+"#3", "k8s patch status RemediationRequest/"+newName+"#1",
+			mergedTakeoverCalls[13]),
 		ended: func(rr *api.RemediationRequest) bool {
 			return rr.Status.Phase == api.PhasePRCreated && rr.Status.MergeCommitAwaitedSince != nil
 		},

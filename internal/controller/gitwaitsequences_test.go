@@ -817,8 +817,10 @@ func TestSequenceStaleCleanupRefusedWithoutARecordedPullRequest(t *testing.T) {
 }
 
 // Seeds 19084 and 110533 of the Git waits model: a merge reported without its commit is recorded without a receipt
-// when the wait passes, and the cache then serves the copy from before the wait. The look on that copy sees the merge
-// without its commit and starts the wait again on the request as the API server holds it: it must add nothing to a
+// when the wait passes, and a reconcile then reads the copy from before the wait, which the request leaves before the
+// reconcile decides (the reconcile reads the API server's copy, so the change comes between that read and the
+// decision). The look on that copy sees the merge without its commit and starts the wait again on the request as the
+// API server holds it: it must add nothing to a
 // request whose merge is recorded (the MergeCheck kind no longer applies), and never replace an entry that stands
 // with a new one of the same kind (a validation rule).
 func TestSequenceStaleCopyStartsNoMergeWaitOnARecordedMerge(t *testing.T) {
@@ -842,10 +844,10 @@ func TestSequenceStaleCopyStartsNoMergeWaitOnARecordedMerge(t *testing.T) {
 	}
 	for range 2 {
 		m.mu.Lock()
-		m.stale, m.staleNext = before.DeepCopy(), true
+		m.staleStart = before.DeepCopy()
 		m.mu.Unlock()
-		m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d)",
-			before.Status.Phase, len(before.Status.GitWaits))
+		m.logf("the next reconcile reads an older copy of the request, which changes before it decides (phase %s, "+
+			"waits %d)", before.Status.Phase, len(before.Status.GitWaits))
 		m.steps(1)
 		if live := m.live(); len(live.Status.GitWaits) > 0 {
 			m.fatalf("end: the request whose merge is recorded (phase %s) holds the waits %v", live.Status.Phase,

@@ -60,20 +60,28 @@ func TestHandoffModelRestartPastEveryWaitEndsThemAll(t *testing.T) {
 }
 
 // The record hold sits in the gate every Git write passes: a write of a request whose other request holds a claim on
-// a merge of their pull request never reaches the host, nor one whose read of that request fails (then for a retry, as
-// the Kubernetes API's); without a claim the write goes through.
+// a merge of their pull request never reaches the host, nor one whose request as stored waits for the other's record
+// while the copy it writes with does not show it, nor one whose read of either request fails or finds it gone (then for
+// a retry, as the Kubernetes API's); without a claim the write goes through.
 func TestRecordHoldGatesEveryWrite(t *testing.T) {
 	ctx := context.Background()
 	other := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace, Name: oldName,
 		UID: hmPredUID}}
 	other.Status.PullRequest = &api.PullRequestStatus{Number: 1, HeadSHA: strings.Repeat("a", 40)}
-	rr := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace, Name: "new"}}
+	rr := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: requestNamespace, Name: newName}}
 	rr.Status.PullRequest = &api.PullRequestStatus{Number: 1, HeadSHA: strings.Repeat("b", 40)}
 	rr.Status.Handoff = &api.Handoff{From: &api.IncomingHandoff{Name: oldName, UID: hmPredUID,
 		Phase: api.HandoffDone}}
 	claim := other.DeepCopy()
 	claim.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitMergeCheck, Since: metav1.Now(),
 		PullRequest: &api.GitWaitPullRequest{Number: 1, HeadSHA: strings.Repeat("a", 40)}}}
+	// The request as stored waits for the other request's record, which can still come (it holds the lock); the copy
+	// the write is made with is older and does not show it (decision of 2026-11-19 on #786: the gate reads it live).
+	holder := other.DeepCopy()
+	holder.Status.HoldsTarget = new(true)
+	waiting := rr.DeepCopy()
+	waiting.Status.Conditions = []metav1.Condition{{Type: api.ConditionApproved, Status: metav1.ConditionFalse,
+		Reason: ReasonMergeRecordPending, Message: "waits", LastTransitionTime: metav1.Now()}}
 	failing := interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object,
 		...client.GetOption) error {
 		return apierrors.NewServiceUnavailable("down")
@@ -81,17 +89,24 @@ func TestRecordHoldGatesEveryWrite(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		other  *api.RemediationRequest
+		stored *api.RemediationRequest
 		funcs  interceptor.Funcs
 		want   error
 		called bool
 	}{
-		{"claim", claim, interceptor.Funcs{}, errRecordHeld, false},
-		{"failed read", other, failing, freshness.ErrWriteBlocked, false},
-		{"no claim", other, interceptor.Funcs{}, nil, true},
+		{"claim", claim, rr, interceptor.Funcs{}, errRecordHeld, false},
+		{"failed read", other, rr, failing, freshness.ErrWriteBlocked, false},
+		{"no claim", other, rr, interceptor.Funcs{}, nil, true},
+		{"stored wait for the record", holder, waiting, interceptor.Funcs{}, errRecordHeld, false},
+		{"request gone", other, nil, interceptor.Funcs{}, freshness.ErrWriteBlocked, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			objs := []client.Object{c.other}
+			if c.stored != nil {
+				objs = append(objs, c.stored)
+			}
 			reader := interceptor.NewClient(clientfake.NewClientBuilder().WithScheme(deadlineScheme(t)).
-				WithObjects(c.other).Build(), c.funcs)
+				WithObjects(objs...).Build(), c.funcs)
 			r := &RemediationRequestReconciler{Client: reader, APIReader: reader}
 			g := fakegit.NewGit(mainBranch, nil)
 			called := false

@@ -297,8 +297,10 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 // made on the request as the API server holds it (patchGitWaits), so a caller's unwritten changes to rr (a takeover's
 // conditions, #786) are never written with it; rr takes only these fields, and the new resourceVersion only when it
 // was the server's copy, so a later write of an older copy is refused as a conflict. A failed write leaves rr as it
-// was and is returned for a retry. When the request as the API server holds it has its merge recorded, or is being
-// deleted (the MergeCheck kind no longer applies), rr was an older copy (the cache served one): nothing is added,
+// was and is returned for a retry. The admission decides on live copies of both requests of a handoff (admits): when
+// the request as the API server holds it has its merge recorded, is settled on a merge the other request records, or
+// is being deleted, or the other request, read here, holds the record of that merge, rr was an older copy (the other
+// request changed it, or the store moved on, after the reconcile read it): nothing is added,
 // and a conflict is returned, so the reconcile runs again on a fresh read instead of starting a wait the request has
 // left (or replacing an entry of the same kind that still stands, which a validation rule refuses).
 func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
@@ -306,12 +308,18 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 	now := r.now()
 	var since *metav1.Time
 	left := false
-	if err := r.patchGitWaits(ctx, rr, func(live *remediationv1alpha1.RemediationRequest) {
-		if left = !waitMergeCheck.applies(live); left {
-			return
+	if err := r.patchGitWaits(ctx, rr, func(live *remediationv1alpha1.RemediationRequest) error {
+		ok, err := r.admits(ctx, live, remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
+			PullRequest: waitPullRequest(cr)})
+		if err != nil {
+			return err
+		}
+		if left = !ok; left {
+			return nil
 		}
 		startMergeWaitIn(live, cr, op, now)
 		since = live.Status.MergeCommitAwaitedSince.DeepCopy()
+		return nil
 	}); err != nil {
 		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
@@ -319,7 +327,8 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 		// The same error a write of the older copy got before (an optimistic lock), so callers treat it alike.
 		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name,
 			apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource("remediationrequests").GroupResource(),
-				rr.Name, errors.New("its merge is recorded or it is being deleted since it was read")))
+				rr.Name, errors.New("its merge is recorded, by it or by the other request of its handoff, or it is being "+
+					"deleted since it was read")))
 	}
 	rr.Status.MergeCommitAwaitedSince = since
 	return nil

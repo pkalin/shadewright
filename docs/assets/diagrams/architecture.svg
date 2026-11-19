@@ -84,7 +84,6 @@
   <text class="s" x="594" y="509">idempotent state machine</text>
 
   <rect class="box" x="332" y="610" width="210" height="64" rx="10"/>
-  <text class="pn" x="526" y="626" text-anchor="end">--verify-outcomes</text>
   <text class="h" x="348" y="636">Verifier</text>
   <text class="s" x="348" y="657">samples pods · no model, no Git</text>
 

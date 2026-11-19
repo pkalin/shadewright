@@ -1427,24 +1427,39 @@ func TestSeededKeysAfterAKeyNameAreRedacted(t *testing.T) {
 		t.Skip("100,000 keys: runs without -race")
 	}
 	const n = 100_000
-	whole, fragments, notOpaque := 0, 0, 0
-	for seed := range uint64(n) {
+	// Each seed is decided on its own (forEachParallel), into its own slot; the counts and messages are then
+	// taken in the order of the seeds, as a serial run takes them.
+	type outcome struct {
+		notOpaque, ok, whole bool
+		out                  string
+	}
+	outs := make([]outcome, n)
+	forEachParallel(n, func(i int) {
+		seed := uint64(i) // #nosec G115 -- i is below n
 		f := keyNameForms[seed%uint64(len(keyNameForms))]
 		k := seededKey(seed)
-		if f.opaqueOnly && !opaqueToken(k) {
+		o := &outs[i]
+		o.notOpaque = f.opaqueOnly && !opaqueToken(k)
+		o.out, o.ok = redactedAfterKeyName(f.before, k, f.after)
+		o.whole = !o.ok && strings.Contains(o.out, k)
+	})
+	whole, fragments, notOpaque := 0, 0, 0
+	for i, o := range outs {
+		if o.notOpaque {
 			notOpaque++ // counted, never skipped: such a key fails below as well
 		}
-		out, ok := redactedAfterKeyName(f.before, k, f.after)
-		if ok {
+		if o.ok {
 			continue
 		}
-		if strings.Contains(out, k) {
+		if o.whole {
 			whole++
 		} else {
 			fragments++
 		}
 		if whole+fragments <= 3 {
-			t.Errorf("seed %d, %s: value not redacted whole:\n in: %s\nout: %s", seed, f.name, f.before+k+f.after, out)
+			seed := uint64(i) // #nosec G115 -- i is below n
+			f := keyNameForms[seed%uint64(len(keyNameForms))]
+			t.Errorf("seed %d, %s: value not redacted whole:\n in: %s\nout: %s", seed, f.name, f.before+seededKey(seed)+f.after, o.out)
 		}
 	}
 	if whole+fragments > 0 || notOpaque > 0 {

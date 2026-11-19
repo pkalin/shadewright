@@ -111,8 +111,9 @@ func TestStringOverAToolResultHidesNothingMore(t *testing.T) {
 	r := rand.New(rand.NewPCG(845, 6)) // #nosec G404 -- test data from a fixed seed, not a secret
 	red := defaultRedactor()
 	calls, failed, n := 0, 0, 0
+	var jobs []func(e *fieldEnv)
+	var msgs []string
 	for _, ft := range fieldTools {
-		e := newFieldEnv(t)
 		for _, typ := range ft.types {
 			places := fieldPlaces(typ)
 			for turn, pq := range returnedPairs(places, r) {
@@ -124,19 +125,30 @@ func TestStringOverAToolResultHidesNothingMore(t *testing.T) {
 						continue
 					}
 					calls++
-					ft.call(t, e, typ, "unused-value", func(obj reflect.Value) {
-						p.fill(obj, k)
-						q.fill(obj, v)
-					})
-					text := ft.answer(t, e)
-					if again := red.String(text); lostWords(text, again, k, v, fieldsPod, fieldsNS) != "" {
-						if failed++; failed <= 10 {
-							t.Errorf("%s %s = %q, %s = %q: String hides more of the answer\n  answer: %q\n  String: %q",
+					msgs = append(msgs, "")
+					at := len(msgs) - 1
+					jobs = append(jobs, func(e *fieldEnv) {
+						ft.call(t, e, typ, "unused-value", func(obj reflect.Value) {
+							p.fill(obj, k)
+							q.fill(obj, v)
+						})
+						text := ft.answer(t, e)
+						if again := red.String(text); lostWords(text, again, k, v, fieldsPod, fieldsNS) != "" {
+							msgs[at] = fmt.Sprintf("%s %s = %q, %s = %q: String hides more of the answer\n  answer: %q\n  String: %q",
 								ft.name, p.name(typ), k, q.name(typ), v, text, again)
 						}
-					}
+					})
 				}
 			}
+		}
+	}
+	runFieldJobs(t, jobs)
+	for _, m := range msgs {
+		if m == "" {
+			continue
+		}
+		if failed++; failed <= 10 {
+			t.Error(m)
 		}
 	}
 	if failed > 0 {

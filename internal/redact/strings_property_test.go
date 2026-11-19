@@ -19,8 +19,11 @@ package redact
 import (
 	"fmt"
 	"math/rand/v2"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -136,6 +139,25 @@ func seqDecided(j seqJoined, quoted bool, i, at int, spans []span) bool {
 	return false
 }
 
+// forEachParallel calls f(i) for every i below n on as many workers as the process may run at once. f writes
+// only what belongs to its i. No test that counts redaction work calls it: the counter is global.
+func forEachParallel(n int, f func(i int)) {
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(runtime.GOMAXPROCS(0), n) {
+		wg.Go(func() {
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= n {
+					return
+				}
+				f(i)
+			}
+		})
+	}
+	wg.Wait()
+}
+
 func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 	rng := rand.New(rand.NewPCG(845, 2)) //nolint:gosec // a fixed seed keeps the sequences the same on every run
 	cases := seqPropertyCases
@@ -143,9 +165,11 @@ func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 		cases /= canonSampleDivisor
 	}
 	parts := append(slices.Clone(seqPropertyParts), seqClassParts(rand.New(rand.NewPCG(845, 4)))...) //nolint:gosec // a fixed seed
-	n, failed, decided, failedSeqs := 0, 0, 0, 0
-	for range cases {
-		before := failed
+	// The sequences are drawn in order from the seeded generator first, then decided on as many workers as the
+	// process may run (forEachParallel), each case into its own slot, so the outcome is that of a serial run.
+	n := 0
+	seqs := make([][]string, cases)
+	for c := range seqs {
 		var items []string
 		for range 2 + rng.IntN(5) {
 			switch rng.IntN(4) {
@@ -157,6 +181,16 @@ func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 				items = append(items, canonPick(rng, parts))
 			}
 		}
+		seqs[c] = items
+	}
+	type outcome struct {
+		decided int
+		errs    []string
+	}
+	outs := make([]outcome, cases)
+	forEachParallel(cases, func(c int) {
+		items := seqs[c]
+		o := &outs[c]
 		got := Strings(items)
 		for ji, j := range seqJoins(items) {
 			spans := defaultRedactor.spans(j.text)
@@ -166,17 +200,24 @@ func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 					continue
 				}
 				v := it[at:]
-				decided++
+				o.decided++
 				if !strings.Contains(got[i], v) {
 					continue
 				}
-				if failed++; failed <= 10 {
-					t.Errorf("String(%q) = %q hides %s, Strings(%q) = %q shows it", j.text, String(j.text), v, items, got)
-				}
+				o.errs = append(o.errs, fmt.Sprintf("String(%q) = %q hides %s, Strings(%q) = %q shows it", j.text, String(j.text), v, items, got))
 			}
 		}
-		if failed > before {
+	})
+	failed, decided, failedSeqs := 0, 0, 0
+	for _, o := range outs {
+		decided += o.decided
+		if len(o.errs) > 0 {
 			failedSeqs++
+		}
+		for _, e := range o.errs {
+			if failed++; failed <= 10 {
+				t.Error(e)
+			}
 		}
 	}
 	if failed > 0 {

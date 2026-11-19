@@ -26,8 +26,11 @@ import (
 	"os"
 	"reflect"
 	"regexp/syntax"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -501,6 +504,33 @@ func newFieldEnv(t *testing.T) *fieldEnv {
 	return e
 }
 
+// runFieldJobs runs jobs, each a call of a read tool, on as many workers as the process may run at once, each
+// worker with a field env of its own (a tool set over its own reader and sources), so that the tables of every
+// tool use the cores they have. A job writes its result into its own slot, so the order of the results is the
+// order of the jobs. The redaction work counters are not read meanwhile: no test that counts work calls this.
+func runFieldJobs(t *testing.T, jobs []func(e *fieldEnv)) {
+	t.Helper()
+	workers := min(runtime.GOMAXPROCS(0), len(jobs))
+	envs := make([]*fieldEnv, workers)
+	for i := range envs {
+		envs[i] = newFieldEnv(t)
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for _, e := range envs {
+		wg.Go(func() {
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(jobs) {
+					return
+				}
+				jobs[i](e)
+			}
+		})
+	}
+	wg.Wait()
+}
+
 // putObject makes obj the object every Get answers with.
 func putObject(e *fieldEnv, obj reflect.Value) { e.reader.obj = obj.Interface().(client.Object) }
 
@@ -588,10 +618,10 @@ func (r fieldResult) id() string {
 func fieldResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) {
 	t.Helper()
 	var out []fieldResult
+	var jobs []func(e *fieldEnv)
 	places := map[string]int{}
 	n := 0
 	for _, ft := range fieldTools {
-		e := newFieldEnv(t)
 		for _, typ := range ft.types {
 			for turn, p := range fieldPlaces(typ) {
 				places[ft.name]++
@@ -605,25 +635,16 @@ func fieldResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) {
 						out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: f.name, skipped: true})
 						continue
 					}
-					obj := reflect.New(typ)
-					p.set(obj, f, v)
-					if m, ok := reflect.TypeAssert[metav1.Object](obj); ok && m.GetName() == "" {
-						m.SetName(fieldsPod)
-						m.SetNamespace(fieldsNS)
-					}
-					e.reader.obj, e.reader.events = nil, nil
-					ft.put(e, obj)
-					args := ft.args
-					if ft.name == tools.NameGetResource {
-						args = map[string]any{fieldsArgKind: typ.Name(), fieldsArgNS: fieldsNS, fieldsArgName: fieldsPod}
-					}
-					text := callFieldTool(t, e.set, ft.name, args)
-					shown := strings.Contains(text, v[:8]) || strings.Contains(text, v[len(v)-8:])
-					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: f.name, hidden: !shown})
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: f.name})
+					at := len(out) - 1
+					jobs = append(jobs, func(e *fieldEnv) {
+						out[at].hidden = !ft.call(t, e, typ, v, func(obj reflect.Value) { p.set(obj, f, v) })
+					})
 				}
 			}
 		}
 	}
+	runFieldJobs(t, jobs)
 	return out, places
 }
 
@@ -803,10 +824,10 @@ func (p fieldPlace) at(root reflect.Value) reflect.Value {
 func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) {
 	t.Helper()
 	var out []fieldResult
+	var jobs []func(e *fieldEnv)
 	calls := map[string]int{}
 	n := 0
 	for _, ft := range fieldTools {
-		e := newFieldEnv(t)
 		for _, typ := range ft.types {
 			places := fieldPlaces(typ)
 			for _, p := range places {
@@ -821,8 +842,11 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "plain value", skipped: true})
 				} else {
 					calls[ft.name]++
-					shown := ft.call(t, e, typ, v, func(obj reflect.Value) { p.setText(obj, v) })
-					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "plain value", hidden: !shown})
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "plain value"})
+					at := len(out) - 1
+					jobs = append(jobs, func(e *fieldEnv) {
+						out[at].hidden = !ft.call(t, e, typ, v, func(obj reflect.Value) { p.setText(obj, v) })
+					})
 				}
 			}
 			for turn, p := range places {
@@ -837,16 +861,19 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 						continue
 					}
 					calls[ft.name]++
-					shown := ft.call(t, e, typ, v, func(obj reflect.Value) {
-						cur := p.at(obj)
-						items := f.items(v)
-						l := reflect.MakeSlice(cur.Type(), len(items), len(items))
-						for i, it := range items {
-							l.Index(i).SetString(it)
-						}
-						cur.Set(l)
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "list " + f.name})
+					at := len(out) - 1
+					jobs = append(jobs, func(e *fieldEnv) {
+						out[at].hidden = !ft.call(t, e, typ, v, func(obj reflect.Value) {
+							cur := p.at(obj)
+							items := f.items(v)
+							l := reflect.MakeSlice(cur.Type(), len(items), len(items))
+							for i, it := range items {
+								l.Index(i).SetString(it)
+							}
+							cur.Set(l)
+						})
 					})
-					out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: "list " + f.name, hidden: !shown})
 				}
 			}
 			for turn, pq := range fieldPairs(places) {
@@ -859,11 +886,14 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 						continue
 					}
 					calls[ft.name]++
-					shown := ft.call(t, e, typ, v, func(obj reflect.Value) {
-						p.setText(obj, f.key)
-						q.setText(obj, v)
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: "pair " + f.name})
+					at := len(out) - 1
+					jobs = append(jobs, func(e *fieldEnv) {
+						out[at].hidden = !ft.call(t, e, typ, v, func(obj reflect.Value) {
+							p.setText(obj, f.key)
+							q.setText(obj, v)
+						})
 					})
-					out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: "pair " + f.name, hidden: !shown})
 				}
 				// The value in the shapes of this pair (shapesAt), the pair forms taken in turn.
 				for i, sh := range shapesAt(turn, fieldPairShapes) {
@@ -876,15 +906,19 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 						continue
 					}
 					calls[ft.name]++
-					shown := ft.call(t, e, typ, v, func(obj reflect.Value) {
-						p.setText(obj, f.key)
-						q.setText(obj, sh.shape(v))
+					out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: form})
+					at := len(out) - 1
+					jobs = append(jobs, func(e *fieldEnv) {
+						out[at].hidden = !ft.call(t, e, typ, v, func(obj reflect.Value) {
+							p.setText(obj, f.key)
+							q.setText(obj, sh.shape(v))
+						})
 					})
-					out = append(out, fieldResult{tool: ft.name, place: p.name(typ) + " > " + q.name(typ), form: form, hidden: !shown})
 				}
 			}
 		}
 	}
+	runFieldJobs(t, jobs)
 	return out, calls
 }
 

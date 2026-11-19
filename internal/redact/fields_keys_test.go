@@ -55,10 +55,10 @@ var fieldKeyForms = []struct {
 func fieldKeyResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) {
 	t.Helper()
 	var out []fieldResult
+	var jobs []func(e *fieldEnv)
 	maps := map[string]int{}
 	n := 0
 	for _, ft := range fieldTools {
-		e := newFieldEnv(t)
 		for _, typ := range ft.types {
 			for _, p := range fieldPlaces(typ) {
 				if p.kind != reflect.Map {
@@ -75,13 +75,17 @@ func fieldKeyResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) 
 							continue
 						}
 						f := fieldForm{key: func(v string) string { return kf.key(sh.shape(v)) }, value: func(string) string { return "x" }}
-						shown := ft.call(t, e, typ, v, func(obj reflect.Value) { p.set(obj, f, v) })
-						out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: form, hidden: !shown})
+						out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: form})
+						at := len(out) - 1
+						jobs = append(jobs, func(e *fieldEnv) {
+							out[at].hidden = !ft.call(t, e, typ, v, func(obj reflect.Value) { p.set(obj, f, v) })
+						})
 					}
 				}
 			}
 		}
 	}
+	runFieldJobs(t, jobs)
 	return out, maps
 }
 
@@ -140,13 +144,13 @@ func literalPlaces(t reflect.Type) []literalPlace {
 func fieldLiteralResults(t *testing.T, sample, checkJSON bool) ([]fieldResult, map[string]int) {
 	t.Helper()
 	var out []fieldResult
+	var jobs []func(e *fieldEnv)
 	places := map[string]int{}
 	n := 0
 	for _, ft := range fieldTools {
 		if ft.name != tools.NameGetResource {
 			continue
 		}
-		e := newFieldEnv(t)
 		for _, typ := range ft.types {
 			for _, p := range literalPlaces(typ) {
 				places[typ.Name()]++
@@ -160,35 +164,40 @@ func fieldLiteralResults(t *testing.T, sample, checkJSON bool) ([]fieldResult, m
 					continue
 				}
 				num := 61000000 + n
-				obj := reflect.New(typ)
-				switch cur := p.at(obj); {
-				case p.kind == reflect.Bool:
-					cur.SetBool(true)
-				case cur.CanInt():
-					cur.SetInt(int64(num))
-				case cur.CanUint():
-					cur.SetUint(uint64(num))
-				default:
-					cur.SetFloat(float64(num))
-				}
-				if m, ok := reflect.TypeAssert[metav1.Object](obj); ok && m.GetName() == "" {
-					m.SetName(fieldsPod)
-					m.SetNamespace(fieldsNS)
-				}
-				e.reader.obj, e.reader.events = nil, nil
-				ft.put(e, obj)
-				text := callFieldTool(t, e.set, ft.name, map[string]any{fieldsArgKind: typ.Name(), fieldsArgNS: fieldsNS, fieldsArgName: fieldsPod})
-				shown := strings.Contains(text, strconv.Itoa(num))
-				if p.kind == reflect.Bool {
-					shown = strings.Contains(text, strconv.Quote(p.json)+": true")
-				}
-				if checkJSON && !json.Valid([]byte(text)) {
-					t.Errorf("%s %s, %s: the answer is no JSON:\n%.2000s", ft.name, p.name(typ), form, text)
-				}
-				out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: form, hidden: !shown})
+				out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: form})
+				at := len(out) - 1
+				jobs = append(jobs, func(e *fieldEnv) {
+					obj := reflect.New(typ)
+					switch cur := p.at(obj); {
+					case p.kind == reflect.Bool:
+						cur.SetBool(true)
+					case cur.CanInt():
+						cur.SetInt(int64(num))
+					case cur.CanUint():
+						cur.SetUint(uint64(num)) // #nosec G115 -- a positive number of the test, far below the limit
+					default:
+						cur.SetFloat(float64(num))
+					}
+					if m, ok := reflect.TypeAssert[metav1.Object](obj); ok && m.GetName() == "" {
+						m.SetName(fieldsPod)
+						m.SetNamespace(fieldsNS)
+					}
+					e.reader.obj, e.reader.events = nil, nil
+					ft.put(e, obj)
+					text := callFieldTool(t, e.set, ft.name, map[string]any{fieldsArgKind: typ.Name(), fieldsArgNS: fieldsNS, fieldsArgName: fieldsPod})
+					shown := strings.Contains(text, strconv.Itoa(num))
+					if p.kind == reflect.Bool {
+						shown = strings.Contains(text, strconv.Quote(p.json)+": true")
+					}
+					if checkJSON && !json.Valid([]byte(text)) {
+						t.Errorf("%s %s, %s: the answer is no JSON:\n%.2000s", ft.name, p.name(typ), form, text)
+					}
+					out[at].hidden = !shown
+				})
 			}
 		}
 	}
+	runFieldJobs(t, jobs)
 	return out, places
 }
 

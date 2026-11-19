@@ -44,10 +44,10 @@ func signalFieldResults(t *testing.T, sample bool) ([]fieldResult, map[string]in
 	t.Helper()
 	forms := signalFieldForms()
 	var out []fieldResult
+	var jobs []func(e *fieldEnv)
 	calls := map[string]int{}
 	n := 0
 	for _, ft := range fieldTools {
-		e := newFieldEnv(t)
 		var places []struct {
 			typ reflect.Type
 			p   fieldPlace
@@ -81,24 +81,28 @@ func signalFieldResults(t *testing.T, sample bool) ([]fieldResult, map[string]in
 					continue
 				}
 				calls[ft.name]++
-				shown := ft.call(t, e, typ, v, func(obj reflect.Value) {
-					switch p.kind {
-					case reflect.Map:
-						p.set(obj, fieldForm{key: func(string) string { return f.prefix }, value: func(v string) string { return v }}, v)
-					case reflect.Slice:
-						cur := p.at(obj)
-						l := reflect.MakeSlice(cur.Type(), 2, 2)
-						l.Index(0).SetString(f.prefix + strings.TrimRight(f.sep, " \r\n"))
-						l.Index(1).SetString(v)
-						cur.Set(l)
-					default:
-						p.setText(obj, f.prefix+f.sep+v)
-					}
+				out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: form})
+				at := len(out) - 1
+				jobs = append(jobs, func(e *fieldEnv) {
+					out[at].hidden = !ft.call(t, e, typ, v, func(obj reflect.Value) {
+						switch p.kind {
+						case reflect.Map:
+							p.set(obj, fieldForm{key: func(string) string { return f.prefix }, value: func(v string) string { return v }}, v)
+						case reflect.Slice:
+							cur := p.at(obj)
+							l := reflect.MakeSlice(cur.Type(), 2, 2)
+							l.Index(0).SetString(f.prefix + strings.TrimRight(f.sep, " \r\n"))
+							l.Index(1).SetString(v)
+							cur.Set(l)
+						default:
+							p.setText(obj, f.prefix+f.sep+v)
+						}
+					})
 				})
-				out = append(out, fieldResult{tool: ft.name, place: p.name(typ), form: form, hidden: !shown})
 			}
 		}
 	}
+	runFieldJobs(t, jobs)
 	return out, calls
 }
 

@@ -185,13 +185,13 @@ func (p marshaledPlace) set(root reflect.Value, f marshaledForm, v string) {
 func fieldMarshaledResults(t *testing.T, sample bool) ([]fieldResult, map[string]int) {
 	t.Helper()
 	var out []fieldResult
+	var jobs []func(e *fieldEnv)
 	byType := map[string]int{}
 	n := 0
 	for _, ft := range fieldTools {
 		if ft.name != tools.NameGetResource {
 			continue
 		}
-		e := newFieldEnv(t)
 		for _, typ := range ft.types {
 			for _, p := range marshaledPlaces(typ) {
 				k, ok := marshaledKinds[p.typ]
@@ -212,12 +212,16 @@ func fieldMarshaledResults(t *testing.T, sample bool) ([]fieldResult, map[string
 						out = append(out, fieldResult{tool: ft.name, place: place, form: f.name, skipped: true})
 						continue
 					}
-					shown := ft.call(t, e, typ, v, func(obj reflect.Value) { p.set(obj, f, v) })
-					out = append(out, fieldResult{tool: ft.name, place: place, form: f.name, hidden: !shown})
+					out = append(out, fieldResult{tool: ft.name, place: place, form: f.name})
+					at := len(out) - 1
+					jobs = append(jobs, func(e *fieldEnv) {
+						out[at].hidden = !ft.call(t, e, typ, v, func(obj reflect.Value) { p.set(obj, f, v) })
+					})
 				}
 			}
 		}
 	}
+	runFieldJobs(t, jobs)
 	return out, byType
 }
 

@@ -2109,7 +2109,11 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
-	if markDeleting(rr) {
+	waits := len(rr.Status.GitWaits)
+	// The waits for a read do not apply to a request being deleted (waitKind.applies, #878): removed in the same write,
+	// so the status does not say it waits for a merge while the cleanup is retried.
+	dropEnded(rr, r.now())
+	if marked := markDeleting(rr); marked || len(rr.Status.GitWaits) != waits {
 		// Before the close below: the limits read this request, and count it against the cap, until the
 		// finalizer is gone (breakercounts.go).
 		if err := r.Status().Update(ctx, rr); err != nil {

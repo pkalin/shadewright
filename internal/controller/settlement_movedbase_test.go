@@ -454,9 +454,11 @@ func TestSettlementMovedBaseUnnamedKeepsLock(t *testing.T) {
 	}
 }
 
-// #892, decision of 2026-11-19: a pull request from the request's branch that is not its own (another number, no
-// marker) open on another base never keeps the lock, whatever its base is called.
-func TestSettlementForeignOnOtherBaseReleases(t *testing.T) {
+// #925, decision of 2026-11-19: a pull request from the request's branch that is not its own (another number, no
+// marker) open on another base has the branch head, which carries the request's commit, and a person can move it to
+// the target branch and merge it: it keeps the lock as one open on the target branch does, whatever its base is
+// called. It is never adopted or closed. Its close releases the lock. On main it was released at once.
+func TestSettlementForeignOnOtherBaseKeepsLock(t *testing.T) {
 	for name, base := range map[string]string{"named": movedBranch, "unnamed": plusBase} {
 		t.Run(name, func(t *testing.T) {
 			r, g, rr, clock, n := movedBaseWorld(t, "branch")
@@ -477,11 +479,51 @@ func TestSettlementForeignOnOtherBaseReleases(t *testing.T) {
 				}
 				g.HideBaseName(base)
 			}
-			if _, err := g.AddOpenChangeRequest(freshness.BranchName(rr), base, "a person's change"); err != nil {
+			foreign, err := g.AddOpenChangeRequest(freshness.BranchName(rr), base, "a person's change")
+			if err != nil {
+				t.Fatal(err)
+			}
+			live := lookMoved(t, r, rr, clock)
+			held := meta.FindStatusCondition(live.Status.Conditions, api.ConditionTargetHeld)
+			if !holdsLock(live) || held == nil || !strings.Contains(held.Message, fmt.Sprintf("#%d", foreign)) {
+				t.Fatalf("a foreign pull request open on %s: holds=%v TargetHeld=%+v; want the lock held and the "+
+					"pull request named", base, holdsLock(live), held)
+			}
+			if live.Status.PullRequest.Number != n {
+				t.Fatalf("the foreign pull request was taken as the request's own: %+v", live.Status.PullRequest)
+			}
+			if got, _ := g.GetChangeRequest(ctx, foreign); got.State != providers.ChangeRequestOpen {
+				t.Fatalf("the foreign pull request was closed: %+v", got)
+			}
+			if err := g.Close(foreign); err != nil {
 				t.Fatal(err)
 			}
 			if live := lookMoved(t, r, rr, clock); holdsLock(live) {
-				t.Fatalf("a foreign pull request on %s keeps the lock: %+v", base, live.Status.Conditions)
+				t.Fatalf("the foreign pull request on %s is closed and the lock is held: %+v", base,
+					live.Status.Conditions)
+			}
+		})
+	}
+}
+
+// #925, case 1: the read of the recorded pull request by its number answers 404 again and again, while the pull
+// request is open on a base a person moved it to: the listings of the recorded and the configured target branch
+// confirm it gone there, but "gone" is concluded only after every base was looked at, so the lock is kept. On main
+// the lock was released on the target branches' listings alone.
+func TestSettlementGoneByNumberOpenElsewhereKeepsLock(t *testing.T) {
+	for _, stop := range []string{"branch", pathCancel} {
+		t.Run(stop, func(t *testing.T) {
+			r, g, rr, clock, n := movedBaseWorld(t, stop)
+			g.SetFail(func(op string) error {
+				if op == opGet {
+					return fmt.Errorf("pull request %d: %w", n, providers.ErrNotFound)
+				}
+				return nil
+			})
+			live := lookMoved(t, r, rr, clock)
+			if !holdsLock(live) {
+				t.Fatalf("pull request #%d open on %s and missing by its number: the lock was released: %+v", n,
+					movedBranch, live.Status.Conditions)
 			}
 		})
 	}

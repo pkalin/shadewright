@@ -138,6 +138,11 @@ type changeVerdict struct {
 	// open is every open pull request of the branch to the target branch, whoever opened it (the listing of the
 	// branch, or openOnBranch).
 	open []providers.ChangeRequest
+	// openOther is every open pull request from the request's branch on a base other than the ones the caller read
+	// (q.otherBases), with or without this request's marker: each has the branch head, which carries the request's
+	// commit, and can be moved to the target branch and merged, so each keeps the lock (#925). Only one with the
+	// marker is ever adopted or closed.
+	openOther []providers.ChangeRequest
 	// ownListed is true for changeUnknown with errOwnListed when the verdict carries every listing of the branch
 	// that the call read (own, and open with openOnBranch). A verdict made unknown again by a later failure (a
 	// listing, a status write) is a new one without it, so closeAllOwn never acts on a listing it does not have.
@@ -322,7 +327,8 @@ func (r *RemediationRequestReconciler) readOnConfigured(ctx context.Context, git
 // those with this request's marker on a base that is not in q.otherBases, the one that wins: an open one, else a merged one, else a closed one, the
 // newest of its state first (the listing's order). The state is the rule, not the age: an old pull request still open
 // can merge, while a newer one closed cannot. Open is changeElsewhere, merged changeMergedElsewhere, closed
-// changeClosedElsewhere, and none is gone. With q.withRecorded the verdict's own holds every one with the marker there, in the
+// changeClosedElsewhere, and none is gone. Every open one there, with or without the marker, is in the verdict's
+// openOther (#925). With q.withRecorded the verdict's own holds every one with the marker there, in the
 // listing's order (the finalizer closes each). The listing is the proof that there is none; one that fails, also past
 // MaxBranchChangeRequests (ErrTooLarge, fail closed), is unknown, never none.
 func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git providers.GitProvider,
@@ -340,7 +346,7 @@ func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git 
 		return unknownChange(listFailed("list the change requests of the branch to every base", err))
 	}
 	var won *providers.ChangeRequest
-	var own []providers.ChangeRequest
+	var own, openOther []providers.ChangeRequest
 	for i, cr := range open {
 		// An entry with no base name (left out by the provider) is on neither target branch: a target branch name
 		// always passes the provider's rule.
@@ -350,6 +356,9 @@ func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git 
 		if stateRank[cr.State] == 0 {
 			return unknownChange(fmt.Errorf("pull request #%d has a state the executor does not know: %q", cr.Number,
 				cr.State))
+		}
+		if cr.State == providers.ChangeRequestOpen {
+			openOther = append(openOther, cr)
 		}
 		switch ours, err := r.ownsMarker(ctx, cr.Body, rr); {
 		case err != nil:
@@ -376,6 +385,7 @@ func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git 
 	if q.withRecorded {
 		v.own = own
 	}
+	v.openOther = openOther
 	return v
 }
 

@@ -32,7 +32,7 @@ var verdictTable = map[changeState]verdictRow{
 	changeUnknown: {
 		name: "unknown", failed: true, stopException: stopExceptNone, heldRecord: heldRecordNone,
 		lockFound: lockverdict.FoundOther, keepsLockMoved: false, lookConfirmGone: false, lookYields: true,
-		lookWins: false, ownOpenOnTarget: false, looksElsewhere: false, fromOtherBases: otherBaseFailed,
+		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: false, fromOtherBases: otherBaseFailed,
 		yieldsToClosed: false, handed: handedRetry, recover: recoverRetry, mergedInto: false,
 		retargetCancel: retargetCancelNone, failCheck: failCheckRetry, cancelLook: cancelLookNone, adopt: adoptRetry,
 		refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedRetry, watch: watchRetry,
@@ -42,7 +42,7 @@ var verdictTable = map[changeState]verdictRow{
 	changeOpen: {
 		name: "open", failed: false, stopException: stopExceptOpen, heldRecord: heldRecordFound,
 		lockFound: lockverdict.FoundOther, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
-		lookWins: false, ownOpenOnTarget: true, looksElsewhere: false, fromOtherBases: otherBaseNone,
+		lookWins: false, ownOpenOnTarget: true, adoptLooksElsewhere: false, lockLooksElsewhere: false, fromOtherBases: otherBaseNone,
 		yieldsToClosed: false, handed: handedIt, recover: recoverRetry, mergedInto: false,
 		retargetCancel: retargetCancelNone, failCheck: failCheckWrite, cancelLook: cancelLookNone, adopt: adoptIt,
 		refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
@@ -52,7 +52,7 @@ var verdictTable = map[changeState]verdictRow{
 	changeMerged: {
 		name: "merged", failed: false, stopException: stopExceptMerged, heldRecord: heldRecordFound,
 		lockFound: lockverdict.FoundMerged, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
-		lookWins: true, ownOpenOnTarget: false, looksElsewhere: false, fromOtherBases: otherBaseNone,
+		lookWins: true, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: true, fromOtherBases: otherBaseNone,
 		yieldsToClosed: false, handed: handedIt, recover: recoverFromPullRequest, mergedInto: true,
 		retargetCancel: retargetCancelNone, failCheck: failCheckWrite, cancelLook: cancelLookMerged, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedMerged, watch: watchGoOn,
@@ -62,7 +62,7 @@ var verdictTable = map[changeState]verdictRow{
 	changeClosed: {
 		name: "closed", failed: false, stopException: stopExceptNone, heldRecord: heldRecordFound,
 		lockFound: lockverdict.FoundClosed, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
-		lookWins: false, ownOpenOnTarget: false, looksElsewhere: true, fromOtherBases: otherBaseClosed,
+		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseClosed,
 		yieldsToClosed: false, handed: handedIt, recover: recoverFromPullRequest, mergedInto: false,
 		retargetCancel: retargetCancelClosed, failCheck: failCheckWrite, cancelLook: cancelLookEnd, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
@@ -72,7 +72,7 @@ var verdictTable = map[changeState]verdictRow{
 	changeGone: {
 		name: "gone", failed: false, stopException: stopExceptNone, heldRecord: heldRecordNone,
 		lockFound: lockverdict.FoundGone, keepsLockMoved: false, lookConfirmGone: true, lookYields: true,
-		lookWins: false, ownOpenOnTarget: false, looksElsewhere: true, fromOtherBases: otherBaseNone,
+		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseNone,
 		yieldsToClosed: true, handed: handedGone, recover: recoverNothing, mergedInto: false,
 		retargetCancel: retargetCancelClosed, failCheck: failCheckNotOursReinstalled, cancelLook: cancelLookEnd,
 		adopt: adoptNone, refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGone,
@@ -82,7 +82,7 @@ var verdictTable = map[changeState]verdictRow{
 	changeElsewhere: {
 		name: "open on another base", failed: false, stopException: stopExceptNone, heldRecord: heldRecordMoved,
 		lockFound: lockverdict.FoundOther, keepsLockMoved: true, lookConfirmGone: false, lookYields: false,
-		lookWins: false, ownOpenOnTarget: false, looksElsewhere: false, fromOtherBases: otherBaseOpen,
+		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: false, fromOtherBases: otherBaseOpen,
 		yieldsToClosed: false, handed: handedMoved, recover: recoverRetry, mergedInto: false,
 		retargetCancel: retargetCancelMoved, failCheck: failCheckMoved, cancelLook: cancelLookMoved,
 		adopt: adoptElsewhere, refuseOpened: refuseMoved, mergedUnrecorded: mergedUnrecordedNothing, watch: watchMoved,
@@ -92,7 +92,7 @@ var verdictTable = map[changeState]verdictRow{
 	changeMergedElsewhere: {
 		name: "merged into another base", failed: false, stopException: stopExceptNone, heldRecord: heldRecordNone,
 		lockFound: lockverdict.FoundGone, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
-		lookWins: false, ownOpenOnTarget: false, looksElsewhere: false, fromOtherBases: otherBaseMerged,
+		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: true, fromOtherBases: otherBaseMerged,
 		yieldsToClosed: false, handed: handedGone, recover: recoverNothing, mergedInto: false,
 		retargetCancel: retargetCancelMergedElsewhere, failCheck: failCheckNotOurs,
 		cancelLook: cancelLookMergedElsewhere, adopt: adoptMergedElsewhere, refuseOpened: refuseMergedElsewhere,
@@ -102,7 +102,7 @@ var verdictTable = map[changeState]verdictRow{
 	changeClosedElsewhere: {
 		name: "closed on another base", failed: false, stopException: stopExceptNone, heldRecord: heldRecordFound,
 		lockFound: lockverdict.FoundClosed, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
-		lookWins: false, ownOpenOnTarget: false, looksElsewhere: true, fromOtherBases: otherBaseClosed,
+		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseClosed,
 		yieldsToClosed: false, handed: handedIt, recover: recoverFromPullRequest, mergedInto: false,
 		retargetCancel: retargetCancelClosed, failCheck: failCheckWrite, cancelLook: cancelLookEnd, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
@@ -142,9 +142,14 @@ type verdictRow struct {
 	// ownOpenOnTarget: the verdict's pull request is the request's own, open on a target branch: it is not another
 	// pull request that holds the lock (lookHeld), and the finalizer closed it already (closeAllOwn).
 	ownOpenOnTarget bool
-	// looksElsewhere: with no pull request recorded, the target branches show none of the request's own open or
-	// merged, so the bases a person may have moved one to are listed (openElsewhere).
-	looksElsewhere bool
+	// lockLooksElsewhere: a verdict on which a stopped holder's lock may be released, so the release waits for the
+	// listing of every base, and every open pull request from the request's branch there, marked or not, keeps the
+	// lock (openElsewhere, #925): "gone" and "closed" are concluded only after every base was looked at.
+	lockLooksElsewhere bool
+	// adoptLooksElsewhere: with no pull request recorded, the target branches show none of the request's own open or
+	// merged, so the request's own is taken from the listing of every base (openElsewhere): by the adoption, and by
+	// the lock, which then records it.
+	adoptLooksElsewhere bool
 	// fromOtherBases is what openElsewhere takes from the listing of every base.
 	fromOtherBases otherBase
 	// yieldsToClosed: a verdict that one closed on another base replaces (openElsewhere): a closed one is evidence of

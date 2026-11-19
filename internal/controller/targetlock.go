@@ -909,35 +909,47 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 	return verdict, holding, nil
 }
 
-// openElsewhere is the read of lookHeld, and of the pull request step's adoption (pullRequestStep), for a request with
-// no pull request recorded, after neither target branch in read showed one with its marker open (*verdict gone or
-// closed): a person may have moved its base to another branch (#892). A closed pull request with the marker on a
-// target branch is no verdict by itself while another with the marker may be open elsewhere (decision of 2026-11-19
-// on #892). With a number recorded the read by number answers about it itself, and no listing of every base is made.
-// The listing (openOnOtherBase) takes the marker as the request's own, and its rule picks one: open, else merged,
-// else closed. One open on another base can still merge, so it keeps the lock wherever it is: it joins *open, and
-// *verdict becomes its changeElsewhere, whose pull request the look then records (recordFound), so the next looks
-// read it by its number. Another pull request from its branch without the marker never keeps the lock.
+// openElsewhere is the read of lookHeld, and of the pull request step's adoption (pullRequestStep), on the bases a
+// person may have moved a pull request to (#892). The adoption (everyState) lists the pull requests from the
+// request's branch to every base in every state when neither target branch showed its own open or merged
+// (adoptLooksElsewhere); lookHeld lists the open ones whenever its verdict may release the lock (lockLooksElsewhere:
+// merged, closed or gone there, or merged into another base).
 //
-// everyState (the adoption) lists every state, so one merged there replaces *verdict (changeMergedElsewhere) and one
-// closed there replaces a gone *verdict: the adoption then stops on it instead of opening a second pull request
-// (decision of 2026-11-19 on #892). lookHeld lists open ones only: a closed or merged one keeps no lock. A failed
-// listing returns its unknown verdict and false: the lock is kept, nothing is opened, and the look is retried as a
-// failed Git read.
+// "Gone" is concluded only from that listing, never from the target branches alone (#925): every open pull request
+// from the request's branch on another base, with the request's marker or without, joins *open and keeps the lock,
+// since each has the branch head, which carries the request's commit, and a person can move it to the target branch
+// and merge it. This holds with a pull request recorded too (decision of 2026-11-19 on #925).
+//
+// Only a pull request with the request's marker is ever taken as the request's own, and only when none is recorded
+// (with a number recorded the read by number answers about it itself) and the target branches showed none of its own
+// open or merged (adoptLooksElsewhere): its rule picks one, open, else merged, else
+// closed. One open there becomes *verdict as changeElsewhere, whose pull request the look then records (recordFound),
+// so the next looks read it by its number; one merged there replaces *verdict (changeMergedElsewhere), and one closed
+// there replaces a gone *verdict: the adoption then stops on it instead of opening a second pull request (decision
+// of 2026-11-19 on #892). A closed pull request with the marker on a target branch is no verdict by itself while
+// another with the marker may be open elsewhere. A failed listing returns its unknown verdict and false: the lock is
+// kept, nothing is opened, and the look is retried as a failed Git read.
 func (r *RemediationRequestReconciler) openElsewhere(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, read []remediationv1alpha1.GitBranch, reinstalled, everyState bool,
 	verdict *changeVerdict, open *[]providers.ChangeRequest) (changeVerdict, bool) {
-	if rr.Status.PullRequest != nil || !verdict.rule().looksElsewhere {
+	row := verdict.rule()
+	if everyState && !row.adoptLooksElsewhere || !everyState && !row.lockLooksElsewhere {
 		return changeVerdict{}, true
 	}
-	elsewhere := r.changeOf(ctx, git, rr, changeQuery{otherBases: read, everyState: everyState, reinstalled: reinstalled})
+	recorded := rr.Status.PullRequest != nil
+	elsewhere := r.changeOf(ctx, git, rr, changeQuery{otherBases: read, everyState: everyState, reinstalled: reinstalled,
+		withRecorded: recorded})
+	if elsewhere.failed() {
+		return elsewhere, false
+	}
+	*open = append(*open, elsewhere.openOther...)
+	if recorded || !row.adoptLooksElsewhere {
+		return changeVerdict{}, true
+	}
 	switch elsewhere.rule().fromOtherBases {
 	case otherBaseFailed:
 		return elsewhere, false
-	case otherBaseOpen:
-		*open = append(*open, elsewhere.pr)
-		*verdict = elsewhere
-	case otherBaseMerged:
+	case otherBaseOpen, otherBaseMerged:
 		*verdict = elsewhere
 	case otherBaseClosed:
 		if verdict.rule().yieldsToClosed {

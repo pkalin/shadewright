@@ -303,6 +303,14 @@ type modelWorld struct {
 	// second says a pull request was opened next to the request's own while that one was open (modelGit
 	// OpenChangeRequest); empty while none was.
 	secondPR string
+	// unmarked is a pull request a person opened from the request's branch to the third base without the request's
+	// marker (unmarkedEvent, #925); 0 while there is none.
+	unmarked int64
+	// reopenedAfterRelease: a person reopened the request's pull request after its lock was released. A released
+	// request does not look at its pull request any more, so the lock does not follow the reopen and a merge after it
+	// is not recorded: a known limit while point 3 of #925 waits for a decision, left out of the properties
+	// "settled merge" and "lock back".
+	reopenedAfterRelease bool
 	// noCommit makes the host report the merge without its merge commit.
 	noCommit bool
 	number   int64
@@ -951,15 +959,100 @@ func (m *modelWorld) moveEvent(cr providers.ChangeRequest) {
 	m.logf("move the pull request from %.12s to %.12s", cr.BaseBranch, to)
 }
 
+// unmarkedEvent is a person who opens a pull request from the request's branch to the third base without the
+// request's marker, or closes the one opened before (#925): open, it has the branch head and can be moved to the
+// target branch and merged, so it keeps the lock as the request's own does (property "lock unmarked").
+func (m *modelWorld) unmarkedEvent() {
+	if m.unmarked != 0 {
+		if err := m.g.Close(m.unmarked); err != nil {
+			m.t.Fatal(err)
+		}
+		m.logf("close the unmarked pull request #%d", m.unmarked)
+		m.unmarked = 0
+		return
+	}
+	n, err := m.g.AddOpenChangeRequest(freshness.BranchName(m.template), movedBranch, "a person's change")
+	if err != nil {
+		return
+	}
+	m.unmarked = n
+	m.logf("open #%d from the request's branch to %.12s without the marker", n, movedBranch)
+}
+
+// unmarkedOpen reports whether the pull request of unmarkedEvent is open.
+func (m *modelWorld) unmarkedOpen() bool {
+	if m.unmarked == 0 {
+		return false
+	}
+	for _, cr := range m.g.ChangeRequests() {
+		if cr.Number == m.unmarked {
+			return cr.State == providers.ChangeRequestOpen
+		}
+	}
+	return false
+}
+
+// reopenEvent is a person who reopens the request's closed pull request (#925), on whatever base it is.
+func (m *modelWorld) reopenEvent(cr providers.ChangeRequest) {
+	if cr.State != providers.ChangeRequestClosed || m.deleted {
+		return
+	}
+	if err := m.g.Reopen(m.number); err != nil {
+		return
+	}
+	if m.released {
+		m.reopenedAfterRelease = true
+	}
+	m.logf("reopen the pull request on %.12s", cr.BaseBranch)
+}
+
+// retargetEvent is a person who changes the base of the request's open pull request to any of the three bases: the
+// recorded target branch, the one the settings name now, or the third base (#925), also from the third base to the
+// configured branch, which moveEvent never draws.
+func (m *modelWorld) retargetEvent(cr providers.ChangeRequest) {
+	if cr.State != providers.ChangeRequestOpen || m.deleted {
+		return
+	}
+	to := []string{mainBranch, m.configured, movedBranch}[m.rng.IntN(3)]
+	if to == cr.BaseBranch {
+		return
+	}
+	if to == movedBranch {
+		m.movedFrom = cr.BaseBranch
+	}
+	if err := m.g.SetBase(m.number, to); err != nil {
+		m.t.Fatal(err)
+	}
+	m.logf("retarget the pull request from %.12s to %.12s", cr.BaseBranch, to)
+}
+
+// moveBackEvent is a person who moves the request's open pull request back from the third base to the base it had,
+// once the request has stopped (#925, ADR-0043 limit (e)): the stopped request keeps the lock while it is open.
+func (m *modelWorld) moveBackEvent(cr providers.ChangeRequest) {
+	if cr.State != providers.ChangeRequestOpen || m.deleted || cr.BaseBranch != movedBranch || progresses(m.live()) {
+		return
+	}
+	m.moveEvent(cr)
+	m.logf("(moved back after the request stopped)")
+}
+
 // event changes the world at random before a reconcile.
 func (m *modelWorld) event() {
 	cr, _ := m.pr()
 	if m.focusEvent(cr) {
 		return
 	}
-	switch m.rng.IntN(19) {
+	switch m.rng.IntN(23) {
 	case 0, 1, 8:
 		m.pullRequestEvent(cr)
+	case 19:
+		m.unmarkedEvent()
+	case 20:
+		m.reopenEvent(cr)
+	case 21:
+		m.retargetEvent(cr)
+	case 22:
+		m.moveBackEvent(cr)
 	case 2, 3, 4, 9:
 		if m.clock.at.Before(m.lastingUntil) {
 			return
@@ -1955,7 +2048,7 @@ func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, pause
 	cr, found := m.pr()
 	if m.afterLift >= liftSettleSteps && m.repo == nil && !m.handoff && found && !m.deleted &&
 		cr.State == providers.ChangeRequestClosed && holdsLock(live) && !progresses(live) &&
-		!heldForVerification(live, m.r.VerifyOutcomes) {
+		!heldForVerification(live, m.r.VerifyOutcomes) && !m.unmarkedOpen() {
 		m.fatalf("lift lock: the pull request is closed and the stopped holder keeps the lock %d reconciles "+
 			"after the lift (phase %s)", m.afterLift, live.Status.Phase)
 	}
@@ -2021,6 +2114,11 @@ func (m *modelWorld) lockProperties(live *api.RemediationRequest) {
 			m.fatalf("lock open: the lock was released while the pull request is open (on %.12s)", cr.BaseBranch)
 		case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live):
 			m.fatalf("lock merge: the lock was released on a merge the status does not record")
+		case m.unmarkedOpen() && !progresses(live) && !mergeRecorded(live):
+			// Any open pull request from the request's branch keeps the lock, on any base, marked or not (#925), as
+			// one open on the target branch does: a release on a recorded merge reads nothing, there as here.
+			m.fatalf("lock unmarked: the lock was released while #%d from the request's branch is open on %.12s",
+				m.unmarked, movedBranch)
 		}
 		if !progresses(live) {
 			m.released = true
@@ -2057,6 +2155,8 @@ func (m *modelWorld) settled() {
 	// The request's own pull request open on any base, a third one included, can still merge and keeps the lock
 	// (decision of 2026-11-19 on #892); a closed or merged one, or none, does not.
 	open := found && cr.State == providers.ChangeRequestOpen && !m.deleted
+	// So does any open pull request from its branch without its marker (#925).
+	open = open || m.unmarkedOpen()
 	switch {
 	case live.Status.MergeReceipt != nil && holdsLock(live) && !progresses(live) &&
 		!heldForVerification(live, m.r.VerifyOutcomes):
@@ -2065,7 +2165,8 @@ func (m *modelWorld) settled() {
 	case m.repo != nil, m.handoff:
 		// The repository left the settings: no read can settle anything else. Or the pull request is the
 		// predecessor's, which holds it.
-	case live.Spec.Cancel && holdsLock(live) && (m.deleted || found && cr.State == providers.ChangeRequestClosed):
+	case live.Spec.Cancel && holdsLock(live) && !m.unmarkedOpen() &&
+		(m.deleted || found && cr.State == providers.ChangeRequestClosed):
 		// A cancel whose pull request is closed or gone settles like any other stop, also after a change of the
 		// target branch (fifth decision of 2026-11-18 on #771).
 		m.fatalf("settled cancel: the request is cancelled, its pull request is %s, and the lock is held: phase %s",
@@ -2074,7 +2175,7 @@ func (m *modelWorld) settled() {
 		m.fatalf("settled lock: the lock is held after the world healed, and the pull request cannot merge (%s): phase %s",
 			cr.State, live.Status.Phase)
 	case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live) && !m.deleted &&
-		!m.releasedAside:
+		!m.releasedAside && !m.reopenedAfterRelease:
 		m.fatalf("settled merge: the merge is not recorded after the world healed: phase %s", live.Status.Phase)
 	}
 }

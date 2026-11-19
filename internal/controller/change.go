@@ -43,12 +43,28 @@ import (
 // rule per answer is the same everywhere:
 //   - changeUnknown: a read failed, conflicted with another read, or answered about another pull request. It is
 //     retried with backoff and ends nothing, releases nothing and removes no finalizer.
-//   - changeOpen, changeMerged, changeClosed: the pull request was read in that state.
+//   - changeOpen, changeMerged, changeClosed: the pull request was read in that state. Closed also covers the
+//     request's pull request read closed on a base a person moved it to: it cannot merge either.
+//   - changeElsewhere: the request's pull request read by its number is open on another base than the target
+//     branch, where a person moved it (#892). It exists and can still merge, but not into the target branch, so it
+//     is neither open nor gone: each caller keeps the lock, writes nothing else to that pull request and says that
+//     pull request #N is open on another base (fourth decision of 2026-11-19 on #892). Its pr carries the number,
+//     which is trusted, and the base only when the provider let its name through (hostBranchText shows it).
+//   - changeMergedElsewhere: the request's pull request, read by its number or found by its marker in the listing
+//     of every base, was merged into another base than the target branch, where a person moved it. It delivered
+//     nothing the request can verify and cannot merge again: it keeps no lock and has nothing to close. The watch,
+//     the adoption, a refused adoption (refuseOpened) and a cancel stop the request for a person with that pull
+//     request named (stopMergedElsewhere, reason ChangeRequestOnOtherBase); every other caller does what it does for
+//     gone. Its pr carries the pull request, and
+//     gone says the same for the callers that show gone's text.
 //   - changeGone: the pull request is confirmed not to be this request's: a 404 that the listing of every pull
 //     request of the branch confirms, on two looks at least confirmWait apart (goneLooks), an answer about
-//     the recorded number itself that is from another branch or to another base branch, a recorded one without
-//     this request's marker when the caller asked for it, or, with no number to read, a branch that has no pull
-//     request with this request's marker.
+//     the recorded number itself that is from another branch, a recorded one without this request's marker when
+//     the caller asked for it, or, with no number to read, a branch that has no pull request with this request's
+//     marker.
+//
+// Every switch over a changeState in this package names changeElsewhere and changeMergedElsewhere in cases of their
+// own (TestEverySwitchNamesEveryVerdict), so no default takes them for another verdict.
 type changeState int
 
 const (
@@ -57,10 +73,13 @@ const (
 	changeMerged
 	changeClosed
 	changeGone
+	changeElsewhere
+	changeMergedElsewhere
 )
 
 // changeStates lists every changeState, for the tests that check each caller has a rule for each.
-var changeStates = []changeState{changeOpen, changeMerged, changeClosed, changeGone, changeUnknown}
+var changeStates = []changeState{changeOpen, changeMerged, changeClosed, changeGone, changeElsewhere,
+	changeMergedElsewhere, changeUnknown}
 
 func (s changeState) String() string {
 	switch s {
@@ -72,6 +91,11 @@ func (s changeState) String() string {
 		return "closed"
 	case changeGone:
 		return "gone"
+	case changeElsewhere:
+		return "open on another base"
+	case changeMergedElsewhere:
+		return "merged into another base"
+	case changeUnknown:
 	}
 	return "unknown"
 }
@@ -96,6 +120,19 @@ type changeQuery struct {
 	// (settleGone), every failed read sets condition PullRequestUnreadable, and any other read that works leaves
 	// the condition to the read on the recorded branch that follows (noteRead).
 	configuredBranch remediationv1alpha1.GitBranch
+	// otherBases, when not nil, is the read of a request with no pull request recorded on the bases that are not in
+	// otherBases, the target branches the caller read already (lookHeld, the adoption, closeUnrecorded; #892): it
+	// lists the pull requests from the request's branch to every base branch of the repository
+	// (ListChangeRequestsAnyBase) and answers about the one with this request's marker that wins (openOnOtherBase);
+	// gone when there is none. With a number recorded the read by number answers about it itself, and no listing of
+	// every base is made.
+	otherBases []remediationv1alpha1.GitBranch
+	// everyState makes the listing of otherBases read pull requests in every state, not only open ones: the
+	// adoption's, which must find one closed or merged there too, so it never opens a second one (invariant 5).
+	everyState bool
+	// withRecorded lists otherBases also when a pull request is recorded: the finalizer closes every open one with
+	// this request's marker there (closeOwnOnOtherBases), whatever its number.
+	withRecorded bool
 	// reinstalled is a read through a new installation of the GitHub App for the plan's repository (#290): every
 	// failed read that is not an answer of the Git host sets condition PullRequestUnreadable (noteRead, #797).
 	reinstalled bool
@@ -256,6 +293,10 @@ func (r *RemediationRequestReconciler) readChange(ctx context.Context, git provi
 		return unknownChange(errors.New("no pull request recorded to read on the configured target branch")), 0
 	case q.configuredBranch != "":
 		return r.readOnConfigured(ctx, git, rr, n, q.configuredBranch), n
+	case q.otherBases != nil && (n == 0 || q.withRecorded):
+		return r.openOnOtherBase(ctx, git, rr, q), 0
+	case q.otherBases != nil:
+		return unknownChange(errors.New("the listing of every base is for a request with no pull request recorded")), n
 	case n == 0:
 		return r.settleGone(ctx, rr, 0, false, r.changeOnBranch(ctx, git, rr)), 0
 	}
@@ -274,8 +315,17 @@ func (r *RemediationRequestReconciler) readOnConfigured(ctx context.Context, git
 	if v.state == changeUnknown && errors.Is(v.err, errOwnListed) {
 		return changeVerdict{state: changeGone, gone: fmt.Sprintf("the Git host has no pull request #%d to %s", n, branch)}
 	}
-	if v.state == changeUnknown || v.state == changeGone {
+	switch v.state {
+	case changeUnknown, changeGone:
 		return v
+	case changeElsewhere, changeMergedElsewhere:
+		// Not on branch: only a merge into branch counts here, and the read on the recorded branch that follows
+		// decides the rest.
+		return changeVerdict{state: changeGone, gone: fmt.Sprintf("pull request #%d targets another branch than %s", n, branch)}
+	case changeOpen, changeMerged, changeClosed:
+		if v.pr.BaseBranch != string(branch) {
+			return changeVerdict{state: changeGone, gone: fmt.Sprintf("pull request #%d targets another branch than %s", n, branch)}
+		}
 	}
 	switch ours, err := r.ownsMarker(ctx, v.pr.Body, rr); {
 	case err != nil:
@@ -285,6 +335,73 @@ func (r *RemediationRequestReconciler) readOnConfigured(ctx context.Context, git
 	}
 	return v
 }
+
+// openOnOtherBase is readChange for q.otherBases, with no pull request recorded (or q.withRecorded): the listing of the
+// pull requests from the request's branch to every base branch (open ones only unless q.everyState is set) and, among
+// those with this request's marker on a base that is not in q.otherBases, the one that wins: an open one, else a merged one, else a closed one, the
+// newest of its state first (the listing's order). The state is the rule, not the age: an old pull request still open
+// can merge, while a newer one closed cannot. Open is changeElsewhere, merged changeMergedElsewhere, closed
+// changeClosed, and none is gone. With q.withRecorded the verdict's own holds every one with the marker there, in the
+// listing's order (the finalizer closes each). The listing is the proof that there is none; one that fails, also past
+// MaxBranchChangeRequests (ErrTooLarge, fail closed), is unknown, never none.
+func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, q changeQuery) changeVerdict {
+	read := q.otherBases
+	open, err := git.ListChangeRequestsAnyBase(ctx, freshness.BranchName(rr), !q.everyState)
+	if providers.IsUntrustedAnswer(err) {
+		// An entry not asked for (another branch or repository, not open): a failed read, paced and shown in
+		// GitReadRetry like any other, not an answer that disagrees (answeredUnknown), which is looked at again with
+		// nothing written. The host's text is dropped. A base name outside the rule for target branches is no such
+		// answer: the provider returns the entry without it (decision of 2026-11-19 on #892).
+		err = readFailure("ListChangeRequestsAnyBase", errors.New("the Git host answered a pull request that was not asked for"))
+	}
+	if err != nil {
+		return unknownChange(listFailed("list the change requests of the branch to every base", err))
+	}
+	var won *providers.ChangeRequest
+	var own []providers.ChangeRequest
+	for i, cr := range open {
+		// An entry with no base name (left out by the provider) is on neither target branch: a target branch name
+		// always passes the provider's rule.
+		if cr.BaseBranch != "" && slices.Contains(read, remediationv1alpha1.GitBranch(cr.BaseBranch)) {
+			continue
+		}
+		if stateRank[cr.State] == 0 {
+			return unknownChange(fmt.Errorf("pull request #%d has a state the executor does not know: %q", cr.Number,
+				cr.State))
+		}
+		switch ours, err := r.ownsMarker(ctx, cr.Body, rr); {
+		case err != nil:
+			return unknownChange(err)
+		case !ours:
+			continue
+		}
+		own = append(own, cr)
+		if won == nil || stateRank[cr.State] > stateRank[won.State] {
+			won = &open[i]
+		}
+	}
+	var v changeVerdict
+	switch {
+	case won == nil:
+		v = changeVerdict{state: changeGone, gone: "no pull request of the request is on another base branch"}
+	case won.State == providers.ChangeRequestOpen:
+		v = changeVerdict{state: changeElsewhere, pr: *won}
+	case won.State == providers.ChangeRequestMerged:
+		v = changeVerdict{state: changeMergedElsewhere, pr: *won, gone: mergedElsewhereText(*won)}
+	default:
+		v = changeVerdict{state: changeClosed, pr: *won}
+	}
+	if q.withRecorded {
+		v.own = own
+	}
+	return v
+}
+
+// stateRank orders the states of the pull requests with a request's marker on other bases (openOnOtherBase): the
+// higher wins. Open can still merge, merged delivered something a person must look at, closed did neither.
+var stateRank = map[providers.ChangeRequestState]int{providers.ChangeRequestOpen: 3, providers.ChangeRequestMerged: 2,
+	providers.ChangeRequestClosed: 1}
 
 // readByNumber is readChange for a number.
 func (r *RemediationRequestReconciler) readByNumber(ctx context.Context, git providers.GitProvider,
@@ -315,8 +432,8 @@ func (r *RemediationRequestReconciler) readByNumber(ctx context.Context, git pro
 
 // checkOpenListing checks v, an answer about pull request n, against the listing of the open pull requests of the
 // branch, when the caller asked for it (q.openOnBranch) or v is closed (one extra read, on closed only):
-//   - a pull request read as closed, merged or missing (or as not this request's from another branch or base)
-//     that the listing has open is unknown (conflicting reads), so a stale closed answer must not end, release or
+//   - a pull request read as closed, merged or missing (or as not this request's from another branch, or open on
+//     another base) that the listing has open is unknown (conflicting reads), so a stale closed answer must not end, release or
 //     cancel anything while the pull request is open. One read open but without this request's marker (gone for
 //     that alone) does not conflict with the listing: both say it is open;
 //   - for gone, another listed pull request with this request's marker is a read that shows a change of this
@@ -336,13 +453,15 @@ func (r *RemediationRequestReconciler) checkOpenListing(ctx context.Context, git
 		return unknownChange(listFailed("list the open change requests of the branch", err))
 	}
 	listed := slices.ContainsFunc(open, func(cr providers.ChangeRequest) bool { return cr.Number == n })
-	readOpen := v.pr.Number == n && v.pr.State == providers.ChangeRequestOpen
+	// Read open on another base (changeElsewhere) while the listing of the target branch has it: one of them lags.
+	readOpen := v.pr.Number == n && v.pr.State == providers.ChangeRequestOpen && v.state != changeElsewhere
 	switch {
 	case v.state == changeUnknown:
 	case listed && !readOpen:
 		*absent = false
 		return unknownChange(fmt.Errorf("%w: #%d", errConflictingReads, n))
-	case v.state == changeGone:
+	case v.state == changeGone, v.state == changeMergedElsewhere:
+		// Merged into another base: another listed pull request of this request is looked at as for gone.
 		for _, o := range open {
 			if o.Number == n {
 				// Read open by its number without this request's marker: that read decides about n.
@@ -366,9 +485,10 @@ func (r *RemediationRequestReconciler) checkOpenListing(ctx context.Context, git
 	return v
 }
 
-// changeByNumber is changeOf's read by number, without the marker, the open listing and the first look. absent
-// is true when the host has no pull request n and the listing of the branch has neither n nor a pull request of
-// this request (settleGone).
+// changeByNumber is changeOf's read by number, without the marker, the open listing and the first look. A pull
+// request to another base than target is changeElsewhere while open, closed when closed, and changeMergedElsewhere
+// when merged. absent is true when the host has no pull request n and the listing of the branch has neither n nor a
+// pull request of this request (settleGone).
 func (r *RemediationRequestReconciler) changeByNumber(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, n int64, target string) (changeVerdict, bool) {
 	cr, err := git.GetChangeRequest(ctx, n)
@@ -410,13 +530,24 @@ func (r *RemediationRequestReconciler) changeByNumber(ctx context.Context, git p
 	case cr.HeadBranch != freshness.BranchName(rr):
 		return changeVerdict{state: changeGone, gone: fmt.Sprintf(
 			"pull request #%d is from another branch than the request's", n)}, false
-	case cr.BaseBranch != target:
-		return changeVerdict{state: changeGone, gone: fmt.Sprintf(
-			"pull request #%d targets another branch than the request's target branch", n)}, false
 	}
 	state, ok := stateOf(cr)
 	if !ok {
 		return unknownChange(fmt.Errorf("pull request #%d has a state the executor does not know: %q", n, cr.State)), false
+	}
+	if cr.BaseBranch != target {
+		// A person moved it to another base (#892): the provider answers it by its number with that base, or with
+		// none when the name is outside its rule for target branches. Open, it can still merge there; closed, it
+		// cannot merge anywhere; merged there, it delivered nothing the plan was made for.
+		switch state {
+		case changeOpen:
+			return changeVerdict{state: changeElsewhere, pr: cr}, false
+		case changeMerged:
+			return changeVerdict{state: changeMergedElsewhere, pr: cr, gone: mergedElsewhereText(cr)}, false
+		case changeClosed:
+		case changeUnknown, changeGone, changeElsewhere, changeMergedElsewhere:
+			return unknownChange(fmt.Errorf("pull request #%d has a state the executor does not know: %q", n, cr.State)), false
+		}
 	}
 	return changeVerdict{state: state, pr: cr}, false
 }

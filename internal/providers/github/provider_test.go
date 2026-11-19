@@ -1574,6 +1574,152 @@ func TestListChangeRequestsRefused(t *testing.T) {
 	}
 }
 
+// listAnyBase is one page of ListChangeRequestsAnyBase's listing: open pull requests of the branch, no base.
+func listAnyBase(pulls ...string) step {
+	return step{method: http.MethodGet, path: pullsPath, status: http.StatusOK,
+		query: "direction=desc&head=acme%3Ashadewright%2Freq-1&page=1&per_page=50&sort=created&state=open",
+		raw:   "[" + strings.Join(pulls, ",") + "]"}
+}
+
+// pullWithBase is open pull request #15 of the branch to base, written as JSON whatever bytes base holds.
+func pullWithBase(base string) string {
+	quoted, err := json.Marshal(base)
+	if err != nil {
+		panic(err)
+	}
+	return strings.Replace(branchPull(15, stateOpen, branch, "acme/fleet", "BASE"), `"BASE"`, string(quoted), 1)
+}
+
+// TestListChangeRequestsAnyBase checks that the listing of the open pull requests of a branch asks GitHub for
+// no base and returns those to any base branch of this repository, newest first (#892), and that an answer not to
+// that question is an error, never a list cut short or an empty one.
+func TestListChangeRequestsAnyBase(t *testing.T) {
+	h := newHarness(t, listAnyBase(branchPull(12, stateOpen, branch, "acme/fleet", target),
+		branchPull(14, stateOpen, branch, "acme/fleet", other)))
+	got, err := h.p.ListChangeRequestsAnyBase(ctx, branch, true)
+	if err != nil || len(got) != 2 || got[0].Number != 14 || got[0].BaseBranch != other ||
+		got[1].BaseBranch != target || got[0].State != providers.ChangeRequestOpen {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if _, err := h.p.ListChangeRequestsAnyBase(ctx, "feature/x", true); err == nil {
+		t.Error("a branch outside shadewright/ was allowed")
+	}
+	forkBase := strings.Replace(branchPull(15, stateOpen, branch, "acme/fleet", other),
+		`"repo":{"full_name":"acme/fleet"}}}`, `"repo":{"full_name":"fork/fleet"}}}`, 1)
+	for name, tc := range map[string]struct {
+		steps []step
+		want  error
+	}{
+		"another repository": {[]step{listAnyBase(branchPull(15, stateOpen, branch, "fork/fleet", other))},
+			providers.ErrUntrustedAnswer},
+		"a base in another repository": {[]step{listAnyBase(forkBase)}, providers.ErrUntrustedAnswer},
+		"another branch": {[]step{listAnyBase(branchPull(15, stateOpen, "shadewright/req-2", "acme/fleet", other))},
+			providers.ErrUntrustedAnswer},
+		"closed in an open listing": {[]step{listAnyBase(branchPull(15, stateClosed, branch, "acme/fleet", other))},
+			providers.ErrUntrustedAnswer},
+		"merged in an open listing": {[]step{listAnyBase(branchPull(15, "merged", branch, "acme/fleet", other))},
+			providers.ErrUntrustedAnswer},
+		"listing answered 404": {[]step{status(http.MethodGet, pullsPath, http.StatusNotFound, fxForbidden)},
+			providers.ErrNotFound},
+		"a pull request listed twice with another head": {[]step{listAnyBase(branchPull(15, stateOpen, branch,
+			"acme/fleet", other), strings.Replace(branchPull(15, stateOpen, branch, "acme/fleet", "release+1"),
+			"7777777777777777777777777777777777777777", "8888888888888888888888888888888888888888", 1))}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, tc.steps...)
+			got, err := h.p.ListChangeRequestsAnyBase(ctx, branch, true)
+			if err == nil || tc.want != nil && !errors.Is(err, tc.want) || got != nil {
+				t.Fatalf("got %+v, %v; want %v", got, err, tc.want)
+			}
+			assertSafe(t, err)
+		})
+	}
+}
+
+// listAnyBaseAll is page of last of the listing of a branch's pull requests in every state to any base.
+func listAnyBaseAll(page, last int, pulls ...string) step {
+	st := listBranch("all", page, last, pulls...)
+	st.query = strings.TrimPrefix(st.query, "base=main&")
+	return st
+}
+
+// TestListChangeRequestsAnyBaseEveryState checks the listing in every state (the adoption's, #892): it asks GitHub
+// for no base and state all, reads every page, returns closed and merged pull requests on any base with the open
+// ones, newest first, keeps a base name outside the rule for target branches out without failing, and answers
+// ErrTooLarge, never a list cut short, past MaxBranchChangeRequests or a page past them.
+func TestListChangeRequestsAnyBaseEveryState(t *testing.T) {
+	h := newHarness(t,
+		listAnyBaseAll(1, 2, branchPull(16, stateOpen, branch, "acme/fleet", target),
+			branchPull(15, "merged", branch, "acme/fleet", other)),
+		listAnyBaseAll(2, 2, branchPull(13, stateClosed, branch, "acme/fleet", "release+1"),
+			branchPull(12, stateClosed, branch, "acme/fleet", other)))
+	got, err := h.p.ListChangeRequestsAnyBase(ctx, branch, false)
+	if err != nil || len(got) != 4 {
+		t.Fatalf("got %+v, %v; want four pull requests", got, err)
+	}
+	want := []struct {
+		n     int64
+		state providers.ChangeRequestState
+		base  string
+	}{{16, providers.ChangeRequestOpen, target}, {15, providers.ChangeRequestMerged, other},
+		{13, providers.ChangeRequestClosed, ""}, {12, providers.ChangeRequestClosed, other}}
+	for i, w := range want {
+		if got[i].Number != w.n || got[i].State != w.state || got[i].BaseBranch != w.base {
+			t.Errorf("entry %d is #%d %s on %q; want #%d %s on %q", i, got[i].Number, got[i].State, got[i].BaseBranch,
+				w.n, w.state, w.base)
+		}
+	}
+	more := make([]string, 0, providers.MaxBranchChangeRequests+1)
+	for i := range providers.MaxBranchChangeRequests + 1 {
+		more = append(more, branchPull(300-i, stateClosed, branch, "acme/fleet", other))
+	}
+	for name, steps := range map[string][]step{
+		"past the bound":        {listAnyBaseAll(1, 1, more...)},
+		"a page past the bound": {listAnyBaseAll(1, 3, more[:50]...), listAnyBaseAll(2, 3, more[50:100]...)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, steps...)
+			if got, err := h.p.ListChangeRequestsAnyBase(ctx, branch, false); !errors.Is(err, providers.ErrTooLarge) ||
+				got != nil {
+				t.Fatalf("got %d, %v; want ErrTooLarge", len(got), err)
+			}
+		})
+	}
+}
+
+// TestListChangeRequestsAnyBaseLeavesOutBaseNames checks that a base whose name is not valid by the rule for
+// target branches never fails the listing (decision of 2026-11-19 on #892): the pull request is returned with its
+// number and no base name, so the caller can still act on the number, and the name, text from the code host
+// (invariant 4), reaches no condition and no log. This holds for the request's own pull request and for any other
+// one from the branch.
+func TestListChangeRequestsAnyBaseLeavesOutBaseNames(t *testing.T) {
+	// #nosec G101 -- a made-up value that a redaction rule must catch, not a credential
+	for name, base := range map[string]string{
+		"a Shadewright branch":   "shadewright/other-request",
+		"a plus sign":            "release+1",
+		"300 bytes":              strings.Repeat("r", 300),
+		"40,000 bytes":           strings.Repeat("b", 40000),
+		"control characters":     "x\nReleased the lock\x1b[31m",
+		"a URL with credentials": "https://user:tok@evil/x",
+		"a key and a value":      "hotfix/credential=review-secret",
+		"non-ASCII":              "wyd\u0105nie",
+		"no name":                "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, listAnyBase(branchPull(16, stateOpen, branch, "acme/fleet", other), pullWithBase(base),
+				branchPull(12, stateOpen, branch, "acme/fleet", target)))
+			got, err := h.p.ListChangeRequestsAnyBase(ctx, branch, true)
+			if err != nil || len(got) != 3 {
+				t.Fatalf("got %+v, %v; want three pull requests", got, err)
+			}
+			if got[0].Number != 16 || got[0].BaseBranch != other || got[1].Number != 15 || got[1].BaseBranch != "" ||
+				got[1].State != providers.ChangeRequestOpen || got[2].Number != 12 || got[2].BaseBranch != target {
+				t.Fatalf("got %+v; want #15 with no base name and the others with theirs", got)
+			}
+		})
+	}
+}
+
 // TestListChangeRequestsContradicting checks that a pull request two pages list with a different state or head is an
 // error, never the first answer: the listing contradicts itself (#688).
 func TestListChangeRequestsContradicting(t *testing.T) {
@@ -1777,6 +1923,71 @@ func TestCloseChangeRequestRefusesOthers(t *testing.T) {
 	}
 	if err := h.p.CloseChangeRequest(ctx, 0); err == nil {
 		t.Error("number 0 was allowed")
+	}
+}
+
+// pull15 is the path of pull request #15.
+const pull15 = "/pulls/15"
+
+// pullOn is GET /pulls/15 answering pull request #15 of the branch in state, to base base of this repository.
+func pullOn(state, base string) step {
+	quoted, err := json.Marshal(base)
+	if err != nil {
+		panic(err)
+	}
+	raw := strings.Replace(branchPull(15, state, branch, "acme/fleet", "BASE"), `"BASE"`, string(quoted), 1)
+	return step{method: http.MethodGet, path: pull15, status: http.StatusOK, raw: raw}
+}
+
+// TestGetChangeRequestOnAnotherBase checks that a pull request of a Shadewright branch of this repository that a
+// person moved to another base of this repository is read by its number with that base (#892), with the name left
+// out when it is outside the rule for target branches, and that one whose head or base is in another repository is
+// still not found.
+func TestGetChangeRequestOnAnotherBase(t *testing.T) {
+	// #nosec G101 -- a made-up value that a redaction rule must catch, not a credential
+	for name, c := range map[string]struct{ base, want string }{
+		"named":                {other, other},
+		"a Shadewright branch": {"shadewright/other-request", ""},
+		"a plus sign":          {"release+1", ""},
+		"300 bytes":            {strings.Repeat("r", 300), ""},
+		"control characters":   {"x\nReleased the lock\x1b[31m", ""},
+		"a key and a value":    {"hotfix/credential=review-secret", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, pullOn(stateOpen, c.base))
+			cr, err := h.p.GetChangeRequest(ctx, 15)
+			if err != nil || cr.Number != 15 || cr.BaseBranch != c.want || cr.State != providers.ChangeRequestOpen {
+				t.Fatalf("got %+v, %v; want #15 open with base %q", cr, err, c.want)
+			}
+		})
+	}
+	forkBase := strings.Replace(branchPull(15, stateOpen, branch, "acme/fleet", other),
+		`"repo":{"full_name":"acme/fleet"}}}`, `"repo":{"full_name":"fork/fleet"}}}`, 1)
+	h := newHarness(t, step{method: http.MethodGet, path: pull15, status: http.StatusOK, raw: forkBase})
+	if _, err := h.p.GetChangeRequest(ctx, 15); !providers.IsNotFound(err) {
+		t.Fatalf("a base in another repository: got %v, want not found", err)
+	}
+}
+
+// TestCloseChangeRequestAnyBase checks that the finalizer's close (#892) closes the request's pull request on a base
+// a person moved it to, while CloseChangeRequest refuses it there, and that it still refuses a pull request of
+// another head branch.
+func TestCloseChangeRequestAnyBase(t *testing.T) {
+	patch := step{method: http.MethodPatch, path: pull15, status: http.StatusOK,
+		raw: branchPull(15, stateClosed, branch, "acme/fleet", other)}
+	h := newHarness(t, pullOn(stateOpen, other), patch)
+	if err := h.p.CloseChangeRequestAnyBase(ctx, 15); err != nil {
+		t.Fatal(err)
+	}
+	h = newHarness(t, pullOn(stateOpen, other))
+	if err := h.p.CloseChangeRequest(ctx, 15); err == nil {
+		t.Fatal("CloseChangeRequest closed a pull request on another base")
+	}
+	h = newHarness(t, get("/pulls/13", "pull_foreign.json"))
+	if err := h.p.CloseChangeRequestAnyBase(ctx, 13); err == nil || providers.IsConflict(err) {
+		t.Fatalf("another head branch: got %v", err)
+	} else if !strings.Contains(err.Error(), "not a Shadewright pull request of this repository") {
+		t.Fatalf("another head branch: the refusal names the target branch: %v", err)
 	}
 }
 

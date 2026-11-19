@@ -135,6 +135,7 @@ nav = [
       { "0040 Sizing from metrics" = "adr/0040-code-sizes-a-memory-proposal-from-the-metrics.md" },
       { "0041 Merge-time freshness check" = "adr/0041-a-freshness-check-at-the-merge-of-a-pull-request.md" },
       { "0042 OpenAI-compatible endpoints" = "adr/0042-openai-compatible-model-endpoints.md" },
+      { "0043 Pull request on another base" = "adr/0043-the-executor-follows-its-own-pull-request-to-any-base.md" },
       { "Template" = "adr/template.md" },
     ] },
     { "The name" = "name.md" },

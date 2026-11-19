@@ -75,6 +75,12 @@ const (
 		"Shadewright closed its pull request, if one was open; the branch is left as it is"
 	messageCancelledFoundClosed = "spec.cancel is set: the request was cancelled before its change was merged; " +
 		"its pull request was found closed; the branch is left as it is"
+	// messageCancelledOpenElsewhere ends a cancelled request whose own pull request is open on another base branch,
+	// where a person moved it (#892), whether or not the target branch changed: it is not closed by Shadewright, and
+	// the target stays locked until it is closed or merged.
+	messageCancelledOpenElsewhere = "spec.cancel is set: the request was cancelled before its change was merged; " +
+		"its pull request is open on another base branch, where it was moved, and Shadewright does not close it " +
+		"there; the target stays locked until a person closes or merges it"
 	// messageCheckNotFailed ends the message of a request that ended Cancelled although its review check could not
 	// be failed, and is the text of EventCancelCheckNotFailed.
 	messageCheckNotFailed = "the failed review check " + providers.CheckRunName + " could not be written on " +
@@ -112,7 +118,9 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 // Cancelled is final only when the pull request cannot merge any more: it is known closed, or known never opened.
 // Before each close, and before the end on a pull request found closed, the check run shadewright/review of the
 // recorded head is failed (failCancelCheck, as for a stale plan, #713), so a pull request reopened later cannot be
-// merged on a check that is still green. A closed pull request ends the request even when that check cannot be
+// merged on a check that is still green. The check reads the recorded pull request by its number first: one open on a
+// base a person moved it to gets no check, and the request ends Cancelled saying so. A closed pull request ends the
+// request even when that check cannot be
 // written: at once on a refusal, after cleanupFailingBound on a failure worth a retry, with a Warning Event that
 // says so (endCancelClosed).
 //
@@ -134,17 +142,24 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 //   - A pause of writes waits (waitWhilePaused) and starts no bound.
 func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	outcome prOutcome) (reconcile.Result, error) {
-	if outcome == prClosed {
-		return r.endCancelClosed(ctx, rr, r.failCancelCheck(ctx, rr), func() {
-			markClosed(rr, ReasonPullRequestClosed, "is closed; the request was cancelled (spec.cancel)")
-		}, messageCancelledFoundClosed)
+	switch outcome {
+	case prClosed:
+		return r.endCancelFound(ctx, rr, r.failCancelCheck(ctx, rr), false)
+	case prOpenElsewhere:
+		// Open on a base a person moved it to (#892): nothing is written to it there, the failed check included.
+		return r.endCancelFound(ctx, rr, nil, true)
+	case prOpen, prUnchecked, prStopped, prConflicted, prMergeCommitPending, prMergeUnchecked, prBranchUnread:
 	}
 	if intent(rr) != nil {
 		return r.cancelHandoffWait(ctx, rr)
 	}
 	// The check fails first, whatever becomes of the close; its failure does not stop the close, and it is tried
-	// again with the next try.
+	// again with the next try. Its read of the pull request by number comes before the write: one found open on a
+	// base a person moved it to gets no check, and the cancel ends saying so.
 	checkErr := r.failCancelCheck(ctx, rr)
+	if errors.Is(checkErr, errOpenElsewhere) {
+		return r.endCancelFound(ctx, rr, nil, true)
+	}
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	err := r.closeChangeRequest(cleanCtx, rr)
 	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead).
@@ -179,6 +194,9 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	case errors.Is(err, errHandoffInFlight):
 		// An intent written since this reconcile read the request (stillOwns read it fresh).
 		return r.cancelHandoffWait(ctx, rr)
+	case errors.Is(err, errOpenElsewhere):
+		// Its own pull request is open on a base a person moved it to since the look (#892): nothing is closed there.
+		return r.endCancelFound(ctx, rr, checkErr, true)
 	case errors.Is(err, errRepositoryGone):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnavailable, "the repository it was made for is not configured any more")
 	case errors.Is(err, errTargetBranchChanged):
@@ -205,6 +223,11 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 //     to the configured branch, as #771 decided on 2026-11-16 (recordMergeOnConfigured).
 //   - Closed or gone: the request ends Cancelled (endCancelClosed); the read of the branch after the end settles the
 //     lock. A review check that waits for a pause keeps the request in its phase until the pause ends.
+//   - Merged into a base a person moved it to (changeMergedElsewhere): stopped as the watch stops it, in
+//     NeedsIntervention with ChangeRequestOnOtherBase naming the merge (stopMergedElsewhere).
+//   - Open on a base a person moved it to (changeElsewhere, #892): it ends Cancelled with
+//     messageCancelledOpenElsewhere and nothing marks the pull request closed: the lock stays while it is open, and
+//     nothing closes it there.
 //
 // A pause set since the close was tried stops the look before any read of the Git host (planEntry): the request
 // waits for the pause (waitWhilePaused). A failed Git read is retried visibly and without an end, with the cancel
@@ -255,12 +278,36 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 		})
 		return res, true, err
 	case changeClosed, changeGone:
-		res, err := r.endCancelClosed(ctx, rr, checkErr, func() {
-			markClosed(rr, ReasonPullRequestClosed, "is closed; the request was cancelled (spec.cancel)")
-		}, messageCancelledFoundClosed)
+		res, err := r.endCancelFound(ctx, rr, checkErr, false)
 		return res, true, err
+	case changeMergedElsewhere:
+		// Merged into a base a person moved it to: stopped as the watch stops it (stopMergedElsewhere), never
+		// Cancelled as found closed.
+		if err := r.stopMergedElsewhere(ctx, rr, v.pr); !errors.Is(err, errStopped) {
+			return reconcile.Result{}, true, err
+		}
+		return reconcile.Result{}, true, nil
+	case changeElsewhere:
+		res, err := r.endCancelFound(ctx, rr, checkErr, true)
+		return res, true, err
+	case changeOpen, changeUnknown:
 	}
 	return reconcile.Result{}, false, nil
+}
+
+// endCancelFound ends a cancel whose pull request a look found closed or gone (cancelOpen with prClosed, cancelLook),
+// or, with movedOpen, whose own pull request it found open on a base a person moved it to (#892): the request ends
+// Cancelled as for one gone from both target branches, but nothing says it is closed. The lock stays while it is
+// open (lookHeld, TargetHeld) and no close is tried on that entry; a person closes or merges it. Both looks decide
+// through this one function.
+func (r *RemediationRequestReconciler) endCancelFound(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	checkErr error, movedOpen bool) (reconcile.Result, error) {
+	if movedOpen {
+		return r.endCancelClosed(ctx, rr, checkErr, func() {}, messageCancelledOpenElsewhere)
+	}
+	return r.endCancelClosed(ctx, rr, checkErr, func() {
+		markClosed(rr, ReasonPullRequestClosed, "is closed; the request was cancelled (spec.cancel)")
+	}, messageCancelledFoundClosed)
 }
 
 // cancelLookFailed is cancelLook's answer to a failed Git read: the read is retried without an end
@@ -340,13 +387,20 @@ func (r *RemediationRequestReconciler) endCancelClosed(ctx context.Context, rr *
 	return r.endCancelled(ctx, rr, message, checkErr != nil)
 }
 
+// unstartableRecovery is why no read can start for a cancelled replacement whose handoff recovery meets a changed
+// target branch (cancelRecoveryFailed): the end of a wait for a read says it.
+const unstartableRecovery = "the repository entry of the plan names another target branch, and the recovery of " +
+	"the handoff reads only through it"
+
 // cancelRecoveryFailed handles err, a failure of the recovery of a handoff (recoverHandoff) of a request whose
 // spec.cancel is set: the cancel cannot finish while it is not known whether the replacement's own commit is on the
 // pull request, and the request is never ended on it, so a merge of that commit is still recorded once the
 // recovery can read again. A pause waits and the caller's cancellation is returned. A final refusal of the Git
 // host, a repository that is not configured or usable any more and a changed target branch are watched
 // (cancelWatch), as for a refused close; anything else, a failed read of a pull request included, is retried
-// (cancelFailed) within cleanupFailingBound, then watched. The recovery's own deadline grace does not apply.
+// (cancelFailed) within cleanupFailingBound, then watched. The recovery's own deadline grace does not apply. A
+// changed target branch also notes that no read can start (unstartableRecovery), so a MergeCheck or MergeContent
+// wait recorded before the change ends at its end, as with a repository gone, and never stands past it.
 func (r *RemediationRequestReconciler) cancelRecoveryFailed(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, err error) (reconcile.Result, error) {
 	const what = "the recovery of its handoff, which learns whether its own commit is on the pull request it replaces"
@@ -358,6 +412,10 @@ func (r *RemediationRequestReconciler) cancelRecoveryFailed(ctx context.Context,
 	case errors.Is(err, errRepositoryGone):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnavailable, "the repository it was made for is not configured any more")
 	case errors.Is(err, errTargetBranchChanged):
+		// The recovery reads only through the plan's repository entry, which names another target branch now, and
+		// nothing else reads for the request while it recovers: no read can start, as with a repository gone
+		// (planEntry), so a wait for a read past its end ends on this note (endAfterLastRead) instead of standing.
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableRecovery)
 		return r.cancelWatchBranchChanged(ctx, rr)
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnusable, "the settings of its repository cannot be used")

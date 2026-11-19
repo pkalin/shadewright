@@ -66,6 +66,8 @@ type ChangeRequest struct {
 	Number     int64
 	URL        string
 	HeadBranch string
+	// BaseBranch is the branch the change request targets. It is empty only in an answer of
+	// ListChangeRequestsAnyBase whose base name the provider left out.
 	BaseBranch string
 	// HeadSHA is the commit at the head of the change request.
 	HeadSHA string
@@ -335,12 +337,24 @@ type GitProvider interface {
 	// out, never an answer (an ErrNotFound included: no branch is not an empty list). It only reads.
 	ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) ([]ChangeRequest, error)
 
+	// ListChangeRequestsAnyBase returns every change request from headBranch, a Shadewright branch of this
+	// repository, to any base branch of this repository, newest first: only the open ones when openOnly is true,
+	// those in any state otherwise; also those whose base a person moved off the target branch (#892). An entry from
+	// another branch or repository, or (with openOnly) one that is not open, is ErrUntrustedAnswer for the whole call.
+	// An entry whose base name is not valid by the provider's rule for target branches is returned with BaseBranch
+	// empty: the name is text from the code host, never shown, and the number is still the answer, so no base name
+	// fails the listing. More than MaxBranchChangeRequests, or a page past them, is ErrTooLarge, never a list cut
+	// short. Any error is a failure to find out, never an answer. It only reads.
+	ListChangeRequestsAnyBase(ctx context.Context, headBranch string, openOnly bool) ([]ChangeRequest, error)
+
 	// GetChangeRequest returns the change request with number, in any state. It finds the recorded change
 	// request of a request again after a lost status write, also when its branch carries a newer change request
 	// (ADR-0030 section 1). ErrNotFound when there is none with that number, and also when the one with that
-	// number is not from a Shadewright branch of this repository to the target branch: such a change request is
-	// never Shadewright's. An answer for another number than the one asked for is ErrUntrustedAnswer. Any other
-	// error is a failure to find out, never an answer. It only reads.
+	// number is not from a Shadewright branch of this repository to a branch of this repository: such a change
+	// request is never Shadewright's. One to another base branch than the target branch (a person moved it, #892)
+	// is returned, with BaseBranch empty when its name is not valid by the provider's rule for target branches: the
+	// caller compares the base with the target branch. An answer for another number than the one asked for is
+	// ErrUntrustedAnswer. Any other error is a failure to find out, never an answer. It only reads.
 	GetChangeRequest(ctx context.Context, number int64) (ChangeRequest, error)
 
 	// EnableAutoMerge asks the host to merge the change request once its rules pass, only if its head is
@@ -350,6 +364,14 @@ type GitProvider interface {
 	// CloseChangeRequest closes a change request without merging. Closing a closed one succeeds; closing a
 	// merged one returns ErrConflict.
 	CloseChangeRequest(ctx context.Context, number int64) error
+
+	// CloseChangeRequestAnyBase is CloseChangeRequest for a change request from a Shadewright branch of this
+	// repository to any base branch of this repository, also one a person moved off the target branch (#892). Its
+	// callers are the finalizer of a deleted request: closeOwnOnOtherBases for each open pull request carrying the
+	// request's marker on a base other than the target branch, and closeAllOwn for the recorded number open on
+	// another base (ADR-0043). The kill switch gates it like CloseChangeRequest. A pull request from another branch
+	// or repository is refused. It is a write.
+	CloseChangeRequestAnyBase(ctx context.Context, number int64) error
 
 	// UpdateChangeRequest replaces the title and the body of an open change request from a Shadewright branch
 	// of this repository to the target branch. A closed or merged one is ErrConflict; any other change request

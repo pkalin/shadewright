@@ -1,0 +1,765 @@
+/*
+Copyright 2026 The Shadewright Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	api "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
+	"github.com/pkalin/shadewright/internal/providers"
+	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
+)
+
+// onHotfix is what a stop's message says of the pull request moved to hotfix.
+const onHotfix = "open on another base branch (hotfix)"
+
+// opCloseAnyBase is the finalizer's close on any base.
+const opCloseAnyBase = "CloseChangeRequestAnyBase"
+
+// reasonOnOtherBase is the stop reason of a request whose own pull request is open on another base (#892).
+const reasonOnOtherBase = "ChangeRequestOnOtherBase"
+
+// movedStopPath is one row of TestStopPathsWithOwnPullRequestMoved: how the request is stopped, and what each look
+// must leave once the request's own pull request is open on another base.
+type movedStopPath struct {
+	name string
+	// prepare stops the request (or sets up the stop) in the world of settlementWorld, with the settings naming the
+	// recorded target branch unless changed is set.
+	prepare func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest)
+	changed bool
+	// paused keeps the kill switch on for the first reconciles, then lifts it.
+	paused bool
+	// deleted is the deletion of the request: its finalizer closes the pull request and goes.
+	deleted bool
+	// phase and reason are what the request ends with, message a text a condition with that reason must hold.
+	phase   api.RemediationPhase
+	reason  string
+	message string
+	// adopt is a request in PolicyChecked that lost the write recording its pull request (adoptMoved).
+	adopt bool
+	// recorded is a request that lost the write recording its pull request and must record it again from the read.
+	recorded bool
+	// ended is set when a person, after the move, closed (foundClosed) or merged (endMerged) the pull request on the
+	// other base: it no longer keeps the lock, and nothing is opened next to it.
+	ended string
+}
+
+// mergedOnHotfix is what a stop's message says of the pull request merged into hotfix.
+const mergedOnHotfix = "merged into another base branch (hotfix)"
+
+// TestStopPathsWithOwnPullRequestMoved walks every stop path with the request's own pull request moved by a person
+// to another base branch (hotfix) before the stop is decided (fourth decision of 2026-11-19 on #892). The read of the
+// pull request by its number answers open on another base (changeElsewhere) on each of them, and each caller
+// handles it: the lock stays held, the request ends with a reason and a message that say the pull request is open on
+// another base (a cancel ends Cancelled, whether or not the target branch changed), and nothing is written to the
+// pull request. Deletion is the one exception: the finalizer closes the pull request there by its number
+// (CloseChangeRequestAnyBase) and only then lets go.
+//
+// The rows with ended set have the pull request closed or merged on the other base after the move. The adoption
+// lists every state on every base, so it finds one closed there and stops as for one closed on the target branch,
+// and one merged there and stops as the watch does for a recorded one: NeedsIntervention with
+// ChangeRequestOnOtherBase, naming it, since a merge into another branch delivers nothing the request can verify.
+// Neither opens a second pull request (invariant 5).
+//
+// On 31ee66d2 every row failed (gone, "closed", or the finalizer letting go with the pull request open) but cancel
+// after a branch change and deadline, which were already right there. On 27f1eded the adoption row (the write
+// recording the pull request lost, then the move, then the pull request step) opened a second pull request to the
+// target branch. On f6dc775c both adoption rows with ended set opened a second one, and the watch of a recorded one
+// merged there stopped with ChangeRequestGone ("cannot be found any more").
+func TestStopPathsWithOwnPullRequestMoved(t *testing.T) {
+	for _, p := range []movedStopPath{
+		{name: "watch", phase: api.PhaseNeedsIntervention, reason: reasonOnOtherBase, message: onHotfix},
+		{name: "cancel", prepare: cancelMoved, phase: api.PhaseCancelled, reason: ReasonCancelRequested,
+			message: messageCancelledOpenElsewhere},
+		{name: "cancel after a branch change", prepare: cancelMoved, changed: true, phase: api.PhaseCancelled,
+			reason: ReasonCancelRequested, message: messageCancelledOpenElsewhere},
+		{name: "supersede", prepare: staleMoved, phase: api.PhaseNeedsIntervention, reason: reasonOnOtherBase,
+			message: onHotfix},
+		{name: focusDeadline, prepare: expireMoved, phase: api.PhaseExpired, reason: ReasonPullRequestDeadline},
+		{name: "kill switch", paused: true, phase: api.PhaseNeedsIntervention, reason: reasonOnOtherBase,
+			message: onHotfix},
+		{name: "cancel, none recorded", prepare: lostMoved(cancelMoved), phase: api.PhaseCancelled,
+			reason: ReasonCancelRequested, message: messageCancelledOpenElsewhere},
+		{name: "adoption", adopt: true, phase: api.PhaseNeedsIntervention, reason: reasonOnOtherBase,
+			message: onHotfix, recorded: true},
+		{name: "delete", deleted: true},
+		{name: "delete, none recorded", prepare: lostMoved(nil), deleted: true},
+		{name: "adoption, closed there", adopt: true, ended: foundClosed, phase: api.PhaseNeedsIntervention,
+			reason: ReasonChangeRequestClosed, message: "closed without merging"},
+		{name: "adoption, merged there", adopt: true, ended: endMerged, phase: api.PhaseNeedsIntervention,
+			reason: reasonOnOtherBase, message: mergedOnHotfix, recorded: true},
+		{name: "watch, merged there", ended: endMerged, phase: api.PhaseNeedsIntervention, reason: reasonOnOtherBase,
+			message: mergedOnHotfix, recorded: true},
+		{name: "cancel, merged there", prepare: cancelMoved, ended: endMerged, phase: api.PhaseNeedsIntervention,
+			reason: reasonOnOtherBase, message: mergedOnHotfix, recorded: true},
+		{name: "cancel after a branch change, merged there", prepare: cancelMoved, changed: true, ended: endMerged,
+			phase: api.PhaseNeedsIntervention, reason: reasonOnOtherBase, message: mergedOnHotfix, recorded: true},
+	} {
+		t.Run(p.name, func(t *testing.T) { walkMovedStop(t, p) })
+	}
+}
+
+// walkMovedStop is one row of TestStopPathsWithOwnPullRequestMoved.
+func walkMovedStop(t *testing.T, p movedStopPath) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	ctx := context.Background()
+	meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if !p.changed {
+		setTargetMain(t, r)
+	}
+	n := rr.Status.PullRequest.Number
+	moveTo(t, g, n, movedBranch)
+	if p.prepare != nil {
+		p.prepare(t, r, rr)
+	}
+	if p.adopt {
+		adoptMoved(t, r, g, rr)
+	}
+	switch p.ended {
+	case foundClosed:
+		if err := g.Close(n); err != nil {
+			t.Fatal(err)
+		}
+	case endMerged:
+		if _, err := g.Merge(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p.deleted {
+		if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
+			return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rr.Finalizers = append(rr.Finalizers, FinalizerName)
+		if err := r.Update(ctx, rr); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Delete(ctx, rr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p.paused {
+		setPaused(t, r, true)
+	}
+	var mu sync.Mutex
+	var writes []string
+	g.SetFail(func(op string) error {
+		if !gitReads[op] {
+			mu.Lock()
+			writes = append(writes, op)
+			mu.Unlock()
+		}
+		return nil
+	})
+	clock := clockOf(r)
+	key := client.ObjectKeyFromObject(rr)
+	live := &api.RemediationRequest{}
+	for i := range 10 {
+		if p.paused && i == 4 {
+			if err := r.Get(ctx, key, live); err != nil {
+				t.Fatal(err)
+			}
+			if live.Status.Phase != api.PhaseAwaitingApproval || !holdsLock(live) || len(writes) > 0 {
+				t.Fatalf("paused: phase %s, holds=%v, writes %v: want the request waiting, the lock held, nothing written",
+					live.Status.Phase, holdsLock(live), writes)
+			}
+			setPaused(t, r, false)
+		}
+		if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+			t.Logf("Reconcile %d: %v", i, err)
+		}
+
+		clock.advance(confirmWait + time.Minute)
+	}
+	if crs := g.ChangeRequests(); len(crs) != 1 {
+		t.Fatalf("pull requests %+v: want #%d alone, no second one (invariant 5)", crs, n)
+	}
+	checkMovedStop(t, p, r, key, g.ChangeRequests()[n-1], writes)
+}
+
+// checkMovedStop checks what a row of TestStopPathsWithOwnPullRequestMoved left: the request (gone for a deletion)
+// and cr, its pull request, after writes, the Git writes made.
+func checkMovedStop(t *testing.T, p movedStopPath, r *RemediationRequestReconciler, key client.ObjectKey,
+	cr providers.ChangeRequest, writes []string) {
+	t.Helper()
+	ctx := context.Background()
+	n := cr.Number
+	live := &api.RemediationRequest{}
+	if p.deleted {
+		err := r.Get(ctx, key, live)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("the request is still there (%v, finalizers %v): the finalizer did not go", err, live.Finalizers)
+		}
+		if cr.State != providers.ChangeRequestClosed || !slices.Equal(writes, []string{opCloseAnyBase}) {
+			t.Fatalf("pull request #%d is %s, writes %v: want it closed on %s by its number, once", n, cr.State,
+				writes, movedBranch)
+		}
+		return
+	}
+	if err := r.Get(ctx, key, live); err != nil {
+		t.Fatal(err)
+	}
+	if p.ended != "" {
+		checkEndedMoved(t, p, live, cr, writes)
+		return
+	}
+	if live.Status.Phase != p.phase || !holdsLock(live) {
+		t.Fatalf("phase %s, holds=%v, conditions %s: want %s with the lock held", live.Status.Phase, holdsLock(live),
+			conditionsOf(live), p.phase)
+	}
+	if p.recorded && (live.Status.PullRequest == nil || live.Status.PullRequest.Number != n) {
+		t.Fatalf("status.pullRequest %+v: want #%d recorded again", live.Status.PullRequest, n)
+	}
+	if !hasReason(live, p.reason, p.message) {
+		t.Fatalf("conditions %s: want reason %s saying %q", conditionsOf(live), p.reason, p.message)
+	}
+	for _, c := range live.Status.Conditions {
+		if c.Reason == ReasonChangeRequestGone || strings.Contains(c.Message, "cannot be found") ||
+			c.Reason == ReasonPullRequestClosed || c.Reason == ReasonChangeRequestClosed {
+			t.Errorf("condition %s says the pull request is gone or closed: %s: %q", c.Type, c.Reason, c.Message)
+		}
+	}
+	held := meta.FindStatusCondition(live.Status.Conditions, api.ConditionTargetHeld)
+	if held == nil || !strings.Contains(held.Message, fmt.Sprintf("#%d", n)) || !strings.Contains(held.Message, movedBranch) {
+		t.Fatalf("TargetHeld %+v: want it naming #%d on %s", held, n, movedBranch)
+	}
+	if cr.State != providers.ChangeRequestOpen || len(writes) > 0 {
+		t.Fatalf("pull request #%d is %s, writes %v: want it open with nothing written", n, cr.State, writes)
+	}
+}
+
+// checkEndedMoved is checkMovedStop for a row whose pull request was closed or merged on the other base: the request
+// stops with the row's reason and message, the lock is released, the pull request is left as the person left it, and
+// nothing is written to it.
+func checkEndedMoved(t *testing.T, p movedStopPath, live *api.RemediationRequest, cr providers.ChangeRequest,
+	writes []string) {
+	t.Helper()
+	n := cr.Number
+	if live.Status.Phase != p.phase || holdsLock(live) {
+		t.Fatalf("phase %s, holds=%v, conditions %s: want %s with the lock released", live.Status.Phase,
+			holdsLock(live), conditionsOf(live), p.phase)
+	}
+	if p.recorded && (live.Status.PullRequest == nil || live.Status.PullRequest.Number != n) {
+		t.Fatalf("status.pullRequest %+v: want #%d recorded", live.Status.PullRequest, n)
+	}
+	if !hasReason(live, p.reason, p.message) {
+		t.Fatalf("conditions %s: want reason %s saying %q", conditionsOf(live), p.reason, p.message)
+	}
+	if p.ended == endMerged && !hasReason(live, p.reason, fmt.Sprintf("#%d", n)) {
+		t.Fatalf("conditions %s: want reason %s naming #%d", conditionsOf(live), p.reason, n)
+	}
+	for _, c := range live.Status.Conditions {
+		if c.Reason == ReasonChangeRequestGone || strings.Contains(c.Message, "cannot be found") ||
+			c.Reason == ReasonChangeRequestMerged || live.Status.MergeReceipt != nil {
+			t.Errorf("condition %s says the pull request is gone or merged into the target: %s: %q", c.Type, c.Reason,
+				c.Message)
+		}
+	}
+	want := map[string]providers.ChangeRequestState{foundClosed: providers.ChangeRequestClosed,
+		endMerged: providers.ChangeRequestMerged}[p.ended]
+	if cr.State != want || cr.BaseBranch != movedBranch || len(writes) > 0 {
+		t.Fatalf("pull request #%d is %s on %s, writes %v: want it %s on %s with nothing written", n, cr.State,
+			cr.BaseBranch, writes, want, movedBranch)
+	}
+}
+
+// hasReason reports whether a condition of rr has reason and a message that holds message.
+func hasReason(rr *api.RemediationRequest, reason, message string) bool {
+	return slices.ContainsFunc(rr.Status.Conditions, func(c metav1.Condition) bool {
+		return c.Reason == reason && strings.Contains(c.Message, message)
+	})
+}
+
+// lostMoved is then (when set) on a request whose write that recorded its pull request was lost: only its marker
+// finds it.
+func lostMoved(then func(*testing.T, *RemediationRequestReconciler, *api.RemediationRequest)) func(*testing.T,
+	*RemediationRequestReconciler, *api.RemediationRequest) {
+	return func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+		t.Helper()
+		rr.Status.PullRequest = nil
+		meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionPROpened)
+		if err := r.Status().Update(context.Background(), rr); err != nil {
+			t.Fatal(err)
+		}
+		if then != nil {
+			then(t, r, rr)
+		}
+	}
+}
+
+// cancelMoved sets spec.cancel.
+func cancelMoved(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+	t.Helper()
+	rr.Spec.Cancel = true
+	if err := r.Update(context.Background(), rr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// staleMoved makes the plan stale: its policy is deleted.
+func staleMoved(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+	t.Helper()
+	pol := &api.RemediationPolicy{ObjectMeta: metav1.ObjectMeta{Name: string(rr.Spec.PolicyRef)}}
+	if err := r.Delete(context.Background(), pol); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// expireMoved is a request in PolicyChecked past its deadline whose pull request was opened while the write that
+// would record it was lost: only its marker finds it.
+func expireMoved(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+	t.Helper()
+	rr.Status.Phase = api.PhasePolicyChecked
+	rr.Status.PullRequest = nil
+	rr.Status.Conditions = nil
+	rr.Status.Deadline = &metav1.Time{Time: time.Now().Add(-time.Hour)}
+	if err := r.Status().Update(context.Background(), rr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// adoptMoved is a request in PolicyChecked, on a fresh plan, whose pull request was opened while the write that
+// would record it was lost: only its marker finds it, and the pull request step (adoption) reads the branch before
+// it opens one. Its Incident stands.
+func adoptMoved(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest) {
+	t.Helper()
+	ctx := context.Background()
+	freshPlanOf(t, r, rr)
+	if err := g.SetBody(rr.Status.PullRequest.Number, marker(rr)); err != nil {
+		t.Fatal(err)
+	}
+	ref := rr.Spec.IncidentRef
+	inc := &api.Incident{ObjectMeta: metav1.ObjectMeta{Namespace: rr.Namespace, Name: ref.Name, UID: types.UID(ref.UID)}}
+	if err := r.Create(ctx, inc); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	rr.Status.Phase = api.PhasePolicyChecked
+	rr.Status.PullRequest = nil
+	rr.Status.Conditions = nil
+	rr.Status.Deadline = &metav1.Time{Time: time.Now().Add(time.Hour)}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// freshPlanOf makes rr's plan fresh at the head of its target branch, as the freshness check computes it, and the
+// source mapping find its file there.
+func freshPlanOf(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+	t.Helper()
+	ctx := context.Background()
+	git, err := r.OpenRepository(ctx, api.GitRepository{TargetBranch: rr.Status.Source.TargetBranch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := git.BranchHead(ctx, string(rr.Status.Source.TargetBranch))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := &api.RemediationPolicy{}
+	settings := &api.RemediationSettings{}
+	if err := r.Get(ctx, client.ObjectKey{Name: string(rr.Spec.PolicyRef)}, pol); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	rr.Status.Source.BaseCommit = head
+	res := resolved()
+	res.Source.BaseCommit = head
+	r.Source = &stubResolver{result: res}
+	if rr.Status.PlanDigest, err = freshness.ComputeDigest(rr, rr.Status.Source, pol, settings); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setTargetMain makes the settings name main as the repository's target branch.
+func setTargetMain(t *testing.T, r *RemediationRequestReconciler) {
+	t.Helper()
+	ctx := context.Background()
+	settings := &api.RemediationSettings{}
+	if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Repositories[0].TargetBranch = api.GitBranch(mainBranch)
+	if err := r.Update(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAdoptionPicksOwnPullRequestOnEveryBase is the adoption with two pull requests with the request's marker on
+// bases other than the target branch, one older (the request's, moved to hotfix) and one newer (opened by a person
+// from the branch to a second base, with the marker copied). The rule is open, then merged, then closed, whatever
+// their age: the request records and stops on the one that wins, and opens nothing.
+func TestAdoptionPicksOwnPullRequestOnEveryBase(t *testing.T) {
+	const second = "hotfix-2"
+	for _, c := range []struct {
+		name         string
+		older, newer string // "", foundClosed or endMerged: left open, closed or merged
+		winsNewer    bool
+		reason, says string
+	}{
+		{name: "older open, newer closed", newer: foundClosed, reason: reasonOnOtherBase, says: onHotfix},
+		{name: "older closed, newer open", older: foundClosed, winsNewer: true, reason: reasonOnOtherBase,
+			says: "open on another base branch (" + second + ")"},
+		{name: "older merged, newer closed", older: endMerged, newer: foundClosed, reason: reasonOnOtherBase,
+			says: mergedOnHotfix},
+		{name: "older closed, newer merged", older: foundClosed, newer: endMerged, winsNewer: true,
+			reason: reasonOnOtherBase, says: "merged into another base branch (" + second + ")"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+			ctx := context.Background()
+			setTargetMain(t, r)
+			n := rr.Status.PullRequest.Number
+			moveTo(t, g, n, movedBranch)
+			adoptMoved(t, r, g, rr)
+			endAs(t, g, n, c.older)
+			head, err := g.BranchHead(ctx, mainBranch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := g.CreateBranch(ctx, second, head); err != nil {
+				t.Fatal(err)
+			}
+			m, err := g.AddOpenChangeRequest(freshness.BranchName(rr), second, marker(rr))
+			if err != nil {
+				t.Fatal(err)
+			}
+			endAs(t, g, m, c.newer)
+			key := client.ObjectKeyFromObject(rr)
+			for i := range 4 {
+				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+					t.Logf("Reconcile %d: %v", i, err)
+				}
+				clockOf(r).advance(time.Minute)
+			}
+			live := &api.RemediationRequest{}
+			if err := r.Get(ctx, key, live); err != nil {
+				t.Fatal(err)
+			}
+			if crs := g.ChangeRequests(); len(crs) != 2 {
+				t.Fatalf("pull requests %+v: want #%d and #%d alone, none opened", crs, n, m)
+			}
+			want := n
+			if c.winsNewer {
+				want = m
+			}
+			if pr := live.Status.PullRequest; pr == nil || pr.Number != want {
+				t.Fatalf("status.pullRequest %+v: want #%d", pr, want)
+			}
+			if live.Status.Phase != api.PhaseNeedsIntervention || !hasReason(live, c.reason, c.says) ||
+				!hasReason(live, c.reason, fmt.Sprintf("#%d", want)) {
+				t.Fatalf("phase %s, conditions %s: want NeedsIntervention, %s saying %q of #%d", live.Status.Phase,
+					conditionsOf(live), c.reason, c.says, want)
+			}
+		})
+	}
+}
+
+// endAs closes (foundClosed) or merges (endMerged) pull request n, or leaves it open ("").
+func endAs(t *testing.T, g *fakegit.Git, n int64, end string) {
+	t.Helper()
+	switch end {
+	case foundClosed:
+		if err := g.Close(n); err != nil {
+			t.Fatal(err)
+		}
+	case endMerged:
+		if _, err := g.Merge(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestAdoptionListingPastTheBoundOpensNothing is the adoption when the branch has more pull requests on other bases
+// than MaxBranchChangeRequests, all closed: the listing of every base in every state answers ErrTooLarge, and the
+// adoption fails closed. Nothing is opened, the request stays where it is, the reconcile returns no error for the
+// rate limiter but a wait of the poll interval at least, and condition GitReadRetry says the read is retried.
+func TestAdoptionListingPastTheBoundOpensNothing(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	ctx := context.Background()
+	setTargetMain(t, r)
+	n := rr.Status.PullRequest.Number
+	moveTo(t, g, n, movedBranch)
+	adoptMoved(t, r, g, rr)
+	if err := g.Close(n); err != nil {
+		t.Fatal(err)
+	}
+	for range providers.MaxBranchChangeRequests {
+		m, err := g.AddOpenChangeRequest(freshness.BranchName(rr), movedBranch, "a person's")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Close(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all := len(g.ChangeRequests())
+	key := client.ObjectKeyFromObject(rr)
+	live := &api.RemediationRequest{}
+	// The first reconciles take the steps before the look (the finalizer); the looks after them wait.
+	for i := range 6 {
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		if err != nil {
+			t.Fatalf("Reconcile %d: %v; want a paced retry, not an error", i, err)
+		}
+		if i >= 3 && res.RequeueAfter < r.pullRequestPollInterval() {
+			t.Fatalf("Reconcile %d: result %+v: a retry sooner than the poll interval", i, res)
+		}
+		clockOf(r).advance(time.Minute)
+	}
+	if err := r.Get(ctx, key, live); err != nil {
+		t.Fatal(err)
+	}
+	if crs := g.ChangeRequests(); len(crs) != all {
+		t.Fatalf("%d pull requests: want %d, none opened past the bound", len(crs), all)
+	}
+	if live.Status.Phase != api.PhasePolicyChecked || live.Status.PullRequest != nil {
+		t.Fatalf("phase %s, pull request %+v: want the request waiting in PolicyChecked", live.Status.Phase,
+			live.Status.PullRequest)
+	}
+	if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry); c == nil ||
+		c.Status != metav1.ConditionTrue {
+		t.Fatalf("GitReadRetry %+v, conditions %s: want it saying the read is retried", c, conditionsOf(live))
+	}
+}
+
+// TestDeletionClosesEveryOwnPullRequestOnEveryBase deletes a request whose own pull request a person moved to hotfix,
+// while a second pull request from its branch with its marker is open on hotfix-2 and a third without the marker is
+// open on hotfix-3. The finalizer closes both with the marker, not only the one the listing ranks first, leaves the
+// third open, and only then goes, with the number recorded or lost. A close that fails keeps the finalizer, and the
+// next reconcile closes what is left.
+func TestDeletionClosesEveryOwnPullRequestOnEveryBase(t *testing.T) {
+	for _, lost := range []bool{false, true} {
+		t.Run(fmt.Sprintf("record lost %v", lost), func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+			ctx := context.Background()
+			setTargetMain(t, r)
+			n := rr.Status.PullRequest.Number
+			if err := g.SetBody(n, marker(rr)); err != nil {
+				t.Fatal(err)
+			}
+			moveTo(t, g, n, movedBranch)
+			if lost {
+				lostMoved(nil)(t, r, rr)
+			}
+			head, err := g.BranchHead(ctx, mainBranch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			others := make([]int64, 0, 2)
+			for _, c := range []struct{ base, body string }{{"hotfix-2", marker(rr)}, {"hotfix-3", "a person's"}} {
+				if err := g.CreateBranch(ctx, c.base, head); err != nil {
+					t.Fatal(err)
+				}
+				m, err := g.AddOpenChangeRequest(freshness.BranchName(rr), c.base, c.body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				others = append(others, m)
+			}
+			second, foreign := others[0], others[1]
+			if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
+				return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			rr.Finalizers = append(rr.Finalizers, FinalizerName)
+			if err := r.Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			key := client.ObjectKeyFromObject(rr)
+			// Every close after the first fails: the finalizer stays while one of the two is open.
+			closes := 0
+			g.SetFail(func(op string) error {
+				if op == opCloseAnyBase {
+					if closes++; closes > 1 {
+						return errors.New("status 502: bad gateway")
+					}
+				}
+				return nil
+			})
+			for i := range 3 {
+				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+					t.Logf("Reconcile %d: %v", i, err)
+				}
+				clockOf(r).advance(confirmWait + time.Minute)
+			}
+			live := &api.RemediationRequest{}
+			if err := r.Get(ctx, key, live); err != nil {
+				t.Fatalf("the finalizer went while a close failed: %v", err)
+			}
+			if crs := g.ChangeRequests(); crs[n-1].State != providers.ChangeRequestOpen &&
+				crs[second-1].State != providers.ChangeRequestOpen {
+				t.Fatalf("pull requests #%d and #%d are closed while every close after the first fails", n, second)
+			}
+			g.SetFail(nil)
+			for i := range 3 {
+				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+					t.Logf("Reconcile %d: %v", i, err)
+				}
+				clockOf(r).advance(confirmWait + time.Minute)
+			}
+			if err := r.Get(ctx, key, live); !apierrors.IsNotFound(err) {
+				t.Fatalf("the request is still there (%v, finalizers %v)", err, live.Finalizers)
+			}
+			crs := g.ChangeRequests()
+			for _, m := range []int64{n, second} {
+				if crs[m-1].State != providers.ChangeRequestClosed {
+					t.Errorf("pull request #%d with the marker on %s is %s: want it closed", m, crs[m-1].BaseBranch,
+						crs[m-1].State)
+				}
+			}
+			if crs[foreign-1].State != providers.ChangeRequestOpen {
+				t.Errorf("pull request #%d without the marker is %s: want it left open", foreign, crs[foreign-1].State)
+			}
+		})
+	}
+}
+
+// A stop's close of a recorded pull request that a person moved to hotfix and closed there has nothing to close: the
+// close to the target branch would be refused there (as the GitHub adapter refuses it), so none is asked for.
+func TestCloseOfOwnClosedOnMovedBaseClosesNothing(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	ctx := context.Background()
+	setTargetMain(t, r)
+	n := rr.Status.PullRequest.Number
+	if err := g.SetBody(n, marker(rr)); err != nil {
+		t.Fatal(err)
+	}
+	moveTo(t, g, n, movedBranch)
+	if err := g.Close(n); err != nil {
+		t.Fatal(err)
+	}
+	var writes []string
+	g.SetFail(func(op string) error {
+		if !gitReads[op] {
+			writes = append(writes, op)
+		}
+		return nil
+	})
+	if err := r.closeChangeRequest(ctx, rr); err != nil {
+		t.Fatalf("closeChangeRequest: %v, want nothing to close", err)
+	}
+	if len(writes) > 0 {
+		t.Fatalf("writes %v: want none", writes)
+	}
+}
+
+// A pull request found by its marker and refused before it was recorded (refuseOpened) that a person moved to hotfix
+// and merged there is not closed (the close to the target branch would be refused there, and retried without an
+// end): the request stops as the watch stops it, NeedsIntervention with ChangeRequestOnOtherBase naming the merge.
+func TestRefuseOpenedMergedOnMovedBaseStops(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	ctx := context.Background()
+	setTargetMain(t, r)
+	n := rr.Status.PullRequest.Number
+	if err := g.SetBody(n, marker(rr)); err != nil {
+		t.Fatal(err)
+	}
+	moveTo(t, g, n, movedBranch)
+	if _, err := g.Merge(n); err != nil {
+		t.Fatal(err)
+	}
+	cr := g.ChangeRequests()[n-1]
+	err := r.refuseOpened(ctx, g, rr, cr, &renderRefusal{reason: ReasonHeadMoved, message: "The head is not the planned one"})
+	if !errors.Is(err, errStopped) {
+		t.Fatalf("refuseOpened: %v, want the request stopped", err)
+	}
+	live := &api.RemediationRequest{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+		t.Fatal(err)
+	}
+	if live.Status.Phase != api.PhaseNeedsIntervention || !hasReason(live, reasonOnOtherBase, mergedOnHotfix) {
+		t.Fatalf("phase %s, conditions %s: want NeedsIntervention with %s saying %q", live.Status.Phase,
+			conditionsOf(live), reasonOnOtherBase, mergedOnHotfix)
+	}
+}
+
+// A cancel whose recorded pull request a person moved to hotfix after the look at it (outcome prOpen) reads it by its
+// number before the failed review check is written: found open there, it gets no check run, and the request ends
+// Cancelled saying it is open on another base. A failed read writes no check either and ends nothing.
+func TestCancelReadsBeforeTheCheckOnMovedBase(t *testing.T) {
+	for _, failRead := range []bool{false, true} {
+		t.Run(fmt.Sprintf("read fails %v", failRead), func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+			ctx := context.Background()
+			r.ReviewerHints = true
+			setTargetMain(t, r)
+			meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+			if err := r.Status().Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			cancelMoved(t, r, rr)
+			n := rr.Status.PullRequest.Number
+			moveTo(t, g, n, movedBranch)
+			var writes []string
+			g.SetFail(func(op string) error {
+				if failRead && op == opGet {
+					return errors.New("status 502: bad gateway")
+				}
+				if !gitReads[op] {
+					writes = append(writes, op)
+				}
+				return nil
+			})
+			if _, err := r.cancelOpen(ctx, rr, prOpen); err != nil {
+				t.Logf("cancelOpen: %v", err)
+			}
+			if slices.Contains(writes, "CreateCheckRun") {
+				t.Fatalf("writes %v: a check run was written on a pull request open on another base", writes)
+			}
+			live := &api.RemediationRequest{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+				t.Fatal(err)
+			}
+			if failRead {
+				if live.Status.Phase != api.PhaseAwaitingApproval {
+					t.Fatalf("phase %s after a failed read: want the request kept", live.Status.Phase)
+				}
+				return
+			}
+			if live.Status.Phase != api.PhaseCancelled || !hasReason(live, ReasonCancelRequested, messageCancelledOpenElsewhere) {
+				t.Fatalf("phase %s, conditions %s: want Cancelled saying the pull request is open on another base",
+					live.Status.Phase, conditionsOf(live))
+			}
+		})
+	}
+}

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 760" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright architecture</title>
-  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, the GitOps controller (Flux) applies it. The verifier, a third identity with no model access and no Git credential, then samples the pods of the rollout and writes a VerificationReport, which is evidence and never a verdict. Built so far: the collector, incidents, the policy engine, the remediation controller up to Merged (the pull request, the wait for approval, and observing a person's merge) the verifier with its report, and the executor reading that report as evidence for its verdict after the merge; the analyzer and its model call and the model provider are planned, and so are the arrows into and out of them, drawn dashed.</desc>
+  <desc id="d">Events from the cluster become durable incidents. The analyzer, with read-only access and the model, proposes a typed RemediationRequest. A deterministic policy engine decides; the remediation controller opens a pull request on the Git host; after human review and required checks the change merges, the GitOps controller (Flux) applies it. The verifier, a third identity with no model access and no Git credential, then samples the pods of the rollout and writes a VerificationReport, which is evidence and never a verdict. Everything drawn is built: the collector, incidents, the analyzer with its model call and the model provider (off unless the analyzer runs with --triage-model), the policy engine, the remediation controller (the pull request, the wait for approval, observing a person's merge, then delivery and verification, which run only with the executor flag --verify-outcomes), the verifier with its report, and the executor reading that report as evidence for its verdict. Not built: automatic merging, which stays with people and required checks.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -11,15 +11,12 @@
       .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
       .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
       .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
-      .pl{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
-      .ple{fill:#16222a;stroke:#2f5d63;stroke-width:1.2;stroke-dasharray:5 4}
       .pn{fill:#8a85a8;font-size:10px;font-weight:600;letter-spacing:.06em}
       .h{fill:#f1edff;font-size:15px;font-weight:650}
       .s{fill:#a9a4c4;font-size:12.5px}
       .id{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
       .idt{fill:#a879ff;font-size:11.5px;font-weight:600;letter-spacing:.06em}
       .f{stroke:#a879ff;stroke-width:1.8;fill:none}
-      .fp{stroke:#a879ff;stroke-width:1.8;fill:none;stroke-dasharray:7 5}
       .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
       .lbl{fill:#c6a8ff;font-size:11.5px}
       .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
@@ -66,8 +63,8 @@
   <text class="h" x="594" y="136">Incident</text>
   <text class="s" x="594" y="157">durable CR · fingerprint</text>
 
-  <rect class="pl" x="578" y="250" width="210" height="72" rx="10"/>
-  <text class="pn" x="772" y="266" text-anchor="end">planned</text>
+  <rect class="box" x="578" y="250" width="210" height="72" rx="10"/>
+  <text class="pn" x="772" y="266" text-anchor="end">--triage-model</text>
   <text class="h" x="594" y="276">Analyzer</text>
   <text class="s" x="594" y="296">rules first, then the model</text>
   <text class="s" x="594" y="313">with read-only tools</text>
@@ -95,8 +92,7 @@
   <text class="s" x="594" y="657">evidence · never a verdict</text>
 
   <!-- outside -->
-  <rect class="ple" x="866" y="250" width="210" height="72" rx="10"/>
-  <text class="pn" x="1060" y="266" text-anchor="end">planned</text>
+  <rect class="ext" x="866" y="250" width="210" height="72" rx="10"/>
   <text class="h" x="882" y="276">Model provider</text>
   <text class="s" x="882" y="296">redacted, bounded context</text>
   <text class="s" x="882" y="313">no tools with write access</text>
@@ -112,9 +108,9 @@
   <!-- flow -->
   <path class="f" d="M254 142H326" marker-end="url(#a)"/>
   <path class="f" d="M542 142H572" marker-end="url(#a)"/>
-  <path class="fp" d="M683 174V244" marker-end="url(#a)"/>
-  <path class="fp" d="M788 278H860" marker-end="url(#a)" marker-start="url(#a)"/>
-  <path class="fp" d="M640 322V350" marker-end="url(#a)"/>
+  <path class="f" d="M683 174V244" marker-end="url(#a)"/>
+  <path class="f" d="M788 278H860" marker-end="url(#a)" marker-start="url(#a)"/>
+  <path class="f" d="M640 322V350" marker-end="url(#a)"/>
   <text class="lbl" x="650" y="342">proposes</text>
   <path class="f" d="M480 412V456" marker-end="url(#a)"/>
   <path class="r" d="M254 484H326" marker-end="url(#m)"/>
@@ -134,12 +130,6 @@
   <path class="f" d="M542 642H572" marker-end="url(#a)"/>
   <path class="f" d="M740 610V566" marker-end="url(#a)"/>
   <text class="lbl" x="732" y="598" text-anchor="end">executor reads</text>
-
-  <!-- legend -->
-  <rect class="box" x="866" y="112" width="30" height="16" rx="4"/>
-  <text class="lbl" x="906" y="125">built</text>
-  <rect class="pl" x="866" y="136" width="30" height="16" rx="4"/>
-  <text class="lbl" x="906" y="149">designed, not built</text>
 
   <!-- refusal -->
   <text class="no" x="332" y="550">denied or stale → stop, explain, no PR</text>

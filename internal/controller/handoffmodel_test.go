@@ -122,7 +122,8 @@ import (
 // A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property; a
 // seed whose only violations an exclusion covers is skipped with the exclusion's name. The default set is the seeds 1
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
-// 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, and for #880 against 1 to 60,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, for #880 against 1 to 60,000, and for its second decision (a wait is a claim) against 1 to 260,000 with the
+// deletion of the claim holder drawn. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.
@@ -170,6 +171,9 @@ const (
 	hBranch   hmKind = "person-deletes-branch"
 	hForce    hmKind = "person-force-pushes"
 	hSettings hmKind = "settings-change"
+	// hDeleteClaim is drawn by the generator only and becomes a deletion of the request holding only a claim on the
+	// merge (hDelete, deleteClaimHolder).
+	hDeleteClaim hmKind = "delete-claim-holder"
 )
 
 // The variants of a force push (hForce) and of a settings change (hSettings).
@@ -184,6 +188,10 @@ const (
 	// settingsRestored puts the plan's repository back in the settings after it left them: the step that follows
 	// the settling run of a sequence that ends with the repository removed.
 	settingsRestored = "repository-restored"
+
+	// deleteClaimHolder is the variant of a deletion (hDelete) that deletes the request holding only a claim on the
+	// merge (holdsOnlyClaim), and does nothing when neither does.
+	deleteClaimHolder = "claim-holder"
 
 	// hmOtherBranch is the target branch a settings change names; hmOtherURL the repository that replaces the plan's.
 	hmOtherBranch = "release"
@@ -230,7 +238,12 @@ func (s hmStep) String() string {
 			return fmt.Sprintf("git-fails %d on every read until it answers", s.Code)
 		}
 		return fmt.Sprintf("git-fails %d on the next %s", s.Code, s.Op)
-	case hLose, hConflict, hDelete:
+	case hDelete:
+		if s.Variant == deleteClaimHolder {
+			return string(s.Kind) + " the request holding only a claim on the merge"
+		}
+		return string(s.Kind) + " " + s.Obj
+	case hLose, hConflict:
 		return string(s.Kind) + " " + s.Obj
 	case hCrash:
 		return fmt.Sprintf("crash after %d writes of the next reconcile", s.N)
@@ -278,6 +291,10 @@ func hmFaultErr(code int, op string) error {
 
 // hmWorld is one run of the model.
 type hmWorld struct {
+	// claimDeleteArmed: a deletion of the request holding only a claim on the merge waits for that shape
+	// (deleteArmedClaimHolder).
+	claimDeleteArmed bool
+
 	t      *testing.T
 	schema *statusSchema
 	start  string
@@ -1032,7 +1049,8 @@ func recordsMerge(rr *api.RemediationRequest) bool {
 }
 
 // readRecord reports whether rr's status stores a record of the merge of pull request number, the first read of it
-// included (decision of 2026-11-19 on #880): a wait of kind MergeCheck or MergeContent that names the pull request, or
+// included (decision of 2026-11-19 on #880): a claim, a wait of kind MergeCheck or MergeContent that names the pull
+// request on a request not being deleted (holdsOnlyClaim; second decision of the same day), or
 // the merge recorded in any form on that pull request (recordsMerge: a receipt, mergedAt, Merged, or a merge that did
 // not deliver the plan as shown, MergedWithForeignChange among them). PullRequestOpened marked merged alone is no
 // record: the settlement of a predecessor that ended HandedOff marks it so. It is the model's own reading of the
@@ -1041,16 +1059,31 @@ func readRecord(rr *api.RemediationRequest, number int64) bool {
 	if rr == nil {
 		return false
 	}
+	if rr.DeletionTimestamp.IsZero() && holdsOnlyClaim(rr, number) {
+		// A claim of a request being deleted is none: its finalizer drops the wait and records nothing, so the
+		// other request records the merge (second decision of 2026-11-19 on #880).
+		return true
+	}
+	if rr.Status.PullRequest == nil || rr.Status.PullRequest.Number != number {
+		return false
+	}
+	return recordsMerge(rr)
+}
+
+// holdsOnlyClaim reports whether rr holds a claim on the merge of pull request number and no record of it: a wait of
+// kind MergeCheck or MergeContent that names the pull request, with no receipt, mergedAt or stored outcome of the merge
+// (second decision of 2026-11-19 on #880). The model's own reading, written apart from the reconciler's.
+func holdsOnlyClaim(rr *api.RemediationRequest, number int64) bool {
+	if rr == nil || recordsMerge(rr) {
+		return false
+	}
 	for _, w := range rr.Status.GitWaits {
 		if (w.Kind == api.GitWaitMergeCheck || w.Kind == api.GitWaitMergeContent) && w.PullRequest != nil &&
 			w.PullRequest.Number == number {
 			return true
 		}
 	}
-	if rr.Status.PullRequest == nil || rr.Status.PullRequest.Number != number {
-		return false
-	}
-	return recordsMerge(rr)
+	return false
 }
 
 // observeFirstRead checks the first read of P1 after every step, for a merge of any head: the first request seen
@@ -1160,6 +1193,7 @@ func (m *hmWorld) observe() {
 	m.observeFirstRead(reqs)
 	m.observeMerge(reqs)
 	m.observeLock(reqs)
+	m.deleteArmedClaimHolder()
 }
 
 // note records what the sequence reached and the shapes later checks excuse.
@@ -1348,14 +1382,15 @@ func (m *hmWorld) apply(s hmStep) {
 			m.t.Fatal(err)
 		}
 	case hDelete:
-		rr := m.get(s.Obj)
-		if rr == nil || !rr.DeletionTimestamp.IsZero() {
+		if s.Variant == deleteClaimHolder {
+			// A person deletes the request that holds only a claim on the merge (second decision of 2026-11-19 on
+			// #880): now, if one does and the other request has read the merge, or else at the end of the first later
+			// step after which that holds (deleteArmedClaimHolder).
+			m.claimDeleteArmed = true
+			m.deleteArmedClaimHolder()
 			return
 		}
-		if err := m.base.Delete(ctx, rr); err != nil && !apierrors.IsNotFound(err) {
-			m.t.Fatal(err)
-		}
-		m.reach["deletion"] = true
+		m.deleteRequest(s.Obj)
 	case hSettings:
 		m.changeSettings(s.Variant)
 	case hMerge, hPush, hClose, hForce:
@@ -1371,6 +1406,64 @@ func (m *hmWorld) apply(s hmStep) {
 		}
 		m.branchGone = true
 		m.reach["branch-deleted"] = true
+	}
+}
+
+// deleteRequest deletes who, unless it is gone or being deleted already, and counts a deletion of a request that holds
+// only a claim on the merge (holdsOnlyClaim), and of one whose other request had read the merge by then and left it to
+// the holder or waits for it: the shape of the second decision of 2026-11-19 on #880.
+func (m *hmWorld) deleteRequest(who string) {
+	rr := m.get(who)
+	if rr == nil || !rr.DeletionTimestamp.IsZero() {
+		return
+	}
+	if m.merge != nil && holdsOnlyClaim(rr, m.number) {
+		m.reach["deleted-claim-holder"] = true
+		if otherReadClaim(m.get(map[string]string{hmPred: hmRepl, hmRepl: hmPred}[who])) {
+			m.reach["deleted-claim-holder-other-left-or-waits"] = true
+		}
+	}
+	if err := m.base.Delete(context.Background(), rr); err != nil && !apierrors.IsNotFound(err) {
+		m.t.Fatal(err)
+	}
+	m.reach["deletion"] = true
+}
+
+// otherReadClaim reports whether other, the request that does not hold the claim, read the merge and left it to the
+// holder (MergedForReplacement, MergedForPredecessor) or waits for its record (MergeRecordPending).
+func otherReadClaim(other *api.RemediationRequest) bool {
+	if other == nil {
+		return false
+	}
+	c := meta.FindStatusCondition(other.Status.Conditions, api.ConditionApproved)
+	return c != nil && (c.Reason == ReasonMergedForReplacement || c.Reason == ReasonMergedForPredecessor ||
+		c.Reason == ReasonMergeRecordPending)
+}
+
+// deleteArmedClaimHolder carries out an armed deletion of the claim holder (deleteClaimHolder) once a request holds
+// only a claim on the merge, and disarms it. When the other request has not read the merge yet, it reconciles that
+// request first (the claim lasts only until the holder's next reconcile after mergeCommitWait, so a random order
+// rarely puts the other's read inside it), then the holder is deleted.
+func (m *hmWorld) deleteArmedClaimHolder() {
+	if !m.claimDeleteArmed || m.merge == nil {
+		return
+	}
+	for _, who := range []string{hmPred, hmRepl} {
+		other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[who]
+		if x := m.get(who); x != nil && x.DeletionTimestamp.IsZero() && holdsOnlyClaim(x, m.number) {
+			m.claimDeleteArmed = false
+			if !otherReadClaim(m.get(other)) {
+				m.logf("  the %s reconciles while the %s holds only a claim on the merge", other, who)
+				m.reconcile(other)
+				m.observe()
+				if x = m.get(who); x == nil || !holdsOnlyClaim(x, m.number) {
+					return
+				}
+			}
+			m.logf("  a person deletes the %s, which holds only a claim on the merge", who)
+			m.deleteRequest(who)
+			return
+		}
 	}
 }
 
@@ -1591,6 +1684,7 @@ func latest(a, b time.Time) time.Time {
 // checks what must hold once reads answer.
 func (m *hmWorld) settle() {
 	m.logf("settle")
+	m.claimDeleteArmed = false
 	m.mu.Lock()
 	m.sticky, m.once, m.lose, m.conflict, m.crashAt = nil, map[string]error{}, map[string]bool{}, map[string]bool{}, -1
 	m.mu.Unlock()
@@ -1839,7 +1933,10 @@ func (m *hmWorld) mergeOwner() string {
 
 // hmGenerate draws a start and a sequence from seed. The seed's focus (seed modulo 4) weights the draw towards the
 // orders of the decision: a refusal and the end of the watch, a lost takeover write and a 5xx past the deadline, a
-// crash and a deleted predecessor, or none.
+// crash and a deleted predecessor, or none. Every focus draws the deletion of the request that holds only a claim on the
+// merge (hDeleteClaim, second decision of 2026-11-19 on #880), the first two and the last more often, and a merge
+// reported without a merge commit ID, which makes that claim, one time in four (more in the first focus): with plain
+// deletions alone the shape came up about once in 30,000 seeds.
 func hmGenerate(seed uint64) (string, []hmStep) {
 	// #nosec G404 -- a seeded generator, so a failing order can be run again from its seed.
 	rng := rand.New(rand.NewPCG(seed, seed^0x2545f4914f6cdd1d))
@@ -1855,20 +1952,20 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 	}
 	weights := []weighted{{6, hRecPred}, {6, hRecRepl}, {4, hClock}, {3, hFault}, {2, hAnswer}, {1, hLose},
 		{1, hConflict}, {1, hRestart}, {1, hCrash}, {1, hPause}, {1, hLift}, {1, hDelete}, {2, hMerge}, {1, hPush},
-		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}}
+		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}, {2, hDeleteClaim}}
 	switch focus {
 	case 1:
-		weights = append(weights, weighted{3, hFault}, weighted{2, hClock}, weighted{2, hMerge})
+		weights = append(weights, weighted{3, hFault}, weighted{2, hClock}, weighted{2, hMerge}, weighted{3, hDeleteClaim})
 	case 2:
 		weights = append(weights, weighted{2, hLose}, weighted{2, hClock}, weighted{2, hFault})
 	case 3:
-		weights = append(weights, weighted{2, hCrash}, weighted{2, hDelete}, weighted{3, hClock})
+		weights = append(weights, weighted{2, hCrash}, weighted{2, hDelete}, weighted{3, hClock}, weighted{2, hDeleteClaim},
+			weighted{1, hForce})
 	}
 	total := 0
 	for _, w := range weights {
 		total += w.w
 	}
-	objs := []string{hmPred, hmRepl}
 	steps := make([]hmStep, 0, hmSteps)
 	for range hmSteps {
 		n := rng.IntN(total)
@@ -1880,51 +1977,60 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 			}
 			n -= w.w
 		}
-		s := hmStep{Kind: k}
-		switch k {
-		case hClock:
-			s.Clock = []string{clockSmall, clockSmall, clockDeadline, clockGrace, clockDay}[rng.IntN(5)]
-			s.Mins = 1 + rng.IntN(5)
-		case hFault:
-			s.Code = []int{503, 403, 404, 422}[rng.IntN(4)]
-			if focus == 2 && rng.IntN(2) == 0 {
-				s.Code = 503
-			}
-			if focus == 1 && rng.IntN(2) == 0 {
-				s.Code = 403
-			}
-			s.Sticky = rng.IntN(3) == 0
-			s.Op = hmReads[rng.IntN(len(hmReads))]
-		case hLose, hConflict:
-			s.Obj = objs[rng.IntN(2)]
-		case hDelete:
-			s.Obj = objs[rng.IntN(2)]
-			if focus == 3 {
-				s.Obj = hmPred
-			}
-		case hCrash:
-			s.N = rng.IntN(3)
-		case hMerge:
-			s.Commit = rng.IntN(4) > 0
-			s.NoID = rng.IntN(8) == 0
-		case hForce:
-			s.Variant = []string{forceDrop, forcePerson}[rng.IntN(2)]
-		case hSettings:
-			s.Variant = []string{settingsRemoved, settingsUnusable, settingsBranch, settingsFixed}[rng.IntN(4)]
-		}
-		steps = append(steps, s)
+		steps = append(steps, hmDrawStep(rng, k, focus))
 	}
 	// Most sequences reach a merge or a close: one without a step that ends the pull request gets one, nine times in
 	// ten, at a random place in its second half, so that later steps still follow it.
 	ends := slices.ContainsFunc(steps, func(s hmStep) bool { return s.Kind == hMerge || s.Kind == hClose || s.Kind == hBranch })
 	if !ends && rng.IntN(10) > 0 {
-		end := hmStep{Kind: hMerge, Commit: rng.IntN(4) > 0, NoID: rng.IntN(8) == 0}
+		end := hmStep{Kind: hMerge, Commit: rng.IntN(4) > 0, NoID: rng.IntN(4) == 0}
 		if rng.IntN(5) == 0 {
 			end = hmStep{Kind: hClose}
 		}
 		steps[hmSteps/2+rng.IntN(hmSteps-hmSteps/2)] = end
 	}
 	return start, steps
+}
+
+// hmDrawStep draws the details of a step of kind k for a seed of focus (hmGenerate).
+func hmDrawStep(rng *rand.Rand, k hmKind, focus uint64) hmStep {
+	objs := []string{hmPred, hmRepl}
+	s := hmStep{Kind: k}
+	if k == hDeleteClaim {
+		s = hmStep{Kind: hDelete, Variant: deleteClaimHolder}
+	}
+	switch k {
+	case hClock:
+		s.Clock = []string{clockSmall, clockSmall, clockDeadline, clockGrace, clockDay}[rng.IntN(5)]
+		s.Mins = 1 + rng.IntN(5)
+	case hFault:
+		s.Code = []int{503, 403, 404, 422}[rng.IntN(4)]
+		if focus == 2 && rng.IntN(2) == 0 {
+			s.Code = 503
+		}
+		if focus == 1 && rng.IntN(2) == 0 {
+			s.Code = 403
+		}
+		s.Sticky = rng.IntN(3) == 0
+		s.Op = hmReads[rng.IntN(len(hmReads))]
+	case hLose, hConflict:
+		s.Obj = objs[rng.IntN(2)]
+	case hDelete:
+		s.Obj = objs[rng.IntN(2)]
+		if focus == 3 {
+			s.Obj = hmPred
+		}
+	case hCrash:
+		s.N = rng.IntN(3)
+	case hMerge:
+		s.Commit = rng.IntN(4) > 0
+		s.NoID = rng.IntN(4) == 0 || (focus == 1 && rng.IntN(3) == 0)
+	case hForce:
+		s.Variant = []string{forceDrop, forcePerson}[rng.IntN(2)]
+	case hSettings:
+		s.Variant = []string{settingsRemoved, settingsUnusable, settingsBranch, settingsFixed}[rng.IntN(4)]
+	}
+	return s
 }
 
 // hmShrink drops steps while the run still breaks property p, as far as one pass goes.

@@ -19,7 +19,7 @@ In the order you will need them:
 
 New to it? Start with [your first proposal](first-proposal.md): the hand-written request, the pull request it opens, and what the phases mean.
 
-The concepts are explained in the design: the [request lifecycle](design/6-reconciliation.md#6-reconciliation), the [API objects](design/5-api.md#5-api) (`RemediationRequest`, `Incident`, `RemediationPolicy`, `RemediationSettings`), [what `approvalRequired` means](design/8-gitops-on-github.md#81-what-approvalrequired-means) and [how a change is made](design/8-gitops-on-github.md#82-making-a-change). The fields of each object are in the [API reference](reference/api.md).
+How the parts fit together is in [How it works](how-it-works/index.md), seven short pages from a symptom to a verified change.
 
 ## Give a reviewer hint
 

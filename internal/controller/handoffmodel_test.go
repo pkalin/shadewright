@@ -250,7 +250,7 @@ func (s hmStep) String() string {
 // hmReads are the reads a fault may name.
 var hmReads = []string{"open", opGet, "FindChangeRequest", opList, opBranchHead, "CheckBranch", "CheckCommit",
 	"CheckMerged", "Parents", "IsAncestor", opReadFile, hmOpListComments, "ListReviews", "ReviewCheckRun", "CanWrite",
-	"CheckChain"}
+	hmOpCheckChain}
 
 // hmWrites are the calls that write the branch or the pull request.
 var hmWrites = map[string]bool{opCommit: true, "AppendCommit": true, opCreateBranch: true, opOpen: true,
@@ -259,6 +259,7 @@ var hmWrites = map[string]bool{opCommit: true, "AppendCommit": true, opCreateBra
 const (
 	hmOpListComments = "ListComments"
 	hmOpAutoMerge    = "EnableAutoMerge"
+	hmOpCheckChain   = "CheckChain"
 )
 
 var errHMCrash = errors.New("the executor crashed")
@@ -2209,7 +2210,7 @@ func TestHandoffModelFirstReadByTheReplacementAsAForeignChange(t *testing.T) {
 // request, so no check run is written there (P4).
 func TestHandoffModelFailedOwnerCheckWritesNothingOnTheMerge(t *testing.T) {
 	hmDirected(t, hmStartPushed, []hmStep{stSticky(403), stRecRepl, stMerge, stAnswer, stRecPred,
-		{Kind: hFault, Code: 503, Op: "CheckChain"}, stRecPred})
+		{Kind: hFault, Code: 503, Op: hmOpCheckChain}, stRecPred})
 }
 
 // #880, seed 14721 (shape C, a second path): the predecessor waits for the replacement's record of the merge of its
@@ -2218,7 +2219,7 @@ func TestHandoffModelFailedOwnerCheckWritesNothingOnTheMerge(t *testing.T) {
 // request: no check run is written there (P4).
 func TestHandoffModelFailedLookWhileAwaitingTheRecordWritesNothing(t *testing.T) {
 	hmDirected(t, hmStartPushed, []hmStep{{Kind: hMerge, Commit: true, NoID: true}, stRecPred,
-		{Kind: hFault, Code: 422, Op: "Parents"}, stRecRepl, {Kind: hFault, Code: 422, Op: "open"}, stRecPred})
+		{Kind: hFault, Code: 422, Op: opParents}, stRecRepl, {Kind: hFault, Code: 422, Op: faultOpen}, stRecPred})
 }
 
 // #880, seed 12352 (shape A, an unusable entry): the predecessor waits for the merge commit of its own merged pull

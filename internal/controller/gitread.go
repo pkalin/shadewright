@@ -87,8 +87,9 @@ const (
 )
 
 // boundPassedWait is the wait of a retry whose end passed while the reconcile's reads ran: the check at the start
-// of the next reconcile (endPassedWait) ends the wait at once.
-const boundPassedWait = time.Nanosecond
+// of the next reconcile (endPassedWait) ends the wait first. It is the floor of every time to run again
+// (requeueFloor), so a passed end never brings a request back hot.
+const boundPassedWait = requeueFloor
 
 // boundBy is the bound of kind k, whose end the request's recorded state holds (waitKind.end).
 func boundBy(k waitKind) waitBound { return waitBound{kind: k} }

@@ -96,8 +96,8 @@ import (
 //     (MergeContentUnreadable or the merge recorded) by T plus mergeContentWait plus one poll interval, or when the
 //     gap it fell in ended (readWaitDue);
 //   - errors: no three reconciles in a row return an error while no write is made to fail;
-//   - pace: no three reconciles in a row ask to be run again within a second without an error (a wait that ends
-//     and is not ended runs hot, and the clock that bounds it never moves);
+//   - pace: no reconcile asks to be run again within a second without an error (a wait that ends and is not ended
+//     runs hot, and the clock that bounds it never moves);
 //   - record: a merge the status records names its pull request;
 //   - lock recorded: a request whose status records its merge (Merged, Succeeded, Inconclusive, Failed with its
 //     receipt, or its pull request marked merged) and that no verification holds holds no lock after a reconcile
@@ -299,7 +299,7 @@ type modelWorld struct {
 	// the reconcile returns the error for a retry); zero when they work, or were never made. contentTried is the
 	// first failure of the reconcile running.
 	contentFailing, contentTried time.Time
-	errorsInRow, hotInRow        int
+	errorsInRow                  int
 	startAt                      time.Time
 	// released: the request's lock was seen released; recorded: the request's merge was seen recorded.
 	released, recorded bool
@@ -1942,7 +1942,8 @@ func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, pause
 	}
 }
 
-// paceProperties: no three errors in a row with no write made to fail, and no three hot requeues in a row.
+// paceProperties: no three errors in a row with no write made to fail, and no reconcile that asks to run again within
+// a second (the floor of every time to run again).
 func (m *modelWorld) paceProperties(live *api.RemediationRequest, res reconcile.Result, err error, faulted bool) {
 	if err != nil && !faulted {
 		m.errorsInRow++
@@ -1953,13 +1954,8 @@ func (m *modelWorld) paceProperties(live *api.RemediationRequest, res reconcile.
 		m.errorsInRow = 0
 	}
 	if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
-		m.hotInRow++
-		if m.hotInRow >= 3 {
-			m.fatalf("pace: three reconciles in a row asked to run again within a second (phase %s, waits %d)",
-				live.Status.Phase, len(live.Status.GitWaits))
-		}
-	} else {
-		m.hotInRow = 0
+		m.fatalf("pace: a reconcile asked to run again within a second (%v, phase %s, waits %d)",
+			res.RequeueAfter, live.Status.Phase, len(live.Status.GitWaits))
 	}
 }
 

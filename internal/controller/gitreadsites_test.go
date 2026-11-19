@@ -412,7 +412,8 @@ func gitReadCalls(t *testing.T) map[string]string {
 
 // Every call that bounds the retry of a failed Git read is in gitReadSites, with the bound it passes, and each
 // bound of its own holds by construction, over generated cases of (time left, call duration, --verify-outcomes):
-// a read that fails with the host asking for an hour is looked at again no later than its bound, and a bound that
+// a read that fails with the host asking for an hour is looked at again no later than its bound (or the floor of every
+// time to run again, requeueFloor, when less is left), and a bound that
 // passed while the call ran ends the wait now (at most boundPassedWait), unless the path's own end ran at once. A
 // new call site fails here until it is added with its bound and a check.
 func TestEveryGitReadRetrySiteKeepsItsBound(t *testing.T) {
@@ -459,7 +460,9 @@ func TestEveryGitReadRetrySiteKeepsItsBound(t *testing.T) {
 					case expired:
 					case wait <= 0:
 						t.Fatalf("the retry has no wait (%v)", wait)
-					case rest > 0 && wait > rest:
+					case rest > 0 && wait > max(rest, requeueFloor):
+						// Less than the floor left (requeueFloor): the retry comes at the floor, and the next
+						// reconcile ends the wait from its entry.
 						t.Fatalf("the retry waits %v, past the %v left of its bound", wait, rest)
 					case rest <= 0 && wait > boundPassedWait:
 						t.Fatalf("the bound passed during the call, and the retry still waits %v", wait)

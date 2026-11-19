@@ -477,6 +477,10 @@ func (r *RemediationRequestReconciler) patchGitWaits(ctx context.Context, rr *ap
 //     its reads once more (markLastRead), and endAfterLastRead ends what they leave standing on evidence about that
 //     read (ninth and tenth decisions of 2026-11-18 on #771).
 //
+// One reconcile ends every entry past its end: an end that stops the request does not leave the others for a later
+// reconcile. When a read wait has passed too, the reconcile goes on after such a stop, as the next one would, and makes
+// its last read.
+//
 // done is true when the reconcile stops here; a merge wait ended by its mark lets the reconcile go on, which then
 // records the merge. A failed status write, or a failed read of the settings, is returned for the error backoff.
 func (r *RemediationRequestReconciler) endPassedWait(ctx context.Context, rr *api.RemediationRequest) (
@@ -510,20 +514,32 @@ func (r *RemediationRequestReconciler) endPassedWait(ctx context.Context, rr *ap
 			return res, true, err
 		}
 	}
+	var ended *ctrl.Result
 	for {
 		kind, ok := passedWait(rr, now, true)
 		if !ok {
 			break
 		}
 		res, done, err := r.endWait(ctx, rr, kind, now, "")
-		if done || err != nil {
-			return res, done, err
+		if err != nil {
+			return res, true, err
+		}
+		if done {
+			// Every other entry past its end ends in this reconcile too: the next one of these, and a read wait by its
+			// last read below. An entry the end left without a kind that applies has no end any more.
+			ended = &res
 		}
 	}
 	if kinds := passedReadWaits(rr, now); len(kinds) > 0 {
+		// Also after an end above stopped the request: the reconcile goes on, as the next one would, and makes the
+		// read of these waits once more, so no wait is left past its end for a later reconcile.
 		logf.FromContext(ctx).Info("Reading the Git host once more for RemediationRequest: a wait for a read passed "+
 			"its end", "remediationRequest", client.ObjectKeyFromObject(rr), "waits", len(kinds))
 		r.gitRetries().markLastRead(client.ObjectKeyFromObject(rr), kinds)
+		return ctrl.Result{}, false, nil
+	}
+	if ended != nil {
+		return *ended, true, nil
 	}
 	return ctrl.Result{}, false, nil
 }

@@ -500,8 +500,17 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"remediationRequest", req.NamespacedName, "error", err.Error())
 		return ctrl.Result{}, nil
 	}
+	if res.RequeueAfter > 0 && res.RequeueAfter < requeueFloor {
+		// No path asks to run again hot: an end that passed while the reads ran (boundPassedWait), or what is left
+		// of a bound, is looked at no sooner than the floor.
+		res.RequeueAfter = requeueFloor
+	}
 	return res, err
 }
+
+// requeueFloor is the shortest time to run again a reconcile of a request returns (Reconcile): a time computed from
+// an end that has passed, or that lies a moment ahead, is raised to it, so no request is reconciled in a hot loop.
+const requeueFloor = time.Second
 
 // checkFailed handles err, a policy check that did not decide: a failed read of the source mapping or the build tree
 // is a visible retry (the check has no deadline yet); a remote system that asked for a delay (Retry-After) gets it,
@@ -594,6 +603,8 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// Every Git write of this reconcile passes the record hold of the handoff (recordHeld), in gatedGit.gate.
+	ctx = r.withRecordHold(ctx, rr)
 	if showsGitWait(rr) {
 		// Reconcile removes it after this reconcile if no read is retried; a request without it costs no read.
 		r.gitRetries().shown(req.NamespacedName)

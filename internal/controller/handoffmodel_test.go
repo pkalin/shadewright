@@ -58,7 +58,9 @@ import (
 // (either order, repeated), the clock moving on (minutes, past the replacement's deadline, past the deadline and the
 // handoff grace, past a day), the Git host failing (503), refusing (403), not finding (404) or rejecting (422) the next
 // read of one operation or every read until it answers again, the next status write of one request lost or meeting a
-// conflicting write, a restart (a new reconciler, nothing kept in memory), a crash after the next reconcile made n
+// conflicting write, a restart (a new reconciler, nothing kept in memory; also after the executor was down for longer
+// than the longest wait, so every wait that stands is past its end), the next read of the RemediationPolicy failing (a
+// Kubernetes read the check at the merge makes), a crash after the next reconcile made n
 // writes (status or Git, so any two writes can be cut apart), the kill switch pausing writes or lifting the pause,
 // either request deleted, a settings change (the repository leaves the settings, its entry cannot be used or is fixed
 // again, its target branch changes), and a person merging the pull request at its head, pushing a commit on top of it,
@@ -92,10 +94,11 @@ import (
 //	   predecessor writes nothing to Git while its intent stands; every write to Git is checked as it is made, against
 //	   the abort as stored by then (noted at the status write that stores it); and a request that waits for the other
 //	   request's merge record (a status write of it carries MergeRecordPending, stored, lost or meeting a conflict,
-//	   until one without it is stored, while that request may still record the merge) writes nothing to Git, not
-//	   even an attempt;
+//	   until one without it is stored, while that request may still record the merge: it holds the target lock or
+//	   its intent, or a claim on the merge) writes nothing to Git, not even an attempt;
 //	P5 every status write passes the CRD schema and its CEL rules (transition rules included), and a reconcile that
-//	   could act leaves no entry of status.gitWaits that stood past its own end at its start;
+//	   could act leaves no entry of status.gitWaits that stood past its own end at its start, also when it ends one of
+//	   them by stopping the request (a restart after more than the longest wait, hRestartLate);
 //	P6 after the settling run, once the pull request is merged or closed, or its branch or its repository is gone, no
 //	   request holds the target lock, but for two named expectations while the repository is not in the settings
 //	   (decision of 2026-11-19 on #786): a holder with no verdict stored (a merge recorded with its receipt or a phase
@@ -103,7 +106,9 @@ import (
 //	   request's merge record (MergeRecordPending) when the repository left, keeps the lock and shows condition
 //	   PullRequestUnreadable with reason RepositoryUnavailable; both are asserted and counted. A sequence that ends
 //	   with the repository removed then puts it back, and a second settling run checks P6, P1 and P2 again: the lock
-//	   is free and a merge is recorded once.
+//	   is free and a merge is recorded once;
+//	P7 no reconcile that returns without an error asks to run again within a second (the floor of every time to run
+//	   again): a wait whose end passed is looked at again at a sane pace, never hot.
 //
 // Exclusions, each named and recognised by its shape, never by a seed (hmShapes, and the checks that name them): the
 // #288 cleanup bound (a request whose cleanup was failing let go of its finalizer at the end of a bound of that
@@ -174,7 +179,15 @@ const (
 	// hDeleteClaim is drawn by the generator only and becomes a deletion of the request holding only a claim on the
 	// merge (hDelete, deleteClaimHolder).
 	hDeleteClaim hmKind = "delete-claim-holder"
+	// hRestartLate is a restart after the executor was down for longer than the longest wait a request records
+	// (hmLongestWait): every wait that stands is past its end at the first reconcile.
+	hRestartLate hmKind = "restart-after-every-wait"
 )
+
+// hmLongestWait is how long the executor is down at hRestartLate: an hour past the longest bound of an entry of
+// status.gitWaits (the watch after a refused recovery, the request's deadline and its handoff grace, the waits for a
+// merge commit and what a merge brought).
+var hmLongestWait = max(recoveryWaitBound, hmDeadline+handoffRecoveryGrace, mergeCommitWait, mergeContentWait) + time.Hour
 
 // The variants of a force push (hForce) and of a settings change (hSettings).
 const (
@@ -224,7 +237,7 @@ type hmStep struct {
 
 func (s hmStep) String() string {
 	switch s.Kind {
-	case hRecPred, hRecRepl, hAnswer, hRestart, hPause, hLift, hPush, hClose, hReopen, hBranch:
+	case hRecPred, hRecRepl, hAnswer, hRestart, hRestartLate, hPause, hLift, hPush, hClose, hReopen, hBranch:
 		return string(s.Kind)
 	case hForce, hSettings:
 		return string(s.Kind) + " " + s.Variant
@@ -263,7 +276,7 @@ func (s hmStep) String() string {
 // hmReads are the reads a fault may name.
 var hmReads = []string{"open", opGet, "FindChangeRequest", opList, opBranchHead, "CheckBranch", "CheckCommit",
 	"CheckMerged", "Parents", "IsAncestor", opReadFile, hmOpListComments, "ListReviews", "ReviewCheckRun", "CanWrite",
-	hmOpCheckChain}
+	hmOpCheckChain, hmOpPolicyRead}
 
 // hmWrites are the calls that write the branch or the pull request.
 var hmWrites = map[string]bool{opCommit: true, "AppendCommit": true, opCreateBranch: true, opOpen: true,
@@ -273,6 +286,9 @@ const (
 	hmOpListComments = "ListComments"
 	hmOpAutoMerge    = "EnableAutoMerge"
 	hmOpCheckChain   = "CheckChain"
+	// hmOpPolicyRead is not a Git operation: a fault that names it fails the next read of the RemediationPolicy, a
+	// Kubernetes read (policyReadFault).
+	hmOpPolicyRead = "PolicyRead"
 )
 
 var errHMCrash = errors.New("the executor crashed")
@@ -569,6 +585,15 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		}
 	}
 	m.cl = interceptor.NewClient(m.base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
+			opts ...client.GetOption) error {
+			if _, ok := obj.(*api.RemediationPolicy); ok {
+				if err := m.policyReadFault(); err != nil {
+					return err
+				}
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
 		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
 			opts ...client.SubResourceUpdateOption) error {
 			return m.statusWrite(ctx, obj, func() error { return c.SubResource(sub).Update(ctx, obj, opts...) })
@@ -765,6 +790,21 @@ func (m *hmWorld) countWrite() error {
 	return nil
 }
 
+// policyReadFault is the fault of the next read of the RemediationPolicy (hmOpPolicyRead): a Kubernetes read, which the
+// freshness check and the check at the merge make, failing once with 503.
+func (m *hmWorld) policyReadFault() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.actor == hmPerson || m.actor == "" {
+		return nil
+	}
+	if _, ok := m.once[hmOpPolicyRead]; !ok {
+		return nil
+	}
+	delete(m.once, hmOpPolicyRead)
+	return apierrors.NewServiceUnavailable("the RemediationPolicy cannot be read")
+}
+
 func (m *hmWorld) gitFail(op string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -810,7 +850,9 @@ func (m *hmWorld) otherMayRecord(who string) bool {
 	if m.merge != nil && holdsMergeRecord(x, m.number, m.merge.head) {
 		return false
 	}
-	return mayStillRecord(x)
+	// A claim on the merge (holdsMergeClaim) is a pending record too, handed off or not (decision of 2026-11-19 on
+	// #880): the request that waits for it writes nothing to Git while it stands.
+	return mayStillRecord(x) || (m.merge != nil && holdsMergeClaim(x, m.number, m.merge.head))
 }
 
 func (m *hmWorld) gitAfter(op string) error {
@@ -1316,6 +1358,11 @@ func (m *hmWorld) reconcile(who string) {
 		m.restart()
 		return
 	}
+	// P7: no reconcile asks to run again within a second.
+	if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
+		m.fail("P7", "the reconcile of the %s asked to run again after %v, below the floor of a second", who,
+			res.RequeueAfter)
+	}
 	// P5: a reconcile that could act ends every wait that stood past its own end at its start.
 	if after != nil && err == nil && !faulted && !m.paused {
 		for _, w := range before.Status.GitWaits {
@@ -1369,6 +1416,10 @@ func (m *hmWorld) apply(s hmStep) {
 		m.conflict[m.keys[s.Obj].Name] = true
 	case hRestart:
 		m.restart()
+	case hRestartLate:
+		m.now = m.now.Add(hmLongestWait)
+		m.restart()
+		m.reach["restart-after-every-wait"] = true
 	case hCrash:
 		m.crashAt = s.N
 	case hPause, hLift:
@@ -1952,7 +2003,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 	}
 	weights := []weighted{{6, hRecPred}, {6, hRecRepl}, {4, hClock}, {3, hFault}, {2, hAnswer}, {1, hLose},
 		{1, hConflict}, {1, hRestart}, {1, hCrash}, {1, hPause}, {1, hLift}, {1, hDelete}, {2, hMerge}, {1, hPush},
-		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}, {2, hDeleteClaim}}
+		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}, {2, hDeleteClaim}, {1, hRestartLate}}
 	switch focus {
 	case 1:
 		weights = append(weights, weighted{3, hFault}, weighted{2, hClock}, weighted{2, hMerge}, weighted{3, hDeleteClaim})
@@ -1960,7 +2011,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 		weights = append(weights, weighted{2, hLose}, weighted{2, hClock}, weighted{2, hFault})
 	case 3:
 		weights = append(weights, weighted{2, hCrash}, weighted{2, hDelete}, weighted{3, hClock}, weighted{2, hDeleteClaim},
-			weighted{1, hForce})
+			weighted{1, hForce}, weighted{2, hRestartLate})
 	}
 	total := 0
 	for _, w := range weights {

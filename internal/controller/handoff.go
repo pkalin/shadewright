@@ -950,6 +950,89 @@ func (r *RemediationRequestReconciler) awaitOtherRecord(ctx context.Context, rr 
 	return errMergeRecordPending
 }
 
+// errRecordHeld is what every Git write of a request returns, instead of calling the host, while it waits for the other
+// request of its handoff to record a merge of their pull request (recordHeld).
+var errRecordHeld = errors.New("waiting for the other request of the handoff to record the merge: nothing is written to Git")
+
+type recordHoldKey struct{}
+
+// withRecordHold returns ctx carrying the record hold of rr, the request a reconcile works on: every Git write made with
+// ctx or a context derived from it passes it in gatedGit.gate, before the kill switch, whatever step makes the write
+// and whichever provider it opened. rr is read at each write, so the hold follows what the reconcile stored meanwhile.
+func (r *RemediationRequestReconciler) withRecordHold(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) context.Context {
+	return context.WithValue(ctx, recordHoldKey{}, func(ctx context.Context) error { return r.recordHeld(ctx, rr) })
+}
+
+// recordHold asks the record hold ctx carries (withRecordHold); nil when it carries none.
+func recordHold(ctx context.Context) error {
+	if hold, ok := ctx.Value(recordHoldKey{}).(func(context.Context) error); ok {
+		return hold(ctx)
+	}
+	return nil
+}
+
+// recordHeld returns errRecordHeld while rr waits for the other request of its handoff to record a merge of their pull
+// request (decision of 2026-11-19 on #880, "a pending wait is a claim"): the other request, read from the API server,
+// holds a claim on a merge of that pull request (holdsMergeClaim: a wait of kind MergeCheck or MergeContent naming it),
+// or rr shows that it waits for that record (condition Approved False with ReasonMergeRecordPending) while the other
+// may still record it (mayStillRecord). It is decided from what is stored, not from a read of the Git host, so a write
+// that would come before the look at the pull request in a reconcile (the rewrite after a handoff, followHandoff) is
+// held too, also when rr's copy is older than the claim. A request with no handoff, or whose other request is gone or
+// made again, is not held. A failed read holds the write too, as freshness.ErrWriteBlocked (the Kubernetes API's),
+// for a retry.
+func (r *RemediationRequestReconciler) recordHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	ho := rr.Status.Handoff
+	if ho == nil {
+		return nil
+	}
+	// A request in the middle of a chain has a handoff at both ends: each is asked.
+	if ho.From != nil {
+		if err := r.heldBy(ctx, rr, string(ho.From.Name), ho.From.UID); err != nil {
+			return err
+		}
+	}
+	if ho.To != nil {
+		return r.heldBy(ctx, rr, string(ho.To.Name), ho.To.UID)
+	}
+	return nil
+}
+
+// heldBy is recordHeld for one other request of rr's handoffs, by its name and UID.
+func (r *RemediationRequestReconciler) heldBy(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	name string, uid remediationv1alpha1.UID) error {
+	other := &remediationv1alpha1.RemediationRequest{}
+	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: name}, other); {
+	case apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("%w: get RemediationRequest %s of the handoff of %s: %w", freshness.ErrWriteBlocked, name,
+			rr.Name, err)
+	}
+	if other.UID != types.UID(uid) {
+		return nil
+	}
+	pr := rr.Status.PullRequest
+	if pr == nil {
+		// A replacement before its takeover: the pull request of the handoff is the predecessor's.
+		pr = other.Status.PullRequest
+	}
+	if pr == nil {
+		return nil
+	}
+	for _, k := range readWaits {
+		if w := gitWait(other, k); w != nil && w.PullRequest != nil && w.PullRequest.Number == pr.Number &&
+			holdsMergeClaim(other, pr.Number, w.PullRequest.HeadSHA) {
+			return errRecordHeld
+		}
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	if c != nil && c.Status == metav1.ConditionFalse && c.Reason == ReasonMergeRecordPending && mayStillRecord(other) {
+		return errRecordHeld
+	}
+	return nil
+}
+
 // afterUpdate reads the pull request after the branch update (ADR-0028 section 4 item 5), by the number the
 // predecessor recorded (ADR-0030 section 1): open, the replacement records it (step 4); merged with the new
 // commit as its head, the replacement owns the merge; merged with another head, closed, or not the predecessor's

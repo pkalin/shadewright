@@ -130,7 +130,8 @@ func (r *RemediationRequestReconciler) GatedRepository(ctx context.Context, repo
 }
 
 // gatedGit is a GitProvider whose writes (CreateBranch, CommitFile, OpenChangeRequest, EnableAutoMerge,
-// CommentChangeRequest, CloseChangeRequest) call allow immediately before the wrapped provider, and return its
+// CommentChangeRequest, CloseChangeRequest, AppendCommit, UpdateChangeRequest, CreateCheckRun) call the record hold of
+// the reconcile (recordHold) and allow immediately before the wrapped provider, and return its
 // error instead of writing when it refuses; the wrapped provider gets allow as its write checkpoint too (gate).
 // Reads pass straight through, without a checkpoint. When closeOnly is set and reports true, every write but
 // CloseChangeRequest and a failed check run shadewright/review returns errStalePlanWrite before allow is asked
@@ -226,16 +227,25 @@ func (g *gatedGit) feedback() (providers.FeedbackSource, bool) {
 // carries allow as the write checkpoint ([providers.WithWriteCheckpoint]), so an adapter that makes several
 // requests in one method, or retries one, asks the gate again right before each of them. The adapter gets
 // only the class of a refusal (a pause, or settings that cannot be read), never the API server's error text.
+// Before allow it asks the hold of the reconcile ctx belongs to (withRecordHold), so a request that waits for the
+// other request of its handoff to record a merge writes nothing to Git, whatever step and whichever provider.
 func (g *gatedGit) gate(ctx context.Context) (context.Context, error) {
-	if err := g.allow(ctx); err != nil {
+	check := func(ctx context.Context) error {
+		if err := recordHold(ctx); err != nil {
+			return err
+		}
+		return g.allow(ctx)
+	}
+	if err := check(ctx); err != nil {
 		return ctx, err
 	}
-	return providers.WithWriteCheckpoint(ctx, g.allow, freshness.ErrPaused, freshness.ErrWriteBlocked), nil
+	return providers.WithWriteCheckpoint(ctx, check, freshness.ErrPaused, freshness.ErrWriteBlocked,
+		errRecordHeld), nil
 }
 
-// gateWrite is gate for every write but CloseChangeRequest and a failed check run shadewright/review: while
-// closeOnly reports true it refuses with errStalePlanWrite, so a stale plan's pull request gets no write but its
-// close and that failed check, whichever step reaches it.
+// gateWrite is gate (the record hold and the kill switch) for every write but CloseChangeRequest and a failed check
+// run shadewright/review: while closeOnly reports true it refuses with errStalePlanWrite, so a stale plan's pull
+// request gets no write but its close and that failed check, whichever step reaches it.
 func (g *gatedGit) gateWrite(ctx context.Context) (context.Context, error) {
 	if g.closeOnly != nil && g.closeOnly() {
 		return ctx, errStalePlanWrite

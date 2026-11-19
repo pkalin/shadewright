@@ -2211,3 +2211,21 @@ func TestHandoffModelFailedOwnerCheckWritesNothingOnTheMerge(t *testing.T) {
 	hmDirected(t, hmStartPushed, []hmStep{stSticky(403), stRecRepl, stMerge, stAnswer, stRecPred,
 		{Kind: hFault, Code: 503, Op: "CheckChain"}, stRecPred})
 }
+
+// #880, seed 14721 (shape C, a second path): the predecessor waits for the replacement's record of the merge of its
+// commit (MergeRecordPending), and its next look fails to open the repository (422 on the token) before it reads the
+// pull request again. The status records that the merge was seen, so nothing after the look runs on the merged pull
+// request: no check run is written there (P4).
+func TestHandoffModelFailedLookWhileAwaitingTheRecordWritesNothing(t *testing.T) {
+	hmDirected(t, hmStartPushed, []hmStep{{Kind: hMerge, Commit: true, NoID: true}, stRecPred,
+		{Kind: hFault, Code: 422, Op: "Parents"}, stRecRepl, {Kind: hFault, Code: 422, Op: "open"}, stRecPred})
+}
+
+// #880, seed 12352 (shape A, an unusable entry): the predecessor waits for the merge commit of its own merged pull
+// request (MergeCheck), and the settings entry of the repository cannot be used once that wait passed its end. No read
+// can start, which ends the wait after that reconcile (endAfterLastRead), as for a repository that left the settings
+// (P5).
+func TestHandoffModelUnusableEntryEndsTheMergeWait(t *testing.T) {
+	hmDirected(t, hmStartIntent, []hmStep{stRecPred, {Kind: hMerge, Commit: true, NoID: true}, stRecPred,
+		stClock(clockDay), {Kind: hSettings, Variant: settingsUnusable}, stRecPred})
+}

@@ -288,6 +288,10 @@ func (r *RemediationRequestReconciler) openPlanEntry(ctx context.Context, rr *re
 	// check run (#713): the one guard every step that writes to the plan's pull request passes (#199).
 	git, err := r.openGated(ctx, repo, func() bool { return reinstalled || staleMark(rr) != nil })
 	if providers.IsInvalidConfig(err) {
+		// Evidence that no read of the Git host can start for the request, as planEntry notes a repository that left
+		// the settings: a wait for a read past its end ends on it (endAfterLastRead).
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr),
+			unstartableReads[string(sourcemap.ReasonRepositoryUnusable)])
 		return nil, "", freshness.ErrRepositoryUnusable
 	}
 	if err != nil {
@@ -1280,6 +1284,7 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (prOutcome, error) {
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	look, err := r.watchStep(stepCtx, rr)
+	err = awaitedMergeUnread(rr, err)
 	mergeSeen, timedOut := errors.Is(err, errMergeCheck), stepCtx.Err() != nil
 	branchUnread := errors.Is(err, errBranchChangedUnread)
 	// A read of a wait of its own (the content of a retargeted merge, the check at the merge) that ran out of the
@@ -1336,6 +1341,27 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prOpen, r.watchReviewCheck(ctx, rr, comments)
 	}
 	return prOpen, nil
+}
+
+// awaitedMergeUnread returns err, the error of watchStep, wrapped in errMergeCheck (with errOwnerCheckUnread) when rr's
+// status records that it waits for the other request of its handoff to record the merge of their pull request
+// (condition Approved False with ReasonMergeRecordPending) and the look failed before it could read that pull request
+// again (opening the repository, the read of the pull request): the merge was seen, so nothing after the look runs on
+// the merged pull request (no full freshness check, no check run) until a look works (#879, #880). Decided from the
+// recorded state, as the failed look read nothing. The outcomes watchStep returns as sentinels, a look that saw the
+// merge, and settings that do not reach the repository (repositoryRead: nothing can be written there, and the path
+// after the look shows that in PullRequestUnreadable) are left as they are.
+func awaitedMergeUnread(rr *remediationv1alpha1.RemediationRequest, err error) error {
+	if err == nil || errors.Is(err, errMergeCheck) || errors.Is(err, errBranchChangedUnread) ||
+		errors.Is(err, errStopped) || errors.Is(err, errClosed) || errors.Is(err, errConflicted) ||
+		errors.Is(err, errMergeCommitPending) || errors.Is(err, errMergeRecordPending) || repositoryRead(rr, err) != nil {
+		return err
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonMergeRecordPending {
+		return err
+	}
+	return fmt.Errorf("%w: %w: %w", errMergeCheck, errOwnerCheckUnread, err)
 }
 
 // mergeSeenErr returns err, the error of a look that saw the pull request merged and did not record the merge,

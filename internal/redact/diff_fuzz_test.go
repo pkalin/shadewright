@@ -47,7 +47,9 @@ const diffWorkSlack = 64 << 10
 // knownDiffFailures are the known failing inputs of the targets of this package, by target and input bytes.
 var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{
 	"FuzzDiffStrings": {string(seedStringsPrivateKey): {Property: "P2",
-		Reason: "a private key header in one string and the secret on a line of the next: Strings leaves it"}},
+		Reason: "a private key header in one string and the secret on a line of the next: Strings leaves it"},
+		string(seedTokenRepeatGrammar): {Property: "P3",
+			Reason: `TOKEN="a",b, repeated to the size limit: Strings, which reads the strings joined, costs about 1,382 own steps per byte`}},
 	"FuzzDiffString": {string(seedStringTokenRepeat): {Property: "P3",
 		Reason: `one format character after 1,024 repeats of TOKEN="a",b, costs about 1,205 own steps per byte`}},
 }
@@ -94,6 +96,10 @@ func utf8Fails(what, in, out string) []string {
 	return nil
 }
 
+// seedTokenRepeatGrammar is seed 4 of the fifteenth decision written in the grammar: TOKEN="a",b, repeated to
+// the size limit, a format character after it.
+var seedTokenRepeatGrammar = []byte{1, 0, 21, 12, 0, 7, 2, 0}
+
 // diffSeeds are grammar inputs every target of this file starts from, besides its corpus in testdata/fuzz.
 var diffSeeds = [][]byte{
 	{1, 0, 14, 0, 1},                  // a key, a separator and a probe
@@ -101,7 +107,7 @@ var diffSeeds = [][]byte{
 	{1, 1, 18, 2},                     // a flag and its value in the next string
 	{1, 1, 19, 0, 6, 3},               // a key word, a look-alike colon and a key word, the probe next
 	{1, 0, 20, 0, 0},                  // a private key header and a secret line
-	{1, 0, 21, 12, 0, 7, 2, 0},        // TOKEN="a",b, repeated, a format character after it
+	seedTokenRepeatGrammar,            // TOKEN="a",b, repeated, a format character after it
 	{1, 0, 23, 0, 0, 7, 0},            // a key, a format character, a look-alike colon, a probe
 	{1, 2, 17, 2, 3, 11, 9, 16, 1, 1}, // an explicit key, then a flow map in the next string
 	redacttest.RawSeed(0, "password: \x01\n"),

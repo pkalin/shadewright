@@ -201,7 +201,7 @@ func labelledPod(args []string, labels map[string]string) *corev1.Pod {
 // the sizes where the replacements and renamed keys make it longer than the bound, an argument is left out whole
 // and replaced by the note of its size (incidentcontext.LeftOut), the answer labelled cut, and everything else is as
 // without the bound.
-// Under -race every second size is called. The pods are read as they are, not through a client that encodes them,
+// Under -race every fourth size is called. The pods are read as they are, not through a client that encodes them,
 // so the invalid bytes reach the tool.
 func TestGetResourceAlwaysFits(t *testing.T) {
 	set, src := diffSet(t)
@@ -214,8 +214,8 @@ func TestGetResourceAlwaysFits(t *testing.T) {
 		}
 		mid := resourceBytes - len(base)
 		whole, left := 0, 0
-		for n := mid - 80; n <= mid+40; n += 12 {
-			if raceDetector && n%24 != mid%24 {
+		for k, n := 0, mid-80; n <= mid+40; k, n = k+1, n+12 {
+			if raceDetector && k%4 != 0 {
 				continue
 			}
 			r := src.run(set, diffScene{pod: labelledPod(sc.args(n), sc.labels)}, NameGetResource, map[string]any{argKind: kindPod, argNamespace: testNS, argName: podName})

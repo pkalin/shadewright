@@ -82,7 +82,9 @@ func (tb *traceBuilder) copy(t trace, from, to int) {
 func (tb *traceBuilder) trace() trace { return trace{text: tb.b.String(), lo: tb.lo, hi: tb.hi} }
 
 // releasedReading applies the redactor of the release before and collects what its passes hide, as spans of
-// the text decided on.
+// the text decided on. The callers widen those spans to whole characters (onRunes) before they return them: that
+// release cut a value at a byte bound (maxValueExtent) and could end a span inside a character, which left the
+// rest of the character after the marker (#845, P4).
 type releasedReading struct {
 	r *released.Redactor
 	// rule is the rule index the spans take: after every rule of this package's redactor, so that on a tie a
@@ -216,9 +218,11 @@ func (r *Redactor) releasedPieces(ps []Piece) []span {
 		return nil
 	}
 	var tb traceBuilder
+	var read strings.Builder
 	off := 0
 	for _, p := range ps {
 		tick(1)
+		read.WriteString(p.Text)
 		t := traceOf(p.Text, off)
 		if p.Data {
 			if !p.MapKey {
@@ -240,7 +244,7 @@ func (r *Redactor) releasedPieces(ps []Piece) []span {
 		off += len(p.Text)
 	}
 	x.redact(tb.trace())
-	return x.hidden
+	return onRunes(read.String(), x.hidden)
 }
 
 // releasedString returns what the release before hid in s, as spans of s: one call of its String when twice
@@ -256,14 +260,14 @@ func (r *Redactor) releasedString(s string, twice bool, cut func(string) int) []
 	}
 	if !twice {
 		x.pass(traceOf(s, 0))
-		return x.hidden
+		return onRunes(s, x.hidden)
 	}
 	t := x.redact(traceOf(s, 0))
 	if cut != nil {
 		from := min(max(cut(t.text), 0), len(t.text))
 		x.redact(trace{text: t.text[from:], lo: t.lo[from:], hi: t.hi[from:]})
 	}
-	return x.hidden
+	return onRunes(s, x.hidden)
 }
 
 // releasedExcerpt returns what the release before hid in a log as the log source read it (s) when it kept the
@@ -300,7 +304,7 @@ func (r *Redactor) releasedExcerpt(s string, from int, drop func(string) int) []
 		d := min(max(drop(ex.text), 0), len(ex.text))
 		x.redact(x.redact(trace{text: ex.text[d:], lo: ex.lo[d:], hi: ex.hi[d:]}))
 	}
-	return x.hidden
+	return onRunes(s, x.hidden)
 }
 
 // StringTwice is String for a text the release before redacted, made valid UTF-8 and redacted again

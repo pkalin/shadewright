@@ -101,9 +101,10 @@ func indentedBeyond(s string, pos, limit, col int) bool {
 	return t >= limit || s[t] == '\n' || s[t] == '\r' || t-pos > col
 }
 
-// extentLimit returns the index the extent rule reads up to from pos.
+// extentLimit returns the index the extent rule reads up to from pos: maxValueExtent bytes on, or the end of
+// the character that bound falls inside, so a value cut at the bound never ends inside a character (#845, P4).
 func extentLimit(s string, pos int) int {
-	return min(len(s), pos+maxValueExtent)
+	return runeCeil(s, min(len(s), pos+maxValueExtent))
 }
 
 // quoteLevel returns the escape level of a double quote preceded by run backslashes: the lowest zero bit of
@@ -681,7 +682,7 @@ func (w *wordMemo) groupEndKey(s string, pos, limit, keyPos int) (end int, ok, u
 	}
 	t := w.groups[pos]
 	if t == nil {
-		t = &groupTrace{g: groupScan{s: s, limit: min(len(s), pos+maxValueExtent), shell: true}, next: pos}
+		t = &groupTrace{g: groupScan{s: s, limit: extentLimit(s, pos), shell: true}, next: pos}
 		if w.groups == nil {
 			w.groups = map[int]*groupTrace{}
 		}

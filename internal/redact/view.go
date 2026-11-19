@@ -68,6 +68,48 @@ func charLen(s string, i int) int {
 	return n
 }
 
+// runeAround returns the start and end of the valid UTF-8 character of s that holds byte i past its first
+// byte, or i, i when i starts a character, is out of s or lies in bytes that are not valid UTF-8.
+func runeAround(s string, i int) (start, end int) {
+	if i <= 0 || i >= len(s) || utf8.RuneStart(s[i]) {
+		return i, i
+	}
+	for j := i - 1; j >= 0 && j > i-utf8.UTFMax; j-- {
+		tick(1)
+		if !utf8.RuneStart(s[j]) {
+			continue
+		}
+		if c, n := utf8.DecodeRuneInString(s[j:]); (c != utf8.RuneError || n > 1) && j+n > i {
+			return j, j + n
+		}
+		break
+	}
+	return i, i
+}
+
+// runeFloor returns i, or the start of the character of s that i falls inside (runeAround).
+func runeFloor(s string, i int) int {
+	start, _ := runeAround(s, i)
+	return start
+}
+
+// runeCeil returns i, or the end of the character of s that i falls inside (runeAround).
+func runeCeil(s string, i int) int {
+	_, end := runeAround(s, i)
+	return end
+}
+
+// onRunes widens each span to the characters of s it cuts: a span that starts or ends inside a valid UTF-8
+// character takes all of it, so a replacement never leaves part of a character behind (#845, P4). A span only
+// grows, so no byte a reading hid is shown.
+func onRunes(s string, spans []span) []span {
+	for i := range spans {
+		tick(1)
+		spans[i].start, spans[i].end = runeFloor(s, spans[i].start), runeCeil(s, spans[i].end)
+	}
+	return spans
+}
+
 // colOf returns the column of to on the line that starts at from.
 func colOf(s string, from, to int) col {
 	var c col

@@ -192,7 +192,7 @@ A cluster-scoped CR, writable only by the cluster admin ([ADR-0011](../adr/0011-
 - A policy must name its target namespaces: there is no "all namespaces".
 - `requestNamespaces` is `[shadewright-system]`. A request from any other namespace is `Denied`, so the right to create requests somewhere does not grant a policy.
 - Bounds have a minimum and a maximum, and `maxDecreasePercent` is 0: decreases are refused unless the admin allows them.
-- `allowedPaths` are globs with a literal first segment. `*` and `**` never match a segment that starts with a dot, and no segment may start with a dot or a dash, so a policy cannot cover the whole repository, `.github/` or option-like names.
+- `allowedPaths` are globs with a literal first segment. `*` and `**` never match a segment that starts with a dot, and no segment may start with a dot or a dash, so a policy cannot cover the whole repository, `.github/` or option-like names. No pattern matches a file whose path contains `..` anywhere, such as `apps/0..yml`, although the API accepts that name in a file path.
 
 ### The decision
 

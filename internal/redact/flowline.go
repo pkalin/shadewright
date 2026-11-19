@@ -61,7 +61,7 @@ type flowLine struct {
 	// The cursor pairs brackets from lo up to pos: stack holds the offsets of the open brackets, and goodOpen,
 	// by kind, the indexes in stack of the open brackets whose closing bracket is good, outermost first.
 	pos      int
-	stack    []int32
+	stack    []int
 	goodOpen [2][]int
 }
 
@@ -129,9 +129,8 @@ func (f *flowLine) build() {
 	}
 	for i := range n {
 		tick(1)
-		c := s[lo+i]
-		switch {
-		case c == ']' || c == '}':
+		switch c := s[lo+i]; c {
+		case ']', '}':
 			t := flowKind(c)
 			f.closes[t] = append(f.closes[t], int32(i))
 			if f.mate[i] < 0 {
@@ -140,7 +139,7 @@ func (f *flowLine) build() {
 					f.goodLone[t] = append(f.goodLone[t], int32(i))
 				}
 			}
-		case c == ',':
+		case ',':
 			if e := plainKeyCommaEnd(s, lo+i, f.hi); e >= 0 {
 				f.keyCommas = append(f.keyCommas, [2]int{lo + i, e})
 			}
@@ -195,7 +194,7 @@ func (f *flowLine) advance(x int) {
 				t := flowKind(c)
 				f.goodOpen[t] = append(f.goodOpen[t], len(f.stack))
 			}
-			f.stack = append(f.stack, int32(i))
+			f.stack = append(f.stack, i)
 		case ']', '}':
 			if f.mate[i] < 0 {
 				continue

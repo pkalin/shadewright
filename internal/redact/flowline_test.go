@@ -41,7 +41,7 @@ var flowLineUnits = []string{
 // 1,000 and 2,000 units of the first).
 func TestFlowLineWorkIsLinear(t *testing.T) {
 	for _, unit := range flowLineUnits {
-		var samples []workSample
+		samples := make([]workSample, 0, 3)
 		for _, n := range []int{250, 500, 1000} {
 			samples = append(samples, sampleWorkAlone(t, strings.Repeat(unit, n)))
 		}
@@ -52,7 +52,7 @@ func TestFlowLineWorkIsLinear(t *testing.T) {
 // flowLinePieces are the characters the brackets, runs and commas of a line are read from.
 var flowLinePieces = []string{
 	"[", "]", "{", "}", "\"", "'", ",", ";", "#", " ", "\t", ":", "a", "b_1", "k.e-y", "\u2237", "\u00a0",
-	"\u200b", "\ufeff", "\xff", "\r", "\n", "auth", ", 'k':", ",\"a,'b':\":", ", x :", ",'x,y:':",
+	"\u200b", "\ufeff", "\xff", "\r", "\n", authKey, ", 'k':", ",\"a,'b':\":", ", x :", ",'x,y:':",
 }
 
 // flowLine gives what the old reading gives (flowline_old_test.go), on generated lines, for values asked in

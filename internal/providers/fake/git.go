@@ -615,15 +615,18 @@ func (g *Git) ListChangeRequestsAnyBase(_ context.Context, headBranch string, op
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i := range out {
-		if g.unnamed[out[i].BaseBranch] {
+		// The target branch's name always passes the rule for target branches, so it is never left out (the
+		// contract of GitProvider.ListChangeRequestsAnyBase), as in the read by number (getFor).
+		if out[i].BaseBranch != g.target && g.unnamed[out[i].BaseBranch] {
 			out[i].BaseBranch = ""
 		}
 	}
 	return out, err
 }
 
-// HideBaseName makes ListChangeRequestsAnyBase answer change requests to base with no base name, as a provider
-// does for a name outside its rule for target branches.
+// HideBaseName makes ListChangeRequestsAnyBase and GetChangeRequest answer change requests to base with no base
+// name, as a provider does for a name outside its rule for target branches. The target branch's name is never hidden:
+// it passes that rule.
 func (g *Git) HideBaseName(base string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -87,6 +87,8 @@ func reinstalledChainWorld(t *testing.T, readErr error) (*RemediationRequestReco
 		t.Fatal("the world needs a cleanup through a new installation")
 	}
 	r.Client = &failChainRead{Client: r.Client, name: oldName, err: readErr}
+	// The chain is read from the API server (decision of 2026-11-19 on #786): that read fails.
+	r.APIReader = r.Client
 	events := record.NewFakeRecorder(10)
 	r.Recorder = events
 	return r, g, rr, events

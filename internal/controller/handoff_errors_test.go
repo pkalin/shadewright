@@ -190,6 +190,8 @@ func TestSettleHandoffLogsAFailedRead(t *testing.T) {
 			return c.Get(ctx, key, obj, opts...)
 		},
 	})
+	// The replacement is read from the API server (decision of 2026-11-19 on #786): that read fails.
+	r.APIReader = r.Client
 	upd := p.DeepCopy()
 	r.settleHandoff(ctx, upd)
 	if intent(upd) == nil {

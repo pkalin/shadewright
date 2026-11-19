@@ -101,6 +101,8 @@ const (
 	callerBound    = "bound"
 	heldLockBound  = "unboundedRead(noBoundHeldLock)"
 	unboundedCalls = "unboundedRead("
+	// mergeCheckBound is the bound of a read of the merge wait (readOfMergeCheck).
+	mergeCheckBound = "waitMergeCheck"
 )
 
 var gitReadSites = map[string]gitReadSite{
@@ -131,7 +133,10 @@ var gitReadSites = map[string]gitReadSite{
 	"branchchange.go:followHeldMerge:1": {bound: heldLockBound},
 	"branchchange.go:lookUnsettled:1":   {bound: callerBound},
 	"cancel.go:cancelLookFailed:1":      {bound: "unboundedRead(noBoundCancelWatch)"},
-	"cancel.go:cancelFailed:1": {bound: "paceWithin(left)",
+	// A cancel watched after a refusal (1) or past cleanupFailingBound (2) records a read of a wait of its own (#889).
+	"cancel.go:cancelFailed:1": {bound: "unboundedRead(noBoundWatchedCancel)"},
+	"cancel.go:cancelFailed:2": {bound: "unboundedRead(noBoundWatchedCancel)"},
+	"cancel.go:cancelFailed:3": {bound: "paceWithin(left)",
 		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, _, rr := settlementWorld(t, api.PhaseAwaitingApproval)
 			clock := clockOf(r)
@@ -149,7 +154,7 @@ var gitReadSites = map[string]gitReadSite{
 	"handoff.go:retryRecovery:1": {bound: "boundBy(waitHandoffGrace)", check: checkRecoveryBound},
 	"incidentcancel.go:followCancelledMerge:1": {bound: heldLockBound},
 	"incidentcancel.go:closeCancelled:1":       {bound: heldLockBound},
-	"merge.go:mergeCheckFailed:1": {bound: "waitMergeCheck",
+	"merge.go:mergeCheckFailed:1": {bound: mergeCheckBound,
 		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 			clock := clockOf(r)
@@ -163,6 +168,27 @@ var gitReadSites = map[string]gitReadSite{
 			clock.advance(c.during)
 			err := r.mergeCheckFailed(context.Background(), rr, cr, failedRead())
 			res, err := r.waitOrFail(context.Background(), rr, err, unboundedRead(noBoundHeldLock))
+			return mustWait(t, res, err), false
+		}},
+	"pullrequest.go:checkMerged:1": {bound: mergeCheckBound,
+		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			ctx := context.Background()
+			if _, err := g.Merge(rr.Status.PullRequest.Number); err != nil {
+				t.Fatal(err)
+			}
+			cr, err := g.GetChangeRequest(ctx, rr.Status.PullRequest.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock := clockOf(r)
+			setMergeWait(rr, clock.at.Add(-mergeCommitWait+c.left))
+			if err := r.Status().Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			failOnce(g, opCheckMerged, clock, c.during)
+			_, err = r.checkMerged(ctx, g, rr, cr)
+			res, err := r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 			return mustWait(t, res, err), false
 		}},
 	"merge.go:mergeNotRecorded:1":   {bound: callerBound},
@@ -304,7 +330,7 @@ func gitReadCalls(t *testing.T) map[string]string {
 				case *ast.Ident:
 					callee = fun.Name
 				}
-				kinded := map[string]string{"readOfMergeCheck": "waitMergeCheck", "readOfContent": "waitMergeContent"}
+				kinded := map[string]string{"readOfMergeCheck": mergeCheckBound, "readOfContent": "waitMergeContent"}
 				if callee != "retryGitRead" && callee != "waitOrFail" && kinded[callee] == "" && callee != "deliveryRetry" {
 					return true
 				}

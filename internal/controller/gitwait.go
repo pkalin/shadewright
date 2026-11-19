@@ -181,7 +181,8 @@ func wholeWait(tmpl api.GitWait, op string, now time.Time) (api.GitWait, bool) {
 
 // applies reports whether an entry of kind k still has something to end on rr: the request deadline only in
 // PolicyChecked before a stale plan's cleanup or a handoff, the handoff grace only while the handoff is recovered,
-// the merge waits only while the merge is not recorded.
+// the merge waits only while the merge is not recorded and the request is not being deleted (#878: the finalizer
+// records no merge, and its cleanup is bounded on its own, so the entry would only stand past its end).
 func (k waitKind) applies(rr *api.RemediationRequest) bool {
 	switch k {
 	case waitRequestDeadline:
@@ -190,7 +191,7 @@ func (k waitKind) applies(rr *api.RemediationRequest) bool {
 	case waitHandoffGrace:
 		return recoveringHandoff(rr)
 	case waitMergeCheck, waitMergeContent:
-		return !mergeRecorded(rr)
+		return !mergeRecorded(rr) && rr.DeletionTimestamp.IsZero()
 	}
 	return false
 }

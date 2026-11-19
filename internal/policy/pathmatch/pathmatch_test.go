@@ -116,6 +116,23 @@ func TestMatch(t *testing.T) {
 		{pattern: "apps/" + strings.Repeat("a", 512) + "/**", noMatch: []string{"apps/" + strings.Repeat("a", 512) + "/x.yaml"}},
 		{pattern: "apps/.hidden/x.yaml", noMatch: []string{"apps/.hidden/x.yaml"}},
 		{pattern: "apps/**", noMatch: []string{"apps/" + strings.Repeat("a", 512) + ".yaml"}},
+
+		// Paths the matcher refuses although a pattern would otherwise match: each clause of the
+		// GitFilePath rule, and ".." anywhere, which the schema of GitFilePath alone does not refuse.
+		{
+			pattern: "apps/**",
+			match:   []string{"apps/" + strings.Repeat("a", 512-len("apps/.yaml")) + ".yaml", "apps/a.b-c_d.yml", "apps/_x/0.yaml"},
+			noMatch: []string{
+				"apps/" + strings.Repeat("a", 513-len("apps/.yaml")) + ".yaml", // longer than 512
+				"apps/x y.yaml", "apps/x+y.yaml", "apps/x~.yaml", "apps/x:y.yaml", "apps/é.yaml", // character class
+				"apps/-x.yaml", "apps/-x/y.yaml", // leading dash
+				"apps/.x.yaml", "apps/.x/y.yaml", // leading dot
+				"apps/x.yamlx", "apps/x.ymll", "apps/x", // suffix
+				"apps/0..yml", "apps/x..yaml", "apps/a..b/x.yaml", "apps/a/b..yaml", // ".." inside a segment
+			},
+		},
+		{pattern: "apps/*.yml", noMatch: []string{"apps/0..yml"}},
+		{pattern: "apps/0..yml", noMatch: []string{"apps/0..yml"}},
 	}
 	for _, tt := range tests {
 		for _, path := range tt.match {
@@ -252,8 +269,12 @@ func FuzzMatch(f *testing.F) {
 			}
 		}
 		// A match implies a path the API server would accept.
-		if len(path) > 512 || !pathRE.MatchString(path) || strings.Contains(path, "..") {
+		if len(path) > 512 || !pathRE.MatchString(path) {
 			t.Fatalf("Match(%q, %q) matched a path the schema refuses", pattern, path)
+		}
+		// A match implies a path without "..", which the matcher refuses on top of the schema of GitFilePath.
+		if strings.Contains(path, "..") {
+			t.Fatalf("Match(%q, %q) matched a path that contains \"..\"", pattern, path)
 		}
 		// The reference matcher agrees (short inputs only, it is exponential).
 		if len(pattern) <= 64 && len(path) <= 64 && strings.Count(pattern, "*") <= 6 {

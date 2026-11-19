@@ -44,7 +44,7 @@ Prefer the narrowest value in each place:
 | Where it may act | `targets.namespaces` (required: there is no "all namespaces"); add `targets.objectSelector` (a label selector) to match only labelled workloads |
 | How far a value may go | `min` and `max` of the action, and `maxIncreasePercent` per request |
 | Lowering values | Keep `maxDecreasePercent: 0`. Decreases are refused unless you allow them |
-| Which files | `allowedPaths`, a list of globs with a literal first segment. `*` and `**` never match a segment that starts with a dot, so `.github/` cannot be covered |
+| Which files | `allowedPaths`, a list of globs with a literal first segment. `*` and `**` never match a segment that starts with a dot, so `.github/` cannot be covered. A file whose path contains `..`, such as `apps/0..yml`, matches no pattern |
 | Who may use it | `requestNamespaces`, whose default is the literal `[shadewright-system]`: set it to your operator namespace if you installed elsewhere, or every request is `Denied`. A request from any other namespace is `Denied` |
 | Review | `approval: Required` (the default). `Optional` only lets a request ask for no approval, and auto-merge is not built, so a person merges either way |
 

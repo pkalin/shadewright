@@ -25,8 +25,11 @@ limitations under the License.
 //
 // Match fails closed: a pattern or path that the API schema would refuse (an absolute path, an empty
 // segment, a segment starting with a dot or a dash, "..", a wildcard in the first pattern segment or in the
-// path, a path that is not a .yaml or .yml file) never matches. The package does not use [path/filepath.Match],
-// whose semantics differ and depend on the operating system.
+// path, a path that is not a .yaml or .yml file) never matches. It also refuses a path that contains ".."
+// anywhere, as in "apps/0..yml": the schema of [v1alpha1.GitFilePath] accepts that name, but Match is the only
+// check for paths that never pass the API server (the files the source mapping reads from Flux objects), and
+// it treats paths as GitPathPattern treats patterns. The package does not use [path/filepath.Match], whose
+// semantics differ and depend on the operating system.
 package pathmatch
 
 import (
@@ -48,7 +51,7 @@ var (
 )
 
 // Match reports whether path matches pattern. It returns false for any pattern or path that is not valid
-// according to its API type.
+// according to its API type, and for any path that contains "..".
 func Match(pattern v1alpha1.GitPathPattern, path v1alpha1.GitFilePath) bool {
 	p, s := string(pattern), string(path)
 	if !validPattern(p) || !validPath(s) {
@@ -62,7 +65,7 @@ func validPattern(p string) bool {
 }
 
 func validPath(s string) bool {
-	return len(s) <= maxLen && filePathRE.MatchString(s)
+	return len(s) <= maxLen && filePathRE.MatchString(s) && !strings.Contains(s, "..")
 }
 
 // matchSegments matches pattern segments against path segments. It uses dynamic programming over

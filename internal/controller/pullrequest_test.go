@@ -1699,6 +1699,78 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseMerged))
 	})
 
+	// The check of a merged pull request found after a lost open (endMerged) that never reads is bounded by the merge
+	// wait about that pull request, as the check of a moved head is: at its end the request stops from the wait's
+	// entry with the merge recorded as one whose content could not be checked, and the lock goes after the read of
+	// the branch. A refusal for good is a failed read like a 503 (design 6.5.1). Before the deadline the open step
+	// reads it (adoptChangeRequest); after it, the read after the stop (recordOwnMerge), which has no bound of its own.
+	DescribeTable("ends a merged pull request found after a lost open whose check never reads at the end of the merge wait (#889)",
+		func(afterDeadline bool, readErr error) {
+			lostOpen()
+			number := openRequests()[0].Number
+			_, err := git.Merge(number)
+			Expect(err).NotTo(HaveOccurred())
+			if afterDeadline {
+				clock = fetch().Status.Deadline.Add(time.Minute)
+				_, err = reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseExpired))
+			}
+			git.SetFail(func(op string) error {
+				if op == opCheckMerged {
+					return readErr
+				}
+				return nil
+			})
+			DeferCleanup(func() { git.SetFail(nil) })
+			start := clock.Truncate(time.Second)
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait")
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			// A refusal for good in the open step stops the request at once (design 6.6.1); the read after the stop
+			// then makes the same check, so the wait may start one reconcile later.
+			got := fetch()
+			if gitWait(got, waitMergeCheck) == nil {
+				clock = clock.Add(time.Second)
+				_ = reconcileOnce()
+				got = fetch()
+			}
+			w := gitWait(got, waitMergeCheck)
+			Expect(w).NotTo(BeNil(), "the failed check starts the merge wait: %+v", got.Status.GitWaits)
+			Expect(w.PullRequest.Number).To(Equal(number))
+
+			ended := func(rr *remediationv1alpha1.RemediationRequest) bool {
+				c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+				return c != nil && c.Reason == ReasonMergedWithForeignChange
+			}
+			for !ended(got) && clock.Before(start.Add(mergeCommitWait+3*time.Minute)) {
+				clock = clock.Add(time.Minute)
+				_ = reconcileOnce()
+				got = fetch()
+			}
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention),
+				"bounded by the merge wait: %+v", got.Status.GitWaits)
+			Expect(clock.After(start.Add(mergeCommitWait+time.Minute))).To(BeFalse(),
+				"ends by the end of the wait plus a poll")
+			approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+			Expect(approved.Reason).To(Equal(ReasonMergedWithForeignChange))
+			Expect(approved.Message).To(ContainSubstring(ReasonMergeContentUnreadable))
+			Expect(got.Status.MergeReceipt).To(BeNil())
+			Expect(got.Status.PullRequest).NotTo(BeNil())
+			Expect(got.Status.PullRequest.Number).To(Equal(number))
+
+			clock = clock.Add(time.Minute)
+			_ = reconcileOnce()
+			Expect(fetch().Status.HoldsTarget).NotTo(HaveValue(BeTrue()),
+				"the read of the branch finds no other open pull request")
+		},
+		Entry("before the deadline, a recurring 503", false, &providers.RetryableError{Err: errors.New("status 503")}),
+		Entry("before the deadline, a refusal for good", false, fmt.Errorf("status 403: %w", providers.ErrForbidden)),
+		Entry("before the deadline, a repository gone", false, fmt.Errorf("status 404: %w", providers.ErrNotFound)),
+		Entry("after the deadline, a recurring 503", true, &providers.RetryableError{Err: errors.New("status 503")}),
+		Entry("after the deadline, a refusal for good", true, fmt.Errorf("status 403: %w", providers.ErrForbidden)),
+	)
+
 	It("ends with MergedWithForeignChange when the merged pull request found after a lost open held more (#524)", func() {
 		got := mergedAfterLostOpen(func(branch string) {
 			_, err := git.Push(branch, "README.yaml", []byte("a: 3\n"))

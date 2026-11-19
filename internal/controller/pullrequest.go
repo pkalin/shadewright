@@ -924,7 +924,8 @@ func (r *RemediationRequestReconciler) requireOnTarget(ctx context.Context, git 
 // (recordMerge, #561), so delivery is checked against that commit; otherwise MergedWithForeignChange without a
 // merge commit, since the change that landed is not the planned one. A read that fails decides nothing and is
 // returned for a retry, with the status unchanged, except a check at the merge that did not answer, which
-// records the pull request first (mergeUnchecked).
+// records the pull request first (mergeUnchecked). A failed read of checkMerged is one of the merge wait about cr,
+// so the caller's retry records that wait and it ends at its end, whatever bound the caller has (#889).
 func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
 	// Without a full merge commit ID it waits for the host to report one, a bounded time (awaitMergeCommit), and
@@ -1012,9 +1013,18 @@ func (r *RemediationRequestReconciler) mergeUnchecked(ctx context.Context, rr *r
 // changes only the target file on top of a commit of the target branch from before the merge (CheckMerged), and
 // the target file there is byte for byte the planned change of the target file at that parent. A merge commit
 // that took the head into the target branch so does not change the answer. A head that fails is returned as a
-// [*renderRefusal]; a read that fails as an error.
+// [*renderRefusal]; a read that fails as an error of the merge wait about cr (readOfMergeCheck), whatever the Git
+// host answers, so every caller's retry records that wait and the request ends at its end, from the entry, as a
+// merge whose content could not be checked (endMergeWait, #889), also on a path whose own bound has no end.
 func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) (*renderRefusal, error) {
+	ref, err := checkMergedHead(ctx, git, rr, cr)
+	return ref, readOfMergeCheck(cr, err)
+}
+
+// checkMergedHead is checkMerged's reads and verdict, with a failed read returned as it failed.
+func checkMergedHead(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest,
+	cr providers.ChangeRequest) (*renderRefusal, error) {
 	path := string(rr.Status.Source.Path)
 	file, err := git.ReadFile(ctx, cr.HeadSHA, path, providers.MaxFileBytes)
 	if err != nil {

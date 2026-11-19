@@ -815,3 +815,42 @@ func TestSequenceStaleCleanupRefusedWithoutARecordedPullRequest(t *testing.T) {
 		}
 	}
 }
+
+// Seeds 19084 and 110533 of the Git waits model: a merge reported without its commit is recorded without a receipt
+// when the wait passes, and the cache then serves the copy from before the wait. The look on that copy sees the merge
+// without its commit and starts the wait again on the request as the API server holds it: it must add nothing to a
+// request whose merge is recorded (the MergeCheck kind no longer applies), and never replace an entry that stands
+// with a new one of the same kind (a validation rule).
+func TestSequenceStaleCopyStartsNoMergeWaitOnARecordedMerge(t *testing.T) {
+	m := scripted(t, modelStart{start: startRunning, fresh: true})
+	if _, err := m.g.Merge(m.number); err != nil {
+		t.Fatal(err)
+	}
+	m.noCommit = true
+	var before *api.RemediationRequest
+	for range 12 {
+		if live := m.live(); before == nil && gitWait(live, waitMergeCheck) == nil && !mergeRecorded(live) {
+			before = live.DeepCopy()
+		}
+		m.steps(1)
+		if mergeRecorded(m.live()) {
+			break
+		}
+	}
+	if live := m.live(); before == nil || !mergeRecorded(live) {
+		t.Fatalf("setup: want the merge recorded without its commit, got phase %s", live.Status.Phase)
+	}
+	for range 2 {
+		m.mu.Lock()
+		m.stale, m.staleNext = before.DeepCopy(), true
+		m.mu.Unlock()
+		m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d)",
+			before.Status.Phase, len(before.Status.GitWaits))
+		m.steps(1)
+		if live := m.live(); len(live.Status.GitWaits) > 0 {
+			m.fatalf("end: the request whose merge is recorded (phase %s) holds the waits %v", live.Status.Phase,
+				live.Status.GitWaits)
+		}
+	}
+	m.report()
+}

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -296,16 +297,29 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 // made on the request as the API server holds it (patchGitWaits), so a caller's unwritten changes to rr (a takeover's
 // conditions, #786) are never written with it; rr takes only these fields, and the new resourceVersion only when it
 // was the server's copy, so a later write of an older copy is refused as a conflict. A failed write leaves rr as it
-// was and is returned for a retry.
+// was and is returned for a retry. When the request as the API server holds it has its merge recorded, or is being
+// deleted (the MergeCheck kind no longer applies), rr was an older copy (the cache served one): nothing is added,
+// and a conflict is returned, so the reconcile runs again on a fresh read instead of starting a wait the request has
+// left (or replacing an entry of the same kind that still stands, which a validation rule refuses).
 func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, op string) error {
 	now := r.now()
 	var since *metav1.Time
+	left := false
 	if err := r.patchGitWaits(ctx, rr, func(live *remediationv1alpha1.RemediationRequest) {
+		if left = !waitMergeCheck.applies(live); left {
+			return
+		}
 		startMergeWaitIn(live, cr, op, now)
 		since = live.Status.MergeCommitAwaitedSince.DeepCopy()
 	}); err != nil {
 		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	if left {
+		// The same error a write of the older copy got before (an optimistic lock), so callers treat it alike.
+		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name,
+			apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource("remediationrequests").GroupResource(),
+				rr.Name, errors.New("its merge is recorded or it is being deleted since it was read")))
 	}
 	rr.Status.MergeCommitAwaitedSince = since
 	return nil
@@ -313,8 +327,12 @@ func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *r
 
 // startMergeWaitIn adds the wait for a merge of cr seen but not recorded (startMergeWait) to rr's status about to be
 // written: status.mergeCommitAwaitedSince when unset, and the MergeCheck entry when there is none, after any entry
-// whose kind no longer applies is removed (removeInapplicable).
+// whose kind no longer applies is removed (removeInapplicable). Nothing is added to a request the MergeCheck kind no
+// longer applies to (its merge recorded, or being deleted).
 func startMergeWaitIn(rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, op string, now time.Time) {
+	if !waitMergeCheck.applies(rr) {
+		return
+	}
 	w, ok := wholeWait(remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
 		PullRequest: waitPullRequest(cr)}, op, now)
 	if rr.Status.MergeCommitAwaitedSince == nil {

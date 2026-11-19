@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -714,8 +715,9 @@ func TestRefuseOpenedMergedOnMovedBaseStops(t *testing.T) {
 }
 
 // A cancel whose recorded pull request a person moved to hotfix after the look at it (outcome prOpen) reads it by its
-// number before the failed review check is written: found open there, it gets no check run, and the request ends
-// Cancelled saying it is open on another base. A failed read writes no check either and ends nothing.
+// number before the failed review check is written: found open there, it gets the failed check on its head (#925,
+// decision of 2026-11-19: moved back, it cannot merge on a check written before the cancel), and the request ends
+// Cancelled saying it is open on another base. A failed read writes no check and ends nothing.
 func TestCancelReadsBeforeTheCheckOnMovedBase(t *testing.T) {
 	for _, failRead := range []bool{false, true} {
 		t.Run(fmt.Sprintf("read fails %v", failRead), func(t *testing.T) {
@@ -743,8 +745,9 @@ func TestCancelReadsBeforeTheCheckOnMovedBase(t *testing.T) {
 			if _, err := r.cancelOpen(ctx, rr, prOpen); err != nil {
 				t.Logf("cancelOpen: %v", err)
 			}
-			if slices.Contains(writes, "CreateCheckRun") {
-				t.Fatalf("writes %v: a check run was written on a pull request open on another base", writes)
+			if wrote := slices.Contains(writes, "CreateCheckRun"); wrote == failRead {
+				t.Fatalf("writes %v: want the failed check written on the head once the read finds the pull request "+
+					"open on another base, and nothing written on a failed read", writes)
 			}
 			live := &api.RemediationRequest{}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
@@ -759,6 +762,140 @@ func TestCancelReadsBeforeTheCheckOnMovedBase(t *testing.T) {
 			if live.Status.Phase != api.PhaseCancelled || !hasReason(live, ReasonCancelRequested, messageCancelledOpenElsewhere) {
 				t.Fatalf("phase %s, conditions %s: want Cancelled saying the pull request is open on another base",
 					live.Status.Phase, conditionsOf(live))
+			}
+		})
+	}
+}
+
+// failedOnly reports whether runs, the check runs of a head, hold a failed shadewright/review with title and no run
+// that passes.
+func failedOnly(runs []providers.CheckRun, title string) bool {
+	failed := false
+	for _, run := range runs {
+		if run.Name != providers.CheckRunName {
+			continue
+		}
+		if run.Status != providers.CheckRunFailure {
+			return false
+		}
+		failed = failed || run.Title == title
+	}
+	return failed
+}
+
+// #925, ADR-0043 limit (e): a request whose own pull request a person moved to another base stops in the step that
+// finds it there, and that step fails its review check on the head: moved back to the target branch after the stop,
+// the pull request keeps the lock and cannot merge on a check written before the stop. On main no check was written.
+func TestStopOnMovedBaseFailsTheCheckAndMovedBackKeepsLock(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	ctx := context.Background()
+	r.ReviewerHints = true
+	setTargetMain(t, r)
+	meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	n, head := rr.Status.PullRequest.Number, rr.Status.PullRequest.HeadSHA
+	moveTo(t, g, n, movedBranch)
+	key := client.ObjectKeyFromObject(rr)
+	clock := clockOf(r)
+	live := &api.RemediationRequest{}
+	reconcileUntil := func(done func() bool) {
+		t.Helper()
+		for range 6 {
+			if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+				t.Logf("Reconcile: %v", err)
+			}
+			if err := r.Get(ctx, key, live); err != nil {
+				t.Fatal(err)
+			}
+			if done() {
+				return
+			}
+			clock.advance(confirmWait + time.Minute)
+		}
+	}
+	reconcileUntil(func() bool { return live.Status.Phase == api.PhaseNeedsIntervention })
+	if live.Status.Phase != api.PhaseNeedsIntervention || !hasReason(live, ReasonChangeRequestOnOtherBase, "") {
+		t.Fatalf("phase %s, conditions %s: want NeedsIntervention with ChangeRequestOnOtherBase", live.Status.Phase,
+			conditionsOf(live))
+	}
+	if !failedOnly(g.CheckRuns(head), stoppedCheckTitle) {
+		t.Fatalf("check runs of the head %+v: want the review check failed in the step that stopped the request",
+			g.CheckRuns(head))
+	}
+	if rc := live.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale || rc.Head != head {
+		t.Fatalf("review check %+v: want state Stale on the head", rc)
+	}
+	moveTo(t, g, n, mainBranch)
+	for range 3 {
+		reconcileUntil(func() bool { return false })
+	}
+	if !holdsLock(live) || live.Status.Phase != api.PhaseNeedsIntervention {
+		t.Fatalf("moved back: phase %s, holds=%v; want the stopped request holding the lock", live.Status.Phase,
+			holdsLock(live))
+	}
+	if !failedOnly(g.CheckRuns(head), stoppedCheckTitle) {
+		t.Fatalf("moved back: check runs of the head %+v: want the failed check alone", g.CheckRuns(head))
+	}
+}
+
+// #925: a request that stopped for another reason while its pull request is open on the target branch fails its review
+// check at the first look of the stopped holder, and a write that fails is tried again at the next look with a
+// Warning Event ReviewCheckNotFailed. A pull request that is closed gets no check. On main no check was written.
+func TestStoppedHolderFailsTheCheckOfItsOpenPullRequest(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("closed %v", closed), func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			ctx := context.Background()
+			r.ReviewerHints = true
+			setTargetMain(t, r)
+			recorder := record.NewFakeRecorder(10)
+			r.Recorder = recorder
+			n, head := rr.Status.PullRequest.Number, rr.Status.PullRequest.HeadSHA
+			if closed {
+				if err := g.Close(n); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failWrite := !closed
+			g.SetFail(func(op string) error {
+				if op == "CreateCheckRun" && failWrite {
+					failWrite = false
+					return &providers.RetryableError{Err: errors.New("status 502: bad gateway")}
+				}
+				return nil
+			})
+			look := func() *api.RemediationRequest {
+				t.Helper()
+				live := &api.RemediationRequest{}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := r.checkHeld(ctx, live); err != nil {
+					t.Fatalf("checkHeld: %v", err)
+				}
+				return live
+			}
+			look()
+			if closed {
+				if runs := g.CheckRuns(head); len(runs) != 0 {
+					t.Fatalf("check runs %+v on a closed pull request: want none", runs)
+				}
+				return
+			}
+			if runs := g.CheckRuns(head); len(runs) != 0 || len(recorder.Events) != 1 ||
+				!strings.Contains(<-recorder.Events, EventReviewCheckNotFailed) {
+				t.Fatalf("check runs %+v after a failed write: want none and a Warning Event %s", runs,
+					EventReviewCheckNotFailed)
+			}
+			live := look()
+			if !failedOnly(g.CheckRuns(head), stoppedCheckTitle) || !holdsLock(live) {
+				t.Fatalf("check runs %+v, holds=%v: want the failed check at the next look and the lock kept",
+					g.CheckRuns(head), holdsLock(live))
+			}
+			if rc := live.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale {
+				t.Fatalf("review check %+v: want state Stale", rc)
 			}
 		})
 	}

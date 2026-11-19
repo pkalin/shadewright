@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -106,16 +107,19 @@ func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remedi
 }
 
 // failCheckStep is failCheck's work: it reads the recorded pull request by its number, writes the failed check, then
-// records Stale. It writes nothing when that read fails (returned for a retry) or finds the pull request open on, or
-// merged into, a base a person moved it to. Through a new installation of the plan's repository (#290) the read also
-// asks for this request's marker, and nothing is written either when the pull request is not this request's.
+// records Stale. It writes nothing when that read fails (returned for a retry) or finds the pull request merged into a
+// base a person moved it to. One open on a base a person moved it to gets the failed check too (#925): the check run
+// belongs to the head commit, and moved back to the target branch the pull request must not merge on a check written
+// before. Through a new installation of the plan's repository (#290) the read also asks for this request's
+// marker, and nothing is written either when the pull request is not this request's.
 func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, run providers.CheckRun) error {
 	git, _, reinstalled, err := r.openPlanRepositoryFor(ctx, rr)
 	if err != nil {
 		return err
 	}
-	switch v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled}); v.rule().failCheck {
+	v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled})
+	switch v.rule().failCheck {
 	case failCheckRetry:
 		return v.err
 	case failCheckNotOurs:
@@ -125,9 +129,6 @@ func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 		if reinstalled {
 			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
 		}
-	case failCheckMoved:
-		// Open on a base a person moved it to: nothing is written to it there.
-		return &openElsewhereError{pr: v.pr}
 	case failCheckWrite:
 	}
 	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run); err != nil {
@@ -157,4 +158,71 @@ func (r *RemediationRequestReconciler) recordStaleCheck(ctx context.Context, rr 
 	logf.FromContext(ctx).Info("Failed the review check of RemediationRequest", "remediationRequest",
 		client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA)
 	return nil
+}
+
+// stoppedCheckTitle is the title of the failed check run of a request that stopped while its pull request is open.
+const stoppedCheckTitle = "The request stopped"
+
+// stoppedCheckRun is the failed check run shadewright/review of a request that stopped with reason while its pull
+// request is open (failStoppedCheck).
+func stoppedCheckRun(reason string) providers.CheckRun {
+	return providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure, Title: stoppedCheckTitle,
+		Summary: "Shadewright stopped the request of this pull request (" + reason + ") and no longer checks its " +
+			"plan, so it must not be merged on an earlier check. This check stays failed."}
+}
+
+// EventReviewCheckNotFailed is the Warning Event recorded when a stopped request could not fail the review check of
+// its open pull request (failStoppedCheck). The next look of the stopped holder tries again.
+const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
+
+// failStoppedCheck fails the review check shadewright/review of a request that stopped while its own pull request is
+// open, on the target branch or on a base a person moved it to (#925, ADR-0043 limit (e)), and records state Stale in
+// rr's status in memory, for the caller's status write: moved back to the target branch, or left there, the pull
+// request cannot merge on a check written before the stop. Its callers have just read the pull request open
+// (stoppedCheck): the step that stops the request for a pull request open on another base (stopOpenElsewhere), and
+// every look of a stopped holder (checkHeld) while the check is pending (staleCheckPending, reviewer hints on), so a
+// stop for any other reason gets it at its first look, and a failed write is tried again at the next. Those looks run
+// while the request keeps its lock, which an open pull request keeps. It reads no pull request itself, so it never
+// changes what a look concludes (a first look at a missing number, goneLooks). A lost status write leaves the check
+// pending, and the next look writes the same failed run again. A failure is logged with a Warning Event
+// ReviewCheckNotFailed and returned; the stop goes on whatever it returns, since a final phase waits for nothing. A
+// repository entry that names another target branch, or none, writes nothing and records no Event: a branch change
+// permits reads only (#771).
+func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	reason string) error {
+	if !r.staleCheckPending(rr) {
+		return nil
+	}
+	pr := rr.Status.PullRequest
+	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
+	defer cancel()
+	git, _, _, err := r.openPlanRepositoryFor(stepCtx, rr)
+	if err == nil {
+		err = git.CreateCheckRun(stepCtx, pr.HeadSHA, stoppedCheckRun(reason))
+		err = boundErr(ctx, stepCtx, "write the check run", err)
+	}
+	switch {
+	case err == nil:
+		pr.ReviewCheck = &remediationv1alpha1.ReviewCheck{Head: pr.HeadSHA, State: remediationv1alpha1.ReviewCheckStale}
+		logf.FromContext(ctx).Info("Failed the review check of a stopped RemediationRequest", "remediationRequest",
+			client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA)
+		return nil
+	case ctx.Err() != nil || errors.Is(err, freshness.ErrPaused):
+		return err
+	case errors.Is(err, errTargetBranchChanged), errors.Is(err, errRepositoryGone),
+		errors.Is(err, freshness.ErrRepositoryUnusable):
+		logf.FromContext(ctx).Info("Did not fail the review check of a stopped RemediationRequest: its repository "+
+			"entry does not allow it", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number,
+			"error", err.Error())
+		return err
+	}
+	logf.FromContext(ctx).Info("Could not fail the review check of a stopped RemediationRequest; tried again at its "+
+		"next look", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA,
+		"error", err.Error())
+	if r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, EventReviewCheckNotFailed, fmt.Sprintf("The review check of "+
+			"pull request #%d could not be failed after the request stopped (%s); it is tried again at the next look",
+			pr.Number, reason))
+	}
+	return err
 }

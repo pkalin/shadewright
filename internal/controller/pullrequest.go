@@ -1653,11 +1653,16 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 // base than the target branch, where a person moved it (#892). A cancelled request ends Cancelled saying so
 // (errOpenElsewhere, prOpenElsewhere, cancelOpen), whether or not its target branch changed. Any other request stops
 // in NeedsIntervention with ChangeRequestOnOtherBase. Nothing is written to the pull request, and the lock stays
-// while it is open (lookHeld, TargetHeld).
+// while it is open (lookHeld, TargetHeld). In the same step the review check of its head is failed (failStoppedCheck,
+// #925): moved back to the target branch, the pull request cannot merge on a check written before the stop. A failed
+// write of the check does not hold the stop: the stopped holder's next look tries it again.
 func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) error {
 	if cancelRequested(rr) {
 		return errOpenElsewhere
+	}
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase); ctx.Err() != nil {
+		return err
 	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,
 		"The recorded "+openElsewhereText(cr)+"; automation stopped"+messageOpenElsewhere)

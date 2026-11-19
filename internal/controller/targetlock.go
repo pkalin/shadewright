@@ -689,6 +689,14 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	}
 	// The read ran through settings that are not paused: a pause that held an earlier look is over.
 	resume(rr)
+	if v.rule().stoppedCheck && rr.Status.PullRequest != nil && v.pr.Number == rr.Status.PullRequest.Number {
+		// The request stopped while its own pull request is open, on the target branch or on another base: its review
+		// check is failed, tried at every look while it is pending (#925). The status write below records it; a
+		// failure is said by failStoppedCheck and does not hold the look.
+		if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase)); ctx.Err() != nil {
+			return reconcile.Result{}, err
+		}
+	}
 	if record := v.rule().heldRecord; record != heldRecordNone {
 		recordFound(rr, v.pr)
 		if cancelled {
@@ -962,10 +970,12 @@ func (r *RemediationRequestReconciler) openElsewhere(ctx context.Context, git pr
 
 // movedMessage is the message of condition TargetHeld for the request's own pull request cr, open on a base a person
 // moved it to (#892, decision of 2026-11-19): its number, and its base through hostBranchText when the provider
-// answered a name.
+// answered a name. The request has stopped and only looks at the lock (#925): moved back, the pull request keeps the
+// lock there, and its review check was failed at the stop (failStoppedCheck).
 func movedMessage(cr providers.ChangeRequest) string {
-	return "P" + strings.TrimPrefix(openElsewhereText(cr), "p") + ", and may still merge; the target stays locked: " +
-		"closing it releases the lock, and moved back to the target branch it is watched there as before"
+	return "P" + strings.TrimPrefix(openElsewhereText(cr), "p") + ", and may still merge; the target stays locked " +
+		"while it is open on any base, and closing it releases the lock. The request has stopped: moved back to the " +
+		"target branch, the pull request still keeps the lock, and nothing else is done with it"
 }
 
 // disproveRepositoryReason is lookHeld's removal of condition PullRequestUnreadable with a reason about the

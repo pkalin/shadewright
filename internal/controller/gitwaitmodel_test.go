@@ -463,6 +463,9 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 	}
 	r, g, rr := settlementWorld(t, phase)
 	m.r, m.g, m.key = r, g, client.ObjectKeyFromObject(rr)
+	// Reviewer hints in half of the runs: the review check of a request that stops while its pull request is open is
+	// failed (property "settled check", #925).
+	r.ReviewerHints = rng.IntN(2) == 0
 	// A third base, neither the plan's target branch nor a configured one, that a person may move the pull request to
 	// (moveEvent, #892).
 	if head, err := g.BranchHead(context.Background(), mainBranch); err != nil {
@@ -2174,10 +2177,35 @@ func (m *modelWorld) settled() {
 	case holdsLock(live) && !open && !progresses(live) && !heldForVerification(live, m.r.VerifyOutcomes):
 		m.fatalf("settled lock: the lock is held after the world healed, and the pull request cannot merge (%s): phase %s",
 			cr.State, live.Status.Phase)
+	case m.uncheckedStop(live, cr, open):
+		m.fatalf("settled check: the request stopped (phase %s) while its pull request is open on %.12s, and the "+
+			"last review check of its head is not failed: %+v", live.Status.Phase, cr.BaseBranch,
+			m.g.CheckRuns(cr.HeadSHA))
 	case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live) && !m.deleted &&
 		!m.releasedAside && !m.reopenedAfterRelease:
 		m.fatalf("settled merge: the merge is not recorded after the world healed: phase %s", live.Status.Phase)
 	}
+}
+
+// uncheckedStop reports whether live, after the world healed, stopped while its own pull request cr is open (open)
+// on any base, with reviewer hints on and its repository entry naming its target branch, and the last review check
+// run of the head is not a failure: a person could move the pull request back to the target branch, or leave it
+// there, and merge it on a check written before the stop (#925, ADR-0043 limit (e)).
+func (m *modelWorld) uncheckedStop(live *api.RemediationRequest, cr providers.ChangeRequest, open bool) bool {
+	pr := live.Status.PullRequest
+	if !m.r.ReviewerHints || m.handoff || m.repo != nil || m.paused || pr == nil || progresses(live) ||
+		!holdsLock(live) || !open || m.deleted || cr.Number != pr.Number || cr.State != providers.ChangeRequestOpen ||
+		cr.HeadSHA != pr.HeadSHA || live.Status.Source == nil || string(live.Status.Source.TargetBranch) != m.configured ||
+		handedOff(live) || intent(live) != nil {
+		return false
+	}
+	var last *providers.CheckRun
+	for _, run := range m.g.CheckRuns(cr.HeadSHA) {
+		if run.Name == providers.CheckRunName {
+			last = &run
+		}
+	}
+	return last == nil || last.Status != providers.CheckRunFailure
 }
 
 // modelResolver maps the request's target to the file on the target branch the settings name now, at its head.

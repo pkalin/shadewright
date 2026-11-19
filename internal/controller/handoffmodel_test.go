@@ -122,7 +122,7 @@ import (
 // A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property; a
 // seed whose only violations an exclusion covers is skipped with the exclusion's name. The default set is the seeds 1
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
-// 9,001 to 13,000, and in the fifth round of #786 against 1 to 24,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, and for #880 against 1 to 60,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.

@@ -57,9 +57,6 @@ nav = [
     { "Data handling" = "data-handling.md" },
     { "Qualify compatible inference" = "how-to/qualify-openai-compatible.md" },
     { "Evaluate the model" = "evaluation.md" },
-    { "Lab: OOM acceptance run" = "lab-oom-acceptance.md" },
-    { "Lab: reviewer hint on OOM" = "lab-oom-hint.md" },
-    { "Condition reasons" = "reasons.md" },
     { "Troubleshooting" = "troubleshooting.md" },
   ] },
   { "Reference" = [
@@ -69,10 +66,11 @@ nav = [
     { "API" = "reference/api.md" },
     { "Metrics" = "reference/metrics.md" },
     { "Traces" = "reference/traces.md" },
+    { "Condition reasons" = "reasons.md" },
     { "Glossary" = "glossary.md" },
   ] },
-  { "Design and decisions" = [
-    { "Design and decisions" = "design-and-decisions.md" },
+  { "Internals" = [
+    { "Internals" = "design-and-decisions.md" },
     { "Design" = [
       { "Overview" = "design.md" },
       { "1. Goals" = "design/1-goals.md" },
@@ -94,7 +92,6 @@ nav = [
       { "The analyzer as a harness" = "design/harness.md" },
     ] },
     { "Threat model" = "threat-model.md" },
-    { "The name" = "name.md" },
     { "Decisions" = [
       { "Overview" = "adr/index.md" },
       { "0001 Record decisions" = "adr/0001-record-architecture-decisions.md" },
@@ -141,8 +138,11 @@ nav = [
       { "0042 OpenAI-compatible endpoints" = "adr/0042-openai-compatible-model-endpoints.md" },
       { "Template" = "adr/template.md" },
     ] },
+    { "The name" = "name.md" },
+    { "Contribute" = "contribute.md" },
+    { "Lab: OOM acceptance run" = "lab-oom-acceptance.md" },
+    { "Lab: reviewer hint on OOM" = "lab-oom-hint.md" },
   ] },
-  { "Contribute" = "contribute.md" },
 ]
 
 [project.theme]
@@ -165,6 +165,7 @@ features = [
   "navigation.instant",
   "navigation.path",
   "navigation.sections",
+  "navigation.tabs",
   "navigation.top",
   "navigation.tracking",
   "search.highlight",

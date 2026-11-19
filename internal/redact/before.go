@@ -208,7 +208,8 @@ func jsonTrace(t trace) trace {
 // texts joined as they were read (a piece the tool writes included): its read tools redacted each value as it
 // was read (incidentcontext.Redact; no map key alone, which encoding/json wrote as it was), wrote it into the
 // answer (a value on a line as incidentcontext.Value showed it, a value in JSON as encoding/json wrote it), and
-// redacted the whole answer the same way before they cut it. nil when r has no such reading.
+// redacted the whole answer the same way before they cut it. A map key also loses what that release hid in the
+// same text as a value. nil when r has no such reading.
 func (r *Redactor) releasedPieces(ps []Piece) []span {
 	x := r.releasedReading()
 	if x == nil {
@@ -222,6 +223,11 @@ func (r *Redactor) releasedPieces(ps []Piece) []span {
 		if p.Data {
 			if !p.MapKey {
 				t = x.redact(t)
+			} else {
+				// That release wrote a map key as it was, but the same text as a value it redacted alone: what it
+				// hides there is hidden in the key too, which keeps its text for the passes over the answer
+				// (#845, fifteenth decision: a label key and a condition reason of one object, one text).
+				x.redact(t)
 			}
 			switch p.Form {
 			case Line:

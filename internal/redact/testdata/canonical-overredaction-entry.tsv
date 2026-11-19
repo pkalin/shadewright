@@ -47,6 +47,7 @@ fc18f182053ee0f7	explicit key	k2	get_pod_logs,get_resource,incidentcontext.Value
 152ee5dbb7332032	forms combined	k1	list_events
 15bd33dc1330d8ca	forms combined	k1	list_events
 19fa323d900c343d	forms combined	k1	list_events
+1aa17e941ba9a078	forms combined	k2	kube.Excerpt
 1b53d7a9256e9ea7	forms combined	k1	list_events
 1d07aaea03e2fce5	forms combined	k1	list_events
 1d4bb0da21fed0e5	forms combined	k1	list_events
@@ -60,6 +61,7 @@ fc18f182053ee0f7	explicit key	k2	get_pod_logs,get_resource,incidentcontext.Value
 2e03f81f527dec09	forms combined	k1	list_events
 2ef8d207e5f0ae84	forms combined	k0	list_events
 2ef8d207e5f0ae84	forms combined	k1	list_events
+3166fa91bb7d2f88	forms combined	k2	kube.Excerpt
 3594c221e5a903d0	forms combined	k1	get_resource,list_events
 36565a5b68460ee8	forms combined	k1	list_events
 3716a441b43c2027	forms combined	k1	get_resource,list_events
@@ -67,10 +69,12 @@ fc18f182053ee0f7	explicit key	k2	get_pod_logs,get_resource,incidentcontext.Value
 3ece6ba040245268	forms combined	k1	list_events
 45b25af80c0f343d	forms combined	k1	list_events
 48c1e069dfd31184	forms combined	k1	list_events
+49373760251350e3	forms combined	k2	kube.Excerpt
 52153074d162ebb3	forms combined	k1	list_events
 57893c8e920b91ee	forms combined	k1	list_events
 5938d7103c8fae80	forms combined	k2	get_resource
 59ca498724f3a8fa	forms combined	k1	list_events
+5ba235899ecc2c4a	forms combined	k2	kube.Excerpt
 5cda60926a94543c	forms combined	k1	list_events
 5e251421c4f42531	forms combined	k1	list_events
 604a4abede9b4a56	forms combined	k1	list_events
@@ -78,6 +82,7 @@ fc18f182053ee0f7	explicit key	k2	get_pod_logs,get_resource,incidentcontext.Value
 618945714a372e4b	forms combined	k1	list_events
 6481c9c2c7486788	forms combined	k1	get_resource
 6481c9c2c7486788	forms combined	k2	get_resource
+6b4ff0a9838e76b1	forms combined	k2	kube.Excerpt
 71601043de8c3f8d	forms combined	k2	get_resource
 78815905631f8025	forms combined	k1	get_resource,list_events
 7b508355f5582504	forms combined	k1	list_events
@@ -89,13 +94,17 @@ fc18f182053ee0f7	explicit key	k2	get_pod_logs,get_resource,incidentcontext.Value
 8eed9f518bad3762	forms combined	k1	list_events
 8f5fcc3faa878cbd	forms combined	k1	list_events
 9020a2342035c43b	forms combined	k1	list_events
+92ad971872a740ea	forms combined	k2	kube.Excerpt
 9338c92b1c064b85	forms combined	k1	list_events
+9342bb17fc1beb5a	forms combined	k2	kube.Excerpt
 9418e79e81df465d	forms combined	k1	list_events
 98c791e78e4f1762	forms combined	k1	get_resource,list_events
 9905f67c7a47a8d0	forms combined	k1	get_resource,list_events
+99a742c898b1f1e1	forms combined	k2	kube.Excerpt
 9b9d513f66f4677f	forms combined	k1	list_events
 9fa83ec7347d5317	forms combined	k2	get_resource
 a1ff163295def285	forms combined	k1	list_events
+a3ca1c4a0b6618c7	forms combined	k2	kube.Excerpt
 adfadff442553180	forms combined	k0	list_events
 adfadff442553180	forms combined	k1	list_events
 b252e51dd87fb1fa	forms combined	k0	list_events
@@ -115,6 +124,7 @@ d07687605325e8f7	forms combined	k1	get_resource
 d07687605325e8f7	forms combined	k2	get_resource
 d17d8c9640dd09ea	forms combined	k2	get_resource
 e0b3cbf1eff064a7	forms combined	k1	list_events
+ed9f79de105b5ad7	forms combined	k2	kube.Excerpt
 ee6a9c34563fd09e	forms combined	k0	list_events
 ee6a9c34563fd09e	forms combined	k1	list_events
 ef8badde03f999c0	forms combined	k1	list_events
@@ -123,19 +133,57 @@ f67bff3d3488b1a6	forms combined	k1	list_events
 f7f43b0c0c7fc3b9	forms combined	k2	get_resource
 f8ce4ded20b4a611	forms combined	k1	list_events
 f8fe6fb45f98fb25	forms combined	k1	list_events
+fbaa359e54cfc9ac	forms combined	k2	kube.Excerpt
+fc6892aa076dc7ad	forms combined	k2	kube.Excerpt
 ff628937594e6a35	forms combined	k1	list_events
+0f327cf312722456	key and value in two strings	k2	kube.Excerpt
+0f9fcaa448fe2d2b	key and value in two strings	k2	kube.Excerpt
+176d154c5daf7492	key and value in two strings	k2	kube.Excerpt
+2529845a6063f104	key and value in two strings	k2	kube.Excerpt
 25a8520110bea726	key and value in two strings	k2	get_resource
+30bbb86479052e97	key and value in two strings	k2	kube.Excerpt
+33052286a04aa801	key and value in two strings	k2	kube.Excerpt
+348ab09f2c635522	key and value in two strings	k2	kube.Excerpt
 38f02d4dd618334c	key and value in two strings	k2	get_resource
+3af2fbe2cb96f2bb	key and value in two strings	k2	kube.Excerpt
+439f7d7579b65d03	key and value in two strings	k2	kube.Excerpt
+480b70b318f76769	key and value in two strings	k2	kube.Excerpt
+499b52325dad7d39	key and value in two strings	k2	kube.Excerpt
+4b8aaf8dd97bc5e6	key and value in two strings	k2	kube.Excerpt
+56b12e2844cdd8c0	key and value in two strings	k2	kube.Excerpt
+5b7ae64ffdc23f91	key and value in two strings	k2	kube.Excerpt
+631224c938c090a1	key and value in two strings	k2	kube.Excerpt
 66655643a8577308	key and value in two strings	k2	get_resource
+6677b3b00256be6d	key and value in two strings	k2	kube.Excerpt
+6e3863f1044c0cf7	key and value in two strings	k2	kube.Excerpt
 71f245c31f1216f0	key and value in two strings	k2	get_resource
 72a21e5aa33e67d6	key and value in two strings	k2	get_resource
+74b5091b713a1cc8	key and value in two strings	k2	kube.Excerpt
 7ba1c5f8bdc25f7d	key and value in two strings	k2	get_resource
 7bcc39d5b37aeda9	key and value in two strings	k2	get_resource
+7c56868e6a7cbcac	key and value in two strings	k2	kube.Excerpt
 85d50f63d09d609a	key and value in two strings	k2	get_resource
 8b38ac16638bcd6c	key and value in two strings	k2	get_resource
+92fd2c6a5e682b07	key and value in two strings	k2	kube.Excerpt
+9402454304422635	key and value in two strings	k2	kube.Excerpt
 9bc0912ebb2af4fa	key and value in two strings	k2	get_resource
+aac51d04a251df53	key and value in two strings	k2	kube.Excerpt
+aea459ee8546d1b6	key and value in two strings	k2	kube.Excerpt
+b7c728ddc5294c2a	key and value in two strings	k2	kube.Excerpt
+b97da0ee51325554	key and value in two strings	k2	kube.Excerpt
+b9d8a00352c3e296	key and value in two strings	k2	kube.Excerpt
+bc39f498bbb65012	key and value in two strings	k2	kube.Excerpt
 c23ae8611c45c5eb	key and value in two strings	k2	get_resource
 cc674cafeb8dfa54	key and value in two strings	k2	get_resource
+d205f8bfa5b4b185	key and value in two strings	k2	kube.Excerpt
+d5bd83e051708929	key and value in two strings	k2	kube.Excerpt
+d663e9ed1461ed31	key and value in two strings	k2	kube.Excerpt
+db68c588b7d0f536	key and value in two strings	k2	kube.Excerpt
+de514d45186874ed	key and value in two strings	k2	kube.Excerpt
+ed5cb763cdcb381f	key and value in two strings	k2	kube.Excerpt
+f899bb6084a1b71d	key and value in two strings	k2	kube.Excerpt
+fa8e61a0517da7b7	key and value in two strings	k2	kube.Excerpt
+fe56d76fc3bb707d	key and value in two strings	k2	kube.Excerpt
 00d8e24b6a2e2767	key with format characters or a colon look-alike	k1	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 00d8e24b6a2e2767	key with format characters or a colon look-alike	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 016dc3aeab7408c8	key with format characters or a colon look-alike	k1	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events

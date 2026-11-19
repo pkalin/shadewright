@@ -18,6 +18,7 @@ package redact
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -144,6 +145,13 @@ func (r *Redactor) Pieces(ps []Piece) []string { return r.PiecesWithin(ps, -1) }
 // replacements of this package may be longer than those of the release before, which wrote its markers on the
 // values before they were escaped. The work is linear in the length of the pieces.
 func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
+	return r.piecesWithin(ps, limit, false)
+}
+
+// piecesWithin is PiecesWithin; with joined true it also hides, cut at each piece's ends, everything String hides
+// in the answer as written, with no match ended at a line break of a value (Strings, whose answer is the strings
+// joined by line breaks: what String hides joined, Strings hides apart).
+func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool) []string {
 	var data []string
 	for _, p := range ps {
 		tick(1)
@@ -184,9 +192,17 @@ func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
 	// Reading 2: the answer as the tool writes it, each match ended at the line breaks of the values.
 	wsize := func(i int) int { return len(ws[i].text) }
 	answer := raw.String()
-	reading2 := endAtValueLines(ps, ws, answer, r.ruleMatches(answer))
-	r.cutAnswer(ps, own, settle(answer, endAtObjectValues(ps, wsize, reading2)), func(i int, sp span) span { return ws[i].widen(sp) },
-		func(i int) string { return ws[i].text })
+	matches := r.ruleMatches(answer)
+	widen := func(i int, sp span) span { return ws[i].widen(sp) }
+	text := func(i int) string { return ws[i].text }
+	if joined {
+		// What String hides in the answer, the reading of the release before included, as String reads it: a match
+		// is not ended at the line breaks of the values (#845, fifteenth decision, P2).
+		whole := append(slices.Clone(matches), r.releasedString(answer, false, nil)...)
+		r.cutAnswer(ps, own, settle(answer, whole), widen, text)
+	}
+	reading2 := endAtValueLines(ps, ws, answer, matches)
+	r.cutAnswer(ps, own, settle(answer, endAtObjectValues(ps, wsize, reading2)), widen, text)
 	// Reading 3: the release before, on the pieces as they were read.
 	hidden := mergeSpans(r.releasedPieces(ps))
 	off, h := 0, 0

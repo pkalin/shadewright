@@ -46,17 +46,14 @@ const diffWorkSlack = 64 << 10
 
 // knownDiffFailures are the known failing inputs of the targets of this package, by target and input bytes.
 var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{
-	"FuzzDiffStrings": {string(seedStringsPrivateKey): {Property: "P2",
-		Reason: "a private key header in one string and the secret on a line of the next: Strings leaves it"},
-		string(seedTokenRepeatGrammar): {Property: "P3",
-			Reason: `TOKEN="a",b, repeated to the size limit: Strings, which reads the strings joined, costs about 1,382 own steps per byte`}},
+	"FuzzDiffStrings": {string(seedTokenRepeatGrammar): {Property: "P3",
+		Reason: `TOKEN="a",b, repeated to the size limit: Strings, which reads the strings joined, costs about 1,382 own steps per byte`}},
 	"FuzzDiffString": {string(seedStringTokenRepeat): {Property: "P3",
 		Reason: `one format character after 1,024 repeats of TOKEN="a",b, costs about 1,205 own steps per byte`}},
 }
 
 // Seeds of the known failures of #845 (fifteenth decision), also in testdata/fuzz.
 var (
-	seedStringsPrivateKey = redacttest.RawSeed(1, "-----BEGIN PRIVATE KEY-----", "\n\x01")
 	seedStringTokenRepeat = redacttest.RawSeed(0, strings.Repeat(`TOKEN="a",b,`, 1024)+"\nx\u200b")
 )
 
@@ -276,20 +273,18 @@ func excerptOf(s string, from int, replace func(string, func(kind, text string) 
 
 // The known failures of this package, as directed tests: each skips while it fails, naming the property.
 
-// Strings leaves a secret on the line after a private key header when the header is in the string before:
+// Strings hides a secret on the line after a private key header when the header is in the string before, as
 // String of the strings joined hides it (#845, fifteenth decision, input 2).
-func TestKnownStringsLeavesTheLineAfterAPrivateKeyHeader(t *testing.T) {
+func TestStringsHidesTheLineAfterAPrivateKeyHeader(t *testing.T) {
 	const secret = "hunter2"
 	items := []string{"-----BEGIN PRIVATE KEY-----", "\n" + secret}
-	var fails []string
 	joined := strings.Join(items, "\n")
 	if l := String(joined); strings.Contains(l, secret) {
 		t.Fatalf("String of the joined strings shows the secret: %q", l)
 	}
 	if out := Strings(items); strings.Contains(strings.Join(out, "\n"), secret) {
-		fails = append(fails, redacttest.LeakLine("P2", "Strings shows what String of the strings joined hides", []string{secret}, strings.Join(out, "\n")))
+		t.Error(redacttest.LeakLine("P2", "Strings shows what String of the strings joined hides", []string{secret}, strings.Join(out, "\n")))
 	}
-	redacttest.CheckKnown(t, knownDiffFailures["FuzzDiffStrings"][string(seedStringsPrivateKey)], true, fails)
 }
 
 // One format character after 1,024 repeats of TOKEN="a",b, makes String add more than ownWorkPerByte per byte

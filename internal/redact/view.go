@@ -1096,8 +1096,10 @@ func seqValues(items []string) []int {
 // takes on them joined by line breaks: each string loses what String redacts of it alone, the value seqValues
 // finds in it (a key, a separator or a flag in one string and the value in a later one, the rule String also
 // applies to a sequence written in a text), what the rules find in the joined text, and what the release before
-// hid where it redacted each string twice and then the joined text twice (releasedPieces). So what String hides
-// in the strings joined, Strings hides in them apart.
+// hid where it redacted each string twice and then the joined text twice (releasedPieces), and everything String
+// hides in the joined text, a match that runs across the line break between two strings included (a private key
+// header in one string and its lines in the next). So what String hides in the strings joined, Strings hides in
+// them apart.
 func (r *Redactor) Strings(items []string) []string {
 	ps := make([]Piece, 0, 2*len(items))
 	for i, it := range items {
@@ -1107,7 +1109,7 @@ func (r *Redactor) Strings(items []string) []string {
 		}
 		ps = append(ps, Piece{Text: it, Data: true})
 	}
-	all := r.Pieces(ps)
+	all := r.piecesWithin(ps, -1, true)
 	out := make([]string, len(items))
 	for i := range out {
 		tick(1)

@@ -151,8 +151,8 @@ A limit holds the request back before its policy check. The request keeps no pha
 | --- | --- | --- |
 | <span id="q-targetlocked"></span>`TargetLocked` | Another request holds the lock on the same target, or a merged one keeps it while its outcome is verified. | Wait for it to end; for a stopped holder, close or merge its pull request. [More](troubleshooting.md#limits) |
 | <span id="q-concurrencylimitreached"></span>`ConcurrencyLimitReached` | `maxConcurrentRemediations` requests are active. | Wait, review the open pull requests, or raise the limit in `RemediationSettings`. [More](troubleshooting.md#limits) |
-| <span id="q-circuitopen"></span>`CircuitOpen` | The circuit breaker is open after consecutive failures. | Find out why they failed; the breaker is half-open 30 minutes after the latest failure. [More](troubleshooting.md#limits) |
-| <span id="q-circuithalfopen"></span>`CircuitHalfOpen` | The breaker is half-open and another request runs as its probe. | Wait for the probe; its success closes the breaker. [More](troubleshooting.md#limits) |
+| <span id="q-circuitopen"></span>`CircuitOpen` | The circuit breaker is open after consecutive failures (`Failed` or `NeedsIntervention` requests, three in a row by default). | Find out why they failed. The request is checked again every 30 seconds and goes on by itself once the breaker is half-open, 30 minutes by default after the latest failure. [More](troubleshooting.md#limits) |
+| <span id="q-circuithalfopen"></span>`CircuitHalfOpen` | The breaker is half-open and another request runs as its probe. | Wait for the probe. Its success closes the breaker; its failure opens the breaker again for a full cool-down. [More](troubleshooting.md#limits) |
 | <span id="q-limitsunknown"></span>`LimitsUnknown` | The limits could not be read, so the request is held back. It shows as no condition: the request stays `Pending` and is retried. Only the metrics count it. | Read the executor log; check the executor's role and that the CRDs match the release. [More](troubleshooting.md#limits) |
 
 ### PullRequestOpened and Approved
@@ -180,21 +180,21 @@ The pull request step. A stop before a pull request is recorded goes on `PullReq
 | <span id="pr-targetfilediverged"></span>`TargetFileDiverged` | The target file on the target branch is not the file the change was made from, so merging would combine edits no render saw. | Apply a new request against the current file. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-branchdiverged"></span>`BranchDiverged` | The Shadewright branch holds neither the previous nor the planned value, or more than its one commit. Someone else pushed. | Review the branch by hand, then apply a new request. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-foreignchangerequest"></span>`ForeignChangeRequest` | A pull request for the branch exists without this request's marker. It is not touched. | Close or rename it, then apply a new request. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-headmoved"></span>`HeadMoved` | Someone pushed to the pull request's branch; automation stopped. | Review the branch by hand. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-changerequestclosed"></span>`ChangeRequestClosed` | A person closed the pull request without a merge. It is never reopened. | Intended if you rejected it; otherwise apply a new request. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-changerequestconflict"></span>`ChangeRequestConflict` | The Git host reports a merge conflict on two looks at least two minutes apart. The pull request stays open. | Resolve the conflict or close the pull request. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-changerequestgone"></span>`ChangeRequestGone` | The recorded pull request cannot be found any more. | Check the repository, then apply a new request. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-mergedwithforeignchange"></span>`MergedWithForeignChange` | A pull request that failed a check was merged by a person before Shadewright could close it. The merge holds something no check saw. | Check by hand what the merge put on the branch. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-mergecontentunreadable"></span>`MergeContentUnreadable` | The pull request was merged on the branch the settings name now, and what the merge brought could not be read for five minutes. | Check the merged content by hand. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-mergenotcheckable"></span>`MergeNotCheckable` | A merge of the request's pull request was found, but the file it is compared against is one the patcher refuses, so the merge cannot be checked. | Check the merged content by hand. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-headmoved"></span>`HeadMoved` | The head of the pull request is not the commit Shadewright pushed, but the branch still holds one commit that changes only the target file, and that file is as Shadewright pushed it. Automation stopped and the pull request is left open. A push that changes more is `BranchDiverged`; a merge of another head is `MergedWithForeignChange`. | Review the branch by hand. The request is final: apply a new request for a new plan. It keeps the target lock while the pull request may be open. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-changerequestclosed"></span>`ChangeRequestClosed` | The pull request was closed without a merge, not by a close Shadewright recorded (usually a person; it may also be Shadewright's own close whose status write was lost). It is never reopened. | Intended if you rejected it; otherwise apply a new request. The request is final. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-changerequestconflict"></span>`ChangeRequestConflict` | The Git host reports a merge conflict on two looks at least two minutes apart, on the same head, while the plan is still fresh. The pull request stays open. | The request is final: resolving the conflict does not restart it. Close the pull request, or apply a new request. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-changerequestgone"></span>`ChangeRequestGone` | The recorded pull request cannot be found any more: the Git host answered not found, and so did the listing of the branch, on two looks at least two minutes apart (or the number now belongs to a pull request of another branch). | Check the repository for the pull request. The request is final: apply a new request. It keeps the target lock until the branch shows no open pull request of its own. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-mergedwithforeignchange"></span>`MergedWithForeignChange` | A merge of the request's pull request was seen, and its content is not shown to be the planned change alone: it failed a check and a person merged it before Shadewright could close it, its head is not the one Shadewright pushed, or, merged into the branch the settings name now, it brought more than the plan. No merge receipt is kept and nothing after the merge is verified. | Check by hand what the merge put on the branch. The request is final. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-mergecontentunreadable"></span>`MergeContentUnreadable` | A merge of the request's pull request was seen (on the branch the settings name now, or with a head Shadewright did not push), and what it brought could not be read for five minutes. It is not known to be the planned change alone. No merge receipt is kept and nothing after the merge is verified. | Check the merged content by hand. The request is final. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-mergenotcheckable"></span>`MergeNotCheckable` | A merge of the request's pull request was found, but the file it is compared against is one the patcher refuses, so the merge cannot be checked. It is neither shown foreign nor shown to be the planned change. No merge receipt is kept and nothing after the merge is verified. | Check the merged content by hand. The request is final. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-renderneverfinished"></span>`RenderNeverFinished` | The render check started three times in a row and never finished, because the executor ended each time. | Look for an executor OOM or lost leader election, then apply a new request. [More](troubleshooting.md#render-check) |
 
 #### Deadline and Git host refusals
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="pr-pullrequestdeadline"></span>`PullRequestDeadline` | `Expired`: no pull request within 30 minutes of the decision. | Find why the Git calls failed, then apply a new request. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-pullrequestdeadlinecleanuprefused"></span>`PullRequestDeadlineCleanupRefused` | `Expired`, and the Git host refused to find or close a pull request Shadewright may have opened on the branch. The request keeps the target lock. | Close any pull request on that branch by hand. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-pullrequestdeadline"></span>`PullRequestDeadline` | `Expired`: no pull request within 30 minutes of the decision (time with writes paused counts). Shadewright then looks for a pull request it may have opened on the branch and closes it, and the target stays locked until none is found open. | Find why no pull request was opened (failing Git calls, a pause of writes), then apply a new request. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-pullrequestdeadlinecleanuprefused"></span>`PullRequestDeadlineCleanupRefused` | `Expired`, and no pull request Shadewright may have opened on the branch could be closed: the Git host refused to find or close it, or the repository of the plan is no longer usable as the settings stand. The request keeps the target lock until none is found open. | Close any pull request on that branch by hand. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-pullrequestdeadlinecleanupfailed"></span>`PullRequestDeadlineCleanupFailed` | `Expired`, and closing a pull request opened with a lost record kept failing for 24 hours. | Close the pull request by hand. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-gitforbidden"></span>`GitForbidden` | The Git host refused the App: a missing permission, an installation or a ruleset. Not retried. | Compare with the App permissions and the rulesets, then apply a new request. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-gitrejected"></span>`GitRejected` | The Git host refused the request as invalid, and Git state does not explain it. Not retried. | Read the executor log, fix, apply a new request. [More](troubleshooting.md#pull-request-step) |
@@ -207,11 +207,11 @@ Two more reasons come with these refusals and are strings in the executor, not A
 | Reason | What it means | What to do |
 | --- | --- | --- |
 | <span id="pr-handedoff"></span>`HandedOff` | The request ended `Superseded` because its replacement took over its pull request and branch. The pull request may still be open. | Follow the replacement request. [More](troubleshooting.md#how-to-read-the-result) |
-| <span id="pr-handoffrefused"></span>`HandoffRefused` | A replacement ended `Cancelled`: the hint was reserved by another one, or the old request changed or went stale. | The old pull request is untouched; post the hint again if wanted. [More](troubleshooting.md#how-to-read-the-result) |
-| <span id="pr-handoffaborted"></span>`HandoffAborted` | A replacement ended `Cancelled`: the pull request was merged or closed, or someone pushed to the branch, while the handoff ran. | Check which request owns the pull request now. [More](troubleshooting.md#how-to-read-the-result) |
-| <span id="pr-cancelrequested"></span>`CancelRequested` | A person set `spec.cancel`; the executor closed the pull request, if there was one, and left the branch. `PullRequestOpened` before a pull request was recorded, `Approved` after. | Nothing; apply a new request for a new plan. [More](troubleshooting.md#how-to-read-the-result) |
+| <span id="pr-handoffrefused"></span>`HandoffRefused` | A replacement ended `Cancelled` before taking anything over: the old request is gone or made again, no longer waits for review, has a stale plan, was handed to another replacement, or its hint is no longer pending. | The old request keeps its pull request and the replacement is final. [More](troubleshooting.md#how-to-read-the-result) |
+| <span id="pr-handoffaborted"></span>`HandoffAborted` | A replacement ended `Cancelled` after its handoff began: the pull request was merged or closed, someone pushed to the branch, the target file changed, or the old request ended or is being deleted. The pull request is left as it is. | Check which request owns the pull request now; the replacement is final. [More](troubleshooting.md#how-to-read-the-result) |
+| <span id="pr-cancelrequested"></span>`CancelRequested` | A person set `spec.cancel`; the request ended `Cancelled` once its pull request was known closed (or known never opened); the branch is left. `PullRequestOpened` before a pull request was recorded, `Approved` after. A merge seen first ends the request `Merged` instead. | Nothing; the request is final. Apply a new request for a new plan. [More](troubleshooting.md#how-to-read-the-result) |
 | <span id="pr-incidentfolded"></span>`IncidentFolded` | `Cancelled` before the pull request: the request's Incident was folded into the Incident of its cause. It sits on `PullRequestOpened`, or on `Approved` once a pull request left by an earlier open is found; that pull request is closed, and a merge of it ends the request `Inconclusive` with `StalePlanMerged`. | Nothing; follow the cause's Incident. [More](troubleshooting.md#how-to-read-the-result) |
-| <span id="pr-incidentgone"></span>`IncidentGone` | `Cancelled` before the pull request: the Incident the request names was deleted or replaced. It sits on `PullRequestOpened`, or on `Approved` once a pull request left by an earlier open is found, as for `IncidentFolded`. | Nothing; if `PullRequestNotClosed` is set, close the pull request it names. [More](troubleshooting.md#how-to-read-the-result) |
+| <span id="pr-incidentgone"></span>`IncidentGone` | `Cancelled` before the pull request: the Incident the request names was deleted or replaced. It sits on `PullRequestOpened`, or on `Approved` once a pull request left by an earlier open is found, as for `IncidentFolded`. It also covers an Incident made again under the same name with another UID. | Nothing; if `PullRequestNotClosed` is set, close the pull request it names. [More](troubleshooting.md#how-to-read-the-result) |
 
 #### Render refusals
 
@@ -266,12 +266,12 @@ With `--verify-outcomes` on, a merged request goes through `Delivered`, then `Co
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="dl-deliverypending"></span>`DeliveryPending` | `Unknown`: the executor waits for the GitOps controller to apply the merge commit (up to one hour). | Nothing. [More](troubleshooting.md#after-the-merge) |
+| <span id="dl-deliverypending"></span>`DeliveryPending` | `Unknown`: the executor waits for the GitOps controller to apply the merge commit (up to one hour, longer by the time writes were paused). | Nothing, it waits and looks every 30 seconds. If the message says the delivery cannot be read, that cause does not clear by itself: fix it, or the request ends `DeliveryNotChecked` after the window and ten minutes of grace. [More](troubleshooting.md#after-the-merge) |
 | <span id="dl-mergecommitapplied"></span>`MergeCommitApplied` | `True`: the merge commit, or a later commit that holds it, is applied. | Nothing. [More](troubleshooting.md#after-the-merge) |
-| <span id="dl-deliveryfailed"></span>`DeliveryFailed` | `False`, request `Failed`: the GitOps controller failed on exactly the merge commit. | Read the Kustomization's `Ready` message, then revert or fix the merged change. [More](troubleshooting.md#after-the-merge) |
-| <span id="dl-deliveryblocked"></span>`DeliveryBlocked` | `False`, `Inconclusive`: Flux failed on a later commit that holds the merge commit. | Fix the later commit and check by hand once Flux applies again. [More](troubleshooting.md#after-the-merge) |
+| <span id="dl-deliveryfailed"></span>`DeliveryFailed` | `False`, request `Failed`: at the end of the delivery window the GitOps controller had failed on exactly the merge commit. | Read the Kustomization's `Ready` message, then revert or fix the merged change. [More](troubleshooting.md#after-the-merge) |
+| <span id="dl-deliveryblocked"></span>`DeliveryBlocked` | `False`, `Inconclusive`: at the end of the delivery window Flux had failed on a later commit that holds the merge commit. | Fix the later commit and check by hand once Flux applies again. [More](troubleshooting.md#after-the-merge) |
 | <span id="dl-deliverysuspended"></span>`DeliverySuspended` | `False`, `Inconclusive`: the Kustomization was suspended at the end of the hour. | Resume it and check by hand. [More](troubleshooting.md#after-the-merge) |
-| <span id="dl-deliverynotobserved"></span>`DeliveryNotObserved` | `False`, `Inconclusive`: no applied revision that holds the merge commit was seen within the hour. The same reason goes on `RolledOut` when verification is off. | Check Flux and the target's labels. [More](troubleshooting.md#after-the-merge) |
+| <span id="dl-deliverynotobserved"></span>`DeliveryNotObserved` | `False`, `Inconclusive`: no applied revision that holds the merge commit was seen within the hour (the unit is still on an older commit, applied one that does not hold it, or the target has no valid Kustomization labels). The same reason goes on `RolledOut` when verification is off. | Check Flux and the target's labels. [More](troubleshooting.md#after-the-merge) |
 | <span id="dl-deliverynotchecked"></span>`DeliveryNotChecked` | `Unknown`, `Inconclusive`: the delivery could not be read to the end of the window and its grace, or the executor's clock went back. | Check the executor log and Flux by hand. [More](troubleshooting.md#after-the-merge) |
 
 #### Configured
@@ -289,10 +289,10 @@ Set on the target's rollout once the merged revision is applied.
 | --- | --- | --- |
 | <span id="ro-rolloutcomplete"></span>`RolloutComplete` | `True`: every pod runs the applied template and is ready. | Nothing. [More](troubleshooting.md#rollout-after-the-merge) |
 | <span id="ro-rolloutpartitioned"></span>`RolloutPartitioned` | `True`: a StatefulSet's partition keeps the pods below it on the old revision on purpose. Not evidence that every replica runs the change. | Lower the partition when you want every pod on the new revision. [More](troubleshooting.md#rollout-after-the-merge) |
-| <span id="ro-rolloutprogressing"></span>`RolloutProgressing` | `Unknown`: the rollout is under way and its 10 minute deadline has not passed. | Wait. [More](troubleshooting.md#rollout-after-the-merge) |
-| <span id="ro-rolloutstuck"></span>`RolloutStuck` | `False`: the rollout did not complete in time. At the verification timeout the request ends `Failed`. | Unblock the rollout; for a StatefulSet, see the note on the old revision in troubleshooting. [More](troubleshooting.md#rollout-after-the-merge) |
+| <span id="ro-rolloutprogressing"></span>`RolloutProgressing` | `Unknown`: the rollout is under way and its deadline (10 minutes by default) has not passed. | Nothing, it waits and is read every 30 seconds. [More](troubleshooting.md#rollout-after-the-merge) |
+| <span id="ro-rolloutstuck"></span>`RolloutStuck` | `False`: the rollout did not complete in time. With verification on, the request ends `Failed` at the verification timeout if it is still stuck; a rollout unblocked before then turns `True`. With verification off the condition only reports, and the rollout is read for an hour more. | Unblock the rollout; for a StatefulSet, see the note on the old revision in troubleshooting. [More](troubleshooting.md#rollout-after-the-merge) |
 | <span id="ro-kindnotchecked"></span>`KindNotChecked` | `Unknown`: the target is not a Deployment or StatefulSet, so the check does not cover it. | Check the target yourself. [More](troubleshooting.md#rollout-after-the-merge) |
-| <span id="ro-rolloutsuperseded"></span>`RolloutSuperseded` | `Unknown`: a newer template revision replaced the one applied with the merge. | Check the newer rollout yourself. [More](troubleshooting.md#rollout-after-the-merge) |
+| <span id="ro-rolloutsuperseded"></span>`RolloutSuperseded` | `Unknown`: a newer template revision replaced the one applied with the merge. With verification on, the request ends `Inconclusive`. | Check the newer rollout yourself. [More](troubleshooting.md#rollout-after-the-merge) |
 | <span id="ro-rolloutnotdetermined"></span>`RolloutNotDetermined` | `Unknown`: the target is gone, or it or the delivery could not be read until the end of the check. | Check the executor log and the target. [More](troubleshooting.md#rollout-after-the-merge) |
 
 #### Cleared
@@ -301,11 +301,11 @@ Whether the symptom cleared after the change, judged from the verifier's report.
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="cl-observing"></span>`Observing` | `Unknown`: the quiet window of a Verifying request runs. | Nothing. [More](troubleshooting.md#after-the-merge) |
+| <span id="cl-observing"></span>`Observing` | `Unknown`: the quiet window of a Verifying request runs. | Nothing, it is read again until the request succeeds or the verification timeout ends it. [More](troubleshooting.md#after-the-merge) |
 | <span id="cl-norecurrence"></span>`NoRecurrence` | `True` (and `Verified` `True`): a quiet window held for `stableFor` plus the node grace. The request is `Succeeded`. | Nothing. [More](troubleshooting.md#after-the-merge) |
-| <span id="cl-resolvedbeforerollout"></span>`ResolvedBeforeRollout` | `True`, in place of `NoRecurrence`: the Incident's count did not move from the merge to the rollout, so the symptom had stopped before the change arrived. The phase is still `Succeeded`. | Nothing; the change is not shown to be the cause. [More](troubleshooting.md#after-the-merge) |
+| <span id="cl-resolvedbeforerollout"></span>`ResolvedBeforeRollout` | `True`, in place of `NoRecurrence`: the Incident's count did not move from the merge to the rollout over at least `stableFor` plus twice the aggregation window, so the symptom had stopped before the change arrived. The phase is still `Succeeded`. | Nothing; the change is not shown to be the cause. [More](troubleshooting.md#after-the-merge) |
 | <span id="cl-oomkilled"></span>`OOMKilled` | `False`, request `Failed` at once: the report records an OOM kill of the action's container on a pod of the rollout. | The limit is still too low, or the cause is not the limit. [More](troubleshooting.md#after-the-merge) |
-| <span id="cl-restarted"></span>`Restarted` | `False`, request `Failed` at the timeout: the report records a container restart above its baseline. | Read the pod's logs and events; the change did not help. [More](troubleshooting.md#after-the-merge) |
+| <span id="cl-restarted"></span>`Restarted` | `False`, request `Failed` at the timeout: the report records a container restart above its baseline. | Read the pod's logs and events. [More](troubleshooting.md#after-the-merge) |
 
 #### Verified
 
@@ -341,7 +341,7 @@ These come and go beside the phase; most name a Git host problem that is retried
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="wp-writespaused"></span>`WritesPaused` | `RemediationSettings` `spec.paused` (the kill switch) holds back the request's next Git write. | Nothing, it goes on when writes resume. See [pause and resume](how-to/pause-and-resume.md). |
+| <span id="wp-writespaused"></span>`WritesPaused` | `RemediationSettings` `spec.paused` (the kill switch) holds back the request's next Git write. | Nothing for a request already waiting for review: it goes on when writes resume. A request that has not opened its pull request still counts its 30 minute deadline during the pause, so it can end `Expired` (`PullRequestDeadline`) right after the pause. See [pause and resume](how-to/pause-and-resume.md). |
 
 #### IncidentStopped
 
@@ -353,7 +353,7 @@ These come and go beside the phase; most name a Git host problem that is retried
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="th-pullrequestopenonbranch"></span>`PullRequestOpenOnBranch` | A request that stopped keeps the lock on its target because another pull request is open on its branch and may still deliver the change. The message names it. | Merge or close that pull request; the lock goes at the next look. [More](troubleshooting.md#limits) |
+| <span id="th-pullrequestopenonbranch"></span>`PullRequestOpenOnBranch` | A request that stopped keeps the lock on its target because another pull request is open on its branch and may still deliver the change. The message names it. | Merge or close that pull request; the lock goes at the next look (every 10 minutes). [More](troubleshooting.md#limits) |
 
 #### PullRequestUnreadable
 
@@ -361,8 +361,8 @@ The executor cannot read the request's pull requests. Nothing is decided on such
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="pu-recordedmissingotherlisted"></span>`RecordedMissingOtherListed` | The Git host has no pull request with the recorded number, but the branch lists another with this request's marker. | Look at the branch and its pull requests; the read repeats until a person acts. [More](troubleshooting.md#pull-request-step) |
-| <span id="pu-gitnotfound"></span>`GitNotFound` | A step through a new GitHub App installation got a 404, for example an installation ID with a typo. | Check the `installationID` in the settings. [More](troubleshooting.md#pull-request-step) |
+| <span id="pu-recordedmissingotherlisted"></span>`RecordedMissingOtherListed` | The Git host has no pull request with the recorded number, but the branch lists another with this request's marker. | Delete the request (it closes the open pull requests of the branch with its marker), or, when the listed pull request is not this request's change, remove the marker from its description. Closing or merging that pull request alone does not end it. The read repeats until then. [More](troubleshooting.md#pull-request-step) |
+| <span id="pu-gitnotfound"></span>`GitNotFound` | A step through a new GitHub App installation got a 404, for example an installation ID with a typo. | Check the `installationID` in the settings, and that the installation is granted the repository. It is tried again. [More](troubleshooting.md#pull-request-step) |
 | <span id="pu-gitfailed"></span>`GitFailed` | A step through a new installation failed without a refusal or 404 (a server error, a timeout, a rate limit). It is tried again. | Wait; check the Git host's status if it lasts. [More](troubleshooting.md#pull-request-step) |
 
 The same condition can also carry `SettingsNotFound`, `RepositoryUnavailable`, `TargetBranchChanged` and `RepositoryUnusable`, described under [PolicyAllowed](#pa-settingsnotfound) and [the pull request step](#deadline-and-git-host-refusals).
@@ -379,7 +379,7 @@ A deleted request's cleanup was refused by the Git host (`GitForbidden` or `GitR
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="cu-cleanupfailed"></span>`CleanupFailed` | A step of a deleted (or `Expired`) request's cleanup failed in a way that is retried and no other reason names. After 24 hours the finalizer lets the request go. | Find why the Git calls fail; the Event `PullRequestLeftOpen` names a pull request that may be open. [More](troubleshooting.md#pull-request-step) |
+| <span id="cu-cleanupfailed"></span>`CleanupFailed` | A step of a deleted request's cleanup failed in a way that is retried and no other reason names (`GitForbidden`, `GitRejected` and `RecordedMissingOtherListed` can stand here too). After 24 hours the finalizer lets the request go. On an `Expired` request the close is retried every 10 minutes for 24 hours, then it ends `PullRequestDeadlineCleanupFailed`. | Find why the Git calls fail; the Event `PullRequestLeftOpen` names a pull request that may be open. [More](troubleshooting.md#pull-request-step) |
 
 #### CancelPending
 
@@ -387,9 +387,9 @@ A deleted request's cleanup was refused by the Git host (`GitForbidden` or `GitR
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="cp-handoffinflight"></span>`HandoffInFlight` | A handoff of the pull request to a replacement stands; nothing is closed until it is done or aborted. | Wait; after 24 hours the reason becomes `CancelNotFinished`. [More](troubleshooting.md#pull-request-step) |
+| <span id="cp-handoffinflight"></span>`HandoffInFlight` | A handoff of the pull request to a replacement stands; nothing is closed until it is done or aborted. | Nothing, it is looked at again every poll interval; after 24 hours the reason becomes `CancelNotFinished`. [More](troubleshooting.md#pull-request-step) |
 | <span id="cp-cancelfailing"></span>`CancelFailing` | A step of the close fails in a way worth a retry. It is retried with backoff for 24 hours. | Find why the Git calls fail. [More](troubleshooting.md#pull-request-step) |
-| <span id="cp-cancelnotfinished"></span>`CancelNotFinished` | A wait or a failure has lasted 24 hours. | Close the pull request by hand if it is open. [More](troubleshooting.md#pull-request-step) |
+| <span id="cp-cancelnotfinished"></span>`CancelNotFinished` | A wait or a failure has lasted 24 hours. The request keeps its phase and is looked at again every poll interval; a merge or a close still ends it. | Close the pull request by hand if it is open. [More](troubleshooting.md#pull-request-step) |
 
 #### GitReadRetry
 
@@ -400,7 +400,7 @@ A deleted request's cleanup was refused by the Git host (`GitForbidden` or `GitR
 | <span id="gr-gitreadfailed"></span>`GitReadFailed` | Only a wait with no end stands: the failed read is retried and nothing bounds it. | Read the executor log; check the Git host. [More](troubleshooting.md#pull-request-step) |
 | <span id="gr-gitreadfailedbeforedeadline"></span>`GitReadFailedBeforeDeadline` | The first wait to end is the request's deadline (in `PolicyChecked`); at its end the request expires. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
 | <span id="gr-gitreadfailedbeforehandoffgrace"></span>`GitReadFailedBeforeHandoffGrace` | The first wait to end is the grace of a handoff recovery, which then ends `NeedsIntervention` with `HandoffRecoveryFailed`. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
-| <span id="gr-gitreadfailedbeforemergewait"></span>`GitReadFailedBeforeMergeWait` | The first wait to end is the five minute wait for the merge commit or for the check at the merge. At its end the merge is recorded with the plan not shown fresh, so the request ends `Inconclusive` with `StalePlanMerged`. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
+| <span id="gr-gitreadfailedbeforemergewait"></span>`GitReadFailedBeforeMergeWait` | The first wait to end is the five minute wait for the merge commit or for the check at the merge. At its end the merge is recorded with the plan not shown fresh, so a good outcome is capped as `Inconclusive` with `StalePlanMerged` (a merge whose head is not Shadewright's ends `NeedsIntervention` instead). | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
 | <span id="gr-gitreadfailedbeforecontentwait"></span>`GitReadFailedBeforeContentWait` | The first wait to end is the five minute wait to read what a merge into a newly configured branch brought. At its end the request ends `NeedsIntervention` with `MergeContentUnreadable`. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
 
 #### GitForbidden and GitRejected
@@ -505,7 +505,7 @@ Always `True`. The symptom came back after the Incident was resolved, and the In
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="rec-recurredwithinwindow"></span>`RecurredWithinWindow` | The symptom was seen again within the recurrence window after the resolution (or while observations were still unwritten, failing closed). | A person decides. [More](troubleshooting.md#not-request-reasons) |
+| <span id="rec-recurredwithinwindow"></span>`RecurredWithinWindow` | The symptom was seen again within the recurrence window after the resolution (or while observations were still unwritten, failing closed). | The Incident is `Escalated` and is not analyzed again; a person decides. [More](troubleshooting.md#not-request-reasons) |
 | <span id="rec-resolvedtimeunknown"></span>`ResolvedTimeUnknown` | The Incident was `Resolved` without a `resolvedTime`, so the window cannot be placed; the recurrence is escalated. | A person decides. [More](troubleshooting.md#not-request-reasons) |
 
 ### RevertsStopped
@@ -516,33 +516,33 @@ Always `True`. The symptom came back after the Incident was resolved, and the In
 
 ## RemediationSettings
 
-The analyzer reports platform and integration detection in the status of `RemediationSettings`. Nothing decides on these conditions.
+The analyzer's detection controller (the leader) writes these four conditions into the status of `RemediationSettings`. It runs when the settings change and every 10 minutes, and each condition is a report only: nothing decides on it.
 
 ### UnknownModules
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="st-unknownmodulesenabled"></span>`UnknownModulesEnabled` | `True`: `spec.modules` names a module this analyzer does not have. | Correct the module name. |
+| <span id="st-unknownmodulesenabled"></span>`UnknownModulesEnabled` | `True`: `spec.modules` names a module this analyzer does not have; that name contributes nothing. | Correct the module name. |
 | <span id="st-allmodulesknown"></span>`AllModulesKnown` | `False`: every named module exists. | Nothing. |
 
 ### DetectionFailed
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="st-detectionfailed"></span>`DetectionFailed` | `True`: the last detection run failed. The message is fixed text. | Read the analyzer log. |
+| <span id="st-detectionfailed"></span>`DetectionFailed` | `True`: the last detection run failed (the node list or the discovery call), so the report is from the last run that succeeded, or shows only the generic platform when none has. The message is fixed text. | Read the analyzer log. The run is retried, and the condition goes when one succeeds. |
 | <span id="st-detected"></span>`Detected` | `False`: detection ran. | Nothing. |
 
 ### NoWatchedNamespaces
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="st-nonamespaceswatched"></span>`NoNamespacesWatched` | `True`: the analyzer was started with an empty `--watch-namespaces` (the chart's default), so it reads no events and records no Incident. | Set the watched namespaces. |
+| <span id="st-nonamespaceswatched"></span>`NoNamespacesWatched` | `True`: the analyzer was started with an empty `--watch-namespaces` (the chart's default), so it reads no events or pods and records no Incident. | Set the watched namespaces (the chart's `analyzer.watchNamespaces`). |
 | <span id="st-namespaceswatched"></span>`NamespacesWatched` | `False`: at least one namespace is watched. | Nothing. |
 
 ### SymptomSourcesNotWatched
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="st-sourcesnotwatched"></span>`SourcesNotWatched` | `True`: an active module declares a symptom source for a kind the analyzer does not watch (not served, not granted, or the check failed). The message names the kinds. | Turn on the chart value of the module under `analyzer.modules`, or disable the module. |
+| <span id="st-sourcesnotwatched"></span>`SourcesNotWatched` | `True`: an active module declares a symptom source for a kind the analyzer does not watch (not served, not granted, or the watch failed), so that kind opens no Incident. The message names the kinds and the state. Not set while no namespace is watched. | `NotGranted`: turn on the chart value of the module under `analyzer.modules`. `NotServed`: the add-on's CRD is not installed. Or disable the module. |
 | <span id="st-allsourceswatched"></span>`AllSourcesWatched` | `False`: every source kind is watched. | Nothing. |
-| <span id="st-sourcesnotchecked"></span>`SourcesNotChecked` | `Unknown`: a kind of an active module has not been checked yet. | Wait. |
+| <span id="st-sourcesnotchecked"></span>`SourcesNotChecked` | `Unknown`: a kind of an active module has not been checked yet (its module just became active, or its first watch has not synced). | Wait; it is reported again when the watch state changes. |

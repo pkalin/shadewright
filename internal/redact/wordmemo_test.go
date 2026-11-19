@@ -199,8 +199,10 @@ func TestViewValueEndMatchesTheOldLogic(t *testing.T) {
 			b.WriteString(pieces[rng.IntN(len(pieces))])
 		}
 		s := b.String()
-		cuts := []int{0, len(s)}
-		for range 2 + rng.IntN(6) {
+		n := 2 + rng.IntN(6)
+		cuts := make([]int, 0, n+2)
+		cuts = append(cuts, 0, len(s))
+		for range n {
 			p := rng.IntN(len(s) + 1)
 			for p < len(s) && !utf8.RuneStart(s[p]) {
 				p++
@@ -230,5 +232,38 @@ func TestViewValueEndMatchesTheOldLogic(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The memory of the last value end (tokenMemo) changes no result: on generated texts, every tokenEnd through one
+// memory, at positions in any order, gives what tokenEnd gives alone.
+func TestTokenMemoMatches(t *testing.T) {
+	rng := rand.New(rand.NewPCG(845, 18)) // #nosec G404 -- reproducible generated texts
+	pieces := append([]string{"\\\\\"", "\\\\\\\"", "\\\\x", "-password,", "\\'"}, wordPieces...)
+	hits := 0
+	for range 20000 {
+		var b strings.Builder
+		for range 1 + rng.IntN(30) {
+			b.WriteString(pieces[rng.IntN(len(pieces))])
+		}
+		s := b.String()
+		tm := &tokenMemo{}
+		pos := 0
+		for range 20 {
+			if rng.IntN(3) == 0 {
+				pos = rng.IntN(len(s) + 1)
+			} else {
+				pos = min(len(s), pos+rng.IntN(4))
+			}
+			if tm.ok && tm.from <= pos && pos <= tm.end {
+				hits++
+			}
+			if got, want := tm.tokenEnd(s, pos), tokenEnd(s, pos); got != want {
+				t.Fatalf("tokenEnd(%q, %d) through the memory = %d, alone %d", s, pos, got, want)
+			}
+		}
+	}
+	if hits < 10000 {
+		t.Fatalf("only %d reads answered from the memory", hits)
 	}
 }

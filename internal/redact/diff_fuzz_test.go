@@ -311,6 +311,19 @@ func TestStringTwiceWorkOnALineWithNoBlank(t *testing.T) {
 	}
 }
 
+// Found by FuzzDiffReplaceFrom in its three and ten minute runs (#845, fifteenth decision): "-password,"
+// repeated, 10,250 bytes with no blank. Each flag read its value, the rest of the run, to the first blank, so the
+// own work grew with the square of the run (1,060 steps per byte here).
+func TestReplaceFromWorkOnGluedFlags(t *testing.T) {
+	fails, counted := diffReplaceFrom([]byte("10\x060\x052<12"))
+	if !counted {
+		t.Skip("redaction work is counted only with the build tag redactwork")
+	}
+	for _, f := range fails {
+		t.Error(f)
+	}
+}
+
 // checkOwnWork fails when f, the redaction of in by what, adds more than ownWorkPerByte per byte of in to the
 // release's reading. It skips without the counter (the build tag redactwork).
 func checkOwnWork(t *testing.T, what, in string, f func()) {

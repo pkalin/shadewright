@@ -146,6 +146,9 @@ type Pattern struct {
 	Expr string
 }
 
+// spanFunc is the span function of a rule (rule.span).
+type spanFunc func(s string, m []int, prevEnd int) (start, end int, ok bool)
+
 // spansFunc is the spans function of a rule (rule.spans).
 type spansFunc func(s string, m []int, prevEnd int, add func(start, end int)) int
 
@@ -156,12 +159,14 @@ type rule struct {
 	kind   string
 	re     *regexp.Regexp
 	groups []int
-	span   func(s string, m []int, prevEnd int) (start, end int, ok bool)
+	span   spanFunc
 	// spans, when set, replaces span for a rule that redacts several ranges per match: it calls add for
 	// each and returns the end of what it read, which later matches of the rule before it skip.
 	spans spansFunc
 	// spansFor, when set, replaces spans with the function it returns, made anew for each pass over a text.
 	spansFor func() spansFunc
+	// spanFor, when set, replaces span in the same way.
+	spanFor func() spanFunc
 	// scan, when set, replaces re and the functions above: a rule that reads the whole text on the canonical
 	// view (view.go) and calls add for each range to redact.
 	scan func(s string, add func(start, end int))
@@ -527,9 +532,12 @@ func (r *Redactor) ruleSpans(s string, spans []span, folded bool) []span {
 			ru.scan(s, add)
 			continue
 		}
-		spanFn := ru.spans
+		spanFn, oneSpan := ru.spans, ru.span
 		if ru.spansFor != nil {
 			spanFn = ru.spansFor()
+		}
+		if ru.spanFor != nil {
+			oneSpan = ru.spanFor()
 		}
 		for _, m := range ru.re.FindAllStringSubmatchIndex(counted(s), -1) {
 			tick(1)
@@ -537,8 +545,8 @@ func (r *Redactor) ruleSpans(s string, spans []span, folded bool) []span {
 				prevEnd = spanFn(s, m, prevEnd, add)
 				continue
 			}
-			if ru.span != nil {
-				if start, end, ok := ru.span(s, m, prevEnd); ok && end > start {
+			if oneSpan != nil {
+				if start, end, ok := oneSpan(s, m, prevEnd); ok && end > start {
 					spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i, folded: folded})
 					prevEnd = end
 				}
@@ -2558,7 +2566,7 @@ func skipEnd(prevEnd, start, end int) int {
 // "--password-file", "--password-stdin") keeps its value. A value that ends inside the previous value is
 // skipped, as it is redacted already; one that starts inside it and runs past its end (a quote opened inside
 // the previous value) is redacted to its own end.
-func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
+func flagValueSpan(s string, m []int, prevEnd int, tm *tokenMemo) (int, int, bool) {
 	switch {
 	case m[0] > 0 && isAlnum(s[m[0]-1]), referenceKey(s[m[2]:m[3]], true):
 		return 0, 0, false
@@ -2569,7 +2577,7 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	sep := s[m[3]:m[1]]
 	q := strings.TrimLeft(sep, `\`)
 	closed := q != "" && (q[0] == '"' || q[0] == '\'')
-	start, end := flagExtent(s, m, closed)
+	start, end := flagExtent(s, m, closed, tm)
 	// A value that lies inside the previous value is redacted already; one that runs past it is not.
 	return start, end, end > prevEnd
 }
@@ -2585,9 +2593,9 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 //
 // The value is the union of keyNameValue's without the extent rule (the value main gave) and the extent
 // rule's, so it is never shorter than main's (TestExtentStillRedactsWhatMainRedacted).
-func flagExtent(s string, m []int, closed bool) (int, int) {
-	start, end := keyNameValue(s, m[1], m[0], closed, extNone)
-	xs, xe := flagExtendedValue(s, m, closed)
+func flagExtent(s string, m []int, closed bool, tm *tokenMemo) (int, int) {
+	start, end := keyNameValue(s, m[1], m[0], closed, extNone, tm)
+	xs, xe := flagExtendedValue(s, m, closed, tm)
 	xs, xe = clampToString(xs, xe, enclosingStringEnd(s, m[0], m[1]))
 	if xe > xs {
 		start, end = min(start, xs), max(end, xe)
@@ -2596,7 +2604,7 @@ func flagExtent(s string, m []int, closed bool) (int, int) {
 }
 
 // flagExtendedValue is the extent rule's part of flagExtent.
-func flagExtendedValue(s string, m []int, closed bool) (int, int) {
+func flagExtendedValue(s string, m []int, closed bool, tm *tokenMemo) (int, int) {
 	sep := s[m[3]:m[1]]
 	pos := m[1]
 	list := strings.IndexByte(sep, '-') >= 0
@@ -2608,7 +2616,7 @@ func flagExtendedValue(s string, m []int, closed bool) (int, int) {
 	if list {
 		if v := nodeProperties(s, pos); isBlockHeader(s, v) {
 			nl := m[3] + strings.LastIndexAny(sep, "\r\n") + 1
-			start, end := listBlockScalarSpan(s, v, indexByte(s[nl:pos], '-'))
+			start, end := listBlockScalarSpan(s, v, indexByte(s[nl:pos], '-'), tm)
 			if v > pos {
 				start = pos
 			}
@@ -2617,7 +2625,7 @@ func flagExtendedValue(s string, m []int, closed bool) (int, int) {
 	}
 	if list || flow {
 		if v := nodeProperties(s, pos); v > pos {
-			_, end := keyNameValue(s, v, m[0], true, ext)
+			_, end := keyNameValue(s, v, m[0], true, ext, tm)
 			switch {
 			case opensGroup(s, v):
 			case flow:
@@ -2628,7 +2636,7 @@ func flagExtendedValue(s string, m []int, closed bool) (int, int) {
 			return pos, end
 		}
 	}
-	start, end := keyNameValue(s, pos, m[0], closed, ext)
+	start, end := keyNameValue(s, pos, m[0], closed, ext, tm)
 	if start == pos && pos < len(s) && !opensGroup(s, pos) && s[pos] != '\\' {
 		switch {
 		case flow:
@@ -2697,7 +2705,7 @@ func blockSequenceItem(s string, m []int) bool {
 // secret-named flag ("--password x", which the flag rule redacts): a match that starts inside a value already
 // taken is skipped ("client_secret db_password --region west" does not read "db_password" as a name), except
 // a secret-named flag, which is judged on its own. Each value is read once, so the cost stays linear.
-func compoundValueSpans(s string, m []int, prevEnd int, add func(start, end int)) int {
+func compoundValueSpans(s string, m []int, prevEnd int, add func(start, end int), tm *tokenMemo) int {
 	name := s[m[2]:m[3]]
 	key := strings.TrimLeft(name, "-")
 	dashes := len(name) - len(key)
@@ -2714,7 +2722,7 @@ func compoundValueSpans(s string, m []int, prevEnd int, add func(start, end int)
 	if !named && !flag {
 		return prevEnd
 	}
-	start, end := keyNameValue(s, m[1], m[2], false, extNone)
+	start, end := keyNameValue(s, m[1], m[2], false, extNone, tm)
 	if v := s[start:end]; named && opaqueToken(v) && (!spelled || !flagWord(v)) {
 		add(start, end)
 	}
@@ -2816,7 +2824,7 @@ func flagWord(v string) bool {
 // opens a quote takes the rest of its line (unclosedQuoteEnd), and any other the rules above. The compound
 // rule passes extNone: an opaque token holds no quote or blank, so a longer extent could not change what it
 // redacts.
-func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int, int) {
+func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode, tm *tokenMemo) (int, int) {
 	if pos >= len(s) {
 		return pos, pos
 	}
@@ -2842,15 +2850,15 @@ func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int
 			return start, end
 		}
 		// The escaped quote does not close on its line: the quote and the token after it, as for a plain one.
-		return pos, tokenEnd(s, start)
+		return pos, tm.tokenEnd(s, start)
 	}
 	if c := s[pos]; c == '"' || c == '\'' {
 		if end := quotedEnd(s, pos); end > 0 {
 			return pos + 1, end - 1
 		}
-		return pos, tokenEnd(s, pos+1)
+		return pos, tm.tokenEnd(s, pos+1)
 	}
-	if end := tokenEnd(s, pos); end > pos || s[pos] != '\\' {
+	if end := tm.tokenEnd(s, pos); end > pos || s[pos] != '\\' {
 		return pos, end
 	}
 	// A quote escaped in a way no JSON level gives ("\'"): the quote and the token after it, as for a
@@ -2860,7 +2868,7 @@ func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int
 		tick(1)
 		q++
 	}
-	return pos, tokenEnd(s, q+1)
+	return pos, tm.tokenEnd(s, q+1)
 }
 
 // flagWordSpan is the extent rule's part of keyNameValue for a value at pos that opens with no escaped quote:
@@ -2906,6 +2914,45 @@ const (
 	// extLiteral reads a value that is an item of a JSON array or YAML sequence: a quoted item is literal.
 	extLiteral
 )
+
+// flagValueSpanFor returns the span function of the flag rule for one pass over a text (flagValueSpan), with
+// its own memory of the last value end read.
+func flagValueSpanFor() spanFunc {
+	tm := &tokenMemo{}
+	return func(s string, m []int, prevEnd int) (int, int, bool) { return flagValueSpan(s, m, prevEnd, tm) }
+}
+
+// compoundValueSpansFor returns the spans function of the compound key name rule for one pass over a text
+// (compoundValueSpans), with its own memory of the last value end read.
+func compoundValueSpansFor() spansFunc {
+	tm := &tokenMemo{}
+	return func(s string, m []int, prevEnd int, add func(start, end int)) int {
+		return compoundValueSpans(s, m, prevEnd, add, tm)
+	}
+}
+
+// tokenMemo is the last value end tokenEnd read in one pass of a rule over one text, so that the values of a
+// run of keys glued with no blank ("-password,-password,...") are read once and not each to the end of the run
+// (#845, fifteenth decision, P3); nil keeps nothing. tokenEnd(s, p) is the first stop at or after p, so it is the
+// same end for every p from the start of the last read to its end: no stop lies between them.
+type tokenMemo struct {
+	from, end int
+	ok        bool
+}
+
+// tokenEnd is tokenEnd(s, pos), with the memory of the last read.
+func (tm *tokenMemo) tokenEnd(s string, pos int) int {
+	if tm == nil {
+		return tokenEnd(s, pos)
+	}
+	if tm.ok && tm.from <= pos && pos <= tm.end {
+		tick(1)
+		return tm.end
+	}
+	end := tokenEnd(s, pos)
+	tm.from, tm.end, tm.ok = pos, end, true
+	return end
+}
 
 // tokenEnd returns the end of the unquoted value that starts at pos, after a flag or a compound key name: the value ends at whitespace, the line end, or a quote character ("\"", "'", or one escaped
 // by backslashes), and at nothing else. So a key inside a JSON or logfmt string cannot take the fields after
@@ -3102,7 +3149,7 @@ func builtinRules() []rule {
 		// argument list (JSON, escaped JSON or a YAML list) or after a shell line continuation:
 		// "--client-secret <value>", "\"--password\", \"<value>\"", "- --password\n- <value>"
 		// (flagValueSpan). "--name=value" is the rule above.
-		{kind: KindCredential, span: flagValueSpan, re: regexp.MustCompile(
+		{kind: KindCredential, spanFor: flagValueSpanFor, re: regexp.MustCompile(
 			`(?i)--?(` + bareKeyExpr + `)` + flagSeparatorExpr)},
 		// Kubernetes environment variables in flow form with the value before the name (#845, view.go).
 		{kind: KindCredential, span: envValueFirstSpan, re: envValueFirst},
@@ -3110,7 +3157,7 @@ func builtinRules() []rule {
 		{kind: KindCredential, scan: seqScan},
 		// A key name of two or more words joined by "_", blanks and one token: "aws_secret_access_key <value>"
 		// (compoundValueSpans).
-		{kind: KindCredential, spans: compoundValueSpans, re: regexp.MustCompile(
+		{kind: KindCredential, spansFor: compoundValueSpansFor, re: regexp.MustCompile(
 			`(?i)(` + bareKeyExpr + `)[ \t]+`)},
 		// JSON and YAML flow mappings: a field after "{" or ",", ending at its closing quote or at , } ].
 		// JSON whitespace, newlines included and also escaped, may surround the key and the colon.

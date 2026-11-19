@@ -915,7 +915,7 @@ func nodeProperties(s string, pos int) int {
 // sequence: the following lines indented deeper than the item's dash, the first of which starts at col of
 // its line, up to the last non-blank one. With no content it is the indicator. It reads at most
 // maxValueExtent bytes; a longer block ends at that bound.
-func listBlockScalarSpan(s string, pos, col int) (int, int) {
+func listBlockScalarSpan(s string, pos, col int, tm *tokenMemo) (int, int) {
 	limit := extentLimit(s, pos)
 	i := pos
 	for i < limit && s[i] != '\n' {
@@ -953,7 +953,7 @@ func listBlockScalarSpan(s string, pos, col int) (int, int) {
 		end = text
 	}
 	if start < 0 {
-		return pos, tokenEnd(s, pos)
+		return pos, tm.tokenEnd(s, pos)
 	}
 	return start, end
 }

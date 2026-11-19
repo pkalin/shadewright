@@ -102,8 +102,8 @@ import (
 //     whose wait for a read is open: that lock waits for a read of the branch (tenth decision, point 3, and the
 //     eleventh, point 2);
 //   - lock: the lock is never released while a pull request of the request is open, nor on a merge the status does
-//     not record, checked at the moment of the release (a pull request merged or open on a branch the plan's change
-//     was not for, seen only after the settings moved, is recorded as released aside), and a lock once released never comes back
+//     not record, checked at the moment of the release (a merge into a branch the plan's change was not for, seen
+//     only after the settings moved, is recorded as released aside), and a lock once released never comes back
 //     while the request does not hold it;
 //   - ending: a reconcile that starts with a RequestDeadline or HandoffGrace wait past its end calls the Git host
 //     nothing before its first status write: the end decides from recorded state alone (fifth decision of 2026-11-18
@@ -299,7 +299,7 @@ type modelWorld struct {
 	startAt                      time.Time
 	// released: the request's lock was seen released; recorded: the request's merge was seen recorded.
 	released, recorded bool
-	// releasedAside: at the release the pull request was merged, or open, on a branch that delivered nothing.
+	// releasedAside: at the release the pull request was merged into a branch that delivered nothing.
 	releasedAside bool
 	// handoff: the request is a replacement recovering a handoff; the pull request is its predecessor's, which
 	// holds the lock on it, so the lock properties about the request's own pull request do not apply.
@@ -1912,12 +1912,7 @@ func (m *modelWorld) lockProperties(live *api.RemediationRequest) {
 			m.released = true
 			// A pull request merged into a branch that delivered nothing at the release (a third base) is not the
 			// request's merge, whatever the settings name later.
-			// So is one open there at the release: the settlement reads the recorded and the configured target
-			// branch only ("on both the recorded target branch and the configured target branch when they differ",
-			// 6-reconciliation.md, one place settles the target lock), so a pull request moved by hand to a third base
-			// does not keep the lock, and its later merge there is not the request's merge either.
-			m.releasedAside = found && (cr.State == providers.ChangeRequestMerged || cr.State == providers.ChangeRequestOpen) &&
-				!m.delivers(live, cr)
+			m.releasedAside = found && cr.State == providers.ChangeRequestMerged && !m.delivers(live, cr)
 		}
 	} else if m.released && holdsLock(live) {
 		m.fatalf("lock back: the lock was released and is held again (phase %s)", live.Status.Phase)

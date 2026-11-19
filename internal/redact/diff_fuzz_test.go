@@ -297,6 +297,20 @@ func TestStringsWorkAfterRepeatedTokens(t *testing.T) {
 	}
 }
 
+// Found by FuzzDiffStringTwice in its ten minute run (#845, fifteenth decision): TOKEN":"<probe>TOKEN: repeated
+// on one line of 40,948 bytes with no blank. Each quoted key read its one-word value to the first blank of the rest
+// of the line before it cut it at the next key, so the own work grew with the square of the line (259, 435 and
+// 788 steps per byte at a quarter, a half and all of it).
+func TestStringTwiceWorkOnALineWithNoBlank(t *testing.T) {
+	fails, counted := diffStringTwice([]byte("10&00001Blr{"))
+	if !counted {
+		t.Skip("redaction work is counted only with the build tag redactwork")
+	}
+	for _, f := range fails {
+		t.Error(f)
+	}
+}
+
 // checkOwnWork fails when f, the redaction of in by what, adds more than ownWorkPerByte per byte of in to the
 // release's reading. It skips without the counter (the build tag redactwork).
 func checkOwnWork(t *testing.T, what, in string, f func()) {

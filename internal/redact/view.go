@@ -523,18 +523,22 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 // its trailing separators.
 func viewValueEnd(s string, keys []viewKeyAt, i, next int) int {
 	k := keys[i]
-	end := k.valueEnd
+	// The keys of a line are in the order of their matches, so a later key that takes its value starts after
+	// keys[next]: when keys[next] starts past the end, so do they.
+	limit := k.valueEnd
+	if next >= 0 && keys[next].m[0] < limit {
+		limit = max(keys[next].m[0], k.after)
+	}
+	end := limit
 	if k.word {
+		// A word ends at the first blank, read only up to the next key, so each key of a line with no blank reads
+		// its own part of it and not the rest of the line (#845, fifteenth decision, P3).
 		end = k.after
-		for end < k.valueEnd && indentLen(s, end) == 0 {
+		for end < limit && indentLen(s, end) == 0 {
 			tick(1)
 			end += charLen(s, end)
 		}
-	}
-	// The keys of a line are in the order of their matches, so a later key that takes its value starts after
-	// keys[next]: when keys[next] starts past the end, so do they.
-	if next >= 0 && keys[next].m[0] < end {
-		end = max(keys[next].m[0], k.after)
+		end = min(end, limit)
 	}
 	switch {
 	case k.plain:

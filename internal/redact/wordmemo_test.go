@@ -19,8 +19,10 @@ package redact
 import (
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // wordPieces are the pieces the texts of the tests below are made of: what shellWordEnd and fieldAfterComma
@@ -151,5 +153,82 @@ func TestFieldAfterCommaMatchesMain(t *testing.T) {
 	}
 	if commas < 100000 {
 		t.Fatalf("only %d commas checked", commas)
+	}
+}
+
+// oldViewValueEnd is viewValueEnd of origin/main's #845 branch before the fifteenth decision, which read a word
+// to the first blank of the rest of the line before it cut it at the next key.
+func oldViewValueEnd(s string, keys []viewKeyAt, i, next int) int {
+	k := keys[i]
+	end := k.valueEnd
+	if k.word {
+		end = k.after
+		for end < k.valueEnd && indentLen(s, end) == 0 {
+			end += charLen(s, end)
+		}
+	}
+	if next >= 0 && keys[next].m[0] < end {
+		end = max(keys[next].m[0], k.after)
+	}
+	switch {
+	case k.plain:
+		if c := strings.IndexByte(s[k.after:end], ','); c >= 0 {
+			end = k.after + c
+		}
+	case len(k.flow) > 0:
+		if c := plainKeyAfterComma.FindStringIndex(s[k.after:end]); c != nil {
+			end = k.after + c[0]
+		}
+	}
+	if n := len(k.flow); n > 0 {
+		if c := flowCloseAt(s, k.after, end, k.flow[n-1]); c >= 0 {
+			end = c
+		}
+	}
+	return valueTail(s, k.after, end, k.flow)
+}
+
+// viewValueEnd, which reads a word only up to the next key that takes its value (#845, P3), ends every value of
+// generated lines where the old logic did: keys at any places of a line, words or not, in a flow collection or not.
+func TestViewValueEndMatchesTheOldLogic(t *testing.T) {
+	rng := rand.New(rand.NewPCG(845, 17)) // #nosec G404 -- reproducible generated texts
+	pieces := append([]string{"\u3000", "\u00a0", "]", "}", "a,b: c", ", x"}, wordPieces...)
+	for range 20000 {
+		var b strings.Builder
+		for range 1 + rng.IntN(30) {
+			b.WriteString(pieces[rng.IntN(len(pieces))])
+		}
+		s := b.String()
+		cuts := []int{0, len(s)}
+		for range 2 + rng.IntN(6) {
+			p := rng.IntN(len(s) + 1)
+			for p < len(s) && !utf8.RuneStart(s[p]) {
+				p++
+			}
+			cuts = append(cuts, p)
+		}
+		slices.Sort(cuts)
+		valueEnd := cuts[len(cuts)-1]
+		var keys []viewKeyAt
+		for j := 0; j+1 < len(cuts)-1; j++ {
+			k := viewKeyAt{m: []int{cuts[j], cuts[j]}, after: cuts[j+1], valueEnd: valueEnd, word: rng.IntN(2) == 0}
+			switch rng.IntN(4) {
+			case 0:
+				k.plain, k.flow = true, []byte{'{'}
+			case 1:
+				k.flow = []byte{'['}
+			}
+			keys = append(keys, k)
+		}
+		for i := range keys {
+			for _, next := range []int{-1, i + 1 + rng.IntN(len(keys)-i)} {
+				if next >= len(keys) {
+					continue
+				}
+				if got, want := viewValueEnd(s, keys, i, next), oldViewValueEnd(s, keys, i, next); got != want {
+					t.Fatalf("viewValueEnd(%q, %+v, %d, %d) = %d, the old logic %d", s, keys, i, next, got, want)
+				}
+			}
+		}
 	}
 }

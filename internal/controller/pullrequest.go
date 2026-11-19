@@ -924,7 +924,8 @@ func (r *RemediationRequestReconciler) requireOnTarget(ctx context.Context, git 
 // (recordMerge, #561), so delivery is checked against that commit; otherwise MergedWithForeignChange without a
 // merge commit, since the change that landed is not the planned one. A read that fails decides nothing and is
 // returned for a retry, with the status unchanged, except a check at the merge that did not answer, which
-// records the pull request first (mergeUnchecked).
+// records the pull request first (mergeUnchecked). A failed read of checkMerged is one of the merge wait about cr,
+// so the caller's retry records that wait and it ends at its end, whatever bound the caller has (#889).
 func (r *RemediationRequestReconciler) endMerged(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
 	// Without a full merge commit ID it waits for the host to report one, a bounded time (awaitMergeCommit), and
@@ -1012,9 +1013,18 @@ func (r *RemediationRequestReconciler) mergeUnchecked(ctx context.Context, rr *r
 // changes only the target file on top of a commit of the target branch from before the merge (CheckMerged), and
 // the target file there is byte for byte the planned change of the target file at that parent. A merge commit
 // that took the head into the target branch so does not change the answer. A head that fails is returned as a
-// [*renderRefusal]; a read that fails as an error.
+// [*renderRefusal]; a read that fails as an error of the merge wait about cr (readOfMergeCheck), whatever the Git
+// host answers, so every caller's retry records that wait and the request ends at its end, from the entry, as a
+// merge whose content could not be checked (endMergeWait, #889), also on a path whose own bound has no end.
 func (r *RemediationRequestReconciler) checkMerged(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) (*renderRefusal, error) {
+	ref, err := checkMergedHead(ctx, git, rr, cr)
+	return ref, readOfMergeCheck(cr, err)
+}
+
+// checkMergedHead is checkMerged's reads and verdict, with a failed read returned as it failed.
+func checkMergedHead(ctx context.Context, git providers.GitProvider, rr *remediationv1alpha1.RemediationRequest,
+	cr providers.ChangeRequest) (*renderRefusal, error) {
 	path := string(rr.Status.Source.Path)
 	file, err := git.ReadFile(ctx, cr.HeadSHA, path, providers.MaxFileBytes)
 	if err != nil {
@@ -1335,9 +1345,17 @@ func (r *RemediationRequestReconciler) mergeSeenErr(ctx context.Context, rr *rem
 	waitCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	// The look ran out of time before it returned what it read: the wait is about the recorded pull request, merged
-	// into the recorded target branch, with no merge commit seen (endMergeWait records it without a receipt).
+	// into the recorded target branch, with no merge commit seen (endMergeWait records it without a receipt), unless
+	// the read that ran out of time was one of the merge wait, which names the pull request it read (a moved head,
+	// #889).
 	cr := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA, State: providers.ChangeRequestMerged,
 		BaseBranch: string(rr.Status.Source.TargetBranch)}
+	if e, ok := errors.AsType[*kindedReadError](err); ok && e.wait.Kind == remediationv1alpha1.GitWaitMergeCheck &&
+		e.wait.PullRequest != nil {
+		p := e.wait.PullRequest
+		cr = providers.ChangeRequest{Number: p.Number, URL: p.URL, HeadSHA: p.HeadSHA, State: providers.ChangeRequestMerged,
+			BaseBranch: string(p.BaseBranch), MergeCommit: p.MergeCommitSHA}
+	}
 	return errors.Join(err, r.startMergeWait(waitCtx, rr, cr, "check the plan at the merge"))
 }
 
@@ -1568,8 +1586,11 @@ func commentMarker(rr *remediationv1alpha1.RemediationRequest) string {
 // stops with BranchDiverged, leaving it open, since a person may be working on it; for a stale plan without the
 // comment (errStalePlanWrite), which ends the retried close of its pull request too. Anything else, a clean move
 // to the same planned change included, stops with HeadMoved as before. A read that fails is returned for a
-// retry, as is a comment the kill switch held back; another failure to comment is logged and the request
-// stops all the same. A comment already there (its marker) is not posted again.
+// retry (on a merged pull request wrapped in errMergeCheck, so nothing after the look runs on the merged change,
+// #879), as is a comment the kill switch held back; another failure to comment is logged and the request
+// stops all the same. A comment already there (its marker) is not posted again. A failed read of the check of a
+// merged head belongs to the merge wait about that head (mergeCheckFailed), so it is bounded like the check at the
+// merge and ends from the wait's entry (#889).
 func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
 	moved := func() error {
@@ -1583,8 +1604,14 @@ func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git provid
 	case providers.ChangeRequestMerged:
 		ref, err := r.checkMerged(ctx, git, rr, cr)
 		switch {
+		case err != nil && gitReadFailure(err):
+			// A merge seen and not recorded (#879): the look is retried, and the full freshness check never runs on
+			// the merged change, which makes the plan look stale. The read is one of the merge wait about cr, the
+			// merged head (#889), as a failed check at the merge is (mergeCheckFailed): at its end the merge is
+			// recorded from the entry, as one whose content could not be checked (endMergeWait).
+			return r.mergeCheckFailed(ctx, rr, cr, err)
 		case err != nil:
-			return err
+			return fmt.Errorf("%w: %w", errMergeCheck, err)
 		case ref != nil:
 			return r.mergedForeign(ctx, rr, ref)
 		}
@@ -1991,7 +2018,9 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		res.RequeueAfter = r.withinWaits(rr, max(res.RequeueAfter, waited.RequeueAfter))
+		if res.RequeueAfter, err = r.withinWaits(ctx, rr, max(res.RequeueAfter, waited.RequeueAfter)); err != nil {
+			return reconcile.Result{}, err
+		}
 		return res, nil
 	}
 	return waited, nil

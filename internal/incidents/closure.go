@@ -481,6 +481,9 @@ func (c *Controller) closeIncidents(ctx context.Context) error {
 func (c *Controller) closeOne(ctx context.Context, name string, now time.Time) (bool, error) {
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
+	c.mu.Lock()
+	deletedMeanwhile := c.watchDeletes(name)
+	c.mu.Unlock()
 	var moved *remediationv1alpha1.Incident
 	var reason string
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -504,6 +507,16 @@ func (c *Controller) closeOne(ctx context.Context, name string, now time.Time) (
 		moved, reason = inc, r
 		return nil
 	})
+	c.mu.Lock()
+	if deletedMeanwhile() {
+		// The informers reported the delete of the Incident while the move was in flight: what it wrote is about
+		// a deleted object and is not remembered again over what the delete changed ([Controller.watchDeletes]).
+		moved = nil
+	}
+	if err == nil && moved != nil {
+		c.noteState(moved)
+	}
+	c.mu.Unlock()
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
@@ -513,9 +526,6 @@ func (c *Controller) closeOne(ctx context.Context, name string, now time.Time) (
 	if moved == nil {
 		return false, nil
 	}
-	c.mu.Lock()
-	c.noteState(moved)
-	c.mu.Unlock()
 	logf.FromContext(ctx).Info("Moved an Incident by the closure rules", "incident", name,
 		"phase", moved.Status.Phase, "reason", reason)
 	return true, nil

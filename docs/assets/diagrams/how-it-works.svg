@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 580" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">How Shadewright works</title>
+  <desc id="d">Five steps from a symptom in the cluster to a verified change. One: the collector reads Warning events and pod status in the namespaces you choose and groups repeated symptoms into an Incident. Two: the analyzer, with read-only cluster access, asks a model for a diagnosis from redacted input; the model call is built but off by default. Its answer is only a typed proposal. Three: the executor checks the proposal against a policy set by the cluster admin and a fixed list of allowed changes. Four: the executor opens a pull request on the Git host, in the one repository it may write to, and a person reviews and merges it under the repository's own rules. The GitOps controller, Flux, applies the merge. Five: the verifier, which has no model and no Git credential, samples the pods of the rollout, and the executor ends the request as succeeded, failed or inconclusive. Shadewright never changes a workload directly, never merges and never runs an action outside the list. The three dashed groups are the three identities: analyzer, executor and verifier.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .n{fill:#a879ff;font-size:12px;font-weight:700;letter-spacing:.08em}
+      .pn{fill:#8a85a8;font-size:10.5px;font-weight:600;letter-spacing:.06em}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .id{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
+      .idt{fill:#a879ff;font-size:11px;font-weight:600;letter-spacing:.06em}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .lbl{fill:#c6a8ff;font-size:11.5px}
+      .no{fill:#ff8fa3;font-size:13px;font-weight:600}
+    </style>
+  </defs>
+
+  <rect width="1120" height="580" rx="18" fill="#0e0e16"/>
+
+  <!-- shadewright lane -->
+  <rect class="lane" x="24" y="24" width="1072" height="226" rx="14"/>
+  <text class="lanet" x="44" y="52">SHADEWRIGHT</text>
+
+  <!-- identities -->
+  <rect class="id" x="40" y="66" width="410" height="168" rx="12"/>
+  <text class="idt" x="438" y="86" text-anchor="end">ANALYZER · read-only</text>
+  <rect class="id" x="460" y="66" width="410" height="168" rx="12"/>
+  <text class="idt" x="858" y="86" text-anchor="end">EXECUTOR · Git access</text>
+  <rect class="id" x="880" y="66" width="200" height="168" rx="12"/>
+  <text class="idt" x="1068" y="86" text-anchor="end">VERIFIER</text>
+
+  <!-- steps -->
+  <rect class="key" x="50" y="102" width="180" height="116" rx="12"/>
+  <text class="n" x="66" y="124">1</text>
+  <text class="h" x="66" y="146">Observe</text>
+  <text class="s" x="66" y="168">Warning events and</text>
+  <text class="s" x="66" y="185">pod status, grouped</text>
+  <text class="s" x="66" y="202">into Incidents</text>
+
+  <rect class="key" x="260" y="102" width="180" height="116" rx="12"/>
+  <text class="n" x="276" y="124">2</text>
+  <text class="h" x="276" y="146">Diagnose</text>
+  <text class="s" x="276" y="168">rules, then a model</text>
+  <text class="s" x="276" y="185">on redacted input;</text>
+  <text class="s" x="276" y="202">a proposal only</text>
+
+  <rect class="key" x="470" y="102" width="180" height="116" rx="12"/>
+  <text class="n" x="486" y="124">3</text>
+  <text class="h" x="486" y="146">Check</text>
+  <text class="s" x="486" y="168">fixed list of changes,</text>
+  <text class="s" x="486" y="185">bounds set by the</text>
+  <text class="s" x="486" y="202">cluster admin</text>
+
+  <rect class="key" x="680" y="102" width="180" height="116" rx="12"/>
+  <text class="n" x="696" y="124">4</text>
+  <text class="h" x="696" y="146">Open a pull request</text>
+  <text class="s" x="696" y="168">one value, one file;</text>
+  <text class="s" x="696" y="185">a person reviews</text>
+  <text class="s" x="696" y="202">and merges</text>
+
+  <rect class="key" x="890" y="102" width="180" height="116" rx="12"/>
+  <text class="n" x="906" y="124">5</text>
+  <text class="h" x="906" y="146">Verify</text>
+  <text class="s" x="906" y="168">samples the pods;</text>
+  <text class="s" x="906" y="185">succeeded, failed or</text>
+  <text class="s" x="906" y="202">inconclusive</text>
+
+  <!-- main flow -->
+  <path class="f" d="M230 160H254" marker-end="url(#a)"/>
+  <path class="f" d="M440 160H464" marker-end="url(#a)"/>
+  <path class="f" d="M650 160H674" marker-end="url(#a)"/>
+  <path class="f" d="M860 160H884" marker-end="url(#a)"/>
+
+  <!-- outside lane -->
+  <rect class="lane" x="24" y="282" width="1072" height="196" rx="14"/>
+  <text class="lanet" x="44" y="466">YOUR CLUSTER AND THE SERVICES IT USES</text>
+
+  <rect class="box" x="50" y="344" width="180" height="96" rx="10"/>
+  <text class="h" x="66" y="372">Your workloads</text>
+  <text class="s" x="66" y="394">events and pod status</text>
+  <text class="s" x="66" y="411">in the namespaces</text>
+  <text class="s" x="66" y="428">you choose</text>
+
+  <rect class="ext" x="260" y="344" width="180" height="96" rx="10"/>
+  <text class="h" x="276" y="372">Model provider</text>
+  <text class="s" x="276" y="394">redacted context out,</text>
+  <text class="s" x="276" y="411">answer back</text>
+  <text class="pn" x="276" y="430">OFF BY DEFAULT</text>
+
+  <rect class="box" x="470" y="344" width="180" height="96" rx="10"/>
+  <text class="h" x="486" y="372">Policy</text>
+  <text class="s" x="486" y="394">written by the cluster</text>
+  <text class="s" x="486" y="411">admin, not by the</text>
+  <text class="s" x="486" y="428">model</text>
+
+  <rect class="ext" x="680" y="344" width="180" height="96" rx="10"/>
+  <text class="h" x="696" y="372">Git host</text>
+  <text class="s" x="696" y="394">your branch rules and</text>
+  <text class="s" x="696" y="411">reviewers decide</text>
+  <text class="s" x="696" y="428">what merges</text>
+
+  <rect class="box" x="890" y="344" width="180" height="96" rx="10"/>
+  <text class="h" x="906" y="372">GitOps controller</text>
+  <text class="s" x="906" y="394">Flux applies the</text>
+  <text class="s" x="906" y="411">merge to your</text>
+  <text class="s" x="906" y="428">workloads</text>
+
+  <!-- links between lanes -->
+  <path class="r" d="M140 344V224" marker-end="url(#m)"/>
+  <text class="lbl" x="150" y="290">reads</text>
+  <path class="f" d="M320 224V338" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="lbl" x="330" y="290">asks, answers</text>
+  <path class="r" d="M560 344V224" marker-end="url(#m)"/>
+  <text class="lbl" x="570" y="290">reads</text>
+  <path class="f" d="M770 224V338" marker-end="url(#a)"/>
+  <text class="lbl" x="780" y="290">opens</text>
+  <path class="f" d="M860 392H884" marker-end="url(#a)"/>
+  <path class="f" d="M980 338V224" marker-end="url(#a)"/>
+  <text class="lbl" x="990" y="290">after delivery</text>
+
+  <!-- never -->
+  <text class="no" x="50" y="512">Never:</text>
+  <text class="s" x="106" y="512">a direct change to a workload</text>
+  <text class="s" x="330" y="512">·</text>
+  <text class="s" x="346" y="512">a merge by Shadewright</text>
+  <text class="s" x="530" y="512">·</text>
+  <text class="s" x="546" y="512">an action outside the fixed list</text>
+  <text class="s" x="770" y="512">·</text>
+  <text class="s" x="786" y="512">a model answer taken as approval</text>
+
+  <!-- legend -->
+  <rect class="box" x="50" y="538" width="26" height="14" rx="4"/>
+  <text class="s" x="84" y="550">in your cluster</text>
+  <rect class="ext" x="214" y="538" width="26" height="14" rx="4"/>
+  <text class="s" x="248" y="550">outside the cluster</text>
+  <path class="f" d="M410 545H446" marker-end="url(#a)"/>
+  <text class="s" x="456" y="550">main flow</text>
+  <path class="r" d="M560 545H596" marker-end="url(#m)"/>
+  <text class="s" x="606" y="550">read only</text>
+</svg>

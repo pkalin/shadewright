@@ -340,6 +340,8 @@ var unboundedReads = map[string]noBoundReason{
 	"closeCancelled":       noBoundHeldLock,
 	// A cancel after a change of the target branch is watched until a read settles its pull request.
 	"cancelLookFailed": noBoundCancelWatch,
+	// A cancel watched after a refusal or past its bound records a read of a wait of its own (#889).
+	"cancelFailed": noBoundWatchedCancel,
 }
 
 func TestUnboundedReadsAreListed(t *testing.T) {
@@ -375,6 +377,7 @@ var reasonName = map[noBoundReason]string{
 	noBoundPolicyCheck: "noBoundPolicyCheck", noBoundHeldLock: "noBoundHeldLock",
 	noBoundStaleCleanup: "noBoundStaleCleanup", noBoundAfterStop: "noBoundAfterStop",
 	noBoundRefusedWatch: "noBoundRefusedWatch", noBoundCancelWatch: "noBoundCancelWatch",
+	noBoundWatchedCancel: "noBoundWatchedCancel",
 }
 
 // TestHeldUnsettledKeepsTheEndOfAWait checks that a look of a stopped holder that settles nothing never asks to run
@@ -389,6 +392,10 @@ func TestHeldUnsettledKeepsTheEndOfAWait(t *testing.T) {
 		Ends: &metav1.Time{Time: clock.at.Add(left)}, Operation: "read of what the merge brought",
 		PullRequest: &api.GitWaitPullRequest{Number: rr.Status.PullRequest.Number, URL: rr.Status.PullRequest.URL,
 			HeadSHA: rr.Status.PullRequest.HeadSHA}}}
+	// The end is read from the request the API server holds (withinWaits, #885).
+	if err := r.Status().Update(context.Background(), rr); err != nil {
+		t.Fatal(err)
+	}
 	for _, c := range []struct {
 		name string
 		v    changeVerdict
@@ -403,4 +410,78 @@ func TestHeldUnsettledKeepsTheEndOfAWait(t *testing.T) {
 			t.Errorf("%s: %+v, %v; want a wait of at most %v, the end of the content wait", c.name, res, err, left)
 		}
 	}
+}
+
+// TestWithinWaitsTakesTheEndsFromTheLiveRequest checks that the cap of a pace at the end of a Git wait comes from the
+// request as the API server holds it (#885): a cached copy that still shows a MergeCheck wait past its end, which a
+// later write already ended, must not bring the request back after a nanosecond, while a wait the live request
+// records still caps the pace at its end, and a passed one at boundPassedWait, so the next reconcile ends it.
+func TestWithinWaitsTakesTheEndsFromTheLiveRequest(t *testing.T) {
+	ctx := context.Background()
+	r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	clock := clockOf(r)
+	stored := rr.DeepCopy()
+	cached := rr.DeepCopy()
+	cached.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitMergeCheck, Since: metav1.NewTime(clock.at.Add(-10 * time.Minute)),
+		Ends: &metav1.Time{Time: clock.at.Add(-5 * time.Minute)}, Operation: mergeCheckOp,
+		PullRequest: &api.GitWaitPullRequest{Number: rr.Status.PullRequest.Number, URL: rr.Status.PullRequest.URL,
+			HeadSHA: rr.Status.PullRequest.HeadSHA}}}
+	if d, err := r.withinWaits(ctx, cached, heldRecheckInterval); err != nil || d != heldRecheckInterval {
+		t.Fatalf("a wait only a stale copy shows: %v, %v; want %v, the pace, with no cap", d, err, heldRecheckInterval)
+	}
+	res, err := r.heldUnsettled(ctx, cached, changeVerdict{state: changeUnknown, err: errConflictingReads}, nil, false)
+	if err != nil || res.RequeueAfter < time.Second {
+		t.Fatalf("held look on a stale copy: %+v, %v; want no requeue sooner than a second", res, err)
+	}
+
+	for _, c := range []struct {
+		name string
+		ends time.Duration
+		want time.Duration
+	}{
+		{"an end ahead", 30 * time.Second, 30 * time.Second},
+		{"an end passed", -time.Minute, boundPassedWait},
+	} {
+		live := stored.DeepCopy()
+		if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+			t.Fatal(err)
+		}
+		live.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitMergeCheck, Since: metav1.NewTime(clock.at.Add(-time.Hour)),
+			Ends: &metav1.Time{Time: clock.at.Add(c.ends)}, Operation: mergeCheckOp,
+			PullRequest: cached.Status.GitWaits[0].PullRequest}}
+		if err := r.Status().Update(ctx, live); err != nil {
+			t.Fatal(err)
+		}
+		if d, err := r.withinWaits(ctx, live, heldRecheckInterval); err != nil || d != c.want {
+			t.Errorf("%s: %v, %v; want %v", c.name, d, err, c.want)
+		}
+	}
+}
+
+// TestWithinWaitsReturnsAFailedRead checks that a failed read of the live request is returned for the error backoff,
+// never taken as a request with no wait (#885).
+func TestWithinWaitsReturnsAFailedRead(t *testing.T) {
+	r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	clock := clockOf(r)
+	rr.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitMergeCheck, Since: metav1.NewTime(clock.at),
+		Ends: &metav1.Time{Time: clock.at.Add(time.Minute)}, Operation: mergeCheckOp,
+		PullRequest: &api.GitWaitPullRequest{Number: rr.Status.PullRequest.Number, URL: rr.Status.PullRequest.URL,
+			HeadSHA: rr.Status.PullRequest.HeadSHA}}}
+	r.APIReader = failingGetReader{Reader: r.APIReader}
+	if d, err := r.withinWaits(context.Background(), rr, heldRecheckInterval); err == nil {
+		t.Fatalf("got %v with no error; want the failed read", d)
+	}
+}
+
+// mergeCheckOp is the operation of the MergeCheck entries of these tests.
+const mergeCheckOp = "check the plan at the merge"
+
+// failingGetReader fails every Get of a RemediationRequest.
+type failingGetReader struct{ client.Reader }
+
+func (f failingGetReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*api.RemediationRequest); ok {
+		return errors.New("the API server did not answer")
+	}
+	return f.Reader.Get(ctx, key, obj, opts...)
 }

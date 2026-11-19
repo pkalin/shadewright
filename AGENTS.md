@@ -155,8 +155,10 @@ Every issue names the ADRs it is tied to:
   the linearity tests count redaction work only with that tag (the product build holds no counter). Dynamic
   analysis is the race detector and the Go fuzz targets: a `Fuzz` function in a parser or matcher of untrusted
   input goes into `FUZZ_TARGETS` in the Makefile (`make fuzz` fails when one is missing or an entry names no
-  such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly. A failing input
-  it finds is committed to the package's `testdata/fuzz/` with the fix.
+  such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly; a target in a package
+  with a file built only with `redactwork` (the differential targets of `internal/redact`) runs with that tag, so
+  it checks the work bound too. A failing input it finds is committed to the package's `testdata/fuzz/` with the
+  fix.
 
 ## Design choices
 

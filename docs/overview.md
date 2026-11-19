@@ -32,4 +32,4 @@ The project is early. The [status section](index.md#status) of the home page lis
 
 - To try it: [Get started](getting-started.md).
 - To run it: [Operator manual](operate.md).
-- For the reasoning: [Design and decisions](design-and-decisions.md).
+- For the reasoning: [Internals](design-and-decisions.md).

@@ -329,7 +329,18 @@ func (r *RemediationRequestReconciler) closeAfterStaleStop(ctx context.Context,
 		// Not a failure this function knows: returned, so the work queue retries it and the retry is not silent.
 		return reconcile.Result{}, err
 	}
-	return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, nil
+	return r.heldPace(ctx, rr, heldRecheckInterval)
+}
+
+// heldPace is the result of a stopped holder's look that runs again after d, never past the end of a wait the
+// request records (withinWaits). A failed read of the request is returned for the error backoff.
+func (r *RemediationRequestReconciler) heldPace(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	d time.Duration) (reconcile.Result, error) {
+	d, err := r.withinWaits(ctx, rr, d)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	return reconcile.Result{RequeueAfter: d}, nil
 }
 
 // nothingToClose reports whether err, from the close after a stale stop, means there is nothing for that close to
@@ -773,7 +784,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
-	return r.heldLookResult(ctx, rr, free, held, holding, v.pr), nil
+	return r.heldLookResult(ctx, rr, free, held, holding, v.pr)
 }
 
 // settleReplacementOwned decides, for settleStopException, who records a merge of rr's pull request (stoppedMergeOwner)
@@ -803,7 +814,8 @@ func (r *RemediationRequestReconciler) settleReplacementOwned(ctx context.Contex
 	case owner == ownerReplacementPending, owner == ownerPredecessorPending:
 		// The replacement does not hold its record of the merge yet: the lock is kept, and read again, until it
 		// does, or until it is deleted and the merge is this request's to record as a foreign change.
-		return owner, reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, true, nil
+		res, err := r.heldPace(ctx, rr, heldRecheckInterval)
+		return owner, res, true, err
 	}
 	return owner, reconcile.Result{}, false, nil
 }
@@ -869,22 +881,22 @@ func (r *RemediationRequestReconciler) closeExpiredOnceMore(ctx context.Context,
 // whether the lock is free now, held whether it was held before the look, holding another open pull request of the
 // branch that keeps it, pr the pull request the look found.
 func (r *RemediationRequestReconciler) heldLookResult(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	free, held bool, holding *providers.ChangeRequest, pr providers.ChangeRequest) reconcile.Result {
+	free, held bool, holding *providers.ChangeRequest, pr providers.ChangeRequest) (reconcile.Result, error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr))
 	switch {
 	case free && !held:
 		// The look was the read of an open wait of a request that holds no lock any more.
-		return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}
+		return r.heldPace(ctx, rr, heldRecheckInterval)
 	case free:
 		log.Info("Released the target lock of RemediationRequest: none of its pull requests is open")
-		return reconcile.Result{}
+		return reconcile.Result{}, nil
 	case holding != nil:
 		log.Info("Kept the target lock of RemediationRequest: another pull request is open on its branch",
 			"pullRequest", holding.Number)
 	default:
 		log.Info("Recorded the open pull request of a stopped RemediationRequest", "pullRequest", pr.Number)
 	}
-	return reconcile.Result{RequeueAfter: heldRecheckInterval}
+	return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 }
 
 // heldUnsettled is checkHeld's answer to a look that settled nothing: err is the look's failure, v its verdict, and
@@ -899,20 +911,19 @@ func (r *RemediationRequestReconciler) heldUnsettled(ctx context.Context, rr *re
 	}
 	switch {
 	case v.state == changeUnknown && !said && errors.Is(err, v.err) && answeredUnknown(v.err):
-		return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, nil
+		return r.heldPace(ctx, rr, heldRecheckInterval)
 	case gitReadFailure(err):
 		res, err := r.retryGitRead(ctx, rr, err, unboundedRead(noBoundHeldLock))
 		if err != nil {
 			return reconcile.Result{}, err
 		}
 		// The pace of a stopped holder's looks, never past the end of a wait it records (the content wait).
-		res.RequeueAfter = r.withinWaits(rr, max(res.RequeueAfter, heldRecheckInterval))
-		return res, nil
+		return r.heldPace(ctx, rr, max(res.RequeueAfter, heldRecheckInterval))
 	case !said && err != nil:
 		return reconcile.Result{}, err
 	}
 	// Never past the end of a wait the request records (the content wait): its end decides from the entry alone.
-	return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, nil
+	return r.heldPace(ctx, rr, heldRecheckInterval)
 }
 
 // settleTargetLock is the only decision that releases a lock held for Git work.

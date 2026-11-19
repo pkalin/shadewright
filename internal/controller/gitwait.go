@@ -26,6 +26,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -251,16 +252,35 @@ func (k waitKind) end(rr *api.RemediationRequest, now time.Time) (time.Time, boo
 	return w.Ends.Time, true
 }
 
-// withinWaits caps d, a wait a path chose after retryGitRead (a slower pace of its own), at the earliest end of
-// rr's Git waits: a pace never carries a wait past its end.
-func (r *RemediationRequestReconciler) withinWaits(rr *api.RemediationRequest, d time.Duration) time.Duration {
+// withinWaits caps d, a wait a path chose after retryGitRead (a slower pace of its own), at the earliest end of the
+// request's Git waits: a pace never carries a wait past its end. The ends are taken from the request as the API server
+// holds it, read when rr records any wait (#885): rr may be a cached copy older than the server's, whose wait a later
+// write already ended, and a cap at its passed end (boundPassedWait) would bring the request back at once, with a Git
+// read on each pass, for as long as the cache lags, since the reconcile that ends waits finds nothing to end in the
+// live request (endAfterLastRead). A request gone, or replaced under the same name, has no wait of rr's to keep: d is
+// returned. A failed read is returned for the error backoff.
+func (r *RemediationRequestReconciler) withinWaits(ctx context.Context, rr *api.RemediationRequest,
+	d time.Duration) (time.Duration, error) {
+	if len(rr.Status.GitWaits) == 0 {
+		return d, nil
+	}
+	live := &api.RemediationRequest{}
+	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return d, nil
+		}
+		return 0, fmt.Errorf("read RemediationRequest %s/%s for the ends of its Git waits: %w", rr.Namespace, rr.Name, err)
+	}
+	if live.UID != rr.UID {
+		return d, nil
+	}
 	now := r.now()
-	for _, w := range rr.Status.GitWaits {
-		if end, ok := kindOfEntry(w).end(rr, now); ok {
+	for _, w := range live.Status.GitWaits {
+		if end, ok := kindOfEntry(w).end(live, now); ok {
 			d = min(d, max(end.Sub(now), boundPassedWait))
 		}
 	}
-	return d
+	return d, nil
 }
 
 // expiringKey marks the context of the path that ends a wait (endPassedWait, expire).

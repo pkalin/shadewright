@@ -516,8 +516,9 @@ func stoppedForBranchChange(rr *remediationv1alpha1.RemediationRequest) bool {
 // merge left none (the settings name the recorded branch again), since the request stopped on a plan made stale by
 // the change. A pull request adopted by the read that settles the lock (adopted: none was recorded, heldMergeFollows)
 // has no recorded head to compare, so its head is checked as endMerged checks one (checkMerged): one that is not the
-// planned change alone ends NeedsIntervention with MergedWithForeignChange and no receipt. It returns what
-// recordMergeSeen returns.
+// planned change alone ends NeedsIntervention with MergedWithForeignChange and no receipt; a failed read of that
+// check is one of the merge wait about cr (checkMerged), which ends it the same way at the wait's end (#889). It
+// returns what recordMergeSeen returns.
 func (r *RemediationRequestReconciler) recordHeldMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, adopted bool) error {
 	if pr := rr.Status.PullRequest; !adopted && pr != nil && cr.HeadSHA != pr.HeadSHA {

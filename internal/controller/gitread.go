@@ -79,6 +79,9 @@ const (
 	// noBoundCancelWatch: a cancel whose close cannot be made after a change of the target branch reads its pull
 	// requests on both branches until a read settles them (cancelLook).
 	noBoundCancelWatch noBoundReason = "a cancel after a change of the target branch is watched until a read settles it"
+	// noBoundWatchedCancel: a cancel watched after a refusal or past cleanupFailingBound (cancelFailed) reads its pull
+	// request until a read settles it; a read of a wait of its own still ends at that wait's end.
+	noBoundWatchedCancel noBoundReason = "a watched cancel reads its pull request until a read settles it"
 	// noBoundRefusedWatch: a refusal while a pull request waits is watched until the next full recheck.
 	noBoundRefusedWatch noBoundReason = "a refused freshness check is watched without an end"
 )
@@ -500,7 +503,11 @@ func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, ke
 		}
 	}
 	const none = time.Duration(1<<63 - 1)
-	if left := r.withinWaits(rr, none); left < none {
+	left, err := r.withinWaits(ctx, rr, none)
+	if err != nil {
+		return 0, err
+	}
+	if left < none {
 		return left, nil
 	}
 	return 0, nil

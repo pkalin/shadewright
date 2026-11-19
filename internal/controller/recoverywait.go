@@ -271,7 +271,19 @@ func (r *RemediationRequestReconciler) abortOnRefusal(ctx context.Context, rr *r
 	if res, perr := r.abortPredecessor(ctx, rr); perr != nil || res.RequeueAfter > 0 {
 		return res, errors.Join(perr, clusterOnly(err))
 	}
-	return reconcile.Result{RequeueAfter: r.withinWaits(rr, r.pullRequestPollInterval())}, clusterOnly(err)
+	d, werr := r.withinWaits(ctx, rr, r.pullRequestPollInterval())
+	if werr != nil {
+		return reconcile.Result{}, errors.Join(clusterSideErr(werr), clusterOnly(err))
+	}
+	return reconcile.Result{RequeueAfter: d}, clusterOnly(err)
+}
+
+// recoveryPace is heldPace for the looks of a replacement's recovery: a failed read of the request, for the ends of
+// its waits, is the Kubernetes API's and is marked so (clusterSideErr), for the error backoff.
+func (r *RemediationRequestReconciler) recoveryPace(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	d time.Duration) (reconcile.Result, error) {
+	res, err := r.heldPace(ctx, rr, d)
+	return res, clusterSideErr(err)
 }
 
 // clusterOnly is err when it carries a failure of the Kubernetes API, for the error backoff, else nil.
@@ -356,10 +368,17 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 	}
 	from := rr.Status.Handoff.From
 	pred := &remediationv1alpha1.RemediationRequest{}
-	wait := reconcile.Result{RequeueAfter: r.withinWaits(rr, r.pullRequestPollInterval())}
+	// The poll, never past the end of a wait rr records (withinWaits), read only where it is the answer.
+	wait := func() (reconcile.Result, bool, error) {
+		res, err := r.recoveryPace(ctx, rr, r.pullRequestPollInterval())
+		if err != nil {
+			return reconcile.Result{}, true, err
+		}
+		return res, !cancelRequested(rr), nil
+	}
 	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
 	case apierrors.IsNotFound(err):
-		return wait, !cancelRequested(rr), nil
+		return wait()
 	case err != nil:
 		return reconcile.Result{}, true, &clusterError{err: fmt.Errorf("get the RemediationRequest %s replaces: %w",
 			rr.Name, err)}
@@ -370,7 +389,7 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 	}
 	if pred.UID != types.UID(from.UID) || to == nil || to.UID != remediationv1alpha1.UID(rr.UID) ||
 		pred.Status.PullRequest == nil {
-		return wait, !cancelRequested(rr), nil
+		return wait()
 	}
 	git, err := r.openRecovery(ctx, rr)
 	if err != nil {
@@ -389,7 +408,7 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 	if err := r.setUnreadable(ctx, rr, nil); err != nil {
 		return reconcile.Result{}, true, err
 	}
-	return wait, !cancelRequested(rr), nil
+	return wait()
 }
 
 // recordWatchedMerge records, on rr, a merge of the pull request of pred, v as read through git, whose merged head is
@@ -669,8 +688,8 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 		return reconcile.Result{}, true, err
 	}
 	// The pace of a stopped holder's looks, never past the end of a wait it records.
-	res.RequeueAfter = r.withinWaits(rr, max(res.RequeueAfter, heldRecheckInterval))
-	return res, true, nil
+	res, err = r.recoveryPace(ctx, rr, max(res.RequeueAfter, heldRecheckInterval))
+	return res, true, err
 }
 
 // heldRecoveryAlone is heldRecovery's read once the predecessor is gone (NotFound), so neither its recorded pull
@@ -728,7 +747,8 @@ func (r *RemediationRequestReconciler) heldRecoveryAlone(ctx context.Context, rr
 	}
 	logf.FromContext(ctx).Info("Kept the target lock of RemediationRequest: a pull request of its branch that may carry "+
 		"its commit is open", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number)
-	return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, true, nil
+	res, err := r.recoveryPace(ctx, rr, heldRecheckInterval)
+	return res, true, err
 }
 
 // endOnOtherMerge settles rr, a replacement that ended before it took the pull request over (endedBeforeTakeover),
@@ -866,7 +886,8 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 		}
 		logf.FromContext(ctx).Info("Kept the target lock of RemediationRequest: the pull request that may carry its "+
 			"commit is open", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number)
-		return reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, true, nil
+		res, err := r.recoveryPace(ctx, rr, heldRecheckInterval)
+	return res, true, err
 	}
 	return reconcile.Result{}, false, nil
 }

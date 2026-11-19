@@ -420,6 +420,10 @@ type recoveryPath struct {
 	// bestEffort holds the calls whose failure the look logs and goes on without: the look then ends as their
 	// afterFailure says. A cancellation of the caller is still returned (the write after them fails).
 	bestEffort map[string]afterFailure
+	// paced holds the calls made after the look that works removed the condition: the read of the request for the
+	// ends of its waits (withinWaits). Any failure of one goes to the error backoff, and the request keeps watching
+	// without the condition, as the look worked.
+	paced map[string]bool
 	// failing is a call that fails with a status error on every look of the path, its row included.
 	failing string
 	// stepTimeout replaces waitStepTimeout for the path.
@@ -462,8 +466,13 @@ func watchCalls(more ...string) []string {
 		"k8s get RemediationSettings/" + api.SettingsName + "#1",
 		callOpen,
 		callGetChange1,
-	}, more...), "k8s get RemediationRequest/"+newName+"#1", "k8s patch status RemediationRequest/"+newName+"#1")
+	}, more...), "k8s get RemediationRequest/"+newName+"#1", "k8s patch status RemediationRequest/"+newName+"#1",
+		// The request as the API server holds it, for the ends of its waits (withinWaits, #885).
+		"k8s get RemediationRequest/"+newName+"#2")
 }
+
+// watchPaced is the read of a watch after the abort that comes after the condition is removed (recoveryPath.paced).
+var watchPaced = map[string]bool{"k8s get RemediationRequest/" + newName + "#2": true}
 
 // watching is the end of a look that leaves the replacement watching after the abort, with the condition removed.
 func watching(rr *api.RemediationRequest) bool {
@@ -550,6 +559,7 @@ var recoveryPaths = []recoveryPath{
 		arrange: func(*testing.T, *RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest, providers.ChangeRequest) {
 		},
 		calls: watchCalls(),
+		paced: watchPaced,
 		ended: watching,
 	},
 	{
@@ -562,6 +572,7 @@ var recoveryPaths = []recoveryPath{
 			}
 		},
 		calls: watchCalls("git ListChangeRequests(open=true)#1"),
+		paced: watchPaced,
 		ended: watching,
 	},
 	{
@@ -639,10 +650,12 @@ var recoveryPaths = []recoveryPath{
 				t.Fatal(err)
 			}
 		},
-		// Nothing is read from the Git host: the watch goes on with the condition of the refusal.
+		// Nothing is read from the Git host: the watch goes on with the condition of the refusal, paced within the
+		// ends of its waits as the API server holds them (withinWaits, #885).
 		calls: []string{
 			"k8s get RemediationRequest/" + oldName + "#1",
 			"k8s get RemediationRequest/" + oldName + "#2",
+			"k8s get RemediationRequest/" + newName + "#1",
 		},
 		ended: func(rr *api.RemediationRequest) bool {
 			return rr.Status.Phase == api.PhasePolicyChecked && abortedOnRefusal(rr) && watchedRecovery(rr) != nil
@@ -772,6 +785,14 @@ func recoveryWaitRow(t *testing.T, path recoveryPath, call string, kind failureK
 		if err != nil || !end(got) {
 			t.Fatalf("a failed read that holds nothing back changed the look: err %v, phase %q, conditions %+v",
 				err, got.Status.Phase, got.Status.Conditions)
+		}
+		return
+	}
+	if path.paced[call] {
+		if err == nil || !watching(got) {
+			t.Fatalf("a failed read of the request for its pace: recoverHandoff = %+v, %v, phase %q, conditions %+v; "+
+				"want the error back for the error backoff and the condition removed", res, err, got.Status.Phase,
+				got.Status.Conditions)
 		}
 		return
 	}

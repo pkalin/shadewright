@@ -131,6 +131,154 @@ func TestBranchChangeStopOnPullRequestOpenedRecordsMerge(t *testing.T) {
 	}
 }
 
+// A pull request adopted by the read after a stop for the branch change (none recorded, #827), merged into the
+// recorded branch, whose check of its head (checkMerged) never reads: the read is one of the merge wait about that
+// pull request, so the request ends at the end of the wait, from its entry, as a merge whose content could not be
+// checked, with no receipt, and the lock goes after the read of the branch (#889). A refusal for good (403, 404) is a
+// failed read like a 503 (design 6.5.1).
+func TestAdoptedHeldMergeCheckEndsAtMergeWait(t *testing.T) {
+	for name, readErr := range map[string]error{
+		"a recurring 503":    &providers.RetryableError{Err: errors.New("status 503")},
+		"a refusal for good": fmt.Errorf("status 403: %w", providers.ErrForbidden),
+		"a repository gone":  fmt.Errorf("status 404: %w", providers.ErrNotFound),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			ctx := context.Background()
+			number := lostRecord(t, r, rr, api.ConditionPROpened)
+			if _, err := g.Merge(number); err != nil {
+				t.Fatal(err)
+			}
+			g.SetFail(func(op string) error {
+				if op == opCheckMerged {
+					return readErr
+				}
+				return nil
+			})
+			clock := clockOf(r)
+			start := clock.at
+			request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+			res, err := r.Reconcile(ctx, request)
+			if err != nil || res.RequeueAfter <= 0 {
+				t.Fatalf("first reconcile = %+v, %v; want a visible wait and no error", res, err)
+			}
+			if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
+				t.Fatal(err)
+			}
+			if w := gitWait(rr, waitMergeCheck); w == nil || w.PullRequest == nil || w.PullRequest.Number != number {
+				t.Fatalf("the failed check starts no merge wait about #%d: %+v", number, rr.Status.GitWaits)
+			}
+			for clock.at.Before(start.Add(mergeCommitWait + 3*time.Minute)) {
+				clock.advance(time.Minute)
+				if _, err := r.Reconcile(ctx, request); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
+					t.Fatal(err)
+				}
+				if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved); c != nil &&
+					c.Reason == ReasonMergedWithForeignChange {
+					break
+				}
+			}
+			approved := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved)
+			if approved == nil || approved.Reason != ReasonMergedWithForeignChange ||
+				!strings.Contains(approved.Message, ReasonMergeContentUnreadable) {
+				t.Fatalf("not ended by the merge wait: Approved %+v, waits %+v", approved, rr.Status.GitWaits)
+			}
+			if clock.at.After(start.Add(mergeCommitWait + time.Minute)) {
+				t.Fatalf("ended %v after the start, past the wait plus a poll", clock.at.Sub(start))
+			}
+			if rr.Status.MergeReceipt != nil || rr.Status.PullRequest == nil || rr.Status.PullRequest.Number != number {
+				t.Fatalf("receipt %+v, pull request %+v; want #%d recorded with no receipt", rr.Status.MergeReceipt,
+					rr.Status.PullRequest, number)
+			}
+			clock.advance(time.Minute)
+			if _, err := r.Reconcile(ctx, request); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
+				t.Fatal(err)
+			}
+			if rr.Status.HoldsTarget != nil && *rr.Status.HoldsTarget {
+				t.Fatal("the lock stays after the read of the branch found no other open pull request")
+			}
+		})
+	}
+}
+
+// A request cancelled because its Incident is gone, whose own pull request, opened with its answer lost, is found
+// merged by the read of the branch (followCancelledMerge) while the check of its head never reads: the read is one of
+// the merge wait about that pull request, so the request ends at the wait's end, from its entry, as a merge whose
+// content could not be checked, with no receipt (#889).
+func TestCancelledForIncidentMergeCheckEndsAtMergeWait(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseCancelled)
+	ctx := context.Background()
+	settings := &api.RemediationSettings{}
+	if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Repositories[0].TargetBranch = mainBranch
+	if err := r.Update(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	number := rr.Status.PullRequest.Number
+	rr.Status.PullRequest = nil
+	meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionPROpened,
+		Status: metav1.ConditionFalse, Reason: api.ReasonIncidentGone, Message: whyIncidentGone})
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Merge(number); err != nil {
+		t.Fatal(err)
+	}
+	g.SetFail(func(op string) error {
+		if op == opCheckMerged {
+			return &providers.RetryableError{Err: errors.New("status 503")}
+		}
+		return nil
+	})
+	clock := clockOf(r)
+	start := clock.at
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+	res, err := r.Reconcile(ctx, request)
+	if err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("first reconcile = %+v, %v; want a visible wait and no error", res, err)
+	}
+	if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
+		t.Fatal(err)
+	}
+	if w := gitWait(rr, waitMergeCheck); w == nil || w.PullRequest == nil || w.PullRequest.Number != number {
+		t.Fatalf("the failed check starts no merge wait about #%d: %+v", number, rr.Status.GitWaits)
+	}
+	for clock.at.Before(start.Add(mergeCommitWait + 3*time.Minute)) {
+		clock.advance(time.Minute)
+		if _, err := r.Reconcile(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Get(ctx, request.NamespacedName, rr); err != nil {
+			t.Fatal(err)
+		}
+		if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved); c != nil &&
+			c.Reason == ReasonMergedWithForeignChange {
+			break
+		}
+	}
+	approved := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved)
+	if approved == nil || approved.Reason != ReasonMergedWithForeignChange ||
+		!strings.Contains(approved.Message, ReasonMergeContentUnreadable) {
+		t.Fatalf("not ended by the merge wait: phase %s, Approved %+v, waits %+v", rr.Status.Phase, approved,
+			rr.Status.GitWaits)
+	}
+	if clock.at.After(start.Add(mergeCommitWait + time.Minute)) {
+		t.Fatalf("ended %v after the start, past the wait plus a poll", clock.at.Sub(start))
+	}
+	if rr.Status.MergeReceipt != nil {
+		t.Fatalf("receipt %+v; want none", rr.Status.MergeReceipt)
+	}
+}
+
 // Finding 2 of #827: every read of what a retargeted merge brought runs out of the cleanup's time. Each reconcile
 // is a paced wait with no error, the content wait's clock starts at the first, and the first reconcile past
 // mergeContentWait ends the request MergeContentUnreadable, before any read.

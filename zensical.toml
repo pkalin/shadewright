@@ -163,29 +163,11 @@ features = [
   "toc.follow",
 ]
 
-# Follow the reader's system preference first, with a toggle between system, light and dark.
+# Dark only: one palette, so the theme renders no toggle and ignores the reader's colour preference.
 [[project.theme.palette]]
-media = "(prefers-color-scheme)"
-primary = "custom"
-accent = "custom"
-toggle.icon = "lucide/sun-moon"
-toggle.name = "Switch to light mode"
-
-[[project.theme.palette]]
-media = "(prefers-color-scheme: light)"
-scheme = "default"
-primary = "custom"
-accent = "custom"
-toggle.icon = "lucide/sun"
-toggle.name = "Switch to dark mode"
-
-[[project.theme.palette]]
-media = "(prefers-color-scheme: dark)"
 scheme = "slate"
 primary = "custom"
 accent = "custom"
-toggle.icon = "lucide/moon"
-toggle.name = "Switch to system preference"
 
 # The Zensical defaults, set explicitly, plus snippets for the abbreviation glossary (includes/glossary.md).
 [project.markdown_extensions]

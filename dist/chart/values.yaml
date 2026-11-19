@@ -121,6 +121,9 @@ rbac:
 ## The executor reconciles RemediationRequests and is the only component that talks to Git. Its identity may
 ## only sign with the GitHub App key in Key Vault.
 executor:
+  # -- Deploy the executor. `false` renders none of its objects (Deployment, ServiceAccount, Roles and bindings, PodDisruptionBudget, metrics Service, NetworkPolicy, leader election Lease, ServiceMonitor, and its subject in the metrics authentication binding), so nothing in the release can write to Git. The analyzer is unchanged: it still records Incidents and diagnoses, and a RemediationRequest it proposes gets no phase because nothing checks it, so leave `analyzer.analysis.actionPolicies` empty in this mode. Also set `verifier.watchNamespaces: []`: the verifier works only on requests in `Verifying`, a phase only the executor sets. With `false` the chart refuses the values that only configure an executor: `executor.replicas` other than 1, `identity.azure.clientId`, `serviceAccount.annotations`, `goMemLimit`, `reviewerHints.enabled`, `verification.enabled`, `verification.nodeGrace` other than `1m`, `extraArgs` and `metricsTLS.secretName`. Image, resources and Pod placement values are not refused and have no effect.
+  # @section -- Executor
+  enabled: true
   # -- Number of Pods. 1 (the default) runs the one Pod. Above 1 the extra Pods are warm standbys: leader election keeps one of them active and the others idle, and when the leader's Pod fails a standby takes over after about one Lease duration (15 seconds by default). A standby costs an idle Pod and adds no throughput. Above 1 the chart also renders a PodDisruptionBudget (`minAvailable: 1`) and a preferred Pod anti-affinity by node, unless `affinity` sets `podAntiAffinity` itself.
   # @section -- Executor
   replicas: 1

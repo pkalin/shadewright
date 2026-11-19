@@ -1,7 +1,7 @@
 name: Chart test
 
 # Lints and renders the Helm chart and installs it on Kind: with explicit values, and with chart-testing (ct lint,
-# then the default values plus image.allowTag with images built from the checkout, an Anthropic-only install, the metrics TLS profile scraped with a right and wrong CA and server name, ct install and helm test), and
+# then the default values plus image.allowTag with images built from the checkout, an Anthropic-only install, an analyzer-only install (executor.enabled=false), the metrics TLS profile scraped with a right and wrong CA and server name, ct install and helm test), and
 # scans the rendered chart and config/ for misconfigurations with Trivy (HIGH and CRITICAL fail the run unless
 # .trivyignore.yaml ignores them with a reason).
 # Called by ci.yml on pull requests and by chart.yml before a release tag publishes the chart.
@@ -206,6 +206,12 @@ jobs:
       # from a Pod with a ServiceAccount token: the right CA and server name succeed, a wrong CA or name fail.
       - name: Install with the metrics TLS profile and scrape with the trust profile
         run: make test-chart-metrics-tls
+
+      # The analyzer without the executor and the verifier (executor.enabled=false, #934): no object of either exists,
+      # a workload that cannot start gets an Incident (no model needed) and no RemediationRequest is created. It
+      # rebuilds the analyzer image from the Docker cache and waits up to 7 minutes for the Incident.
+      - name: Install without the executor and check the analyzer alone
+        run: make test-chart-analyzer-only
 
       # Installs with ci/default-values.yaml (image.allowTag only, the rest default), runs helm test and uninstalls.
       - name: ct install

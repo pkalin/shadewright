@@ -118,7 +118,7 @@ spec:
     - /bin/sh
     - -ec
     - |
-      for url in "$EXECUTOR_URL" "$ANALYZER_URL" ${VERIFIER_URL:+"$VERIFIER_URL"}; do
+      for url in {{ if include "shadewright.executorEnabled" . }}"$EXECUTOR_URL" {{ end }}"$ANALYZER_URL" ${VERIFIER_URL:+"$VERIFIER_URL"}; do
         got=""
         for i in $(seq 1 30); do
           got="$(curl --silent --insecure --output /dev/null --max-time 5 --write-out '%{http_code}' "$url" || true)"
@@ -134,8 +134,10 @@ spec:
     env:
     - name: WANT
       value: {{ $want | quote }}
+    {{- if include "shadewright.executorEnabled" . }}
     - name: EXECUTOR_URL
       value: {{ printf "%s://%s.%s.svc:%d/metrics" $scheme (include "shadewright.resourceName" (dict "suffix" "executor-metrics-service" "context" $)) .Release.Namespace (int .Values.metrics.port) | quote }}
+    {{- end }}
     - name: ANALYZER_URL
       value: {{ printf "%s://%s.%s.svc:%d/metrics" $scheme (include "shadewright.resourceName" (dict "suffix" "analyzer-metrics-service" "context" $)) .Release.Namespace (int .Values.metrics.port) | quote }}
     {{- if include "shadewright.verifierEnabled" . }}

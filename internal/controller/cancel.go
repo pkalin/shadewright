@@ -129,7 +129,8 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 //     merge ends it Merged and a close Cancelled, and tries the close again.
 //   - A failed read of a pull request, whatever its class, and any other failure are retried with backoff, with
 //     CancelPending (cancelFailed), for cleanupFailingBound; then the request is watched as for a refusal. While a
-//     refusal is the reason of CancelPending, such a failure writes nothing and records no Event.
+//     refusal is the reason of CancelPending, such a failure writes nothing and records no Event, except a failed
+//     check of a merged head, which records its merge wait in both watches (cancelFailed, #889).
 //   - A pause of writes waits (waitWhilePaused) and starts no bound.
 func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	outcome prOutcome) (reconcile.Result, error) {
@@ -390,9 +391,12 @@ func (r *RemediationRequestReconciler) cancelHandoffWait(ctx context.Context, rr
 // answer). Within cleanupFailingBound after CancelPending was first set, it records CancelPending (CancelFailing)
 // and retries as waitOrFail says (the error backoff, or the delay the host asked for), never later than the end of
 // the bound. After it, the request is watched (CancelNotFinished). While a refusal is the reason of CancelPending
-// (cancelRefused), the reason does not change: nothing is written, no Event is recorded, and the request is looked
-// at again after the poll interval (or the delay the host asked for, when longer), as the refusal's watch does. The
-// caller's cancellation records nothing and is returned.
+// (cancelRefused), the reason does not change: no condition is written, no Event is recorded, and the request is
+// looked at again after the poll interval (or the delay the host asked for, when longer), as the refusal's watch
+// does. In both watches a failed read of a wait of its own (waitedRead: the check of a merged head, what a merge
+// brought) is recorded with that wait (retryGitRead, noBoundWatchedCancel), so the request ends at that wait's end
+// as with every other caller, and the retry is never later than it (#889). The caller's cancellation records
+// nothing and is returned.
 func (r *RemediationRequestReconciler) cancelFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error, why string) (reconcile.Result, error) {
 	if ctx.Err() != nil {
@@ -403,13 +407,20 @@ func (r *RemediationRequestReconciler) cancelFailed(ctx context.Context, rr *rem
 		// nothing and records no Event, and the request stays watched.
 		logf.FromContext(ctx).Info("Could not finish the cancel of RemediationRequest; still watching it",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "refusal", c.Reason, "error", err.Error())
+		if waitedRead(err) {
+			return r.retryGitRead(ctx, rr, err, unboundedRead(noBoundWatchedCancel))
+		}
 		return reconcile.Result{RequeueAfter: max(r.pullRequestPollInterval(), retryAfterOf(err))}, nil
 	}
 	left, past := r.cancelBound(rr)
 	if past {
 		logf.FromContext(ctx).Info("Could not finish the cancel of RemediationRequest; watching it",
 			"remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
-		return r.cancelWatch(ctx, rr, ReasonCancelNotFinished, why)
+		res, werr := r.cancelWatch(ctx, rr, ReasonCancelNotFinished, why)
+		if werr != nil || !waitedRead(err) {
+			return res, werr
+		}
+		return r.retryGitRead(ctx, rr, err, unboundedRead(noBoundWatchedCancel))
 	}
 	if werr := r.setCancelPending(ctx, rr, ReasonCancelFailing, why, false); werr != nil {
 		return reconcile.Result{}, werr
@@ -419,6 +430,13 @@ func (r *RemediationRequestReconciler) cancelFailed(ctx context.Context, rr *rem
 		res.RequeueAfter = left
 	}
 	return res, werr
+}
+
+// waitedRead reports whether err is a failed Git read that belongs to a wait of its own with an end (the check at the
+// merge, readOfMergeCheck, or what a merge brought, readOfContent).
+func waitedRead(err error) bool {
+	_, ok := errors.AsType[*kindedReadError](err)
+	return ok && gitReadFailure(err)
 }
 
 // cancelWatch keeps a cancelled request that cannot be ended in its phase (reason and why say why) and watches its

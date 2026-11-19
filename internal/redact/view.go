@@ -328,11 +328,6 @@ var viewKey = regexp.MustCompile(`(?i)(` + secretKeyExpr + `)` + keySpaceExpr + 
 var neighbourKey = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])(?:\\*["'])?(` + bareKeyExpr + `)(?:\\*["'])?` +
 	keySpaceExpr + `*[:=]|(?:^|[^A-Za-z0-9_.-])(--?` + bareKeyExpr + `)(?:[ \t=]|$)`)
 
-// plainKeyAfterComma matches a comma and a plain key ("name:", "'user':") after it: the end of a value in a
-// flow collection at the same boundary the flow rule has, so the fields after it stay.
-var plainKeyAfterComma = regexp.MustCompile(`,` + keySpaceExpr + `*(?:"[^"\r\n]*"|'[^'\r\n]*'|[A-Za-z_][A-Za-z0-9_.-]*)` +
-	keySpaceExpr + `*:`)
-
 // maxStripClosers bounds the closing brackets after a value that the block-value rule keeps, so a line of many
 // brackets costs constant time per key.
 const maxStripClosers = 8
@@ -422,12 +417,13 @@ func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), re
 		}
 	}
 	covered := -1
+	fl := newFlowLine(s, l.start, l.end)
 	for i, k := range keys {
 		tick(1)
 		if !k.block && !k.plain && !k.word || k.after > k.valueEnd || k.m[0] < covered {
 			continue
 		}
-		end := viewValueEnd(s, keys, i, nextTaking[i])
+		end := viewValueEndIn(fl, keys, i, nextTaking[i])
 		// The keys inside this value are read with it, so a line of keys is read once.
 		covered = max(covered, end)
 		if k.after < end && (s[k.after] != '#' || !k.block || bStart < 0 || k.strEnd >= 0) &&
@@ -564,6 +560,13 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 // comma and a plain key in a flow collection, at the last bracket that closes the innermost collection, without
 // its trailing separators.
 func viewValueEnd(s string, keys []viewKeyAt, i, next int) int {
+	return viewValueEndIn(newFlowLine(s, 0, len(s)), keys, i, next)
+}
+
+// viewValueEndIn is viewValueEnd with the flow brackets and commas of the line read once for all its keys (fl,
+// the line the keys stand on), asked with the values of the keys in order.
+func viewValueEndIn(fl *flowLine, keys []viewKeyAt, i, next int) int {
+	s := fl.s
 	k := keys[i]
 	// The keys of a line are in the order of their matches, so a later key that takes its value starts after
 	// keys[next]: when keys[next] starts past the end, so do they.
@@ -585,16 +588,18 @@ func viewValueEnd(s string, keys []viewKeyAt, i, next int) int {
 	switch {
 	case k.plain:
 		// A plain value in a flow collection ends at a comma, as the flow rule has it.
-		if c := indexByte(s[k.after:end], ','); c >= 0 {
-			end = k.after + c
+		if k.after < end {
+			if c := fl.nextComma(k.after); c < end {
+				end = c
+			}
 		}
 	case len(k.flow) > 0:
-		if c := plainKeyAfterComma.FindStringIndex(counted(s[k.after:end])); c != nil {
-			end = k.after + c[0]
+		if c := fl.keyCommaAt(k.after, end); c >= 0 {
+			end = c
 		}
 	}
 	if n := len(k.flow); n > 0 {
-		if c := flowCloseAt(s, k.after, end, k.flow[n-1]); c >= 0 {
+		if c := fl.closeAt(k.after, end, k.flow[n-1]); c >= 0 {
 			end = c
 		}
 	}
@@ -686,43 +691,6 @@ func addAround(s string, start, end int, block bool, add func(start, end int)) {
 		pos = ne
 	}
 	add(pos, end)
-}
-
-// flowCloseAt returns where a value from start to end in a flow collection opened by opener ends: at the last
-// closing bracket of that collection on the line, brackets opened inside the value followed, that is followed
-// by the end, a blank, a comma, a semicolon or a comment, after any more closing brackets and quotes; or -1.
-// A bracket glued to more text ("a]b") is part of the value, however it could pair with an earlier one.
-func flowCloseAt(s string, start, end int, opener byte) int {
-	var inner []byte
-	// runEnd is the end of the run of closing brackets and quotes read last: a later bracket in the same run
-	// ends there too, so the run is read once, not once for each of its brackets (#845, third decision of
-	// 2026-11-18: "{password: x" and n closing braces cost n*n/2 steps).
-	last, runEnd := -1, -1
-	for i := start; i < end; i++ {
-		tick(1)
-		switch c := s[i]; c {
-		case '[', '{':
-			inner = append(inner, c)
-		case ']', '}':
-			if n := len(inner); n > 0 && inner[n-1] == c-2 {
-				inner = inner[:n-1]
-				continue
-			}
-			if c != opener+2 {
-				continue
-			}
-			j := max(i, runEnd)
-			for j < end && strings.IndexByte(`]})"'`, s[j]) >= 0 {
-				tick(1)
-				j++
-			}
-			runEnd = j
-			if j == end || indentLen(s, j) > 0 || strings.IndexByte(",;#", s[j]) >= 0 {
-				last = i
-			}
-		}
-	}
-	return last
 }
 
 // bracketCursor follows the flow brackets ("[" and "{") of a line from its start, quotes or not, so that the

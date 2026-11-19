@@ -17,11 +17,14 @@ limitations under the License.
 package released
 
 // This package is the redactor of the release before #845 (origin/main at 0701cd3a): redact.go, extent.go and
-// work.go are that release's files of package redact, byte for byte apart from the package clause, and must not
-// be edited (TestReleasedIsTheReleaseBefore pins them). Package redact applies it as one reading of each text, at
+// work.go are that release's files of package redact, apart from the package clause and the change of #873, and
+// must not be edited otherwise (TestReleasedIsTheReleaseBefore pins them). #873 made its work linear on the
+// shapes where it was not (lines.go, the line index of a text, and the reach of the comma key expression in
+// extent.go) without changing what it hides: the code before that change is kept in testdata/v052, and the
+// tests check that both find the same spans on every input of the corpora and on generated ones. Package redact applies it as one reading of each text, at
 // the places and in the order of passes the tools of that release applied it (#845, thirteenth decision of
-// 2026-11-18), so that what the release before hid is hidden because its own code says so. Only this file and
-// the tick files are new. The package is retired, with its reading, by its own issue (pkalin/shadewright#922)
+// 2026-11-18), so that what the release before hid is hidden because its own code says so. Only this file, lines.go
+// and the tick files are new. The package is retired, with its reading, by its own issue (pkalin/shadewright#922)
 // once a release has run with both readings.
 
 // Span is a byte range of a text that the redactor of the release before hides, with the kind its marker names.

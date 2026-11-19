@@ -19,6 +19,7 @@ package released
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // The extent rule (#708). After a secret key name or flag, a value that opens a group (a quote, "[", "{",
@@ -464,7 +465,7 @@ func fieldAfterComma(s string, i, limit int) bool {
 	if j >= limit || isSpace(s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
 		return true
 	}
-	if commaSecretKey.MatchString(counted(s[j:limit])) {
+	if commaSecretKey.MatchString(counted(s[j:commaKeyReach(s, j, limit)])) {
 		return true
 	}
 	for j < limit && (isAlnum(s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
@@ -485,6 +486,33 @@ func fieldAfterComma(s string, i, limit int) bool {
 // commaSecretKey is a secret key name at the start of the text after a comma, followed by what the key rules
 // read as its separator: "=", ":" or ":=" after optional blanks, or blanks (a compound name).
 var commaSecretKey = regexp.MustCompile(`(?i)^(?:` + bareKeyExpr + `)(?:[ \t]*[:=]|[ \t]+)`)
+
+// commaKeyReach returns the end of the text from j that commaSecretKey can read, within limit: the run of the
+// characters a key name of bareKeyExpr is made of (ASCII letters, digits, "_", "." and "-", and the two
+// characters outside ASCII that a case-insensitive match reads as one of them, KELVIN SIGN for "k" and LONG S for
+// "s"), the blanks after it, and one byte more for its separator. A match starts at j and cannot read past it, so
+// the expression decides the same on that text as on the rest of the value up to limit; handing it the rest made
+// the reading of every comma of a long value cost up to maxValueExtent steps (#873).
+func commaKeyReach(s string, j, limit int) int {
+	k := j
+	for k < limit {
+		tick(1)
+		if c := s[k]; isAlnum(c) || c == '_' || c == '.' || c == '-' {
+			k++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[k:limit])
+		if r != '\u212a' && r != '\u017f' {
+			break
+		}
+		k += size
+	}
+	for k < limit && (s[k] == ' ' || s[k] == '\t') {
+		tick(1)
+		k++
+	}
+	return min(k+1, limit)
+}
 
 // plainWordEnd returns the end of a shell word that starts with plain text at pos (no quote, "$(" or
 // backtick), when a "$(" or backtick group or an escaped blank is glued to that text ("abc$(cat pw)",

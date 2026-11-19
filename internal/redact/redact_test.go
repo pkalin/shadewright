@@ -549,9 +549,10 @@ func skipLarge(t *testing.T) {
 
 // maxWorkPerByte bounds the work ([Work]) per byte of input on every hostile input of the tests: of String
 // where it has no reading of the release before, and of that reading alone (released.Spans) where it has,
-// except on the shapes of releasedSuperlinear (#873). The largest, about 710 on runs of commas after a quoted
-// value ("blanks commas"), comes from the extent rule, which reads up to maxValueExtent bytes from each value;
-// the rules that read every byte a fixed number of times account for 30 to 75. Since the thirteenth decision
+// except on the shapes of releasedSuperlinear (none since #873). The extent rule reads up to maxValueExtent bytes
+// from each value; on runs of commas after a quoted value ("blanks commas") it cost about 710 until #873, which
+// stopped reading the rest of the value again after each comma (28 since); the rules that read every byte a
+// fixed number of times account for 30 to 75. Since the thirteenth decision
 // of 2026-11-18 (#845) String also applies one pass of the reading of the release before (package released),
 // whose extent rule costs as much again; what String adds to that reading is bounded by ownWorkPerByte.
 const maxWorkPerByte = 1024

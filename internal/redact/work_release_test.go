@@ -42,13 +42,9 @@ const releaseReadingShare = 1.15
 // releasedSuperlinear are the shapes on which the reading of the release before, by itself, costs more than
 // maxWorkPerByte per byte or grows faster than linear, each with the issue that makes it linear. A shape that
 // does so and is not listed fails its test, and so does a listed shape that no longer does, so that its row
-// goes when the issue is fixed.
-var releasedSuperlinear = map[string]int{
-	`stair "pass: |"`:         873,
-	`stair "pass: | pass: |"`: 873,
-	`stair "pass: | x"`:       873,
-	`stair "pass: '|"`:        873,
-}
+// goes when the issue is fixed. Since #873 none is: the four staircases of a block scalar under a bare short key
+// listed here before it cost 505 to 1,952 steps per byte from 64 KiB to 1 MiB.
+var releasedSuperlinear = map[string]int{}
 
 // workSample is the work of String on one input, the work of the release's reading alone on the same input,
 // and the size of the input.

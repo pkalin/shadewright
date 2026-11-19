@@ -24,13 +24,16 @@ import (
 )
 
 // The files of the release before are kept byte for byte: the sums are those of redact.go, extent.go and work.go
-// of package redact at origin/main 0701cd3a with "package redact" replaced by "package released". What the code
-// computes is checked against that release's results by TestReleasedReproducesTheReleaseBefore (package redact).
+// of package redact at origin/main 0701cd3a with "package released" for "package redact", and the change of #873,
+// which made the work linear without changing the output (lines.go is new with it). What the code computes is
+// checked against that release's results by TestReleasedReproducesTheReleaseBefore (package redact), and against
+// the code before #873 (testdata/v052) by the tests of kept_test.go and TestReleasedSpansMatchKeptCopy.
 func TestReleasedIsTheReleaseBefore(t *testing.T) {
 	for name, want := range map[string]string{
-		"redact.go": "d560eb22aad31d315132ba899d54e20a6786c886cc5f30d35638fbb70877de9b",
-		"extent.go": "852b5f906660bb70bac104431b3de27b9ef25c2f79b0ddfdc4b13f7b42beed9a",
+		"redact.go": "f1c529161cef604df2e6d6741caa0d589fff7959969aef33981cbba97e81e031",
+		"extent.go": "83c7cd9d2f8b1de7af41019e7631c88eeb23962bfa3952a5f2edc6f54d0ba0aa",
 		"work.go":   "02ba296592fb1f3ac8f8d5cda941abe1ee782c89e7d1f7901844d6ae7211e3f5",
+		"lines.go":  "7ba72fa9847d6bce30faecc36b3385f67d85fe2e12ea512746a33452469b6a0c",
 	} {
 		b, err := os.ReadFile(name)
 		if err != nil {

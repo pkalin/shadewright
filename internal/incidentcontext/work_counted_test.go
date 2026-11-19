@@ -101,3 +101,68 @@ func TestBuildReadsEachValueOnce(t *testing.T) {
 		}
 	}
 }
+
+// gluedFieldsUnit is the unit the label value of the FuzzDiffBuild input bb930588237836fd repeats.
+const gluedFieldsUnit = "SECRETPROBE0005TOKEN=\"a\",b,\ufe55"
+
+// buildShapes are the two shapes of #873 as the value of a metric label, which the context builder hands to
+// redaction whole: the label value of the FuzzDiffBuild input bb930588237836fd (a key name, a quoted value and
+// fields glued to it by commas, repeated), and the staircase of the issue (a block scalar under a bare short key
+// on every line, each line one column deeper).
+var buildShapes = map[string]func(n int) string{
+	"glued fields": func(n int) string { return strings.Repeat(gluedFieldsUnit, n/len(gluedFieldsUnit)+1) },
+	"staircase": func(n int) string {
+		var b strings.Builder
+		for i := 0; b.Len() < n; i++ {
+			b.WriteString(strings.Repeat(" ", i) + "pass: |\n")
+		}
+		return b.String()
+	},
+}
+
+// buildWorkPerByte bounds the work of a whole Build, per byte of the label value in the answers of the metric
+// templates (each answers the series with that value), on the shapes of #873: the bound of package redact on
+// one reading (maxWorkPerByte). Measured on the build of #873: 278 to 283 on the glued fields and 136 to 138 on
+// the staircase, flat from 64 KiB to 1 MiB; before it, 18,203 on the glued fields at 64 KiB, and 1,075, 2,039
+// and 3,969 on the staircase.
+const buildWorkPerByte = 1024
+
+// The work of a whole Build on the shapes of #873 stays within buildWorkPerByte per byte of what the metric
+// sources answered, at 64 KiB, 256 KiB and 1 MiB, and does not grow with the size (#873).
+func TestBuildWorkIsLinear(t *testing.T) {
+	templates := 0
+	for _, p := range metricPlans {
+		if !p.hpa {
+			templates++
+		}
+	}
+	for _, name := range []string{"glued fields", "staircase"} {
+		first := 0.0
+		for _, n := range []int{64 << 10, 256 << 10, 1 << 20} {
+			value := buildShapes[name](n)
+			s := webSources()
+			for _, p := range metricPlans {
+				s.metrics.Set(p.template, []providers.Series{{
+					Labels:  map[string]string{"pod": crashPod, "key": value},
+					Samples: []providers.Sample{{Time: testNow, Value: 1}},
+				}})
+			}
+			b := newBuilder(t, reader(t, webObjects()...), s, nil)
+			total, release := redact.WorkOfReleased(func() { build(t, b, incident(deploymentRef())) })
+			size := templates * len(value)
+			perByte := float64(total) / float64(size)
+			t.Logf("%s at %d bytes of value: %.1f steps per byte, the release's reading %.1f", name, len(value), perByte,
+				float64(release)/float64(size))
+			if perByte > buildWorkPerByte {
+				t.Errorf("%s: Build takes %.1f steps per byte at %d bytes of value, over %d", name, perByte, len(value), buildWorkPerByte)
+				break
+			}
+			if first == 0 {
+				first = perByte
+			} else if perByte > 1.125*first+0.5 {
+				t.Errorf("%s: Build takes %.1f steps per byte at %d bytes of value, %.1f at the smallest: more than linear", name,
+					perByte, len(value), first)
+			}
+		}
+	}
+}

@@ -79,7 +79,7 @@ func TestExcerptWorkIsBoundedOnTheLargestInput(t *testing.T) {
 			t.Errorf("%q: Excerpt adds %.1f steps per byte at %d bytes, %.1f at %d: more than linear", unit,
 				per(st-sr, sn), sn, per(lt-lr, ln), ln)
 		}
-		// None of these shapes is one on which the release's reading is superlinear (#873): it stays bounded.
+		// The release's reading is linear on every shape since #873: it stays bounded.
 		if lr > excerptWorkPerByte*int64(ln) || grows(per(sr, sn), per(lr, ln)) {
 			t.Errorf("%q: the release's reading alone costs %.1f steps per byte at %d bytes, %.1f at %d", unit,
 				per(sr, sn), sn, per(lr, ln), ln)
@@ -88,9 +88,9 @@ func TestExcerptWorkIsBoundedOnTheLargestInput(t *testing.T) {
 }
 
 // excerptWorkPerByte bounds the work of the reading of the release before per byte of the input of Excerpt on
-// these shapes: its extent rule, at most about 710 steps per byte on the most costly one (`TOKEN="a",b,`), over
-// all of it and again over the bytes kept. On a staircase under a secret key that reading alone grows faster
-// than linear (#873, releasedSuperlinear in package redact).
+// these shapes: its extent rule, over all of it and again over the bytes kept, which cost about 710 steps per
+// byte on the most costly one (`TOKEN="a",b,`) until #873 made the reading after each comma of a value read only
+// the key name there (28 since).
 const excerptWorkPerByte = 1024
 
 // excerptOwnWorkPerByte bounds what Excerpt adds per byte to the reading of the release before: the rules of

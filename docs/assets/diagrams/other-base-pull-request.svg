@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 560" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">The executor follows its own pull request to any base</title>
-  <desc id="d">Overview of ADR-0043. The executor reads a pull request from the request's own shadewright branch on every base branch of the configured repository, not only the target branch. Open on another base: the request stops NeedsIntervention with ChangeRequestOnOtherBase and keeps the lock, TargetHeld names the pull request and its base, nothing is written to it, and the finalizer of a deleted request closes it when it carries the request's marker, except where it lets go without closing. Merged on another base: the request stops NeedsIntervention with ChangeRequestOnOtherBase, also on a cancel, records no merge and keeps no lock. Closed on another base: handled as closed, no second pull request. From a fork, another repository or another branch: in a listing ErrUntrustedAnswer for the whole call, nothing adopted or closed; by a recorded number, not the request's. More than 100 pull requests: ErrTooLarge, the lock is kept and the look is retried. Never on another base: no push, comment, check run or merge.</desc>
+  <desc id="d">Overview of ADR-0043. The executor reads a pull request from the request's own shadewright branch on every base branch of the configured repository, not only the target branch. Open on another base: the request stops NeedsIntervention with ChangeRequestOnOtherBase and keeps the lock, TargetHeld names the pull request and its base, nothing is written to it but a failed review check, any open pull request from the branch keeps the lock whether or not it carries the marker, and the finalizer of a deleted request closes only those with the request's marker, except where it lets go without closing. Merged on another base: the request stops NeedsIntervention with ChangeRequestOnOtherBase, also on a cancel, records no merge and keeps no lock. Closed on another base: handled as closed, no second pull request; the lock goes, and a number read as not found is gone, only after the listing of every base shows no open pull request from the branch. From a fork, another repository or another branch: in a listing ErrUntrustedAnswer for the whole call, nothing adopted or closed; by a recorded number, not the request's. More than 100 pull requests: ErrTooLarge, the lock is kept and the look is retried. Never on another base: no push, comment or merge, and no check run but a failed one at a stop.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -34,8 +34,8 @@
   <rect class="key" x="360" y="36" width="724" height="92" rx="12"/>
   <text class="tag" x="378" y="62">OPEN ON ANOTHER BASE</text>
   <text class="h" x="378" y="84">NeedsIntervention, ChangeRequestOnOtherBase; lock kept</text>
-  <text class="s" x="378" y="104">TargetHeld names pull request #N and its base (redacted, bounded). Nothing is written to it.</text>
-  <text class="s" x="378" y="120">A deleted request's finalizer closes it if it carries the marker (not always). A cancel ends Cancelled.</text>
+  <text class="s" x="378" y="104">TargetHeld names #N and its base (redacted, bounded). Only a failed review check is written.</text>
+  <text class="s" x="378" y="120">Any open one from the branch keeps the lock, marked or not. Deletion closes marked ones only.</text>
 
   <rect class="box" x="360" y="140" width="724" height="92" rx="12"/>
   <text class="tag" x="378" y="166">MERGED ON ANOTHER BASE</text>
@@ -46,8 +46,8 @@
   <rect class="box" x="360" y="244" width="724" height="92" rx="12"/>
   <text class="tag" x="378" y="270">CLOSED ON ANOTHER BASE</text>
   <text class="h" x="378" y="292">Handled as closed</text>
-  <text class="s" x="378" y="312">No second pull request is opened. With no number recorded, the lock is released only after the</text>
-  <text class="s" x="378" y="328">listing of every base shows no other open one; with a number, the read by number decides.</text>
+  <text class="s" x="378" y="312">No second pull request is opened. The lock is released, and a number read as not found is gone,</text>
+  <text class="s" x="378" y="328">only after the listing of every base shows no open pull request from the branch.</text>
 
   <rect class="ext" x="360" y="348" width="724" height="92" rx="12"/>
   <text class="tag" x="378" y="374">FROM A FORK, ANOTHER REPOSITORY OR ANOTHER BRANCH</text>
@@ -57,5 +57,5 @@
 
   <rect class="box" x="36" y="470" width="1048" height="64" rx="12"/>
   <text class="no" x="54" y="498">Never on another base</text>
-  <text class="s" x="54" y="518">no push, comment, check run or merge; no close of a pull request without the request's marker; no other branch, fork or repository.</text>
+  <text class="s" x="54" y="518">no push, comment or merge, no check run but a failed one at a stop; no close without the marker; no fork or other repository.</text>
 </svg>

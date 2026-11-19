@@ -45,5 +45,6 @@
 | [0041](0041-a-freshness-check-at-the-merge-of-a-pull-request.md) | A freshness check at the merge of a pull request | Proposed |
 | [0042](0042-openai-compatible-model-endpoints.md) | OpenAI-compatible model endpoints and an optional API key | Accepted |
 | [0043](0043-the-executor-follows-its-own-pull-request-to-any-base.md) | The executor follows its own pull request to any base | Accepted |
+| [0044](0044-git-origin-of-an-oci-source.md) | The Git origin of an OCI source is declared, and the artifact is only a cross-check | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

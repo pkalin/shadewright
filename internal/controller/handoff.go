@@ -780,13 +780,23 @@ func replacementHoldsRecord(pred, repl *remediationv1alpha1.RemediationRequest, 
 	return repl != nil && pred.Status.PullRequest != nil && holdsMergeRecord(repl, pred.Status.PullRequest.Number, head)
 }
 
-// holdsMergeRecord reports whether x recorded the merge of pull request number with head as its own: with its receipt,
-// or without one (status.pullRequest of that number and head with mergedAt, which the write that sets Merged stores
-// with the receipt or with the NoMergeReceipt mark, recordMerge). A merge the Git host reported without a merge commit
-// ID is recorded that way after the wait for the commit, and the request then ends Inconclusive and releases its lock:
-// it holds the record all the same, so the other request of the handoff never records the same merge again (sixth
-// round of #786).
+// holdsMergeRecord reports whether x holds the record of the merge of pull request number with head: x read that merge
+// first and stored it before anything else it did about it, so the other request of the handoff never records the
+// same merge again (decision of 2026-11-19 on #880). The record is any of: a wait of kind MergeCheck or MergeContent
+// that names that pull request and head (the first read of a merge reported without a merge commit ID, or of a merge
+// into a retargeted branch, which ends with the merge recorded); the merge recorded with its receipt, or without one
+// (status.pullRequest of that number and head with mergedAt, which the write that sets Merged stores with the receipt
+// or with the NoMergeReceipt mark, recordMerge); or a merge of that pull request recorded as not delivering the plan as
+// shown (undeliveredMerge: MergedWithForeignChange, MergeContentUnreadable, MergeNotCheckable), which stores no head:
+// a pull request merges once, so its number names the merge. Ownership does not depend on a merge commit ID, a receipt
+// or the lock alone.
 func holdsMergeRecord(x *remediationv1alpha1.RemediationRequest, number int64, head string) bool {
+	for _, k := range readWaits {
+		if w := gitWait(x, k); w != nil && w.PullRequest != nil && w.PullRequest.Number == number &&
+			w.PullRequest.HeadSHA == head {
+			return true
+		}
+	}
 	pr := x.Status.PullRequest
 	if pr == nil || pr.Number != number {
 		return false
@@ -794,7 +804,7 @@ func holdsMergeRecord(x *remediationv1alpha1.RemediationRequest, number int64, h
 	if mr := x.Status.MergeReceipt; mr != nil && mr.HeadSHA == head {
 		return true
 	}
-	return pr.HeadSHA == head && pr.MergedAt != nil
+	return undeliveredMerge(x) || (pr.HeadSHA == head && pr.MergedAt != nil)
 }
 
 // replacementTookOver reports whether the replacement rr's standing intent names, read from the API server, recorded

@@ -436,6 +436,44 @@ func TestGitCloseAndMerge(t *testing.T) {
 	}
 }
 
+// A change request moved to another base is refused by CloseChangeRequest with an error of no class, open or merged,
+// as the GitHub adapter refuses a pull request that is not to its target branch; CloseChangeRequestAnyBase and a
+// view opened for that base close it.
+func TestGitCloseRefusesAnotherBase(t *testing.T) {
+	for _, merged := range []bool{false, true} {
+		g, head := newRepo(t)
+		ctx := context.Background()
+		_, cr := mustOpen(t, g, head)
+		if err := g.CreateBranch(ctx, "hotfix", head); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetBase(cr.Number, "hotfix"); err != nil {
+			t.Fatal(err)
+		}
+		if merged {
+			if _, err := g.Merge(cr.Number); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := g.CloseChangeRequest(ctx, cr.Number)
+		if err == nil || providers.IsConflict(err) || providers.IsNotFound(err) {
+			t.Fatalf("merged=%v: close on another base: %v, want a refusal of no class", merged, err)
+		}
+		if merged {
+			continue
+		}
+		if got := g.ChangeRequests()[cr.Number-1]; got.State != providers.ChangeRequestOpen {
+			t.Fatalf("refused close left it %s", got.State)
+		}
+		if err := g.ForTarget("hotfix").CloseChangeRequest(ctx, cr.Number); err != nil {
+			t.Fatalf("close through a view for its base: %v", err)
+		}
+		if err := g.CloseChangeRequestAnyBase(ctx, cr.Number); err != nil {
+			t.Fatalf("close on any base: %v", err)
+		}
+	}
+}
+
 func TestGitCheckMergedAndComment(t *testing.T) {
 	g, head := newRepo(t)
 	ctx := context.Background()

@@ -48,6 +48,7 @@ const (
 	opFindCR       = "GitHub find pull request"
 	opGetCR        = "GitHub get pull request"
 	opListCR       = "GitHub list pull requests of a branch"
+	opListAnyCR    = "GitHub list pull requests of a branch to any base"
 	opCloseCR      = "GitHub close pull request"
 	opCommentCR    = "GitHub comment on pull request"
 	opAutoMerge    = "GitHub auto-merge"
@@ -1011,8 +1012,25 @@ func (p *Provider) ownRepo(r *pullRepoJSON) bool {
 // ours reports whether a pull request comes from a shadewright/ branch of this repository and targets the
 // target branch of this repository. A fork may use the same branch name; its pull requests are not ours.
 func (p *Provider) ours(pr pullJSON) bool {
-	return pr.Number > 0 && isHeadBranch(pr.Head.Ref) && p.ownRepo(pr.Head.Repo) &&
-		pr.Base.Ref == p.target && p.ownRepo(pr.Base.Repo)
+	return p.oursAnyBase(pr) && pr.Base.Ref == p.target
+}
+
+// oursAnyBase reports whether a pull request comes from a shadewright/ branch of this repository and targets any
+// branch of this repository: also one whose base a person moved off the target branch (#892).
+func (p *Provider) oursAnyBase(pr pullJSON) bool {
+	return pr.Number > 0 && isHeadBranch(pr.Head.Ref) && p.ownRepo(pr.Head.Repo) && p.ownRepo(pr.Base.Repo)
+}
+
+// baseText is the base name of cr as the caller may see it: the target branch, or another name only when it is
+// valid by the rule for target branches. A base is text from the code host that would reach a condition message
+// and the log (invariant 4), and a code host allows more base names than that rule does (shadewright/ branches,
+// "+", long names), so a name outside it is left out, never the pull request: its number is still the answer
+// (decision of 2026-11-19 on #892).
+func (p *Provider) baseText(base string) string {
+	if base == p.target || validTargetBranch(base) {
+		return base
+	}
+	return ""
 }
 
 func (p *Provider) toChangeRequest(op string, pr pullJSON) (providers.ChangeRequest, error) {
@@ -1202,8 +1220,27 @@ const branchPullsPerPage = 50
 // right, since it is no longer open.
 func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) (
 	[]providers.ChangeRequest, error) {
+	return p.listBranch(ctx, opListCR, headBranch, openOnly, false)
+}
+
+// ListChangeRequestsAnyBase returns the pull requests from headBranch of this repository to any base branch of
+// this repository, newest first (#892): the open ones when openOnly is true, all of them otherwise. It is
+// ListChangeRequests without the base, on the same terms: at most MaxBranchChangeRequests in pages of
+// branchPullsPerPage, ErrTooLarge past them. Every entry must be from headBranch of this repository to a branch of
+// this repository (with openOnly, also open): any other entry is ErrUntrustedAnswer for the whole call. A base whose
+// name is not valid by the rule for target branches is returned empty, with the pull request (decision of
+// 2026-11-19).
+func (p *Provider) ListChangeRequestsAnyBase(ctx context.Context, headBranch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	return p.listBranch(ctx, opListAnyCR, headBranch, openOnly, true)
+}
+
+// listBranch is ListChangeRequests (anyBase false) and ListChangeRequestsAnyBase (anyBase true, which asks
+// GitHub for no base and takes an entry to any base branch of this repository).
+func (p *Provider) listBranch(ctx context.Context, op, headBranch string, openOnly, anyBase bool) (
+	[]providers.ChangeRequest, error) {
 	if !isHeadBranch(headBranch) {
-		return nil, errors.New(opListCR + ": head branch is not a Shadewright branch")
+		return nil, errors.New(op + ": head branch is not a Shadewright branch")
 	}
 	state := "all"
 	if openOnly {
@@ -1215,58 +1252,67 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 	var out []providers.ChangeRequest
 	const maxPages = providers.MaxBranchChangeRequests / branchPullsPerPage
 	for page := 1; ; page++ {
-		r, err := p.do(ctx, call{op: opListCR, method: http.MethodGet, path: pathPulls, query: url.Values{
+		query := url.Values{
 			"head": {p.repo.Owner + ":" + headBranch}, "base": {p.target}, paramState: {state},
 			"sort": {"created"}, "direction": {"desc"}, paramPerPage: {strconv.Itoa(branchPullsPerPage)},
 			paramPage: {strconv.Itoa(page)},
-		}})
+		}
+		if anyBase {
+			query.Del("base")
+		}
+		r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: pathPulls, query: query})
 		if err != nil {
 			return nil, err
 		}
 		if !r.ok() {
-			return nil, statusError(opListCR, r.status)
+			return nil, statusError(op, r.status)
 		}
 		// A pointer, so that a JSON null (or an empty body) is told apart from an empty list: only an array is an
 		// answer, anything else is a broken one, retried like any unclassified failure, never "none".
 		var prs *[]pullJSON
-		if err := decode(opListCR, r, &prs); err != nil {
+		if err := decode(op, r, &prs); err != nil {
 			return nil, err
 		}
 		if prs == nil {
-			return nil, errors.New(opListCR + ": GitHub answered without a list of pull requests")
+			return nil, errors.New(op + ": GitHub answered without a list of pull requests")
 		}
 		for _, pr := range *prs {
-			if !p.ours(pr) || pr.Head.Ref != headBranch || (openOnly && (pr.State != stateOpen || pr.MergedAt != nil)) {
-				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", opListCR,
+			ours := p.ours(pr)
+			if anyBase {
+				ours = p.oursAnyBase(pr)
+			}
+			if !ours || pr.Head.Ref != headBranch || (openOnly && (pr.State != stateOpen || pr.MergedAt != nil)) {
+				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", op,
 					providers.ErrUntrustedAnswer)
 			}
-			cr, err := p.toChangeRequest(opListCR, pr)
+			cr, err := p.toChangeRequest(op, pr)
 			if err != nil {
 				return nil, err
 			}
+			cr.BaseBranch = p.baseText(cr.BaseBranch)
 			if prev, ok := seen[pr.Number]; ok {
 				if prev.State != cr.State || prev.HeadSHA != cr.HeadSHA {
 					// Two pages answered differently about one pull request: neither answer is believed.
 					return nil, fmt.Errorf("%s: GitHub listed pull request #%d twice with a different state or head",
-						opListCR, pr.Number)
+						op, pr.Number)
 				}
 				continue
 			}
 			seen[pr.Number] = cr
 			if out = append(out, cr); len(out) > providers.MaxBranchChangeRequests {
-				return nil, fmt.Errorf("%s: more than %d pull requests: %w", opListCR,
+				return nil, fmt.Errorf("%s: more than %d pull requests: %w", op,
 					providers.MaxBranchChangeRequests, providers.ErrTooLarge)
 			}
 		}
 		last, err := lastLinkPage(r.header.Get("Link"))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", opListCR, err)
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 		if last <= page {
 			break
 		}
 		if page >= maxPages {
-			return nil, fmt.Errorf("%s: more than %d pull requests: %w", opListCR,
+			return nil, fmt.Errorf("%s: more than %d pull requests: %w", op,
 				providers.MaxBranchChangeRequests, providers.ErrTooLarge)
 		}
 	}
@@ -1275,8 +1321,9 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 }
 
 // GetChangeRequest returns pull request number of this repository, in any state. ErrNotFound when GitHub has
-// none with that number (404, 410), and also when it is not from a shadewright/ branch of this repository to
-// the target branch, such as a fork's pull request: that one is never Shadewright's. An answer with another
+// none with that number (404, 410), and also when it is not from a shadewright/ branch of this repository, such
+// as a fork's pull request: that one is never Shadewright's. A pull request on any base branch of the repository is
+// returned, with its base name (BaseBranch) when it passes the rule for target branches. An answer with another
 // number is ErrUntrustedAnswer, never retried; an answer without a number is an unclassified error, retried. A
 // merged pull request without a full merge commit ID is returned with none (toChangeRequest).
 func (p *Provider) GetChangeRequest(ctx context.Context, number int64) (providers.ChangeRequest, error) {
@@ -1305,19 +1352,35 @@ func (p *Provider) GetChangeRequest(ctx context.Context, number int64) (provider
 		return providers.ChangeRequest{}, fmt.Errorf("%s: GitHub returned another pull request: %w", opGetCR,
 			providers.ErrUntrustedAnswer)
 	}
-	if !p.ours(pr) {
-		return providers.ChangeRequest{}, fmt.Errorf("%s: not a Shadewright pull request to the target branch: %w",
+	if !p.oursAnyBase(pr) {
+		return providers.ChangeRequest{}, fmt.Errorf("%s: not a Shadewright pull request of this repository: %w",
 			opGetCR, providers.ErrNotFound)
 	}
-	return p.toChangeRequest(opGetCR, pr)
-}
-
-func (p *Provider) pull(ctx context.Context, number int64) (pullJSON, error) {
-	return p.pullFor(ctx, opCloseCR, number)
+	cr, err := p.toChangeRequest(opGetCR, pr)
+	if err != nil {
+		return providers.ChangeRequest{}, err
+	}
+	// A pull request a person moved to another base is still read by its number (#892): the caller compares the
+	// base with the target branch, and sees another base's name only when it passes the rule (baseText).
+	cr.BaseBranch = p.baseText(cr.BaseBranch)
+	return cr, nil
 }
 
 // pullFor reads pull request number for op and refuses one that is not ours.
 func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJSON, error) {
+	return p.pullIf(ctx, op, number, p.ours, refusedTarget)
+}
+
+// What pullIf says of a pull request that ok refuses: not ours on the target branch, or (any base) not from a
+// shadewright/ branch of this repository to a branch of this repository.
+const (
+	refusedTarget  = "not a Shadewright pull request to the target branch"
+	refusedAnyBase = "not a Shadewright pull request of this repository"
+)
+
+// pullIf reads pull request number for op and refuses one that is not ok.
+func (p *Provider) pullIf(ctx context.Context, op string, number int64, ok func(pullJSON) bool,
+	refusal string) (pullJSON, error) {
 	r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: "/pulls/" + strconv.FormatInt(number, 10)})
 	if err != nil {
 		return pullJSON{}, err
@@ -1332,8 +1395,8 @@ func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJS
 	if pr.Number != number {
 		return pullJSON{}, errors.New(op + ": GitHub returned an unexpected pull request")
 	}
-	if !p.ours(pr) {
-		return pullJSON{}, errors.New(op + ": not a Shadewright pull request to the target branch")
+	if !ok(pr) {
+		return pullJSON{}, errors.New(op + ": " + refusal)
 	}
 	return pr, nil
 }
@@ -1566,12 +1629,24 @@ func closeState(pr pullJSON) (bool, error) {
 // CloseChangeRequest closes a pull request from a shadewright/ branch to the target branch without merging
 // it. Closing a closed one succeeds; a merged one is ErrConflict. Other pull requests are refused.
 func (p *Provider) CloseChangeRequest(ctx context.Context, number int64) error {
+	return p.closeIf(ctx, number, p.ours, refusedTarget)
+}
+
+// CloseChangeRequestAnyBase is CloseChangeRequest for a pull request from a shadewright/ branch of this repository to
+// any base branch of this repository (#892): the finalizer closes the request's own one wherever a person moved it.
+func (p *Provider) CloseChangeRequestAnyBase(ctx context.Context, number int64) error {
+	return p.closeIf(ctx, number, p.oursAnyBase, refusedAnyBase)
+}
+
+// closeIf closes pull request number when ok accepts it, read before the close and after a refused one; refusal is
+// the text of the error for one it does not.
+func (p *Provider) closeIf(ctx context.Context, number int64, ok func(pullJSON) bool, refusal string) error {
 	if number < 1 {
 		return errors.New(opCloseCR + ": number must be positive")
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
-	pr, err := p.pull(ctx, number)
+	pr, err := p.pullIf(ctx, opCloseCR, number, ok, refusal)
 	if err != nil {
 		return err
 	}
@@ -1597,7 +1672,7 @@ func (p *Provider) CloseChangeRequest(ctx context.Context, number int64) error {
 		pr = closed
 	case http.StatusUnprocessableEntity:
 		// It may have been merged or closed in the meantime: read it again.
-		if pr, err = p.pull(ctx, number); err != nil {
+		if pr, err = p.pullIf(ctx, opCloseCR, number, ok, refusal); err != nil {
 			return err
 		}
 	default:

@@ -602,14 +602,18 @@ func (r *RemediationRequestReconciler) findHanded(ctx context.Context, git provi
 	if pred.Status.PullRequest == nil {
 		return providers.ChangeRequest{}, "", errors.New("no pull request recorded")
 	}
-	switch v := r.changeOf(ctx, git, pred, changeQuery{}); v.state {
+	v := r.changeOf(ctx, git, pred, changeQuery{})
+	switch v.state {
 	case changeUnknown:
 		return providers.ChangeRequest{}, "", v.err
-	case changeGone:
+	case changeGone, changeMergedElsewhere:
 		return providers.ChangeRequest{}, v.gone, nil
-	default:
-		return v.pr, "", nil
+	case changeElsewhere:
+		// Open on a base a person moved it to (#892): it is not taken over, and nothing is written to it there.
+		return providers.ChangeRequest{}, openElsewhereText(v.pr), nil
+	case changeOpen, changeMerged, changeClosed:
 	}
+	return v.pr, "", nil
 }
 
 func closedOrMerged(cr providers.ChangeRequest) string {
@@ -1130,10 +1134,12 @@ const (
 
 // recoverRule is recoverStep's rule per verdict after a 404 for the branch: open and unknown are retried (the
 // branch of an open pull request exists), gone has nothing to recover, merged and closed are judged by the pull
-// request's head.
+// request's head. Open on a base a person moved it to (changeElsewhere, #892) is retried like open: its branch
+// exists.
 var recoverRule = map[changeState]recoverOutcome{
 	changeOpen: recoverRetry, changeMerged: recoverFromPullRequest, changeClosed: recoverFromPullRequest,
-	changeGone: recoverNothing, changeUnknown: recoverRetry,
+	changeGone: recoverNothing, changeElsewhere: recoverRetry, changeMergedElsewhere: recoverNothing,
+	changeUnknown: recoverRetry,
 }
 
 // handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep

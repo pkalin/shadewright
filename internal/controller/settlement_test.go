@@ -117,7 +117,7 @@ func TestSettlementRetargetedClosedWithAnotherOpen(t *testing.T) {
 	if err := g.SetBase(n, freshOtherBranch); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.CloseChangeRequest(ctx, n); err != nil {
+	if err := g.Close(n); err != nil {
 		t.Fatal(err)
 	}
 	other, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(rr), BaseBranch: freshOtherBranch, Body: marker(rr)})
@@ -143,7 +143,7 @@ func TestSettlementCancelledReadsBothBranches(t *testing.T) {
 			if err := g.SetBase(rr.Status.PullRequest.Number, branch); err != nil {
 				t.Fatal(err)
 			}
-			if err := g.CloseChangeRequest(ctx, rr.Status.PullRequest.Number); err != nil {
+			if err := g.Close(rr.Status.PullRequest.Number); err != nil {
 				t.Fatal(err)
 			}
 			_, err := r.checkHeld(ctx, rr)
@@ -494,7 +494,7 @@ func TestSettlementClusterFailuresAreNotGitFailures(t *testing.T) {
 	if err := g.SetBase(rr.Status.PullRequest.Number, freshOtherBranch); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.CloseChangeRequest(ctx, rr.Status.PullRequest.Number); err != nil {
+	if err := g.Close(rr.Status.PullRequest.Number); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(rr), BaseBranch: freshOtherBranch, Body: marker(rr)}); err != nil {
@@ -867,7 +867,7 @@ func TestSettlementMergeNotCheckableWithAnotherOpen(t *testing.T) {
 			t.Fatalf("reconcile %d: the kept lock asks for no time to run again", i+1)
 		}
 	}
-	if err := g.CloseChangeRequest(ctx, other.Number); err != nil {
+	if err := g.Close(other.Number); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {

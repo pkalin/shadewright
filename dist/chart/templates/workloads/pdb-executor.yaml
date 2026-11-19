@@ -1,4 +1,4 @@
-{{- if gt (int .Values.executor.replicas) 1 }}
+{{- if and (include "shadewright.executorEnabled" .) (gt (int .Values.executor.replicas) 1) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

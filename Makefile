@@ -86,6 +86,7 @@ docs-requirements: ## Regenerate requirements-docs.txt (versions and sha256 hash
 
 .PHONY: docs-check
 docs-check: ## Build the docs site and check its internal links, heading anchors and published URLs (needs .venv, see AGENTS.md).
+	python3 -I hack/docs-reasons-check.py
 	.venv/bin/zensical build --clean
 	python3 -I hack/docs-check.py check site hack/docs-published-paths.txt
 
@@ -102,7 +103,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check and plugin dependency check scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check, condition reasons page check and plugin dependency check scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
@@ -115,6 +116,8 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/require-on-main_test.sh
 	hack/fuzz-targets_test.sh
 	hack/docs-check_test.sh
+	hack/docs-reasons-check_test.sh
+	python3 -I hack/docs-reasons-check.py
 	hack/check-plugin-deps_test.sh
 
 .PHONY: test
@@ -547,6 +550,22 @@ test-chart-defaults: chart-ct-cluster ## Install the chart with the default valu
 .PHONY: test-chart-anthropic
 test-chart-anthropic: chart-ct-cluster ## Install the chart with Anthropic-only values (test/chart/testdata/anthropic-only-values.yaml, a dummy key Secret) on the chart-testing Kind cluster and check the Deployments, the analyzer's restarts and log, and what the API server does with RemediationSettings.
 	hack/chart-anthropic-install-test.sh "$(KUBECTL)" "$(HELM)"
+
+.PHONY: chart-ct-cluster-analyzer
+chart-ct-cluster-analyzer: kind ## Create the Kind cluster of the chart-testing job (if it is not there) and load only the analyzer image built from this checkout under the chart's repository:appVersion.
+	@if printf '%s\n' "$(CHART_CT_ANALYZER)" | grep -Evxq '[a-z0-9./_-]+:[0-9A-Za-z.+-]+'; then \
+		echo "no image repository or appVersion in $(CHART_DIR): '$(CHART_CT_ANALYZER)'" >&2; exit 1; \
+	fi
+	@$(KIND) get clusters | grep -qx '$(CHART_CT_KIND_CLUSTER)' \
+		&& echo "Kind cluster '$(CHART_CT_KIND_CLUSTER)' already exists." \
+		|| $(KIND) create cluster --name $(CHART_CT_KIND_CLUSTER)
+	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) --target analyzer -t $(CHART_CT_ANALYZER) .
+	$(KIND) load docker-image --name $(CHART_CT_KIND_CLUSTER) $(CHART_CT_ANALYZER)
+	$(KUBECTL) config use-context kind-$(CHART_CT_KIND_CLUSTER)
+
+.PHONY: test-chart-analyzer-only
+test-chart-analyzer-only: chart-ct-cluster-analyzer ## Install the chart with executor.enabled=false, no verifier namespace, one watched namespace and no action policy (only the analyzer image is built) and check that no executor or verifier object exists, a broken workload gets an Incident and no RemediationRequest is created.
+	hack/chart-analyzer-only-install-test.sh "$(KUBECTL)" "$(HELM)"
 
 .PHONY: test-chart-metrics-tls
 test-chart-metrics-tls: chart-ct-cluster ## Install the chart with the metrics TLS trust profile on the chart-testing Kind cluster and scrape the metrics Services of all three components with the right CA (200), a wrong CA and a wrong server name (TLS failure).

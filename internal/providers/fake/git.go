@@ -60,6 +60,8 @@ type Git struct {
 	foreignRuns map[string][]providers.CheckRun
 	// fb is the feedback of the change requests (feedback.go), guarded by mu.
 	fb feedbackStore
+	// unnamed are the base names ListChangeRequestsAnyBase leaves out (HideBaseName), guarded by mu.
+	unnamed map[string]bool
 }
 
 // NewGit returns a repository whose branch base, its target branch, has one commit holding files.
@@ -537,7 +539,8 @@ func (g *Git) syncHeads(branch, sha string) {
 	}
 }
 
-// OpenChangeRequest opens a change request, or returns the open one for the same head branch.
+// OpenChangeRequest opens a change request, or returns the open one for the same head and base branch. As on
+// GitHub, an open one from the same head to another base (a person moved it, #892) does not stop a second one.
 func (g *Git) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
 	if err := g.before("OpenChangeRequest"); err != nil {
 		return providers.ChangeRequest{}, err
@@ -547,7 +550,7 @@ func (g *Git) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequ
 	}
 	g.mu.Lock()
 	for _, cr := range g.crs {
-		if cr.HeadBranch == req.HeadBranch && cr.State == providers.ChangeRequestOpen {
+		if cr.HeadBranch == req.HeadBranch && cr.BaseBranch == req.BaseBranch && cr.State == providers.ChangeRequestOpen {
 			out := *cr
 			g.mu.Unlock()
 			return out, nil
@@ -601,13 +604,61 @@ func (g *Git) ListChangeRequests(ctx context.Context, headBranch string, openOnl
 	return g.listFor(headBranch, openOnly, g.target)
 }
 
-// listFor is ListChangeRequests to the target branch target.
+// ListChangeRequestsAnyBase is GitProvider.ListChangeRequestsAnyBase: the change requests of headBranch to every
+// base branch, only the open ones when openOnly is true.
+func (g *Git) ListChangeRequestsAnyBase(_ context.Context, headBranch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	if err := g.before("ListChangeRequestsAnyBase"); err != nil {
+		return nil, err
+	}
+	out, err := g.listFor(headBranch, openOnly, "")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := range out {
+		if g.unnamed[out[i].BaseBranch] {
+			out[i].BaseBranch = ""
+		}
+	}
+	return out, err
+}
+
+// HideBaseName makes ListChangeRequestsAnyBase answer change requests to base with no base name, as a provider
+// does for a name outside its rule for target branches.
+func (g *Git) HideBaseName(base string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.unnamed == nil {
+		g.unnamed = map[string]bool{}
+	}
+	g.unnamed[base] = true
+}
+
+// AddOpenChangeRequest opens a change request from head to base with body, as a person can on the host, also while
+// another one of head is open (to another base). It returns its number.
+func (g *Git) AddOpenChangeRequest(head, base, body string) (int64, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	sha, ok := g.branches[head]
+	if !ok {
+		return 0, fmt.Errorf("branch %q: %w", head, providers.ErrNotFound)
+	}
+	if _, ok := g.branches[base]; !ok {
+		return 0, fmt.Errorf("branch %q: %w", base, providers.ErrNotFound)
+	}
+	n := int64(len(g.crs) + 1)
+	g.crs = append(g.crs, &providers.ChangeRequest{Number: n, URL: fmt.Sprintf("%s/pull/%d", g.url, n),
+		HeadBranch: head, BaseBranch: base, HeadSHA: sha, State: providers.ChangeRequestOpen, Body: body})
+	return n, nil
+}
+
+// listFor is ListChangeRequests to the target branch target, or to every base branch when target is empty.
 func (g *Git) listFor(headBranch string, openOnly bool, target string) ([]providers.ChangeRequest, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var out []providers.ChangeRequest
 	for _, cr := range slices.Backward(g.crs) {
-		if cr.HeadBranch != headBranch || cr.BaseBranch != target || (openOnly && cr.State != providers.ChangeRequestOpen) {
+		if cr.HeadBranch != headBranch || target != "" && cr.BaseBranch != target ||
+			(openOnly && cr.State != providers.ChangeRequestOpen) {
 			continue
 		}
 		if out = append(out, *cr); len(out) > providers.MaxBranchChangeRequests {
@@ -648,7 +699,8 @@ func (g *Git) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRe
 	return g.getFor(n, g.target)
 }
 
-// getFor is GetChangeRequest to the target branch target.
+// getFor is GetChangeRequest with the target branch target: a change request from a Shadewright branch to any base,
+// with its base name left out when HideBaseName hides it and it is not target.
 func (g *Git) getFor(n int64, target string) (providers.ChangeRequest, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -656,11 +708,15 @@ func (g *Git) getFor(n int64, target string) (providers.ChangeRequest, error) {
 	if err != nil {
 		return providers.ChangeRequest{}, err
 	}
-	if !strings.HasPrefix(cr.HeadBranch, "shadewright/") || cr.BaseBranch != target {
+	if !strings.HasPrefix(cr.HeadBranch, "shadewright/") {
 		return providers.ChangeRequest{}, fmt.Errorf("change request %d is not a Shadewright one: %w", n, providers.ErrNotFound)
 	}
 	found := *cr
 	found.Conflicted = cr.Conflicted && cr.State == providers.ChangeRequestOpen
+	if found.BaseBranch != target && g.unnamed[found.BaseBranch] {
+		// Moved to another base whose name the provider leaves out (HideBaseName).
+		found.BaseBranch = ""
+	}
 	return found, nil
 }
 
@@ -768,9 +824,28 @@ func (g *Git) AutoMergeEnabled(n int64) bool {
 	return g.auto[n]
 }
 
-// CloseChangeRequest closes a change request, idempotently.
+// CloseChangeRequest closes a change request to the target branch, idempotently. One on another base is refused
+// with an error of no class, as the GitHub adapter refuses a pull request that is not to its target branch, before
+// it looks at the state.
 func (g *Git) CloseChangeRequest(ctx context.Context, n int64) error {
-	if err := g.before("CloseChangeRequest"); err != nil {
+	return g.closeAs(ctx, "CloseChangeRequest", n, g.target)
+}
+
+// CloseChangeRequestAnyBase is GitProvider.CloseChangeRequestAnyBase: CloseChangeRequest on any base, under its own
+// operation name, so a test can tell the two apart.
+func (g *Git) CloseChangeRequestAnyBase(ctx context.Context, n int64) error {
+	return g.closeAs(ctx, "CloseChangeRequestAnyBase", n, "")
+}
+
+// CloseChangeRequest is Git.CloseChangeRequest to the view's target branch.
+func (v *TargetView) CloseChangeRequest(ctx context.Context, n int64) error {
+	return v.closeAs(ctx, "CloseChangeRequest", n, v.target)
+}
+
+// closeAs is the close of change request n as operation op, refused unless its base is target (any base when target
+// is empty).
+func (g *Git) closeAs(ctx context.Context, op string, n int64, target string) error {
+	if err := g.before(op); err != nil {
 		return err
 	}
 	if err := providers.CheckWrite(ctx); err != nil {
@@ -781,6 +856,10 @@ func (g *Git) CloseChangeRequest(ctx context.Context, n int64) error {
 	if err != nil {
 		g.mu.Unlock()
 		return err
+	}
+	if target != "" && cr.BaseBranch != target {
+		g.mu.Unlock()
+		return errors.New(op + ": not a Shadewright pull request to the target branch")
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
@@ -793,7 +872,24 @@ func (g *Git) CloseChangeRequest(ctx context.Context, n int64) error {
 	cr.State = providers.ChangeRequestClosed
 	delete(g.auto, n)
 	g.mu.Unlock()
-	return g.after("CloseChangeRequest")
+	return g.after(op)
+}
+
+// Close closes change request n on whatever base it is, as a person does on the host: no operation is recorded and
+// no hook runs. A merged one is ErrConflict; a closed one stays closed.
+func (g *Git) Close(n int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cr, err := g.get(n)
+	if err != nil {
+		return err
+	}
+	if cr.State == providers.ChangeRequestMerged {
+		return fmt.Errorf("change request %d is merged: %w", n, providers.ErrConflict)
+	}
+	cr.State = providers.ChangeRequestClosed
+	delete(g.auto, n)
+	return nil
 }
 
 // Merge squash-merges an open change request into its base, as a reviewer would, and returns the merge

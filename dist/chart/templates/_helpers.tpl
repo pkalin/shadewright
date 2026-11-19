@@ -169,6 +169,42 @@ subject), and a merged request can end only Inconclusive.
 {{- end }}
 
 {{/*
+"true" when the executor is deployed (executor.enabled, default true), else empty. Without it the chart renders no
+executor object at all (Deployment, ServiceAccount, Roles, bindings, PDB, metrics Service, NetworkPolicy, Lease,
+ServiceMonitor, the metrics-auth subject): the analyzer's identity and grants are the same either way. The values
+that only configure an executor are refused by shadewright.validate while it is off.
+*/}}
+{{- define "shadewright.executorEnabled" -}}
+{{- if .Values.executor.enabled -}}true{{- end -}}
+{{- end }}
+
+{{/*
+Refuses the values that only make sense with an executor while executor.enabled is false, so a value that does
+nothing is never accepted without a word. Left alone: image, resources, podLabels, podAnnotations, nodeSelector,
+tolerations, affinity, topologySpreadConstraints, priorityClassName and imagePullSecrets (inert placement or
+packaging: the published chart pins the executor's digest, so an image value cannot be told from a choice).
+Takes the root context. Renders nothing.
+*/}}
+{{- define "shadewright.executorOffValues" -}}
+{{- $e := .Values.executor -}}
+{{- if not $e.enabled -}}
+{{- $set := list -}}
+{{- if ne (int ($e.replicas | default 1)) 1 -}}{{- $set = append $set "executor.replicas" -}}{{- end -}}
+{{- if dig "identity" "azure" "clientId" "" $e -}}{{- $set = append $set "executor.identity.azure.clientId" -}}{{- end -}}
+{{- if dig "serviceAccount" "annotations" dict $e -}}{{- $set = append $set "executor.serviceAccount.annotations" -}}{{- end -}}
+{{- if $e.goMemLimit -}}{{- $set = append $set "executor.goMemLimit" -}}{{- end -}}
+{{- if dig "reviewerHints" "enabled" false $e -}}{{- $set = append $set "executor.reviewerHints.enabled" -}}{{- end -}}
+{{- if dig "verification" "enabled" false $e -}}{{- $set = append $set "executor.verification.enabled" -}}{{- end -}}
+{{- if ne (dig "verification" "nodeGrace" "1m" $e) "1m" -}}{{- $set = append $set "executor.verification.nodeGrace" -}}{{- end -}}
+{{- if $e.extraArgs -}}{{- $set = append $set "executor.extraArgs" -}}{{- end -}}
+{{- if dig "metricsTLS" "secretName" "" $e -}}{{- $set = append $set "executor.metricsTLS.secretName" -}}{{- end -}}
+{{- if $set -}}
+{{- fail (printf "executor.enabled is false, so no executor is deployed, but these values only configure one and are set: %s. Remove them, or set executor.enabled to true" (join ", " $set)) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Flags the chart renders itself in the Deployments. extraArgs may not name them, so a free list cannot turn off
 leader election, the metrics authentication or the watched namespaces. Keep in step with the args in
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
@@ -184,6 +220,7 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- define "shadewright.validate" -}}
 {{- $v := .context.Values -}}
 {{- $c := index $v .component -}}
+{{- $_ := include "shadewright.executorOffValues" .context -}}
 {{- $ex := $v.executor.identity.azure.clientId | default "" | lower -}}
 {{- $an := $v.analyzer.identity.azure.clientId | default "" | lower -}}
 {{- if and $ex $an (eq $ex $an) -}}

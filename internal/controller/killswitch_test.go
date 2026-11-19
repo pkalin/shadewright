@@ -34,7 +34,7 @@ import (
 // write method added to the interface is gated by this test's rule until it is listed here on purpose.
 var gitReads = map[string]bool{"Capabilities": true, "ReadFile": true, "ListDir": true, "BranchHead": true,
 	"CheckBranch": true, "CheckMerged": true, opFind: true, "GetChangeRequest": true, "CheckChain": true, "Parents": true,
-	"CheckCommit": true, "ListChangeRequests": true, opReviewCheckRun: true, opCheckBetween: true, opCountAhead: true}
+	"CheckCommit": true, "ListChangeRequests": true, opListAnyBase: true, opReviewCheckRun: true, opCheckBetween: true, opCountAhead: true}
 
 // TestGatedGitGatesEveryWrite calls every GitProvider method of a gated provider whose gate refuses, and checks
 // that each write asked the gate and never reached the host, and that no read asked it.
@@ -151,6 +151,10 @@ func (p *checkpointProbe) ListChangeRequests(ctx context.Context, _ string, _ bo
 	return nil, p.probe(ctx, "ListChangeRequests")
 }
 
+func (p *checkpointProbe) ListChangeRequestsAnyBase(ctx context.Context, _ string, _ bool) ([]providers.ChangeRequest, error) {
+	return nil, p.probe(ctx, "ListChangeRequestsAnyBase")
+}
+
 func (p *checkpointProbe) CreateBranch(ctx context.Context, _, _ string) error {
 	return p.probe(ctx, "CreateBranch")
 }
@@ -170,6 +174,10 @@ func (p *checkpointProbe) EnableAutoMerge(ctx context.Context, _ int64, _ string
 
 func (p *checkpointProbe) CloseChangeRequest(ctx context.Context, _ int64) error {
 	return p.probe(ctx, "CloseChangeRequest")
+}
+
+func (p *checkpointProbe) CloseChangeRequestAnyBase(ctx context.Context, _ int64) error {
+	return p.probe(ctx, "CloseChangeRequestAnyBase")
 }
 
 func (p *checkpointProbe) CheckChain(ctx context.Context, _, _ string, _ int) (providers.BranchState, error) {
@@ -253,6 +261,8 @@ var staleWrites = map[string]bool{
 	"UpdateChangeRequest":  false,
 	opCreateCheckRun:       false, // but a failed review check (TestGatedGitStalePlanFailsTheReviewCheck, #713)
 	"CloseChangeRequest":   true,
+	// The finalizer's close on any base (#892) is a close too.
+	opCloseAnyBase: true,
 }
 
 // TestGatedGitStalePlanWritesOnlyTheClose calls every write of a gated provider with closeOnly true, false and

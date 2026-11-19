@@ -2,24 +2,40 @@
 """Checks the built docs site (Zensical output in site/): internal links, heading anchors and published URLs.
 
 Usage (run with -I, standard library only):
-  hack/docs-check.py check SITE_DIR PATHS_FILE   internal links, anchors, redirect targets and listed paths; exit 1 on any problem
+  hack/docs-check.py check SITE_DIR PATHS_FILE [REPO_DIR]
+                                                 internal links, anchors, redirect targets and listed paths, and the
+                                                 user-page rules (below); exit 1 on any problem
   hack/docs-check.py list SITE_DIR               print every published page path (the format of hack/docs-published-paths.txt)
   hack/docs-check.py external SITE_DIR           report external links that do not answer; always exits 0 (weekly report)
 
 A published path is the URL path of a page, such as /emergency/. It must resolve to a built page; a redirect page
 counts. Adding a page is free; removing a listed path needs its line removed from hack/docs-published-paths.txt in
 the same pull request.
+
+User pages (the "Overview", "How it works", "Get started", "User guide" and "Operator manual" sections of nav in
+zensical.toml, except docs/troubleshooting.md) carry no issue references (#123), no dates (YYYY-MM-DD) and at most
+USER_PAGE_WORDS words. A page that does not pass yet is listed in hack/docs-user-pages-pending.txt (one path per
+line, relative to the repo); the list may only shrink: a listed page that passes, is not a user page or does not
+exist fails the check.
 """
 import json
 import os
 import re
 import sys
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
 SITE_URL = "https://shadewright.io"
+
+USER_PAGE_WORDS = 900  # the longest page of the first set has 742 words
+USER_PAGE_SECTIONS = ("Overview", "How it works", "Get started", "User guide", "Operator manual")
+USER_PAGE_EXCLUDED = ("troubleshooting.md",)
+PENDING_FILE = "hack/docs-user-pages-pending.txt"
+ISSUE_REF = re.compile(r"(?<![\w&/])#\d+\b")
+DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
 
 class Page(HTMLParser):
@@ -141,6 +157,77 @@ def check(site, listed_file):
     return problems
 
 
+def nav_files(items):
+    """Yields every page path in a nav fragment of zensical.toml."""
+    if isinstance(items, str):
+        yield items
+    elif isinstance(items, list):
+        for i in items:
+            yield from nav_files(i)
+    elif isinstance(items, dict):
+        for v in items.values():
+            yield from nav_files(v)
+
+
+def user_pages(repo):
+    """Returns the repo-relative paths (docs/...) of the user pages named by the nav sections."""
+    with open(os.path.join(repo, "zensical.toml"), "rb") as f:
+        nav = tomllib.load(f)["project"]["nav"]
+    found = set()
+    for section in nav:
+        for name, items in section.items():
+            if name in USER_PAGE_SECTIONS:
+                found.update("docs/" + p for p in nav_files(items) if p.endswith(".md") and p not in USER_PAGE_EXCLUDED)
+    return found
+
+
+def page_problems(path, text):
+    """Returns the user-page rule violations of one page's Markdown."""
+    problems = []
+    for n, line in enumerate(text.splitlines(), 1):
+        for m in ISSUE_REF.finditer(line):
+            problems.append(f"{path}:{n}: issue or pull request reference {m.group(0)}")
+        for m in DATE.finditer(line):
+            problems.append(f"{path}:{n}: date {m.group(0)}")
+    words = len(text.split())
+    if words > USER_PAGE_WORDS:
+        problems.append(f"{path}: {words} words, over the budget of {USER_PAGE_WORDS}")
+    return problems
+
+
+def check_user_pages(repo):
+    """Checks the user pages against the writing rules, with the allow-list of pages that do not pass yet."""
+    problems = []
+    pages_ = user_pages(repo)
+    pending_path = os.path.join(repo, PENDING_FILE)
+    with open(pending_path, encoding="utf-8") as f:
+        pending = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    for path in sorted(pages_):
+        try:
+            with open(os.path.join(repo, path), encoding="utf-8") as f:
+                found = page_problems(path, f.read())
+        except OSError as e:
+            problems.append(f"{path}: cannot read ({e.strerror}); retry")
+            continue
+        if found and path not in pending:
+            problems += found
+            problems.append(f"{path}: fix the lines above (user pages carry no issue numbers, dates or history), "
+                            f"or, for an existing page only, list it in {PENDING_FILE}")
+    for path in pending:
+        if path not in pages_:
+            problems.append(f"{PENDING_FILE}: {path} is not a user page that exists; remove the line")
+            continue
+        try:
+            with open(os.path.join(repo, path), encoding="utf-8") as f:
+                clean = not page_problems(path, f.read())
+        except OSError as e:
+            problems.append(f"{path}: cannot read ({e.strerror}); retry")
+            continue
+        if clean:
+            problems.append(f"{PENDING_FILE}: {path} passes now; remove the line")
+    return problems
+
+
 def external(site):
     seen = {}
     for url, f in sorted(pages(site).items()):
@@ -165,14 +252,15 @@ def external(site):
 
 
 def main(argv):
-    if len(argv) == 4 and argv[1] == "check":
-        problems = check(argv[2], argv[3])
+    if len(argv) in (4, 5) and argv[1] == "check":
+        repo = argv[4] if len(argv) == 5 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        problems = check(argv[2], argv[3]) + check_user_pages(repo)
         for p in problems:
             print(f"ERROR {p}", file=sys.stderr)
         if problems:
             print(f"{len(problems)} problem(s) in the docs site", file=sys.stderr)
             return 1
-        print("docs site links, anchors and published paths ok")
+        print("docs site links, anchors, published paths and user pages ok")
         return 0
     if len(argv) == 3 and argv[1] == "list":
         for url in sorted(u for u in pages(argv[2]) if u != "/404.html"):

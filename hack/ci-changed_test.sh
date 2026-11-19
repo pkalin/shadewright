@@ -61,6 +61,7 @@ check "theme overrides run docs only" "false false false true false" $pr overrid
 check "glossary snippet runs docs only" "false false false true false" $pr includes/glossary.md
 check "docs requirements run docs only" "false false false true false" $pr requirements-docs.txt
 check "published paths list runs all but codeql" "true true true true false" $pr hack/docs-published-paths.txt
+check "user pages allow-list runs all but codeql" "true true true true false" $pr hack/docs-user-pages-pending.txt
 check "readme only skips docs" "false false false false false" $pr README.md
 check "go.mod runs codeql" "true true true false true" $pr go.mod
 check "this script runs everything" "true true true true true" $pr hack/ci-changed.sh

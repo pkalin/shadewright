@@ -1335,9 +1335,17 @@ func (r *RemediationRequestReconciler) mergeSeenErr(ctx context.Context, rr *rem
 	waitCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	// The look ran out of time before it returned what it read: the wait is about the recorded pull request, merged
-	// into the recorded target branch, with no merge commit seen (endMergeWait records it without a receipt).
+	// into the recorded target branch, with no merge commit seen (endMergeWait records it without a receipt), unless
+	// the read that ran out of time was one of the merge wait, which names the pull request it read (a moved head,
+	// #889).
 	cr := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA, State: providers.ChangeRequestMerged,
 		BaseBranch: string(rr.Status.Source.TargetBranch)}
+	if e, ok := errors.AsType[*kindedReadError](err); ok && e.wait.Kind == remediationv1alpha1.GitWaitMergeCheck &&
+		e.wait.PullRequest != nil {
+		p := e.wait.PullRequest
+		cr = providers.ChangeRequest{Number: p.Number, URL: p.URL, HeadSHA: p.HeadSHA, State: providers.ChangeRequestMerged,
+			BaseBranch: string(p.BaseBranch), MergeCommit: p.MergeCommitSHA}
+	}
 	return errors.Join(err, r.startMergeWait(waitCtx, rr, cr, "check the plan at the merge"))
 }
 
@@ -1570,7 +1578,9 @@ func commentMarker(rr *remediationv1alpha1.RemediationRequest) string {
 // to the same planned change included, stops with HeadMoved as before. A read that fails is returned for a
 // retry (on a merged pull request wrapped in errMergeCheck, so nothing after the look runs on the merged change,
 // #879), as is a comment the kill switch held back; another failure to comment is logged and the request
-// stops all the same. A comment already there (its marker) is not posted again.
+// stops all the same. A comment already there (its marker) is not posted again. A failed read of the check of a
+// merged head belongs to the merge wait about that head (mergeCheckFailed), so it is bounded like the check at the
+// merge and ends from the wait's entry (#889).
 func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
 	moved := func() error {
@@ -1584,9 +1594,13 @@ func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git provid
 	case providers.ChangeRequestMerged:
 		ref, err := r.checkMerged(ctx, git, rr, cr)
 		switch {
-		case err != nil:
+		case err != nil && gitReadFailure(err):
 			// A merge seen and not recorded (#879): the look is retried, and the full freshness check never runs on
-			// the merged change, which makes the plan look stale.
+			// the merged change, which makes the plan look stale. The read is one of the merge wait about cr, the
+			// merged head (#889), as a failed check at the merge is (mergeCheckFailed): at its end the merge is
+			// recorded from the entry, as one whose content could not be checked (endMergeWait).
+			return r.mergeCheckFailed(ctx, rr, cr, err)
+		case err != nil:
 			return fmt.Errorf("%w: %w", errMergeCheck, err)
 		case ref != nil:
 			return r.mergedForeign(ctx, rr, ref)

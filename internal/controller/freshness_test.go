@@ -2676,13 +2676,6 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 		return err
 	}
-	// confirmGone makes the next look of r confirm the pull request missing on the recorded branch (settleGone).
-	confirmGone := func(r *RemediationRequestReconciler) {
-		first, ok := r.looks().first(fetch(), cr.Number)
-		Expect(ok).To(BeTrue(), "the read on the recorded branch keeps its first look")
-		r.looks().note(fetch(), cr.Number, first.Add(-confirmWait-time.Second))
-	}
-
 	It("records a merge into the target branch the settings name now as a merged stale plan, with its receipt "+
 		"(#771)", func() {
 		retarget(freshOtherBranch)
@@ -2722,12 +2715,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		retarget("hotfix")
 		_, err := git.Merge(cr.Number)
 		Expect(err).NotTo(HaveOccurred())
-		r := retargetedReconciler(nil)
-		Expect(reconcileWith(r)).To(Succeed(), "a first look at a missing number waits for the time it names")
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-		// The read on the configured branch keeps and drops no first look, so the wait ends.
-		confirmGone(r)
-		Expect(reconcileWith(r)).To(Succeed())
+		// The read by its number answers it merged into another base, which delivers nothing of the plan: gone at
+		// once, with no wait for a second look, since the host answered it rather than missing it (#892).
+		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(planFresh().Reason).To(Equal("TargetBranchChanged"))
@@ -2740,11 +2730,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(git.SetBody(cr.Number, unmarkedBody)).To(Succeed())
 		_, err := git.Merge(cr.Number)
 		Expect(err).NotTo(HaveOccurred())
-		r := retargetedReconciler(nil)
-		Expect(reconcileWith(r)).To(Succeed())
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-		confirmGone(r)
-		Expect(reconcileWith(r)).To(Succeed())
+		// The read by its number answers it merged into another base, which delivers nothing of the plan: gone at
+		// once, with no wait for a second look, since the host answered it rather than missing it (#892).
+		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(got.Status.MergeReceipt).To(BeNil())
@@ -2756,11 +2744,9 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		_, err = git.Merge(cr.Number)
 		Expect(err).NotTo(HaveOccurred())
-		r := retargetedReconciler(nil)
-		Expect(reconcileWith(r)).To(Succeed())
-		Expect(fetch().Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-		confirmGone(r)
-		Expect(reconcileWith(r)).To(Succeed())
+		// The read by its number answers it merged into another base, which delivers nothing of the plan: gone at
+		// once, with no wait for a second look, since the host answered it rather than missing it (#892).
+		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
 		got := fetch()
 		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
 		Expect(got.Status.MergeReceipt).To(BeNil())
@@ -2931,8 +2917,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 				case stepMergeCommit:
 					sha, err = git.MergeWithCommit(cr.Number)
 				case stepClose:
-					err = git.CloseChangeRequest(ctx, cr.Number)
-					closes.Add(-1) // the person's close, not Shadewright's
+					err = git.Close(cr.Number) // the person's close, on whatever base
 				}
 				Expect(err).NotTo(HaveOccurred())
 				gap(o.gaps[i+1])
@@ -3119,7 +3104,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(git.CreateBranch(ctx, freshOtherBranch, head)).To(Succeed())
 		Expect(git.SetBase(cr.Number, freshOtherBranch)).To(Succeed())
-		Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+		Expect(git.Close(cr.Number)).To(Succeed())
 		second, err := git.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: freshness.BranchName(fetch()), BaseBranch: freshOtherBranch, Body: marker(fetch())})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
@@ -3138,7 +3123,7 @@ var _ = Describe("RemediationRequest plan freshness", func() {
 			got.Status.Phase = remediationv1alpha1.PhaseCancelled
 			meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionApproved, Status: metav1.ConditionFalse, Reason: remediationv1alpha1.ReasonIncidentGone, Message: whyIncidentGone})
 			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
-			Expect(git.CloseChangeRequest(ctx, cr.Number)).To(Succeed())
+			Expect(git.Close(cr.Number)).To(Succeed())
 			Expect(reconcileWith(retargetedReconciler(nil))).To(Succeed())
 			got = fetch()
 			Expect(holdsLock(got)).To(BeFalse())

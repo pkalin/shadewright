@@ -203,6 +203,12 @@ func (g *gatedGit) ListChangeRequests(ctx context.Context, headBranch string, op
 	return value, readFailure("ListChangeRequests", err)
 }
 
+func (g *gatedGit) ListChangeRequestsAnyBase(ctx context.Context, headBranch string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	value, err := g.git.ListChangeRequestsAnyBase(ctx, headBranch, openOnly)
+	return value, readFailure("ListChangeRequestsAnyBase", err)
+}
+
 // IsAncestor is a read and passes straight through, when the wrapped provider can answer it
 // ([providers.AncestryChecker]); otherwise it returns errNoAncestry. The check after the merge uses it.
 func (g *gatedGit) IsAncestor(ctx context.Context, ancestor, commit string) (bool, error) {
@@ -299,6 +305,15 @@ func (g *gatedGit) CloseChangeRequest(ctx context.Context, number int64) error {
 		return err
 	}
 	return g.git.CloseChangeRequest(ctx, number)
+}
+
+// CloseChangeRequestAnyBase is gated like CloseChangeRequest: a close, also of a stale plan's pull request.
+func (g *gatedGit) CloseChangeRequestAnyBase(ctx context.Context, number int64) error {
+	ctx, err := g.gate(ctx)
+	if err != nil {
+		return err
+	}
+	return g.git.CloseChangeRequestAnyBase(ctx, number)
 }
 
 func (g *gatedGit) CheckChain(ctx context.Context, commit, path string, commits int) (providers.BranchState, error) {

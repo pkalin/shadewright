@@ -1763,6 +1763,12 @@ func (r *RemediationRequestReconciler) cleanUpStale(ctx context.Context, rr *rem
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, reasonTargetBranchChanged
 		message = "The plan is stale and its repository now targets another branch; " +
 			"its change request, if any, was not closed"
+	case errors.Is(err, errOpenElsewhere):
+		// Its own pull request is open on a base a person moved it to (#892): nothing is closed there, and the lock
+		// stays while it is open.
+		pr := openElsewhereOf(err)
+		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase
+		message = "The plan is stale and " + openElsewhereText(pr) + "; it was not closed" + messageOpenElsewhere
 	case errors.Is(err, errChangeRequestNotOurs):
 		phase, reason = remediationv1alpha1.PhaseNeedsIntervention, ReasonForeignChangeRequest
 		message = "The plan is stale and the pull request recorded for it could not be confirmed as this " +
@@ -2307,11 +2313,22 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 	// request on the same branch never stands in for it (ADR-0030 section 1), and it is closed only when it is
 	// from the request's branch to the target branch and carries this request's marker (changeOf).
 	recorded := rr.Status.PullRequest
-	if recorded != nil && deleting {
-		return r.closeAllOwn(ctx, git, rr)
+	// The finalizer also closes every open pull request with this request's marker on a base other than the target
+	// branch, where a person may have moved one (closeOwnOnOtherBases): after the recorded one, so a refused read of
+	// it is reported alone, and before the listing of the branch without a number, which may end in a merge found.
+	switch {
+	case deleting && recorded != nil:
+		if err := r.closeAllOwn(ctx, git, rr); err != nil {
+			return err
+		}
+		return r.closeOwnOnOtherBases(ctx, git, rr)
+	case deleting:
+		if err := r.closeOwnOnOtherBases(ctx, git, rr); err != nil {
+			return err
+		}
 	}
 	if recorded == nil {
-		return r.closeUnrecorded(ctx, git, rr)
+		return r.closeUnrecorded(ctx, git, rr, deleting)
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: true})
 	switch v.state {
@@ -2320,8 +2337,20 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 		// retried (#688), so a stale plan's cleanup, the deadline's and a render refusal's never end the request
 		// with its pull request open on a single read.
 		return v.err
-	case changeGone:
+	case changeGone, changeMergedElsewhere:
+		// Merged into another base (#892): nothing to close, and nothing is written to it there, as for gone.
 		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
+	case changeElsewhere:
+		// Open on a base a person moved it to (#892): nothing is written to it there; each caller ends its stop
+		// saying so, and the lock stays while it is open.
+		return &openElsewhereError{pr: v.pr}
+	case changeClosed:
+		if v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
+			// Closed on a base a person moved it to: nothing to close, and the close to the target branch would be
+			// refused there.
+			return nil
+		}
+	case changeOpen, changeMerged:
 	}
 	if err := r.stillOwns(ctx, rr); err != nil {
 		return err
@@ -2337,11 +2366,25 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 // ones are closed; the caller checks the merge. A close refused as a conflict (maybe merged between the read and
 // the close) is a *closeConflictError, which mergedUnrecorded reads again by its number. Unknown is returned for a
 // retry: a failed listing never means none was opened.
+//
+// When the target branch shows none of its own open or merged, a stop lists the open pull requests from its branch to
+// every base (openOnOtherBase, #892): one with its marker open on another base, where a person moved it, is an
+// *openElsewhereError, so the stop that asked for the close closes nothing there and says so. The finalizer closed
+// every such one already (closeOwnOnOtherBases) and does not list them again.
 func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest) error {
+	rr *remediationv1alpha1.RemediationRequest, deleting bool) error {
 	v := r.changeOf(ctx, git, rr, changeQuery{})
-	if v.state == changeUnknown {
+	switch v.state {
+	case changeUnknown:
 		return v.err
+	case changeGone, changeClosed:
+		// The finalizer closed every one open on another base already (closeOwnOnOtherBases).
+		if !deleting {
+			if err := r.closeUnrecordedElsewhere(ctx, git, rr); err != nil {
+				return err
+			}
+		}
+	case changeOpen, changeMerged, changeElsewhere, changeMergedElsewhere:
 	}
 	for _, cr := range v.own {
 		if cr.State != providers.ChangeRequestOpen {
@@ -2363,6 +2406,50 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 	return nil
 }
 
+// closeUnrecordedElsewhere is closeUnrecorded's look at the other bases, for a stop of a request with no pull request
+// recorded whose target branch shows none of its own open or merged: one open on another base is an
+// *openElsewhereError, and nothing is closed there.
+func (r *RemediationRequestReconciler) closeUnrecordedElsewhere(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	v := r.changeOf(ctx, git, rr, changeQuery{otherBases: []remediationv1alpha1.GitBranch{rr.Status.Source.TargetBranch}})
+	switch v.state {
+	case changeUnknown:
+		return v.err
+	case changeElsewhere:
+		return &openElsewhereError{pr: v.pr}
+	case changeOpen, changeMerged, changeClosed, changeGone, changeMergedElsewhere:
+	}
+	return nil
+}
+
+// closeOwnOnOtherBases is the finalizer's close on the bases other than the target branch, with or without a pull
+// request recorded: every open pull request from the request's branch with this request's marker there, whatever
+// its number, is closed by its number (CloseChangeRequestAnyBase), not only the one the listing ranks first. A
+// failed listing, a listing past MaxBranchChangeRequests and a failed close are returned for a retry, which keeps the
+// finalizer; every close is preceded by stillOwns.
+func (r *RemediationRequestReconciler) closeOwnOnOtherBases(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	v := r.changeOf(ctx, git, rr, changeQuery{otherBases: []remediationv1alpha1.GitBranch{rr.Status.Source.TargetBranch},
+		withRecorded: true})
+	switch v.state {
+	case changeUnknown:
+		return v.err
+	case changeOpen, changeMerged, changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
+	}
+	for _, cr := range v.own {
+		if cr.State != providers.ChangeRequestOpen {
+			continue
+		}
+		if err := r.stillOwns(ctx, rr); err != nil {
+			return err
+		}
+		if err := closeFailed(cr, git.CloseChangeRequestAnyBase(ctx, cr.Number)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // closeAllOwn is the finalizer's close of a request with a recorded pull request. It returns nil, and the
 // finalizer may go, only when the recorded pull request is not open, or open without this request's marker, and
 // no open pull request of the request's branch carries this request's marker:
@@ -2370,8 +2457,9 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 //     listing). Unknown (a failed read, a 404 the branch does not confirm, an answer about another pull request, or
 //     the recorded one read as not open while the branch lists it open) is returned for a retry and keeps the
 //     finalizer; its error class, ErrConflict included, is never taken for a merge.
-//   - the recorded one, open with this request's marker, is closed; gone (not this request's, or without its
-//     marker), closed or merged, nothing is closed on its account;
+//   - the recorded one, open with this request's marker, is closed, also on a base a person moved it to
+//     (changeElsewhere, #892), where it is closed by its number through CloseChangeRequestAnyBase; gone (not this
+//     request's, or without its marker), closed or merged, nothing is closed on its account;
 //   - then every open pull request of the branch that carries this request's marker is this request's change,
 //     whatever its number, and is closed. One without the marker is left alone and does not hold the finalizer;
 //   - a recorded number that is missing, or not this request's, while a listing of the branch shows a pull request
@@ -2404,6 +2492,16 @@ func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git prov
 		if err := closeIt(v.pr); err != nil {
 			return err
 		}
+	case finalizeCloseAnyBase:
+		// Open with this request's marker on a base a person moved it to (fourth decision of 2026-11-19 on #892):
+		// closed there by its recorded number, as on the target branch, and a failed close is retried the same way.
+		if err := r.stillOwns(ctx, rr); err != nil {
+			return err
+		}
+		if err := closeFailed(v.pr, git.CloseChangeRequestAnyBase(ctx, v.pr.Number)); err != nil {
+			return err
+		}
+	case finalizeNothing:
 	}
 	for _, o := range v.open {
 		if o.Number == v.pr.Number && v.state == changeOpen {
@@ -2461,14 +2559,17 @@ const (
 	finalizeRetry finalizeOutcome = iota
 	finalizeClose
 	finalizeNothing
+	// finalizeCloseAnyBase closes the recorded pull request on whatever base it is open (#892).
+	finalizeCloseAnyBase
 )
 
-// finalizeRule is closeAllOwn's rule per verdict: open is closed, merged, closed and gone close nothing on the
+// finalizeRule is closeAllOwn's rule per verdict: open is closed, on any base, merged, closed and gone close nothing on the
 // recorded one's account (the open pull requests of the branch are looked at either way), unknown is retried
 // and keeps the finalizer.
 var finalizeRule = map[changeState]finalizeOutcome{
 	changeOpen: finalizeClose, changeMerged: finalizeNothing, changeClosed: finalizeNothing,
-	changeGone: finalizeNothing, changeUnknown: finalizeRetry,
+	changeGone: finalizeNothing, changeElsewhere: finalizeCloseAnyBase, changeMergedElsewhere: finalizeNothing,
+	changeUnknown: finalizeRetry,
 }
 
 // closeConflictError is closeChangeRequest's answer when the close of a pull request it found by the branch of a

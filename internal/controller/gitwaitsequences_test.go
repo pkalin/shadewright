@@ -856,3 +856,144 @@ func TestSequenceStaleCopyStartsNoMergeWaitOnARecordedMerge(t *testing.T) {
 	}
 	m.report()
 }
+
+// settledViolations runs the model's check after the world healed (settled) and returns its violations of kind.
+func settledViolations(m *modelWorld, kind string) []string {
+	m.settled()
+	var out []string
+	for _, v := range m.violations {
+		if strings.HasPrefix(v, kind+":") {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// thirdBase creates the branch hotfix, neither the plan's target branch nor the configured one.
+func thirdBase(t *testing.T, m *modelWorld) {
+	t.Helper()
+	ctx := context.Background()
+	head, err := m.g.BranchHead(ctx, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.g.CreateBranch(ctx, movedBranch, head); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #892, decision of 2026-11-19: the model's check after the world healed takes the request's own pull request open
+// on any base as a reason to hold the lock, a third base included.
+func TestSettledOwnOpenOnAThirdBaseHolds(t *testing.T) {
+	m := scripted(t, modelStart{start: stopOther})
+	thirdBase(t, m)
+	if err := m.g.SetBase(m.number, movedBranch); err != nil {
+		t.Fatal(err)
+	}
+	if !holdsLock(m.live()) {
+		t.Fatal("the start holds no lock")
+	}
+	if v := settledViolations(m, "settled lock"); len(v) != 0 {
+		t.Fatalf("the request's own pull request is open on %s and the check refuses the held lock: %v", movedBranch, v)
+	}
+}
+
+// #892: the narrowing stops at the request's own pull request. Its own closed, and a foreign pull request open on a
+// third base, the held lock still fails the check.
+func TestSettledForeignOpenOnAThirdBaseFails(t *testing.T) {
+	m := scripted(t, modelStart{start: stopOther})
+	ctx := context.Background()
+	thirdBase(t, m)
+	if err := m.g.CloseChangeRequest(ctx, m.number); err != nil {
+		t.Fatal(err)
+	}
+	const foreign = "shadewright/other"
+	head, err := m.g.BranchHead(ctx, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.g.CreateBranch(ctx, foreign, head); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.g.OpenChangeRequest(ctx, providers.NewChangeRequest{HeadBranch: foreign,
+		BaseBranch: movedBranch, Body: "not this request's"}); err != nil {
+		t.Fatal(err)
+	}
+	if !holdsLock(m.live()) {
+		t.Fatal("the start holds no lock")
+	}
+	if v := settledViolations(m, "settled lock"); len(v) == 0 {
+		t.Fatal("a held lock with only a foreign pull request open on a third base passed the check")
+	}
+}
+
+// Seed 179902 of TestGitWaitModel, made minimal: a replacement in PolicyChecked recovering its handoff while the
+// repository cannot be opened; the pull request is merged into the plan's branch without its merge commit; a pause; a
+// person cancels; the read of the merge is retried with the first write of its MergeCheck wait lost, then recorded;
+// the settings name another target branch. The cancel then waits on the changed branch (cancelWatchBranchChanged)
+// and reads nothing, so the wait must still end at its end, after one more look, and never stand past it.
+//
+// Since #786 the cancelled recovery that can open the repository again reads the pull request merged with the head
+// its predecessor recorded, a merge that is the predecessor's to record, and the cancel ends it Cancelled at once:
+// no MergeCheck wait is started on it. The sequence is kept for its end: no MergeCheck wait stands after the branch
+// change and the heal, and the request stays Cancelled.
+func TestSequenceCancelledRecoveryMergeCheckEndsAfterABranchChange(t *testing.T) {
+	m := scripted(t, modelStart{start: startPolicyChecked, open: true, lasting: 10 * time.Minute, handoff: true,
+		focus: focusDeadline})
+	m.steps(2)
+	sha, err := m.g.Merge(m.number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.merge, m.noCommit = sha, true
+	m.logf("merge the pull request into main without its commit")
+	m.steps(1)
+	m.pause(true)
+	m.steps(1)
+	m.cancel()
+	m.steps(1)
+	m.fault, m.loseNext = faultBetween, true
+	m.logf("reads: between, and lose the next status write")
+	m.steps(1)
+	m.pause(false)
+	m.steps(2)
+	if live := m.live(); live.Status.Phase != api.PhaseCancelled || len(live.Status.GitWaits) > 0 {
+		m.fatalf("setup: want the cancel ended once the merge is read, got phase %s, waits %v",
+			live.Status.Phase, live.Status.GitWaits)
+	}
+	m.setConfigured(freshOtherBranch)
+	m.logf("the settings name target branch %s", freshOtherBranch)
+	m.steps(4)
+	m.fault, m.lastingUntil = faultNone, time.Time{}
+	m.logf("heal")
+	m.steps(8)
+	if live := m.live(); gitWait(live, waitMergeCheck) != nil || live.Status.Phase != api.PhaseCancelled {
+		m.fatalf("end: phase %s, waits %v after the world healed; want Cancelled and no MergeCheck wait",
+			live.Status.Phase, live.Status.GitWaits)
+	}
+	m.report()
+}
+
+// Seed 136467 of TestGitWaitModel, made minimal (main has it too): a request in PolicyChecked whose pull request's
+// record was lost records a RequestDeadline wait while the repository cannot be opened; the write that adopts the
+// pull request (PRCreated, no deadline) is applied and reported failed. That write must end the deadline's wait with
+// the deadline, not leave it standing until the next reconcile.
+func TestSequenceAdoptionWriteEndsTheDeadlineWait(t *testing.T) {
+	m := scripted(t, modelStart{start: startPolicyChecked, verify: true})
+	m.steps(1)
+	m.conflictNext = true
+	m.steps(1)
+	m.fault = faultOpen
+	m.steps(1)
+	if gitWait(m.live(), waitRequestDeadline) == nil {
+		t.Fatalf("setup: no RequestDeadline wait recorded: %v", m.live().Status.GitWaits)
+	}
+	m.fault, m.loseNext = faultContent+faultTimeout, true
+	m.steps(1)
+	m.applyNext = true
+	m.steps(1)
+	if live := m.live(); live.Status.Phase == api.PhasePRCreated && gitWait(live, waitRequestDeadline) != nil {
+		m.fatalf("end: the write that records the pull request left the RequestDeadline wait standing")
+	}
+	m.report()
+}

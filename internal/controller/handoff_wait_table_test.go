@@ -386,6 +386,20 @@ func (w *logGit) CloseChangeRequest(ctx context.Context, number int64) error {
 	return w.g.CloseChangeRequest(ctx, number)
 }
 
+func (w *logGit) ListChangeRequestsAnyBase(ctx context.Context, headBranch string, openOnly bool) ([]providers.ChangeRequest, error) {
+	if err := w.l.call(ctx, false, fmt.Sprintf("ListChangeRequestsAnyBase(open=%v)", openOnly)); err != nil {
+		return nil, err
+	}
+	return w.g.ListChangeRequestsAnyBase(ctx, headBranch, openOnly)
+}
+
+func (w *logGit) CloseChangeRequestAnyBase(ctx context.Context, number int64) error {
+	if err := w.l.call(ctx, false, "CloseChangeRequestAnyBase"); err != nil {
+		return err
+	}
+	return w.g.CloseChangeRequestAnyBase(ctx, number)
+}
+
 func (w *logGit) UpdateChangeRequest(ctx context.Context, number int64, title, body string) error {
 	if err := w.l.call(ctx, false, "UpdateChangeRequest"); err != nil {
 		return err

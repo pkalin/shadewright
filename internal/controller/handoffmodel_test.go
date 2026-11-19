@@ -114,7 +114,12 @@ import (
 //	   with the repository removed then puts it back, and a second settling run checks P6, P1 and P2 again: the lock
 //	   is free and a merge is recorded once;
 //	P7 no reconcile that returns without an error asks to run again within a second (the floor of every time to run
-//	   again): a wait whose end passed is looked at again at a sane pace, never hot.
+//	   again): a wait whose end passed is looked at again at a sane pace, never hot;
+//	P8 once a person moved the pull request to another base (hMoveBase, ADR-0043), neither request writes to it or
+//	   to its branch; the move is a step of directed sequences only, the generator does not draw it;
+//	P9 the predecessor never stores the abort of an intent whose takeover the replacement, as stored at that write,
+//	   recorded (from Done), whatever ends it, unless a person put the predecessor's own head back on the pull
+//	   request (fourth round of #786).
 //
 // Exclusions, each named and recognised by its shape, never by a seed (hmShapes, and the checks that name them): the
 // #288 cleanup bound (a request whose cleanup was failing let go of its finalizer at the end of a bound of that
@@ -197,7 +202,14 @@ const (
 	// hStale: the cache serves the copy of Obj from before its last stored status write at the next read of it
 	// through the cache (the reconciler's client), as an informer that has not seen that write yet.
 	hStale hmKind = "cache-serves-older-copy"
+	// hMoveBase: a person moves the pull request to another base branch (hmMovedBase), where ADR-0043's verdicts
+	// apply (open or merged on another base). Directed sequences only: the generator does not draw it.
+	hMoveBase hmKind = "person-moves-base"
 )
+
+// hmMovedBase is the base branch a person moves the pull request to (hMoveBase), neither the plan's target branch nor
+// the one a settings change names.
+const hmMovedBase = "hotfix"
 
 // hmLongestWait is how long the executor is down at hRestartLate: an hour past the longest bound of an entry of
 // status.gitWaits (the watch after a refused recovery, the request's deadline and its handoff grace, the waits for a
@@ -252,7 +264,7 @@ type hmStep struct {
 
 func (s hmStep) String() string {
 	switch s.Kind {
-	case hRecPred, hRecRepl, hAnswer, hRestart, hRestartLate, hPause, hLift, hPush, hClose, hReopen, hBranch:
+	case hRecPred, hRecRepl, hAnswer, hRestart, hRestartLate, hPause, hLift, hPush, hClose, hReopen, hBranch, hMoveBase:
 		return string(s.Kind)
 	case hForce, hSettings:
 		return string(s.Kind) + " " + s.Variant
@@ -353,6 +365,9 @@ type hmWorld struct {
 	settings string
 	// branchGone: a person deleted the branch of the pull request.
 	branchGone bool
+	// movedBase: a person moved the pull request to hmMovedBase (hMoveBase); a merge there does not reach the target
+	// branch, so nobody records it (ADR-0043) and it is no merge of the properties.
+	movedBase bool
 	// releasedAtReopen names the requests that did not hold the target lock (a verdict released it, or they were
 	// gone) when a person reopened the pull request: the named exclusion "a reopen after a release" (design 6.5), a
 	// released request does not take the lock back and records nothing of the reopened pull request.
@@ -1034,6 +1049,13 @@ func (m *hmWorld) gitAfter(op string) error {
 			m.mu.Lock()
 		}
 	}
+	if m.movedBase {
+		// P8 (ADR-0043): nothing writes to a pull request a person moved to another base, nor to its branch; only the
+		// finalizer closes it there (CloseChangeRequestAnyBase, not a write of hmWrites).
+		m.mu.Unlock()
+		m.fail("P8", "the %s wrote %s after a person moved the pull request to %s", who, op, hmMovedBase)
+		m.mu.Lock()
+	}
 	if m.abortStored {
 		m.writers[who] = true
 		if len(m.writers) == 2 {
@@ -1121,6 +1143,16 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 	m.prev[rr.Name] = old
 	delete(m.lag, rr.Name)
 	m.mu.Unlock()
+	// P9 at the write that moves the predecessor's intent to Aborted: the replacement, as stored then, has not
+	// recorded its takeover, unless a person put the predecessor's own head back on the pull request (fourth round of
+	// #786: the predecessor then decides on its own head).
+	if stored.Name == m.keys[hmPred].Name && intent(old) != nil && stored.Status.Handoff != nil &&
+		stored.Status.Handoff.To != nil && stored.Status.Handoff.To.Phase == api.HandoffAborted {
+		if repl := m.get(hmRepl); repl != nil && tookOver(repl) && m.pr().HeadSHA != m.predCommit {
+			m.fail("P9", "the predecessor stored the abort of an intent whose takeover the replacement recorded "+
+				"(pred: %s, repl: %s)", describe(stored), describe(repl))
+		}
+	}
 	// P4 follows the abort from the write that stores it, so a write to Git later in the same reconcile counts.
 	if stored.Name == m.keys[hmPred].Name && stored.Status.Handoff != nil && stored.Status.Handoff.To != nil &&
 		stored.Status.Handoff.To.Phase == api.HandoffAborted {
@@ -1620,7 +1652,7 @@ func (m *hmWorld) apply(s hmStep) {
 		m.deleteRequest(s.Obj)
 	case hSettings:
 		m.changeSettings(s.Variant)
-	case hMerge, hPush, hClose, hForce:
+	case hMerge, hPush, hClose, hForce, hMoveBase:
 		m.personEvent(s)
 	case hReopen:
 		m.reopen()
@@ -1817,7 +1849,33 @@ func (m *hmWorld) personEvent(s hmStep) {
 		m.mu.Unlock()
 	}()
 	switch s.Kind {
+	case hMoveBase:
+		if !m.movedBase {
+			head, err := m.g.BranchHead(ctx, mainBranch)
+			if err != nil {
+				m.t.Fatal(err)
+			}
+			if err := m.g.CreateBranch(ctx, hmMovedBase, head); err != nil {
+				m.t.Fatal(err)
+			}
+		}
+		if err := m.g.SetBase(m.number, hmMovedBase); err != nil {
+			m.t.Fatal(err)
+		}
+		m.movedBase = true
+		m.reach["moved-base"] = true
 	case hMerge:
+		if m.movedBase {
+			// Merged into the base a person moved it to: the change did not reach the target branch, nothing records
+			// it, and no request keeps the lock for it (ADR-0043).
+			if _, err := m.g.Merge(m.number); err != nil {
+				m.logf("  the merge is refused: %v", err)
+				return
+			}
+			m.logf("  merged into %s, not the target branch", hmMovedBase)
+			m.reach["merged-elsewhere"] = true
+			return
+		}
 		var err error
 		if s.Commit {
 			_, err = m.g.MergeWithCommit(m.number)

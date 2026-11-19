@@ -95,6 +95,7 @@ var troubleshootingSections = map[string][]string{
 	"ChangeRequestClosed":               {secPullRequest},
 	"ChangeRequestConflict":             {secPullRequest},
 	"ChangeRequestGone":                 {secPullRequest},
+	"ChangeRequestOnOtherBase":          {secPullRequest},
 	"ChangeRequestMerged":               {secPullRequest},
 	"CheckNotAvailable":                 {secAfterMerge},
 	"CircuitHalfOpen":                   {secLimits},

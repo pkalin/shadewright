@@ -291,8 +291,10 @@ type modelWorld struct {
 	stale     *api.RemediationRequest
 	// writeFaulted reports that this reconcile met an injected write fault or a stale read.
 	writeFaulted bool
-	// deleted hides the pull request from every read (gone from the host).
+	// deleted hides the pull request from every read (gone from the host); gone are earlier pull requests of the
+	// request deleted before it opened the one the model follows now (modelGit.OpenChangeRequest).
 	deleted bool
+	gone    []int64
 	// movedFrom is the base the pull request had before a person moved it to the third base, and moves how often
 	// it was moved there or back in this sequence (moveEvent).
 	movedFrom string
@@ -2112,7 +2114,7 @@ func (g *modelGit) answers404() bool {
 func (g *modelGit) hidden(n int64) bool {
 	g.m.mu.Lock()
 	defer g.m.mu.Unlock()
-	return g.m.deleted && n == g.m.number
+	return g.m.deleted && n == g.m.number || slices.Contains(g.m.gone, n)
 }
 
 // shown is cr as the host reports it: without its merge commit while the model withholds it.
@@ -2168,6 +2170,10 @@ func (g *modelGit) OpenChangeRequest(ctx context.Context, req providers.NewChang
 	// closed or merged one on another base is not listed): the new pull request is the request's from now on, and the
 	// model's properties are about it.
 	g.m.mu.Lock()
+	if g.m.deleted {
+		// Gone from the host: it stays hidden from every read after the model follows the new one.
+		g.m.gone = append(g.m.gone, own.Number)
+	}
 	g.m.number, g.m.deleted, g.m.merge, g.m.noCommit = out.Number, false, "", false
 	g.m.mu.Unlock()
 	g.m.logf("the request opened #%d to %.12s; #%d is %s on %.12s", out.Number, req.BaseBranch, own.Number,

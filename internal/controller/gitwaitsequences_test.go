@@ -834,3 +834,27 @@ func TestSequenceCancelledRecoveryMergeCheckEndsAfterABranchChange(t *testing.T)
 	}
 	m.report()
 }
+
+// Seed 136467 of TestGitWaitModel, made minimal (main has it too): a request in PolicyChecked whose pull request's
+// record was lost records a RequestDeadline wait while the repository cannot be opened; the write that adopts the
+// pull request (PRCreated, no deadline) is applied and reported failed. That write must end the deadline's wait with
+// the deadline, not leave it standing until the next reconcile.
+func TestSequenceAdoptionWriteEndsTheDeadlineWait(t *testing.T) {
+	m := scripted(t, modelStart{start: startPolicyChecked, verify: true})
+	m.steps(1)
+	m.conflictNext = true
+	m.steps(1)
+	m.fault = faultOpen
+	m.steps(1)
+	if gitWait(m.live(), waitRequestDeadline) == nil {
+		t.Fatalf("setup: no RequestDeadline wait recorded: %v", m.live().Status.GitWaits)
+	}
+	m.fault, m.loseNext = faultContent+faultTimeout, true
+	m.steps(1)
+	m.applyNext = true
+	m.steps(1)
+	if live := m.live(); live.Status.Phase == api.PhasePRCreated && gitWait(live, waitRequestDeadline) != nil {
+		m.fatalf("end: the write that records the pull request left the RequestDeadline wait standing")
+	}
+	m.report()
+}

@@ -1171,12 +1171,16 @@ func (r *RemediationRequestReconciler) mergedForeign(ctx context.Context, rr *re
 			"%s. Review the merged change", recordedNumber(rr), ref.reason, ref.message))
 }
 
-// recordPullRequest writes PRCreated with the pull request in one status write.
+// recordPullRequest writes PRCreated with the pull request in one status write, which also ends the Git waits that
+// no longer apply (the request deadline's).
 func (r *RemediationRequestReconciler) recordPullRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) error {
 	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
 	recordNumber(rr, remediationv1alpha1.PullRequestStatus{Number: cr.Number, URL: cr.URL, HeadSHA: cr.HeadSHA})
 	rr.Status.Deadline = nil
+	// The deadline's wait ends with the deadline, in this write: a write applied but reported failed must not leave
+	// an entry that no longer applies standing past its end until the next reconcile removes it.
+	dropEnded(rr, r.now())
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionPROpened,
 		Status:             metav1.ConditionTrue,

@@ -105,12 +105,15 @@ import (
 // #288 cleanup bound (a request whose cleanup was failing let go of its finalizer at the end of a bound of that
 // cleanup, elapsed on the model's clock, with the pull request open), the #870 head (P3), a reopen after a release (a
 // request whose lock a verdict released when a person reopened the pull request does not take it back and records
-// nothing of it, design 6.5), a request deleted while the repository was not in the settings (its finalizer does not
-// wait for the repository, design 6, so its pull request stays open with no holder after the repository is back:
-// P3), and #875: a replacement deleted before it recorded the merge of its pull request after its predecessor
+// nothing of it, design 6.5), #877, a request deleted while the repository was not in the settings (its finalizer
+// does not wait for the repository, design 6, so its pull request stays open with no holder after the repository is
+// back: P3), and #875: a replacement deleted before it recorded the merge of its pull request after its predecessor
 // ended HandedOff (the pull request was the replacement's alone, and a request deleted before it records the merge of
 // its own pull request records nothing, as any request; the predecessor has ended). With the repository gone, reads
-// never answer, so P1 and P2 ask nothing of a merge then.
+// never answer, so P1 and P2 ask nothing of a merge then. The #288 and #877 shapes excuse only what the request that
+// let go leaves (goneShape): the lock free on the open pull request while no live request has a commit on it, and,
+// for #288, the record missing of a merge of that request's commit and a lock the other request holds after the
+// settling run; a later violation by the request still there is a violation.
 //
 // A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property; a
 // seed whose only violations an exclusion covers is skipped with the exclusion's name. The default set is the seeds 1
@@ -310,13 +313,14 @@ type hmWorld struct {
 	// lastRes and lastErr are what the last reconcile of each request returned.
 	lastRes map[string]reconcile.Result
 	lastErr map[string]error
-	// gone288: a request was deleted and let go of its finalizer with the pull request open after its cleanup failed
-	// until a bound of it elapsed on the model's clock (CleanupFailing True on its last copy): the end of the cleanup
-	// bound (#288).
-	gone288 bool
-	// goneMissing: a request being deleted let go of its finalizer while the repository was not in the settings, with
-	// the pull request open (design 6: a repository that left the settings does not block the deletion).
-	goneMissing bool
+	// gone288 names the requests that were deleted and let go of their finalizer with the pull request open after
+	// their cleanup failed until a bound of it elapsed on the model's clock (CleanupFailing True on the last copy): the
+	// end of the cleanup bound (#288).
+	gone288 map[string]bool
+	// goneMissing names the requests that, being deleted, let go of their finalizer while the repository was not in
+	// the settings, with the pull request open (design 6: a repository that left the settings does not block the
+	// deletion; #877).
+	goneMissing map[string]bool
 	lastRepl    *api.RemediationRequest
 	lastPred    *api.RemediationRequest
 	// reach is what the sequence reached, for the counts; excused counts the violations a named shape excuses;
@@ -389,31 +393,78 @@ func (m *hmWorld) logf(format string, args ...any) {
 var hmShapes = []struct {
 	name     string
 	excuses  string
-	matching func(m *hmWorld) bool
+	matching func(m *hmWorld, about string) bool
 }{
 	// A request is deleted while every read or the close fails; its finalizer lets go at the end of the
 	// CleanupRefused or CleanupFailing bound, elapsed on the model's clock, with the pull request left open (design 6,
 	// "The Git cleanup cannot hold a deletion for good", #288), so no request holds the lock of that open pull
-	// request, and a later merge of it is recorded by nobody.
-	{name: "#288 cleanup bound", excuses: "P1 P3 P6", matching: func(m *hmWorld) bool { return m.gone288 }},
+	// request, and a later merge of its commit is recorded by nobody. It excuses only that: the lock free on the open
+	// pull request while no live request has a commit on it, the record missing of a merge of the gone request's
+	// commit, and a lock the other request still holds after the settling run.
+	{name: "#288 cleanup bound", excuses: "P1 P3 P6", matching: func(m *hmWorld, about string) bool {
+		return m.goneShape(m.gone288, about, true)
+	}},
 	// A request is deleted while the repository is not in the settings: nothing can close its pull request, and the
-	// deletion does not wait for the repository (design 6, the deletion), so the pull request stays open with no
-	// holder after the repository comes back.
-	{name: "deleted while the repository was missing", excuses: "P3", matching: func(m *hmWorld) bool {
-		return m.goneMissing
+	// deletion does not wait for the repository (design 6, the deletion; #877), so the pull request stays open with
+	// no holder after the repository comes back. It excuses only the lock free on that open pull request while no
+	// live request has a commit on it.
+	{name: "#877 deleted while the repository was missing", excuses: "P3", matching: func(m *hmWorld, about string) bool {
+		return m.goneShape(m.goneMissing, about, false)
 	}},
 	// A person pushed on top of the replacement's commit (#870): the head of the pull request carries the
 	// replacement's commit with further commits on it. The merge of such a head is excluded from P1 and P2 by its
 	// owner (gap870); P3 asks nothing of the lock of that head.
-	{name: "#870 commits on top of the replacement's", excuses: "P3", matching: func(m *hmWorld) bool {
+	{name: "#870 commits on top of the replacement's", excuses: "P3", matching: func(m *hmWorld, _ string) bool {
 		return m.ownerOf(m.pr().HeadSHA) == "gap870"
 	}},
 }
 
-// excusedBy is the name of the shape that excuses a violation of p now, "" for none.
-func (m *hmWorld) excusedBy(p string) string {
+// What a violation is about, for the shapes that excuse only their own (goneShape): the lock free on the open pull
+// request, the record missing of a merge, or a lock still held by a request (aboutHolder plus its name). A violation
+// about anything else ("") is never excused by them.
+const (
+	aboutLockFree   = "lock-free"
+	aboutUnrecorded = "merge-unrecorded"
+	aboutHolder     = "holder:"
+)
+
+// goneShape reports whether a violation about about is the one a request of gone (that let go of its finalizer with
+// the pull request open) leaves: the lock free while the pull request is open and every request whose commit its head
+// carries is gone, one of them in gone; with all, also the record missing of a merge of the commit of a request in
+// gone, and a lock held after the settling run by the other request of one in gone.
+func (m *hmWorld) goneShape(gone map[string]bool, about string, all bool) bool {
+	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}
+	switch {
+	case about == aboutLockFree:
+		cr := m.pr()
+		if cr.State != providers.ChangeRequestOpen || !m.carries(cr.HeadSHA) {
+			return false
+		}
+		left := false
+		for _, who := range []string{hmPred, hmRepl} {
+			if !m.carriesOwn(cr.HeadSHA, who) {
+				continue
+			}
+			if m.get(who) != nil {
+				return false
+			}
+			left = left || gone[who]
+		}
+		return left
+	case !all:
+		return false
+	case about == aboutUnrecorded:
+		return m.merge != nil && gone[m.merge.owner]
+	case strings.HasPrefix(about, aboutHolder):
+		return gone[other[strings.TrimPrefix(about, aboutHolder)]]
+	}
+	return false
+}
+
+// excusedBy is the name of the shape that excuses a violation of p about about now, "" for none.
+func (m *hmWorld) excusedBy(p, about string) string {
 	for _, sh := range hmShapes {
-		if slices.Contains(strings.Fields(sh.excuses), p) && sh.matching(m) {
+		if slices.Contains(strings.Fields(sh.excuses), p) && sh.matching(m, about) {
 			return sh.name
 		}
 	}
@@ -422,7 +473,13 @@ func (m *hmWorld) excusedBy(p string) string {
 
 // fail notes a violation of property p; one per property. A violation a named shape excuses is counted under it.
 func (m *hmWorld) fail(p, format string, args ...any) {
-	if shape := m.excusedBy(p); shape != "" {
+	m.failAbout(p, "", format, args...)
+}
+
+// failAbout is fail for a violation about about (aboutLockFree, aboutUnrecorded, aboutHolder plus a name), which only
+// the shapes that excuse that may excuse.
+func (m *hmWorld) failAbout(p, about, format string, args ...any) {
+	if shape := m.excusedBy(p, about); shape != "" {
 		if m.excused[shape] == 0 {
 			m.logf("EXCUSED (%s) %s: %s", shape, p, fmt.Sprintf(format, args...))
 		}
@@ -448,6 +505,7 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		number: cr.Number, branch: cr.HeadBranch, predCommit: p.Status.PullRequest.HeadSHA,
 		personCommits: map[string]bool{}, replCommits: map[string]bool{}, once: map[string]error{},
 		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{}, awaiting: map[string]bool{},
+		gone288: map[string]bool{}, goneMissing: map[string]bool{},
 		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
 		waitingAtRemoval: map[string]bool{}, expected: map[string]int{}, lastErr: map[string]error{},
 		lastRes: map[string]reconcile.Result{}}
@@ -1077,15 +1135,17 @@ func (m *hmWorld) note(p, rr *api.RemediationRequest) {
 	goneMissing := func(now, last *api.RemediationRequest) bool {
 		return now == nil && last != nil && !last.DeletionTimestamp.IsZero() && m.settings == settingsRemoved
 	}
-	if (goneMissing(rr, m.lastRepl) || goneMissing(p, m.lastPred)) && m.pr().State == providers.ChangeRequestOpen &&
-		!m.goneMissing {
-		m.goneMissing = true
-		m.logf("  a request deleted while the repository is not in the settings let go with the pull request open")
-	}
-	if (letGo(rr, m.lastRepl) || letGo(p, m.lastPred)) && m.pr().State == providers.ChangeRequestOpen &&
-		!m.gone288 {
-		m.gone288 = true
-		m.logf("  the #288 shape: a request let go at its cleanup bound with the pull request open")
+	open := m.pr().State == providers.ChangeRequestOpen
+	for who, now := range map[string]*api.RemediationRequest{hmPred: p, hmRepl: rr} {
+		last := map[string]*api.RemediationRequest{hmPred: m.lastPred, hmRepl: m.lastRepl}[who]
+		if open && goneMissing(now, last) && !m.goneMissing[who] {
+			m.goneMissing[who] = true
+			m.logf("  the %s, deleted while the repository is not in the settings, let go with the pull request open", who)
+		}
+		if open && letGo(now, last) && !m.gone288[who] {
+			m.gone288[who] = true
+			m.logf("  the #288 shape: the %s let go at its cleanup bound with the pull request open", who)
+		}
 	}
 	m.lastRepl, m.lastPred = rr, p
 }
@@ -1119,7 +1179,7 @@ func (m *hmWorld) observeLock(reqs map[string]*api.RemediationRequest) {
 	}
 	if free && cr.State == providers.ChangeRequestOpen && m.carries(cr.HeadSHA) && !repoGone &&
 		!m.reopenExcuses(cr.HeadSHA) {
-		m.fail("P3", "the lock is free while the open pull request carries a commit of a request (pred: %s, repl: %s)",
+		m.failAbout("P3", aboutLockFree, "the lock is free while the open pull request carries a commit of a request (pred: %s, repl: %s)",
 			describe(reqs[hmPred]), describe(reqs[hmRepl]))
 	}
 }
@@ -1538,7 +1598,7 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 		// The predecessor went before it recorded the merge of its commit put back after the takeover: the replacement
 		// records it as a foreign change.
 		if !m.foreignOnReplacement(reqs) && reqs[hmRepl] != nil && reqs[hmRepl].DeletionTimestamp.IsZero() {
-			m.fail("P1", "the merge of the predecessor's commit %s after the takeover is recorded on neither request "+
+			m.failAbout("P1", aboutUnrecorded, "the merge of the predecessor's commit %s after the takeover is recorded on neither request "+
 				"(repl: %s)", short(mg.head), describe(reqs[hmRepl]))
 		}
 		return
@@ -1558,13 +1618,13 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 		// The host never reported a merge commit ID: no receipt can be made, and the merge is recorded on its owner
 		// without one (Merged, then Inconclusive with NoMergeReceipt).
 		if !recordsMerge(owner) && !m.foreignOnReplacement(reqs) {
-			m.fail("P1", "the merge of the %s's commit %s, reported without a merge commit ID, is not recorded on it "+
+			m.failAbout("P1", aboutUnrecorded, "the merge of the %s's commit %s, reported without a merge commit ID, is not recorded on it "+
 				"(pred: %s, repl: %s)", mg.owner, short(mg.head), describe(m.get(hmPred)), describe(m.get(hmRepl)))
 		}
 		return
 	}
 	if (owner.Status.MergeReceipt == nil || owner.Status.MergeReceipt.HeadSHA != mg.head) && !m.foreignOnReplacement(reqs) {
-		m.fail("P1", "the merge of the %s's commit %s is not recorded on it with its receipt (pred: %s, repl: %s)",
+		m.failAbout("P1", aboutUnrecorded, "the merge of the %s's commit %s is not recorded on it with its receipt (pred: %s, repl: %s)",
 			mg.owner, short(mg.head), describe(m.get(hmPred)), describe(m.get(hmRepl)))
 	}
 }
@@ -1591,7 +1651,7 @@ func (m *hmWorld) settledGoneOwner(mg *hmMerge, reqs map[string]*api.Remediation
 		return
 	}
 	if mg.owner == hmRepl && !mg.recorded[hmRepl] && reqs[hmPred] != nil && !m.foreignForGone(reqs) {
-		m.fail("P1", "the merge of the deleted replacement's commit %s is recorded on neither request (pred: %s)",
+		m.failAbout("P1", aboutUnrecorded, "the merge of the deleted replacement's commit %s is recorded on neither request (pred: %s)",
 			short(mg.head), describe(reqs[hmPred]))
 	}
 }
@@ -1623,7 +1683,8 @@ func (m *hmWorld) liveness() {
 				m.expectMissingShown(who, x, name)
 				continue
 			}
-			m.fail("P6", "%s, and the %s still holds the target lock after the settling run (%s)", why, who, describe(x))
+			m.failAbout("P6", aboutHolder+who, "%s, and the %s still holds the target lock after the settling run (%s)", why,
+				who, describe(x))
 		}
 	}
 }

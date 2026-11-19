@@ -144,6 +144,9 @@ func occurrenceOf(name string) int32 {
 // UID yet (a cause observation counted, its write not done) is kept: that write sets status.cause. The caller
 // holds mu.
 func (c *Controller) noteState(inc *remediationv1alpha1.Incident) {
+	if _, ok := c.names[inc.Name]; ok && inc.UID != "" {
+		c.uids[inc.Name] = inc.UID
+	}
 	st := &inc.Status
 	if st.Cause && inc.HasDerivedName() {
 		c.causes[inc.Name] = causeIncident{spec: inc.Spec, uid: inc.UID}
@@ -189,12 +192,16 @@ func (c *Controller) rolls(o collector.Observation) bool {
 	return c.notFuture(o.ObservedAt).Sub(resolved) > RecurrenceWindow
 }
 
-// deletedError is a write to a later occurrence this process did not open that no longer exists: someone
-// deleted it (the clean-up at the cap). It is never created again from memory; latest is the newest
-// occurrence of the fingerprint that still exists, or nil when none does.
+// deletedError is an Incident this process did not open (or opened and wrote) that no longer exists: someone
+// deleted it (the clean-up at the cap, or a person). It is never created again from memory (#893 for the
+// first occurrence); latest is the newest occurrence of the fingerprint that still exists, or nil when none
+// does.
 type deletedError struct {
 	name   string
 	latest *remediationv1alpha1.Incident
+	// latestN is, when latest is nil, the newest occurrence of the fingerprint this process knows to exist
+	// (from its places under the cap), or 0 when none does.
+	latestN int32
 }
 
 func (e *deletedError) Error() string {

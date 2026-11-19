@@ -372,13 +372,20 @@ func (r *RemediationRequestReconciler) endCancelClosed(ctx context.Context, rr *
 	return r.endCancelled(ctx, rr, message, checkErr != nil)
 }
 
+// unstartableRecovery is why no read can start for a cancelled replacement whose handoff recovery meets a changed
+// target branch (cancelRecoveryFailed): the end of a wait for a read says it.
+const unstartableRecovery = "the repository entry of the plan names another target branch, and the recovery of " +
+	"the handoff reads only through it"
+
 // cancelRecoveryFailed handles err, a failure of the recovery of a handoff (recoverHandoff) of a request whose
 // spec.cancel is set: the cancel cannot finish while it is not known whether the replacement's own commit is on the
 // pull request, and the request is never ended on it, so a merge of that commit is still recorded once the
 // recovery can read again. A pause waits and the caller's cancellation is returned. A final refusal of the Git
 // host, a repository that is not configured or usable any more and a changed target branch are watched
 // (cancelWatch), as for a refused close; anything else, a failed read of a pull request included, is retried
-// (cancelFailed) within cleanupFailingBound, then watched. The recovery's own deadline grace does not apply.
+// (cancelFailed) within cleanupFailingBound, then watched. The recovery's own deadline grace does not apply. A
+// changed target branch also notes that no read can start (unstartableRecovery), so a MergeCheck or MergeContent
+// wait recorded before the change ends at its end, as with a repository gone, and never stands past it.
 func (r *RemediationRequestReconciler) cancelRecoveryFailed(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, err error) (reconcile.Result, error) {
 	const what = "the recovery of its handoff, which learns whether its own commit is on the pull request it replaces"
@@ -390,6 +397,10 @@ func (r *RemediationRequestReconciler) cancelRecoveryFailed(ctx context.Context,
 	case errors.Is(err, errRepositoryGone):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnavailable, "the repository it was made for is not configured any more")
 	case errors.Is(err, errTargetBranchChanged):
+		// The recovery reads only through the plan's repository entry, which names another target branch now, and
+		// nothing else reads for the request while it recovers: no read can start, as with a repository gone
+		// (planEntry), so a wait for a read past its end ends on this note (endAfterLastRead) instead of standing.
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableRecovery)
 		return r.cancelWatchBranchChanged(ctx, rr)
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		return r.cancelWatch(ctx, rr, reasonRepositoryUnusable, "the settings of its repository cannot be used")

@@ -794,3 +794,43 @@ func TestSettledForeignOpenOnAThirdBaseFails(t *testing.T) {
 		t.Fatal("a held lock with only a foreign pull request open on a third base passed the check")
 	}
 }
+
+// Seed 179902 of TestGitWaitModel, made minimal: a replacement in PolicyChecked recovering its handoff while the
+// repository cannot be opened; the pull request is merged into the plan's branch without its merge commit; a pause; a
+// person cancels; the read of the merge is retried with the first write of its MergeCheck wait lost, then recorded;
+// the settings name another target branch. The cancel then waits on the changed branch (cancelWatchBranchChanged)
+// and reads nothing, so the wait must still end at its end, after one more look, and never stand past it.
+func TestSequenceCancelledRecoveryMergeCheckEndsAfterABranchChange(t *testing.T) {
+	m := scripted(t, modelStart{start: startPolicyChecked, open: true, lasting: 10 * time.Minute, handoff: true,
+		focus: focusDeadline})
+	m.steps(2)
+	sha, err := m.g.Merge(m.number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.merge, m.noCommit = sha, true
+	m.logf("merge the pull request into main without its commit")
+	m.steps(1)
+	m.pause(true)
+	m.steps(1)
+	m.cancel()
+	m.steps(1)
+	m.fault, m.loseNext = faultBetween, true
+	m.logf("reads: between, and lose the next status write")
+	m.steps(1)
+	m.pause(false)
+	m.steps(2)
+	if gitWait(m.live(), waitMergeCheck) == nil {
+		t.Fatalf("setup: no MergeCheck wait recorded: %v", m.live().Status.GitWaits)
+	}
+	m.setConfigured(freshOtherBranch)
+	m.logf("the settings name target branch %s", freshOtherBranch)
+	m.steps(4)
+	m.fault, m.lastingUntil = faultNone, time.Time{}
+	m.logf("heal")
+	m.steps(8)
+	if live := m.live(); gitWait(live, waitMergeCheck) != nil {
+		m.fatalf("end: the MergeCheck wait stands after the world healed (phase %s)", live.Status.Phase)
+	}
+	m.report()
+}

@@ -139,7 +139,7 @@ On `PolicyAllowed`; repeated by the policy check on the resolved source.
 | `BranchMismatch` | Denied | The branch Flux tracks is not the repository's `targetBranch` | Align `targetBranch` with Flux (default is `main`) |
 | `BranchNotAllowed` | Denied | The same check, made again by the policy | As `BranchMismatch` |
 | `BranchNotFound` | NeedsIntervention | The target branch does not exist in the repository | Create it or correct the settings |
-| `PathNotAllowed` | Denied | The file that declares the object matches none of the policy's `allowedPaths` | Widen `allowedPaths` deliberately, or the change is out of scope |
+| `PathNotAllowed` | Denied | The file that declares the object matches none of the policy's `allowedPaths` (a path that contains `..` matches none; a file with such a name found by source mapping is refused earlier, as `InvalidPath`) | Widen `allowedPaths` deliberately, or the change is out of scope |
 
 ## Files in Git
 

@@ -96,6 +96,11 @@ type changeQuery struct {
 	// (settleGone), every failed read sets condition PullRequestUnreadable, and any other read that works leaves
 	// the condition to the read on the recorded branch that follows (noteRead).
 	configuredBranch remediationv1alpha1.GitBranch
+	// otherBases, when not nil, lists the open pull requests from the request's branch to every base branch of the
+	// repository (ListOpenChangeRequestsAnyBase) for the settlement of the target lock (lookHeld, #892), and answers
+	// open with the request's own one (its recorded number, or, with none recorded, one with this request's marker)
+	// on a base not in otherBases, the target branches the settlement read already; gone when there is none.
+	otherBases []remediationv1alpha1.GitBranch
 	// reinstalled is a read through a new installation of the GitHub App for the plan's repository (#290): every
 	// failed read that is not an answer of the Git host sets condition PullRequestUnreadable (noteRead, #797).
 	reinstalled bool
@@ -124,6 +129,9 @@ type changeVerdict struct {
 	// that the call read (own, and open with openOnBranch). A verdict made unknown again by a later failure (a
 	// listing, a status write) is a new one without it, so closeAllOwn never acts on a listing it does not have.
 	ownListed bool
+	// movedTo is set by the settlement of the target lock alone (lookHeld, #892): the base branch, neither target
+	// branch it read, where the request's own pull request is open (a person moved it there). Empty otherwise.
+	movedTo remediationv1alpha1.GitBranch
 }
 
 // errUnconfirmedNotFound means the Git host answered 404 for the pull request number, but the request's branch
@@ -256,6 +264,8 @@ func (r *RemediationRequestReconciler) readChange(ctx context.Context, git provi
 		return unknownChange(errors.New("no pull request recorded to read on the configured target branch")), 0
 	case q.configuredBranch != "":
 		return r.readOnConfigured(ctx, git, rr, n, q.configuredBranch), n
+	case q.otherBases != nil:
+		return r.openOnOtherBase(ctx, git, rr, n, q.otherBases), n
 	case n == 0:
 		return r.settleGone(ctx, rr, 0, false, r.changeOnBranch(ctx, git, rr)), 0
 	}
@@ -284,6 +294,33 @@ func (r *RemediationRequestReconciler) readOnConfigured(ctx context.Context, git
 		return changeVerdict{state: changeGone, gone: fmt.Sprintf("pull request #%d lacks this request's marker", n)}
 	}
 	return v
+}
+
+// openOnOtherBase is readChange for q.otherBases: the request's own pull request (number n, or, when n is 0, the
+// newest with this request's marker) found open by the listing of the open pull requests from its branch to every
+// base branch, on a base that is not in read. The listing is the proof that none is open elsewhere; one that fails
+// is unknown, never none.
+func (r *RemediationRequestReconciler) openOnOtherBase(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, n int64, read []remediationv1alpha1.GitBranch) changeVerdict {
+	open, err := git.ListOpenChangeRequestsAnyBase(ctx, freshness.BranchName(rr))
+	if err != nil {
+		return unknownChange(listFailed("list the open change requests of the branch to every base", err))
+	}
+	for _, cr := range open {
+		if slices.Contains(read, remediationv1alpha1.GitBranch(cr.BaseBranch)) || n != 0 && cr.Number != n {
+			continue
+		}
+		if n == 0 {
+			switch ours, err := r.ownsMarker(ctx, cr.Body, rr); {
+			case err != nil:
+				return unknownChange(err)
+			case !ours:
+				continue
+			}
+		}
+		return changeVerdict{state: changeOpen, pr: cr}
+	}
+	return changeVerdict{state: changeGone, gone: "no pull request of the request is open on another base branch"}
 }
 
 // readByNumber is readChange for a number.

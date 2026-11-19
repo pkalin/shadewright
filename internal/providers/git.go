@@ -335,6 +335,13 @@ type GitProvider interface {
 	// out, never an answer (an ErrNotFound included: no branch is not an empty list). It only reads.
 	ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) ([]ChangeRequest, error)
 
+	// ListOpenChangeRequestsAnyBase returns every open change request from headBranch, a Shadewright branch of this
+	// repository, to any base branch of this repository, newest first: also those whose base a person moved off the
+	// target branch (#892). An entry from another branch or repository, or one that is not open, is
+	// ErrUntrustedAnswer for the whole call. More than MaxBranchChangeRequests is ErrTooLarge. Any error is a failure
+	// to find out, never an answer. It only reads.
+	ListOpenChangeRequestsAnyBase(ctx context.Context, headBranch string) ([]ChangeRequest, error)
+
 	// GetChangeRequest returns the change request with number, in any state. It finds the recorded change
 	// request of a request again after a lost status write, also when its branch carries a newer change request
 	// (ADR-0030 section 1). ErrNotFound when there is none with that number, and also when the one with that

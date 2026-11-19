@@ -2052,6 +2052,18 @@ func (g *modelGit) ListChangeRequests(ctx context.Context, head string, openOnly
 	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return g.hidden(cr.Number) }), err
 }
 
+// ListOpenChangeRequestsAnyBase is a listing too: it fails with the listing's fault and hides a deleted pull request.
+func (g *modelGit) ListOpenChangeRequestsAnyBase(ctx context.Context, head string) ([]providers.ChangeRequest, error) {
+	if err := g.fail(ctx, opList); err != nil {
+		return nil, err
+	}
+	all, err := g.GitProvider.ListOpenChangeRequestsAnyBase(ctx, head)
+	for i := range all {
+		all[i] = g.shown(all[i])
+	}
+	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return g.hidden(cr.Number) }), err
+}
+
 func (g *modelGit) FindChangeRequest(ctx context.Context, head string) (providers.ChangeRequest, error) {
 	if err := g.fail(ctx, opFind); err != nil {
 		return providers.ChangeRequest{}, err

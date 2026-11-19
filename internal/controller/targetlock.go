@@ -740,8 +740,8 @@ func (r *RemediationRequestReconciler) heldLookResult(ctx context.Context, rr *r
 		log.Info("Released the target lock of RemediationRequest: none of its pull requests is open")
 		return reconcile.Result{}
 	case holding != nil:
-		log.Info("Kept the target lock of RemediationRequest: another pull request is open on its branch",
-			"pullRequest", holding.Number)
+		log.Info("Kept the target lock of RemediationRequest: a pull request from its branch is open",
+			"pullRequest", holding.Number, "base", holding.BaseBranch)
 	default:
 		log.Info("Recorded the open pull request of a stopped RemediationRequest", "pullRequest", pr.Number)
 	}
@@ -790,10 +790,13 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 			return v, holding, err
 		}
 	} else if holding != nil {
+		msg := fmt.Sprintf("Pull request #%d is open on the request's branch and may still deliver its change; the target stays locked until it is closed or merged", holding.Number)
+		if v.movedTo != "" && holding.BaseBranch == string(v.movedTo) {
+			msg = fmt.Sprintf("Pull request #%d of the request is open on base branch %s, where it was moved, and may still merge; the target stays locked until it is closed or merged", holding.Number, v.movedTo)
+		}
 		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 			Type: remediationv1alpha1.ConditionTargetHeld, Status: metav1.ConditionTrue, Reason: ReasonOpenOnBranch,
-			Message:            fmt.Sprintf("Pull request #%d is open on the request's branch and may still deliver its change; the target stays locked until it is closed or merged", holding.Number),
-			ObservedGeneration: rr.Generation,
+			Message: msg, ObservedGeneration: rr.Generation,
 		})
 	} else {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionTargetHeld)
@@ -801,8 +804,10 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 	return v, holding, nil
 }
 
-// lookHeld reads both the recorded and configured branches of the plan's repository. The open listings are
-// combined before openHolding decides whether another request already holds any of those pull requests.
+// lookHeld reads both the recorded and configured branches of the plan's repository. When neither shows the
+// request's own pull request, it also lists the open pull requests from its branch to every base (#892), and the
+// request's own one open on another base joins the open listings. They are combined before openHolding decides
+// whether another request already holds any of those pull requests.
 func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	changeVerdict, *providers.ChangeRequest, error) {
 	if r.OpenRepository == nil {
@@ -818,12 +823,12 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 	}
 	var verdict changeVerdict
 	var open []providers.ChangeRequest
+	var git providers.GitProvider
 	branches := []remediationv1alpha1.GitBranch{rr.Status.Source.TargetBranch}
 	if changed {
 		branches = append([]remediationv1alpha1.GitBranch{repo.TargetBranch}, branches...)
 	}
 	for _, branch := range branches {
-		var git providers.GitProvider
 		if changed {
 			git, err = r.openRecordedBranch(ctx, repo, branch)
 		} else {
@@ -864,13 +869,11 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 			verdict = v
 		}
 	}
-	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); changed &&
-		c != nil && repositoryReasons[c.Reason] {
-		// Both branches were read through the repository entry: a reason about the repository (it left the
-		// settings, could not be used) is disproved, as noteRead removes it after a read on one branch.
-		if err := r.setUnreadable(ctx, rr, nil); err != nil {
-			return changeVerdict{}, nil, &clusterError{err: err}
-		}
+	if failed, ok := r.openElsewhere(ctx, git, rr, branches, reinstalled, &verdict, &open); !ok {
+		return failed, nil, nil
+	}
+	if err := r.disproveRepositoryReason(ctx, rr, changed); err != nil {
+		return changeVerdict{}, nil, err
 	}
 	holding, err := r.openHolding(ctx, rr, open)
 	if holding != nil && verdict.state == changeOpen && holding.Number == verdict.pr.Number {
@@ -882,8 +885,48 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 	return verdict, holding, nil
 }
 
-// ReasonOpenOnBranch is the reason of condition TargetHeld: a pull request is open on the request's branch and
-// may still deliver its change, although the request's own is closed or gone.
+// openElsewhere is lookHeld's read after neither target branch in read showed the request's own pull request (or,
+// with none recorded, one with its marker), when *verdict is gone: a person may have moved its base to another
+// branch (#892). An open pull request can still merge, so it keeps the lock wherever it is: it joins *open, and
+// verdict.movedTo names its base. Once it is closed or merged there, the listing no longer has it, and the lock goes.
+// A merge there is not recorded as the request's: it delivers nothing the plan was made for. A failed listing returns
+// its unknown verdict and false: the lock is kept, and the look retried as a failed Git read.
+func (r *RemediationRequestReconciler) openElsewhere(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, read []remediationv1alpha1.GitBranch, reinstalled bool,
+	verdict *changeVerdict, open *[]providers.ChangeRequest) (changeVerdict, bool) {
+	if verdict.state != changeGone {
+		return changeVerdict{}, true
+	}
+	elsewhere := r.changeOf(ctx, git, rr, changeQuery{otherBases: read, reinstalled: reinstalled})
+	switch elsewhere.state {
+	case changeUnknown:
+		return elsewhere, false
+	case changeOpen:
+		*open = append(*open, elsewhere.pr)
+		verdict.movedTo = remediationv1alpha1.GitBranch(elsewhere.pr.BaseBranch)
+	}
+	return changeVerdict{}, true
+}
+
+// disproveRepositoryReason is lookHeld's removal of condition PullRequestUnreadable with a reason about the
+// repository after both branches of a changed target were read through the repository entry: such a reason (it
+// left the settings, could not be used) is disproved, as noteRead removes it after a read on one branch. A failed
+// write is a *clusterError.
+func (r *RemediationRequestReconciler) disproveRepositoryReason(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, changed bool) error {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	if !changed || c == nil || !repositoryReasons[c.Reason] {
+		return nil
+	}
+	if err := r.setUnreadable(ctx, rr, nil); err != nil {
+		return &clusterError{err: err}
+	}
+	return nil
+}
+
+// ReasonOpenOnBranch is the reason of condition TargetHeld: a pull request from the request's branch is open and
+// may still deliver its change, although the request's own is closed or gone, or the request's own is open on a
+// base a person moved it to (#892).
 const ReasonOpenOnBranch = "PullRequestOpenOnBranch"
 
 // openHolding is the one rule for which open pull requests of a request's branch keep the lock of a request whose

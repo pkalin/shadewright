@@ -601,13 +601,23 @@ func (g *Git) ListChangeRequests(ctx context.Context, headBranch string, openOnl
 	return g.listFor(headBranch, openOnly, g.target)
 }
 
-// listFor is ListChangeRequests to the target branch target.
+// ListOpenChangeRequestsAnyBase is GitProvider.ListOpenChangeRequestsAnyBase: the open change requests of
+// headBranch to every base branch.
+func (g *Git) ListOpenChangeRequestsAnyBase(_ context.Context, headBranch string) ([]providers.ChangeRequest, error) {
+	if err := g.before("ListOpenChangeRequestsAnyBase"); err != nil {
+		return nil, err
+	}
+	return g.listFor(headBranch, true, "")
+}
+
+// listFor is ListChangeRequests to the target branch target, or to every base branch when target is empty.
 func (g *Git) listFor(headBranch string, openOnly bool, target string) ([]providers.ChangeRequest, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var out []providers.ChangeRequest
 	for _, cr := range slices.Backward(g.crs) {
-		if cr.HeadBranch != headBranch || cr.BaseBranch != target || (openOnly && cr.State != providers.ChangeRequestOpen) {
+		if cr.HeadBranch != headBranch || target != "" && cr.BaseBranch != target ||
+			(openOnly && cr.State != providers.ChangeRequestOpen) {
 			continue
 		}
 		if out = append(out, *cr); len(out) > providers.MaxBranchChangeRequests {

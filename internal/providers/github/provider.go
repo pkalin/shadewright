@@ -48,6 +48,7 @@ const (
 	opFindCR       = "GitHub find pull request"
 	opGetCR        = "GitHub get pull request"
 	opListCR       = "GitHub list pull requests of a branch"
+	opListAnyCR    = "GitHub list open pull requests of a branch to any base"
 	opCloseCR      = "GitHub close pull request"
 	opCommentCR    = "GitHub comment on pull request"
 	opAutoMerge    = "GitHub auto-merge"
@@ -1202,8 +1203,24 @@ const branchPullsPerPage = 50
 // right, since it is no longer open.
 func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, openOnly bool) (
 	[]providers.ChangeRequest, error) {
+	return p.listBranch(ctx, opListCR, headBranch, openOnly, false)
+}
+
+// ListOpenChangeRequestsAnyBase returns the open pull requests from headBranch of this repository to any base
+// branch of this repository, newest first (#892): ListChangeRequests with openOnly and without the base, on the
+// same terms. Every entry must be open and from headBranch of this repository to a branch of this repository: any
+// other entry is ErrUntrustedAnswer for the whole call.
+func (p *Provider) ListOpenChangeRequestsAnyBase(ctx context.Context, headBranch string) (
+	[]providers.ChangeRequest, error) {
+	return p.listBranch(ctx, opListAnyCR, headBranch, true, true)
+}
+
+// listBranch is ListChangeRequests (anyBase false) and ListOpenChangeRequestsAnyBase (anyBase true, which asks
+// GitHub for no base and takes an entry to any base branch of this repository).
+func (p *Provider) listBranch(ctx context.Context, op, headBranch string, openOnly, anyBase bool) (
+	[]providers.ChangeRequest, error) {
 	if !isHeadBranch(headBranch) {
-		return nil, errors.New(opListCR + ": head branch is not a Shadewright branch")
+		return nil, errors.New(op + ": head branch is not a Shadewright branch")
 	}
 	state := "all"
 	if openOnly {
@@ -1215,32 +1232,41 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 	var out []providers.ChangeRequest
 	const maxPages = providers.MaxBranchChangeRequests / branchPullsPerPage
 	for page := 1; ; page++ {
-		r, err := p.do(ctx, call{op: opListCR, method: http.MethodGet, path: pathPulls, query: url.Values{
+		query := url.Values{
 			"head": {p.repo.Owner + ":" + headBranch}, "base": {p.target}, paramState: {state},
 			"sort": {"created"}, "direction": {"desc"}, paramPerPage: {strconv.Itoa(branchPullsPerPage)},
 			paramPage: {strconv.Itoa(page)},
-		}})
+		}
+		if anyBase {
+			query.Del("base")
+		}
+		r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: pathPulls, query: query})
 		if err != nil {
 			return nil, err
 		}
 		if !r.ok() {
-			return nil, statusError(opListCR, r.status)
+			return nil, statusError(op, r.status)
 		}
 		// A pointer, so that a JSON null (or an empty body) is told apart from an empty list: only an array is an
 		// answer, anything else is a broken one, retried like any unclassified failure, never "none".
 		var prs *[]pullJSON
-		if err := decode(opListCR, r, &prs); err != nil {
+		if err := decode(op, r, &prs); err != nil {
 			return nil, err
 		}
 		if prs == nil {
-			return nil, errors.New(opListCR + ": GitHub answered without a list of pull requests")
+			return nil, errors.New(op + ": GitHub answered without a list of pull requests")
 		}
 		for _, pr := range *prs {
-			if !p.ours(pr) || pr.Head.Ref != headBranch || (openOnly && (pr.State != stateOpen || pr.MergedAt != nil)) {
-				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", opListCR,
+			ours := p.ours(pr)
+			if anyBase {
+				ours = pr.Number > 0 && isHeadBranch(pr.Head.Ref) && p.ownRepo(pr.Head.Repo) && p.ownRepo(pr.Base.Repo) &&
+					pr.Base.Ref != ""
+			}
+			if !ours || pr.Head.Ref != headBranch || (openOnly && (pr.State != stateOpen || pr.MergedAt != nil)) {
+				return nil, fmt.Errorf("%s: GitHub returned a pull request that was not asked for: %w", op,
 					providers.ErrUntrustedAnswer)
 			}
-			cr, err := p.toChangeRequest(opListCR, pr)
+			cr, err := p.toChangeRequest(op, pr)
 			if err != nil {
 				return nil, err
 			}
@@ -1248,25 +1274,25 @@ func (p *Provider) ListChangeRequests(ctx context.Context, headBranch string, op
 				if prev.State != cr.State || prev.HeadSHA != cr.HeadSHA {
 					// Two pages answered differently about one pull request: neither answer is believed.
 					return nil, fmt.Errorf("%s: GitHub listed pull request #%d twice with a different state or head",
-						opListCR, pr.Number)
+						op, pr.Number)
 				}
 				continue
 			}
 			seen[pr.Number] = cr
 			if out = append(out, cr); len(out) > providers.MaxBranchChangeRequests {
-				return nil, fmt.Errorf("%s: more than %d pull requests: %w", opListCR,
+				return nil, fmt.Errorf("%s: more than %d pull requests: %w", op,
 					providers.MaxBranchChangeRequests, providers.ErrTooLarge)
 			}
 		}
 		last, err := lastLinkPage(r.header.Get("Link"))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", opListCR, err)
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 		if last <= page {
 			break
 		}
 		if page >= maxPages {
-			return nil, fmt.Errorf("%s: more than %d pull requests: %w", opListCR,
+			return nil, fmt.Errorf("%s: more than %d pull requests: %w", op,
 				providers.MaxBranchChangeRequests, providers.ErrTooLarge)
 		}
 	}

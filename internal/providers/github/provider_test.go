@@ -1574,6 +1574,56 @@ func TestListChangeRequestsRefused(t *testing.T) {
 	}
 }
 
+// listAnyBase is one page of ListOpenChangeRequestsAnyBase's listing: open pull requests of the branch, no base.
+func listAnyBase(pulls ...string) step {
+	return step{method: http.MethodGet, path: pullsPath, status: http.StatusOK,
+		query: "direction=desc&head=acme%3Ashadewright%2Freq-1&page=1&per_page=50&sort=created&state=open",
+		raw:   "[" + strings.Join(pulls, ",") + "]"}
+}
+
+// TestListOpenChangeRequestsAnyBase checks that the listing of the open pull requests of a branch asks GitHub for
+// no base and returns those to any base branch of this repository, newest first (#892), and that an answer not to
+// that question is an error, never a list cut short or an empty one.
+func TestListOpenChangeRequestsAnyBase(t *testing.T) {
+	h := newHarness(t, listAnyBase(branchPull(12, stateOpen, branch, "acme/fleet", target),
+		branchPull(14, stateOpen, branch, "acme/fleet", other)))
+	got, err := h.p.ListOpenChangeRequestsAnyBase(ctx, branch)
+	if err != nil || len(got) != 2 || got[0].Number != 14 || got[0].BaseBranch != other ||
+		got[1].BaseBranch != target || got[0].State != providers.ChangeRequestOpen {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if _, err := h.p.ListOpenChangeRequestsAnyBase(ctx, "feature/x"); err == nil {
+		t.Error("a branch outside shadewright/ was allowed")
+	}
+	forkBase := strings.Replace(branchPull(15, stateOpen, branch, "acme/fleet", other),
+		`"repo":{"full_name":"acme/fleet"}}}`, `"repo":{"full_name":"fork/fleet"}}}`, 1)
+	for name, tc := range map[string]struct {
+		steps []step
+		want  error
+	}{
+		"another repository": {[]step{listAnyBase(branchPull(15, stateOpen, branch, "fork/fleet", other))},
+			providers.ErrUntrustedAnswer},
+		"a base in another repository": {[]step{listAnyBase(forkBase)}, providers.ErrUntrustedAnswer},
+		"another branch": {[]step{listAnyBase(branchPull(15, stateOpen, "shadewright/req-2", "acme/fleet", other))},
+			providers.ErrUntrustedAnswer},
+		"closed in an open listing": {[]step{listAnyBase(branchPull(15, stateClosed, branch, "acme/fleet", other))},
+			providers.ErrUntrustedAnswer},
+		"merged in an open listing": {[]step{listAnyBase(branchPull(15, "merged", branch, "acme/fleet", other))},
+			providers.ErrUntrustedAnswer},
+		"listing answered 404": {[]step{status(http.MethodGet, pullsPath, http.StatusNotFound, fxForbidden)},
+			providers.ErrNotFound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, tc.steps...)
+			got, err := h.p.ListOpenChangeRequestsAnyBase(ctx, branch)
+			if !errors.Is(err, tc.want) || got != nil {
+				t.Fatalf("got %+v, %v; want %v", got, err, tc.want)
+			}
+			assertSafe(t, err)
+		})
+	}
+}
+
 // TestListChangeRequestsContradicting checks that a pull request two pages list with a different state or head is an
 // error, never the first answer: the listing contradicts itself (#688).
 func TestListChangeRequestsContradicting(t *testing.T) {

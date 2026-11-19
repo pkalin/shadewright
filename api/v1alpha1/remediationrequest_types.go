@@ -361,7 +361,9 @@ const (
 	ConditionQueued = "Queued"
 	// ConditionTargetHeld is True, with reason PullRequestOpenOnBranch, while a request that stopped keeps the
 	// lock on its target (status.holdsTarget) because its recorded pull request is closed or merged but another
-	// pull request is open on its branch and may still deliver its change; the message names that pull request.
+	// pull request is open on its branch and may still deliver its change, or because its own pull request is open
+	// on a base branch a person moved it to, neither the recorded nor the configured target branch (#892); the
+	// message names that pull request (and that base).
 	// It is written when the executor finds that, not on every look, and removed when the lock is released.
 	ConditionTargetHeld = "TargetHeld"
 	// ConditionPullRequestUnreadable is True while the executor cannot read the request's pull requests (#688):

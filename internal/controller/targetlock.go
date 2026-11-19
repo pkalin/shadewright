@@ -801,7 +801,7 @@ func (r *RemediationRequestReconciler) settleReplacementOwned(ctx context.Contex
 		// and no failure for the circuit breaker; the lock goes in the same write.
 		return owner, reconcile.Result{}, true, r.ignoreStopped(r.leavePredecessorMerge(ctx, rr, v))
 	case owner == ownerReplacementPending, owner == ownerPredecessorPending:
-		// The replacement does not hold the receipt of its merge yet: the lock is kept, and read again, until it
+		// The replacement does not hold its record of the merge yet: the lock is kept, and read again, until it
 		// does, or until it is deleted and the merge is this request's to record as a foreign change.
 		return owner, reconcile.Result{RequeueAfter: r.withinWaits(rr, heldRecheckInterval)}, true, nil
 	}

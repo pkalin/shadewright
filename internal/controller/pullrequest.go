@@ -1568,7 +1568,7 @@ func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git pr
 		case owner == ownerReplacement:
 			return r.leaveReplacementMerge(ctx, rr, v, owner)
 		case owner == ownerReplacementPending:
-			// The replacement records the merge of its commit; this request ends once it holds the receipt, and
+			// The replacement records the merge of its commit; this request ends once it holds its record of it, and
 			// writes nothing to the merged pull request meanwhile.
 			return r.awaitOtherRecord(ctx, rr, v, string(rr.Status.Handoff.To.Name))
 		}

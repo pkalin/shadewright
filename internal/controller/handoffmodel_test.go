@@ -63,7 +63,8 @@ import (
 // either request deleted, a settings change (the repository leaves the settings, its entry cannot be used or is fixed
 // again, its target branch changes), and a person merging the pull request at its head, pushing a commit on top of it,
 // force pushing it back to the predecessor's commit (alone, or with a person's commit on it), closing it, reopening it
-// or deleting its branch (which closes it). Nine sequences in ten that draw no merge, close or branch deletion get one
+// or deleting its branch (which closes it); one merge in eight is reported by the host without a merge commit ID on
+// every read, so it can only be recorded without a receipt. Nine sequences in ten that draw no merge, close or branch deletion get one
 // in their second half, so most reach the end of the pull request.
 //
 // After every step, and at the end after a settling run (the pause lifted, reads answering, an unusable entry fixed,
@@ -72,7 +73,8 @@ import (
 //	P1 a merge of a request's commit is recorded once: on the request whose commit it is, with its merge receipt, or,
 //	   when that request is the replacement and it is deleted before it recorded the merge, on the predecessor as
 //	   MergedWithForeignChange with no receipt (#786, decision 2 of the model result of 2026-11-18), a completed
-//	   takeover included; never on both, and, once reads answer, never on none. A merged head with further commits on
+//	   takeover included (without a receipt when the host reports no merge commit ID); never on both, and, once
+//	   reads answer, never on none. A merged head with further commits on
 //	   top of the replacement's commit is the documented gap #870, and the predecessor's commit put back by a force
 //	   push after the replacement took the pull request over, with the predecessor handed off or gone, is a foreign
 //	   change to the replacement: both are left out;
@@ -130,8 +132,10 @@ const (
 	hmDeadline = 20 * time.Minute
 	// hmSteps is how many steps a generated sequence has.
 	hmSteps = 28
-	// hmSettleRounds is how many rounds of the settling run reconcile both requests.
-	hmSettleRounds = 10
+	// hmSettleRounds is how many rounds of the settling run reconcile both requests: enough after the jump past the
+	// recovery bound (half way) for a merge reported without a merge commit ID, which waits mergeCommitWait (one more
+	// round) before it is recorded, and for the step after that record.
+	hmSettleRounds = 12
 )
 
 type hmKind string
@@ -194,6 +198,8 @@ type hmStep struct {
 	Mins   int
 	N      int  // writes before a crash
 	Commit bool // a merge with a merge commit
+	// NoID: the Git host reports the merged pull request without a merge commit ID, on every read.
+	NoID bool
 	// Variant is the kind of a force push or a settings change.
 	Variant string
 }
@@ -219,10 +225,14 @@ func (s hmStep) String() string {
 	case hCrash:
 		return fmt.Sprintf("crash after %d writes of the next reconcile", s.N)
 	case hMerge:
+		kind := "squash"
 		if s.Commit {
-			return "person-merges (merge commit)"
+			kind = "merge commit"
 		}
-		return "person-merges (squash)"
+		if s.NoID {
+			kind += ", the host reports no merge commit ID"
+		}
+		return "person-merges (" + kind + ")"
 	}
 	return string(s.Kind)
 }
@@ -343,6 +353,8 @@ type hmMerge struct {
 	recorded map[string]bool
 	// afterTakeover: the predecessor's commit, merged after the replacement took the pull request over.
 	afterTakeover bool
+	// noID: the host reports the merge without a merge commit ID, so it is recorded without a receipt.
+	noID bool
 }
 
 // foreignOnReplacement reports the other record a merge of the predecessor's commit may have once the replacement took
@@ -1330,8 +1342,16 @@ func (m *hmWorld) personEvent(s hmStep) {
 			m.logf("  the merge is refused: %v", err)
 			return
 		}
+		if s.NoID {
+			// The host answers every read of the merged pull request without a merge commit ID: the merge can only be
+			// recorded without a receipt, after the wait for the merge commit (mergeCommitWait).
+			if err := m.g.SetMergeCommit(m.number, ""); err != nil {
+				m.t.Fatal(err)
+			}
+			m.reach["merge-without-commit-id"] = true
+		}
 		m.merge = &hmMerge{head: cr.HeadSHA, owner: m.ownerOf(cr.HeadSHA), failed: map[string]bool{},
-			recorded: map[string]bool{}}
+			recorded: map[string]bool{}, noID: s.NoID}
 		if pred := m.get(hmPred); m.merge.owner == hmPred && (m.replTookOver() || (pred != nil && handedOff(pred))) {
 			// The replacement took the pull request over, and a person put the predecessor's commit back with a force
 			// push: the predecessor records that merge as its own while it can (alive, not handed off), or the
@@ -1491,6 +1511,15 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 		// The same shape for the predecessor's commit put back after the takeover: the pull request was the
 		// replacement's alone, and it was deleted before it recorded the merge.
 		m.excused["#875 replacement deleted before it recorded, predecessor handed off"]++
+		return
+	}
+	if mg.noID {
+		// The host never reported a merge commit ID: no receipt can be made, and the merge is recorded on its owner
+		// without one (Merged, then Inconclusive with NoMergeReceipt).
+		if !recordsMerge(owner) && !m.foreignOnReplacement(reqs) {
+			m.fail("P1", "the merge of the %s's commit %s, reported without a merge commit ID, is not recorded on it "+
+				"(pred: %s, repl: %s)", mg.owner, short(mg.head), describe(m.get(hmPred)), describe(m.get(hmRepl)))
+		}
 		return
 	}
 	if (owner.Status.MergeReceipt == nil || owner.Status.MergeReceipt.HeadSHA != mg.head) && !m.foreignOnReplacement(reqs) {
@@ -1710,6 +1739,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 			s.N = rng.IntN(3)
 		case hMerge:
 			s.Commit = rng.IntN(4) > 0
+			s.NoID = rng.IntN(8) == 0
 		case hForce:
 			s.Variant = []string{forceDrop, forcePerson}[rng.IntN(2)]
 		case hSettings:
@@ -1721,7 +1751,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 	// ten, at a random place in its second half, so that later steps still follow it.
 	ends := slices.ContainsFunc(steps, func(s hmStep) bool { return s.Kind == hMerge || s.Kind == hClose || s.Kind == hBranch })
 	if !ends && rng.IntN(10) > 0 {
-		end := hmStep{Kind: hMerge, Commit: rng.IntN(4) > 0}
+		end := hmStep{Kind: hMerge, Commit: rng.IntN(4) > 0, NoID: rng.IntN(8) == 0}
 		if rng.IntN(5) == 0 {
 			end = hmStep{Kind: hClose}
 		}

@@ -28,9 +28,9 @@ stateDiagram-v2
     PolicyChecked --> Superseded: a plan input changed
     PRCreated --> Superseded: a plan input changed
     AwaitingApproval --> Superseded: a plan input changed
-    AwaitingApproval --> Superseded: its pull request merged with its replacement's commit, once the replacement holds the receipt (MergedForReplacement, #786)
+    AwaitingApproval --> Superseded: its pull request merged with its replacement's commit, once the replacement records the merge (MergedForReplacement, #786)
     NeedsIntervention --> Superseded: the same, after a stop (MergedForReplacement, #786)
-    PRCreated --> Superseded: a replacement that took the pull request over, merged with its predecessor's commit put back, once the predecessor holds the receipt (MergedForPredecessor, #786)
+    PRCreated --> Superseded: a replacement that took the pull request over, merged with its predecessor's commit put back, once the predecessor records the merge (MergedForPredecessor, #786)
     AwaitingApproval --> Superseded: the same (MergedForPredecessor, #786)
     NeedsIntervention --> Superseded: the same, after a stop (MergedForPredecessor, #786)
     Pending --> Cancelled: spec.cancel (CancelRequested)

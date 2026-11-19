@@ -20,9 +20,10 @@ limitations under the License.
 //
 // It only reads the object it is given: it never lists pods and never acts on them (invariant 2, no delete, no
 // restart), so the executor needs no permission beyond its existing get on the target kinds (invariant 6). For a
-// StatefulSet the pods on the old revision are inferred by ordinal from the status, because a rolling update
-// replaces pods from the highest ordinal down; for a Deployment, whose pod names are random, only the counts are
-// reported.
+// StatefulSet the pods not on the update revision are inferred by ordinal from the status, because a rolling update
+// replaces pods from the highest ordinal down; the status counts the pods on the current and the update revision but
+// never says which pod runs which, so the current revision is named as their old revision only when the counts
+// leave no pod on a third one (#894). For a Deployment, whose pod names are random, only the counts are reported.
 package rollout
 
 import (
@@ -171,7 +172,7 @@ type Result struct {
 	Reason string
 	// Message explains the result; for Stuck it names what is still on the old revision and the manual step.
 	Message string
-	// OldPods are the pods inferred to be on the old revision (StatefulSet only), highest ordinal first, at
+	// OldPods are the pods inferred to be on an old revision (StatefulSet only), highest ordinal first, at
 	// most maxNamedPods: those a stuck rollout left behind, or, for RolloutPartitioned, those below the partition.
 	OldPods []string
 }
@@ -299,7 +300,7 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	s := ss.Status
 	// The revisions are names the cluster reports; only capped copies go into a message, which becomes a condition
 	// message and an Event.
-	current, update := capRevision(s.CurrentRevision), capRevision(s.UpdateRevision)
+	update := capRevision(s.UpdateRevision)
 	if s.ObservedGeneration < ss.Generation {
 		return false, "the StatefulSet controller has not observed the new template yet", nil
 	}
@@ -315,6 +316,7 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	updated := min(max(s.UpdatedReplicas, 0), want)
 	ready := min(max(s.ReadyReplicas, 0), want)
 	allReady := ready >= want
+	current, other := oldRevision(s, want)
 	switch {
 	case onDelete:
 		// The current revision is promoted only by a rolling update, so it stays behind after pods were
@@ -330,9 +332,10 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 			if len(old) == 0 {
 				return true, "", nil
 			}
+			subject, note := oldRevisionPhrase(current, other, want)
 			return true, fmt.Sprintf("The rolling update is complete as its partition %d asks, but pods below the "+
-				"partition stay on the old revision %q on purpose: %s. They are no evidence for the change until "+
-				"the partition is lowered", partition, current, names), old
+				"partition stay on %s on purpose: %s%s. They are no evidence for the change until the partition is "+
+				"lowered", partition, subject, names, note), old
 		}
 	default:
 		if s.UpdateRevision == s.CurrentRevision && updated >= want && allReady {
@@ -352,13 +355,13 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 	old, names := oldPods(ss.Name, start, want-1-updated, partition)
 	msg := notReady
 	if len(old) > 0 {
-		msg += fmt.Sprintf("; pods on the old revision %q (inferred by ordinal from the StatefulSet status): %s",
-			current, names)
+		subject, note := oldRevisionPhrase(current, other, want)
+		msg += fmt.Sprintf("; pods on %s (inferred by ordinal from the StatefulSet status): %s%s", subject, names, note)
 	}
 	if ready >= want {
 		return false, msg, old
 	}
-	msg += ". The StatefulSet controller does not replace a pod that is not Ready on the old revision (a broken " +
+	msg += ". The StatefulSet controller does not replace a pod that is not Ready on an old revision (a broken " +
 		"rollout needs a manual step, see the Kubernetes StatefulSet docs on forced rollback). Shadewright does " +
 		"not delete pods"
 	if updated > 0 {
@@ -366,14 +369,52 @@ func statefulSet(ss *appsv1.StatefulSet) (bool, string, []string) {
 			"does not help: fix the template", update)
 	}
 	if ready == 0 && partition == 0 && len(old) > 0 {
-		// Every pod is not Ready, so the lowest ordinal is certainly a pod that is not Ready on the old revision.
+		// Every pod is not Ready, so the lowest ordinal is certainly a pod that is not Ready on an old revision.
 		blocker := fmt.Sprintf("%s-%d", ss.Name, start)
 		return false, msg + fmt.Sprintf(". Check that the new template is correct, then delete %s yourself so it "+
 			"is recreated from update revision %q", blocker, update), old
 	}
+	runsOld := fmt.Sprintf("the old revision %q", current)
+	if current == "" {
+		runsOld = fmt.Sprintf("an old revision, not update revision %q", update)
+	}
 	return false, msg + fmt.Sprintf(". Find the pod that is not Ready (kubectl get pods -L "+
-		"controller-revision-hash); if it runs the old revision %q, check that the new template is correct and "+
-		"delete that pod yourself, never a Ready one", current), old
+		"controller-revision-hash); if it runs %s, check that the new template is correct and delete that pod "+
+		"yourself, never a Ready one", runsOld), old
+}
+
+// oldRevision returns the StatefulSet's current revision, capped for a message, when its status proves that every
+// one of the want pods not on the update revision runs it: the two revisions differ and the pods counted on them
+// add up to want, with want pods in all. Otherwise it returns "" and the number of pods counted on neither revision
+// (0 when the status cannot tell, for example with both revisions equal). The status counts pods per revision
+// from their controller-revision-hash label but never says which pod runs which, so the executor, which has no
+// grant on pods, cannot name the revision of one pod (#894).
+func oldRevision(s appsv1.StatefulSetStatus, want int32) (string, int32) {
+	if s.CurrentRevision == "" || s.CurrentRevision == s.UpdateRevision || s.CurrentReplicas < 0 ||
+		s.UpdatedReplicas < 0 || s.Replicas != want {
+		return "", 0
+	}
+	if s.CurrentReplicas > want || s.UpdatedReplicas > want-s.CurrentReplicas {
+		return "", 0
+	}
+	if other := want - s.CurrentReplicas - s.UpdatedReplicas; other > 0 {
+		return "", other
+	}
+	return capRevision(s.CurrentRevision), 0
+}
+
+// oldRevisionPhrase returns how a message names the old revision of the pods it lists, and a note to follow the
+// list: the current revision when oldRevision proved it, with no note; otherwise "an old revision" and a note that
+// the status does not say which, with the pods it counts on neither revision.
+func oldRevisionPhrase(current string, other, want int32) (subject, note string) {
+	if current != "" {
+		return fmt.Sprintf("the old revision %q", current), ""
+	}
+	note = "; the StatefulSet status does not say which old revision they run"
+	if other > 0 {
+		note += fmt.Sprintf(" (it counts %d of %d pods on neither its current nor its update revision)", other, want)
+	}
+	return "an old revision", note
 }
 
 // maxRevisionInMessage is the most bytes of a revision name a message carries. A ControllerRevision name is a

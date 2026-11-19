@@ -165,6 +165,29 @@ For development, install from a clone with `./dist/chart` in place of the OCI re
 
 The same settings object and checks as above apply (`--set settings.create=true` and `settings.spec` create it from values, only when it does not exist; Helm never changes it afterwards). Uninstalling keeps the CRDs by default (`crd.keep`), so Incidents survive. The commands to upgrade the release and to uninstall it, what stays behind (the CRDs and the settings object) and how to remove it are in [upgrade with Helm](upgrade-uninstall.md#upgrade-with-helm), [uninstall with Helm](upgrade-uninstall.md#uninstall-with-helm) and [the settings object](upgrade-uninstall.md#the-settings-object-and-helm).
 
+## Install the analyzer without the executor
+
+To try Shadewright on a cluster with real workloads, install only the analyzer. Nothing in the release can write to Git then: the analyzer reads the cluster, records Incidents and, with a triage model, diagnoses them.
+
+```bash
+helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --namespace shadewright-system --create-namespace \
+  --set executor.enabled=false --set-json 'verifier.watchNamespaces=[]' \
+  --set 'analyzer.watchNamespaces={default}'
+```
+
+`executor.enabled=false` leaves out every object of the executor: Deployment, ServiceAccount, Roles and bindings, PodDisruptionBudget, metrics Service, NetworkPolicy, leader election Lease, ServiceMonitor and its subject in the metrics authentication binding. The analyzer's identity and grants are the same as with the executor. The verifier only works on requests the executor has merged, so the example also sets `verifier.watchNamespaces` to an empty list, which leaves it out too. A source checkout needs no executor image digest in this mode.
+
+The chart refuses `executor.enabled=false` together with a value that only configures an executor, and the message names it: `executor.replicas` other than 1, `executor.identity.azure.clientId`, `executor.serviceAccount.annotations`, `executor.goMemLimit`, `executor.reviewerHints.enabled`, `executor.verification.enabled`, `executor.verification.nodeGrace` other than `1m`, `executor.extraArgs` and `executor.metricsTLS.secretName`. Image, resources and Pod placement values are not refused and have no effect.
+
+What the analyzer leaves, and where to read it:
+
+- Leave `analyzer.analysis.actionPolicies` empty. A proposed action with no policy ends the analysis with the reason `NoPolicyForAction`: no RemediationRequest is created and the Incident goes to `Escalated`.
+- The Incident shows its phase and the outcome of the last analysis in the `Analyzed` condition, with `kubectl get incident <name> -o yaml` or `kubectl shadewright status` ([check status](how-to/check-status.md)). The diagnosis text is not on the Incident: it is in the analyzer log (the `Analyzed Incident` line, field `summary`) and, when a record store is configured, in the analysis record whose ID is in `status.analysisRecords`.
+- With action policies set, the analyzer still creates RemediationRequests. Nothing sets a phase on them without an executor, so `kubectl get remediationrequests` shows an empty Phase, and nothing checks, expires or cancels them.
+
+To go on to proposals, upgrade with `executor.enabled=true` and the executor's identity ([first proposal](first-proposal.md)). An executor started later treats a request with no phase as a new one and runs the policy check on it.
+
 ## OpenAI-compatible inference
 
 For an analyzer using only OpenAI-compatible endpoints, set

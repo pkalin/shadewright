@@ -1085,6 +1085,12 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 			"pullRequest", cr.Number)
 	}
 	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
+	// A merge seen without its merge commit ID starts the wait for it in the same write (as awaitMergeCommit would on
+	// the next look), so the status records that the pull request is merged: a next look that cannot read it is a
+	// merge seen and not recorded (awaitedMergeUnread), and nothing is written to the merged pull request on it (#786).
+	if cr.State == providers.ChangeRequestMerged && gitWait(rr, waitMergeCheck) == nil {
+		startMergeWaitIn(rr, cr, "wait for the merge commit", r.now())
+	}
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return &clusterError{err: fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)}
 	}
@@ -1143,7 +1149,8 @@ func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *re
 	from := rr.Status.Handoff.From
 	p := rr.Status.Phase
 	if (p != remediationv1alpha1.PhasePRCreated && p != remediationv1alpha1.PhaseAwaitingApproval) ||
-		rr.Status.PullRequest == nil || from.PullRequestUpdate != "" {
+		rr.Status.PullRequest == nil || from.PullRequestUpdate != "" || recordedMergeWait(rr) != nil {
+		// Nothing to rewrite on a pull request whose merge the status records as seen (#786).
 		return nil
 	}
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)

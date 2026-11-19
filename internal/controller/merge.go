@@ -300,24 +300,31 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, op string) error {
 	now := r.now()
-	w, ok := wholeWait(remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
-		PullRequest: waitPullRequest(cr)}, op, now)
 	var since *metav1.Time
 	if err := r.patchGitWaits(ctx, rr, func(live *remediationv1alpha1.RemediationRequest) {
-		if live.Status.MergeCommitAwaitedSince == nil {
-			live.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Truncate(time.Second)}
-		}
+		startMergeWaitIn(live, cr, op, now)
 		since = live.Status.MergeCommitAwaitedSince.DeepCopy()
-		// As every write that adds an entry (removeInapplicable): one whose kind no longer applies goes first.
-		removeInapplicable(live)
-		if ok && gitWait(live, waitMergeCheck) == nil {
-			live.Status.GitWaits = append(live.Status.GitWaits, w)
-		}
 	}); err != nil {
 		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	rr.Status.MergeCommitAwaitedSince = since
 	return nil
+}
+
+// startMergeWaitIn adds the wait for a merge of cr seen but not recorded (startMergeWait) to rr's status about to be
+// written: status.mergeCommitAwaitedSince when unset, and the MergeCheck entry when there is none, after any entry
+// whose kind no longer applies is removed (removeInapplicable).
+func startMergeWaitIn(rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, op string, now time.Time) {
+	w, ok := wholeWait(remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
+		PullRequest: waitPullRequest(cr)}, op, now)
+	if rr.Status.MergeCommitAwaitedSince == nil {
+		rr.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Truncate(time.Second)}
+	}
+	// As every write that adds an entry (removeInapplicable): one whose kind no longer applies goes first.
+	removeInapplicable(rr)
+	if ok && gitWait(rr, waitMergeCheck) == nil {
+		rr.Status.GitWaits = append(rr.Status.GitWaits, w)
+	}
 }
 
 // mergeCommitClockSlack is how far the recorded start of the wait may lie after the executor's clock before the

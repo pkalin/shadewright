@@ -71,3 +71,13 @@ func TestHandoffModelClaimRegressionSeeds(t *testing.T) {
 		})
 	}
 }
+
+// Strict seed 142489: the replacement's recovery meets a refusal (403) and the handoff is aborted, a person merges the
+// replacement's commit without a merge commit ID, the replacement then records its takeover, and its next look meets a
+// refused read of the pull request (403). That look knows nothing about the pull request, so it writes nothing to it:
+// after the abort is stored only one request writes the pull request (P4).
+func TestHandoffModelRefusedReadAfterTheTakeoverWritesNothing(t *testing.T) {
+	once := func(op string) hmStep { return hmStep{Kind: hFault, Code: 403, Op: op} }
+	hmDirected(t, hmStartPushed, []hmStep{once(opGet), once(opBranchHead), {Kind: hMerge, NoID: true}, stRecRepl, stRecPred,
+		stRecRepl, once(opGet), stRecRepl})
+}

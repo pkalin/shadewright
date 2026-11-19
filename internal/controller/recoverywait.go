@@ -887,7 +887,7 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 		logf.FromContext(ctx).Info("Kept the target lock of RemediationRequest: the pull request that may carry its "+
 			"commit is open", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number)
 		res, err := r.recoveryPace(ctx, rr, heldRecheckInterval)
-	return res, true, err
+		return res, true, err
 	}
 	return reconcile.Result{}, false, nil
 }

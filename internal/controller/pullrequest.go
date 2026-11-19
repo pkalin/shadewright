@@ -1353,12 +1353,15 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	return prOpen, nil
 }
 
-// awaitedMergeUnread returns err, the error of watchStep, wrapped in errMergeCheck (with errOwnerCheckUnread) when rr's
-// status records that it waits for the other request of its handoff to record the merge of their pull request
-// (condition Approved False with ReasonMergeRecordPending) and the look failed before it could read that pull request
-// again (opening the repository, the read of the pull request): the merge was seen, so nothing after the look runs on
-// the merged pull request (no full freshness check, no check run) until a look works (#879, #880). Decided from the
-// recorded state, as the failed look read nothing. The outcomes watchStep returns as sentinels, a look that saw the
+// awaitedMergeUnread returns err, the error of watchStep, wrapped in errMergeCheck when rr's status records that the
+// merge of its pull request was seen and is not recorded, and the look failed before it could read that pull request
+// again (opening the repository, the read of the pull request): rr records a MergeCheck wait about its recorded pull
+// request (recordedMergeWait; a failed Git read is then one read of that wait, readOfMergeCheck), or it waits for the
+// other request of its handoff to record the merge (condition Approved False with ReasonMergeRecordPending, with
+// errOwnerCheckUnread). The merge was seen, so nothing after the look runs on the merged pull request (no full
+// freshness check, no check run, no close) until a look works (#879, #880, #786). Decided from the recorded state, as
+// the failed look read nothing. A pause of writes is left to the recheck, which waits while it lasts and writes
+// nothing (waitWhilePaused). The outcomes watchStep returns as sentinels, a look that saw the
 // merge, and settings that do not reach the repository (repositoryRead: nothing can be written there, and the path
 // after the look shows that in PullRequestUnreadable) are left as they are.
 func awaitedMergeUnread(rr *remediationv1alpha1.RemediationRequest, err error) error {
@@ -1367,11 +1370,33 @@ func awaitedMergeUnread(rr *remediationv1alpha1.RemediationRequest, err error) e
 		errors.Is(err, errMergeCommitPending) || errors.Is(err, errMergeRecordPending) || repositoryRead(rr, err) != nil {
 		return err
 	}
+	if w := recordedMergeWait(rr); w != nil && !errors.Is(err, freshness.ErrPaused) {
+		// The merge of the recorded pull request was seen and its wait recorded (awaitMergeCommit, a takeover of a
+		// merged pull request, checkAtMerge): the failed look is one read of that wait, which bounds it and records
+		// the merge from its entry at its end (endMergeWait), as a failed check at the merge (mergeCheckFailed).
+		p := w.PullRequest
+		cr := providers.ChangeRequest{Number: p.Number, URL: p.URL, HeadSHA: p.HeadSHA,
+			State: providers.ChangeRequestMerged, BaseBranch: string(p.BaseBranch), MergeCommit: p.MergeCommitSHA}
+		if _, kinded := errors.AsType[*kindedReadError](err); !kinded && gitReadFailure(err) {
+			err = readOfMergeCheck(cr, err)
+		}
+		return fmt.Errorf("%w: %w", errMergeCheck, err)
+	}
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
 	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonMergeRecordPending {
 		return err
 	}
 	return fmt.Errorf("%w: %w: %w", errMergeCheck, errOwnerCheckUnread, err)
+}
+
+// recordedMergeWait is rr's MergeCheck entry of status.gitWaits when it is about rr's recorded pull request (same
+// number): the merge of that pull request was seen and is not recorded yet. Nil otherwise. It reads the status only.
+func recordedMergeWait(rr *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.GitWait {
+	w, pr := gitWait(rr, waitMergeCheck), rr.Status.PullRequest
+	if w == nil || w.PullRequest == nil || pr == nil || w.PullRequest.Number != pr.Number {
+		return nil
+	}
+	return w
 }
 
 // mergeSeenErr returns err, the error of a look that saw the pull request merged and did not record the merge,

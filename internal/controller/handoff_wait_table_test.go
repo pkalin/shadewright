@@ -762,6 +762,17 @@ func TestRecoveryWaitSortsEachFailureByItsSource(t *testing.T) {
 	}
 }
 
+// checkPacedFailure checks a row of recoveryPath.paced: the failed read goes to the error backoff, and the request
+// keeps watching without the condition, as the look worked.
+func checkPacedFailure(t *testing.T, res reconcile.Result, err error, got *api.RemediationRequest) {
+	t.Helper()
+	if err == nil || !watching(got) {
+		t.Fatalf("a failed read of the request for its pace: recoverHandoff = %+v, %v, phase %q, conditions %+v; "+
+			"want the error back for the error backoff and the condition removed", res, err, got.Status.Phase,
+			got.Status.Conditions)
+	}
+}
+
 func recoveryWaitRow(t *testing.T, path recoveryPath, call string, kind failureKind) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -789,11 +800,7 @@ func recoveryWaitRow(t *testing.T, path recoveryPath, call string, kind failureK
 		return
 	}
 	if path.paced[call] {
-		if err == nil || !watching(got) {
-			t.Fatalf("a failed read of the request for its pace: recoverHandoff = %+v, %v, phase %q, conditions %+v; "+
-				"want the error back for the error backoff and the condition removed", res, err, got.Status.Phase,
-				got.Status.Conditions)
-		}
+		checkPacedFailure(t, res, err, got)
 		return
 	}
 	if got.Status.Phase != api.PhasePolicyChecked || got.Status.Handoff.From.Phase != api.HandoffReserved {

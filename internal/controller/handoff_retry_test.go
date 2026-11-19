@@ -460,3 +460,29 @@ func TestReviewGateCompletesTheCheckWhenACommentTimesOut(t *testing.T) {
 		t.Fatalf("a comment that timed out kept a passing gate from completing: %s", got)
 	}
 }
+
+// A replacement whose status records the merge of the pull request it took over as seen (its MergeCheck entry names
+// that pull request) has nothing to rewrite there: no title and body are sent to the merged pull request (#786).
+func TestNoRewriteOfAPullRequestRecordedAsMerged(t *testing.T) {
+	r, g, _, rr, _, _ := tookOverWorld(t)
+	ctx := context.Background()
+	rr.Status.Phase = api.PhasePRCreated
+	setMergeWait(rr, r.now())
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	var rewrites atomic.Int32
+	g.SetFail(func(op string) error {
+		if op == opUpdateChangeRequest {
+			rewrites.Add(1)
+		}
+		return nil
+	})
+	if err := r.afterHandoff(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if n := rewrites.Load(); n != 0 || rr.Status.Handoff.From.PullRequestUpdate != "" {
+		t.Fatalf("rewrote a pull request recorded as merged: %d rewrites, recorded %q", n,
+			rr.Status.Handoff.From.PullRequestUpdate)
+	}
+}

@@ -178,6 +178,20 @@ var gitReadSites = map[string]gitReadSite{
 			res, err := r.waitOrFail(context.Background(), rr, err, unboundedRead(noBoundHeldLock))
 			return mustWait(t, res, err), false
 		}},
+	// A failed look at a pull request whose merge the request records as seen (its MergeCheck wait, #786).
+	"pullrequest.go:awaitedMergeUnread:1": {bound: mergeCheckBound,
+		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
+			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			clock := clockOf(r)
+			setMergeWait(rr, clock.at.Add(-mergeCommitWait+c.left))
+			if err := r.Status().Update(context.Background(), rr); err != nil {
+				t.Fatal(err)
+			}
+			clock.advance(c.during)
+			err := awaitedMergeUnread(rr, failedRead())
+			res, err := r.waitOrFail(context.Background(), rr, err, unboundedRead(noBoundHeldLock))
+			return mustWait(t, res, err), false
+		}},
 	"pullrequest.go:checkMerged:1": {bound: mergeCheckBound,
 		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)

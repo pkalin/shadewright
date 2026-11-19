@@ -366,8 +366,11 @@ type GitProvider interface {
 	CloseChangeRequest(ctx context.Context, number int64) error
 
 	// CloseChangeRequestAnyBase is CloseChangeRequest for a change request from a Shadewright branch of this
-	// repository to any base branch of this repository, also one a person moved off the target branch (#892). Only
-	// the finalizer calls it, with the request's recorded number. It is a write.
+	// repository to any base branch of this repository, also one a person moved off the target branch (#892). Its
+	// callers are the finalizer of a deleted request: closeOwnOnOtherBases for each open pull request carrying the
+	// request's marker on a base other than the target branch, and closeAllOwn for the recorded number open on
+	// another base (ADR-0043). The kill switch gates it like CloseChangeRequest. A pull request from another branch
+	// or repository is refused. It is a write.
 	CloseChangeRequestAnyBase(ctx context.Context, number int64) error
 
 	// UpdateChangeRequest replaces the title and the body of an open change request from a Shadewright branch

@@ -1367,11 +1367,19 @@ func (p *Provider) GetChangeRequest(ctx context.Context, number int64) (provider
 
 // pullFor reads pull request number for op and refuses one that is not ours.
 func (p *Provider) pullFor(ctx context.Context, op string, number int64) (pullJSON, error) {
-	return p.pullIf(ctx, op, number, p.ours)
+	return p.pullIf(ctx, op, number, p.ours, refusedTarget)
 }
 
+// What pullIf says of a pull request that ok refuses: not ours on the target branch, or (any base) not from a
+// shadewright/ branch of this repository to a branch of this repository.
+const (
+	refusedTarget  = "not a Shadewright pull request to the target branch"
+	refusedAnyBase = "not a Shadewright pull request of this repository"
+)
+
 // pullIf reads pull request number for op and refuses one that is not ok.
-func (p *Provider) pullIf(ctx context.Context, op string, number int64, ok func(pullJSON) bool) (pullJSON, error) {
+func (p *Provider) pullIf(ctx context.Context, op string, number int64, ok func(pullJSON) bool,
+	refusal string) (pullJSON, error) {
 	r, err := p.do(ctx, call{op: op, method: http.MethodGet, path: "/pulls/" + strconv.FormatInt(number, 10)})
 	if err != nil {
 		return pullJSON{}, err
@@ -1387,7 +1395,7 @@ func (p *Provider) pullIf(ctx context.Context, op string, number int64, ok func(
 		return pullJSON{}, errors.New(op + ": GitHub returned an unexpected pull request")
 	}
 	if !ok(pr) {
-		return pullJSON{}, errors.New(op + ": not a Shadewright pull request to the target branch")
+		return pullJSON{}, errors.New(op + ": " + refusal)
 	}
 	return pr, nil
 }
@@ -1620,23 +1628,24 @@ func closeState(pr pullJSON) (bool, error) {
 // CloseChangeRequest closes a pull request from a shadewright/ branch to the target branch without merging
 // it. Closing a closed one succeeds; a merged one is ErrConflict. Other pull requests are refused.
 func (p *Provider) CloseChangeRequest(ctx context.Context, number int64) error {
-	return p.closeIf(ctx, number, p.ours)
+	return p.closeIf(ctx, number, p.ours, refusedTarget)
 }
 
 // CloseChangeRequestAnyBase is CloseChangeRequest for a pull request from a shadewright/ branch of this repository to
 // any base branch of this repository (#892): the finalizer closes the request's own one wherever a person moved it.
 func (p *Provider) CloseChangeRequestAnyBase(ctx context.Context, number int64) error {
-	return p.closeIf(ctx, number, p.oursAnyBase)
+	return p.closeIf(ctx, number, p.oursAnyBase, refusedAnyBase)
 }
 
-// closeIf closes pull request number when ok accepts it, read before the close and after a refused one.
-func (p *Provider) closeIf(ctx context.Context, number int64, ok func(pullJSON) bool) error {
+// closeIf closes pull request number when ok accepts it, read before the close and after a refused one; refusal is
+// the text of the error for one it does not.
+func (p *Provider) closeIf(ctx context.Context, number int64, ok func(pullJSON) bool, refusal string) error {
 	if number < 1 {
 		return errors.New(opCloseCR + ": number must be positive")
 	}
 	ctx, cancel := p.withTimeout(ctx)
 	defer cancel()
-	pr, err := p.pullIf(ctx, opCloseCR, number, ok)
+	pr, err := p.pullIf(ctx, opCloseCR, number, ok, refusal)
 	if err != nil {
 		return err
 	}
@@ -1662,7 +1671,7 @@ func (p *Provider) closeIf(ctx context.Context, number int64, ok func(pullJSON) 
 		pr = closed
 	case http.StatusUnprocessableEntity:
 		// It may have been merged or closed in the meantime: read it again.
-		if pr, err = p.pullIf(ctx, opCloseCR, number, ok); err != nil {
+		if pr, err = p.pullIf(ctx, opCloseCR, number, ok, refusal); err != nil {
 			return err
 		}
 	default:

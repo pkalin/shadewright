@@ -1986,6 +1986,8 @@ func TestCloseChangeRequestAnyBase(t *testing.T) {
 	h = newHarness(t, get("/pulls/13", "pull_foreign.json"))
 	if err := h.p.CloseChangeRequestAnyBase(ctx, 13); err == nil || providers.IsConflict(err) {
 		t.Fatalf("another head branch: got %v", err)
+	} else if !strings.Contains(err.Error(), "not a Shadewright pull request of this repository") {
+		t.Fatalf("another head branch: the refusal names the target branch: %v", err)
 	}
 }
 

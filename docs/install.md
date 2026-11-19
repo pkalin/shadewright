@@ -188,6 +188,8 @@ What the analyzer leaves, and where to read it:
 
 To go on to proposals, upgrade with `executor.enabled=true` and the executor's identity ([first proposal](first-proposal.md)). An executor started later treats a request with no phase as a new one and runs the policy check on it.
 
+The Chart workflow installs this shape on Kind (`hack/chart-analyzer-only-install-test.sh`: no executor or verifier object, an Incident for a workload whose image does not exist, no request); run it locally with `make test-chart-analyzer-only` (needs Docker and Kind, builds only the analyzer image).
+
 ## OpenAI-compatible inference
 
 For an analyzer using only OpenAI-compatible endpoints, set

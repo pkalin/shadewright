@@ -376,7 +376,7 @@ func TestSettlementMovedBaseUnnamedKeepsLock(t *testing.T) {
 			held := meta.FindStatusCondition(live.Status.Conditions, api.ConditionTargetHeld)
 			if !holdsLock(live) || held == nil || held.Reason != ReasonOpenOnBranch ||
 				!strings.Contains(held.Message, fmt.Sprintf("#%d", n)) ||
-				!strings.Contains(held.Message, "another base branch") || !strings.Contains(held.Message, "moving it back") {
+				!strings.Contains(held.Message, "another base branch") || !strings.Contains(held.Message, "closing it releases the lock") {
 				t.Fatalf("holds=%v TargetHeld=%+v; want the lock held and TargetHeld naming #%d on another base",
 					holdsLock(live), held, n)
 			}

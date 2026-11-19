@@ -935,7 +935,7 @@ func movedMessage(cr providers.ChangeRequest) string {
 		where += " (" + hostBranchText(cr.BaseBranch) + ")"
 	}
 	return fmt.Sprintf("Pull request #%d of the request is open on %s, where it was moved, and may still merge; "+
-		"the target stays locked: closing it or moving it back releases the lock", cr.Number, where)
+		"the target stays locked: closing it releases the lock, and moved back to the target branch it is watched there as before", cr.Number, where)
 }
 
 // disproveRepositoryReason is lookHeld's removal of condition PullRequestUnreadable with a reason about the

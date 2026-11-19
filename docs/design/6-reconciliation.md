@@ -248,6 +248,8 @@ It looks for a change request on `shadewright/<request-uid>` first (`shadewright
 - One that carries the request's exact marker and holds the desired value at its head is adopted.
 - A merged one becomes `Merged`.
 - A closed one, or one without the marker, is `NeedsIntervention` (`ChangeRequestClosed`, `ForeignChangeRequest`).
+- With none of its own open or merged on the target branch, the open pull requests from the branch to every base are listed too, as the read that settles the lock does (#892, decision of 2026-11-19). One with the marker that a person moved to another base is recorded and stops the request `NeedsIntervention` with `ChangeRequestOnOtherBase`, as the watch does; no second pull request is opened to the target branch (invariant 5). A failed listing is retried as a failed Git read and opens nothing.
+- Known limit: that listing reads open pull requests only. One with the marker that a person moved to another base and closed or merged there is not seen, and the step opens a new pull request to the target branch from the request's branch. A request that recorded its pull request stops instead (closed there is `ChangeRequestClosed`, merged there is gone).
 
 ### Step 3: branch, commit and pull request
 

@@ -914,9 +914,9 @@ func (r *RemediationRequestReconciler) lookHeld(ctx context.Context, rr *remedia
 	return verdict, holding, nil
 }
 
-// openElsewhere is lookHeld's read for a request with no pull request recorded, after neither target branch in read
-// showed one with its marker open (*verdict gone or closed): a person may have moved its base to another branch
-// (#892). A closed pull request with the marker on a target branch is no verdict by itself while another with the
+// openElsewhere is the read of lookHeld, and of the pull request step's adoption (pullRequestStep), for a request with
+// no pull request recorded, after neither target branch in read showed one with its marker open (*verdict gone or
+// closed): a person may have moved its base to another branch (#892). A closed pull request with the marker on a target branch is no verdict by itself while another with the
 // marker may be open elsewhere (decision of 2026-11-19 on #892). With a number recorded the read by number answers
 // changeElsewhere itself, and no listing of every base is made. The listing (openOnOtherBase) takes the marker as the
 // request's own: one open on another base can still merge, so it keeps the lock wherever it is: it joins *open, and

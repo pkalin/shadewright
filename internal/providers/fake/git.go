@@ -539,7 +539,8 @@ func (g *Git) syncHeads(branch, sha string) {
 	}
 }
 
-// OpenChangeRequest opens a change request, or returns the open one for the same head branch.
+// OpenChangeRequest opens a change request, or returns the open one for the same head and base branch. As on
+// GitHub, an open one from the same head to another base (a person moved it, #892) does not stop a second one.
 func (g *Git) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
 	if err := g.before("OpenChangeRequest"); err != nil {
 		return providers.ChangeRequest{}, err
@@ -549,7 +550,7 @@ func (g *Git) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequ
 	}
 	g.mu.Lock()
 	for _, cr := range g.crs {
-		if cr.HeadBranch == req.HeadBranch && cr.State == providers.ChangeRequestOpen {
+		if cr.HeadBranch == req.HeadBranch && cr.BaseBranch == req.BaseBranch && cr.State == providers.ChangeRequestOpen {
 			out := *cr
 			g.mu.Unlock()
 			return out, nil

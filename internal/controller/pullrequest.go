@@ -629,14 +629,26 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 
 	// The pull request may exist although the status write that records it failed (design section 6). Every pull
 	// request of the branch is read (changeOf), since the newest may hide an older one of this request: an open one
-	// of its own is adopted, else a merged one, else a closed one. With none of its own, a pull request of the
-	// branch without its marker stops the request; with none at all the branch steps go on. Unknown is retried.
-	switch v := r.changeOf(ctx, git, rr, changeQuery{}); adoptRule[v.state] {
+	// of its own is adopted, else a merged one, else a closed one. With none of its own open or merged on the target
+	// branch, the open ones of the branch to every base are listed (openElsewhere, as the settlement does): one of
+	// its own that a person moved to another base is recorded and stops the request, and none is opened next to it
+	// (#892, decision of 2026-11-19; invariant 5). With none of its own, a pull request of the branch without its
+	// marker stops the request; with none at all the branch steps go on. Unknown is retried.
+	v := r.changeOf(ctx, git, rr, changeQuery{})
+	var open []providers.ChangeRequest
+	if failed, ok := r.openElsewhere(ctx, git, rr, []remediationv1alpha1.GitBranch{src.TargetBranch}, false, &v,
+		&open); !ok {
+		v = failed
+	}
+	switch adoptRule[v.state] {
 	case adoptRetry:
 		return reconcile.Result{}, v.err
 	case adoptIt:
 		return reconcile.Result{}, r.adoptChangeRequest(ctx, git, rr, v.pr, fresh.File)
 	case adoptElsewhere:
+		// Recorded in the write that stops the request, so the watch, the lock and the finalizer read it by its
+		// number from then on. A lost write is found again by the next look.
+		recordFound(rr, v.pr)
 		return reconcile.Result{}, r.stopOpenElsewhere(ctx, rr, v.pr)
 	case adoptNone:
 		if v.foreign {
@@ -766,10 +778,10 @@ const (
 	adoptRetry adoptOutcome = iota
 	adoptIt
 	adoptNone
-	// adoptElsewhere: the request's own pull request is open on a base a person moved it to (#892): the request
-	// stops as the watch does (stopOpenElsewhere), and nothing is opened on the target branch next to it. The listing
-	// of the branch, read when no number is recorded, lists the target branch only, so it is answered for a recorded
-	// number alone.
+	// adoptElsewhere: the request's own pull request is open on a base a person moved it to (#892): read by its
+	// recorded number, or, with none recorded, found by its marker in the listing of the branch to every base
+	// (openElsewhere). The request records it and stops as the watch does (stopOpenElsewhere), and nothing is
+	// opened on the target branch next to it.
 	adoptElsewhere
 )
 

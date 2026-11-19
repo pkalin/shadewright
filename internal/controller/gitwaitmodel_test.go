@@ -32,6 +32,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -296,6 +297,9 @@ type modelWorld struct {
 	// it was moved there or back in this sequence (moveEvent).
 	movedFrom string
 	moves     int
+	// second says a pull request was opened next to the request's own while that one was open (modelGit
+	// OpenChangeRequest); empty while none was.
+	secondPR string
 	// noCommit makes the host report the merge without its merge commit.
 	noCommit bool
 	number   int64
@@ -314,6 +318,9 @@ type modelWorld struct {
 	// handoff: the request is a replacement recovering a handoff; the pull request is its predecessor's, which
 	// holds the lock on it, so the lock properties about the request's own pull request do not apply.
 	handoff bool
+	// lost: the request started in PolicyChecked with the write recording its own pull request lost (and no handoff),
+	// so only its marker finds that pull request.
+	lost bool
 	// lastingUntil keeps the fault as it is until then (an outage that lasts): fault events wait.
 	lastingUntil time.Time
 	// history is every copy of the request the API server held after a reconcile, for the stale cache.
@@ -491,6 +498,7 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 	default:
 		orderStop(t, r, rr, start)
 	}
+	m.lost = start == startPolicyChecked && !m.handoff
 	r.VerifyOutcomes = st.verify
 	m.logf("start %+v", st)
 	m.clock = clockOf(r)
@@ -758,6 +766,8 @@ func (m *modelWorld) run() {
 		// A person moves the pull request and merges it before the executor looks (decision of 2026-11-16: every
 		// order of the settings change, the move and the merge).
 		m.prelude()
+	} else if m.lost && m.rng.IntN(3) == 0 {
+		m.lostThenMoved()
 	}
 	// The copy the API server held before the first reconcile, for the stale cache.
 	m.history = append(m.history, m.live())
@@ -789,6 +799,20 @@ func (m *modelWorld) run() {
 	}
 	m.settled()
 	m.report()
+}
+
+// lostThenMoved is the order lost write, move, reconcile (#892, decision of 2026-11-19): a person moves the pull
+// request whose record was lost to the third base before the executor first looks, and the request's Incident stands,
+// so nothing but the look for its own pull request keeps the request from opening another one to the target branch
+// (modelGit.OpenChangeRequest notes one).
+func (m *modelWorld) lostThenMoved() {
+	ref := m.template.Spec.IncidentRef
+	inc := &api.Incident{ObjectMeta: metav1.ObjectMeta{Namespace: m.key.Namespace, Name: ref.Name, UID: types.UID(ref.UID)}}
+	if err := m.base.Create(context.Background(), inc); err != nil && !apierrors.IsAlreadyExists(err) {
+		m.t.Fatal(err)
+	}
+	cr, _ := m.pr()
+	m.moveEvent(cr)
 }
 
 // prelude moves the pull request to the configured branch and merges it there, before the first reconcile.
@@ -1996,6 +2020,12 @@ func (m *modelWorld) settled() {
 	if err := m.base.Get(context.Background(), m.key, live); err != nil {
 		m.t.Fatal(err)
 	}
+	m.mu.Lock()
+	second := m.secondPR
+	m.mu.Unlock()
+	if second != "" {
+		m.fatalf("second pull request: %s", second)
+	}
 	cr, found := m.pr()
 	// The request's own pull request open on any base, a third one included, can still merge and keeps the lock
 	// (decision of 2026-11-19 on #892); a closed or merged one, or none, does not.
@@ -2115,6 +2145,23 @@ func (g *modelGit) ListChangeRequests(ctx context.Context, head string, openOnly
 		all[i] = g.shown(all[i])
 	}
 	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return g.hidden(cr.Number) }), err
+}
+
+// OpenChangeRequest notes a pull request opened next to the request's own while that one is open, on any base: a
+// request that lost the write recording it finds it again and never opens another (invariant 5, #892).
+func (g *modelGit) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
+	own, found := g.m.pr()
+	out, err := g.GitProvider.OpenChangeRequest(ctx, req)
+	if err == nil && found && own.State == providers.ChangeRequestOpen && !g.hidden(own.Number) &&
+		out.Number != own.Number {
+		g.m.mu.Lock()
+		if g.m.secondPR == "" {
+			g.m.secondPR = fmt.Sprintf("#%d opened to %.12s while #%d is open on %.12s", out.Number, req.BaseBranch,
+				own.Number, own.BaseBranch)
+		}
+		g.m.mu.Unlock()
+	}
+	return out, err
 }
 
 // ListOpenChangeRequestsAnyBase is a listing too: it fails with the listing's fault and hides a deleted pull request.

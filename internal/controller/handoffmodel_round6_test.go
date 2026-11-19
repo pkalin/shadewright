@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -61,4 +63,29 @@ func TestHandoffModelMergeWithoutCommitIDReplacementDeleted(t *testing.T) {
 func TestHandoffModelPredecessorMergeWithoutCommitID(t *testing.T) {
 	hmDirected(t, hmStartIntent, []hmStep{stRecRepl, {Kind: hForce, Variant: forceDrop}, stMergeNoID, stRecPred,
 		{Kind: hClock, Clock: clockSmall, Mins: 6}, stRecPred, stRecPred, stRecRepl})
+}
+
+// After the takeover a person puts the predecessor's commit back and closes the pull request; the predecessor's look is
+// cut after its first write, then a person reopens and merges it. The replacement waits for the predecessor's record,
+// and the status write that shows the wait is lost (or meets a conflict): the look must end there, with nothing written
+// to the merged pull request (no check run, no close, no stale cleanup marked), not go on to the full freshness check:
+// the reconcile returns the failed write as a merge seen and not recorded (errMergeCheck), and P4 holds.
+func TestHandoffModelLostWaitWriteWritesNothing(t *testing.T) {
+	for _, fault := range []hmKind{hLose, hConflict} {
+		t.Run(string(fault), func(t *testing.T) {
+			steps := []hmStep{stRecRepl, {Kind: hForce, Variant: forceDrop}, {Kind: hClose}, {Kind: hCrash, N: 1},
+				stRecPred, {Kind: hReopen}, stMerge, {Kind: fault, Obj: hmRepl}, stRecRepl}
+			m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
+			for i, s := range steps {
+				m.stepNo = i + 1
+				m.apply(s)
+				m.observe()
+			}
+			if err := m.lastErr[hmRepl]; !errors.Is(err, errMergeCheck) || !isClusterError(err) {
+				t.Fatalf("the look after the failed write of the wait returned %v, want the write's failure under "+
+					"errMergeCheck from the Kubernetes API\n  %s", err, strings.Join(m.trace, "\n  "))
+			}
+			hmDirected(t, hmStartPushed, steps)
+		})
+	}
 }

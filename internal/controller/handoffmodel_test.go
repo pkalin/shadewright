@@ -86,7 +86,10 @@ import (
 //	   own commit it does not record;
 //	P4 after the abort is stored, the two requests never both write the branch or the pull request, and the
 //	   predecessor writes nothing to Git while its intent stands; every write to Git is checked as it is made, against
-//	   the abort as stored by then (noted at the status write that stores it);
+//	   the abort as stored by then (noted at the status write that stores it); and a request that waits for the other
+//	   request's merge record (a status write of it carries MergeRecordPending, stored, lost or meeting a conflict,
+//	   until one without it is stored, while that request may still record the merge) writes nothing to Git, not
+//	   even an attempt;
 //	P5 every status write passes the CRD schema and its CEL rules (transition rules included), and a reconcile that
 //	   could act leaves no entry of status.gitWaits that stood past its own end at its start;
 //	P6 after the settling run, once the pull request is merged or closed, or its branch or its repository is gone, no
@@ -334,6 +337,9 @@ type hmWorld struct {
 	paused      bool
 	abortStored bool
 	writers     map[string]bool
+	// awaiting names the requests that wait for the other request's merge record: a status write of theirs carried
+	// MergeRecordPending (stored, lost or meeting a conflict), and none without it was stored since (P4).
+	awaiting map[string]bool
 
 	merge *hmMerge
 	held  map[string]bool
@@ -441,7 +447,7 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		keys:   map[string]client.ObjectKey{hmPred: client.ObjectKeyFromObject(p), hmRepl: client.ObjectKeyFromObject(rr)},
 		number: cr.Number, branch: cr.HeadBranch, predCommit: p.Status.PullRequest.HeadSHA,
 		personCommits: map[string]bool{}, replCommits: map[string]bool{}, once: map[string]error{},
-		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{},
+		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{}, awaiting: map[string]bool{},
 		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
 		waitingAtRemoval: map[string]bool{}, expected: map[string]int{}, lastErr: map[string]error{},
 		lastRes: map[string]reconcile.Result{}}
@@ -685,6 +691,12 @@ func (m *hmWorld) gitFail(op string) error {
 	if m.crashed {
 		return errHMCrash
 	}
+	if hmWrites[op] && m.awaiting[m.actor] && m.otherMayRecord(m.actor) {
+		who := m.actor
+		m.mu.Unlock()
+		m.fail("P4", "the %s attempted %s while it waits for the other request's merge record", who, op)
+		m.mu.Lock()
+	}
 	if hmWrites[op] {
 		if m.crashAt == 0 {
 			m.crashed = true
@@ -700,6 +712,22 @@ func (m *hmWorld) gitFail(op string) error {
 		return m.sticky
 	}
 	return nil
+}
+
+// otherMayRecord reports whether the request of the handoff other than who may still record the merge of the pull
+// request as stored now: it exists, is not being deleted, holds the target lock or its intent, and holds no record of
+// that merge yet. Only then does who wait for that record (mayStillRecord); a record or a release ends the wait, and
+// the next look of who decides again.
+func (m *hmWorld) otherMayRecord(who string) bool {
+	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[who]
+	x := &api.RemediationRequest{}
+	if err := m.base.Get(context.Background(), m.keys[other], x); err != nil {
+		return false
+	}
+	if m.merge != nil && holdsMergeRecord(x, m.number, m.merge.head) {
+		return false
+	}
+	return mayStillRecord(x)
 }
 
 func (m *hmWorld) gitAfter(op string) error {
@@ -748,7 +776,15 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 		m.fail("P5", "the API server refuses a status write of %s: %v", rr.Name, errs)
 		return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
 	}
+	who := hmPred
+	if rr.Name == m.keys[hmRepl].Name {
+		who = hmRepl
+	}
+	awaiting := waitsForRecord(rr)
 	m.mu.Lock()
+	if awaiting {
+		m.awaiting[who] = true
+	}
 	lose, conflict := m.lose[rr.Name], m.conflict[rr.Name]
 	delete(m.lose, rr.Name)
 	delete(m.conflict, rr.Name)
@@ -793,6 +829,11 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 			return err
 		}
 		return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
+	}
+	if !awaiting {
+		m.mu.Lock()
+		delete(m.awaiting, who)
+		m.mu.Unlock()
 	}
 	// P4 follows the abort from the write that stores it, so a write to Git later in the same reconcile counts.
 	if stored.Name == m.keys[hmPred].Name && stored.Status.Handoff != nil && stored.Status.Handoff.To != nil &&

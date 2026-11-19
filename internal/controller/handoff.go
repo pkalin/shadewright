@@ -877,7 +877,8 @@ var errMergeRecordPending = errors.New("waiting for the other request of the han
 // (condition Approved False, ReasonMergeRecordPending, written only when it changes), and returns
 // errMergeRecordPending. The wait lasts while other may still record it (mayStillRecord); once other records it or
 // releases its lock, the next look decides again (predecessorMergeOwner, replacementMergeOwner). A failed status write
-// is returned for a retry.
+// is returned for a retry wrapped in errMergeCheck and marked as the Kubernetes API's (a *clusterError): the caller
+// then runs nothing else on the merged pull request, as for errMergeRecordPending.
 func (r *RemediationRequestReconciler) awaitOtherRecord(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict, other string) error {
 	changed := meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
@@ -891,7 +892,11 @@ func (r *RemediationRequestReconciler) awaitOtherRecord(ctx context.Context, rr 
 	})
 	if changed {
 		if err := r.Status().Update(ctx, rr); err != nil {
-			return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+			// Under errMergeCheck, so that nothing after the look runs on the merged pull request (no full freshness
+			// check, no check run, no close): a lost or conflicting write of the wait is a merge seen and not recorded,
+			// and the Kubernetes API's failure goes to the error backoff (sixth round of #786).
+			return &clusterError{err: fmt.Errorf("%w: update status of RemediationRequest %s/%s: %w", errMergeCheck,
+				rr.Namespace, rr.Name, err)}
 		}
 		logf.FromContext(ctx).Info("The pull request of RemediationRequest was merged with the commit of the other "+
 			"request of its handoff; waiting for that request to record the merge",

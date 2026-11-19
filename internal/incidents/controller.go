@@ -30,9 +30,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	toolscache "k8s.io/client-go/tools/cache"
 	corerecord "k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -80,6 +82,11 @@ const overflowLogInterval = time.Minute
 // refusedRemembered bounds the fingerprints refused at the cap that are remembered, so each gets one
 // Warning event per process.
 const refusedRemembered = 1024
+
+// deletedOccurrencesRemembered bounds the occurrences of deleted Incidents that are remembered so they never
+// open an Incident again (#893): enough for the records of 64 Incidents at MaxOccurrenceRecords each, own and
+// absorbed, and their unwritten batches.
+const deletedOccurrencesRemembered = 8192
 
 // Config configures a [Controller]. Zero values take the defaults above.
 type Config struct {
@@ -174,8 +181,11 @@ type Controller struct {
 	client client.Client
 	reader client.Reader
 	cache  client.Reader
-	obs    <-chan collector.Observation
-	ready  chan struct{}
+	// informers tell the controller of each Incident deleted ([Controller.incidentDeleted]); nil in tests that
+	// find a delete only at the next write.
+	informers ctrlcache.Informers
+	obs       <-chan collector.Observation
+	ready     chan struct{}
 	// noTrigger keeps Start from running the analysis trigger (closure rules, folds and due marks). Only tests set
 	// it: those that drive the observation writes alone, so that no pass writes their Incidents meanwhile.
 	noTrigger bool
@@ -211,12 +221,21 @@ type Controller struct {
 	absorbedDroppedThrough map[string]time.Time
 	// names are the Incidents that exist or are pending; their number is held to MaxIncidents.
 	names map[string]struct{}
+	// uids is, per name in names, the UID of the Incident of that name as last listed or written, so a delete
+	// the informers report is matched to the object this process knows ([Controller.incidentDeleted]) and not
+	// to an older one of the same name. It holds at most one entry per name in names.
+	uids map[string]types.UID
+	// deletedOccurrences are the occurrences a deleted Incident counted or held unwritten when its delete was
+	// found (#893): seen again, they open nothing ([Controller.consumeLocked]). The oldest are forgotten past
+	// deletedOccurrencesRemembered. Memory only: a restart forgets them.
+	deletedOccurrences *boundedSet
 	// current is, per fingerprint, the number of its latest occurrence this process knows of (design 3.2,
 	// #251), when it is 2 or more: from the names load lists, and from each write that reached a later one.
 	// A fingerprint without an entry is at occurrence 1. It holds at most one entry per name in names.
 	current map[string]int32
-	// opening are the later occurrences (n >= 2) this process took a place under the cap for and has not
-	// written yet: only these are created when not found ([Controller.write]); one gone otherwise was deleted.
+	// opening are the occurrences this process took a place under the cap for and has not written yet: only
+	// these are created when not found ([Controller.write]); one gone otherwise was deleted (#893 for the first
+	// occurrence).
 	opening map[string]struct{}
 	// resolvedAt is, per Incident name, the resolvedTime of an Incident that is Resolved with one: from load,
 	// every trigger pass (which lists every Incident) and each write. It decides whether a symptom seen again
@@ -383,6 +402,8 @@ func New(cfg Config) (*Controller, error) {
 		held:                   map[string]*holding{},
 		heldIn:                 map[string]int{},
 		names:                  map[string]struct{}{},
+		uids:                   map[string]types.UID{},
+		deletedOccurrences:     newBoundedSet(deletedOccurrencesRemembered),
 		current:                map[string]int32{},
 		opening:                map[string]struct{}{},
 		resolvedAt:             map[string]time.Time{},
@@ -406,6 +427,7 @@ func New(cfg Config) (*Controller, error) {
 // Incidents from the cache at start. It runs only on the leader, like the collector.
 func (c *Controller) SetupWithManager(mgr ctrl.Manager, obs <-chan collector.Observation) error {
 	c.client, c.reader, c.cache, c.obs = mgr.GetClient(), mgr.GetAPIReader(), mgr.GetClient(), obs
+	c.informers = mgr.GetCache()
 	if err := mgr.Add(c); err != nil {
 		return fmt.Errorf("adding the Incident controller: %w", err)
 	}
@@ -475,6 +497,21 @@ func (c *Controller) nameOf(fp string) string {
 // or a lost leadership), it writes what is pending and what failed, trying again until StopTimeout; see
 // [Controller.stop] for what can still be lost.
 func (c *Controller) Start(ctx context.Context) error {
+	if c.informers != nil {
+		// Registered before the load, so no delete falls between the two: one reported before the load is of an
+		// Incident the load does not list.
+		inf, err := c.informers.GetInformer(ctx, &remediationv1alpha1.Incident{})
+		if err != nil {
+			return fmt.Errorf("getting the Incident informer: %w", err)
+		}
+		reg, err := inf.AddEventHandlerWithOptions(toolscache.ResourceEventHandlerFuncs{
+			DeleteFunc: func(obj any) { c.incidentDeleted(ctx, obj) },
+		}, toolscache.HandlerOptions{})
+		if err != nil {
+			return fmt.Errorf("watching the Incident deletes: %w", err)
+		}
+		defer func() { _ = inf.RemoveEventHandler(reg) }()
+	}
 	if err := c.load(ctx); err != nil {
 		return err
 	}
@@ -772,6 +809,13 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 	if _, ok := c.names[c.nameOf(o.Fingerprint)]; ok && !c.rolls(o) {
 		return c.count(ctx, o)
 	}
+	if c.deletedOccurrences.has(o.Occurrence) {
+		// An occurrence a deleted Incident counted, or held unwritten when the delete was found, going on: it
+		// never opens an Incident again; only an occurrence that deleted Incident never saw does (#893).
+		logf.FromContext(ctx).Info("Dropped an observation of an occurrence of a deleted Incident",
+			"incident", c.nameOf(o.Fingerprint), "count", o.Count)
+		return heldDue
+	}
 	// A fingerprint without an Incident, or whose latest occurrence is Resolved more than RecurrenceWindow
 	// ago: the observation opens one, the next occurrence then, only through the same gate.
 	var open []collector.Observation
@@ -849,11 +893,11 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 			return false
 		}
 		c.names[name] = struct{}{}
+		// Only this process may create it: once written, one not found was deleted (#893).
+		c.opening[name] = struct{}{}
 		if n := occurrenceOf(name); n >= 2 && n > occurrenceOf(c.nameOf(o.Fingerprint)) {
-			// The next occurrence of a Resolved Incident: it is the latest from now on, and only this process
-			// may create it.
+			// The next occurrence of a Resolved Incident: it is the latest from now on.
 			c.current[o.Fingerprint] = n
-			c.opening[name] = struct{}{}
 		}
 	}
 	b := c.pending[o.Fingerprint]
@@ -1100,7 +1144,7 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 	c.mu.Unlock()
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
-	res, err := c.write(wctx, name, occurrenceOf(name) < 2 || opening, batches)
+	res, err := c.write(wctx, name, opening, batches)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.landed(fp)
@@ -1109,7 +1153,13 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		delete(c.opening, name)
 	}
 	if deleted, ok := errors.AsType[*deletedError](err); ok {
-		c.dropDeleted(ctx, fp, name, batches, deleted)
+		if _, reopened := c.opening[name]; reopened && !opening {
+			// The informers reported the delete while this write was in flight ([Controller.incidentDeleted]), and
+			// an observation counted since then opens the Incident again: only what this write carried goes.
+			c.dropStale(ctx, name, batches, deleted)
+			return
+		}
+		c.dropDeleted(ctx, fp, name, batches, deleted, !opening)
 		return
 	}
 	if back, ok := errors.AsType[*notResolvedError](err); ok {
@@ -1204,6 +1254,7 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 // occurrence makes the one before it the latest again. The caller holds mu.
 func (c *Controller) unopen(fp, name string) {
 	delete(c.names, name)
+	delete(c.uids, name)
 	delete(c.folds, name)
 	delete(c.causes, name)
 	delete(c.opening, name)
@@ -1221,38 +1272,139 @@ func (c *Controller) setCurrent(fp string, n int32) {
 	c.current[fp] = n
 }
 
-// dropDeleted handles a write to a later occurrence someone deleted: the batches are dropped and counted
-// (reason "deleted"), their memory goes, the deleted name leaves the cap, and the newest occurrence that still
-// exists becomes the latest. A fingerprint none of whose occurrences exists has no Incident: its next
-// observation passes the gate of a new fingerprint. The caller holds mu.
-func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches []*batch, deleted *deletedError) {
+// dropDeleted handles an Incident someone deleted, found by a write that did not find it ([deletedError]) or
+// reported by the informers ([Controller.incidentDeleted]): the batches are dropped and counted (reason
+// "deleted"), their memory goes, the occurrences the Incident counted or held go to deletedOccurrences so they
+// never open it again (#893) when it existed (one this process was still opening, whose write found only
+// consequences to create it with, never did, and its consequences may be counted again elsewhere), the deleted
+// name leaves the cap, and the newest occurrence that still exists becomes the latest. A fingerprint none of whose occurrences exists has no Incident: its next observation
+// passes the gate of a new fingerprint, and is written at once, not a window after the drop (#901). The caller
+// holds mu.
+func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches []*batch, deleted *deletedError,
+	existed bool) {
+	if existed {
+		for id := range c.recordsOf[name] {
+			c.deletedOccurrences.add(id)
+		}
+		c.forgetDeleted(batches)
+	}
 	c.forget(fp, name, batches, nil)
 	c.prune(fp, name, nil, &remediationv1alpha1.IncidentStatus{}, true)
 	delete(c.names, name)
+	delete(c.uids, name)
 	delete(c.causes, name)
 	delete(c.opening, name)
 	delete(c.resolvedAt, name)
 	delete(c.folds, name)
-	if c.current[fp] == occurrenceOf(name) {
+	left := deleted.latest != nil || deleted.latestN >= 1
+	if c.nameOf(fp) == name {
 		latest := int32(1)
-		if deleted.latest != nil {
+		switch {
+		case deleted.latest != nil:
 			latest = deleted.latest.Spec.Occurrence()
-			c.noteState(deleted.latest)
 			// It exists, so it counts under the cap whether or not this process knew it.
 			c.names[deleted.latest.Name] = struct{}{}
+			c.noteState(deleted.latest)
+		case deleted.latestN >= 1:
+			latest = deleted.latestN
 		}
 		c.setCurrent(fp, latest)
-		if deleted.latest == nil {
+		if !left {
 			// No occurrence is left: the next observation opens one through the gate, as for a new
 			// fingerprint, never from memory.
 			delete(c.names, Name(fp))
 		}
 	}
-	c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
+	if left {
+		c.nextWrite[fp] = c.cfg.Now().Add(c.cfg.Window)
+	} else {
+		delete(c.nextWrite, fp)
+	}
+	if len(batches) == 0 {
+		logf.FromContext(ctx).Info("Saw an Incident deleted; it is not created again without a new occurrence",
+			"incident", name, "latest", c.nameOf(fp))
+		return
+	}
 	droppedBatches.WithLabelValues(dropDeleted).Add(float64(len(batches)))
 	count, absorbed := counts(batches)
 	logf.FromContext(ctx).Error(deleted, "Dropped observations of a deleted Incident", "incident", name,
 		"latest", c.nameOf(fp), "count", count, "absorbed", absorbed)
+}
+
+// dropStale drops the batches of a write in flight when the informers reported the delete of its Incident,
+// after an observation counted since then took the name again to open it: their occurrences go to
+// deletedOccurrences and their memory goes, while the place under the cap and the new pending batch stay.
+// The caller holds mu.
+func (c *Controller) dropStale(ctx context.Context, name string, batches []*batch, deleted *deletedError) {
+	c.forgetDeleted(batches)
+	for _, b := range batches {
+		for id := range b.occurrences {
+			if r, ok := c.records[id]; ok && r.incident == name {
+				if _, again := c.pending[b.spec.Fingerprint].occurrenceOf(id); !again {
+					c.deleteRecord(id)
+				}
+			}
+		}
+	}
+	droppedBatches.WithLabelValues(dropDeleted).Add(float64(len(batches)))
+	count, absorbed := counts(batches)
+	logf.FromContext(ctx).Error(deleted, "Dropped observations of a deleted Incident", "incident", name,
+		"latest", name, "count", count, "absorbed", absorbed)
+}
+
+// forgetDeleted adds the occurrences of batches, dropped with a deleted Incident, to deletedOccurrences. The
+// caller holds mu.
+func (c *Controller) forgetDeleted(batches []*batch) {
+	for _, b := range batches {
+		for id := range b.occurrences {
+			c.deletedOccurrences.add(id)
+		}
+	}
+}
+
+// incidentDeleted is told by the informers of each Incident deleted (obj, or its tombstone). When it is the
+// latest occurrence of its fingerprint as this process knows it, with the same UID, its delete is handled at
+// once ([Controller.dropDeleted]): what was counted for it before the delete and is still unwritten is
+// dropped, so it is never created again from that (#893), and an observation counted from now on goes through
+// the gate of a new fingerprint. A batch in flight finds the delete at its write. Anything else (an earlier
+// occurrence, an Incident being opened, another object of the same name) is left to the next write, which
+// finds an Incident gone that it did not open ([deletedError]).
+func (c *Controller) incidentDeleted(ctx context.Context, obj any) {
+	if t, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
+		obj = t.Obj
+	}
+	inc, ok := obj.(*remediationv1alpha1.Incident)
+	if !ok || inc.Namespace != c.cfg.Namespace || !inc.HasDerivedName() {
+		return
+	}
+	fp, name := inc.Spec.Fingerprint, inc.Name
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if uid, known := c.uids[name]; !known || uid != inc.UID || c.nameOf(fp) != name {
+		return
+	}
+	if _, opening := c.opening[name]; opening {
+		return
+	}
+	var batches []*batch
+	for _, b := range []*batch{c.failed[fp], c.pending[fp]} {
+		if b != nil {
+			batches = append(batches, b)
+		}
+	}
+	delete(c.failed, fp)
+	delete(c.pending, fp)
+	deleted := &deletedError{name: name}
+	for n := occurrenceOf(name) - 1; n >= 1; n-- {
+		if _, ok := c.names[remediationv1alpha1.IncidentName(fp, n)]; ok {
+			deleted.latestN = n
+			break
+		}
+	}
+	c.dropDeleted(ctx, fp, name, batches, deleted, true)
+	if c.inflight[fp] == nil {
+		c.recount(fp)
+	}
 }
 
 // counts returns what bs counted for the Incident itself (status.count) and as evidence of its cause (the
@@ -1359,11 +1511,12 @@ type writeResult struct {
 // it does not already hold, retrying on conflict. A conflict or a lost create race means the attempt stored
 // nothing, so only the last attempt's answer can be unknown.
 //
-// name is the latest occurrence of the fingerprint this process knows. A later occurrence (n >= 2) is created
-// only when this process opened it ([Controller.count]), from the spec of its observations linked to the
-// occurrence before it ([nextSpec]); its name is deterministic, so a create that races with another replica
-// or follows a restart finds AlreadyExists and adopts the existing object (invariant 5). One this process did
-// not open that is not found was deleted ([deletedError]) and is not created again.
+// name is the latest occurrence of the fingerprint this process knows. Any occurrence is created only when this
+// process opened it ([Controller.count]) and has not written it yet (create); a later one (n >= 2) from the
+// spec of its observations linked to the occurrence before it ([nextSpec]). Its name is deterministic, so a
+// create that races with another replica or follows a restart finds AlreadyExists and adopts the existing
+// object (invariant 5). One that is not found otherwise, or that an attempt read and then could not update
+// because it was gone, was deleted ([deletedError]) and is not created again (#893).
 //
 // A Resolved Incident is never analyzed again (design 3.2, #251): when the Incident read is Resolved and the
 // batches hold something new, [onResolved] decides from their newest observation whether they predate the
@@ -1413,6 +1566,8 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 		if err != nil {
 			return err
 		}
+		// It exists: from now on, one not found was deleted, and is never created again by this write.
+		create = false
 		if res.inc.Spec.Fingerprint != spec.Fingerprint || res.inc.Spec.Occurrence() != n {
 			return &refusedError{exists: true, conflict: true,
 				err: fmt.Errorf("incident %s holds fingerprint %s occurrence %d, not %s occurrence %d", key.Name,
@@ -1455,6 +1610,9 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 		}
 		if err = c.client.Status().Update(ctx, res.inc); apierrors.IsInvalid(err) {
 			return &refusedError{exists: true, err: err}
+		} else if apierrors.IsNotFound(err) {
+			// Deleted since the read: the next attempt reads it again and finds it gone ([deletedError]).
+			return errGoneSinceRead
 		}
 		return err
 	})
@@ -1474,8 +1632,11 @@ type refusedError struct {
 func (e *refusedError) Error() string { return e.err.Error() }
 func (e *refusedError) Unwrap() error { return e.err }
 
-// retriable reports whether a write is tried again at once on a fresh read: a conflict, or a create that
-// lost a race to another writer.
+// errGoneSinceRead is a status update of an Incident deleted after the attempt read it.
+var errGoneSinceRead = errors.New("the Incident was deleted after it was read")
+
+// retriable reports whether a write is tried again at once on a fresh read: a conflict, a create that lost a
+// race to another writer, or an update of an Incident deleted since the read (the fresh read finds it gone).
 func retriable(err error) bool {
-	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err)
+	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) || errors.Is(err, errGoneSinceRead)
 }

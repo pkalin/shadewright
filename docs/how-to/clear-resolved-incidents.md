@@ -56,7 +56,7 @@ The gauge `shadewright_incidents` reports Incidents by `phase` <span class="sw-s
    kubectl -n shadewright-system delete incident <name>
    ```
 
-6. **Restart the analyzer.** It counts Incidents, and finds the latest occurrence of each fingerprint (`incident-<64 hex>-<n>`), only when it starts; deleting an earlier occurrence does not make it open that one again. Deleting the latest occurrence of a fingerprint makes the one before it the latest again: if that one is `Resolved`, the next recurrence more than 24 hours after its `resolvedTime` opens a new occurrence under the deleted name; within 24 hours it escalates that earlier Incident:
+6. **Restart the analyzer.** It counts Incidents, and finds the latest occurrence of each fingerprint (`incident-<64 hex>-<n>`), only when it starts; deleting an earlier occurrence does not make it open that one again. A deleted Incident is not created again from what the analyzer counted before the delete; a new occurrence of the symptom (a kill it did not see before) opens it again ([#893](https://github.com/pkalin/shadewright/issues/893)). That memory does not survive the restart: an old kill still shown in the status of a pod that still exists can then open it again, so delete the Incident of a workload whose pods have been replaced. Deleting the latest occurrence of a fingerprint makes the one before it the latest again: if that one is `Resolved`, the next recurrence more than 24 hours after its `resolvedTime` opens a new occurrence under the deleted name; within 24 hours it escalates that earlier Incident:
 
    ```bash
    kubectl -n shadewright-system rollout restart deploy/shadewright-analyzer

@@ -104,3 +104,29 @@ func TestFlowLineMatchesTheOldReading(t *testing.T) {
 		}
 	}
 }
+
+// A value repeated in the pieces of one answer (a label in the series lines of several metric templates, the
+// FuzzDiffBuild input testdata/fuzz/FuzzDiffBuild/81e201e983440dcc of the context builder) is read alone once:
+// eight copies cost eight times one copy less at least six readings of the value alone.
+func TestPiecesReadARepeatedValueOnce(t *testing.T) {
+	r, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := strings.Repeat("aws_secret_access_key", 256) + "\ufe55\ufeff\xbf\u200b"
+	lines := func(n int) []Piece {
+		var ps []Piece
+		for i := range n {
+			ps = append(ps, Piece{Text: fmt.Sprintf("template_%d{", i)}, Piece{Text: value, Data: true, Form: Line},
+				Piece{Text: "=\"\"} 1\n"})
+		}
+		return ps
+	}
+	alone := countWork(t, func() { r.ownSpans(value) })
+	one := countWork(t, func() { r.PiecesWithin(lines(1), -1) })
+	eight := countWork(t, func() { r.PiecesWithin(lines(8), -1) })
+	if limit := 8*one - 6*alone; eight > limit {
+		t.Errorf("eight copies of a %d byte value cost %d steps, over %d (one copy %d, the value read alone %d): "+
+			"each copy is read alone again", len(value), eight, limit, one, alone)
+	}
+}

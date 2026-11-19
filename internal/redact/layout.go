@@ -178,8 +178,10 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 		ws[i] = write(p)
 		raw.WriteString(ws[i].text)
 	}
-	// own holds, by piece, the spans found in its written text; reading 1 first.
+	// own holds, by piece, the spans found in its written text; reading 1 first. A value repeated in the pieces
+	// (a label in the series lines of several metric templates) is read once: ownSpans depends on the text only.
 	own := make([][]span, len(ps))
+	read := make(map[string][]span)
 	k := 0
 	for i, p := range ps {
 		tick(1)
@@ -190,7 +192,12 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 		if hiddenByObject(p) {
 			own[i] = []span{{start: 0, end: len(w.text), kind: KindCredential, rule: len(r.rules)}}
 		} else {
-			for _, sp := range r.ownSpans(p.Text) {
+			found, ok := read[p.Text]
+			if !ok {
+				found = r.ownSpans(p.Text)
+				read[p.Text] = found
+			}
+			for _, sp := range found {
 				tick(1)
 				own[i] = append(own[i], w.carry(sp))
 			}

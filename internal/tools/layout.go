@@ -141,18 +141,20 @@ var errUnwritten = errors.New("the JSON of the object could not be read back alo
 // text decided on is the text returned. Two keys of a map that are decided alike stay two entries: the later one
 // in the encoding's order gets " (2)", " (3)" and so on (distinctKeys). The markers are fitted to limit bytes
 // (decide), the bound the answer is cut to, so the answer is whole JSON whenever its replacements can make it fit
-// (#845, thirteenth decision of 2026-11-18). obj is only read.
-func (s *Set) jsonAnswer(obj any, limit int) (string, error) {
+// (#845, thirteenth decision of 2026-11-18), and where they cannot, values are left out until it fits (leaveOut), so
+// the answer is valid JSON within limit whatever the replacements and the renamed keys add; leftOut says whether
+// anything was. obj is only read.
+func (s *Set) jsonAnswer(obj any, limit int) (answer string, leftOut bool, err error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", " ")
 	if err := enc.Encode(obj); err != nil {
-		return "", fmt.Errorf("encoding the object: %w", err)
+		return "", false, fmt.Errorf("encoding the object: %w", err)
 	}
 	t, err := tokens(buf.Bytes(), reflect.ValueOf(obj))
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	// The markers are fitted to the answer as returned: the keys renamed after the decision (distinctKeys) count
 	// too (#845, fifteenth decision, P4).
@@ -165,8 +167,95 @@ func (s *Set) jsonAnswer(obj any, limit int) (string, error) {
 		}
 		return limit < 0 || n <= limit
 	})
+	answer, leftOut = leaveOut(out, t, limit)
+	return answer, leftOut, nil
+}
+
+// leaveOut returns the answer of the pieces decided, its map keys made distinct (distinctKeys), joined: at most
+// limit bytes long and valid JSON (none when limit is negative; #845, fifteenth decision, P4). Where the shortest
+// markers and the renamed keys still make it longer, values are left out whole, each replaced by a note of its size
+// as a value too long for a line is (incidentcontext.LeftOut): the smallest value whose leaving out makes the
+// answer fit, else the largest and again. When no value is left to leave out, every map key that is longer than
+// its note is left out too, and the keys are made distinct again; when even that does not fit, the answer is one
+// such note for the whole answer, as a JSON string. Values and keys are the contents of JSON strings, so a note
+// keeps the answer JSON. The work is linear in the length of the pieces, apart from the sort of the values by size
+// (n log n comparisons for n values). leftOut says whether anything was left out.
+func leaveOut(decided []string, t walked, limit int) (answer string, leftOut bool) {
+	out := slices.Clone(decided)
 	distinctKeys(out, t.mapOf, t.maps)
-	return strings.Join(out, ""), nil
+	n := joinedLen(out)
+	if limit < 0 || n <= limit {
+		return strings.Join(out, ""), false
+	}
+	whole := n
+	var values, keys []int
+	for i, p := range t.ps {
+		redact.Tick(1)
+		switch {
+		case !p.Data:
+		case t.mapOf[i] >= 0:
+			keys = append(keys, i)
+		default:
+			values = append(values, i)
+		}
+	}
+	n = leaveOutOf(out, values, n, limit)
+	if n > limit && len(keys) > 0 {
+		for i := range values {
+			redact.Tick(1)
+			decided[values[i]] = out[values[i]]
+		}
+		for _, i := range keys {
+			redact.Tick(1)
+			if note := incidentcontext.LeftOut(len(decided[i])); len(note) < len(decided[i]) {
+				decided[i] = note
+			}
+		}
+		out = slices.Clone(decided)
+		distinctKeys(out, t.mapOf, t.maps)
+		n = joinedLen(out)
+	}
+	if n > limit {
+		return strconv.Quote(incidentcontext.LeftOut(whole)), true
+	}
+	return strings.Join(out, ""), true
+}
+
+// leaveOutOf leaves out values of out, the pieces at the indices idx, while the pieces joined, n bytes long, are
+// longer than limit: the value whose note saves the fewest bytes that are enough, else the one that saves the most,
+// and again. It returns the length of the pieces joined.
+func leaveOutOf(out []string, idx []int, n, limit int) int {
+	saving := func(i int) int { return len(out[i]) - len(incidentcontext.LeftOut(len(out[i]))) }
+	var c []int
+	for _, i := range idx {
+		redact.Tick(1)
+		if saving(i) > 0 {
+			c = append(c, i)
+		}
+	}
+	slices.SortStableFunc(c, func(a, b int) int { return saving(a) - saving(b) })
+	for n > limit && len(c) > 0 {
+		redact.Tick(1)
+		k, _ := slices.BinarySearchFunc(c, n-limit, func(i, need int) int { return saving(i) - need })
+		if k == len(c) {
+			k = len(c) - 1
+		}
+		i := c[k]
+		n -= saving(i)
+		out[i] = incidentcontext.LeftOut(len(out[i]))
+		c = slices.Delete(c, k, k+1)
+	}
+	return n
+}
+
+// joinedLen is the length of the pieces joined.
+func joinedLen(out []string) int {
+	n := 0
+	for _, p := range out {
+		redact.Tick(1)
+		n += len(p)
+	}
+	return n
 }
 
 // holds is what a JSON object or array of the answer holds.

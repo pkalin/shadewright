@@ -32,6 +32,9 @@ var wordPieces = []string{
 	",password ", ",a=", ",a==", "TOKEN=", "\\ ", "\\,", "\\", " ", "\t", "\n", nlIndent, "x", "abc", "\u02d0", "\u212a",
 	"\u017f", "=", ":", "--token=", "\"\\\"a\\\"\"",
 	"\"a\nb\"", "\"a\n  b\"", "'a\n c'", "x\n  y",
+	// Quoted groups across lines whose end depends on the key's column, and the bytes a group's limit decides on
+	// (#845, P3: the group memory, groupTrace).
+	"\"\n", "\n        ", "\n\t \t", "\n\n", "''", "'a''b'", "\"$(", "\"`", "\uff1a", "\"\n      \"",
 }
 
 // wordText returns a text of n pieces of wordPieces.
@@ -49,7 +52,7 @@ func wordText(rng *rand.Rand, n int) string {
 func TestShellWordEndMemoMatches(t *testing.T) {
 	rng := rand.New(rand.NewPCG(845, 15)) // #nosec G404 -- reproducible generated texts
 	calls, reused := 0, 0
-	for range 10000 {
+	for range 40000 {
 		s := wordText(rng, 1+rng.IntN(60))
 		if rng.IntN(2) == 0 {
 			// Glued words, as the keys of one long word read them.
@@ -265,5 +268,36 @@ func TestTokenMemoMatches(t *testing.T) {
 	}
 	if hits < 10000 {
 		t.Fatalf("only %d reads answered from the memory", hits)
+	}
+}
+
+// A quoted group that closes at the limit of one read, only because its last quote could not look past it,
+// does not close at that place for a read with a larger limit: the single-quoted group of the text below closes for
+// a limit just after its second quote, while the quote after that makes the two a doubled quote. The memory went on from the first read's state after the
+// group, so the second read ended its word there instead of before the group.
+func TestShellWordEndMemoAtTheLimit(t *testing.T) {
+	s := `"x"'a''b'z`
+	w := &wordMemo{}
+	for _, limit := range []int{6, 7} {
+		wantEnd, wantLast, wantOK := shellWordEnd(s, 0, limit, noKey, false, true, nil)
+		end, last, ok := shellWordEnd(s, 0, limit, noKey, false, true, w)
+		if end != wantEnd || last != wantLast || ok != wantOK {
+			t.Errorf("limit %d: with the memory %d %v %v, without %d %v %v", limit, end, last, ok, wantEnd, wantLast, wantOK)
+		}
+	}
+}
+
+// A quoted group across a line end closes for a read whose key is at a column less than the next line's
+// indentation and not for one whose key is at a larger column: a read with such a key does not go on past the
+// group from the states an earlier read without a key, or with a key further left, kept.
+func TestShellWordEndMemoKeyColumn(t *testing.T) {
+	s := "x = \"a\"\"b\n  \"c d"
+	w := &wordMemo{}
+	for _, keyPos := range []int{noKey, 0, 1, 2, 3} {
+		wantEnd, wantLast, wantOK := shellWordEnd(s, 4, len(s), keyPos, false, true, nil)
+		end, last, ok := shellWordEnd(s, 4, len(s), keyPos, false, true, w)
+		if end != wantEnd || last != wantLast || ok != wantOK {
+			t.Errorf("key at %d: with the memory %d %v %v, without %d %v %v", keyPos, end, last, ok, wantEnd, wantLast, wantOK)
+		}
 	}
 }

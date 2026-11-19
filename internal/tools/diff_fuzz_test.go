@@ -47,8 +47,11 @@ import (
 // (diff_main_test.go, with the redactor of that release). Checked, by name:
 //
 //	P1: every probe secret the redactor of the release before hid at any of its passes is hidden in the answer.
-//	P4: the answer is valid UTF-8, within the tool's bound, valid JSON for get_resource whenever origin/main's
-//	    answer was, and nothing panics.
+//	P4: the answer is valid UTF-8 whatever the source gave, within the tool's bound, valid JSON for get_resource
+//	    whenever origin/main's answer was, and nothing panics. (Valid UTF-8 is a property of the tool results and
+//	    the incident context; redact.String and the other plain string functions keep the invalid bytes they do not
+//	    hide, as the release's String does.) TestGetResourceAlwaysFits checks more for get_resource: valid JSON
+//	    within its bound at every size.
 //
 // P2 and P3 are properties of package redact and checked there.
 
@@ -203,6 +206,7 @@ var diffToolSeeds = [][]byte{
 	redacttest.RawSeed(0, "password: \x01"),
 	redacttest.RawSeed(2, "192.168.1.1--password\n\x01\n"),
 	redacttest.RawSeed(3, "--password", "\x01", "token", "\x01"),
+	{0xf1, 0, 242, 0, 7, 0}, // a run of one invalid byte and an "x", 3,150 times (the first argument with knob 0)
 }
 
 // toolBodies are the checks of the fuzz targets of this file over one tool set, by target: the failures of one
@@ -250,6 +254,17 @@ const foundPodLogsAfterAWideColon = "\xc5\xd0s\xc51\xa75\x86\xbfPB\xb7ib\xaad\x0
 // seedGetResourceAtTheLimit is input 3 of the fifteenth decision: a pod with the labels 10.0.0.1 and 10.0.0.2
 // (decided alike) and one argument that brings the answer to its bound.
 var seedGetResourceAtTheLimit = redacttest.RawSeed(3, strings.Repeat("x ", 8048)+"x", "", "10.0.0.1", "a", "10.0.0.2", "b")
+
+// seedGetResourceOverTheLimit is a pod with the labels 0.0.0.1 and 0.0.0.2 (decided alike) and one argument
+// long enough that the answer is over its bound with the shortest markers and the second key renamed: origin/main's
+// answer, with one marker shorter and no renamed key, was valid JSON at the bound, and this package's lost its
+// closing brace to the cut.
+var seedGetResourceOverTheLimit = redacttest.RawSeed(3, strings.Repeat("x ", 8050), "", "0.0.0.1", "v", "0.0.0.2", "v")
+
+// seedGetResourceInvalidRuns is a pod with one argument of 3,000 runs of one invalid byte, each before an "x": each
+// run was written as the six bytes of the escape of U+FFFD where origin/main wrote "?", so an answer of 6 KiB on
+// origin/main grew past its bound and was cut.
+var seedGetResourceInvalidRuns = redacttest.RawSeed(0, strings.Repeat("\xffx", 3000))
 
 // getResourceScene puts the fields into a pod (or, with knob bit 0x10, a Deployment) by the knob's low bits:
 // 0 the container's arguments, 1 labels, 2 the waiting, terminated and pod status reasons and messages, 3 one or
@@ -530,6 +545,36 @@ func TestGetResourceLabelsDecidedAlikeAtTheLimit(t *testing.T) {
 	}
 	if fails := answerFails(NameGetResource, r, m.rec, mainText); len(fails) > 0 {
 		t.Error(strings.Join(fails, "\n"))
+	}
+}
+
+// get_resource answers valid JSON within its bound whatever the replacements and the renamed keys add: values are
+// left out, largest needed first, and each says how many bytes it had (#845, fifteenth decision, P4).
+func TestGetResourceIsValidJSONOverTheLimit(t *testing.T) {
+	for name, seed := range map[string][]byte{
+		"two map keys decided alike": seedGetResourceOverTheLimit,
+		"many runs of invalid bytes": seedGetResourceInvalidRuns,
+	} {
+		t.Run(name, func(t *testing.T) {
+			set, src := diffSet(t)
+			in := redacttest.Decode(seed, 6)
+			scene, obj, kind := getResourceScene(in)
+			r := src.run(set, scene, NameGetResource, map[string]any{argKind: kind, argNamespace: testNS, argName: obj.GetName()})
+			m := mainTools{rec: redacttest.NewRecorder()}
+			mainText, err := m.getResource(obj.DeepCopyObject().(client.Object))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !json.Valid([]byte(mainText)) {
+				t.Fatalf("origin/main's answer of %d bytes is not valid JSON either", len(mainText))
+			}
+			if fails := answerFails(NameGetResource, r, m.rec, mainText); len(fails) > 0 {
+				t.Error(strings.Join(fails, "\n"))
+			}
+			if r.Status != StatusOK || len(r.Text) > resourceBytes || !json.Valid([]byte(r.Text)) {
+				t.Errorf("get_resource answered %s, %d bytes, valid JSON %v", r.Status, len(r.Text), json.Valid([]byte(r.Text)))
+			}
+		})
 	}
 }
 

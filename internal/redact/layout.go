@@ -44,7 +44,8 @@ const (
 	Line
 	// JSON writes the value as the content of a JSON string, as encoding/json does without HTML escapes: '"' and
 	// '\\' escaped, a control character as "\n", "\r", "\t", "\b", "\f" or "\u00XX", U+2028 and U+2029 as
-	// "\u2028" and "\u2029", and an invalid byte as "\ufffd".
+	// "\u2028" and "\u2029", and a run of invalid bytes as one "?", as the release before made each value valid
+	// UTF-8 before it was encoded.
 	JSON
 )
 
@@ -524,10 +525,11 @@ func write(p Piece) written {
 		c, size := utf8.DecodeRuneInString(p.Text[i:])
 		from := b.Len()
 		if p.Form == JSON && c == utf8.RuneError && size == 1 {
-			// A run of invalid bytes is one unit, written as one replacement character as strings.ToValidUTF8
-			// writes it (the release before made each value valid so before it was encoded), not one escape of six
-			// bytes per byte, which made an answer of a few KiB of them too long for its bound (#845, fifteenth
-			// decision, P4).
+			// A run of invalid bytes is one unit, written as one "?", as the release before made each value valid
+			// UTF-8 before it was encoded (strings.ToValidUTF8 with "?"). A unit is never longer than the bytes it
+			// stands for, so an answer of many runs is not longer than the value read: one escape of U+FFFD per
+			// byte, then per run (six bytes for one), made an answer of a few KiB of them too long for its bound
+			// (#845, fifteenth decision, P4).
 			for i+size < n {
 				tick(1)
 				if r, sz := utf8.DecodeRuneInString(p.Text[i+size:]); r != utf8.RuneError || sz != 1 {
@@ -535,7 +537,7 @@ func write(p Piece) written {
 				}
 				size++
 			}
-			b.WriteString(`\ufffd`)
+			b.WriteByte('?')
 		} else {
 			writeUnit(&b, p.Form, p.Text[i:i+size], c, size)
 		}
@@ -573,7 +575,7 @@ func writeUnit(b *strings.Builder, f Form, raw string, c rune, size int) {
 	case JSON:
 		switch {
 		case invalid:
-			b.WriteString(`\ufffd`)
+			b.WriteByte('?')
 		case c == '"' || c == '\\':
 			b.WriteByte('\\')
 			b.WriteRune(c)

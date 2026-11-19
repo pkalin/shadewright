@@ -45,6 +45,7 @@ func indexByte(t string, c byte) int {
 	return i
 }
 
+//nolint:unparam // the counted strings.LastIndexByte, with its signature like the other counted functions here
 func lastIndexByte(t string, c byte) int {
 	i := strings.LastIndexByte(t, c)
 	tick(len(t) - i)

@@ -67,7 +67,7 @@ func Value(r RedactFunc, s string) string {
 // redacts several values together (the name and value of a metric label, #845) shows each result with it.
 func Shown(v string) string {
 	if len(v) > maxValueBytes {
-		return "(" + strconv.Itoa(len(v)) + " bytes left out)"
+		return LeftOut(len(v))
 	}
 	return strings.Map(func(c rune) rune {
 		if unicode.IsControl(c) || c == '\u2028' || c == '\u2029' {
@@ -76,6 +76,10 @@ func Shown(v string) string {
 		return c
 	}, v)
 }
+
+// LeftOut is the note that replaces a value of n bytes left out whole ([Shown]; get_resource for an answer over
+// its bound).
+func LeftOut(n int) string { return "(" + strconv.Itoa(n) + " bytes left out)" }
 
 // LogRead says how a read of the log source ended, as [RenderLog] shows it.
 type LogRead int

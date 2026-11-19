@@ -27,7 +27,10 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 )
 
 // limitSweepTable records, for each pod of limitSweep, whether the release before #845 (origin/main at 0701cd3a)
@@ -166,3 +169,92 @@ func readLimitSweepTable(t *testing.T) map[string]bool {
 	}
 	return out
 }
+
+// fitScenes are pods whose answer grows past what the release before wrote for them, by a filler argument of n
+// bytes: map keys that are decided alike (three IP addresses, the second and third renamed " (2)" and " (3)") and
+// many short runs of invalid bytes (each written as one "?", as the release before wrote it). wantArgs are the
+// arguments the answer shows when nothing is left out, known by construction: the filler and the "?x" runs are
+// never redacted; and the answer has as many labels as the pod, renamed keys staying distinct.
+var fitScenes = map[string]struct {
+	args, wantArgs func(n int) []string
+	labels         map[string]string
+}{
+	"map keys decided alike": {
+		args:     func(n int) []string { return []string{limitFiller(n)} },
+		wantArgs: func(n int) []string { return []string{limitFiller(n)} },
+		labels:   map[string]string{"0.0.0.1": "v", "0.0.0.2": "v", "10.0.0.3": "w"},
+	},
+	"short runs of invalid bytes": {
+		args:     func(n int) []string { return []string{strings.Repeat("\xffx", 500), limitFiller(n)} },
+		wantArgs: func(n int) []string { return []string{strings.Repeat("?x", 500), limitFiller(n)} },
+	},
+}
+
+// labelledPod is minimalPod with the labels.
+func labelledPod(args []string, labels map[string]string) *corev1.Pod {
+	p := minimalPod(args)
+	p.Labels = labels
+	return p
+}
+
+// The answer of get_resource is valid JSON within its bound at every size (#845, fifteenth decision, P4): across
+// the sizes where the replacements and renamed keys make it longer than the bound, an argument is left out whole
+// and replaced by the note of its size (incidentcontext.LeftOut), the answer labelled cut, and everything else is as
+// without the bound.
+// Under -race every second size is called. The pods are read as they are, not through a client that encodes them,
+// so the invalid bytes reach the tool.
+func TestGetResourceAlwaysFits(t *testing.T) {
+	set, src := diffSet(t)
+	for _, name := range slices.Sorted(maps.Keys(fitScenes)) {
+		sc := fitScenes[name]
+		// The pod as the release before wrote it: each run of invalid bytes as "?".
+		base, err := json.MarshalIndent(labelledPod(sc.wantArgs(0), sc.labels), "", " ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mid := resourceBytes - len(base)
+		whole, left := 0, 0
+		for n := mid - 80; n <= mid+40; n += 12 {
+			if raceDetector && n%24 != mid%24 {
+				continue
+			}
+			r := src.run(set, diffScene{pod: labelledPod(sc.args(n), sc.labels)}, NameGetResource, map[string]any{argKind: kindPod, argNamespace: testNS, argName: podName})
+			if r.Status != StatusOK || len(r.Text) > resourceBytes || !json.Valid([]byte(r.Text)) {
+				t.Fatalf("%s, filler %d: answered %s, %d bytes, valid JSON %v", name, n, r.Status, len(r.Text), json.Valid([]byte(r.Text)))
+			}
+			var got corev1.Pod
+			if err := json.Unmarshal([]byte(r.Text), &got); err != nil {
+				t.Fatalf("%s, filler %d: %v", name, n, err)
+			}
+			args := got.Spec.Containers[0].Args
+			want := sc.wantArgs(n)
+			if len(args) != len(want) || len(got.Labels) != len(sc.labels) {
+				t.Fatalf("%s, filler %d: %d arguments and %d labels, want %d and %d", name, n, len(args), len(got.Labels), len(want), len(sc.labels))
+			}
+			shown := true
+			for i := range want {
+				switch args[i] {
+				case want[i]:
+				case incidentcontext.LeftOut(len(want[i])):
+					shown = false
+				default:
+					t.Fatalf("%s, filler %d: argument %d is %q, neither as read nor left out", name, n, i, redacttestClip(args[i]))
+				}
+			}
+			if cut := slices.Contains(r.Labels, LabelCut); cut == shown {
+				t.Fatalf("%s, filler %d: labelled cut %v with every argument shown %v", name, n, cut, shown)
+			}
+			if shown {
+				whole++
+			} else {
+				left++
+			}
+		}
+		if whole == 0 || left == 0 {
+			t.Errorf("%s: the sizes do not cross the bound: %d answers whole, %d with an argument left out", name, whole, left)
+		}
+	}
+}
+
+// redacttestClip is the start of s, for a failure message.
+func redacttestClip(s string) string { return s[:min(len(s), 80)] }

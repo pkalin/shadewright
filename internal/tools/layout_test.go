@@ -28,6 +28,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // The pieces of get_resource are the string tokens of the JSON it returns (#845, seventh decision of 2026-11-18).
@@ -51,7 +53,7 @@ func TestJSONAnswerDecidesStringsOfTypesThatWriteThemselves(t *testing.T) {
 		"raw object": &withRaw{Raw: runtime.RawExtension{Raw: []byte(`{"password":"` + secret + `"}`)}},
 		"raw list":   &withRaw{Raw: runtime.RawExtension{Raw: []byte(`["--password","` + secret + `"]`)}},
 	} {
-		text, err := e.set.jsonAnswer(obj, -1)
+		text, _, err := e.set.jsonAnswer(obj, -1)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -79,13 +81,14 @@ func layoutWord(r *rand.Rand, n int) string {
 }
 
 // With values made of those characters, and no secret in them, the answer is valid JSON and decodes to the
-// values as encoding/json writes them (each invalid byte as U+FFFD), in arguments, map keys and values, and an
+// values as the release before wrote them (each run of invalid bytes as "?"), in arguments, map keys and values, and an
 // IntOrString; with a secret flag and its value added to the arguments, the value is hidden and every other
 // argument still decodes as it was. The right answer is known by construction: nothing of the generated values is
 // a secret.
 func TestJSONAnswerKeepsEveryValueItDoesNotHide(t *testing.T) {
-	// answered is a value as the answer gives it: each run of invalid bytes one U+FFFD (#845, fifteenth decision).
-	answered := func(s string) string { return strings.ToValidUTF8(s, "\uFFFD") }
+	// answered is a value as the answer gives it: each run of invalid bytes one "?", as the release before made each
+	// value valid UTF-8 before it encoded it (#845, fifteenth decision, P4).
+	answered := func(s string) string { return strings.ToValidUTF8(s, "?") }
 	const secret = "Qz7secretValue1"
 	e := newEnv(t, nil)
 	r := rand.New(rand.NewPCG(845, 7)) // #nosec G404 -- a reproducible test corpus, not a secret
@@ -106,7 +109,7 @@ func TestJSONAnswerKeepsEveryValueItDoesNotHide(t *testing.T) {
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: container, Args: args,
 				LivenessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString(port)}}}}}},
 		}
-		text, err := e.set.jsonAnswer(pod, -1)
+		text, _, err := e.set.jsonAnswer(pod, -1)
 		if err != nil {
 			t.Fatalf("turn %d: %v", turn, err)
 		}
@@ -229,5 +232,52 @@ func TestTokensKeysAndWholeValues(t *testing.T) {
 	}
 	if w.maps != 1 {
 		t.Errorf("%d maps, want 1", w.maps)
+	}
+}
+
+// leaveOut keeps an answer within its bound as valid JSON (#845, fifteenth decision, P4), with answers known by
+// construction: an object of two map keys decided alike (the second renamed " (2)") and two values. The smallest
+// value whose note is enough goes first; keys go only when no value is left, and stay distinct; an answer whose
+// text alone is over the bound is one note.
+func TestLeaveOut(t *testing.T) {
+	object := func(key, v1, v2 string) ([]string, walked) {
+		ps := []redact.Piece{
+			{Text: `{"`}, {Text: key, Data: true, MapKey: true}, {Text: `":"`}, {Text: v1, Data: true},
+			{Text: `","`}, {Text: key, Data: true, MapKey: true}, {Text: `":"`}, {Text: v2, Data: true}, {Text: `"}`},
+		}
+		out := make([]string, len(ps))
+		for i, p := range ps {
+			out[i] = p.Text
+		}
+		return out, walked{ps: ps, mapOf: []int{-1, 0, -1, -1, -1, 0, -1, -1, -1}, maps: 1}
+	}
+	long, longer := strings.Repeat("a", 100), strings.Repeat("b", 300)
+	for _, tc := range []struct {
+		name        string
+		key, v1, v2 string
+		limit       int
+		want        string
+		wantLeftOut bool
+	}{
+		{name: "fits", key: "k", v1: "x", v2: "y", limit: 100, want: `{"k":"x","k (2)":"y"}`},
+		{name: "the smallest value that is enough", key: "k", v1: long, v2: longer, limit: 400,
+			want: `{"k":"(100 bytes left out)","k (2)":"` + longer + `"}`, wantLeftOut: true},
+		{name: "the largest value, then the next", key: "k", v1: long, v2: longer, limit: 80,
+			want: `{"k":"(100 bytes left out)","k (2)":"(300 bytes left out)"}`, wantLeftOut: true},
+		{name: "keys once no value is left", key: longer, v1: "x", v2: "y", limit: 100,
+			want: `{"(300 bytes left out)":"x","(300 bytes left out) (2)":"y"}`, wantLeftOut: true},
+		{name: "one note for the whole answer", key: "k", v1: long, v2: longer, limit: 30,
+			want: `"(419 bytes left out)"`, wantLeftOut: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, w := object(tc.key, tc.v1, tc.v2)
+			got, leftOut := leaveOut(out, w, tc.limit)
+			if got != tc.want || leftOut != tc.wantLeftOut {
+				t.Errorf("leaveOut = %s, %v; want %s, %v", got, leftOut, tc.want, tc.wantLeftOut)
+			}
+			if len(got) > tc.limit || !json.Valid([]byte(got)) {
+				t.Errorf("%d bytes over the bound of %d, or not valid JSON: %s", len(got), tc.limit, got)
+			}
+		})
 	}
 }

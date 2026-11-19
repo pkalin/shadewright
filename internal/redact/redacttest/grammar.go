@@ -88,6 +88,9 @@ var (
 		"10.0.0.1", "192.168.1.1", "postgres://u:", "@db:5432/x", "Bearer ", "Basic ", "https://h/p?sig=",
 		"Server=db;Password=", "  ", "    ", "\t", "\u00a0", "user", "env", "msg: ", "- name: ", "  value: ",
 	}
+	// sameMarkers are map keys that the redactor replaces by markers that read alike (IP addresses), so that the
+	// read tools rename the second (get_resource's " (2)").
+	sameMarkers = []string{"0.0.0.1", "0.0.0.2", "10.0.0.1", "10.0.0.2", "192.168.1.1", "192.168.1.2"}
 	// repeats are the counts a repeat takes, up to the sizes at each limit (the 16,384 bytes of get_resource, the
 	// excerpt and section budgets).
 	repeats = []int{2, 3, 8, 64, 512, 1024, 2047, 4096, 8048}
@@ -165,7 +168,8 @@ func (b *builder) repeat(k, n int) {
 
 // Decode decodes data into an input of n fields. The first byte selects the mode: divisible by 4, the rest after
 // the knob byte is the text itself (raw mode: FieldSep separates fields, ProbeByte stands for a fresh probe);
-// otherwise the rest is read as the grammar, one operation per byte with its operands after it.
+// otherwise the rest is read as the grammar, one operation per byte with its operands after it (with a mode byte of
+// extendedMode or more, a byte of extendedOps or more is one of the operations added later, extendedOp).
 func Decode(data []byte, n int) Input {
 	n = max(n, 1)
 	r := &reader{b: data}
@@ -186,7 +190,7 @@ func Decode(data []byte, n int) Input {
 		}
 	} else {
 		for r.more() {
-			b.op(r)
+			b.op(r, mode >= extendedMode)
 		}
 	}
 	in.Fields = make([]string, n)
@@ -197,9 +201,22 @@ func Decode(data []byte, n int) Input {
 	return in
 }
 
-// op reads and applies one operation of the grammar.
-func (b *builder) op(r *reader) {
-	switch r.next() % 24 {
+// extendedOps is the first operation byte of the operations added after the first corpus was written, read as
+// such only after a mode byte of extendedMode or more: with a smaller one every byte selects one of the 24 first
+// operations, as before, so the inputs of testdata/fuzz decode as they did.
+const (
+	extendedOps  = 240
+	extendedMode = 0xf0
+)
+
+// op reads and applies one operation of the grammar; extended says whether the operations added later are read.
+func (b *builder) op(r *reader, extended bool) {
+	c := r.next()
+	if extended && c >= extendedOps {
+		b.extendedOp(c-extendedOps, r)
+		return
+	}
+	switch c % 24 {
 	case 0:
 		b.write(pick(r, keyWords))
 	case 1:
@@ -276,6 +293,31 @@ func (b *builder) op(r *reader) {
 	default:
 		// A key, a look-alike separator with a format character, and a probe.
 		b.write(pick(r, keyWords) + pick(r, formats) + pick(r, seps) + pick(r, formats) + b.probe())
+	}
+}
+
+// extendedOp applies the operation op of those added after the first corpus (#845, fifteenth decision, the classes
+// the fuzzer did not reach on its own).
+func (b *builder) extendedOp(op byte, r *reader) {
+	switch op % 3 {
+	case 0:
+		// A key and a quoted value, repeated, then a quote, a line end, a line of blanks and a closing quote with a
+		// look-alike colon after it: each key reads its value as one shell word up to that group, whose end depends
+		// on the key's column (P3).
+		k, n, m, sep := pick(r, keyWords), repeats[int(r.next())%len(repeats)], repeats[int(r.next())%len(repeats)], pick(r, seps)
+		b.write(strings.Repeat(k+`="a"`, min(n, MaxFieldBytes/(len(k)+4)/2)) + "\"\n" + strings.Repeat(" ", min(m, MaxFieldBytes/2)) + "\"" + sep)
+	case 1:
+		// A map key that is replaced by a marker that reads like another's, in one field, and its value in the next
+		// (labels, as get_resource renames them after the decision, near its bound with a long argument).
+		b.write(pick(r, sameMarkers))
+		b.nextField()
+		b.write(pick(r, words))
+		b.nextField()
+	default:
+		// Short runs of invalid bytes, each before a character, repeated up to the bound of an answer (each run
+		// one "?" in the answer, as the release before wrote it).
+		run, n := strings.Repeat("\xff", int(r.next()%3)+1), repeats[int(r.next())%len(repeats)]
+		b.write(strings.Repeat(run+pick(r, words), min(n, MaxFieldBytes/(len(run)+12))))
 	}
 }
 

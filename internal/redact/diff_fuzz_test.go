@@ -19,6 +19,8 @@ package redact
 import (
 	"bytes"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -36,7 +38,10 @@ import (
 //	P2: what String hides in the strings joined by line breaks, Strings hides in them apart (Strings only).
 //	P3: the work String adds to the release's reading is within ownWorkPerByte per byte, with a constant for
 //	    short inputs (only with -tags redactwork; without it the property is not checked).
-//	P4: the output is valid UTF-8 when the input is, and nothing panics.
+//	P4: the output is valid UTF-8 when the input is, and nothing panics. Valid UTF-8 whatever the input is a
+//	    property of the tool results and the incident context (decided 2026-11-19): these entry points keep the
+//	    bytes they do not hide, invalid ones included, as the release's String does (released.String("a\xffb")
+//	    returns it unchanged).
 //
 // The inputs known to fail (knownDiffFailures) are seeds in testdata/fuzz: they skip, naming the property, until
 // the rule is fixed, and fail once they pass, so that the fix removes them.
@@ -99,7 +104,14 @@ var diffSeeds = [][]byte{
 	{1, 2, 17, 2, 3, 11, 9, 16, 1, 1}, // an explicit key, then a flow map in the next string
 	redacttest.RawSeed(0, "password: \x01\n"),
 	redacttest.RawSeed(1, "192.168.1.1--password", "\x01"),
+	seedPairsBeforeABlankLine, // TOKEN="a" repeated, a quote, a line end, 4,096 blanks, a quote and a fullwidth colon
+	{0xf1, 0, 242, 0, 7, 0},   // a run of one invalid byte and an "x", 3,150 times
 }
+
+// seedPairsBeforeABlankLine is the input of TestStringWorkOnRepeatedPairsBeforeALongBlankLine in the grammar (the
+// first operation added later, redacttest.extendedOp): 1,024 times TOKEN="a", then a quote, a line end, a line of
+// 4,096 blanks and a closing quote with a fullwidth colon after it.
+var seedPairsBeforeABlankLine = []byte{0xf1, 0, 240, 8, 5, 7, 7}
 
 // diffBodies are the checks of the fuzz targets of this file, by target: the failures of one input, and whether
 // P3 was checked. TestMinimizeCollected runs them too.
@@ -346,5 +358,37 @@ func TestStringWorkOnTokensWithALookAlikeColon(t *testing.T) {
 	for _, n := range []int{128, 512, 2048} {
 		in := strings.Repeat("TOKEN=\"a\",b,\u02d0", n)
 		checkOwnWork(t, "String", in, func() { String(in) })
+	}
+}
+
+// TOKEN="a" repeated, then a double quote, a line break, a line of 4,096 blanks and a closing quote with a
+// fullwidth colon after it: about 1,208 own steps per byte. Every key within maxValueExtent of the last quote
+// read its value as one shell word up to that quoted group, whose end depends on the key's column, so the memory
+// of the shell words (wordMemo) went on from the group and each key read the group again.
+func TestStringWorkOnRepeatedPairsBeforeALongBlankLine(t *testing.T) {
+	in := strings.Repeat(`TOKEN="a"`, 1000) + "\"\n" + strings.Repeat(" ", 4096) + "\"："
+	checkOwnWork(t, "String", in, func() { String(in) })
+}
+
+// The class of TestStringWorkOnRepeatedPairsBeforeALongBlankLine through the grammar (redacttest.extendedOp): key
+// forms, counts, lengths of the blank line and separators, each through every target of this file, whose oracles
+// (the release's reading for P1, String joined for P2, the work bound for P3, valid UTF-8 for P4) give the answers.
+func TestDiffPairsBeforeABlankLine(t *testing.T) {
+	if raceDetector {
+		t.Skip("the inputs of 13 KB are read under -race by the seeds of the fuzz targets")
+	}
+	for _, key := range []byte{8, 0} { // TOKEN, password
+		for _, n := range []byte{5} { // 1,024 repeats
+			for _, m := range []byte{7, 6} { // 4,096 and 2,047 blanks
+				for _, sep := range []byte{7, 0} { // fullwidth colon, ":"
+					data := []byte{0xf1, 0, 240, key, n, m, sep}
+					for _, target := range slices.Sorted(maps.Keys(diffBodies)) {
+						if fails, _ := diffBodies[target](data); len(fails) > 0 {
+							t.Errorf("%s(%v): %s", target, data, strings.Join(fails, "\n"))
+						}
+					}
+				}
+			}
+		}
 	}
 }

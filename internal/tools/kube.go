@@ -131,10 +131,14 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	text, err := s.jsonAnswer(stripped, resourceBytes)
+	text, leftOut, err := s.jsonAnswer(stripped, resourceBytes)
 	if err != nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
+	}
+	if leftOut {
+		// Values left out to keep the answer within its bound and valid JSON: the answer is cut, as one the bound cut.
+		r.addLabel(LabelCut)
 	}
 	r.Text, r.raw = text, true
 	return nil

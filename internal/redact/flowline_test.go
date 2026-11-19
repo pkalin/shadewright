@@ -114,19 +114,21 @@ func TestPiecesReadARepeatedValueOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	value := strings.Repeat("aws_secret_access_key", 256) + "\ufe55\ufeff\xbf\u200b"
-	lines := func(n int) []Piece {
-		var ps []Piece
-		for i := range n {
-			ps = append(ps, Piece{Text: fmt.Sprintf("template_%d{", i)}, Piece{Text: value, Data: true, Form: Line},
-				Piece{Text: "=\"\"} 1\n"})
-		}
-		return ps
-	}
 	alone := countWork(t, func() { r.ownSpans(value) })
-	one := countWork(t, func() { r.PiecesWithin(lines(1), -1) })
-	eight := countWork(t, func() { r.PiecesWithin(lines(8), -1) })
+	one := countWork(t, func() { r.PiecesWithin(seriesLinesOf(value, 1), -1) })
+	eight := countWork(t, func() { r.PiecesWithin(seriesLinesOf(value, 8), -1) })
 	if limit := 8*one - 6*alone; eight > limit {
 		t.Errorf("eight copies of a %d byte value cost %d steps, over %d (one copy %d, the value read alone %d): "+
 			"each copy is read alone again", len(value), eight, limit, one, alone)
 	}
+}
+
+// seriesLinesOf returns n series lines of a metric answer, each with value as its one label name.
+func seriesLinesOf(value string, n int) []Piece {
+	ps := make([]Piece, 0, 3*n)
+	for i := range n {
+		ps = append(ps, Piece{Text: fmt.Sprintf("template_%d{", i)}, Piece{Text: value, Data: true, Form: Line},
+			Piece{Text: "=\"\"} 1\n"})
+	}
+	return ps
 }

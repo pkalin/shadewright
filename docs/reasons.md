@@ -13,13 +13,15 @@ kubectl -n shadewright-system get incident <name> \
   -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
 ```
 
-Where in the life of a request each group of conditions appears:
+Where in the life of a request each group of conditions appears. `Queued` is set by the limits check, before the policy check runs; `Lifecycle` and `Recurred` are set on the Incident after the request ended (or after the Incident went quiet):
 
 ```mermaid
 flowchart LR
-  I["Incident<br/>Analyzed, AnalysisDue,<br/>Lifecycle, Recurred"] --> P["Request created<br/>PolicyAllowed, Queued"]
+  I["Incident<br/>Analyzed, AnalysisDue"] --> Q["Request created<br/>Queued (the limits)"]
+  Q --> P["Policy check<br/>PolicyAllowed"]
   P --> R["Pull request<br/>PullRequestOpened, Approved,<br/>PlanFresh"]
   R --> M["After the merge<br/>Delivered, Configured,<br/>RolledOut, Cleared, Verified"]
+  M --> L["Request ended<br/>on the Incident: Lifecycle,<br/>Recurred"]
   A["Any time<br/>WritesPaused, GitReadRetry,<br/>cancel and cleanup conditions"] -.-> R
 ```
 
@@ -35,15 +37,15 @@ A reason with no row here is not a condition reason. The Event-only reasons and 
 
 ### PolicyAllowed
 
-The policy check, before any Git write. `False` ends the request `Denied`, `Unknown` ends it `NeedsIntervention` or means it waits, `True` lets it through. Most requests that stop here stop on one of the rows under [request and target](#request-and-target) or [policy bounds](#policy-bounds).
+The policy check, before any Git write. `False` ends the request `Denied`, `Unknown` ends it `NeedsIntervention` or means it waits, `True` lets it through. Most requests that stop here stop on one of the rows under [request and target](#request-and-target) or [policy bounds](#policy-bounds). A request that ended `Denied` or `NeedsIntervention` in this check is not decided again: after the fix, apply a new request.
 
 #### Allowed and waiting
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
 | <span id="pa-withinapprovedbounds"></span>`WithinApprovedBounds` | Every check passed (`True`). | Nothing. [More](troubleshooting.md#request-and-target) |
-| <span id="pa-kustomizationreconciling"></span>`KustomizationReconciling` | A wait, not a stop (`Unknown`): Flux is still reconciling the Kustomization that delivers the target. | Nothing. After 10 minutes the request ends `NeedsIntervention` with `KustomizationNotReady`. [More](troubleshooting.md#delivery-from-flux) |
-| <span id="pa-scaledobjectreadinessunknown"></span>`ScaledObjectReadinessUnknown` | A wait (`Unknown`): KEDA has not reported on the ScaledObject yet. | Check that KEDA runs; the request is checked again for up to 10 minutes. [More](troubleshooting.md#policy-decision) |
+| <span id="pa-kustomizationreconciling"></span>`KustomizationReconciling` | A wait, not a stop (`Unknown`): Flux is still reconciling the Kustomization that delivers the target. | Nothing. After 10 minutes the request ends `NeedsIntervention` with `KustomizationNotReady`. While the pull request waits, the same reason on `PlanFresh` is retried the same way, and after 10 minutes the plan is taken as stale (`SourceChanged`). [More](troubleshooting.md#delivery-from-flux) |
+| <span id="pa-scaledobjectreadinessunknown"></span>`ScaledObjectReadinessUnknown` | A wait (`Unknown`): KEDA has not reported on the ScaledObject yet. | Check that KEDA runs; the request is checked again for up to 10 minutes, then ends `NeedsIntervention` with `ScaledObjectNotReady`. [More](troubleshooting.md#policy-decision) |
 
 #### Request and target
 
@@ -139,7 +141,7 @@ The checks of the policy against the plan, in the order they run. `Denied` unles
 | <span id="pa-decreasenotallowed"></span>`DecreaseNotAllowed` | A decrease, while `maxDecreasePercent` is 0 or unset. Decreases are refused by default. | Change it by hand, or set `maxDecreasePercent` on purpose. [More](troubleshooting.md#policy-decision) |
 | <span id="pa-decreasetoolarge"></span>`DecreaseTooLarge` | The decrease is more than `maxDecreasePercent`. | Take a smaller step. [More](troubleshooting.md#policy-decision) |
 | <span id="pa-modulenotenabled"></span>`ModuleNotEnabled` | The action belongs to an integration module (for example `keda`) that `spec.modules.integrations` does not list. | Enable the module in the settings. [More](troubleshooting.md#policy-decision) |
-| <span id="pa-scaledobjectnotready"></span>`ScaledObjectNotReady` | `NeedsIntervention`: the ScaledObject is not ready (paused, on fallback, `HPAActive` false, being deleted or malformed), so raising `maxReplicaCount` is not the fix. | Fix the autoscaler first. [More](troubleshooting.md#policy-decision) |
+| <span id="pa-scaledobjectnotready"></span>`ScaledObjectNotReady` | `NeedsIntervention`: the ScaledObject is not ready (`Ready` false, a partial trigger error, paused, on fallback, `HPAActive` false, being deleted, missing or malformed), so raising `maxReplicaCount` is not the fix. | Fix the autoscaler first. [More](troubleshooting.md#policy-decision) |
 
 ### Queued
 
@@ -147,7 +149,7 @@ A limit holds the request back before its policy check. The request keeps no pha
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
-| <span id="q-targetlocked"></span>`TargetLocked` | Another request holds the lock on the same target. | Wait for it to end; for a stopped holder, close or merge its pull request. [More](troubleshooting.md#limits) |
+| <span id="q-targetlocked"></span>`TargetLocked` | Another request holds the lock on the same target, or a merged one keeps it while its outcome is verified. | Wait for it to end; for a stopped holder, close or merge its pull request. [More](troubleshooting.md#limits) |
 | <span id="q-concurrencylimitreached"></span>`ConcurrencyLimitReached` | `maxConcurrentRemediations` requests are active. | Wait, review the open pull requests, or raise the limit in `RemediationSettings`. [More](troubleshooting.md#limits) |
 | <span id="q-circuitopen"></span>`CircuitOpen` | The circuit breaker is open after consecutive failures. | Find out why they failed; the breaker is half-open 30 minutes after the latest failure. [More](troubleshooting.md#limits) |
 | <span id="q-circuithalfopen"></span>`CircuitHalfOpen` | The breaker is half-open and another request runs as its probe. | Wait for the probe; its success closes the breaker. [More](troubleshooting.md#limits) |
@@ -165,7 +167,7 @@ The pull request step. A stop before a pull request is recorded goes on `PullReq
 | <span id="pr-waitingforreview"></span>`WaitingForReview` | `Approved` is `False`: the pull request waits for a person. Nothing is merged automatically. | Review and merge it, or close it. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-reviewcheckrefused"></span>`ReviewCheckRefused` | With reviewer hints on, the Git host refused for good to write the check run `shadewright/review` on the head, so a ruleset that requires it blocks the merge. | Fix the App's permission or the ruleset; it is asked again after a backoff. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-reviewlisttoolong"></span>`ReviewListTooLong` | With reviewer hints on, the pull request has more reviews than the merge gate reads, so it failed the check on that head. | Final for that head; merge by hand if you accept it, or close the pull request. [More](troubleshooting.md#pull-request-step) |
-| <span id="pr-pullrequestclosed"></span>`PullRequestClosed` | Shadewright closed its pull request without a merge, because the plan is stale or the change no longer renders as planned. `PullRequestOpened` stays `True`. | The message names the number and why; apply a new request if the change is still wanted. [More](troubleshooting.md#pull-request-step) |
+| <span id="pr-pullrequestclosed"></span>`PullRequestClosed` | Shadewright closed its pull request without a merge, because the plan is stale (the request ends `Superseded`), the change no longer renders as planned, or a person set `spec.cancel` (the request ends `Cancelled`). `PullRequestOpened` stays `True`. | The message names the number and why; apply a new request if the change is still wanted. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-changerequestmerged"></span>`ChangeRequestMerged` | The pull request was merged (phase `Merged`). | Nothing; the delivery and verification follow. [More](troubleshooting.md#pull-request-step) |
 | <span id="pr-pullrequestrewriterefused"></span>`PullRequestRewriteRefused` | `PullRequestOpened` stays `True`: a replacement took the pull request over, but the Git host refused for good to rewrite its title and body, so the text shows the old plan. | Read the diff, not the text; fix the permission or rule. [More](troubleshooting.md#pull-request-step) |
 
@@ -208,8 +210,8 @@ Two more reasons come with these refusals and are strings in the executor, not A
 | <span id="pr-handoffrefused"></span>`HandoffRefused` | A replacement ended `Cancelled`: the hint was reserved by another one, or the old request changed or went stale. | The old pull request is untouched; post the hint again if wanted. [More](troubleshooting.md#how-to-read-the-result) |
 | <span id="pr-handoffaborted"></span>`HandoffAborted` | A replacement ended `Cancelled`: the pull request was merged or closed, or someone pushed to the branch, while the handoff ran. | Check which request owns the pull request now. [More](troubleshooting.md#how-to-read-the-result) |
 | <span id="pr-cancelrequested"></span>`CancelRequested` | A person set `spec.cancel`; the executor closed the pull request, if there was one, and left the branch. `PullRequestOpened` before a pull request was recorded, `Approved` after. | Nothing; apply a new request for a new plan. [More](troubleshooting.md#how-to-read-the-result) |
-| <span id="pr-incidentfolded"></span>`IncidentFolded` | `Cancelled` before the pull request: the request's Incident was folded into the Incident of its cause. | Nothing; follow the cause's Incident. [More](troubleshooting.md#how-to-read-the-result) |
-| <span id="pr-incidentgone"></span>`IncidentGone` | `Cancelled` before the pull request: the Incident the request names was deleted or replaced. | Nothing; if `PullRequestNotClosed` is set, close the pull request it names. [More](troubleshooting.md#how-to-read-the-result) |
+| <span id="pr-incidentfolded"></span>`IncidentFolded` | `Cancelled` before the pull request: the request's Incident was folded into the Incident of its cause. It sits on `PullRequestOpened`, or on `Approved` once a pull request left by an earlier open is found; that pull request is closed, and a merge of it ends the request `Inconclusive` with `StalePlanMerged`. | Nothing; follow the cause's Incident. [More](troubleshooting.md#how-to-read-the-result) |
+| <span id="pr-incidentgone"></span>`IncidentGone` | `Cancelled` before the pull request: the Incident the request names was deleted or replaced. It sits on `PullRequestOpened`, or on `Approved` once a pull request left by an earlier open is found, as for `IncidentFolded`. | Nothing; if `PullRequestNotClosed` is set, close the pull request it names. [More](troubleshooting.md#how-to-read-the-result) |
 
 #### Render refusals
 
@@ -244,18 +246,17 @@ Whether the plan is still current. Checked about every five minutes while the pu
 | --- | --- | --- |
 | <span id="pf-policychanged"></span>`PolicyChanged` | The policy was deleted, recreated or edited. | Apply a new request against the new policy. [More](troubleshooting.md#freshness) |
 | <span id="pf-settingschanged"></span>`SettingsChanged` | The settings or the repository entry were removed, or its URL, installation or branch changed. | Apply a new request. [More](troubleshooting.md#freshness) |
-| <span id="pf-targetchanged"></span>`TargetChanged` | The target is gone, has another UID, or no longer holds the previous value live. | Apply a new request. [More](troubleshooting.md#freshness) |
-| <span id="pf-targetfilechanged"></span>`TargetFileChanged` | The file on the target branch changed, or no longer declares the target alone. | Apply a new request. [More](troubleshooting.md#freshness) |
+| <span id="pf-targetchanged"></span>`TargetChanged` | The target is gone, has another UID, no longer holds the previous value live, or its labels left the policy's `objectSelector`. | Apply a new request. [More](troubleshooting.md#freshness) |
+| <span id="pf-targetfilechanged"></span>`TargetFileChanged` | The file on the target branch is gone, is refused as YAML, no longer declares the target alone, or no longer holds the previous value. | Apply a new request. [More](troubleshooting.md#freshness) |
 | <span id="pf-planchanged"></span>`PlanChanged` | The recorded inputs no longer give the recorded digest, for example a new `installationID` for the same repository. | Apply a new request. [More](troubleshooting.md#freshness) |
 | <span id="pf-sourcechanged"></span>`SourceChanged` | Mapping the target again gives another repository, branch or file, or now denies it. | Look at the Flux objects, then apply a new request. [More](troubleshooting.md#freshness) |
 | <span id="pf-scaledobjectnotready"></span>`ScaledObjectNotReady` | The ScaledObject is not ready on two reads. | Fix the autoscaler. [More](troubleshooting.md#freshness) |
 | <span id="pf-modulenotenabled"></span>`ModuleNotEnabled` | The action's module was removed from the settings. | Enable it, then apply a new request. [More](troubleshooting.md#freshness) |
 | <span id="pf-anotherrequestmerged"></span>`AnotherRequestMerged` | Another request of the same Incident and target was merged while this one waited. It opened no pull request. | Nothing; the merged request is the fix. [More](troubleshooting.md#how-to-read-the-result) |
-| <span id="pf-anotherrequestclosed"></span>`AnotherRequestClosed` | The request this one waited behind had its pull request closed without a merge, so this one opens none. | Nothing, unless the change is still wanted; a new analysis can propose again. [More](troubleshooting.md#how-to-read-the-result) |
+| <span id="pf-anotherrequestclosed"></span>`AnotherRequestClosed` | The request this one waited behind had its pull request closed without a merge, so this one opens none. The Incident is then `Escalated` (Lifecycle `RequestSuperseded`) and is not analyzed again. | Nothing, unless the change is still wanted; a person proposes it again. [More](troubleshooting.md#how-to-read-the-result) |
 | <span id="pf-anotherrequestsucceeded"></span>`AnotherRequestSucceeded` | The request this one waited behind changed the same field the same way and ended `Succeeded`. | Nothing; the other request is the fix. [More](troubleshooting.md#how-to-read-the-result) |
-| <span id="pf-staleplanmerged"></span>`StalePlanMerged` | A person merged a pull request whose plan was already stale. The request ends `Inconclusive`, never `Succeeded`. | Check by hand what the merge put on the branch. [More](troubleshooting.md#after-the-merge) |
-| <span id="pf-gitforbidden"></span>`GitForbidden` | `Unknown`: the Git host refuses the freshness check while the pull request waits. Nothing is written to Git. | As for `GitForbidden` above. [More](troubleshooting.md#pull-request-step) |
-| <span id="pf-gitrejected"></span>`GitRejected` | `Unknown`: the Git host refuses the freshness check as invalid. | As for `GitRejected` above. [More](troubleshooting.md#pull-request-step) |
+| <span id="pf-gitforbidden"></span>`GitForbidden` | `Unknown`: the Git host refuses the freshness check while the pull request waits. Nothing is written to Git; the request keeps watching the pull request and repeats the check. | Fix the App's permission or the rule; the condition goes when the check passes. [More](troubleshooting.md#pull-request-step) |
+| <span id="pf-gitrejected"></span>`GitRejected` | `Unknown`: the Git host refuses the freshness check as invalid. The request keeps watching and repeats the check. | Read the executor log and fix the cause; the condition goes when the check passes. [More](troubleshooting.md#pull-request-step) |
 
 ### After the merge
 
@@ -308,10 +309,11 @@ Whether the symptom cleared after the change, judged from the verifier's report.
 
 #### Verified
 
-`False` ends the request `Failed`; `Unknown` ends it `Inconclusive`. Besides the reasons below, `Verified` carries `DeliveryFailed`, `DeliveryBlocked`, `DeliverySuspended`, `DeliveryNotObserved`, `DeliveryNotChecked`, `ValueChanged`, `RolloutSuperseded`, `StalePlanMerged`, `NoRecurrence`, `OOMKilled` and `Restarted` (see above).
+`False` ends the request `Failed`; `Unknown` ends it `Inconclusive`. Besides the reasons below, `Verified` carries `DeliveryFailed`, `DeliveryBlocked`, `DeliverySuspended`, `DeliveryNotObserved`, `DeliveryNotChecked`, `ValueChanged`, `RolloutStuck`, `RolloutSuperseded`, `NoRecurrence`, `OOMKilled` and `Restarted` (see above). From `StaleReport` to `ObservationGap` the reason is the one that held the quiet window closed when the verification timeout came; while the timeout has not passed, the window opens again by itself and the request can still succeed.
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
+| <span id="vf-staleplanmerged"></span>`StalePlanMerged` | `Unknown`, `Inconclusive`: a person merged a pull request whose plan was stale when the merge was recorded, so the request is never `Succeeded` (with `--verify-outcomes` off it is capped the same way). A Warning Event of the same name is recorded when the merge is found. A failure still ends `Failed`. | Check by hand what the merge put on the branch. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-nomergereceipt"></span>`NoMergeReceipt` | `Unknown`: the Git host reported no full merge commit for the merged pull request, so nothing after the merge can be checked. | Check by hand what the merge put on the branch. [More](troubleshooting.md#merge-receipt) |
 | <span id="vf-mergedbeforeverification"></span>`MergedBeforeVerification` | `Unknown`: the request was merged before the executor wrote merge receipts. It keeps `Merged` and no verification starts. | Nothing; check the rollout yourself if needed. [More](troubleshooting.md#merge-receipt) |
 | <span id="vf-targetgone"></span>`TargetGone` | `Inconclusive` at once: the target was deleted after the merge. | Nothing to verify. [More](troubleshooting.md#after-the-merge) |
@@ -319,7 +321,7 @@ Whether the symptom cleared after the change, judged from the verifier's report.
 | <span id="vf-targetnotchecked"></span>`TargetNotChecked` | `Inconclusive`: the executor's own evidence on the target could not be read. | Check the executor log and its `get` on the target kind. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-kedanotready"></span>`KedaNotReady` | `Failed`: a ScaledObject target is not ready at the timeout. | Read the ScaledObject's conditions and fix its triggers. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-verificationdisabled"></span>`VerificationDisabled` | `Inconclusive` at once: the executor runs without `--verify-outcomes` and found the request waiting for delivery or verifying. | Check the change by hand, or turn verification on. [More](troubleshooting.md#after-the-merge) |
-| <span id="vf-clearingnotchecked"></span>`ClearingNotChecked` | `Inconclusive`: clearing is not checked for a ScaledObject, whose symptom does not show in container status. | Check the symptom yourself. [More](troubleshooting.md#after-the-merge) |
+| <span id="vf-clearingnotchecked"></span>`ClearingNotChecked` | `Inconclusive`: clearing is not checked for a ScaledObject, whose symptom does not show in container status (`Cleared` shows it as `Unknown` while the request runs; it ends once the ScaledObject was ready for `stableFor`). | Check the symptom yourself. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-checknotavailable"></span>`CheckNotAvailable` | `Inconclusive`: the request names the check `QueueBacklogDecreasing`, which no evidence source supports yet. | Check the backlog yourself. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-revertapplied"></span>`RevertApplied` | `Inconclusive`: a revert (`spec.reverts`) ran its course. It is never checked for clearing. | Nothing; the change it undid had failed, so the Incident stays with a person. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-stalereport"></span>`StaleReport` | `Inconclusive` at the timeout: the verifier's report was missing or stopped being updated. | Check that the verifier runs. [More](troubleshooting.md#after-the-merge) |
@@ -396,52 +398,52 @@ A deleted request's cleanup was refused by the Git host (`GitForbidden` or `GitR
 | Reason | What it means | What to do |
 | --- | --- | --- |
 | <span id="gr-gitreadfailed"></span>`GitReadFailed` | Only a wait with no end stands: the failed read is retried and nothing bounds it. | Read the executor log; check the Git host. [More](troubleshooting.md#pull-request-step) |
-| <span id="gr-gitreadfailedbeforedeadline"></span>`GitReadFailedBeforeDeadline` | The first wait to end is the request's deadline (in `PolicyChecked`), which expires the request. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
+| <span id="gr-gitreadfailedbeforedeadline"></span>`GitReadFailedBeforeDeadline` | The first wait to end is the request's deadline (in `PolicyChecked`); at its end the request expires. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
 | <span id="gr-gitreadfailedbeforehandoffgrace"></span>`GitReadFailedBeforeHandoffGrace` | The first wait to end is the grace of a handoff recovery, which then ends `NeedsIntervention` with `HandoffRecoveryFailed`. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
-| <span id="gr-gitreadfailedbeforemergewait"></span>`GitReadFailedBeforeMergeWait` | The first wait to end is the five minute wait for the merge commit. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
-| <span id="gr-gitreadfailedbeforecontentwait"></span>`GitReadFailedBeforeContentWait` | The first wait to end is the five minute wait to read what a merge into a newly configured branch brought. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
+| <span id="gr-gitreadfailedbeforemergewait"></span>`GitReadFailedBeforeMergeWait` | The first wait to end is the five minute wait for the merge commit or for the check at the merge. At its end the merge is recorded with the plan not shown fresh, so the request ends `Inconclusive` with `StalePlanMerged`. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
+| <span id="gr-gitreadfailedbeforecontentwait"></span>`GitReadFailedBeforeContentWait` | The first wait to end is the five minute wait to read what a merge into a newly configured branch brought. At its end the request ends `NeedsIntervention` with `MergeContentUnreadable`. | As for `GitReadFailed`. [More](troubleshooting.md#pull-request-step) |
 
 #### GitForbidden and GitRejected
 
-On every condition above that names them, `GitForbidden` means the Git host refused Shadewright's identity (a permission the App lacks, or a rule of the repository) and `GitRejected` means it refused the request as invalid. Neither is retried by itself: fix the permission or the rule, or read the executor log. [More](troubleshooting.md#pull-request-step)
+On every condition above that names them, `GitForbidden` means the Git host refused Shadewright's identity (a permission the App lacks, or a rule of the repository) and `GitRejected` means it refused the request as invalid. On `PullRequestOpened` and `Approved` they end the request and nothing is retried: fix the permission or the rule, read the executor log, then apply a new request. On the conditions that watch a pull request or clean up after one (`PlanFresh`, `PullRequestUnreadable`, `PullRequestNotClosed`, `CleanupRefused`, `CancelPending`) the step is repeated, but it fails the same way until the permission or the rule is fixed. [More](troubleshooting.md#pull-request-step)
 
 ## Incident
 
 ### Analyzed
 
-The outcome of the last analysis (`True`, with a fixed message). An analysis that ends without a request says why here.
+The outcome of the last analysis (`True`, with a fixed message). An analysis that ends without a request says why here. Except `Proposed`, `RunbookMatched`, `PlanUnchanged` and `HintNotPending`, every reason below is a hand-off: the Incident goes to phase `Escalated` and the trigger never analyzes an `Escalated` Incident again (`AnalysisDue` says `Escalated`). Nothing is retried for this Incident. Fixing the cause helps new Incidents; this one stays with a person. (An analysis run for a reviewer hint puts the Incident back to `Proposed` instead.)
 
 | Reason | What it means | What to do |
 | --- | --- | --- |
 | <span id="an-proposed"></span>`Proposed` | The result carried a valid proposal with evidence; a request is created. | Review the request. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-runbookmatched"></span>`RunbookMatched` | A deterministic runbook matched and proposed without a model call. | Review the request. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-nomodelconfigured"></span>`NoModelConfigured` | `RemediationSettings` names no triage model, so no model was called and no budget used. | Configure a model. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-budgetspent"></span>`BudgetSpent` | The daily analysis budget is spent; no model was called. | Wait for the next UTC day or raise the limit. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-nomodelconfigured"></span>`NoModelConfigured` | `RemediationSettings` names no triage deployment, or the analyzer was started without its triage model (chart value `analyzer.analysis.triageModel`), so no model was called and no budget used. | Configure the model; it applies to new Incidents. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-budgetspent"></span>`BudgetSpent` | The daily analysis budget is spent; no model was called. | Wait for the next UTC day or raise the limit; this Incident is not analyzed again. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-budgetunavailable"></span>`BudgetUnavailable` | The budget could not be read or trusted; no model was called. | Check the budget ConfigMap and the analyzer log. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-noproposal"></span>`NoProposal` | The result made no proposal. | Nothing; a person looks at the Incident. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-missingdata"></span>`MissingData` | The result made no proposal and listed missing data. | Read the missing data in the Incident; provide it. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-noevidence"></span>`NoEvidence` | The result proposed without a quote found in the blocks it cites, so it was dropped. | Nothing; the next analysis may do better. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-missingdata"></span>`MissingData` | The result made no proposal and listed missing data. | Read the missing data in the Incident status and act on it by hand. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-noevidence"></span>`NoEvidence` | The proposal quoted no evidence found in the context or tool results, so it was dropped. | Nothing; a person decides. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-targetnotsupported"></span>`TargetNotSupported` | The proposed action may not target the Incident's subject, or the subject has no namespace or UID. | Nothing; the action catalog does not cover this subject. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-previousvalueunknown"></span>`PreviousValueUnknown` | The proposal changes a value the analyzer takes from the pod template, and the template has no such value (no container of that name, no memory limit, or a limit outside the bounded form). | Set the value in the workload first. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-nochange"></span>`NoChange` | The proposed value is the one the pod template already holds. | Nothing. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-previousvalueunknown"></span>`PreviousValueUnknown` | The proposal changes a value the analyzer takes from the pod template, and the template has no such value (no container of that name, no memory limit, or a limit outside the bounded form), or the ScaledObject was not read or has no usable `maxReplicaCount`. | Set the value in the workload first; it helps new Incidents. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-nochange"></span>`NoChange` | The proposed value is the one the pod template (or the ScaledObject's `maxReplicaCount`) already holds. | Nothing. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-directionreversed"></span>`DirectionReversed` | With the previous value taken from the pod template, the proposal turns from an increase into a decrease or back, or states no direction. | Nothing; the model reasoned about another change. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-nopolicyforaction"></span>`NoPolicyForAction` | No `RemediationPolicy` is configured for the proposed action type. | Add a policy for the action. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-actionoutofbounds"></span>`ActionOutOfBounds` | The proposed action failed the policy's catalog check. There is no retry and no feedback to the model. | Widen the policy on purpose if the bounds are too tight. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-invalidoutput"></span>`InvalidOutput` | The result did not match the schema and no escalation could follow. | Check the model deployment; retry later. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-nopolicyforaction"></span>`NoPolicyForAction` | The analyzer has no `RemediationPolicy` named for the proposed action type (chart value `analyzer.analysis.actionPolicies`). | Name a policy for the action; it applies to new Incidents. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-actionoutofbounds"></span>`ActionOutOfBounds` | The proposed action failed the action catalog's fixed check (type, parameters, bounds), which no `RemediationPolicy` changes. There is no retry and no feedback to the model. | Nothing; a person decides. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-invalidoutput"></span>`InvalidOutput` | The escalated model's reply did not match the schema (or asked for too many tool calls at once). | Check the model deployment; this Incident is not analyzed again. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-escalationnotconfigured"></span>`EscalationNotConfigured` | An escalation signal was found and no escalation model is configured. | Configure an escalation model, or decide by hand. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-steplimit"></span>`StepLimit` | The escalated model asked for tool calls past the step limit. | Nothing; a person decides. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-tokenlimit"></span>`TokenLimit` | The next call could exceed the analysis's or the deployment's token bound. | Nothing; a person decides. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-deadlineexceeded"></span>`DeadlineExceeded` | The analysis ran out of its deadline. | The Incident is analyzed again after the cooldown. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-modelunavailable"></span>`ModelUnavailable` | The model stayed throttled or failing after its bounded retries. | Check the deployment's quota and status. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-modelnotfound"></span>`ModelNotFound` | The model deployment does not exist. | Correct the deployment name in the settings. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-modelforbidden"></span>`ModelForbidden` | The endpoint refused the analyzer's identity. | Grant the analyzer's identity access to the deployment. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-deadlineexceeded"></span>`DeadlineExceeded` | The analysis ran out of its deadline, or the context of the Incident could not be built. | Read the analyzer log; this Incident is not analyzed again. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-modelunavailable"></span>`ModelUnavailable` | The model stayed throttled or failing after its bounded retries, or the retries used up the call limit. | Check the deployment's quota and status; this Incident is not analyzed again. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-modelnotfound"></span>`ModelNotFound` | The model deployment does not exist. | Correct the deployment name in the settings; it applies to new Incidents. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-modelforbidden"></span>`ModelForbidden` | The endpoint refused the analyzer's identity. | Grant the analyzer's identity access to the deployment; it applies to new Incidents. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-modelerror"></span>`ModelError` | Any other failure of the model call, or of building its provider. | Read the analyzer log. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-unexpectedmodel"></span>`UnexpectedModel` | A reply named another model than the one configured for its role, or none. It is not used. | Check the deployment behind the endpoint. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-endpointnotallowed"></span>`EndpointNotAllowed` | The deployment's endpoint is one the analyzer may not call. Nothing was sent to it. | Correct the endpoint or the analyzer's allow-list. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-modelnotallowed"></span>`ModelNotAllowed` | The OpenAI-compatible deployment's model is absent from its endpoint's install-time list. No request is sent. | Add the model to the list. [More](troubleshooting.md#openai-compatible-model-refusals) |
-| <span id="an-providernotconfigured"></span>`ProviderNotConfigured` | The provider needs something the analyzer was not started with (an API key file, an allow-list, a workload identity), or the key file could not be read. | Fix the analyzer's configuration. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-providernotconfigured"></span>`ProviderNotConfigured` | The provider needs something the analyzer was not started with (an API key file, an allow-list, a workload identity), or the key file could not be read. | Fix the analyzer's configuration; it applies to new Incidents. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-planunchanged"></span>`PlanUnchanged` | An analysis for a reviewer hint proposed the plan of the request it would replace, so no replacement was created. | Nothing; the pull request keeps its plan. [More](troubleshooting.md#not-request-reasons) |
-| <span id="an-scalernotready"></span>`ScalerNotReady` | The Incident's subject is a KEDA ScaledObject that is not ready, so `AdjustKedaMaxReplicas` was not offered. | Fix the autoscaler first. [More](troubleshooting.md#not-request-reasons) |
+| <span id="an-scalernotready"></span>`ScalerNotReady` | The Incident's subject is a KEDA ScaledObject that is not ready, so `AdjustKedaMaxReplicas` was not offered, and the analysis made no other proposal (or proposed it anyway). | Fix the autoscaler first. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-hintnotpending"></span>`HintNotPending` | The reviewer hint was no longer pending, so no replacement was created. | Nothing. [More](troubleshooting.md#not-request-reasons) |
 | <span id="an-requestnotcreated"></span>`RequestNotCreated` | The analysis made a plan and the `RemediationRequest` could not be created. | Read the analyzer log; the analyzer's create grant is the usual cause. [More](troubleshooting.md#not-request-reasons) |
 
@@ -454,16 +456,16 @@ Whether the Incident is due for analysis, and why not. `True` for the first five
 | <span id="ad-firstanalysis"></span>`FirstAnalysis` | `True`: the Incident was never analyzed and has settled. | Nothing; it is analyzed next. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-newoccurrence"></span>`NewOccurrence` | `True`: a new symptom began after the last analysis and the cooldown has passed. | Nothing. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-cooldownexpired"></span>`CooldownExpired` | `True`: the symptom was seen again after the last analysis and the cooldown has passed. | Nothing. [More](troubleshooting.md#not-request-reasons) |
-| <span id="ad-analysistimedout"></span>`AnalysisTimedOut` | `True`: the Incident was `Analyzing` longer than the analysis timeout, so that analysis is taken as lost. | Nothing; it runs again. [More](troubleshooting.md#not-request-reasons) |
-| <span id="ad-reviewerhint"></span>`ReviewerHint` | `True`: a request naming the Incident holds a reviewer hint no analysis has answered. | Nothing. [More](troubleshooting.md#not-request-reasons) |
+| <span id="ad-analysistimedout"></span>`AnalysisTimedOut` | `True`: the Incident was `Analyzing` longer than the analysis timeout, so that analysis is taken as lost. | Nothing; it runs again once the cooldown has passed (a lost run of a reviewer hint that needs no model call runs at once) and the budget allows. [More](troubleshooting.md#not-request-reasons) |
+| <span id="ad-reviewerhint"></span>`ReviewerHint` | `True`: a request naming the Incident holds a reviewer hint no analysis has answered. | Nothing; it runs once the cooldown since the last analysis has passed and the budget allows. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-notobserved"></span>`NotObserved` | The status records no observation yet. | Wait; check the analyzer watches the namespace. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-notrecent"></span>`NotRecent` | The Incident was never analyzed and was last seen longer ago than the recent window, so it takes no budget. | Nothing; a new observation makes it due again. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-analyzing"></span>`Analyzing` | An analysis is running. | Wait. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-analysisstartunknown"></span>`AnalysisStartUnknown` | The Incident is `Analyzing` without a `lastAnalysisTime`, so the timeout cannot be placed. It stays not due. | Report it; the status needs repair. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-proposed"></span>`Proposed` | The last analysis made a proposal; the closure rules move the Incident on once its request ends or it goes quiet. | Nothing. [More](troubleshooting.md#not-request-reasons) |
-| <span id="ad-escalated"></span>`Escalated` | The last analysis, or a request that ended without success, handed the Incident to a person. | Look at the Incident. [More](troubleshooting.md#not-request-reasons) |
+| <span id="ad-escalated"></span>`Escalated` | The last analysis, or a request that ended without success, handed the Incident to a person. It is not analyzed again. | Look at the Incident. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-resolved"></span>`Resolved` | The Incident is `Resolved` and is not analyzed while it stays so. | Nothing. [More](troubleshooting.md#not-request-reasons) |
-| <span id="ad-recurred"></span>`Recurred` | The Incident is `Escalated` because its symptom came back after it was resolved. | A person decides. [More](troubleshooting.md#not-request-reasons) |
+| <span id="ad-recurred"></span>`Recurred` | The Incident is `Escalated` because its symptom came back after it was resolved. It is not analyzed again. | A person decides. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-nonewdata"></span>`NoNewData` | Nothing was seen since the last analysis. | Nothing. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-coolingdown"></span>`CoolingDown` | New data exists, but the cooldown since the last analysis has not passed. | Wait. [More](troubleshooting.md#not-request-reasons) |
 | <span id="ad-debouncing"></span>`Debouncing` | The last observation is more recent than the debounce, so the Incident has not settled. | Wait. [More](troubleshooting.md#not-request-reasons) |
@@ -491,7 +493,7 @@ Why the closure rules last moved the Incident's phase. Always `True`.
 | <span id="lc-requestfailed"></span>`RequestFailed` | The newest request ended `Failed`; the Incident moved to `Escalated`. | Read the request's `Verified` reason. [More](troubleshooting.md#not-request-reasons) |
 | <span id="lc-requestcancelled"></span>`RequestCancelled` | The newest request ended `Cancelled`; the Incident moved to `Escalated`. | A person decides. [More](troubleshooting.md#not-request-reasons) |
 | <span id="lc-requestneedsintervention"></span>`RequestNeedsIntervention` | The newest request ended `NeedsIntervention`; the Incident moved to `Escalated`. | Read the request's reason and act. [More](troubleshooting.md#not-request-reasons) |
-| <span id="lc-requestsuperseded"></span>`RequestSuperseded` | The newest request ended `Superseded` and no newer request names the Incident; it moved to `Escalated`. | A new analysis or a person proposes again. [More](troubleshooting.md#not-request-reasons) |
+| <span id="lc-requestsuperseded"></span>`RequestSuperseded` | The newest request ended `Superseded` and no newer request names the Incident; it moved to `Escalated`. It is not analyzed again; a request created later that names it decides it. | A person decides. [More](troubleshooting.md#not-request-reasons) |
 | <span id="lc-requestinconclusive"></span>`RequestInconclusive` | The newest request ended `Inconclusive`; the Incident moved to `Escalated`. | Check the change by hand. [More](troubleshooting.md#not-request-reasons) |
 | <span id="lc-reopened"></span>`Reopened` | A `Resolved` Incident (by quiet time before any analysis, or folded) saw its symptom again within the recurrence window, so it is `Open` again. | Nothing; it is analyzed as usual. [More](troubleshooting.md#not-request-reasons) |
 | <span id="lc-requestactive"></span>`RequestActive` | The Incident was `Resolved` while a request naming it was active, so it moved back to `Proposed`. | Nothing; the request decides. [More](troubleshooting.md#not-request-reasons) |

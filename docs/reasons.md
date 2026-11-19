@@ -85,7 +85,7 @@ All `NeedsIntervention` unless marked. Shadewright maps the live object to its f
 | <span id="pa-sourcenotbranch"></span>`SourceNotBranch` | The `GitRepository` does not track only a branch. | Track a branch. [More](troubleshooting.md#delivery-from-flux) |
 | <span id="pa-sourceincludes"></span>`SourceIncludes` | The `GitRepository` has `spec.include`. | Remove the include. [More](troubleshooting.md#delivery-from-flux) |
 | <span id="pa-sourceoptions"></span>`SourceOptions` | The `GitRepository` is suspended or sets `ignore`, `recurseSubmodules` or `sparseCheckout`, or a `.sourceignore` file is on the path. | Remove the option or the file. [More](troubleshooting.md#delivery-from-flux) |
-| <span id="pa-sourcenotready"></span>`SourceNotReady` | The `GitRepository` is not `Ready` for its current generation. | Fix the source (URL, credentials) and wait. [More](troubleshooting.md#delivery-from-flux) |
+| <span id="pa-sourcenotready"></span>`SourceNotReady` | The `GitRepository` is not `Ready` for its current generation. | This request has ended. Fix the source (URL, credentials) until the `GitRepository` is `Ready`, then apply a new request. [More](troubleshooting.md#delivery-from-flux) |
 | <span id="pa-revisionmismatch"></span>`RevisionMismatch` | The Kustomization has not applied the revision its source last fetched, or that revision is not from the tracked branch. | Wait for Flux to catch up, then apply a new request. [More](troubleshooting.md#delivery-from-flux) |
 
 #### Repository, branch and path

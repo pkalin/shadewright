@@ -2182,6 +2182,76 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionCancelPending)).To(BeNil())
 	})
 
+	// A cancel whose own pull request, opened with its answer lost, is found merged while the check of its head
+	// (checkMerged) never reads. Past cleanupFailingBound (CancelNotFinished) or while a refusal is the reason of
+	// CancelPending, the cancel is watched, and the watch records the merge wait about that pull request like every
+	// other caller: the request ends at the wait's end from its entry, as a merge whose content could not be checked,
+	// and the lock goes after the read of the branch (#889).
+	DescribeTable("ends a watched cancel whose merged pull request's check never reads at the end of the merge wait (#889)",
+		func(refused bool) {
+			lostOpen()
+			number := openRequests()[0].Number
+			cancelIt()
+			if refused {
+				faulty.failOn(opClose, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+				_, err := reconcileResult()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(cancelRefused(fetch())).NotTo(BeNil(), "setup: a refused close is the reason of CancelPending")
+				faulty.failOn("", nil)
+			} else {
+				got := fetch()
+				meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+					Type: remediationv1alpha1.ConditionCancelPending, Status: metav1.ConditionTrue,
+					Reason: ReasonCancelNotFinished, Message: "the close failed",
+					LastTransitionTime: metav1.NewTime(clock.Add(-25 * time.Hour))})
+				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			}
+			_, err := git.Merge(number)
+			Expect(err).NotTo(HaveOccurred())
+			git.SetFail(func(op string) error {
+				if op == opCheckMerged {
+					return &providers.RetryableError{Err: errors.New("status 503")}
+				}
+				return nil
+			})
+			DeferCleanup(func() { git.SetFail(nil) })
+			start := clock.Truncate(time.Second)
+			res, err := reconcileResult()
+			Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait")
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			got := fetch()
+			w := gitWait(got, waitMergeCheck)
+			Expect(w).NotTo(BeNil(), "the failed check starts the merge wait: %+v", got.Status.GitWaits)
+			Expect(w.PullRequest.Number).To(Equal(number))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)).
+				NotTo(BeNil())
+
+			ended := func(rr *remediationv1alpha1.RemediationRequest) bool {
+				c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+				return c != nil && c.Reason == ReasonMergedWithForeignChange
+			}
+			for !ended(got) && clock.Before(start.Add(mergeCommitWait+3*time.Minute)) {
+				clock = clock.Add(time.Minute)
+				_ = reconcileOnce()
+				got = fetch()
+			}
+			Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention),
+				"bounded by the merge wait: %+v", got.Status.GitWaits)
+			Expect(clock.After(start.Add(mergeCommitWait+time.Minute))).To(BeFalse(),
+				"ends by the end of the wait plus a poll")
+			approved := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved)
+			Expect(approved.Message).To(ContainSubstring(ReasonMergeContentUnreadable))
+			Expect(got.Status.MergeReceipt).To(BeNil())
+
+			clock = clock.Add(time.Minute)
+			_ = reconcileOnce()
+			Expect(fetch().Status.HoldsTarget).NotTo(HaveValue(BeTrue()),
+				"the read of the branch finds no other open pull request")
+		},
+		Entry("past cleanupFailingBound (CancelNotFinished)", false),
+		Entry("while a refused close is the reason of CancelPending", true),
+	)
+
 	It("fails the review check before the close, so a pull request reopened after Cancelled cannot merge on it (#289)", func() {
 		recorder = record.NewFakeRecorder(50)
 		hints = true

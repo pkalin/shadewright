@@ -133,7 +133,10 @@ var gitReadSites = map[string]gitReadSite{
 	"branchchange.go:followHeldMerge:1": {bound: heldLockBound},
 	"branchchange.go:lookUnsettled:1":   {bound: callerBound},
 	"cancel.go:cancelLookFailed:1":      {bound: "unboundedRead(noBoundCancelWatch)"},
-	"cancel.go:cancelFailed:1": {bound: "paceWithin(left)",
+	// A cancel watched after a refusal (1) or past cleanupFailingBound (2) records a read of a wait of its own (#889).
+	"cancel.go:cancelFailed:1": {bound: "unboundedRead(noBoundWatchedCancel)"},
+	"cancel.go:cancelFailed:2": {bound: "unboundedRead(noBoundWatchedCancel)"},
+	"cancel.go:cancelFailed:3": {bound: "paceWithin(left)",
 		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
 			r, _, rr := settlementWorld(t, api.PhaseAwaitingApproval)
 			clock := clockOf(r)

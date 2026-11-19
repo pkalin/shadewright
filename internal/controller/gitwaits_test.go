@@ -340,6 +340,8 @@ var unboundedReads = map[string]noBoundReason{
 	"closeCancelled":       noBoundHeldLock,
 	// A cancel after a change of the target branch is watched until a read settles its pull request.
 	"cancelLookFailed": noBoundCancelWatch,
+	// A cancel watched after a refusal or past its bound records a read of a wait of its own (#889).
+	"cancelFailed": noBoundWatchedCancel,
 }
 
 func TestUnboundedReadsAreListed(t *testing.T) {
@@ -375,6 +377,7 @@ var reasonName = map[noBoundReason]string{
 	noBoundPolicyCheck: "noBoundPolicyCheck", noBoundHeldLock: "noBoundHeldLock",
 	noBoundStaleCleanup: "noBoundStaleCleanup", noBoundAfterStop: "noBoundAfterStop",
 	noBoundRefusedWatch: "noBoundRefusedWatch", noBoundCancelWatch: "noBoundCancelWatch",
+	noBoundWatchedCancel: "noBoundWatchedCancel",
 }
 
 // TestHeldUnsettledKeepsTheEndOfAWait checks that a look of a stopped holder that settles nothing never asks to run

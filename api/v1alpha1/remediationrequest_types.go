@@ -385,8 +385,8 @@ const (
 	// wait (24 hours from the first refusal, lastTransitionTime); reason RecoveryReadFailed names another read of that
 	// watch that fails once that cause is gone. At the end the replacement ends NeedsIntervention with reason
 	// RecoveryWaitExpired, keeps this condition, its handoff Reserved and the lock, and the look at stopped holders
-	// records a merge of its commit whenever it comes; the lock goes on merged, closed, or the branch or repository
-	// gone. The message names the read;
+	// records a merge of its commit whenever it comes; the lock goes on merged, closed or the branch gone; a
+	// repository that left the settings keeps it until it is back. The message names the read;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,

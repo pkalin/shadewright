@@ -643,8 +643,14 @@ func (m *modelWorld) recovering(rr *api.RemediationRequest) {
 	m.planBranch = m.configured
 }
 
-// setConfigured makes branch the target branch the settings name now (created on the host when missing).
+// setConfigured makes branch the target branch the settings name now (created on the host when missing). The count of
+// reconciles that settle a stopped holder after a lift (afterLift) starts again: until the settings name the plan's
+// branch again, a cancel only reads (the close waits), so the close and the look that settles it may come only now
+// (seed 199179).
 func (m *modelWorld) setConfigured(branch string) {
+	if m.afterLift > 0 {
+		m.afterLift = 0
+	}
 	ctx := context.Background()
 	if _, err := m.g.BranchHead(ctx, branch); err != nil {
 		head, err := m.g.BranchHead(ctx, mainBranch)

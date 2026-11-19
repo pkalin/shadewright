@@ -33,12 +33,22 @@ import (
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
+const (
+	// fnChangeByNumber is the reader of the recorded number, named in the allowlists below.
+	fnChangeByNumber = "changeByNumber"
+	// colFailed is the column of verdictRow that says a read failed.
+	colFailed = "failed"
+)
+
+// unknownRowMayHold names the columns of the changeUnknown row that may hold a value other than their zero.
+var unknownRowMayHold = map[string]bool{"name": true, "lookYields": true, colFailed: true}
+
 // pullRequestReads are the GitProvider methods that read pull requests, or a branch (BranchHead), with the
 // functions of this package allowed to call them. Every other function asks changeOf (#688), so one rule per
 // verdict holds for all of them. gatedGit only passes the calls on (killswitch.go).
 var pullRequestReads = map[string]map[string]bool{
-	opGet:  {"changeByNumber": true, "gatedGit.GetChangeRequest": true},
-	opList: {"checkOpenListing": true, "changeByNumber": true, "changeOnBranch": true, "gatedGit.ListChangeRequests": true},
+	opGet:  {fnChangeByNumber: true, "gatedGit.GetChangeRequest": true},
+	opList: {"checkOpenListing": true, fnChangeByNumber: true, "changeOnBranch": true, "gatedGit.ListChangeRequests": true},
 	opFind: {"gatedGit.FindChangeRequest": true},
 	// BranchHead reads a head, never whether a pull request exists: the step reads it to cut the branch (a 404
 	// creates it, and CreateBranch refuses one that exists at another commit), the handoff to update it, and the
@@ -503,7 +513,7 @@ func funcName(fn *ast.FuncDecl) string {
 // v.rule() and acts on its column.
 var verdictReaders = map[string]bool{
 	"changeOf": true, "readChange": true, "readOnConfigured": true, "openOnOtherBase": true, "readByNumber": true,
-	"checkOpenListing": true, "changeByNumber": true, "settleGone": true, "changeOnBranch": true, "stateOf": true,
+	"checkOpenListing": true, fnChangeByNumber: true, "settleGone": true, "changeOnBranch": true, "stateOf": true,
 	"noteRead": true, "unknownChange": true, "decideVerdict": true, "rule": true,
 }
 
@@ -662,7 +672,7 @@ func TestVerdictTableDecidesEveryVerdict(t *testing.T) {
 	rv := reflect.ValueOf(unknown)
 	for i := range rv.NumField() {
 		f := rv.Type().Field(i).Name
-		if f != "name" && f != "failed" && f != "lookYields" && !rv.Field(i).IsZero() {
+		if !unknownRowMayHold[f] && !rv.Field(i).IsZero() {
 			t.Errorf("the failed read's %s is not the zero value", f)
 		}
 	}

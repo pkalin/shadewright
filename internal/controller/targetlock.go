@@ -689,14 +689,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	}
 	// The read ran through settings that are not paused: a pause that held an earlier look is over.
 	resume(rr)
-	if v.rule().stoppedCheck && rr.Status.PullRequest != nil && v.pr.Number == rr.Status.PullRequest.Number {
-		// The request stopped while its own pull request is open, on the target branch or on another base: its review
-		// check is failed, tried at every look while it is pending (#925). The status write below records it; a
-		// failure is said by failStoppedCheck and does not hold the look.
-		if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase)); ctx.Err() != nil {
-			return reconcile.Result{}, err
-		}
-	}
+	r.failCheckAfterLook(ctx, rr, v)
 	if record := v.rule().heldRecord; record != heldRecordNone {
 		recordFound(rr, v.pr)
 		if cancelled {
@@ -1118,4 +1111,16 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 		}
 	}
 	return out
+}
+
+// failCheckAfterLook fails the review check of a stopped holder whose look v read its own pull request open, on the
+// target branch or on another base (stoppedCheck, #925): tried at every look while it is pending, and recorded by the
+// look's status write. A failure is said by failStoppedCheck and does not hold the look; a cancelled reconcile fails
+// that status write.
+func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) {
+	if pr := rr.Status.PullRequest; v.rule().stoppedCheck && pr != nil && v.pr.Number == pr.Number {
+		// The error is logged and said by failStoppedCheck; the next look tries again.
+		_ = r.failStoppedCheck(ctx, rr, string(rr.Status.Phase))
+	}
 }

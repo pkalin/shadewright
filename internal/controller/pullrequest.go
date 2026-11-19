@@ -2346,16 +2346,11 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 				return res, err
 			}
 			left = release
-		case errors.Is(err, errRepositoryGone), errors.Is(err, freshness.ErrRepositoryUnusable):
-			// No usable entry of the plan's repository in the settings, so nothing can be read or closed: the deletion
-			// goes, and says so (leftUnreachable, #925), since its pull request may still be open.
-			unreachable = true
-			if err := r.clearCleanupConditions(ctx, rr); err != nil {
-				return reconcile.Result{}, err
-			}
-		case err == nil, isMergedUnrecorded(err), errors.Is(err, errChangeRequestNotOurs):
-			// Closed, nothing reachable to close, the open ones closed and a merged one read as merged, or not
-			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
+		case cleanupDone(err):
+			// Closed, nothing reachable to close (said by leftUnreachable below, #925), the open ones closed and a
+			// merged one read as merged, or not ours to close. A close refused as a conflict is not a merge until a
+			// read says so: it is retried.
+			unreachable = errors.Is(err, errRepositoryGone) || errors.Is(err, freshness.ErrRepositoryUnusable)
 			if err := r.clearCleanupConditions(ctx, rr); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -2380,15 +2375,9 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		}
 		return reconcile.Result{}, err
 	}
-	if unreachable {
-		// Before the patch, as for left below.
-		r.leftUnreachable(ctx, rr)
-	}
-	if left != nil {
-		// Before the patch, so a patch that finds the request gone, or a restart right after it, loses neither the
-		// Event nor the log line. A failed patch is retried and reports it again: at least once, maybe twice.
-		r.reportRelease(ctx, rr, *left)
-	}
+	// Before the patch, so a patch that finds the request gone, or a restart right after it, loses neither the Event
+	// nor the log line. A failed patch is retried and reports it again: at least once, maybe twice.
+	r.reportLetGo(ctx, rr, left, unreachable)
 	base := rr.DeepCopy()
 	controllerutil.RemoveFinalizer(rr, FinalizerName)
 	if err := r.Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -2396,6 +2385,27 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	return reconcile.Result{}, nil
+}
+
+// reportLetGo reports a deleted request the finalizer lets go without a finished cleanup: left, when a bound of the
+// cleanup released it (reportRelease), or unreachable, when its repository has no usable entry in the settings
+// (leftUnreachable). It does nothing for a cleanup that finished.
+func (r *RemediationRequestReconciler) reportLetGo(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	left *cleanupRelease, unreachable bool) {
+	switch {
+	case left != nil:
+		r.reportRelease(ctx, rr, *left)
+	case unreachable:
+		r.leftUnreachable(ctx, rr)
+	}
+}
+
+// cleanupDone reports whether err, from the finalizer's close (closeOnDeleteOf), lets the finalizer go: nil, or an
+// answer that leaves nothing to close or nothing reachable (the plan's repository gone from the settings or unusable,
+// a merge read as merged, a pull request not the request's).
+func cleanupDone(err error) bool {
+	return err == nil || errors.Is(err, errRepositoryGone) || errors.Is(err, freshness.ErrRepositoryUnusable) ||
+		isMergedUnrecorded(err) || errors.Is(err, errChangeRequestNotOurs)
 }
 
 // closeOnDelete reports whether deleting a request in phase p closes its pull request: before merge, and

@@ -50,6 +50,9 @@ const plusBase = "release+1"
 // movedBranch is a third base: neither the recorded target branch (main) nor the configured one (release).
 const movedBranch = "hotfix"
 
+// stopBranch is the stop of movedBaseWorld for TargetBranchChanged.
+const stopBranch = "branch"
+
 // movedBaseWorld is a stopped holder (stop: "branch" for TargetBranchChanged, "cancel" for a cancel for its
 // Incident, "lost" for TargetBranchChanged with the write that recorded the pull request lost) whose recorded target
 // branch is main, with the settings naming release, and whose open pull request a person moved to base hotfix. It
@@ -117,7 +120,7 @@ func lookMoved(t *testing.T, r *RemediationRequestReconciler, rr *api.Remediatio
 // before, and nothing records it as the request's merge (no receipt, no phase after a merge, PullRequestOpened not
 // marked merged).
 func TestSettlementMovedBaseKeepsLockWhileOpen(t *testing.T) {
-	for _, stop := range []string{"branch", pathCancel, stopLost} {
+	for _, stop := range []string{stopBranch, pathCancel, stopLost} {
 		for _, end := range []string{foundClosed, endMerged} {
 			t.Run(stop+"/"+end, func(t *testing.T) {
 				r, g, rr, clock, n := movedBaseWorld(t, stop)
@@ -160,7 +163,7 @@ func TestSettlementMovedBaseFailedReadKeepsLock(t *testing.T) {
 		stop, op string
 		fail     error
 	}{
-		"by number, host error": {"branch", opGet, &providers.RetryableError{Err: errors.New("server error")}},
+		"by number, host error": {stopBranch, opGet, &providers.RetryableError{Err: errors.New("server error")}},
 		"listing, host error":   {stopLost, opListAnyBase, &providers.RetryableError{Err: errors.New("server error")}},
 		"listing, untrusted": {stopLost, opListAnyBase,
 			fmt.Errorf("an entry from another branch: %w", providers.ErrUntrustedAnswer)},
@@ -264,7 +267,7 @@ func TestSettlementMovedBaseMessageBoundsTheBase(t *testing.T) {
 		"long":    strings.Repeat("b", 40000),
 	} {
 		t.Run(name, func(t *testing.T) {
-			r, g, rr, clock, n := movedBaseWorld(t, "branch")
+			r, g, rr, clock, n := movedBaseWorld(t, stopBranch)
 			ctx := context.Background()
 			head, err := g.BranchHead(ctx, mainBranch)
 			if err != nil {
@@ -430,7 +433,7 @@ func moveTo(t *testing.T, g *fakegit.Git, n int64, base string) {
 func TestSettlementMovedBaseUnnamedKeepsLock(t *testing.T) {
 	for name, base := range unnamedBases {
 		t.Run(name, func(t *testing.T) {
-			r, g, rr, clock, n := movedBaseWorld(t, "branch")
+			r, g, rr, clock, n := movedBaseWorld(t, stopBranch)
 			moveTo(t, g, n, base)
 			g.HideBaseName(base)
 			live := lookMoved(t, r, rr, clock)
@@ -461,7 +464,7 @@ func TestSettlementMovedBaseUnnamedKeepsLock(t *testing.T) {
 func TestSettlementForeignOnOtherBaseKeepsLock(t *testing.T) {
 	for name, base := range map[string]string{"named": movedBranch, "unnamed": plusBase} {
 		t.Run(name, func(t *testing.T) {
-			r, g, rr, clock, n := movedBaseWorld(t, "branch")
+			r, g, rr, clock, n := movedBaseWorld(t, stopBranch)
 			ctx := context.Background()
 			if err := g.SetBase(n, mainBranch); err != nil {
 				t.Fatal(err)
@@ -511,7 +514,7 @@ func TestSettlementForeignOnOtherBaseKeepsLock(t *testing.T) {
 // confirm it gone there, but "gone" is concluded only after every base was looked at, so the lock is kept. On main
 // the lock was released on the target branches' listings alone.
 func TestSettlementGoneByNumberOpenElsewhereKeepsLock(t *testing.T) {
-	for _, stop := range []string{"branch", pathCancel} {
+	for _, stop := range []string{stopBranch, pathCancel} {
 		t.Run(stop, func(t *testing.T) {
 			r, g, rr, clock, n := movedBaseWorld(t, stop)
 			g.SetFail(func(op string) error {

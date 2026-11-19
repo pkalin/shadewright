@@ -143,6 +143,8 @@ On `PolicyAllowed`; repeated by the policy check on the resolved source.
 | `BranchNotFound` | NeedsIntervention | The target branch does not exist in the repository | Create it or correct the settings |
 | `PathNotAllowed` | Denied | The file that declares the object matches none of the policy's `allowedPaths` | Widen `allowedPaths` deliberately, or the change is out of scope |
 
+**A request deleted while its repository is missing from the settings** (known limit, [#877](https://github.com/pkalin/shadewright/issues/877)). The deletion does not wait for a repository the executor cannot reach, so the finalizer goes at once and the request's pull request stays open, with nothing holding its target. Putting the repository back does not bring the request back: no request watches that pull request, a merge of it is recorded by nobody, and another request may take the target meanwhile. Close the pull request by hand, or put the repository back in the settings before you delete the request.
+
 ## Files in Git
 
 All `NeedsIntervention`, on `PolicyAllowed`. The mapping reads plain kustomize manifests only.

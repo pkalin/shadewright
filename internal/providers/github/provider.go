@@ -1321,8 +1321,9 @@ func (p *Provider) listBranch(ctx context.Context, op, headBranch string, openOn
 }
 
 // GetChangeRequest returns pull request number of this repository, in any state. ErrNotFound when GitHub has
-// none with that number (404, 410), and also when it is not from a shadewright/ branch of this repository to
-// the target branch, such as a fork's pull request: that one is never Shadewright's. An answer with another
+// none with that number (404, 410), and also when it is not from a shadewright/ branch of this repository, such
+// as a fork's pull request: that one is never Shadewright's. A pull request on any base branch of the repository is
+// returned, with its base name (BaseBranch) when it passes the rule for target branches. An answer with another
 // number is ErrUntrustedAnswer, never retried; an answer without a number is an unclassified error, retried. A
 // merged pull request without a full merge commit ID is returned with none (toChangeRequest).
 func (p *Provider) GetChangeRequest(ctx context.Context, number int64) (providers.ChangeRequest, error) {

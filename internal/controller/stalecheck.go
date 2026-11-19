@@ -115,20 +115,20 @@ func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	switch v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled}); v.state {
-	case changeUnknown:
+	switch v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled}); v.rule().failCheck {
+	case failCheckRetry:
 		return v.err
-	case changeMergedElsewhere:
+	case failCheckNotOurs:
 		// Merged into another base: nothing is written to it there, as for gone.
 		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
-	case changeGone:
+	case failCheckNotOursReinstalled:
 		if reinstalled {
 			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
 		}
-	case changeElsewhere:
+	case failCheckMoved:
 		// Open on a base a person moved it to: nothing is written to it there.
 		return &openElsewhereError{pr: v.pr}
-	case changeOpen, changeMerged, changeClosed:
+	case failCheckWrite:
 	}
 	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run); err != nil {
 		return freshness.WrapProvider("write the check run", err)

@@ -775,7 +775,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 // when it decided (adopted, stopped or a failed read to retry, err), false when the branch steps go on.
 func (r *RemediationRequestReconciler) adoptFound(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, freshFile []byte) (bool, error) {
-	switch adoptRule[v.state] {
+	switch v.rule().adopt {
 	case adoptRetry:
 		return true, v.err
 	case adoptIt:
@@ -819,12 +819,9 @@ const (
 	adoptMergedElsewhere
 )
 
-// adoptRule is pullRequestStep's rule per verdict: open, merged and closed adopt the pull request (record it, end
-// Merged, or stop as closed; closed on another base as well), gone goes on to the branch steps, unknown is retried.
-var adoptRule = map[changeState]adoptOutcome{
-	changeOpen: adoptIt, changeMerged: adoptIt, changeClosed: adoptIt, changeGone: adoptNone,
-	changeElsewhere: adoptElsewhere, changeMergedElsewhere: adoptMergedElsewhere, changeUnknown: adoptRetry,
-}
+// pullRequestStep's rule per verdict is the column adopt of verdictTable: open, merged and closed adopt the pull
+// request (record it, end Merged, or stop as closed; closed on another base as well), gone goes on to the branch
+// steps, unknown is retried.
 
 // checkPlanned checks a branch head whose file holds the planned value before its pull request is opened or
 // recorded (#524): data, the file at head, must be byte for byte the planned change of the target file the
@@ -905,19 +902,19 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
 	// decides nothing; the close by number below still runs.
 	read := changeQuery{number: cr.Number}
-	switch v := r.changeOf(cleanCtx, git, rr, read); v.state {
-	case changeMerged, changeClosed:
+	switch v := r.changeOf(cleanCtx, git, rr, read); v.rule().refuseOpened {
+	case refuseEnded:
 		if ok, err := ended(v.pr); ok {
 			return err
 		}
-	case changeElsewhere:
+	case refuseMoved:
 		// A person moved it to another base since the open (#892): nothing is closed there.
 		return r.stopOpenElsewhere(ctx, rr, v.pr)
-	case changeMergedElsewhere:
+	case refuseMergedElsewhere:
 		// Moved to another base and merged there: nothing to close (the close to the target branch would be refused),
 		// and the request stops with the pull request named, as the watch stops it.
 		return r.stopMergedElsewhere(ctx, rr, v.pr)
-	case changeOpen, changeGone, changeUnknown:
+	case refuseClose:
 	}
 	err := git.CloseChangeRequest(cleanCtx, cr.Number)
 	err = boundErr(ctx, cleanCtx, "close the pull request", err)
@@ -929,7 +926,7 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 		// A merge between the look-up and the close is a conflict, but so is any other 409 of the host: only a
 		// look-up that shows the pull request merged (or closed) decides; anything else is retried.
 		v := r.changeOf(cleanCtx, git, rr, read)
-		if v.state == changeMerged || v.state == changeClosed {
+		if v.rule().refuseOpened == refuseEnded {
 			if ok, err := ended(v.pr); ok {
 				return err
 			}
@@ -1186,12 +1183,12 @@ func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr 
 		return errors.Join(closeErr, err)
 	}
 	// openPlanRepository returned, so the source is recorded and its target branch is the repository's.
-	switch v := r.changeOf(ctx, git, rr, changeQuery{number: tried.number, marker: true}); v.state {
-	case changeMerged:
+	switch v := r.changeOf(ctx, git, rr, changeQuery{number: tried.number, marker: true}); v.rule().mergedUnrecorded {
+	case mergedUnrecordedMerged:
 		return r.endMerged(ctx, git, rr, v.pr)
-	case changeUnknown:
+	case mergedUnrecordedRetry:
 		return errors.Join(closeErr, v.err)
-	case changeOpen, changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
+	case mergedUnrecordedNothing:
 	}
 	return closeErr
 }
@@ -1591,17 +1588,17 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	// Unknown is returned for a retry and ends nothing; gone is confirmed (changeOf). Through a new installation
 	// (#290) only a pull request with this request's marker is taken for the recorded one.
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().watch {
+	case watchRetry:
 		return hintLook{}, v.err
-	case changeGone:
+	case watchGone:
 		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
 			"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
-	case changeElsewhere:
+	case watchMoved:
 		return hintLook{}, r.stopOpenElsewhere(ctx, rr, v.pr)
-	case changeMergedElsewhere:
+	case watchMergedElsewhere:
 		return hintLook{}, r.stopMergedElsewhere(ctx, rr, v.pr)
-	case changeOpen, changeMerged, changeClosed:
+	case watchGoOn:
 	}
 	// changeOf read the recorded number and answers about it only, so cr is that pull request.
 	cr := v.pr
@@ -1977,7 +1974,7 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 	case gitReadFailure(err) && !expiredCleanupOver(rr, r.now()):
 		// A failed read of the cleanup: a visible retry at the pace of a stopped holder's looks. Past the cutoff it is
 		// the one more close that failed, which ends the cleanup (expiredCloseFailed).
-		return r.heldUnsettled(ctx, rr, changeVerdict{state: changeUnknown}, err, false)
+		return r.heldUnsettled(ctx, rr, unknownChange(err), err, false)
 	default:
 		// A close the Git host failed to answer (a 5xx, a rate limit, a conflict, a token it does not give): retried
 		// visibly and within a bound (expiredCloseFailed).

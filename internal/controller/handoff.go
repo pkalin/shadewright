@@ -603,15 +603,15 @@ func (r *RemediationRequestReconciler) findHanded(ctx context.Context, git provi
 		return providers.ChangeRequest{}, "", errors.New("no pull request recorded")
 	}
 	v := r.changeOf(ctx, git, pred, changeQuery{})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().handed {
+	case handedRetry:
 		return providers.ChangeRequest{}, "", v.err
-	case changeGone, changeMergedElsewhere:
+	case handedGone:
 		return providers.ChangeRequest{}, v.gone, nil
-	case changeElsewhere:
+	case handedMoved:
 		// Open on a base a person moved it to (#892): it is not taken over, and nothing is written to it there.
 		return providers.ChangeRequest{}, openElsewhereText(v.pr), nil
-	case changeOpen, changeMerged, changeClosed:
+	case handedIt:
 	}
 	return v.pr, "", nil
 }
@@ -1094,7 +1094,7 @@ func (r *RemediationRequestReconciler) recoverStep(ctx context.Context, rr *reme
 		// decides (changeOf). Merged or closed, its head is the branch's last head, and is judged as the branch
 		// head would be; gone, nothing was taken over; open, or unknown, the 404 is a passing fault, retried.
 		v := r.changeOf(ctx, git, pred, changeQuery{})
-		switch recoverRule[v.state] {
+		switch v.rule().recover {
 		case recoverRetry:
 			if v.err == nil {
 				v.err = fmt.Errorf("the branch of the handoff answered 404 while its pull request #%d is open; it "+
@@ -1132,15 +1132,9 @@ const (
 	recoverFromPullRequest
 )
 
-// recoverRule is recoverStep's rule per verdict after a 404 for the branch: open and unknown are retried (the
-// branch of an open pull request exists), gone has nothing to recover, merged and closed are judged by the pull
-// request's head. Open on a base a person moved it to (changeElsewhere, #892) is retried like open: its branch
-// exists.
-var recoverRule = map[changeState]recoverOutcome{
-	changeOpen: recoverRetry, changeMerged: recoverFromPullRequest, changeClosed: recoverFromPullRequest,
-	changeGone: recoverNothing, changeElsewhere: recoverRetry, changeMergedElsewhere: recoverNothing,
-	changeUnknown: recoverRetry,
-}
+// recoverStep's rule per verdict after a 404 for the branch is the column recover of verdictTable: open and unknown
+// are retried (the branch of an open pull request exists), gone has nothing to recover, merged and closed are judged
+// by the pull request's head. Open on a base a person moved it to (#892) is retried like open: its branch exists.
 
 // handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep
 // is true when its pull request is its replacement's (handed over, or the replacement took it over and has not

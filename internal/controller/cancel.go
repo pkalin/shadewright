@@ -223,9 +223,9 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 //     to the configured branch, as #771 decided on 2026-11-16 (recordMergeOnConfigured).
 //   - Closed or gone: the request ends Cancelled (endCancelClosed); the read of the branch after the end settles the
 //     lock. A review check that waits for a pause keeps the request in its phase until the pause ends.
-//   - Merged into a base a person moved it to (changeMergedElsewhere): stopped as the watch stops it, in
+//   - Merged into a base a person moved it to: stopped as the watch stops it, in
 //     NeedsIntervention with ChangeRequestOnOtherBase naming the merge (stopMergedElsewhere).
-//   - Open on a base a person moved it to (changeElsewhere, #892): it ends Cancelled with
+//   - Open on a base a person moved it to (#892): it ends Cancelled with
 //     messageCancelledOpenElsewhere and nothing marks the pull request closed: the lock stays while it is open, and
 //     nothing closes it there.
 //
@@ -246,7 +246,7 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 		res, waitErr := r.waitWhilePaused(ctx, rr)
 		return res, true, waitErr
 	}
-	if err != nil || v.state == changeUnknown || ctx.Err() != nil {
+	if err != nil || v.failed() || ctx.Err() != nil {
 		if err == nil {
 			err = v.err
 		}
@@ -265,8 +265,8 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 		// settled; the caller's cancel watch stands.
 		return reconcile.Result{}, false, nil
 	}
-	switch v.state {
-	case changeMerged:
+	switch v.rule().cancelLook {
+	case cancelLookMerged:
 		if mergeRecorded(rr) {
 			return reconcile.Result{}, false, nil
 		}
@@ -277,20 +277,20 @@ func (r *RemediationRequestReconciler) cancelLook(ctx context.Context, rr *remed
 			return r.recordOwnMerge(ctx, rr, v.pr)
 		})
 		return res, true, err
-	case changeClosed, changeGone:
+	case cancelLookEnd:
 		res, err := r.endCancelFound(ctx, rr, checkErr, false)
 		return res, true, err
-	case changeMergedElsewhere:
+	case cancelLookMergedElsewhere:
 		// Merged into a base a person moved it to: stopped as the watch stops it (stopMergedElsewhere), never
 		// Cancelled as found closed.
 		if err := r.stopMergedElsewhere(ctx, rr, v.pr); !errors.Is(err, errStopped) {
 			return reconcile.Result{}, true, err
 		}
 		return reconcile.Result{}, true, nil
-	case changeElsewhere:
+	case cancelLookMoved:
 		res, err := r.endCancelFound(ctx, rr, checkErr, true)
 		return res, true, err
-	case changeOpen, changeUnknown:
+	case cancelLookNone:
 	}
 	return reconcile.Result{}, false, nil
 }

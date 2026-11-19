@@ -86,6 +86,7 @@ docs-requirements: ## Regenerate requirements-docs.txt (versions and sha256 hash
 
 .PHONY: docs-check
 docs-check: ## Build the docs site and check its internal links, heading anchors and published URLs (needs .venv, see AGENTS.md).
+	python3 -I hack/docs-reasons-check.py
 	.venv/bin/zensical build --clean
 	python3 -I hack/docs-check.py check site hack/docs-published-paths.txt
 
@@ -102,7 +103,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check and plugin dependency check scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check, condition reasons page check and plugin dependency check scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
@@ -115,6 +116,8 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/require-on-main_test.sh
 	hack/fuzz-targets_test.sh
 	hack/docs-check_test.sh
+	hack/docs-reasons-check_test.sh
+	python3 -I hack/docs-reasons-check.py
 	hack/check-plugin-deps_test.sh
 
 .PHONY: test

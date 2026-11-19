@@ -52,6 +52,9 @@ const (
 	caseUnusable     = "unusable"
 )
 
+// annotationRecoveryTouched is the annotation a test sets between a read and a write of the request.
+const annotationRecoveryTouched = "example.com/recovery-touched"
+
 // findChangeRead is the text that names the watch's read of the pull request after the abort.
 const findChangeRead = "find the change request"
 
@@ -275,7 +278,7 @@ func TestRecoveryRetriesTheConditionLostToAConflict(t *testing.T) {
 	refuseRecoveryReads(g)
 	stale := rr.DeepCopy()
 	touched := rr.DeepCopy()
-	touched.Annotations = map[string]string{"example.com/recovery-touched": fieldTrue}
+	touched.Annotations = map[string]string{annotationRecoveryTouched: fieldTrue}
 	if err := r.Update(ctx, touched); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +292,7 @@ func TestRecoveryRetriesTheConditionLostToAConflict(t *testing.T) {
 		c.Reason != ReasonGitForbidden || !abortedOnRefusal(rr) {
 		t.Fatalf("PullRequestUnreadable = %+v, waits %+v", c, rr.Status.GitWaits)
 	}
-	if rr.Annotations["example.com/recovery-touched"] != fieldTrue {
+	if rr.Annotations[annotationRecoveryTouched] != fieldTrue {
 		t.Fatalf("annotations = %v, want the change kept", rr.Annotations)
 	}
 	if ev := drain(rec); len(ev) != 1 {
@@ -757,7 +760,7 @@ func TestRecoveryRetriesTheReplacedConditionLostToAConflict(t *testing.T) {
 	failRecoveryReadsRetryable(g, 0)
 	stale := rr.DeepCopy()
 	touched := rr.DeepCopy()
-	touched.Annotations = map[string]string{"example.com/recovery-touched": fieldTrue}
+	touched.Annotations = map[string]string{annotationRecoveryTouched: fieldTrue}
 	if err := r.Update(ctx, touched); err != nil {
 		t.Fatal(err)
 	}
@@ -988,5 +991,256 @@ func TestEndDropsTheRecoveryWait(t *testing.T) {
 				t.Fatalf("PullRequestUnreadable kept = %v, want %v", got, tc.kept)
 			}
 		})
+	}
+}
+
+// hotfixBranch is the base a person moves the predecessor's pull request to in the tests of a merge on another base.
+const hotfixBranch = "hotfix"
+
+// abortedThenMoved is a replacement whose handoff a refused read aborted, with the predecessor's pull request moved by
+// a person to hotfixBranch afterwards. It returns the world of handoffAppendedWorld and the writes to Git recorded
+// from the move on.
+func abortedThenMoved(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest,
+	*api.RemediationRequest, providers.ChangeRequest, *[]string) {
+	t.Helper()
+	r, g, p, rr, cr, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	refuseRecoveryReads(g)
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	if !abortedOnRefusal(rr) {
+		t.Fatalf("waits = %+v: the case is not the one under test", rr.Status.GitWaits)
+	}
+	writes := &[]string{}
+	g.SetFail(func(op string) error {
+		if hmWrites[op] || op == opCreateBranch || op == opCloseAnyBase {
+			*writes = append(*writes, op)
+		}
+		return nil
+	})
+	base, err := g.BranchHead(ctx, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.CreateBranch(ctx, hotfixBranch, base); err != nil {
+		t.Fatal(err)
+	}
+	*writes = nil
+	if err := g.SetBase(cr.Number, hotfixBranch); err != nil {
+		t.Fatal(err)
+	}
+	return r, g, p, rr, cr, writes
+}
+
+// A recovery wait whose pull request a person moved to another base and merged there ends at once (decision of
+// 2026-11-19 on #786, as a cancel with its pull request merged on another base ends): the replacement stops in
+// NeedsIntervention with ChangeRequestOnOtherBase, naming the base, its handoff moves to Aborted and its lock is
+// released in that write, nothing is written to the pull request, and neither request holds the target, so a later
+// request for it can be admitted. Before the change the replacement kept the lock and watched for the rest of its
+// HandoffRecovery wait (24 hours).
+func TestRecoveryWaitEndsOnAMergeOnAnotherBase(t *testing.T) {
+	r, g, p, rr, cr, writes := abortedThenMoved(t)
+	ctx := context.Background()
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened)
+	if rr.Status.Phase != api.PhaseNeedsIntervention || c == nil || c.Reason != ReasonChangeRequestOnOtherBase ||
+		!strings.Contains(c.Message, mergedOnHotfix) || !strings.Contains(c.Message, fmt.Sprintf("#%d", cr.Number)) {
+		t.Fatalf("phase %q, PullRequestOpened %+v, requeue %v: want the wait ended at once, naming the merge on %s",
+			rr.Status.Phase, c, res.RequeueAfter, hotfixBranch)
+	}
+	if holdsLock(rr) || rr.Status.Handoff.From.Phase != api.HandoffAborted || gitWait(rr, waitHandoffRecovery) != nil {
+		t.Fatalf("holds %v, handoff %s, waits %+v: want the lock released and the handoff aborted", holdsLock(rr),
+			rr.Status.Handoff.From.Phase, rr.Status.GitWaits)
+	}
+	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable); c != nil {
+		t.Fatalf("PullRequestUnreadable = %+v after a read that worked", c)
+	}
+	for range 3 {
+		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(p)})
+		_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	if holdsLock(p) || holdsLock(rr) || rr.Status.Phase != api.PhaseNeedsIntervention {
+		t.Fatalf("predecessor %q holds %v, replacement %q holds %v: want the target free for a later request",
+			p.Status.Phase, holdsLock(p), rr.Status.Phase, holdsLock(rr))
+	}
+	if len(*writes) != 0 {
+		t.Fatalf("writes to Git: %q, want none to the pull request merged on another base", *writes)
+	}
+}
+
+// The neighbours of a merge on another base during a recovery wait keep the wait and the lock (decision of 2026-11-19
+// on #786 ends the wait only for a merge there): a pull request closed on another base may be reopened, one open there
+// may be moved back and merged, and a read that fails or a 404 the listing does not confirm decides nothing. Each keeps
+// the replacement watching in PolicyChecked with the lock, writes nothing to Git, returns no error and a wait no longer
+// than the poll interval (an unconfirmed 404 waits for its confirmation); a failed read shows condition PullRequestUnreadable. Once the wait has passed, the end
+// (RecoveryWaitExpired) and the looks at stopped holders settle the target: free for the one closed there, held for
+// the one open there (by the predecessor, whose own pull request it is: stopOpenElsewhere).
+func TestRecoveryWaitKeepsTheLockForTheNeighboursOfAMergeOnAnotherBase(t *testing.T) {
+	notFound := fmt.Errorf("status 404: %w", providers.ErrNotFound)
+	unavailable := &providers.RetryableError{Err: errors.New("status 503")}
+	for _, tc := range []struct {
+		name string
+		// change is what a person or the host does after the move.
+		change func(*testing.T, *fakegit.Git, providers.ChangeRequest)
+		// fail makes the reads fail (nil for none).
+		fail func(op string) error
+		// releasedAfterEnd is whether the target is free once the wait has passed (only read without fail).
+		releasedAfterEnd bool
+	}{
+		{name: "closed there", change: func(t *testing.T, g *fakegit.Git, cr providers.ChangeRequest) {
+			if err := g.Close(cr.Number); err != nil {
+				t.Fatal(err)
+			}
+		}, releasedAfterEnd: true},
+		{name: "open there", change: func(*testing.T, *fakegit.Git, providers.ChangeRequest) {}},
+		{name: "merged there, the read fails", change: mergeThere, fail: func(op string) error {
+			if op == opGet {
+				return unavailable
+			}
+			return nil
+		}},
+		{name: "merged there, a 404 the listing fails to confirm", change: mergeThere, fail: func(op string) error {
+			switch op {
+			case opGet:
+				return notFound
+			case opList:
+				return unavailable
+			}
+			return nil
+		}},
+		{name: "merged there, a 404 the listing contradicts", change: mergeThere, fail: func(op string) error {
+			if op == opGet {
+				return notFound
+			}
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, p, rr, cr, writes := abortedThenMoved(t)
+			ctx := context.Background()
+			tc.change(t, g, cr)
+			if tc.fail != nil {
+				g.SetFail(func(op string) error {
+					if hmWrites[op] || op == opCloseAnyBase {
+						*writes = append(*writes, op)
+					}
+					return tc.fail(op)
+				})
+			}
+			for range 3 {
+				res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+				if err != nil {
+					t.Fatalf("Reconcile: %v, want a wait without an error", err)
+				}
+				if res.RequeueAfter <= 0 {
+					t.Fatalf("RequeueAfter = %v, want a wait", res.RequeueAfter)
+				}
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+				t.Fatal(err)
+			}
+			if rr.Status.Phase != api.PhasePolicyChecked || !holdsLock(rr) || !abortedOnRefusal(rr) ||
+				rr.Status.Handoff.From.Phase != api.HandoffReserved {
+				t.Fatalf("phase %q, holds %v, waits %+v, handoff %s: want the replacement still watching with the lock",
+					rr.Status.Phase, holdsLock(rr), rr.Status.GitWaits, rr.Status.Handoff.From.Phase)
+			}
+			unreadable := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable)
+			if (tc.fail != nil) != (unreadable != nil) {
+				t.Fatalf("PullRequestUnreadable = %+v, want one exactly while a read fails", unreadable)
+			}
+			if len(*writes) != 0 {
+				t.Fatalf("writes to Git: %q, want none", *writes)
+			}
+			if tc.fail != nil {
+				return
+			}
+			later := reconcilerClock.Add(recoveryWaitBound + time.Hour)
+			r.Now = func() time.Time { return later }
+			for range 4 {
+				_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(p)})
+				_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+				t.Fatal(err)
+			}
+			if held := holdsLock(rr) || holdsLock(p); rr.Status.Phase != api.PhaseNeedsIntervention ||
+				held == tc.releasedAfterEnd {
+				t.Fatalf("after the wait: replacement %q holds %v, predecessor %q holds %v; want the target free: %v",
+					rr.Status.Phase, holdsLock(rr), p.Status.Phase, holdsLock(p), tc.releasedAfterEnd)
+			}
+			if len(*writes) != 0 {
+				t.Fatalf("writes to Git after the wait: %q, want none", *writes)
+			}
+		})
+	}
+}
+
+// mergeThere merges cr where it is now, with a merge commit.
+func mergeThere(t *testing.T, g *fakegit.Git, cr providers.ChangeRequest) {
+	t.Helper()
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The end of a recovery wait on a merge on another base is one status write on the copy read at the start of the
+// reconcile: a request changed between that read and the write (an annotation) loses the write to a conflict, which
+// is returned for the error backoff as the Kubernetes API's with nothing recorded, and the next reconcile reads the pull
+// request again and ends the wait, keeping the annotation.
+func TestRecoveryWaitEndOnAnotherBaseSurvivesAConflict(t *testing.T) {
+	r, g, _, rr, cr, writes := abortedThenMoved(t)
+	ctx := context.Background()
+	mergeThere(t, g, cr)
+	stale := rr.DeepCopy()
+	touched := rr.DeepCopy()
+	touched.Annotations = map[string]string{annotationRecoveryTouched: fieldTrue}
+	if err := r.Update(ctx, touched); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.observeStep(ctx, stale); !isClusterError(err) || !apierrors.IsConflict(err) {
+		t.Fatalf("observeStep = %v, want the conflict of the end returned as the Kubernetes API's", err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != api.PhasePolicyChecked || !holdsLock(rr) || !abortedOnRefusal(rr) {
+		t.Fatalf("phase %q, holds %v: the lost write recorded something", rr.Status.Phase, holdsLock(rr))
+	}
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened)
+	if rr.Status.Phase != api.PhaseNeedsIntervention || c == nil || c.Reason != ReasonChangeRequestOnOtherBase ||
+		holdsLock(rr) || rr.Annotations[annotationRecoveryTouched] != fieldTrue {
+		t.Fatalf("phase %q, PullRequestOpened %+v, holds %v, annotations %v", rr.Status.Phase, c, holdsLock(rr),
+			rr.Annotations)
+	}
+	if len(*writes) != 0 {
+		t.Fatalf("writes to Git: %q, want none", *writes)
 	}
 }

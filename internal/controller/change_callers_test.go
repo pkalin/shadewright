@@ -146,7 +146,8 @@ func other(git providers.GitProvider) {
 // verdict settleReleasedBeforeField). The handoff's reads of the pull request release on their verdicts too (#786):
 // leaveReplacementMerge for a predecessor whose pull request merged with its replacement's commit
 // (settleReplacementMerge); endOnOtherMerge and endWithoutCommit for an ended replacement whose predecessor's pull
-// request merged without its commit or is open with the predecessor's head (settleHandoffAborted). No stopped
+// request merged without its commit or is open with the predecessor's head, and endMergedElsewhere for a replacement
+// in its recovery wait whose predecessor's pull request was merged into another base (settleHandoffAborted). No stopped
 // request, including an Incident cancellation, has a separate release rule.
 const releaseFunc = "Release"
 
@@ -156,6 +157,7 @@ var (
 		"settleTargetLock": true, "releaseUnread": true, "settleRecorded": true, "releaseRefused": true, "supersedeDuplicate": true,
 		"endHandoff": true, "supersedePredecessor": true, "cancelUndecided": true, "backfill": true,
 		"leaveReplacementMerge": true, "endOnOtherMerge": true, "endWithoutCommit": true, "leavePredecessorMerge": true,
+		"endMergedElsewhere": true,
 	}
 	// statusReplacers may replace a request's whole status: restoreStatus puts back the status the same caller saved
 	// earlier in the same reconcile, which holds the lock as it was then (a release since then is undone, so the lock

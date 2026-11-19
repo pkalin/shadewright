@@ -193,22 +193,23 @@ func (e *openElsewhereError) Is(target error) bool { return target == errOpenEls
 // openElsewhereText says that pull request cr of the request is open on another base, where a person moved it: its
 // number, and its base through hostBranchText when the provider answered a name (#892).
 func openElsewhereText(cr providers.ChangeRequest) string {
-	where := "another base branch"
-	if cr.BaseBranch != "" {
-		where += " (" + hostBranchText(cr.BaseBranch) + ")"
+	return fmt.Sprintf("pull request #%d of the request is open on %s, where it was moved", cr.Number, otherBaseText(cr))
+}
+
+// otherBaseText names the base of cr, a pull request on another base than the target branch: "another base branch",
+// with its name through hostBranchText when the provider answered one.
+func otherBaseText(cr providers.ChangeRequest) string {
+	if cr.BaseBranch == "" {
+		return "another base branch"
 	}
-	return fmt.Sprintf("pull request #%d of the request is open on %s, where it was moved", cr.Number, where)
+	return "another base branch (" + hostBranchText(cr.BaseBranch) + ")"
 }
 
 // mergedElsewhereText says that pull request cr of the request was merged into another base than the target branch,
 // where a person moved it: its number, and its base through hostBranchText when the provider answered a name (#892).
 func mergedElsewhereText(cr providers.ChangeRequest) string {
-	where := "another base branch"
-	if cr.BaseBranch != "" {
-		where += " (" + hostBranchText(cr.BaseBranch) + ")"
-	}
 	return fmt.Sprintf("pull request #%d of the request was merged into %s, where it was moved, not into the "+
-		"target branch", cr.Number, where)
+		"target branch", cr.Number, otherBaseText(cr))
 }
 
 // messageOpenElsewhere is the tail of every message that ends a stop on the request's own pull request open on

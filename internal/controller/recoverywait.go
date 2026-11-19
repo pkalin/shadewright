@@ -57,7 +57,8 @@ import (
 //     BranchDiverged with its comment when the branch carries the replacement's commit;
 //   - keeps the target lock, writes nothing to Git, and reads the predecessor's pull request every poll interval
 //     until the end of its HandoffRecovery wait (observeStep): a merge of its commit seen in that time is recorded;
-//     a read that fails is retried visibly (observeFailed). The end (endPassedWait, endRecoveryWait) is no verdict on
+//     a merge into a base a person moved the pull request to ends the wait at once (endMergedElsewhere); a read that
+//     fails is retried visibly (observeFailed). The end (endPassedWait, endRecoveryWait) is no verdict on
 //     the lock and does not end the observation: the replacement ends NeedsIntervention with RecoveryWaitExpired, so
 //     a person sees it, keeps status.handoff.from Reserved and the lock, and the look at stopped holders (checkHeld,
 //     heldRecovery first) goes on reading that pull request: a merge of its commit is recorded with its receipt
@@ -355,8 +356,9 @@ func (r *RemediationRequestReconciler) recordRefusalEntry(ctx context.Context, r
 // observeStep is the recovery of a replacement whose handoff was aborted at a refusal (abortedOnRefusal): it aborts the
 // predecessor's intent while it still stands (abortPredecessor), then reads the predecessor's pull request by its
 // recorded number (changeOf). A merge whose head is this request's handoff commit (isHandoffCommit) is recorded
-// (recordHandoff: Merged, or PRCreated while the merge commit or the check at the merge is awaited). Anything else
-// writes nothing to Git and takes nothing over: a read that works removes condition PullRequestUnreadable, and the
+// (recordHandoff: Merged, or PRCreated while the merge commit or the check at the merge is awaited). A merge into a
+// base a person moved the pull request to (changeMergedElsewhere), with any head, ends the wait at once
+// (endMergedElsewhere). Anything else writes nothing to Git and takes nothing over: a read that works removes condition PullRequestUnreadable, and the
 // request is read again after the poll interval, never later than the end of its waits, which ends it
 // (endPassedWait). With spec.cancel set, a read that works and finds no merge of its commit returns done false, so the
 // cancel finishes. A predecessor that is gone, made again, or no longer names this request has nothing to read: the
@@ -396,8 +398,16 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		return reconcile.Result{}, true, err
 	}
 	v := r.changeOf(ctx, git, pred, changeQuery{})
-	if v.state == changeUnknown {
+	switch v.state {
+	case changeUnknown:
 		return reconcile.Result{}, true, v.err
+	case changeMergedElsewhere:
+		// Nothing left to recover, and the target branch did not get the change: the wait ends at once (decision of
+		// 2026-11-19 on #786).
+		return reconcile.Result{}, true, clusterSideErr(r.endMergedElsewhere(ctx, rr, v.pr))
+	case changeOpen, changeMerged, changeClosed, changeGone, changeElsewhere:
+		// Only a merge of this request's commit is recorded; anything else waits for the end of the wait. Closed, here
+		// or on another base, may be reopened, and open on another base may still be moved back.
 	}
 	switch recorded, err := r.recordWatchedMerge(ctx, git, rr, pred, to, v); {
 	case err != nil:
@@ -785,6 +795,35 @@ func (r *RemediationRequestReconciler) endOnOtherMerge(ctx context.Context, rr *
 			"this request's commit; nothing was taken over", cr.Number, cr.HeadSHA)))
 }
 
+// endMergedElsewhere ends rr, a replacement whose handoff was aborted at a refusal and that watches for a merge of its
+// commit (observeStep), once the pull request it was to take over, cr, is found merged into a base a person moved it
+// to, not the target branch (changeMergedElsewhere; decision of 2026-11-19 on #786). Nothing is left to recover, and
+// the target branch did not get the change, so the request ends as a cancel or a watch does on such a merge
+// (stopMergedElsewhere): NeedsIntervention with ChangeRequestOnOtherBase and a message that names the pull request and
+// its base. Its handoff moves to Aborted and its lock is released (settleHandoffAborted) in that one status write, which
+// also drops its HandoffRecovery entry. Nothing is written to the pull request. A failed write is returned for a retry:
+// nothing is recorded then, and the next reconcile reads the pull request again.
+func (r *RemediationRequestReconciler) endMergedElsewhere(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	cr providers.ChangeRequest) error {
+	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
+	if s, ok := settleHandoffAborted(rr); ok {
+		if err := lockverdict.Release(&rr.Status, s); err != nil {
+			return err
+		}
+	}
+	err := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,
+		fmt.Sprintf("Pull request #%d, which this request was to take over, was merged into %s, where it was moved, "+
+			"not into the target branch, so its change did not reach the target branch; automation stopped and "+
+			"Shadewright writes nothing to it", cr.Number, otherBaseText(cr))))
+	if err != nil {
+		return err
+	}
+	logf.FromContext(ctx).Info("Released the target lock of RemediationRequest: the pull request it was to take over "+
+		"was merged into another base", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number,
+		"base", cr.BaseBranch)
+	return nil
+}
+
 // endWithoutCommit settles rr, a replacement that ended before it took the pull request over (endedBeforeTakeover),
 // once that pull request, cr, is found open with the predecessor's own head: rr's commit is not on it and cannot get
 // there, since only rr pushes it and rr has ended. Its handoff moves to Aborted and its lock is released
@@ -890,8 +929,9 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 		return res, true, err
 	case changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
 		// Settled by the verdict of the look (settleTargetLock): closed or gone release; open on a base a person
-		// moved it to keeps the lock while it is open there, merged there keeps none (ADR-0043). Nothing here
-		// records a merge into another base.
+		// moved it to holds the target through the predecessor, whose own pull request it is (stopOpenElsewhere),
+		// not through this request; merged there keeps none (ADR-0043). Nothing here records a merge into another
+		// base. A merge there seen during the watch ended the request before this look (endMergedElsewhere).
 	}
 	return reconcile.Result{}, false, nil
 }

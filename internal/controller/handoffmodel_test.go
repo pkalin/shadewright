@@ -117,6 +117,10 @@ import (
 //	   again): a wait whose end passed is looked at again at a sane pace, never hot;
 //	P8 once a person moved the pull request to another base (hMoveBase, ADR-0043), neither request writes to it or
 //	   to its branch; the move is a step of directed sequences only, the generator does not draw it;
+//	P10 a replacement in its recovery wait (aborted at a refusal) whose predecessor's pull request a person merged into
+//	   another base ends at the first reconcile that reads it with every read answering (decision of 2026-11-19 on
+//	   #786): NeedsIntervention with ChangeRequestOnOtherBase naming that base, its handoff Aborted, no lock; like
+//	   P8, only directed sequences reach it;
 //	P9 the predecessor never stores the abort of an intent whose takeover the replacement, as stored at that write,
 //	   recorded (from Done), whatever ends it, unless a person put the predecessor's own head back on the pull
 //	   request (fourth round of #786).
@@ -368,6 +372,8 @@ type hmWorld struct {
 	// movedBase: a person moved the pull request to hmMovedBase (hMoveBase); a merge there does not reach the target
 	// branch, so nobody records it (ADR-0043) and it is no merge of the properties.
 	movedBase bool
+	// mergedElsewhere: a person merged the pull request into hmMovedBase after the move (mergeElsewhere).
+	mergedElsewhere bool
 	// releasedAtReopen names the requests that did not hold the target lock (a verdict released it, or they were
 	// gone) when a person reopened the pull request: the named exclusion "a reopen after a release" (design 6.5), a
 	// released request does not take the lock back and records nothing of the reopened pull request.
@@ -1534,6 +1540,7 @@ func (m *hmWorld) reconcile(who string) {
 	m.mu.Lock()
 	m.actor, m.faulted = who, false
 	m.mu.Unlock()
+	p10 := m.p10Applies(who, before)
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]})
 	m.mu.Lock()
 	m.actor = ""
@@ -1560,6 +1567,10 @@ func (m *hmWorld) reconcile(who string) {
 		m.logf("  the executor crashed and restarts")
 		m.restart()
 		return
+	}
+	// P10: a recovery wait whose pull request was merged into another base ends at the first reconcile that reads it.
+	if p10 && err == nil && !faulted {
+		m.checkEndedOnOtherBase(after)
 	}
 	// P7: no reconcile asks to run again within a second.
 	if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
@@ -1950,7 +1961,51 @@ func (m *hmWorld) mergeElsewhere() {
 		return
 	}
 	m.logf("  merged into %s, not the target branch", hmMovedBase)
+	m.mergedElsewhere = true
 	m.reach["merged-elsewhere"] = true
+}
+
+// p10Applies reports whether P10 checks the reconcile of who about to start from before: the replacement in its
+// recovery wait, with the pull request merged into hmMovedBase, its predecessor naming it (namesReplacement), and
+// nothing armed against the reconcile (no fault, lost write, conflict, interleaving, crash, pause or settings change).
+func (m *hmWorld) p10Applies(who string, before *api.RemediationRequest) bool {
+	m.mu.Lock()
+	quiet := m.sticky == nil && len(m.once) == 0 && len(m.lose) == 0 && len(m.conflict) == 0 && m.interleave == "" &&
+		m.crashAt < 0 && !m.paused && m.settings == ""
+	m.mu.Unlock()
+	return who == hmRepl && m.mergedElsewhere && quiet && abortedOnRefusal(before) && m.namesReplacement()
+}
+
+// namesReplacement reports whether the predecessor, as stored, exists and names the replacement in its outgoing handoff
+// with its pull request recorded: only then does the replacement's recovery wait read that pull request (observeStep).
+func (m *hmWorld) namesReplacement() bool {
+	p, rr := m.get(hmPred), m.get(hmRepl)
+	if p == nil || rr == nil || p.Status.Handoff == nil || p.Status.Handoff.To == nil || p.Status.PullRequest == nil {
+		return false
+	}
+	return p.Status.Handoff.To.UID == api.UID(rr.UID)
+}
+
+// checkEndedOnOtherBase checks P10 on the replacement as stored after a reconcile that began in its recovery wait,
+// with the pull request merged into hmMovedBase, every read answering and nothing armed against its writes: the wait
+// ended in that reconcile (decision of 2026-11-19 on #786). The replacement is in NeedsIntervention with
+// ChangeRequestOnOtherBase naming hmMovedBase, its handoff Aborted, and it holds no lock; P8 checks that nothing was
+// written to the pull request.
+func (m *hmWorld) checkEndedOnOtherBase(after *api.RemediationRequest) {
+	if after == nil {
+		return
+	}
+	m.reach["recovery-wait-merged-elsewhere"] = true
+	c := meta.FindStatusCondition(after.Status.Conditions, api.ConditionPROpened)
+	switch {
+	case abortedOnRefusal(after) || after.Status.Phase != api.PhaseNeedsIntervention:
+		m.fail("P10", "the replacement's recovery wait goes on after a read of its pull request merged into %s (%s)",
+			hmMovedBase, describe(after))
+	case c == nil || c.Reason != ReasonChangeRequestOnOtherBase || !strings.Contains(c.Message, hmMovedBase):
+		m.fail("P10", "the replacement's end does not say where its pull request was merged: %+v", c)
+	case ptr.Deref(after.Status.HoldsTarget, false) || after.Status.Handoff.From.Phase != api.HandoffAborted:
+		m.fail("P10", "the replacement keeps the lock or its handoff after its end on another base (%s)", describe(after))
+	}
 }
 
 // replTookOver reports whether the replacement exists and recorded the takeover.
@@ -2639,4 +2694,17 @@ func TestHandoffModelFailedLookWhileAwaitingTheRecordWritesNothing(t *testing.T)
 func TestHandoffModelUnusableEntryEndsTheMergeWait(t *testing.T) {
 	hmDirected(t, hmStartIntent, []hmStep{stRecPred, {Kind: hMerge, Commit: true, NoID: true}, stRecPred,
 		stClock(clockDay), {Kind: hSettings, Variant: settingsUnusable}, stRecPred})
+}
+
+// The replacement's handoff is aborted at a refused read, reads answer again, and a person moves the pull request to
+// another base and merges it there. The replacement's next reconcile ends its recovery wait at once (P10): before the
+// decision of 2026-11-19 on #786 it kept the lock and watched for the rest of the wait, a day. The predecessor, looked
+// at after it, stops on its own merge there; nothing writes to the pull request (P8), and after the settling run no
+// request holds the target (P6).
+func TestHandoffModelRecoveryWaitEndsOnAMergeOnAnotherBase(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{stSticky(403), stRecRepl, stAnswer, {Kind: hMoveBase}, stMerge,
+		stRecRepl, stRecPred})
+	if !m.reach["recovery-wait-merged-elsewhere"] {
+		t.Fatal("the sequence did not reach a recovery wait with its pull request merged into another base")
+	}
 }

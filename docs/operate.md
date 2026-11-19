@@ -1,17 +1,24 @@
 ---
-title: Operate
+title: Operator manual
 ---
 
-# Operate
+# Operator manual
 
-What keeping Shadewright running takes: moving to a new release, stopping it, rotating its identities, knowing what it stores, and trying it in the reference lab. The settings themselves are in the [configuration reference](reference/configuration.md).
+This manual is for the team that installs and runs Shadewright: configuring it, setting the policies it works within, and the tasks that come after, such as upgrades, key rotation and stopping it. Reviewing proposals is in the [user guide](use.md); the settings themselves are in the [configuration reference](reference/configuration.md). To install, begin with [install in observe-only mode](install.md).
 
+In the order the work comes:
+
+- [Check an install with kubectl](how-to/check-install.md), then [limit the namespaces it watches](how-to/limit-watched-namespaces.md).
+- [Write or tighten a policy](how-to/write-a-policy.md) and [turn reviewer hints on](how-to/turn-on-reviewer-hints.md).
+- [Pause and resume writes](how-to/pause-and-resume.md) and the [emergency stop](emergency.md): what a pause does not undo.
+- [Clear Resolved Incidents at the cap](how-to/clear-resolved-incidents.md).
 - [Upgrade and uninstall](upgrade-uninstall.md): the order, open pull requests and finalizers, and how to verify a release.
-- [Emergency stop](emergency.md): pause the executor and stop the analysis, and what a pause does not undo.
 - [Identity rotation](identity-rotation.md): the GitHub App key, the installation, federated credentials and Key Vault key versions.
 - [Data handling](data-handling.md): what is stored, sent to the model, published and retained.
+- [Qualify compatible inference](how-to/qualify-openai-compatible.md) and [evaluate the model](evaluation.md).
+- [Lab runbook: the OOM scenario](lab-oom-acceptance.md) and [reviewer hint on OOM](lab-oom-hint.md): acceptance runs in the reference lab in Azure.
+- [Troubleshooting](troubleshooting.md): every condition reason with its cause and fix.
 - [Metrics](reference/metrics.md): what the three components export.
-- [Lab runbook: the OOM scenario](lab-oom-acceptance.md): the acceptance run in the reference lab in Azure.
 
 ## Health probes
 

@@ -66,9 +66,11 @@ import (
 // again, its target branch changes), and a person merging the pull request at its head, pushing a commit on top of it,
 // force pushing it back to the predecessor's commit (alone, or with a person's commit on it), closing it, reopening it
 // or deleting its branch (which closes it), the other request changing between a read of the next reconcile of one
-// request and its decisions (that other request reconciled in full before a read of the Git host the reconcile makes,
-// outside the per-request lock of a look at a pull request), or the cache serving a request as it was before its last
-// status write; one merge in eight is reported by the host without a merge commit ID on
+// request and its decisions (that other request reconciled in full before a read the reconcile makes: of the Git
+// host, or of a request from the API server or the cache, outside the per-request lock of a look at a pull request;
+// the cache has not seen that change for the rest of the reconcile, so a read through it returns the other request as
+// it was before, and a read from the API server returns it as it is), or the cache serving a request as it was before
+// its last status write; one merge in eight is reported by the host without a merge commit ID on
 // every read, so it can only be recorded without a receipt. Nine sequences in ten that draw no merge, close or branch deletion get one
 // in their second half, so most reach the end of the pull request.
 //
@@ -98,7 +100,8 @@ import (
 //	   the abort as stored by then (noted at the status write that stores it); and a request that waits for the other
 //	   request's merge record (a status write of it carries MergeRecordPending, stored, lost or meeting a conflict,
 //	   until one without it is stored, while that request may still record the merge: it holds the target lock or
-//	   its intent, or a claim on the merge) writes nothing to Git, not even an attempt;
+//	   its intent, or a claim on the merge) writes nothing to Git, not even an attempt; nor does any request while
+//	   the other, as stored, holds a claim on the merge;
 //	P5 every status write passes the CRD schema and its CEL rules (transition rules included), and a reconcile that
 //	   could act leaves no entry of status.gitWaits that stood past its own end at its start, also when it ends one of
 //	   them by stopping the request (a restart after more than the longest wait, hRestartLate);
@@ -131,7 +134,8 @@ import (
 // seed whose only violations an exclusion covers is skipped with the exclusion's name. The default set is the seeds 1
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
 // 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, for #880 against 1 to 60,000, and for its second decision (a wait is a claim) against 1 to 260,000 with the
-// deletion of the claim holder drawn. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// deletion of the claim holder drawn, and for the live copies of the requests (decision of 2026-11-19 on #786) against 1 to
+// 260,000 with the cache lagging behind a change of the other request drawn. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.
@@ -397,10 +401,16 @@ type hmWorld struct {
 	// MergeRecordPending (stored, lost or meeting a conflict), and none without it was stored since (P4).
 	awaiting map[string]bool
 	// interleave is the request whose next reconcile meets a change of the other request (hInterleave) before its
-	// read interleaveAt of the Git host ("" for none); interleaving is set while that other reconcile runs.
+	// read interleaveAt ("" for none): a read of the Git host, or a read of a request from the API server or the
+	// cache; interleaving is set while that other reconcile runs.
 	interleave   string
 	interleaveAt int
 	interleaving bool
+	// lag holds, for the rest of the reconcile that met the change, the copy of the other request the cache serves:
+	// as it was before that change, which the cache has not seen yet (decision of 2026-11-19 on #786, point 4). A read
+	// from the API server sees the change; a read through the cache does not, until the reconcile ends or writes the
+	// request itself.
+	lag map[string]*api.RemediationRequest
 	// prev holds each request as stored before its last stored status write; stale the copies the cache serves at
 	// the next read of each (hStale).
 	prev  map[string]*api.RemediationRequest
@@ -573,7 +583,7 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
 		waitingAtRemoval: map[string]bool{}, expected: map[string]int{}, lastErr: map[string]error{},
 		lastRes: map[string]reconcile.Result{}, prev: map[string]*api.RemediationRequest{},
-		stale: map[string]*api.RemediationRequest{}}
+		stale: map[string]*api.RemediationRequest{}, lag: map[string]*api.RemediationRequest{}}
 	base, err := g.BranchHead(ctx, mainBranch)
 	if err != nil {
 		t.Fatal(err)
@@ -764,12 +774,16 @@ func (m *hmWorld) cache() client.Client {
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
 			opts ...client.GetOption) error {
 			if rr, ok := obj.(*api.RemediationRequest); ok {
+				m.interleaveBefore("read " + key.Name + " from the cache")
 				m.mu.Lock()
 				old := m.stale[key.Name]
 				delete(m.stale, key.Name)
+				if old == nil {
+					old = m.lag[key.Name]
+				}
 				m.mu.Unlock()
 				if old != nil {
-					m.logf("  the cache serves %s as it was before its last status write", key.Name)
+					m.logf("  the cache serves %s as it was before its last change", key.Name)
 					old.DeepCopyInto(rr)
 					return nil
 				}
@@ -779,8 +793,23 @@ func (m *hmWorld) cache() client.Client {
 	})
 }
 
+// liveReads is the API server as the reconciler's APIReader sees it: every read of a request is a point where the
+// other request may change first (interleaveBefore).
+type liveReads struct {
+	client.Reader
+	m *hmWorld
+}
+
+func (l liveReads) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*api.RemediationRequest); ok {
+		l.m.interleaveBefore("read " + key.Name + " from the API server")
+	}
+	return l.Reader.Get(ctx, key, obj, opts...)
+}
+
 // interleaveBefore runs the reconcile of the other request when the reconcile running is the one hInterleave named and
 // op is the read it named: a change of the other request between what the running one read and what it decides next.
+// The cache has not seen that change for the rest of the running reconcile (lag).
 func (m *hmWorld) interleaveBefore(op string) {
 	m.mu.Lock()
 	who := m.actor
@@ -804,7 +833,12 @@ func (m *hmWorld) interleaveBefore(op string) {
 	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[who]
 	m.logf("  before %s of the %s, the %s is reconciled", op, who, other)
 	m.reach["interleaved"] = true
-	if m.get(other) != nil {
+	if before := m.get(other); before != nil {
+		defer func() {
+			m.mu.Lock()
+			m.lag[before.Name] = before
+			m.mu.Unlock()
+		}()
 		m.mu.Lock()
 		m.actor = other
 		m.mu.Unlock()
@@ -840,7 +874,7 @@ func lookHeld(r *RemediationRequestReconciler) bool {
 func (m *hmWorld) restart() {
 	g := m.g
 	// The API server answers the != field selectors of the limits, which the fake client refuses (apiServerReader).
-	m.r = &RemediationRequestReconciler{Client: m.cache(), APIReader: &apiServerReader{Reader: m.cl}, ReviewerHints: true,
+	m.r = &RemediationRequestReconciler{Client: m.cache(), APIReader: &apiServerReader{Reader: liveReads{Reader: m.cl, m: m}}, ReviewerHints: true,
 		Scheme: m.base.Scheme(), Now: func() time.Time { return m.now }, Source: &hmResolver{m: m},
 		OpenRepository: func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
 			if err := m.gitFail("open"); err != nil {
@@ -924,6 +958,12 @@ func (m *hmWorld) gitFail(op string) error {
 		m.fail("P4", "the %s attempted %s while it waits for the other request's merge record", who, op)
 		m.mu.Lock()
 	}
+	if hmWrites[op] && m.otherClaims(m.actor) {
+		who := m.actor
+		m.mu.Unlock()
+		m.fail("P4", "the %s attempted %s while the other request holds a claim on the merge", who, op)
+		m.mu.Lock()
+	}
 	if hmWrites[op] {
 		if m.crashAt == 0 {
 			m.crashed = true
@@ -957,6 +997,21 @@ func (m *hmWorld) otherMayRecord(who string) bool {
 	// A claim on the merge (holdsMergeClaim) is a pending record too, handed off or not (decision of 2026-11-19 on
 	// #880): the request that waits for it writes nothing to Git while it stands.
 	return mayStillRecord(x) || (m.merge != nil && holdsMergeClaim(x, m.number, m.merge.head))
+}
+
+// otherClaims reports whether the request of the handoff other than who, as stored now, holds a claim on the merge of
+// the pull request (holdsMergeClaim): every Git write of who is held while it stands (recordHeld, decision of
+// 2026-11-19 on #880), whether or not who has read the merge yet.
+func (m *hmWorld) otherClaims(who string) bool {
+	if m.merge == nil {
+		return false
+	}
+	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[who]
+	x := &api.RemediationRequest{}
+	if err := m.base.Get(context.Background(), m.keys[other], x); err != nil {
+		return false
+	}
+	return holdsMergeClaim(x, m.number, m.merge.head)
 }
 
 func (m *hmWorld) gitAfter(op string) error {
@@ -1064,6 +1119,7 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 		delete(m.awaiting, who)
 	}
 	m.prev[rr.Name] = old
+	delete(m.lag, rr.Name)
 	m.mu.Unlock()
 	// P4 follows the abort from the write that stores it, so a write to Git later in the same reconcile counts.
 	if stored.Name == m.keys[hmPred].Name && stored.Status.Handoff != nil && stored.Status.Handoff.To != nil &&
@@ -1444,6 +1500,7 @@ func (m *hmWorld) reconcile(who string) {
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]})
 	m.mu.Lock()
 	m.actor = ""
+	clear(m.lag)
 	if m.interleave == who {
 		// The reconcile made fewer reads than the step named: the change did not come.
 		m.interleave = ""
@@ -2188,7 +2245,7 @@ func hmDrawStep(rng *rand.Rand, k hmKind, focus uint64) hmStep {
 		s.Obj = objs[rng.IntN(2)]
 	case hInterleave:
 		s.Obj = objs[rng.IntN(2)]
-		s.N = rng.IntN(6)
+		s.N = rng.IntN(12)
 	case hDelete:
 		s.Obj = objs[rng.IntN(2)]
 		if focus == 3 {

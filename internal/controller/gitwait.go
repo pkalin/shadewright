@@ -802,6 +802,22 @@ func (r *RemediationRequestReconciler) endMergeWait(ctx context.Context, rr *api
 	other := source != nil && branch != "" && branch != source.TargetBranch
 	unread := &renderRefusal{reason: ReasonMergeContentUnreadable,
 		message: "what the merge brought could not be checked within " + mergeCommitWait.String() + " (" + why + ")"}
+	var unreadable *metav1.Condition
+	if !ours {
+		pred, taken, err := r.takenOverMerge(ctx, rr, pr)
+		if err != nil {
+			return err
+		}
+		if taken {
+			// The takeover saw its own commit merged and started this wait, and its write was lost: the merge is this
+			// request's, recorded with the takeover in the write that ends it, as the takeover would have been.
+			if endedBeforeTakeover(rr) {
+				rr.Status.BreakerCounts = nil
+			}
+			unreadable = takeOverInto(ctx, rr, pred, cr, pr.HeadSHA)
+			ours = true
+		}
+	}
 	if !ours || (other && pr.MergeCommitSHA == "") {
 		recordFound(rr, cr)
 		if cancelled {
@@ -841,7 +857,42 @@ func (r *RemediationRequestReconciler) endMergeWait(ctx context.Context, rr *api
 	}
 	markClosed(rr, ReasonChangeRequestMerged, "was merged")
 	recordMergeInto(ctx, rr, cr, branch)
-	return r.stop(ctx, rr, api.PhaseMerged, ReasonChangeRequestMerged, message)
+	err := r.stop(ctx, rr, api.PhaseMerged, ReasonChangeRequestMerged, message)
+	if errors.Is(err, errStopped) {
+		r.unreadableEvent(rr, unreadable, nil)
+	}
+	return err
+}
+
+// takenOverMerge reports whether pr, the pull request of rr's MergeCheck entry, is the merged pull request rr's
+// takeover found with rr's handoff commit as its head, whose record was lost: rr is a replacement before its takeover
+// (its handoff Reserved, its source recorded, no pull request of its own recorded), and pr is the pull request its
+// predecessor records. Only the takeover starts such an entry on such a request, and only on a merged head that is
+// rr's commit (afterUpdate, recordFoundMerge): the wait is the stored record of that first read (decision of
+// 2026-11-19 on #880), so its end must not take the merge for a foreign one because the takeover's own status write
+// was lost (seed 3506 of the handoff model). The predecessor is read from the API server; one gone or made again
+// counts by its name alone, as for recordFoundMerge. A failed read is the Kubernetes API's (a *clusterError).
+func (r *RemediationRequestReconciler) takenOverMerge(ctx context.Context, rr *api.RemediationRequest,
+	pr *api.GitWaitPullRequest) (*api.RemediationRequest, bool, error) {
+	if pr == nil || rr.Status.PullRequest != nil || !mayCarryHandoffCommit(rr) ||
+		rr.Status.Handoff.From.Phase != api.HandoffReserved {
+		return nil, false, nil
+	}
+	from := rr.Status.Handoff.From
+	pred := &api.RemediationRequest{}
+	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return nil, false, &clusterError{err: fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)}
+	case pred.UID == types.UID(from.UID):
+		if pred.Status.PullRequest == nil || pred.Status.PullRequest.Number != pr.Number {
+			return nil, false, nil
+		}
+		return pred, true, nil
+	}
+	gone := &api.RemediationRequest{}
+	gone.Name, gone.Namespace = string(from.Name), rr.Namespace
+	return gone, true, nil
 }
 
 // endContentUnreadable ends a request whose reads of what a retargeted merge brought kept failing for

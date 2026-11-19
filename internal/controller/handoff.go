@@ -1155,6 +1155,51 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 	if err := r.writeAllowed(ctx); err != nil {
 		return clusterSideErr(err)
 	}
+	unreadable := takeOverInto(ctx, rr, pred, cr, newHead)
+	// Merged without a full merge commit ID yet: recorded like an open one, and the look at the recorded pull
+	// request waits for the commit (awaitMergeCommit) and records the merge. With one, the plan is checked at the
+	// merge first (checkAtMerge, ADR-0041): a stale one is marked in the write that sets Merged. When the check
+	// cannot read what it needs, the takeover is recorded like an open pull request in the same way (with the
+	// start of the wait checkAtMerge recorded), and the look at the recorded pull request checks the plan again
+	// before it records the merge, until the wait is over; a failed read never records the merge as fresh.
+	if cr.State == providers.ChangeRequestMerged && shaPattern.MatchString(cr.MergeCommit) {
+		err := r.checkAtMerge(ctx, rr, cr)
+		if err == nil {
+			recordMerge(ctx, rr, cr)
+			err := r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
+				"The pull request was merged with this request's change, right after the handoff")
+			if errors.Is(err, errStopped) {
+				r.unreadableEvent(rr, unreadable, nil)
+			}
+			return clusterSideErr(r.ignoreStopped(err))
+		}
+		logf.FromContext(ctx).Error(err, "Recorded the takeover of a merged pull request without its merge: the "+
+			"plan could not be checked at the merge", "remediationRequest", client.ObjectKeyFromObject(rr),
+			"pullRequest", cr.Number)
+	}
+	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
+	// A merge seen without its merge commit ID starts the wait for it in the same write (as awaitMergeCommit would on
+	// the next look), so the status records that the pull request is merged: a next look that cannot read it is a
+	// merge seen and not recorded (awaitedMergeUnread), and nothing is written to the merged pull request on it (#786).
+	if cr.State == providers.ChangeRequestMerged && gitWait(rr, waitMergeCheck) == nil {
+		startMergeWaitIn(rr, cr, "wait for the merge commit", r.now())
+	}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return &clusterError{err: fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)}
+	}
+	r.unreadableEvent(rr, unreadable, nil)
+	logf.FromContext(ctx).Info("Took over the pull request for RemediationRequest", "remediationRequest",
+		client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "replaces", pred.Name)
+	return nil
+}
+
+// takeOverInto makes the changes of the takeover (step 4) in rr, unwritten: from Done, every hint of the chain, the
+// predecessor's refused commands and its comment cursor carried over, the pull request recorded with newHead, the
+// deadline gone, condition PullRequestOpened set and PullRequestUnreadable removed. It returns the removed
+// PullRequestUnreadable, for its Normal Event once the caller's write went through. pred may hold only the name of
+// the predecessor once it is gone.
+func takeOverInto(ctx context.Context, rr, pred *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest,
+	newHead string) *metav1.Condition {
 	from := rr.Status.Handoff.From
 	from.Phase = remediationv1alpha1.HandoffDone
 	for _, h := range pred.Status.Hints {
@@ -1206,41 +1251,7 @@ func (r *RemediationRequestReconciler) recordHandoff(ctx context.Context, rr, pr
 		Message:            fmt.Sprintf("Pull request #%d is open; this request took it over from the request it replaces", cr.Number),
 		ObservedGeneration: rr.Generation,
 	})
-	// Merged without a full merge commit ID yet: recorded like an open one, and the look at the recorded pull
-	// request waits for the commit (awaitMergeCommit) and records the merge. With one, the plan is checked at the
-	// merge first (checkAtMerge, ADR-0041): a stale one is marked in the write that sets Merged. When the check
-	// cannot read what it needs, the takeover is recorded like an open pull request in the same way (with the
-	// start of the wait checkAtMerge recorded), and the look at the recorded pull request checks the plan again
-	// before it records the merge, until the wait is over; a failed read never records the merge as fresh.
-	if cr.State == providers.ChangeRequestMerged && shaPattern.MatchString(cr.MergeCommit) {
-		err := r.checkAtMerge(ctx, rr, cr)
-		if err == nil {
-			recordMerge(ctx, rr, cr)
-			err := r.stop(ctx, rr, remediationv1alpha1.PhaseMerged, ReasonChangeRequestMerged,
-				"The pull request was merged with this request's change, right after the handoff")
-			if errors.Is(err, errStopped) {
-				r.unreadableEvent(rr, unreadable, nil)
-			}
-			return clusterSideErr(r.ignoreStopped(err))
-		}
-		logf.FromContext(ctx).Error(err, "Recorded the takeover of a merged pull request without its merge: the "+
-			"plan could not be checked at the merge", "remediationRequest", client.ObjectKeyFromObject(rr),
-			"pullRequest", cr.Number)
-	}
-	r.setPhase(rr, remediationv1alpha1.PhasePRCreated)
-	// A merge seen without its merge commit ID starts the wait for it in the same write (as awaitMergeCommit would on
-	// the next look), so the status records that the pull request is merged: a next look that cannot read it is a
-	// merge seen and not recorded (awaitedMergeUnread), and nothing is written to the merged pull request on it (#786).
-	if cr.State == providers.ChangeRequestMerged && gitWait(rr, waitMergeCheck) == nil {
-		startMergeWaitIn(rr, cr, "wait for the merge commit", r.now())
-	}
-	if err := r.Status().Update(ctx, rr); err != nil {
-		return &clusterError{err: fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)}
-	}
-	r.unreadableEvent(rr, unreadable, nil)
-	logf.FromContext(ctx).Info("Took over the pull request for RemediationRequest", "remediationRequest",
-		client.ObjectKeyFromObject(rr), "pullRequest", cr.Number, "replaces", pred.Name)
-	return nil
+	return unreadable
 }
 
 // endHandoff ends a replacement whose handoff did not happen: Cancelled with reason. The predecessor keeps everything

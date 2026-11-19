@@ -31,7 +31,7 @@ It observes events and pod status, diagnoses with rules and then a model, checks
 
 ## An example pull request
 
-For a container that keeps running out of memory, the executor opens this pull request (the title and body come from `internal/controller/pullrequest.go`, the diff from the [lab runbook](lab-oom-acceptance.md)):
+For a container that keeps running out of memory, the executor opens a pull request like this one, taken from the [lab runbook](lab-oom-acceptance.md):
 
 **Title:** `fix: set the memory limit of container web of demo/web to 64Mi`
 
@@ -41,7 +41,7 @@ For a container that keeps running out of memory, the executor opens this pull r
 >
 > **Scope:** one value in `apps/demo/web-deployment.yaml` on `cluster/lab`. Nothing else in this pull request is part of the plan.
 >
-> **Size:** an increase of 34% of the previous value, within policy `demo-memory`.
+> **Size:** an increase of 34% of the previous value, within policy `demo-memory`. The policy bounds the step; it does not say the step is the right size.
 >
 > **Rollback:** revert this pull request; the GitOps controller applies the previous value.
 >

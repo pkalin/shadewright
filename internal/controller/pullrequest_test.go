@@ -7356,8 +7356,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isClosed:      lookAgain(o(stopped, none, held, kept, done)),
 					isGone:        o(created, none, held, kept, done),
 					goneOtherOpen: lookAgain(o(stopped, none, held, kept, done)),
-					// The listing of the target branch has none of its own, so a new one is opened, as for gone.
-					isElsewhere:    o(created, none, held, kept, done),
+					// Found by its marker on the other base (decision of 2026-11-19 on #892): recorded, nothing
+					// opened next to it, stopped ChangeRequestOnOtherBase like the watch; the stopped holder is looked
+					// at again, as for closed.
+					isElsewhere:    lookAgain(o(stopped, none, held, kept, done)),
 					goneFirstLook:  na,
 					failedRead:     o(checked, none, held, kept, requeue),
 					unconfirmed404: o(checked, none, held, kept, requeue),

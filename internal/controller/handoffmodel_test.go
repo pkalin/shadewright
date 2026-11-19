@@ -2202,3 +2202,12 @@ func TestHandoffModelFirstReadByTheReplacementAsAForeignChange(t *testing.T) {
 		t.Fatalf("the first read of the merge is not the replacement's: %+v", m.merge)
 	}
 }
+
+// #879 and #880, seed 6470 (shape C): the handoff is aborted at a refusal, a person merges the replacement's commit,
+// and the predecessor waits for the replacement's record of that merge (MergeRecordPending). A 503 of the chain check
+// in the owner check of its next look is a merge seen and not recorded: nothing after the look runs on the merged pull
+// request, so no check run is written there (P4).
+func TestHandoffModelFailedOwnerCheckWritesNothingOnTheMerge(t *testing.T) {
+	hmDirected(t, hmStartPushed, []hmStep{stSticky(403), stRecRepl, stMerge, stAnswer, stRecPred,
+		{Kind: hFault, Code: 503, Op: "CheckChain"}, stRecPred})
+}

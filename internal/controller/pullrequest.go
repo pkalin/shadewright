@@ -1341,7 +1341,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 // mergeSeenErr returns err, the error of a look that saw the pull request merged and did not record the merge,
 // so that it matches errMergeCheck. When the step's own deadline ended the look (timedOut) and the reconcile goes
 // on, it records the start of the wait for the merge first (startMergeWait, within a deadline of its own), so a
-// check that always runs out of time is bounded by the wait like any other failure (checkAtMerge). A failed write
+// check that always runs out of time is bounded by the wait like any other failure (checkAtMerge). A failed owner
+// check of a moved head (errOwnerCheckUnread) starts none: the merged head is not the recorded one. A failed write
 // is joined to the error; the next look tries again.
 func (r *RemediationRequestReconciler) mergeSeenErr(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error, timedOut bool) error {
@@ -1349,7 +1350,8 @@ func (r *RemediationRequestReconciler) mergeSeenErr(ctx context.Context, rr *rem
 		err = fmt.Errorf("%w: %w", errMergeCheck, err)
 	}
 	pr := rr.Status.PullRequest
-	if !timedOut || gitWait(rr, waitMergeCheck) != nil || ctx.Err() != nil || pr == nil || rr.Status.Source == nil {
+	if !timedOut || errors.Is(err, errOwnerCheckUnread) || gitWait(rr, waitMergeCheck) != nil || ctx.Err() != nil ||
+		pr == nil || rr.Status.Source == nil {
 		return err
 	}
 	waitCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
@@ -1523,22 +1525,24 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 // lookMovedHead is watchStep's look at rr's recorded pull request, v.pr, found with a head that is not the one rr
 // recorded: the replacement's expected commit while the intent stands, a takeover the replacement recorded, the merge
 // of a head another request of the handoff records (mergedHeadOwner), or a head that moved (headMoved). A failed read
-// or write is returned for a retry.
+// or write is returned for a retry; on a merged pull request it is a merge seen and not recorded (ownerCheckFailed),
+// so nothing after the look runs on it.
 func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) error {
 	cr := v.pr
+	failed := func(err error) error { return ownerCheckFailed(cr, err) }
 	if intent(rr) != nil {
 		// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
 		// what happens to the pull request from here, and this request waits for it.
 		switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
 		case err != nil:
-			return err
+			return failed(err)
 		case ok && cr.State == providers.ChangeRequestMerged:
 			// Merged with the replacement's expected commit: while the replacement may still record the merge, this
 			// request waits for that record without acting on the merged pull request as on an open one.
 			switch owner, err := r.predecessorMergeOwner(ctx, git, rr, cr.HeadSHA); {
 			case err != nil:
-				return err
+				return failed(err)
 			case owner == ownerReplacementPending:
 				return r.awaitOtherRecord(ctx, rr, v, string(intent(rr).Name))
 			}
@@ -1551,20 +1555,20 @@ func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git pr
 		// HandedOff (step 5, supersedePredecessor). The replacement is read first (second round of #786).
 		switch took, err := r.replacementTookOver(ctx, rr); {
 		case err != nil:
-			return err
+			return failed(err)
 		case took:
 			return nil
 		}
 		// Any other head ends the handoff: the abort is stored before this request writes anything to the pull
 		// request (its comment, headMoved), as nothing is written to Git while the intent stands (#786).
 		if err := r.abortStandingIntent(ctx, rr, "its pull request moved to a head that is not its replacement's commit"); err != nil {
-			return err
+			return failed(err)
 		}
 	}
 	if cr.State == providers.ChangeRequestMerged && rr.Status.Handoff != nil && rr.Status.Handoff.To != nil {
 		switch owner, err := r.predecessorMergeOwner(ctx, git, rr, cr.HeadSHA); {
 		case err != nil:
-			return err
+			return failed(err)
 		case owner == ownerReplacement:
 			return r.leaveReplacementMerge(ctx, rr, v, owner)
 		case owner == ownerReplacementPending:
@@ -1577,7 +1581,7 @@ func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git pr
 		// A person put the predecessor's recorded head back and merged it: the predecessor records that merge.
 		switch owner, err := r.replacementMergeOwner(ctx, rr, cr.HeadSHA); {
 		case err != nil:
-			return err
+			return failed(err)
 		case owner == ownerPredecessorRecords:
 			return r.leavePredecessorMerge(ctx, rr, v)
 		case owner == ownerPredecessorPending:
@@ -1585,6 +1589,23 @@ func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git pr
 		}
 	}
 	return r.headMoved(ctx, git, rr, cr)
+}
+
+// errOwnerCheckUnread marks a failed read or write of lookMovedHead's owner checks on a merged pull request: a merge
+// seen and not recorded, but of a head that is not the one the request recorded, so mergeSeenErr starts no wait for
+// the merge commit of the recorded head on it.
+var errOwnerCheckUnread = errors.New("the owner of the merge could not be read")
+
+// ownerCheckFailed returns err, a failed read or write of lookMovedHead's owner checks (the handoff's expected head,
+// the takeover, the abort of the intent, the owner of the merge) about cr: unchanged while cr is open, and on a merged
+// cr wrapped in errMergeCheck (with errOwnerCheckUnread), so that the caller runs nothing after the look on the merged
+// pull request (no full freshness check, no check run, no close) until a read works (#879). The error keeps what it
+// wraps: a failed Git read gets the visible poll, a Kubernetes error the error backoff (waitOrFail).
+func ownerCheckFailed(cr providers.ChangeRequest, err error) error {
+	if err == nil || cr.State != providers.ChangeRequestMerged || errors.Is(err, errMergeCheck) {
+		return err
+	}
+	return fmt.Errorf("%w: %w: %w", errMergeCheck, errOwnerCheckUnread, err)
 }
 
 // recordMergeSeen records the merge of the recorded pull request, cr, seen merged with the head Shadewright

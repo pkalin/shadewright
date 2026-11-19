@@ -1568,7 +1568,8 @@ func commentMarker(rr *remediationv1alpha1.RemediationRequest) string {
 // stops with BranchDiverged, leaving it open, since a person may be working on it; for a stale plan without the
 // comment (errStalePlanWrite), which ends the retried close of its pull request too. Anything else, a clean move
 // to the same planned change included, stops with HeadMoved as before. A read that fails is returned for a
-// retry, as is a comment the kill switch held back; another failure to comment is logged and the request
+// retry (on a merged pull request wrapped in errMergeCheck, so nothing after the look runs on the merged change,
+// #879), as is a comment the kill switch held back; another failure to comment is logged and the request
 // stops all the same. A comment already there (its marker) is not posted again.
 func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest) error {
@@ -1584,7 +1585,9 @@ func (r *RemediationRequestReconciler) headMoved(ctx context.Context, git provid
 		ref, err := r.checkMerged(ctx, git, rr, cr)
 		switch {
 		case err != nil:
-			return err
+			// A merge seen and not recorded (#879): the look is retried, and the full freshness check never runs on
+			// the merged change, which makes the plan look stale.
+			return fmt.Errorf("%w: %w", errMergeCheck, err)
 		case ref != nil:
 			return r.mergedForeign(ctx, rr, ref)
 		}

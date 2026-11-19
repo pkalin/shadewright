@@ -663,6 +663,38 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		Expect(got.Status.HoldsTarget).NotTo(Equal(new(true)), "a merged pull request releases the target")
 	})
 
+	// A merge with a moved head whose check fails to read is a merge seen and not recorded: the full freshness check
+	// must not run on the merged change, which calls the plan stale (TargetFileChanged).
+	It("never runs the full check on a merge with a moved head whose check fails to read (#879)", func() {
+		got := drive(remediationv1alpha1.PhaseAwaitingApproval)
+		_, err := git.Push(freshness.BranchName(got), "README.yaml", []byte("a: 3\n"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = git.Merge(got.Status.PullRequest.Number)
+		Expect(err).NotTo(HaveOccurred())
+		git.SetFail(func(op string) error {
+			if op == opCheckMerged {
+				return &providers.RetryableError{Err: errors.New("status 503")}
+			}
+			return nil
+		})
+		res, err := reconcileResult()
+		git.SetFail(nil)
+		Expect(err).NotTo(HaveOccurred(), "a failed read is a visible wait")
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval), "a failed read decides nothing")
+		fresh := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionPlanFresh)
+		Expect(fresh == nil || fresh.Status != metav1.ConditionFalse).To(BeTrue(), "never marked stale: %+v", fresh)
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry).Message).
+			To(ContainSubstring("check what the merged pull request held"))
+
+		_ = reconcileOnce()
+		got = fetch()
+		Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseNeedsIntervention))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionApproved).Reason).
+			To(Equal(ReasonMergedWithForeignChange))
+	})
+
 	It("stops with HeadMoved when the head moves to the same planned change (#524)", func() {
 		parent, err := git.BranchHead(ctx, mainBranch)
 		Expect(err).NotTo(HaveOccurred())

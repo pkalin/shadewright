@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode"
@@ -304,17 +305,29 @@ func TestASecretMapValueTakesNoOtherEntry(t *testing.T) {
 // Map keys that redact alike are told apart in linear work (#845, sixth decision of 2026-11-18, point 5): one
 // counter per redacted key, not a search from " (2)" for each, which made n such keys take n*n/2 probes (1,145 ms
 // for 4,096 keys). The allocations of get_resource for a pod with n and 4n such labels must grow about fourfold,
-// not sixteenfold.
+// not sixteenfold. Each size is called once, counted as testing.AllocsPerRun counts (one goroutine, the
+// mallocs of the call), after one call on a small pod warms the tools up; AllocsPerRun would call each size twice,
+// its warm-up included, and under -race these calls take about a minute (#873).
 func TestRenamingAlikeMapKeysIsLinear(t *testing.T) {
 	e := newFieldEnv(t)
-	allocs := func(n int) float64 {
+	args := map[string]any{fieldsArgKind: toolKind, fieldsArgNS: fieldsNS, fieldsArgName: fieldsPod}
+	setPod := func(n int) {
 		labels := make(map[string]string, n)
 		for i := range n {
 			labels[fmt.Sprintf("AbCdEfGhIjKlMnOpQrStUvWx%08d", i)] = "v"
 		}
 		e.reader.obj = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fieldsPod, Namespace: fieldsNS, Labels: labels}}
-		args := map[string]any{fieldsArgKind: toolKind, fieldsArgNS: fieldsNS, fieldsArgName: fieldsPod}
-		return testing.AllocsPerRun(1, func() { callFieldTool(t, e.set, tools.NameGetResource, args) })
+	}
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	setPod(8)
+	callFieldTool(t, e.set, tools.NameGetResource, args)
+	allocs := func(n int) float64 {
+		setPod(n)
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		callFieldTool(t, e.set, tools.NameGetResource, args)
+		runtime.ReadMemStats(&after)
+		return float64(after.Mallocs - before.Mallocs)
 	}
 	small, large := allocs(512), allocs(2048)
 	t.Logf("allocations for 512 and 2,048 alike keys: %.0f and %.0f (%.1f times)", small, large, large/small)

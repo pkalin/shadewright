@@ -1143,16 +1143,7 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 	m.prev[rr.Name] = old
 	delete(m.lag, rr.Name)
 	m.mu.Unlock()
-	// P9 at the write that moves the predecessor's intent to Aborted: the replacement, as stored then, has not
-	// recorded its takeover, unless a person put the predecessor's own head back on the pull request (fourth round of
-	// #786: the predecessor then decides on its own head).
-	if stored.Name == m.keys[hmPred].Name && intent(old) != nil && stored.Status.Handoff != nil &&
-		stored.Status.Handoff.To != nil && stored.Status.Handoff.To.Phase == api.HandoffAborted {
-		if repl := m.get(hmRepl); repl != nil && tookOver(repl) && m.pr().HeadSHA != m.predCommit {
-			m.fail("P9", "the predecessor stored the abort of an intent whose takeover the replacement recorded "+
-				"(pred: %s, repl: %s)", describe(stored), describe(repl))
-		}
-	}
+	m.checkAbortAfterTakeover(old, stored)
 	// P4 follows the abort from the write that stores it, so a write to Git later in the same reconcile counts.
 	if stored.Name == m.keys[hmPred].Name && stored.Status.Handoff != nil && stored.Status.Handoff.To != nil &&
 		stored.Status.Handoff.To.Phase == api.HandoffAborted {
@@ -1164,6 +1155,20 @@ func (m *hmWorld) statusWrite(ctx context.Context, obj client.Object, do func() 
 		m.mu.Unlock()
 	}
 	return nil
+}
+
+// checkAbortAfterTakeover checks P9 at a status write that moves the predecessor's intent (old) to Aborted (stored):
+// the replacement, as stored then, has not recorded its takeover, unless a person put the predecessor's own head back
+// on the pull request (fourth round of #786: the predecessor then decides on its own head).
+func (m *hmWorld) checkAbortAfterTakeover(old, stored *api.RemediationRequest) {
+	if stored.Name != m.keys[hmPred].Name || intent(old) == nil || stored.Status.Handoff == nil ||
+		stored.Status.Handoff.To == nil || stored.Status.Handoff.To.Phase != api.HandoffAborted {
+		return
+	}
+	if repl := m.get(hmRepl); repl != nil && tookOver(repl) && m.pr().HeadSHA != m.predCommit {
+		m.fail("P9", "the predecessor stored the abort of an intent whose takeover the replacement recorded "+
+			"(pred: %s, repl: %s)", describe(stored), describe(repl))
+	}
 }
 
 // get reads who as stored, nil when gone.
@@ -1850,30 +1855,10 @@ func (m *hmWorld) personEvent(s hmStep) {
 	}()
 	switch s.Kind {
 	case hMoveBase:
-		if !m.movedBase {
-			head, err := m.g.BranchHead(ctx, mainBranch)
-			if err != nil {
-				m.t.Fatal(err)
-			}
-			if err := m.g.CreateBranch(ctx, hmMovedBase, head); err != nil {
-				m.t.Fatal(err)
-			}
-		}
-		if err := m.g.SetBase(m.number, hmMovedBase); err != nil {
-			m.t.Fatal(err)
-		}
-		m.movedBase = true
-		m.reach["moved-base"] = true
+		m.moveBase()
 	case hMerge:
 		if m.movedBase {
-			// Merged into the base a person moved it to: the change did not reach the target branch, nothing records
-			// it, and no request keeps the lock for it (ADR-0043).
-			if _, err := m.g.Merge(m.number); err != nil {
-				m.logf("  the merge is refused: %v", err)
-				return
-			}
-			m.logf("  merged into %s, not the target branch", hmMovedBase)
-			m.reach["merged-elsewhere"] = true
+			m.mergeElsewhere()
 			return
 		}
 		var err error
@@ -1936,6 +1921,36 @@ func (m *hmWorld) personEvent(s hmStep) {
 			m.personCommits[sha] = true
 		}
 	}
+}
+
+// moveBase is hMoveBase: a person moves the open pull request to hmMovedBase (created from the target branch).
+func (m *hmWorld) moveBase() {
+	ctx := context.Background()
+	if !m.movedBase {
+		head, err := m.g.BranchHead(ctx, mainBranch)
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		if err := m.g.CreateBranch(ctx, hmMovedBase, head); err != nil {
+			m.t.Fatal(err)
+		}
+	}
+	if err := m.g.SetBase(m.number, hmMovedBase); err != nil {
+		m.t.Fatal(err)
+	}
+	m.movedBase = true
+	m.reach["moved-base"] = true
+}
+
+// mergeElsewhere is a merge after hMoveBase, into the base a person moved the pull request to: the change did not
+// reach the target branch, nothing records it, and no request keeps the lock for it (ADR-0043).
+func (m *hmWorld) mergeElsewhere() {
+	if _, err := m.g.Merge(m.number); err != nil {
+		m.logf("  the merge is refused: %v", err)
+		return
+	}
+	m.logf("  merged into %s, not the target branch", hmMovedBase)
+	m.reach["merged-elsewhere"] = true
 }
 
 // replTookOver reports whether the replacement exists and recorded the takeover.

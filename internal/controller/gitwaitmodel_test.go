@@ -1006,6 +1006,7 @@ func (m *modelWorld) reopenEvent(cr providers.ChangeRequest) {
 	if m.released {
 		m.reopenedAfterRelease = true
 	}
+	m.restartSettlement()
 	m.logf("reopen the pull request on %.12s", cr.BaseBranch)
 }
 
@@ -1026,7 +1027,18 @@ func (m *modelWorld) retargetEvent(cr providers.ChangeRequest) {
 	if err := m.g.SetBase(m.number, to); err != nil {
 		m.t.Fatal(err)
 	}
+	m.restartSettlement()
 	m.logf("retarget the pull request from %.12s to %.12s", cr.BaseBranch, to)
+}
+
+// restartSettlement starts the count of property "lift lock" again, as at a lift, after a change of the world the
+// settlement decides on: a reopened or retargeted pull request (an expired request closes a reopened one again) or
+// the repository's return to the settings (the close of an expired request's cleanup once more) takes reconciles of
+// its own (model seeds 10135, 138015 and 171640).
+func (m *modelWorld) restartSettlement() {
+	if m.afterLift > 0 {
+		m.afterLift = 0
+	}
 }
 
 // moveBackEvent is a person who moves the request's open pull request back from the third base to the base it had,
@@ -1578,11 +1590,7 @@ func (m *modelWorld) restoreRepository() {
 		s.Spec.Repositories = append([]api.GitRepository{*repo}, s.Spec.Repositories...)
 	})
 	m.repo = nil
-	if m.afterLift > 0 {
-		// The count of property "lift lock" starts again, as at a lift: an end the repository's return lets through
-		// (the close of an expired request's cleanup once more) takes reconciles of its own (model seed 10135).
-		m.afterLift = 0
-	}
+	m.restartSettlement()
 	m.logf("the repository is back in the settings")
 }
 

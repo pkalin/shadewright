@@ -43,7 +43,7 @@ The model's reasoning is not in the pull request. It is in the analysis record a
 
 ## Who merges
 
-A person, under your own rules. Shadewright never approves its own pull request and does not check reviews: required reviews, status checks and `CODEOWNERS` on your branch decide what merges. The executor sees the merge within about a minute and records it.
+A person, under your own rules. Shadewright never approves its own pull request and does not check reviews by default: required reviews, status checks and `CODEOWNERS` on your branch decide what merges. With reviewer hints on (`executor.reviewerHints.enabled`, off by default) the executor also reads comments and reviews on its own pull requests and creates the check run `shadewright/review`. The executor sees the merge within about a minute and records it.
 
 Shadewright pushes only to its own branch and has no way to bypass branch protection. Automatic merging is <span class="sw-status sw-planned">planned</span> and not built, so today every pull request waits for a person.
 
@@ -54,7 +54,7 @@ If the plan goes stale before the merge (the policy, the settings, the target or
 - A GitHub App whose private key stays in a cloud key vault: the executor asks the vault to sign and never holds the key. The token lasts an hour and names one repository.
 - A lock keeps two requests from changing the same field at once.
 - A cap on concurrent requests, and a circuit breaker that holds new requests after three failures with no success between.
-- The kill switch, `spec.paused` in `RemediationSettings`, is read from the API server right before every Git write. See [pause and resume](../how-to/pause-and-resume.md).
+- The kill switch, `spec.paused` in `RemediationSettings`, is read from the API server (never the cache) right before each write request to the Git host, each retry included. It fails closed: settings that cannot be read block the write. A request already sent is not recalled. See [pause and resume](../how-to/pause-and-resume.md).
 
 ## In depth
 

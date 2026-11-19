@@ -19,13 +19,14 @@ There is no free-form command, no `exec` and no direct apply. Adding a third mea
 
 ## Who writes the policy
 
-A `RemediationPolicy` is a cluster-scoped object that only your cluster admin should be able to write. Per action it sets:
+A `RemediationPolicy` is a cluster-scoped object that only your cluster admin should be able to write. It sets, for the whole policy:
 
-- the allowed range: a minimum, a maximum and the largest increase or decrease in percent;
 - the namespaces and labels of the objects it covers;
 - the Git paths that may be changed, and the one repository;
-- the namespaces whose requests may use it;
+- the namespaces whose requests may use it (`requestNamespaces`);
 - whether review is always required.
+
+For each action it sets only the allowed range: a minimum, a maximum and the largest increase or decrease in percent.
 
 The defaults are strict. Approval is required, a policy must name its namespaces (there is no "all namespaces"), and decreases are refused unless the admin allows them.
 

@@ -18,7 +18,7 @@ Shadewright watches a Kubernetes cluster for symptoms, works out a fix, and prop
 
 ## What never happens
 
-- Shadewright does not change a workload directly. The only changes it makes to the cluster are its own objects: Incidents, requests and their status, an analysis counter, leader election leases and Events.
+- Shadewright does not change a workload directly. It writes only its own objects: Incidents, requests and verification reports with their status, the analysis counter, the platform detection in the settings status, leader election leases and Events. Outside the cluster it writes analysis records to a blob container when you configure one, and the pull request.
 - It does not merge. Automatic merging is <span class="sw-status sw-planned">planned</span> and not built: today a person merges every pull request.
 - It does not run an action outside the fixed list, and it does not run shell commands.
 - It does not treat a model's answer as approval. The model's output is a proposal, nothing more.

@@ -17,7 +17,7 @@ Shadewright assumes the model can be wrong or fooled, and that anything it reads
 
 ## The three identities
 
-Shadewright runs as three Deployments, each with its own ServiceAccount. The diagram shows who can write what; the analyzer also updates the status of Incidents, and it alone calls the model.
+Shadewright runs as three Deployments, each with its own ServiceAccount. The diagram shows the main writes; the table below lists them all. Only the analyzer calls the model.
 
 ```mermaid
 flowchart LR
@@ -31,8 +31,9 @@ flowchart LR
 
 | | Analyzer | Executor | Verifier |
 | --- | --- | --- | --- |
-| Cluster | Read-only in the namespaces you list | Reads the target, its Flux objects, policy and settings | Lists pods and reads ReplicaSets and Deployments in your namespaces |
-| Writes in the cluster | Incidents, the requests it proposes, its analysis counter, Events | The status of requests | Its own reports |
+| Cluster | Read-only in the namespaces you list, plus `list` on Nodes (platform detection) and `get` on the policies it is told to show the model | Reads the target, its Flux objects, policy, settings, the Incident a request names and the verifier's reports | Lists pods and reads ReplicaSets, Deployments and StatefulSets in your namespaces, and reads requests |
+| Writes in the cluster | Incidents and their status, the requests it proposes, its analysis counter, platform detection in the settings status, Events, its lease | The status of requests and its finalizer on them, Events, its lease | Its own reports and their status, Events, its lease |
+| Writes outside it | Analysis records in a blob container, when configured | The pull request | Nothing |
 | Model | Yes | No | No |
 | Git | No | Yes, one repository, through a GitHub App | No |
 | Reads Secrets | No | No | No |

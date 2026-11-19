@@ -12,7 +12,7 @@ A merged pull request does not prove the fix worked. Verification follows the ch
 ## What happens after the merge
 
 1. **Merge receipt.** The executor records the merge commit and binds it to the repository, branch and pull request. No receipt, no verdict: the request ends `Inconclusive`.
-2. **Waiting for delivery.** It waits for Flux to report that commit, or a later one containing it, as applied. If Flux fails on that commit the request ends `Failed`. If nothing is delivered within an hour it ends `Inconclusive`.
+2. **Waiting for delivery.** It waits for Flux to report that commit, or a later one containing it, as applied. If nothing is delivered within an hour, the last read of Flux decides: `Failed` (`DeliveryFailed`) if Flux failed on exactly that commit, otherwise `Inconclusive`. A Flux failure earlier in the hour is not final, because a later fix can still apply the commit.
 3. **Verifying.** Every 30 seconds the executor checks that the live field holds the new value and that the pods run the new template. A separate component, the verifier, lists the pods of the rollout and writes a `VerificationReport`.
 4. **The quiet window.** The symptom must stay away for a set time, 11 minutes for a memory fix with the defaults, and the Incident's count must not rise.
 
@@ -21,7 +21,8 @@ stateDiagram-v2
     [*] --> Merged
     Merged --> WaitingForDelivery
     WaitingForDelivery --> Verifying: Flux applied the commit
-    WaitingForDelivery --> Failed: Flux failed on the commit
+    WaitingForDelivery --> Failed: hour over, Flux failed on the commit
+    WaitingForDelivery --> Inconclusive: hour over, not delivered
     Verifying --> Succeeded: quiet window, evidence fresh
     Verifying --> Failed: OOM kill, stuck rollout or restarts
     Verifying --> Inconclusive: no usable evidence
@@ -36,7 +37,7 @@ The verifier has no model, no Git credential and no Secrets, and it cannot write
 | Outcome | Meaning |
 | --- | --- |
 | `Succeeded` | Delivered, rolled out, configured, and the symptom stayed away for the whole window. |
-| `Failed` | Flux failed on the commit, the rollout stuck, the container was killed for running out of memory again (at once), or it restarted during the window. |
+| `Failed` | Flux still failed on the commit when the delivery hour ended, the rollout stuck, the container was killed for running out of memory again (at once), or it restarted during the window. |
 | `Inconclusive` | Merged, but neither success nor failure could be shown: the value was changed by a later commit, the target is gone, or there was no evidence. |
 
 Other endings come before the merge: `Denied` (policy refused), `NeedsIntervention` (a person must act), `Superseded` (the plan went stale), `Expired` and `Cancelled`.

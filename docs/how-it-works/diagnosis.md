@@ -11,17 +11,18 @@ Diagnosis turns an Incident into a proposal, or into a hand-off to a person. Pla
 
 ## The order of work
 
-1. **Rules first.** A known problem with a known fix belongs in a runbook, which needs no model. <span class="sw-status sw-planned">planned</span> No runbook ships yet, so every analysis uses the model.
+1. **Rules first.** A known problem with a known fix belongs in a runbook, which needs no model. <span class="sw-status sw-planned">planned</span> The analyzer can run runbooks before the model, but none is registered yet, so every analysis uses the model.
 2. **Build the context.** Code, not the model, collects what the model will see: the Incident summary, the status of the object and its owners, a log excerpt, selected metrics (if Prometheus is configured) and the bounds of the policy that would judge a proposal. Each block is size-limited, tagged with its source and redacted, and the model is told that every block is data, never instructions.
 3. **One call.** A small model gets the context and returns a structured result: a summary, hypotheses, evidence quotes, what is missing, and optionally one proposal.
-4. **Escalate only on a fixed signal.** If the context had to be cut, a source failed, or the reply was invalid twice, a stronger model runs with read-only tools. A feeling of low confidence never triggers it.
+4. **Escalate only on a fixed signal.** If the context had to be cut or a source failed, the stronger model runs first and the small one is skipped. If the small model's reply was invalid twice, the stronger one runs after it. A feeling of low confidence never triggers it. Escalation is optional: without `--escalation-model` there is no stronger model, and the Incident is handed off to a person.
 
 ```mermaid
 flowchart LR
     inc[Due Incident] --> ctx[Build redacted context]
     ctx --> small[Small model: one call]
+    ctx -- cut context or failed source --> big[Stronger model with read tools]
     small -- valid --> chk[Checks in code]
-    small -- cut context or invalid twice --> big[Stronger model with read tools]
+    small -- invalid twice --> big
     big --> chk
     chk -- passes --> rr[RemediationRequest]
     chk -- fails --> hand[Hand-off to a person]
@@ -29,7 +30,7 @@ flowchart LR
 
 ## What the model can use
 
-On escalation it may call up to five read tools: object state, recent events, pod logs, approved metric queries and a check for a missing Secret or ConfigMap a pod refers to. Logs and metrics are offered only when those sources are configured. Every tool is limited to the namespace of the Incident, has a size limit and a timeout, and returns redacted output. The analyzer's cluster access is read-only, so no write is possible even if a tool were added.
+On escalation it may call up to five read tools: object state, recent events, pod logs, approved metric queries and a check for a missing Secret or ConfigMap a pod refers to. Logs and metrics are offered only when those sources are configured. Every tool is limited to the namespace of the Incident, has a size limit and a timeout, and returns redacted output. The analyzer has no write access to workloads, so a tool could not change one even if it were added.
 
 ## What the model cannot do
 
@@ -45,7 +46,7 @@ On escalation it may call up to five read tools: object state, recent events, po
 
 Missing evidence gives no proposal and a note on what is missing, and the Incident becomes `Escalated`.
 
-Only the analyzer's own controller creates the `RemediationRequest`, always asking for approval. The model's answer is never an approval, as the [policy page](policy.md) explains.
+The analyzer's own controller creates the `RemediationRequest` from a valid proposal, asking for approval. The model's answer is never an approval, as the [policy page](policy.md) explains.
 
 ## Limits
 

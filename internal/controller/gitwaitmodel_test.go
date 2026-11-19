@@ -2152,15 +2152,26 @@ func (g *modelGit) ListChangeRequests(ctx context.Context, head string, openOnly
 func (g *modelGit) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
 	own, found := g.m.pr()
 	out, err := g.GitProvider.OpenChangeRequest(ctx, req)
-	if err == nil && found && own.State == providers.ChangeRequestOpen && !g.hidden(own.Number) &&
-		out.Number != own.Number {
+	if err != nil || out.Number == own.Number {
+		return out, err
+	}
+	if found && own.State == providers.ChangeRequestOpen && !g.hidden(own.Number) {
 		g.m.mu.Lock()
 		if g.m.secondPR == "" {
 			g.m.secondPR = fmt.Sprintf("#%d opened to %.12s while #%d is open on %.12s", out.Number, req.BaseBranch,
 				own.Number, own.BaseBranch)
 		}
 		g.m.mu.Unlock()
+		return out, err
 	}
+	// Its own was closed, merged or deleted where the look for it does not reach (the known limit of the adoption: a
+	// closed or merged one on another base is not listed): the new pull request is the request's from now on, and the
+	// model's properties are about it.
+	g.m.mu.Lock()
+	g.m.number, g.m.deleted, g.m.merge, g.m.noCommit = out.Number, false, "", false
+	g.m.mu.Unlock()
+	g.m.logf("the request opened #%d to %.12s; #%d is %s on %.12s", out.Number, req.BaseBranch, own.Number,
+		own.State, own.BaseBranch)
 	return out, err
 }
 

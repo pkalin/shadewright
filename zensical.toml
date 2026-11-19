@@ -137,6 +137,7 @@ nav = [
       { "0041 Merge-time freshness check" = "adr/0041-a-freshness-check-at-the-merge-of-a-pull-request.md" },
       { "0042 OpenAI-compatible endpoints" = "adr/0042-openai-compatible-model-endpoints.md" },
       { "0043 Pull request on another base" = "adr/0043-the-executor-follows-its-own-pull-request-to-any-base.md" },
+      { "0044 Git origin of an OCI source" = "adr/0044-git-origin-of-an-oci-source.md" },
       { "Template" = "adr/template.md" },
     ] },
     { "The name" = "name.md" },

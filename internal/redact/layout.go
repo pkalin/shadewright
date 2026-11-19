@@ -501,7 +501,7 @@ func endAtObjectValues(ps []Piece, size func(i int) int, spans []span) []span {
 func hiddenByObject(p Piece) bool { return p.Data && (p.Whole || (p.Key != "" && SecretKey(p.Key))) }
 
 // written is a piece as the answer writes it, with the units it was written in: each character of a data piece
-// (an invalid byte counts as one) is one unit of the value and one of the answer.
+// (an invalid byte counts as one, and in JSON a run of them) is one unit of the value and one of the answer.
 type written struct {
 	text string
 	// For a piece written in another form than AsIs: start and end give, for each byte of the value, the
@@ -523,7 +523,22 @@ func write(p Piece) written {
 		tick(1)
 		c, size := utf8.DecodeRuneInString(p.Text[i:])
 		from := b.Len()
-		writeUnit(&b, p.Form, p.Text[i:i+size], c, size)
+		if p.Form == JSON && c == utf8.RuneError && size == 1 {
+			// A run of invalid bytes is one unit, written as one replacement character as strings.ToValidUTF8
+			// writes it (the release before made each value valid so before it was encoded), not one escape of six
+			// bytes per byte, which made an answer of a few KiB of them too long for its bound (#845, fifteenth
+			// decision, P4).
+			for i+size < n {
+				tick(1)
+				if r, sz := utf8.DecodeRuneInString(p.Text[i+size:]); r != utf8.RuneError || sz != 1 {
+					break
+				}
+				size++
+			}
+			b.WriteString(`\ufffd`)
+		} else {
+			writeUnit(&b, p.Form, p.Text[i:i+size], c, size)
+		}
 		to := b.Len()
 		for j := i; j < i+size; j++ {
 			tick(1)
